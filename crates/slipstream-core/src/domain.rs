@@ -1137,6 +1137,43 @@ pub struct ExportSubmission {
     pub retained_output_bytes_max: u64,
 }
 
+impl ExportSubmission {
+    /// The canonical payload digest that scopes a request identity: two
+    /// submissions under one identity conflict unless these digests match.
+    pub fn payload_digest(&self) -> String {
+        let payload = serde_json::json!({
+            "photo_id": self.photo_id,
+            "source_profile_id": self.source_profile_id,
+            "policy_id": self.policy_id,
+            "bundle_id": self.bundle_id,
+            "expected_recipe_revision": self.expected_recipe_revision,
+            "expected_source_revision": self.expected_source_revision,
+        });
+        use sha2::{Digest, Sha256};
+        format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&payload)
+                    .expect("submission serializes")
+                    .as_slice()
+            )
+        )
+    }
+}
+
+/// The pre-admission resolution of a request identity: recorded identities
+/// replay, expire, or conflict without any launcher contact.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExportSubmissionResolution {
+    /// The identity and payload resolve to the existing Export.
+    Existing(Box<ExportRecord>),
+    /// The identity's receipt survived its Export's retention; it can never
+    /// start new work.
+    Expired,
+    /// The identity is recorded with a different payload.
+    Conflict,
+}
+
 /// Outcomes of the one serialized submit transaction.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExportSubmitOutcome {

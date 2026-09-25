@@ -3426,16 +3426,6 @@ pub(crate) async fn submit_export(
             "The source class has no approved profile",
         );
     };
-    // Launcher admission happens before acceptance: a deployment that cannot
-    // admit the work never consumes a request identity or a capacity
-    // reservation.
-    if manager.ensure_admissible().await.is_err() {
-        return export_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "processing_unavailable",
-            "The processing launcher is not admitting development work",
-        );
-    }
     let submission = slipstream_core::ExportSubmission {
         request_id: body.request_id,
         photo_id,
@@ -3458,6 +3448,51 @@ pub(crate) async fn submit_export(
         },
         retained_output_bytes_max: manager.allowance(),
     };
+    // Receipt resolution precedes admission: a recorded identity replays,
+    // expires, or conflicts even while the launcher is unavailable, and a
+    // fresh identity is admitted before anything is accepted.
+    match state
+        .application
+        .library
+        .resolve_export_submission(submission.clone())
+        .await
+    {
+        Ok(Some(slipstream_core::ExportSubmissionResolution::Existing(record))) => {
+            return crate::http::json_response(
+                StatusCode::OK,
+                &crate::wire::export_submit(&record),
+            );
+        }
+        Ok(Some(slipstream_core::ExportSubmissionResolution::Expired)) => {
+            return export_error(
+                StatusCode::GONE,
+                "export_expired",
+                "The request identity expired and cannot start new work",
+            );
+        }
+        Ok(Some(slipstream_core::ExportSubmissionResolution::Conflict)) => {
+            return export_error(
+                StatusCode::CONFLICT,
+                "export_conflict",
+                "The request identity was already used with a different payload",
+            );
+        }
+        Ok(None) => {}
+        Err(_) => {
+            return export_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "outcome_unknown",
+                "The submission outcome is unconfirmed",
+            );
+        }
+    }
+    if manager.ensure_admissible().await.is_err() {
+        return export_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "processing_unavailable",
+            "The processing launcher is not admitting development work",
+        );
+    }
     match state.application.library.submit_export(submission).await {
         Ok(outcome) => match outcome {
             slipstream_core::ExportSubmitOutcome::Created(record) => {
@@ -3790,9 +3825,33 @@ pub(crate) async fn get_export_artifact(
         }
     };
     let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(4);
+    // A live stream keeps its lease's liveness anchor fresh so the staleness
+    // sweep can never reclaim it before the response settles.
+    let renewer = {
+        let library = Arc::clone(&state.application.library);
+        let lease_id = lease_id.clone();
+        let interval = manager.lease_renewal_interval();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                if library
+                    .renew_export_lease(&lease_id, unix_seconds_now())
+                    .await
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                break;
+            }
+        })
+    };
     let release_on_settle = {
         let library = Arc::clone(&state.application.library);
         let lease_id = lease_id.clone();
+        let renewer = renewer;
         tokio::spawn(async move {
             use tokio::io::AsyncReadExt as _;
             let mut file = file;
@@ -3814,6 +3873,7 @@ pub(crate) async fn get_export_artifact(
             // The lease holds until the response stream settles, whatever its
             // outcome.
             let _ = library.release_export_lease(&lease_id).await;
+            renewer.abort();
         })
     };
     drop(release_on_settle);

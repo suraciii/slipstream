@@ -3,12 +3,12 @@ use crate::{
     AlbumMutation, AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary,
     AppliedRelocations, CaptureFact, CheckedAlbumMutation, CheckedAlbumMutationResult,
     EditRecipeRead, EditRecipeWriteOutcome, ExportAttempt, ExportLeaseOutcome, ExportRecord,
-    ExportRetryOutcome, ExportSettlement, ExportSubmission, ExportSubmitOutcome, ExportSweepResult,
-    LibraryRoot, NativeWorkBudget, NativeWorkPermit, OriginalCapability, PhotoAlbumMembership,
-    PhotoQuery, PhotoQueryError, PhotoQueryProjection, PhotoRead, PhotoStateBatchMutation,
-    PhotoStateBatchResult, PhotoStateMutation, PhotoStateMutationResult, PreviewSeed,
-    PreviewSeedResult, RebindEditRecipe, RecoverySurvey, RequestedRelocation, SaveEditRecipe,
-    ScanLimits, ScanResult, ScanSnapshot,
+    ExportRetryOutcome, ExportSettlement, ExportSubmission, ExportSubmissionResolution,
+    ExportSubmitOutcome, ExportSweepResult, LibraryRoot, NativeWorkBudget, NativeWorkPermit,
+    OriginalCapability, PhotoAlbumMembership, PhotoQuery, PhotoQueryError, PhotoQueryProjection,
+    PhotoRead, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateMutation,
+    PhotoStateMutationResult, PreviewSeed, PreviewSeedResult, RebindEditRecipe, RecoverySurvey,
+    RequestedRelocation, SaveEditRecipe, ScanLimits, ScanResult, ScanSnapshot,
     capture::capture_source_revision,
     persistence::{
         AlbumWriteError, DatabaseName, MutationError, Persistence, PersistenceError,
@@ -793,6 +793,37 @@ impl Library {
                 expected_bundle_id,
                 allowance,
             )
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Resolves a request identity without admission or state change: a
+    /// recorded identity replays, expires, or conflicts before the submit
+    /// transaction runs. `None` means the identity was never recorded.
+    pub async fn resolve_export_submission(
+        &self,
+        submission: ExportSubmission,
+    ) -> Result<Option<ExportSubmissionResolution>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .resolve_export_submission_receiver(submission)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Refreshes a download lease's liveness anchor while its stream runs.
+    /// `false` means the lease is gone and the stream must stop renewing.
+    pub async fn renew_export_lease(&self, lease_id: &str, now: u64) -> Result<bool, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.renew_export_lease_receiver(lease_id, now)
         }?;
         receive
             .await

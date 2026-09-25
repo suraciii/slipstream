@@ -10521,6 +10521,12 @@ mod export_routes {
         availability: Availability,
         attempts: HashMap<(String, u64), AttemptReceipt>,
         output: Option<Vec<u8>>,
+        /// Refuse ValidateOutput like a lost acknowledgement.
+        refuse_ack: bool,
+        /// Refuse Output like a spent transfer claim.
+        refuse_output: bool,
+        /// Every served operation in arrival order.
+        ops: Vec<String>,
     }
 
     impl LauncherScript {
@@ -10534,6 +10540,9 @@ mod export_routes {
                 availability: Availability::Available,
                 attempts: HashMap::new(),
                 output: None,
+                refuse_ack: false,
+                refuse_output: false,
+                ops: Vec::new(),
             }
         }
 
@@ -10614,6 +10623,13 @@ mod export_routes {
         script: &Arc<std::sync::Mutex<LauncherScript>>,
     ) -> std::io::Result<()> {
         let (request, descriptor) = photo::receive_request(connection.as_raw_fd())?;
+        // A scripted lost acknowledgement closes the connection without a
+        // response, exactly like a launcher dying mid-acknowledgement.
+        if matches!(request, Request::ValidateOutput { .. })
+            && with_script(script, |s| s.refuse_ack)
+        {
+            return Ok(());
+        }
         let response = with_script(script, |script| {
             launcher_answer(&request, descriptor, script)
         });
@@ -10651,6 +10667,17 @@ mod export_routes {
         descriptor: Option<std::os::fd::OwnedFd>,
         script: &mut LauncherScript,
     ) -> PhotoResponse {
+        script.ops.push(
+            match request {
+                Request::Reconcile { .. } => "reconcile",
+                Request::Start { .. } => "start",
+                Request::Inspect { .. } => "inspect",
+                Request::Cancel { .. } => "cancel",
+                Request::Output { .. } => "output",
+                Request::ValidateOutput { .. } => "validate",
+            }
+            .to_owned(),
+        );
         match request {
             Request::Reconcile { instance, .. } => {
                 if instance != &script.instance {
@@ -10723,8 +10750,11 @@ mod export_routes {
                 incarnation,
                 sequence,
                 ..
+            } => {
+                let receipt = launcher_receipt(script, export_id, incarnation, *sequence);
+                PhotoResponse::result(ResultBody::Receipt { receipt })
             }
-            | Request::ValidateOutput {
+            Request::ValidateOutput {
                 export_id,
                 incarnation,
                 sequence,
@@ -10760,6 +10790,9 @@ mod export_routes {
                 sequence,
                 ..
             } => {
+                if script.refuse_output {
+                    return PhotoResponse::error(ErrorCode::Conflict);
+                }
                 let Some(output) = script.output.clone() else {
                     return PhotoResponse::error(ErrorCode::Unavailable);
                 };
@@ -11878,9 +11911,10 @@ mod export_routes {
         .await;
         assert_eq!(replayed.status(), StatusCode::GONE);
         assert_eq!(error_code(&response_json(replayed).await), "export_expired");
-        // The swept identity cannot retry either: it resolves to nothing.
+        // The swept identity still reports its expiry on retry.
         let retried = retry_export(&router, &export_id, "retry-swept").await;
-        assert_eq!(retried.status(), StatusCode::NOT_FOUND);
+        assert_eq!(retried.status(), StatusCode::GONE);
+        assert_eq!(error_code(&response_json(retried).await), "export_expired");
 
         application.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(base);
@@ -12076,6 +12110,346 @@ mod export_routes {
             error_code(&response_json(expired).await),
             "artifact_expired"
         );
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// P1-1: the durable publication and Export commit happen before the
+    /// launcher acknowledgement, so a lost or refused acknowledgement can
+    /// never release the only valid result unpublished.
+    #[tokio::test]
+    async fn export_publication_commits_before_the_launcher_acknowledgement() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+        let source_revision = current_source_revision(&application, &photo_id).await;
+        let created = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        let export_id = response_json(created).await["exportId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        wait_for_state(&router, &export_id, "running").await;
+
+        // The result is valid but the acknowledgement is lost (the launcher
+        // dies before answering): the Export must still settle succeeded with
+        // a downloadable artifact, because publication committed first.
+        launcher.with_script(|s| {
+            s.output = Some(valid_development_tiff());
+            s.settle_attempt(1, "completed");
+            s.refuse_ack = true;
+        });
+        let settled = wait_for_state(&router, &export_id, "succeeded").await;
+        assert_eq!(settled["terminalOutcome"], "succeeded");
+        let download = download_artifact(&router, &export_id).await;
+        assert_eq!(download.status(), StatusCode::OK);
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// P1-2: restart reconciliation validates an already-published artifact
+    /// from disk instead of requesting a second, impossible launcher
+    /// transfer, and resolves the Export from it.
+    #[tokio::test]
+    async fn export_restart_recovers_an_already_published_artifact() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let manager = Arc::clone(application.exports.as_ref().unwrap());
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+        let source_revision = current_source_revision(&application, &photo_id).await;
+        let created = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        let export_id = response_json(created).await["exportId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        wait_for_state(&router, &export_id, "running").await;
+        let ops_after_run = launcher.with_script(|s| s.ops.clone());
+
+        // The previous process renamed the validated file into place and
+        // crashed before committing: the record still looks running with its
+        // attempt, the launcher receipt says completed, and the transfer
+        // claim is spent.
+        let artifact_bytes = valid_development_tiff();
+        let path = manager.artifact_path(&export_id).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &artifact_bytes).unwrap();
+        let incarnation = launcher.with_script(|s| s.incarnation.clone());
+        launcher.with_script(|s| {
+            s.output = Some(artifact_bytes.clone());
+            s.settle_attempt(1, "completed");
+            s.refuse_output = true;
+        });
+        let connection =
+            rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+        connection
+            .execute(
+                "UPDATE exports SET state='running', attempt_incarnation=?1,
+                   attempt_sequence=1 WHERE id=?2",
+                rusqlite::params![incarnation, export_id],
+            )
+            .unwrap();
+        drop(connection);
+
+        manager.reconcile_after_restart();
+        let settled = wait_for_state(&router, &export_id, "succeeded").await;
+        assert_eq!(
+            settled["artifact"]["byteLength"],
+            artifact_bytes.len() as u64
+        );
+        assert_eq!(
+            settled["artifact"]["sha256"],
+            format!("{:x}", Sha256::digest(&artifact_bytes))
+        );
+        // The recovery must not have asked the launcher for another transfer.
+        let ops = launcher.with_script(|s| s.ops.clone());
+        assert!(
+            !ops[ops_after_run.len()..].contains(&"output".to_owned()),
+            "recovery must not request a second transfer: {ops:?}"
+        );
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// P1-3: a recorded submission replays with 200 even while the launcher
+    /// cannot admit work; a different payload under the recorded identity
+    /// still conflicts.
+    #[tokio::test]
+    async fn export_replay_resolves_without_launcher_availability() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+        let source_revision = current_source_revision(&application, &photo_id).await;
+        let created = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let export_id = response_json(created).await["exportId"].clone();
+
+        launcher.with_script(|s| s.availability = Availability::Blocked);
+        let replayed = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(replayed.status(), StatusCode::OK);
+        assert_eq!(response_json(replayed).await["exportId"], export_id);
+
+        // A different payload under the recorded identity still conflicts.
+        let conflict = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            "other-revision",
+            &source_revision,
+        )
+        .await;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            error_code(&response_json(conflict).await),
+            "export_conflict"
+        );
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// P2-1: Export request identities are scoped per Photo; the same
+    /// otherwise-valid identity on another Photo starts its own Export.
+    #[tokio::test]
+    async fn export_request_identities_are_scoped_per_photo() {
+        let (base, mut config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        raw_fixture_with_camera(
+            &config.library_root.join("second.ARW"),
+            b"SONY\0",
+            b"ILCE-7RM5\0\0\0",
+        );
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let second_id = photo_id_for(&config, "second.ARW");
+        let first = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+        let second = save_recipe(&application, &second_id, "save-2", None, 0.5).await;
+        let first_source = current_source_revision(&application, &photo_id).await;
+        let second_source = current_source_revision(&application, &second_id).await;
+
+        let first_created = submit_export_request(
+            &router,
+            &photo_id,
+            "shared-request",
+            &first.revision,
+            &first_source,
+        )
+        .await;
+        assert_eq!(first_created.status(), StatusCode::CREATED);
+        let second_created = submit_export_request(
+            &router,
+            &second_id,
+            "shared-request",
+            &second.revision,
+            &second_source,
+        )
+        .await;
+        assert_eq!(second_created.status(), StatusCode::CREATED);
+        assert_ne!(
+            response_json(first_created).await["exportId"],
+            response_json(second_created).await["exportId"]
+        );
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// P2-3: a live download stream keeps its lease renewed, so the staleness
+    /// sweep cannot drop it, while an unrenewed lease is still reclaimed.
+    #[tokio::test]
+    async fn export_download_renews_its_lease_while_the_stream_is_live() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let (application, router) = export_application(&base, &config).await;
+        let manager = Arc::clone(application.exports.as_ref().unwrap());
+        manager.set_lease_renewal_interval(Duration::from_millis(150));
+        let photo_id = photo_id_for(&config, "pair.ARW");
+
+        // A settled Export with a large retained artifact, seeded directly:
+        // the download is served from disk without any launcher contact.
+        let export_id = "exp-lease-renewal-check".to_owned();
+        let artifact_bytes = vec![7_u8; 4 * 1024 * 1024];
+        let digest = format!("{:x}", Sha256::digest(&artifact_bytes));
+        // The stored recipe digest must be the real capture digest; the
+        // owner re-derives it on every read.
+        let recipe_digest = slipstream_core::ExportRecipePayload::capture(
+            &slipstream_core::EditRecipeSettings {
+                exposure_ev: 0.0,
+                white_balance: slipstream_core::WhiteBalanceIntent::AsShot,
+            },
+            slipstream_core::ExportExposureRange {
+                minimum_milli_ev: i64::MIN,
+                maximum_milli_ev: i64::MAX,
+            },
+        )
+        .unwrap()
+        .digest();
+        let path = manager.artifact_path(&export_id).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &artifact_bytes).unwrap();
+        let connection =
+            rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+        connection
+            .execute(
+                "INSERT INTO exports(id,photo_id,target,state,recipe_revision,exposure_ev,
+                   white_balance_mode,source_revision,source_profile_id,source_kind,
+                   recipe_digest,policy_id,bundle_id,workload,created_at,outcome,
+                   artifact_size,artifact_sha256,artifact_expires_at,artifact_width,
+                   artifact_height,artifact_profile_identity,settled_at,retain_until)
+                 VALUES(?1,?2,'development-tiff','succeeded','rev',0.0,'as-shot','src',
+                   'profile','raw',?3,?4,?5,'development-tiff',1,NULL,?6,?7,?8,2,1,?9,
+                   1800000000,1900000000)",
+                rusqlite::params![
+                    export_id,
+                    photo_id,
+                    recipe_digest,
+                    "b".repeat(64),
+                    "c".repeat(64),
+                    artifact_bytes.len() as i64,
+                    digest,
+                    1_900_000_000_i64,
+                    "e".repeat(64),
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let download = download_artifact(&router, &export_id).await;
+        assert_eq!(download.status(), StatusCode::OK);
+        // Hold the stream open without consuming it; the renewal keeps the
+        // lease's liveness anchor advancing.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let connection =
+            rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+        let first_renewal: i64 = connection
+            .query_row(
+                "SELECT created_at FROM export_download_leases WHERE export_id = ?1",
+                [&export_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let renewed_at: i64 = connection
+            .query_row(
+                "SELECT created_at FROM export_download_leases WHERE export_id = ?1",
+                [&export_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+        assert!(
+            renewed_at > first_renewal,
+            "a live stream must keep its lease renewed: {first_renewal} then {renewed_at}"
+        );
+        drop(download);
+
+        // The lease is released once the response stream settles.
+        let connection =
+            rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let leases = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM export_download_leases WHERE export_id = ?1",
+                    [&export_id],
+                    |row| row.get::<_, u32>(0),
+                )
+                .unwrap();
+            if leases == 0 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the download lease must be released after the stream settles"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        drop(connection);
 
         application.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(base);

@@ -13,16 +13,17 @@ use crate::{
     EditRecipeRead, EditRecipeSettings, EditRecipeWriteOutcome, ExportArtifactFacts, ExportAttempt,
     ExportExposureRange, ExportLeaseOutcome, ExportRecipePayload, ExportRecord, ExportRetryOutcome,
     ExportSettlement, ExportSnapshot, ExportSourceEvidence, ExportState, ExportSubmission,
-    ExportSubmitOutcome, ExportSweepResult, LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS,
-    MAXIMUM_PHOTO_RATING, OriginalErrorCategory, OriginalFacts, OriginalFingerprint, OriginalKind,
-    OriginalRecord, OriginalScanError, PhotoAlbumMembership, PhotoDecisionFacts,
-    PhotoDecisionSnapshot, PhotoQuery, PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder,
-    PhotoQueryProjection, PhotoQuerySource, PhotoRead, PhotoRecord, PhotoStateBatchApplied,
-    PhotoStateBatchChangedElsewhere, PhotoStateBatchMissing, PhotoStateBatchMutation,
-    PhotoStateBatchResult, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult,
-    PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult, PreviewState,
-    RebindEditRecipe, RecoverySurvey, RelativeOriginalPath, RequestedRelocation, SaveEditRecipe,
-    ScanLimits, ScanSnapshot, SelectionState, UnavailablePhotoRecord, WhiteBalanceIntent,
+    ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult, LibraryRoot,
+    MAXIMUM_FOLDER_ALBUM_PHOTOS, MAXIMUM_PHOTO_RATING, OriginalErrorCategory, OriginalFacts,
+    OriginalFingerprint, OriginalKind, OriginalRecord, OriginalScanError, PhotoAlbumMembership,
+    PhotoDecisionFacts, PhotoDecisionSnapshot, PhotoQuery, PhotoQueryCandidate, PhotoQueryError,
+    PhotoQueryOrder, PhotoQueryProjection, PhotoQuerySource, PhotoRead, PhotoRecord,
+    PhotoStateBatchApplied, PhotoStateBatchChangedElsewhere, PhotoStateBatchMissing,
+    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField, PhotoStateMutation,
+    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult,
+    PreviewState, RebindEditRecipe, RecoverySurvey, RelativeOriginalPath, RequestedRelocation,
+    SaveEditRecipe, ScanLimits, ScanSnapshot, SelectionState, UnavailablePhotoRecord,
+    WhiteBalanceIntent,
     identity::classify_name,
     reconcile::{preview_should_preserve, reconcile, selected_source},
 };
@@ -765,6 +766,15 @@ enum Command {
         allowance: u64,
         reply: Reply<ExportRetryOutcome>,
     },
+    ResolveExportSubmission {
+        submission: ExportSubmission,
+        reply: Reply<Option<ExportSubmissionResolution>>,
+    },
+    RenewExportLease {
+        lease_id: String,
+        now: u64,
+        reply: Reply<bool>,
+    },
     SweepExportExpiry {
         now: u64,
         reply: Reply<ExportSweepResult>,
@@ -1310,6 +1320,39 @@ impl Persistence {
             request_id: request_id.to_owned(),
             expected_bundle_id: expected_bundle_id.to_owned(),
             allowance,
+            reply: send,
+        })?;
+        Ok(receive)
+    }
+
+    /// Resolves a request identity without any admission or state change: a
+    /// recorded identity replays, expires, or conflicts before the submit
+    /// transaction ever runs.
+    pub(crate) fn resolve_export_submission_receiver(
+        &self,
+        submission: ExportSubmission,
+    ) -> Result<
+        oneshot::Receiver<Result<Option<ExportSubmissionResolution>, PersistenceError>>,
+        PersistenceError,
+    > {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::ResolveExportSubmission {
+            submission,
+            reply: send,
+        })?;
+        Ok(receive)
+    }
+
+    /// Refreshes a download lease's liveness anchor while its stream runs.
+    pub(crate) fn renew_export_lease_receiver(
+        &self,
+        lease_id: &str,
+        now: u64,
+    ) -> Result<oneshot::Receiver<Result<bool, PersistenceError>>, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::RenewExportLease {
+            lease_id: lease_id.to_owned(),
+            now,
             reply: send,
         })?;
         Ok(receive)
@@ -1948,6 +1991,16 @@ fn owner_main(
                     allowance,
                 );
                 let _ = reply.send(result);
+            }
+            Command::ResolveExportSubmission { submission, reply } => {
+                let _ = reply.send(Ok(resolve_export_submission(&connection, &submission)));
+            }
+            Command::RenewExportLease {
+                lease_id,
+                now,
+                reply,
+            } => {
+                let _ = reply.send(Ok(renew_export_lease(&mut connection, &lease_id, now)));
             }
             Command::SweepExportExpiry { now, reply } => {
                 let result = sweep_export_expiry(&state, &database_name, &mut connection, now);
@@ -4561,30 +4614,45 @@ fn validate_export_request_id(request_id: &str) -> bool {
 }
 
 fn export_payload_digest(submission: &ExportSubmission) -> Result<String, PersistenceError> {
-    let payload = serde_json::json!({
-        "photo_id": submission.photo_id,
-        "source_profile_id": submission.source_profile_id,
-        "policy_id": submission.policy_id,
-        "bundle_id": submission.bundle_id,
-        "expected_recipe_revision": submission.expected_recipe_revision,
-        "expected_source_revision": submission.expected_source_revision,
-    });
-    let bytes = serde_json::to_vec(&payload).map_err(|_| PersistenceError::Storage)?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(submission.payload_digest())
 }
 
-fn export_receipt_key(request_id: &str) -> String {
-    format!("{EXPORT_RECEIPT_PREFIX}{request_id}")
+/// Export request identities are unique per Photo; the receipt key carries
+/// the Photo identity next to the caller's request identity.
+fn export_receipt_key(photo_id: &str, request_id: &str) -> String {
+    format!("{EXPORT_RECEIPT_PREFIX}{photo_id}\0{request_id}")
+}
+
+/// A post-retention identity marker: the Export row is gone, but its
+/// identity stays expired forever.
+fn export_expiry_tombstone_key(export_id: &str) -> String {
+    format!("export_expired:{export_id}")
+}
+
+fn read_export_expiry_tombstone(
+    transaction: &Transaction<'_>,
+    export_id: &str,
+) -> Result<bool, PersistenceError> {
+    transaction
+        .query_row(
+            "SELECT 1 FROM library_metadata WHERE key=?",
+            [export_expiry_tombstone_key(export_id)],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map(|found| found.is_some())
+        .map_err(|_| PersistenceError::Storage)
 }
 
 fn read_export_receipt(
     transaction: &Transaction<'_>,
+    photo_id: &str,
     request_id: &str,
 ) -> Result<Option<ExportReceipt>, PersistenceError> {
     let value = transaction
         .query_row(
             "SELECT value FROM library_metadata WHERE key=?",
-            [export_receipt_key(request_id)],
+            [export_receipt_key(photo_id, request_id)],
             |row| row.get::<_, String>(0),
         )
         .optional()
@@ -4596,6 +4664,7 @@ fn read_export_receipt(
 
 fn write_export_receipt(
     transaction: &Transaction<'_>,
+    photo_id: &str,
     request_id: &str,
     receipt: &ExportReceipt,
 ) -> Result<(), PersistenceError> {
@@ -4604,7 +4673,7 @@ fn write_export_receipt(
         .execute(
             "INSERT INTO library_metadata(key,value) VALUES(?,?)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![export_receipt_key(request_id), value],
+            params![export_receipt_key(photo_id, request_id), value],
         )
         .map_err(|_| PersistenceError::Storage)?;
     Ok(())
@@ -4858,7 +4927,9 @@ fn submit_export(
     }
     let payload_digest = export_payload_digest(&submission)?;
     write_transaction(state, database_name, connection, |transaction| {
-        if let Some(receipt) = read_export_receipt(transaction, &submission.request_id)? {
+        if let Some(receipt) =
+            read_export_receipt(transaction, &submission.photo_id, &submission.request_id)?
+        {
             if receipt.payload_digest != payload_digest {
                 return Ok(ExportSubmitOutcome::RequestConflict);
             }
@@ -4935,6 +5006,7 @@ fn submit_export(
             .map_err(|_| PersistenceError::Storage)?;
         write_export_receipt(
             transaction,
+            &submission.photo_id,
             &submission.request_id,
             &ExportReceipt {
                 payload_digest,
@@ -4961,6 +5033,49 @@ fn export_record(
         .optional()
         .map_err(|_| PersistenceError::Storage)?;
     row.map(export_record_from_row).transpose()
+}
+
+/// Resolves a request identity from its receipt without any state change.
+/// `None` means the identity was never recorded and submission may proceed.
+fn resolve_export_submission(
+    connection: &Connection,
+    submission: &ExportSubmission,
+) -> Option<ExportSubmissionResolution> {
+    let value = connection
+        .query_row(
+            "SELECT value FROM library_metadata WHERE key=?",
+            [export_receipt_key(
+                &submission.photo_id,
+                &submission.request_id,
+            )],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()?;
+    let receipt: ExportReceipt = serde_json::from_str(&value).ok()?;
+    if receipt.payload_digest != export_payload_digest(submission).ok()? {
+        return Some(ExportSubmissionResolution::Conflict);
+    }
+    match export_record(connection, &receipt.export_id) {
+        Ok(Some(record)) => Some(ExportSubmissionResolution::Existing(Box::new(record))),
+        // The export row is removed exactly when its retention window
+        // passes, so a surviving receipt without a row is expired.
+        Ok(None) => Some(ExportSubmissionResolution::Expired),
+        Err(_) => None,
+    }
+}
+
+/// Refreshes one download lease's liveness anchor. `false` means the lease
+/// is gone and the stream must stop renewing.
+fn renew_export_lease(connection: &mut Connection, lease_id: &str, now: u64) -> bool {
+    connection
+        .execute(
+            "UPDATE export_download_leases SET created_at=?1 WHERE id=?2",
+            params![now as i64, lease_id],
+        )
+        .map(|updated| updated > 0)
+        .unwrap_or(false)
 }
 
 fn list_photo_exports(
@@ -5188,11 +5303,18 @@ fn retry_export(
     );
     write_transaction(state, database_name, connection, |transaction| {
         let Some(current) = read_export_row(transaction, export_id)? else {
+            // A reclaimed record keeps its expired identity: retry reports
+            // the explicit expired outcome instead of unknown.
+            if read_export_expiry_tombstone(transaction, export_id)? {
+                return Ok(ExportRetryOutcome::Expired);
+            }
             return Ok(ExportRetryOutcome::Unknown);
         };
         // An accepted retry identity resolves to its Export and starts no
         // work; a different payload under that identity is a conflict.
-        if let Some(receipt) = read_export_receipt(transaction, request_id)? {
+        if let Some(receipt) =
+            read_export_receipt(transaction, &current.snapshot.photo_id, request_id)?
+        {
             if receipt.export_id == export_id && receipt.payload_digest == retry_digest {
                 return Ok(ExportRetryOutcome::Replayed(Box::new(current)));
             }
@@ -5238,6 +5360,7 @@ fn retry_export(
             .map_err(|_| PersistenceError::Storage)?;
         write_export_receipt(
             transaction,
+            &current.snapshot.photo_id,
             request_id,
             &ExportReceipt {
                 payload_digest: retry_digest,
@@ -5300,6 +5423,14 @@ fn sweep_export_expiry(
         for export_id in expired_records {
             transaction
                 .execute("DELETE FROM exports WHERE id=?", [&export_id])
+                .map_err(|_| PersistenceError::Storage)?;
+            // The identity stays expired forever: it can never start new
+            // work and retry keeps reporting the explicit expired outcome.
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO library_metadata(key,value) VALUES(?1,?2)",
+                    params![export_expiry_tombstone_key(&export_id), "expired"],
+                )
                 .map_err(|_| PersistenceError::Storage)?;
             result.record_expiry_ids.push(export_id);
         }

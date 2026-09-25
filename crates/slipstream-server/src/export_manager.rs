@@ -42,7 +42,12 @@ pub(crate) struct ExportManager {
     /// The initial scheduler admits at most one heavy processing job at a
     /// time per instance; the slot also serializes reconciliation output.
     admission: tokio::sync::Mutex<()>,
+    /// How often a live download stream renews its lease liveness anchor.
+    lease_renewal_interval_millis: std::sync::atomic::AtomicU64,
 }
+
+/// A live download renews its lease well inside the staleness window.
+const LEASE_RENEWAL_INTERVAL: u64 = 10 * 60 * 1000;
 
 impl ExportManager {
     /// Opens the application-owned Export workspace. Blocking filesystem
@@ -68,7 +73,27 @@ impl ExportManager {
             processing,
             allowance,
             admission: tokio::sync::Mutex::new(()),
+            lease_renewal_interval_millis: std::sync::atomic::AtomicU64::new(
+                LEASE_RENEWAL_INTERVAL,
+            ),
         })
+    }
+
+    /// The interval at which a live download stream renews its lease.
+    pub(crate) fn lease_renewal_interval(&self) -> Duration {
+        Duration::from_millis(
+            self.lease_renewal_interval_millis
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Overrides the download lease renewal interval; tests shorten it.
+    #[cfg(test)]
+    pub(crate) fn set_lease_renewal_interval(&self, interval: Duration) {
+        self.lease_renewal_interval_millis.store(
+            interval.as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     pub(crate) fn allowance(&self) -> u64 {
@@ -707,6 +732,17 @@ impl ExportManager {
         sequence: u64,
     ) -> Result<(), String> {
         let export_id = record.id.clone();
+        // A previous process may have renamed the validated file into place
+        // and crashed before committing. The published file is the surviving
+        // truth: validate and resolve from it instead of requesting a second
+        // transfer the launcher can no longer serve.
+        if let Some(published_path) = self.artifact_path(&export_id)
+            && tokio::fs::metadata(&published_path).await.is_ok()
+        {
+            return self
+                .settle_from_published_file(&export_id, &published_path)
+                .await;
+        }
         // Collect the output into a private temporary file through the
         // workspace, then validate before any acknowledgement.
         let writer = self
@@ -785,23 +821,12 @@ impl ExportManager {
             return Err("export was settled by cancellation".to_owned());
         }
 
-        let acknowledged = self
-            .acknowledge_output(
-                &export_id,
-                incarnation,
-                sequence,
-                true,
-                output_receipt.size,
-                &output_receipt.sha256,
-            )
-            .await;
-        if !acknowledged {
-            return Err("launcher did not accept the validation acknowledgement".to_owned());
-        }
-
-        // Validate-and-publish in one atomic rename, then commit durable
-        // success. The publication validator re-checks type and identity and
-        // yields the disclosed artifact facts.
+        // Publish and commit durable success BEFORE the positive
+        // acknowledgement: the launcher cleans its attempt as settled once
+        // it is accepted, so the only valid result must already be renamed
+        // into place and committed when it is released. A lost or refused
+        // acknowledgement is benign afterwards; the launcher reconciles the
+        // attempt by its own deadline and the Export is already settled.
         let facts_slot = std::cell::RefCell::new(None);
         let facts_ref = &facts_slot;
         let published = writer
@@ -836,6 +861,77 @@ impl ExportManager {
             // Cancellation won the exactly-once settlement race; the renamed
             // file belongs to no record and must not leak.
             let _ = fs::remove_file(&published.path);
+            return Ok(());
+        }
+        // Best-effort: the Export is durably settled, so an unanswered
+        // acknowledgement never loses the result.
+        let _ = self
+            .acknowledge_output(
+                &export_id,
+                incarnation,
+                sequence,
+                true,
+                output_receipt.size,
+                &output_receipt.sha256,
+            )
+            .await;
+        Ok(())
+    }
+
+    /// Resolves an Export from an artifact that a previous process already
+    /// renamed into place before crashing: the file is validated through the
+    /// same closed Development TIFF contract, hashed, and settled with its
+    /// own publication time. No launcher transfer is requested.
+    async fn settle_from_published_file(&self, export_id: &str, path: &Path) -> Result<(), String> {
+        let hash_path = path.to_path_buf();
+        let facts_and_hash = tokio::task::spawn_blocking(move || -> Result<_, String> {
+            let facts = validate_development_tiff(&hash_path)
+                .map_err(|_| OUTPUT_VALIDATION_FAILED.to_owned())?;
+            let file = open_read_only(&hash_path)
+                .map_err(|_| "published artifact could not be reopened".to_owned())?;
+            let metadata = file
+                .metadata()
+                .map_err(|_| "published artifact could not be stated".to_owned())?;
+            use sha2::{Digest as _, Sha256};
+            let mut hasher = Sha256::new();
+            let mut file = file;
+            std::io::copy(&mut file, &mut hasher)
+                .map_err(|_| "published artifact could not be hashed".to_owned())?;
+            let published_at = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or_else(unix_seconds);
+            Ok((
+                facts,
+                metadata.len(),
+                format!("{:x}", hasher.finalize()),
+                published_at,
+            ))
+        })
+        .await
+        .map_err(|error| format!("artifact recovery task failed: {error}"))??;
+        let (facts, size, sha256, published_at) = facts_and_hash;
+        let settled = self
+            .library
+            .settle_export(
+                export_id,
+                ExportSettlement::Succeeded {
+                    artifact_size: size,
+                    artifact_sha256: sha256,
+                    published_at,
+                    artifact_width: facts.width,
+                    artifact_height: facts.height,
+                    artifact_profile_identity: facts.profile_identity,
+                },
+            )
+            .await
+            .map_err(|_| PERSISTENCE_UNAVAILABLE.to_owned())?;
+        if let Some(settled) = settled
+            && settled.state != ExportState::Succeeded
+        {
+            let _ = fs::remove_file(path);
         }
         Ok(())
     }
