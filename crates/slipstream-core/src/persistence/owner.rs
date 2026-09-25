@@ -3838,10 +3838,12 @@ fn validate_edit_recipe_request_id(request_id: &str) -> bool {
 }
 
 fn edit_recipe_payload_digest(mutation: &SaveEditRecipe) -> Result<String, PersistenceError> {
-    // The as-shot formula is unchanged so receipts written by earlier
-    // versions keep replaying; a value-carrying intent serializes its
-    // values because two different payloads under one request identity
-    // must never collide.
+    // The digest formula is durable, not a wire field: receipts written by
+    // earlier releases hold digests over these exact serialized keys, so the
+    // internal rename of the recipe-version field must not change them.
+    // The as-shot white-balance value stays a bare string for the same
+    // reason; a value-carrying intent serializes its values because two
+    // different payloads under one request identity must never collide.
     let white_balance = match mutation.settings.white_balance {
         WhiteBalanceIntent::AsShot => serde_json::json!("as-shot"),
         WhiteBalanceIntent::TemperatureTint {
@@ -3855,7 +3857,7 @@ fn edit_recipe_payload_digest(mutation: &SaveEditRecipe) -> Result<String, Persi
     };
     let payload = serde_json::json!({
         "photo_id": mutation.photo_id,
-        "expected_recipe_version": mutation.expected_recipe_version,
+        "expected_recipe_revision": mutation.expected_recipe_version,
         "expected_source_revision": mutation.expected_source_revision,
         "exposure_ev": mutation.settings.exposure_ev,
         "white_balance": white_balance,
@@ -6580,6 +6582,93 @@ mod tests {
             .unwrap();
         assert!(!edit_read.source_available);
         assert!(persistence.snapshot().await.unwrap().photos[0].has_saved_edits);
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn pre_upgrade_receipts_replay_with_the_original_digest_formula() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v8.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+
+        // A receipt written by a release before the internal recipe-version
+        // rename: its digest covers the original serialized key set, and its
+        // shape carries no temperature or tint values because the as-shot
+        // intent predates the value-carrying columns.
+        let source_revision = "legacy-source-revision";
+        let legacy_payload = serde_json::json!({
+            "photo_id": "raw-photo",
+            "expected_recipe_revision": serde_json::Value::Null,
+            "expected_source_revision": source_revision,
+            "exposure_ev": 0.25,
+            "white_balance": "as-shot",
+        });
+        let legacy_digest = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&legacy_payload).unwrap())
+        );
+        let legacy_receipt = serde_json::json!({
+            "photo_id": "raw-photo",
+            "payload_digest": legacy_digest,
+            "outcome": "Saved",
+            "revision": "legacy-recipe-version",
+            "source_revision": source_revision,
+            "exposure_ev": 0.25,
+            "white_balance_mode": "as-shot",
+        });
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('edit_recipe_receipt:legacy-save',?)",
+                [serde_json::to_string(&legacy_receipt).unwrap()],
+            )
+            .unwrap();
+        drop(connection);
+
+        // The same logical save retried after the upgrade must replay the
+        // committed receipt, not refuse the identity as conflicted.
+        let persistence = Persistence::open(
+            state,
+            name.clone(),
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let replay = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "legacy-save".to_owned(),
+                expected_recipe_version: None,
+                expected_source_revision: source_revision.to_owned(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.25,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            replay,
+            EditRecipeWriteOutcome::Replayed(EditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                revision: "legacy-recipe-version".to_owned(),
+                source_revision: source_revision.to_owned(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.25,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            }),
+            "a pre-upgrade receipt must keep replaying with the committed version"
+        );
         persistence.shutdown().unwrap();
     }
 

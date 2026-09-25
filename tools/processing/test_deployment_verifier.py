@@ -261,7 +261,7 @@ class DeploymentVerifierTests(unittest.TestCase):
             def ready_capability():
                 return {
                     "state": "ready",
-                    "bundleId": "b" * 64,
+                    "bundleId": BUNDLE,
                     "incarnation": "a" * 32,
                     "exposure": {"minimumEv": 0.0, "maximumEv": 1.0, "stepEv": 0.001},
                     "profiles": [
@@ -269,7 +269,12 @@ class DeploymentVerifierTests(unittest.TestCase):
                             "profileId": "sony-ilce-7rm5-arw",
                             "whiteBalanceModes": ["as-shot"],
                             "whiteBalanceRanges": None,
-                        }
+                        },
+                        {
+                            "profileId": "sony-ilce-7cm2-arw",
+                            "whiteBalanceModes": ["as-shot"],
+                            "whiteBalanceRanges": None,
+                        },
                     ],
                     "stages": {"develop": "ready", "film": "unavailable"},
                 }
@@ -377,6 +382,65 @@ class DeploymentVerifierTests(unittest.TestCase):
                 urlopen=urlopen_unapproved,
             )
             checks = unapproved._web_checks()
+            self.assertEqual(checks[0].reason, "web-capability-response-invalid")
+            self.assertEqual(checks[0].detail, "profiles")
+
+            # A ready response naming a different, well-formed bundle fails
+            # the check: readiness proves the exact deployed bundle.
+            def urlopen_bundle_mismatch(request, timeout):
+                path = request.full_url.split("/", 3)[-1]
+                if path == "healthz":
+                    return FakeResponse({"status": "ok"})
+                if path == "api/status":
+                    return FakeResponse({"state": "published"})
+                if path == "api/overview":
+                    return FakeResponse({"albums": []})
+                capability = ready_capability()
+                capability["bundleId"] = "d" * 64
+                return FakeResponse(capability)
+
+            mismatched = deployment.DeploymentSnapshot(
+                instance=INSTANCE,
+                policy=POLICY,
+                bundle=BUNDLE,
+                web_url="https://photos.example.com",
+                web_token_file=token_file,
+                urlopen=urlopen_bundle_mismatch,
+            )
+            checks = mismatched._web_checks()
+            self.assertEqual(checks[0].reason, "web-capability-unavailable")
+            self.assertEqual(checks[0].detail, "bundle-mismatch")
+
+            # A ready response advertising only one of the two approved
+            # source classes is also a failed check: the wire contract gives
+            # profiles one object per approved source class, not a subset.
+            def urlopen_subset(request, timeout):
+                path = request.full_url.split("/", 3)[-1]
+                if path == "healthz":
+                    return FakeResponse({"status": "ok"})
+                if path == "api/status":
+                    return FakeResponse({"state": "published"})
+                if path == "api/overview":
+                    return FakeResponse({"albums": []})
+                capability = ready_capability()
+                capability["profiles"] = [
+                    {
+                        "profileId": "sony-ilce-7rm5-arw",
+                        "whiteBalanceModes": ["as-shot"],
+                        "whiteBalanceRanges": None,
+                    }
+                ]
+                return FakeResponse(capability)
+
+            subset = deployment.DeploymentSnapshot(
+                instance=INSTANCE,
+                policy=POLICY,
+                bundle=BUNDLE,
+                web_url="https://photos.example.com",
+                web_token_file=token_file,
+                urlopen=urlopen_subset,
+            )
+            checks = subset._web_checks()
             self.assertEqual(checks[0].reason, "web-capability-response-invalid")
             self.assertEqual(checks[0].detail, "profiles")
 

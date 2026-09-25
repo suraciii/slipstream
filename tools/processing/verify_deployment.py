@@ -441,6 +441,17 @@ class DeploymentSnapshot:
             or not _lower_hex(incarnation, 32)
         ):
             return [Check("web-capability", False, "web-capability-response-invalid", "identities")]
+        # A ready answer proves the exact deployed bundle: any other bundle
+        # identity fails the check even when well formed.
+        if bundle_id != self.bundle:
+            return [
+                Check(
+                    "web-capability",
+                    False,
+                    "web-capability-unavailable",
+                    "bundle-mismatch",
+                )
+            ]
         if capability.get("exposure") != {
             "minimumEv": 0.0,
             "maximumEv": 1.0,
@@ -452,15 +463,23 @@ class DeploymentSnapshot:
             # The profile list stays empty only for `source-unsupported`,
             # which cannot be `ready`.
             return [Check("web-capability", False, "web-capability-unavailable", "profiles")]
-        # The qualified profile set is closed: a ready deployment may only
-        # advertise profiles the contract approves.
+        # The wire contract gives profiles one object per approved source
+        # class: the exact closed qualified set, no duplicates, no subsets.
         qualified_profile_ids = {"sony-ilce-7rm5-arw", "sony-ilce-7cm2-arw"}
+        profile_ids = [
+            profile.get("profileId")
+            for profile in profiles
+            if isinstance(profile, dict)
+        ]
+        if (
+            len(profile_ids) != len(profiles)
+            or len(set(profile_ids)) != len(profile_ids)
+            or set(profile_ids) != qualified_profile_ids
+        ):
+            return [Check("web-capability", False, "web-capability-response-invalid", "profiles")]
         for profile in profiles:
             if (
-                not isinstance(profile, dict)
-                or not isinstance(profile.get("profileId"), str)
-                or profile.get("profileId") not in qualified_profile_ids
-                or profile.get("whiteBalanceModes") != ["as-shot"]
+                profile.get("whiteBalanceModes") != ["as-shot"]
                 or profile.get("whiteBalanceRanges") is not None
             ):
                 return [
