@@ -16,6 +16,20 @@ const MAXIMUM_DEVELOPMENT_TIFF_BYTES: u64 = 1024 * 1024 * 1024;
 /// and a new qualification record.
 pub const DISPLAY_TRANSFORM_VERSION: &str = "display-transform-v1";
 
+/// The qualified Edit Preview geometry. The reduced Development Result renders
+/// at a 1224-pixel long edge through the qualified history path; full-size
+/// development is never a preview path, and no smaller geometry is qualified.
+pub const DEVELOPMENT_PREVIEW_LONG_EDGE: u32 = 1224;
+
+/// The pinned linear ProPhoto RGB source profile asset of a Development
+/// Result, embedded in every generated Development TIFF fixture.
+const SOURCE_PROFILE_ASSET: &[u8] = include_bytes!("../assets/prophoto-linear-g10.icc");
+
+/// The recorded SHA-256 identity of the pinned source profile asset.
+#[cfg(test)]
+const SOURCE_PROFILE_ASSET_DIGEST: &str =
+    "df7b2c677645f1ca5364b52e62f8db04ca61f80163792942f3e409a84a6b12ed";
+
 /// Linear ProPhoto RGB to linear sRGB, Bradford D50-to-D65 adaptation, derived
 /// from the two pinned ICC profile assets and pinned by
 /// `design/development-color.md#display-and-comparison`. Every row sums to 1.0,
@@ -94,6 +108,9 @@ unsafe extern "C" {
 pub enum DerivativeTarget {
     Thumbnail512,
     Review2560,
+    /// The qualified Edit Preview geometry of
+    /// `design/photo-development.md#service-surface`.
+    DevelopmentPreview1224,
 }
 
 impl DerivativeTarget {
@@ -101,6 +118,7 @@ impl DerivativeTarget {
         match self {
             Self::Thumbnail512 => 512,
             Self::Review2560 => 2560,
+            Self::DevelopmentPreview1224 => DEVELOPMENT_PREVIEW_LONG_EDGE,
         }
     }
 }
@@ -214,9 +232,11 @@ pub(crate) fn process_jpeg_with_orientation(
 /// Convert one Development Result into the fixed sRGB display derivative.
 ///
 /// `fd` must be a read-only descriptor for a float32 RGB TIFF that carries the
-/// pinned linear ProPhoto RGB source profile. The descriptor is read only. The
-/// linear samples are resampled in their own light before the pinned matrix,
-/// the per-channel clip, and the sRGB transfer function are applied, so this
+/// pinned linear ProPhoto RGB source profile, and `long_edge` is the rendition
+/// geometry; the qualified Edit Preview geometry is
+/// [`DEVELOPMENT_PREVIEW_LONG_EDGE`]. The descriptor is read only. The linear
+/// samples are resampled in their own light before the pinned matrix, the
+/// per-channel clip, and the sRGB transfer function are applied, so this
 /// branch is the only place that clips, exactly as
 /// `design/development-color.md#display-and-comparison` defines.
 ///
@@ -234,17 +254,18 @@ pub fn process_development_tiff(
     fd: RawFd,
     target: DerivativeTarget,
 ) -> Result<Derivative, DerivativeError> {
+    let long_edge = target.long_edge();
     initialize()?;
-    if fd < 0 {
+    if fd < 0 || long_edge == 0 {
         return Err(DerivativeError::Internal);
     }
     let mut linear = empty_linear_result();
-    // SAFETY: the borrowed descriptor stays open for the complete synchronous
-    // native call, and the result is freed through the matching C ABI below.
+    // SAFETY: the borrowed descriptor stays open for the complete synchronous native call,
+    // and the result is freed through the matching C ABI below.
     let status = unsafe {
         slipstream_vips_linear_from_fd(
             fd,
-            target.long_edge(),
+            long_edge,
             MAXIMUM_DEVELOPMENT_TIFF_BYTES,
             MAXIMUM_PIXELS,
             &mut linear,
@@ -404,6 +425,91 @@ fn hex_digest(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn align_to(value: u32, boundary: u32) -> u32 {
+    value + (boundary - value % boundary) % boundary
+}
+
+/// Writes one uncompressed little-endian TIFF: `width * height` samples per
+/// band, three bands, one strip, and an embedded ICC profile.
+fn tiff_bytes(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    bits: u16,
+    sample_format: u16,
+    profile: &[u8],
+) -> Vec<u8> {
+    let entries: [[u32; 4]; 11] = [
+        [256, 4, 1, width],
+        [257, 4, 1, height],
+        [258, 3, 3, 0],
+        [259, 3, 1, 1],
+        [262, 3, 1, 2],
+        [273, 4, 1, 0],
+        [277, 3, 1, 3],
+        [278, 4, 1, height],
+        [279, 4, 1, pixels.len() as u32],
+        [339, 3, 3, 0],
+        [34675, 7, profile.len() as u32, 0],
+    ];
+    let ifd_offset = 8u32;
+    let ifd_bytes = 2 + entries.len() as u32 * 12 + 4;
+    let bits_offset = align_to(ifd_offset + ifd_bytes, 2);
+    let sample_offset = align_to(bits_offset + 6, 2);
+    let profile_offset = align_to(sample_offset + 6, 2);
+    let pixel_offset = align_to(profile_offset + profile.len() as u32, 4);
+
+    let mut tiff = Vec::new();
+    tiff.extend_from_slice(b"II\x2a\0");
+    tiff.extend_from_slice(&ifd_offset.to_le_bytes());
+    tiff.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    for entry in entries {
+        let value = match entry[0] {
+            258 => bits_offset,
+            273 => pixel_offset,
+            339 => sample_offset,
+            34675 => profile_offset,
+            _ => entry[3],
+        };
+        tiff.extend_from_slice(&(entry[0] as u16).to_le_bytes());
+        tiff.extend_from_slice(&(entry[1] as u16).to_le_bytes());
+        tiff.extend_from_slice(&entry[2].to_le_bytes());
+        if entry[1] == 3 && entry[2] == 1 {
+            tiff.extend_from_slice(&(value as u16).to_le_bytes());
+            tiff.extend_from_slice(&[0, 0]);
+        } else {
+            tiff.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    tiff.extend_from_slice(&0u32.to_le_bytes());
+    tiff.resize(bits_offset as usize, 0);
+    for _ in 0..3 {
+        tiff.extend_from_slice(&bits.to_le_bytes());
+    }
+    tiff.resize(sample_offset as usize, 0);
+    for _ in 0..3 {
+        tiff.extend_from_slice(&sample_format.to_le_bytes());
+    }
+    tiff.resize(profile_offset as usize, 0);
+    tiff.extend_from_slice(profile);
+    tiff.resize(pixel_offset as usize, 0);
+    tiff.extend_from_slice(pixels);
+    tiff
+}
+
+/// Builds a minimal generated float32 RGB TIFF that carries the pinned linear
+/// ProPhoto source profile: the input shape `process_development_tiff`
+/// accepts. Tests across the workspace share this builder so generated
+/// fixture bytes never drift from the accepted source-profile identity.
+/// `samples` holds `width * height * 3` row-major interleaved RGB values.
+pub fn development_tiff_fixture(samples: &[f32], width: u32, height: u32) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(samples.len() * 4);
+    for sample in samples {
+        pixels.extend_from_slice(&sample.to_le_bytes());
+    }
+    tiff_bytes(&pixels, width, height, 32, 3, SOURCE_PROFILE_ASSET)
 }
 
 #[cfg(test)]
@@ -703,11 +809,6 @@ mod tests {
         ([0.9, 0.2, 0.05], [255, 57, 38]),
     ];
 
-    /// The pinned source profile asset, used to build fixture artifacts and to
-    /// prove the committed asset still carries its recorded identity.
-    const SOURCE_PROFILE_ASSET: &[u8] = include_bytes!("../assets/prophoto-linear-g10.icc");
-    const SOURCE_PROFILE_ASSET_DIGEST: &str =
-        "df7b2c677645f1ca5364b52e62f8db04ca61f80163792942f3e409a84a6b12ed";
     /// The source profile bytes the qualified darktable run embeds. Only the
     /// description tag differs from the pinned asset, so this is the artifact
     /// the accepted-digest list must not refuse.
@@ -743,8 +844,9 @@ mod tests {
         }
     }
 
-    /// Writes one uncompressed little-endian TIFF: `width * height` samples per
-    /// band, three bands, one strip, and an embedded ICC profile.
+    /// Writes one uncompressed little-endian TIFF with the requested sample
+    /// format and embedded profile, shared with the public generated fixture
+    /// builder.
     fn tiff_fixture(
         pixels: &[u8],
         width: u32,
@@ -753,66 +855,9 @@ mod tests {
         sample_format: u16,
         profile: &[u8],
     ) -> Fixture {
-        let entries: [[u32; 4]; 11] = [
-            [256, 4, 1, width],
-            [257, 4, 1, height],
-            [258, 3, 3, 0],
-            [259, 3, 1, 1],
-            [262, 3, 1, 2],
-            [273, 4, 1, 0],
-            [277, 3, 1, 3],
-            [278, 4, 1, height],
-            [279, 4, 1, pixels.len() as u32],
-            [339, 3, 3, 0],
-            [34675, 7, profile.len() as u32, 0],
-        ];
-        let ifd_offset = 8u32;
-        let ifd_bytes = 2 + entries.len() as u32 * 12 + 4;
-        let bits_offset = align(ifd_offset + ifd_bytes, 2);
-        let sample_offset = align(bits_offset + 6, 2);
-        let profile_offset = align(sample_offset + 6, 2);
-        let pixel_offset = align(profile_offset + profile.len() as u32, 4);
-
-        let mut tiff = Vec::new();
-        tiff.extend_from_slice(b"II\x2a\0");
-        tiff.extend_from_slice(&ifd_offset.to_le_bytes());
-        tiff.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-        for entry in entries {
-            let value = match entry[0] {
-                258 => bits_offset,
-                273 => pixel_offset,
-                339 => sample_offset,
-                34675 => profile_offset,
-                _ => entry[3],
-            };
-            tiff.extend_from_slice(&(entry[0] as u16).to_le_bytes());
-            tiff.extend_from_slice(&(entry[1] as u16).to_le_bytes());
-            tiff.extend_from_slice(&entry[2].to_le_bytes());
-            if entry[1] == 3 && entry[2] == 1 {
-                tiff.extend_from_slice(&(value as u16).to_le_bytes());
-                tiff.extend_from_slice(&[0, 0]);
-            } else {
-                tiff.extend_from_slice(&value.to_le_bytes());
-            }
+        Fixture {
+            bytes: tiff_bytes(pixels, width, height, bits, sample_format, profile),
         }
-        tiff.extend_from_slice(&0u32.to_le_bytes());
-        tiff.resize(bits_offset as usize, 0);
-        for _ in 0..3 {
-            tiff.extend_from_slice(&bits.to_le_bytes());
-        }
-        tiff.resize(sample_offset as usize, 0);
-        for _ in 0..3 {
-            tiff.extend_from_slice(&sample_format.to_le_bytes());
-        }
-        tiff.resize(profile_offset as usize, 0);
-        tiff.extend_from_slice(profile);
-        tiff.resize(pixel_offset as usize, 0);
-        tiff.extend_from_slice(pixels);
-        Fixture { bytes: tiff }
-    }
-
-    fn align(value: u32, boundary: u32) -> u32 {
-        value + (boundary - value % boundary) % boundary
     }
 
     const DESCRIPTION_TAG: [u8; 4] = *b"desc";

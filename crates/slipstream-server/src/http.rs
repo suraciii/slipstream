@@ -30,6 +30,7 @@ pub(crate) struct HttpState {
     pub(crate) application: Arc<Application>,
     pub(crate) web_root: Arc<WebRoot>,
     pub(crate) processing: Option<ProcessingConfig>,
+    pub(crate) edit_preview: Arc<crate::edit_preview::EditPreviewOwner>,
 }
 
 pub(crate) struct CloseState {
@@ -155,10 +156,23 @@ pub(crate) fn create_router_with_processing(
     web_root: WebRoot,
     processing: Option<ProcessingConfig>,
 ) -> Router {
+    let owner = Arc::new(crate::edit_preview::EditPreviewOwner::production());
+    create_router_with_preview(application, web_root, processing, owner)
+}
+
+/// Builds the router with explicit Edit Preview seams. Production uses the
+/// unlanded retention and render gate; route tests inject scripted seams.
+pub(crate) fn create_router_with_preview(
+    application: Arc<Application>,
+    web_root: WebRoot,
+    processing: Option<ProcessingConfig>,
+    edit_preview: Arc<crate::edit_preview::EditPreviewOwner>,
+) -> Router {
     let state = HttpState {
         application,
         web_root: Arc::new(web_root),
         processing,
+        edit_preview,
     };
     Router::new()
         .route(HEALTH_PATH, get(healthz))
@@ -183,6 +197,10 @@ pub(crate) fn create_router_with_processing(
         .route(
             "/api/photos/{id}/edit-recipe/rebind",
             get(method_not_allowed).post(crate::edit_recipe::post_edit_recipe_rebind),
+        )
+        .route(
+            "/api/photos/{id}/edit-preview/{stage}",
+            get(crate::edit_preview::get_edit_preview),
         )
         .route("/api/file-locations", get(get_file_locations))
         .route("/api/browse", post(open_browse))
