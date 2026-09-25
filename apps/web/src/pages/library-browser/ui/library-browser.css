@@ -512,6 +512,8 @@
 .options-dialog,
 .album-dialog,
 .recovery-dialog,
+.removal-dialog,
+.removed-dialog,
 .photo-tools-dialog,
 .rating-dialog,
 .browser.sources-drawer .source-dialog {
@@ -535,6 +537,8 @@
 .options-dialog::backdrop,
 .album-dialog::backdrop,
 .recovery-dialog::backdrop,
+.removal-dialog::backdrop,
+.removed-dialog::backdrop,
 .photo-tools-dialog::backdrop,
 .rating-dialog::backdrop,
 .browser.sources-drawer .source-dialog::backdrop {
@@ -544,6 +548,8 @@
 .options-sheet,
 .album-dialog-sheet,
 .recovery-sheet,
+.removal-sheet,
+.removed-sheet,
 .photo-tools-sheet,
 .rating-sheet,
 .browser.sources-drawer .source-panel {
@@ -564,6 +570,8 @@
 
 .options-body,
 .recovery-sheet > :not(.recovery-header),
+.removal-sheet > :not(.removal-header),
+.removed-sheet > :not(.removed-header),
 .photo-tools-body {
   min-height: 0;
   overflow-y: auto;
@@ -715,6 +723,8 @@
   .options-dialog,
   .album-dialog,
   .recovery-dialog,
+  .removal-dialog,
+  .removed-dialog,
   .photo-tools-dialog,
   .rating-dialog,
   .browser.sources-drawer .source-dialog {
@@ -729,6 +739,8 @@
   .options-sheet,
   .album-dialog-sheet,
   .recovery-sheet,
+  .removal-sheet,
+  .removed-sheet,
   .photo-tools-sheet,
   .rating-sheet,
   .browser.sources-drawer .source-panel {
@@ -2156,6 +2168,127 @@
   margin: 0.25rem 0 0;
   font-size: 0.85rem;
   color: var(--danger, #e5484d);
+}
+
+/* The removal review names the count that would leave the Library before its
+   one explicit confirmation, and reports the outcome beside the Undo the
+   removal leaves. */
+.removal-body {
+  min-height: 0;
+  display: grid;
+  gap: 0.5rem;
+  align-content: start;
+}
+
+.removal-summary,
+.removal-message {
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.removal-message {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.removal-message[data-tone="success"] {
+  color: var(--text);
+}
+
+.removal-message[data-tone="warning"],
+.removal-message[data-tone="failure"] {
+  color: var(--warning);
+}
+
+.removal-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.removal-actions button {
+  flex: 1 1 0;
+  min-height: 2.75rem;
+}
+
+.removal-actions .quiet {
+  flex: 0 0 auto;
+}
+
+/* The Removed Photos listing is the recovery path: one bounded page of rows,
+   each presenting the Photo facts the Grid presents and its own Restore. */
+.removed-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.removed-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+}
+
+.removed-item {
+  display: grid;
+  grid-template-columns: 3rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.removed-thumb {
+  width: 3rem;
+  height: 3rem;
+  object-fit: cover;
+  border-radius: 0.35rem;
+  background: var(--raised);
+}
+
+.removed-thumb.delivery-failed {
+  opacity: 0.45;
+}
+
+.removed-facts {
+  min-width: 0;
+}
+
+.removed-name {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.removed-when {
+  margin: 0.1rem 0 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.removed-message {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--warning);
+}
+
+.removed-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.removed-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.removed-pager span {
+  color: var(--muted);
+  font-size: 0.75rem;
 }
 
 @media (max-width: 420px) {

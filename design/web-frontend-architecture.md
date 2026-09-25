@@ -110,6 +110,11 @@ defined by Web Async Ownership:
 - The **saved-position coordinator** serializes admitted Album-position writes
   while validating both the captured Album source and current Photo owners. It
   does not become a general persistence service.
+- The **removal owner** owns the reviewed removal: the `Rejected` Browse
+  Snapshot under review, the operation identity its confirmation uses, the
+  confirmed operation Undo can still restore, and the admission of every
+  removal and restoration write. It never restores an operation or a Photo the
+  Library no longer holds, and it holds no Photo facts of its own.
 - The **page UI** owns Library Browser markup, DOM bindings, semantic rendering,
   focus, keyboard, pointer, and responsive presentation. It reports user intent
   to the page model; it does not issue HTTP requests or decide async ownership.

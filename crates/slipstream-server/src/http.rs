@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     app::CliPreviewRefusal,
+    config::MAX_RESTORATION_PHOTOS,
     folders::valid_folder_location,
     queries::{
         CLI_CONTRACT_VERSION, CursorError, MAXIMUM_LIST_PAGE, MAXIMUM_RETAINED_IDS, QUERY_IDLE,
@@ -265,6 +266,15 @@ pub(crate) fn create_router_with_preview(
             "/api/photos/state",
             get(method_not_allowed).post(mutate_photo_state_batch),
         )
+        .route(
+            "/api/photos/remove",
+            get(method_not_allowed).post(remove_photos),
+        )
+        .route(
+            "/api/photos/restore",
+            get(method_not_allowed).post(restore_photos),
+        )
+        .route("/api/photos/removed", get(get_removed_photos))
         .route(
             "/api/photos/{id}/state",
             get(method_not_allowed).post(mutate_photo_state),
@@ -644,6 +654,7 @@ pub(crate) async fn get_album_summaries(
             .insert(
                 token.clone(),
                 RetainedKind::Album,
+                None,
                 ids,
                 Instant::now(),
                 evaluated_at,
@@ -976,6 +987,7 @@ pub(crate) async fn create_photo_query(
             .insert(
                 token.clone(),
                 RetainedKind::Photo,
+                None,
                 ids,
                 Instant::now(),
                 evaluated_at,
@@ -1242,6 +1254,100 @@ pub(crate) async fn open_browse(
         .browse_open(source, order, selection, preferred_photo_id.as_deref())
         .await
     {
+        Ok(result) => json_response(StatusCode::OK, &result),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+/// Confirms the removal of one reviewed rejected result. The body names the
+/// Browse Snapshot and the browser-generated operation id; the reviewed result
+/// itself never travels back from the client.
+pub(crate) async fn remove_photos(
+    State(state): State<HttpState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let body = match read_json_body(request).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let Some(body) = body.as_object() else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid removal request");
+    };
+    if !has_exact_keys(body, &["token", "operationId"]) {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid removal request");
+    }
+    let Some(token) = body
+        .get("token")
+        .and_then(Value::as_str)
+        .filter(|token| valid_id(token))
+    else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid removal request");
+    };
+    let Some(operation_id) = body
+        .get("operationId")
+        .and_then(Value::as_str)
+        .filter(|operation_id| valid_id(operation_id))
+    else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid removal request");
+    };
+    match state.application.remove_photos(token, operation_id).await {
+        Ok(result) => json_response(StatusCode::OK, &result),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+/// Restores one removal operation or one explicit bounded list of Photos.
+pub(crate) async fn restore_photos(
+    State(state): State<HttpState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let body = match read_json_body(request).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let Some(body) = body.as_object() else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid restore request");
+    };
+    if body.is_empty() || !body.keys().all(|key| key == "operation" || key == "photos") {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid restore request");
+    }
+    let operation = match body.get("operation") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(operation)) if valid_id(operation) => Some(operation.to_owned()),
+        Some(_) => return api_error(StatusCode::BAD_REQUEST, "Invalid restore request"),
+    };
+    // An explicit restore names each Photo together with the removal marker it
+    // was reviewed at, so the request is a compare-and-set instead of a clear
+    // of whatever removal the Photo carries now.
+    let photos = match body.get("photos") {
+        None | Some(Value::Null) => None,
+        Some(value) => match valid_removal_markers(value) {
+            Some(markers) if !markers.is_empty() => Some(markers),
+            _ => return api_error(StatusCode::BAD_REQUEST, "Invalid restore request"),
+        },
+    };
+    // One named operation or one named Photo list, never both and never
+    // neither: a restore that could mean two different sets is refused.
+    let restoration = match (operation, photos) {
+        (Some(operation), None) => slipstream_core::PhotoRestoration::Operation(operation),
+        (None, Some(markers)) => slipstream_core::PhotoRestoration::Photos(markers),
+        _ => return api_error(StatusCode::BAD_REQUEST, "Invalid restore request"),
+    };
+    match state.application.restore_photos(restoration).await {
+        Ok(result) => json_response(StatusCode::OK, &result),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+/// One bounded page of removed Photos, newest removal first.
+pub(crate) async fn get_removed_photos(
+    State(state): State<HttpState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let Some((start, limit)) = browse_query(request.uri().query()) else {
+        return api_error(StatusCode::BAD_REQUEST, "Removed Photos window is invalid");
+    };
+    match state.application.removed_photos(start, limit).await {
         Ok(result) => json_response(StatusCode::OK, &result),
         Err(error) => ApiError::from(error).into_response(),
     }
@@ -2940,6 +3046,45 @@ pub(crate) fn valid_ids(value: Option<&Value>, max_ids: usize) -> Option<Vec<Str
     (unique == ids.len()).then(|| ids.into_iter().map(str::to_owned).collect())
 }
 
+/// One explicit restore list: each Photo named with the removal marker the
+/// caller reviewed. A marker must be a non-negative count of milliseconds, and
+/// no Photo may be named twice.
+pub(crate) fn valid_removal_markers(
+    value: &Value,
+) -> Option<Vec<slipstream_core::PhotoRemovalMarker>> {
+    let values = value.as_array()?;
+    if values.len() > MAX_RESTORATION_PHOTOS {
+        return None;
+    }
+    let markers = values
+        .iter()
+        .map(|value| {
+            let entry = value.as_object()?;
+            if !has_exact_keys(entry, &["id", "removedAtMs"]) {
+                return None;
+            }
+            let photo_id = entry.get("id")?.as_str()?;
+            if !valid_id(photo_id) {
+                return None;
+            }
+            let removed_at_ms = entry.get("removedAtMs")?.as_i64()?;
+            if removed_at_ms < 0 {
+                return None;
+            }
+            Some(slipstream_core::PhotoRemovalMarker {
+                photo_id: photo_id.to_owned(),
+                removed_at_ms,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let unique = markers
+        .iter()
+        .map(|marker| marker.photo_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    (unique == markers.len()).then_some(markers)
+}
+
 pub(crate) fn valid_selection(value: &Value) -> Option<SelectionState> {
     match value.as_str()? {
         "undecided" => Some(SelectionState::Undecided),
@@ -3072,6 +3217,18 @@ impl From<ServerError> for ApiError {
             ServerError::QueryCapacity => Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 message: "Retained query capacity is unavailable",
+            },
+            ServerError::RemovalFilter => Self {
+                status: StatusCode::BAD_REQUEST,
+                message: "Removal requires a Browse Snapshot filtered to Rejected",
+            },
+            ServerError::RemovedWindow => Self {
+                status: StatusCode::BAD_REQUEST,
+                message: "Removed Photos window is invalid",
+            },
+            ServerError::RestorationInvalid => Self {
+                status: StatusCode::BAD_REQUEST,
+                message: "Restore names exactly one operation or a bounded Photo list",
             },
             ServerError::NotPublished => Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,

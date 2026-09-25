@@ -298,6 +298,9 @@ pub enum ServerError {
     FileLocationWindow,
     FolderAlbumLimit,
     QueryCapacity,
+    RemovalFilter,
+    RemovedWindow,
+    RestorationInvalid,
 }
 
 impl fmt::Display for ServerError {
@@ -335,6 +338,13 @@ impl fmt::Display for ServerError {
             Self::FolderAlbumLimit => formatter
                 .write_str("This Original Folder contains too many Photos for one Album operation"),
             Self::QueryCapacity => formatter.write_str("Retained query capacity is unavailable"),
+            Self::RemovalFilter => {
+                formatter.write_str("Removal requires a Browse Snapshot filtered to Rejected")
+            }
+            Self::RemovedWindow => formatter.write_str("Removed Photos window is invalid"),
+            Self::RestorationInvalid => {
+                formatter.write_str("Restore names exactly one operation or a bounded Photo list")
+            }
         }
     }
 }
@@ -435,6 +445,11 @@ pub(crate) fn canonicalize_layout_path(path: &Path) -> io::Result<PathBuf> {
 }
 
 pub(crate) const MAX_BROWSE_WINDOW: usize = 60;
+/// Maximum removed Photos one bounded Removed Photos listing page returns.
+pub(crate) const MAX_REMOVED_WINDOW: usize = 60;
+/// Maximum Photos one explicit restore request may name. Undo restores one
+/// operation instead, so this bound only limits machine clients.
+pub(crate) const MAX_RESTORATION_PHOTOS: usize = 100;
 pub(crate) const MAX_BROWSE_SNAPSHOTS: usize = 8;
 pub(crate) const BROWSE_SNAPSHOT_IDLE: Duration = Duration::from_secs(30 * 60);
 

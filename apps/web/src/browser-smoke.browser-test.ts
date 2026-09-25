@@ -1808,6 +1808,186 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   );
 });
 
+test("rejected Photos leave the Library, return from Undo, and are restored from the Removed Photos listing", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 3);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  expect(ids).toHaveLength(3);
+
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 3 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  // Two Photos are rejected, and the Grid is filtered to that result. Removal
+  // is reviewed against the Snapshot the Photographer actually sees.
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(cell(0)).toBeEnabled();
+  await page.keyboard.press("x");
+  await expect(cell(0).locator(".cell-state.rejected")).toHaveText("×");
+  await expect(cell(1)).toBeEnabled();
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("x");
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+    "Source progress: 0 selected · 2 rejected · 1 undecided",
+  );
+  await openViewOptions(page);
+  await page.locator("[data-filter-select]").selectOption("rejected");
+  await applyViewOptions(page);
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 2 Photos",
+  );
+
+  // The review names the result it covers and removes nothing by itself.
+  const review = page.locator("[data-removal-review]");
+  await page.locator("[data-removal-open]").click();
+  await expect(review).toBeVisible();
+  await expect(page.locator("[data-removal-summary]")).toHaveText(
+    /^2 Photos reviewed as Rejected\./,
+  );
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 2 Photos",
+  );
+
+  // One confirmation removes exactly the reviewed result, and the Library
+  // reads again: the rejected result is empty and the Overview count drops.
+  await page.locator("[data-removal-confirm]").click();
+  await expect(page.locator("[data-removal-message]")).toHaveText(
+    /^2 Photos removed from the Library\. Their Original Files are unchanged\.$/,
+  );
+  // The filtered source is now empty, so the Grid explains the empty result
+  // instead of the reopen that produced it.
+  await expect(page.locator("[data-grid-status]")).toHaveText("0 Photos");
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+    "Source progress: 0 selected · 0 rejected · 1 undecided",
+  );
+  await page.locator("[data-removal-close]").click();
+  await expect(review).toBeHidden();
+  await expect(page.locator("[data-grid-empty-message]")).toHaveText(
+    "No Photos match this filter.",
+  );
+  // The Library Overview count is the committed count, not the filtered one.
+  await expect(
+    page.getByRole("link", { name: /^All Photos 1 Photo$/ }),
+  ).toBeVisible();
+
+  // The operation-level Undo is recovered from persisted removal state after
+  // the page owner is recreated by a reload.
+  await page.reload();
+  await expect(
+    page.getByRole("link", { name: /^All Photos 1 Photo$/ }),
+  ).toBeVisible();
+  await page.locator("[data-removed-open]").click();
+  const removed = page.locator("[data-removed-panel]");
+  await expect(page.locator("[data-removed-status]")).toHaveText(
+    "2 Photos removed from the Library. Showing 1–2.",
+  );
+  await expect(page.locator("[data-removed-list] .removed-item")).toHaveCount(
+    2,
+  );
+  await expect(page.locator("[data-removed-undo]")).toHaveText(
+    "Undo the last removal (2)",
+  );
+  await page.locator("[data-removed-undo]").click();
+  await expect(page.locator("[data-removed-message]")).toHaveText(
+    /^2 Photos restored to the Library\.$/,
+  );
+  await expect(page.locator("[data-removed-list] .removed-item")).toHaveCount(
+    0,
+  );
+  await page.locator("[data-removed-close]").click();
+  await expect(removed).toBeHidden();
+  await expect(
+    page.getByRole("link", { name: /^All Photos 3 Photos$/ }),
+  ).toBeVisible();
+
+  // Restored Photos keep the decisions they had before the removal.
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+    "Source progress: 0 selected · 2 rejected · 1 undecided",
+  );
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Source reopened after the restore.",
+  );
+
+  // Remove again, then restore one named Photo from the listing: the durable
+  // per-Photo path survives a reload.
+  await page.locator("[data-removal-open]").click();
+  await expect(page.locator("[data-removal-summary]")).toHaveText(
+    /^2 Photos reviewed as Rejected\./,
+  );
+  await page.locator("[data-removal-confirm]").click();
+  await expect(page.locator("[data-removal-message]")).toHaveText(
+    /^2 Photos removed from the Library\./,
+  );
+  await page.locator("[data-removal-close]").click();
+  await page.locator("[data-removed-open]").click();
+  await expect(page.locator("[data-removed-list] .removed-item")).toHaveCount(
+    2,
+  );
+  const restoredRow = page.locator("[data-removed-list] .removed-item").first();
+  const restoredName = await restoredRow.locator(".removed-name").innerText();
+  await restoredRow.getByRole("button", { name: "Restore" }).click();
+  await expect(page.locator("[data-removed-message]")).toHaveText(
+    /^1 Photo restored to the Library\.$/,
+  );
+  await expect(page.locator("[data-removed-list] .removed-item")).toHaveCount(
+    1,
+  );
+  await expect(
+    page.locator("[data-removed-list] .removed-name"),
+  ).not.toHaveText(restoredName);
+  await page.reload();
+  await expect(
+    page.getByRole("link", { name: /^All Photos 2 Photos$/ }),
+  ).toBeVisible();
+  await page.locator("[data-removed-open]").click();
+  await expect(page.locator("[data-removed-list] .removed-item")).toHaveCount(
+    1,
+  );
+  await expect(page.locator("[data-removed-status]")).toHaveText(
+    "1 Photo removed from the Library. Showing 1–1.",
+  );
+  await expect(
+    page.locator("[data-removed-list] .removed-name"),
+  ).not.toHaveText(restoredName);
+  // A stale listing marker is answered truthfully: the Photo remains removed
+  // and the Photographer is told that its removal state changed elsewhere.
+  await page.route("**/api/photos/restore", async (route) => {
+    const body = JSON.parse(route.request().postData() ?? "{}") as {
+      photos?: ReadonlyArray<{ id?: unknown }>;
+    };
+    const photoId = body.photos?.[0]?.id;
+    if (typeof photoId !== "string")
+      throw new Error("restore request did not name a Photo");
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        counts: { restored: 0, changedElsewhere: 1, missing: 0 },
+        changedElsewhere: [photoId],
+        missing: [],
+        operations: [],
+      }),
+    });
+  });
+  await page
+    .locator("[data-removed-list] .removed-item")
+    .getByRole("button", { name: "Restore" })
+    .click();
+  await expect(page.locator("[data-removed-message]")).toHaveText(
+    "Nothing was restored. 1 Photo could not be restored because their removal state changed elsewhere.",
+  );
+  await expect(page.locator("[data-removed-list] .removed-item")).toHaveCount(
+    1,
+  );
+  await page.unroute("**/api/photos/restore");
+});
+
 test("EXIF-rotated thumbnails display the corrected orientation exactly once", async ({
   page,
 }) => {

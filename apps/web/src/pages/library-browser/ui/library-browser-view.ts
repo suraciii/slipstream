@@ -166,6 +166,28 @@ export type LibraryBrowserIntent =
   | Readonly<{ kind: "grid-batch-album-add"; albumId: string }>
   | Readonly<{ kind: "grid-batch-album-remove" }>
   | Readonly<{ kind: "grid-batch-review" }>
+  /// Opens the review of the current `Rejected` result. The review is the only
+  /// surface that removes Photos, and it removes exactly the result it named.
+  | Readonly<{ kind: "removal-review-open" }>
+  | Readonly<{ kind: "removal-review-close" }>
+  | Readonly<{ kind: "removal-confirm" }>
+  /// Undo restores one confirmed operation. It is offered beside the removal
+  /// that confirmed it and in the listing a Photographer returns to, so it
+  /// names the surface that reports the outcome.
+  | Readonly<{ kind: "removal-undo"; surface: "review" | "listing" }>
+  /// Opens the bounded Removed Photos listing: the recovery path for every
+  /// confirmed removal, and the only ordinary surface a removed Photo has.
+  | Readonly<{ kind: "removed-list-open" }>
+  | Readonly<{ kind: "removed-list-close" }>
+  | Readonly<{ kind: "removed-page"; direction: -1 | 1 }>
+  | Readonly<{ kind: "removed-retry" }>
+  | Readonly<{
+      kind: "removed-restore";
+      photoId: string;
+      /// The removal marker the rendered row presented, so the restore names
+      /// the removal the Photographer saw.
+      removedAtMs: number;
+    }>
   | Readonly<{
       kind:
         | "show-grid"
@@ -454,6 +476,9 @@ type ControlsViewModel = Readonly<{
   previousEnabled: boolean;
   nextEnabled: boolean;
   undoEnabled: boolean;
+  /// Whether the current source is a `Rejected` result a removal could be
+  /// reviewed against. The review is offered only where it can be admitted.
+  removalEnabled: boolean;
 }>;
 
 /// The batch tray's Album choices. `pending` covers one Add to Album settling
@@ -461,6 +486,46 @@ type ControlsViewModel = Readonly<{
 export type BatchAlbumsViewModel = Readonly<{
   albums: ReadonlyArray<Readonly<{ id: string; name: string }>>;
   pending: boolean;
+}>;
+
+/// The reviewed removal: the count one confirmation would take out of the
+/// Library, the outcome of the last attempt, and the Undo record a successful
+/// removal leaves. `canConfirm` is false once the reviewed result is consumed,
+/// so the surface never offers a confirmation it cannot admit.
+export type RemovalReviewViewModel = Readonly<{
+  reviewed: number;
+  pending: boolean;
+  canConfirm: boolean;
+  tone?: "success" | "warning" | "failure";
+  message?: string;
+  undo?: Readonly<{ removed: number }>;
+}>;
+
+/// One bounded page of removed Photos, newest removal first. Each item carries
+/// the facts the Grid and Photo View already present, so the Photographer
+/// recognizes what is recoverable before restoring it.
+export type RemovedPanelViewModel = Readonly<{
+  start: number;
+  total: number;
+  limit: number;
+  pending: boolean;
+  /// Whether the last read of the listing failed, so the surface offers the
+  /// one control that repeats it.
+  canRetry: boolean;
+  restoringPhotoId?: string;
+  message?: string;
+  /// The last confirmed operation, while Undo can still restore it. The
+  /// listing is the surface a Photographer returns to, so the operation-level
+  /// recovery is offered here and not only beside the confirmation.
+  undo?: Readonly<{ removed: number }>;
+  items: ReadonlyArray<
+    Readonly<{
+      photoId: string;
+      filename: string;
+      removedAtMs: number;
+      preview: GridPhotoViewModel["preview"];
+    }>
+  >;
 }>;
 
 export interface LibraryBrowserView {
@@ -579,6 +644,19 @@ export interface LibraryBrowserView {
   setAlbumFormMessage(formId: string, message: string): void;
   setAlbumFormPending(formId: string, pending: boolean, name?: string): void;
   dismissAlbumForm(formId: string): void;
+  /// Presents the reviewed removal: the count that would leave the Library,
+  /// the outcome of the last attempt, and the Undo record a successful removal
+  /// leaves. Opening the surface removes nothing; only the confirmation does.
+  openRemovalReview(model: RemovalReviewViewModel): void;
+  /// Updates the open removal review without reopening it, so a settling
+  /// confirmation, its outcome, and its Undo record all reach the surface the
+  /// Photographer is looking at.
+  renderRemovalReview(model: RemovalReviewViewModel): void;
+  closeRemovalReview(): void;
+  /// Opens the bounded Removed Photos listing and presents its first page.
+  openRemovedPanel(model: RemovedPanelViewModel): void;
+  renderRemovedPanel(model: RemovedPanelViewModel): void;
+  closeRemovedPanel(): void;
   /// Presents the committed recovery counts of the last scan and, while
   /// Originals remain unavailable, the one bounded review entry.
   setRecoveryNotice(
@@ -637,7 +715,7 @@ export function createLibraryBrowserView(
         </dialog>
         <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" tabindex="0"></div>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-          <header class="grid-header"><div class="grid-header-row"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false"><span class="source-toggle-name" data-grid-compact-title>All Photos</span><span class="source-toggle-indicator" aria-hidden="true">▾</span></button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-connection" data-grid-connection role="status" hidden></p><div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options>Options</button><span class="options-flag" data-view-options-flag hidden></span><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button></div><div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
+          <header class="grid-header"><div class="grid-header-row"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false"><span class="source-toggle-name" data-grid-compact-title>All Photos</span><span class="source-toggle-indicator" aria-hidden="true">▾</span></button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-connection" data-grid-connection role="status" hidden></p><div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options>Options</button><span class="options-flag" data-view-options-flag hidden></span><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button><button type="button" class="quiet" data-removal-open hidden>Remove rejected Photos</button><button type="button" class="quiet" data-removed-open>Removed Photos</button></div><div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
           <div class="grid-batch" data-grid-batch hidden><div class="grid-batch-result" data-grid-batch-result hidden><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-select>Select</button><button type="button" data-batch-reject>Reject</button><label for="batch-album-select">Add to</label><select id="batch-album-select" data-batch-album-select></select><button type="button" data-batch-album-add>Add to Album</button></div></div>
         </section>
@@ -743,6 +821,25 @@ export function createLibraryBrowserView(
           <ul class="recovery-proposals" data-recovery-proposals hidden></ul>
           <div class="recovery-actions"><button type="button" data-recovery-apply hidden>Apply mappings</button></div>
           <p class="recovery-message" data-recovery-message role="alert" hidden></p>
+          </div>
+        </dialog>
+        <dialog class="removal-dialog" data-removal-review aria-labelledby="removal-title">
+          <div class="removal-sheet">
+            <header class="removal-header"><h3 id="removal-title">Remove rejected Photos</h3><button type="button" class="quiet" data-removal-close>Close</button></header>
+            <div class="removal-body">
+              <p class="removal-summary" data-removal-summary></p>
+              <p class="removal-message" data-removal-message role="alert" hidden></p>
+            </div>
+            <footer class="removal-actions"><button type="button" data-removal-confirm>Remove from Library</button><button type="button" class="quiet" data-removal-undo hidden>Undo</button></footer>
+          </div>
+        </dialog>
+        <dialog class="removed-dialog" data-removed-panel aria-labelledby="removed-title">
+          <div class="removed-sheet">
+            <header class="removed-header"><h3 id="removed-title">Removed Photos</h3><button type="button" class="quiet" data-removed-close>Close</button></header>
+            <p class="removed-status" data-removed-status role="status"></p>
+            <ul class="removed-list" data-removed-list></ul>
+            <p class="removed-message" data-removed-message role="alert" hidden></p>
+            <footer class="removed-pager"><button type="button" class="quiet" data-removed-previous>Previous</button><span data-removed-page></span><button type="button" class="quiet" data-removed-next>Next</button><button type="button" data-removed-retry hidden>Retry</button></footer><footer class="removed-actions"><button type="button" class="quiet" data-removed-undo hidden>Undo the last removal</button></footer>
           </div>
         </dialog>
       </section>
@@ -852,6 +949,54 @@ export function createLibraryBrowserView(
     root,
     "[data-recovery-close]",
   );
+  const removalOpen = required<HTMLButtonElement>(root, "[data-removal-open]");
+  const removalDialog = required<HTMLDialogElement>(
+    root,
+    "[data-removal-review]",
+  );
+  const removalSummary = required<HTMLElement>(root, "[data-removal-summary]");
+  const removalMessage = required<HTMLElement>(root, "[data-removal-message]");
+  const removalConfirm = required<HTMLButtonElement>(
+    root,
+    "[data-removal-confirm]",
+  );
+  const removalUndo = required<HTMLButtonElement>(root, "[data-removal-undo]");
+  const removalClose = required<HTMLButtonElement>(
+    root,
+    "[data-removal-close]",
+  );
+  const removedOpen = required<HTMLButtonElement>(root, "[data-removed-open]");
+  const removedPanel = required<HTMLDialogElement>(
+    root,
+    "[data-removed-panel]",
+  );
+  const removedStatus = required<HTMLElement>(root, "[data-removed-status]");
+  const removedList = required<HTMLElement>(root, "[data-removed-list]");
+  const removedMessage = required<HTMLElement>(root, "[data-removed-message]");
+  const removedPrevious = required<HTMLButtonElement>(
+    root,
+    "[data-removed-previous]",
+  );
+  const removedNext = required<HTMLButtonElement>(root, "[data-removed-next]");
+  const removedPage = required<HTMLElement>(root, "[data-removed-page]");
+  const removedRetry = required<HTMLButtonElement>(
+    root,
+    "[data-removed-retry]",
+  );
+  const removedClose = required<HTMLButtonElement>(
+    root,
+    "[data-removed-close]",
+  );
+  const removedUndo = required<HTMLButtonElement>(root, "[data-removed-undo]");
+  /// Thumbnails the Removed Photos listing attached. They are released when
+  /// the listing re-renders or closes, so the page's image delivery holds only
+  /// the rows that are actually presented.
+  let removedListBindings: ReadonlyArray<GridThumbnailBinding> = [];
+  const releaseRemovedRows = () => {
+    for (const binding of removedListBindings) releaseThumbnail(binding);
+    removedListBindings = [];
+    removedList.replaceChildren();
+  };
   let recoveryCurrentProposals: ReadonlyArray<RecoveryProposalViewModel> = [];
   const recoveryRetireSelection = new Map<string, boolean>();
   const recoveryOutcomeLabel = (
@@ -1184,6 +1329,14 @@ export function createLibraryBrowserView(
   });
   surfaces.register("recovery", {
     dialog: recoveryPanel,
+    modal: () => true,
+  });
+  surfaces.register("removal-review", {
+    dialog: removalDialog,
+    modal: () => true,
+  });
+  surfaces.register("removed-panel", {
+    dialog: removedPanel,
     modal: () => true,
   });
 
@@ -3958,6 +4111,38 @@ export function createLibraryBrowserView(
   recoveryClose.addEventListener("click", () =>
     send({ kind: "recovery-close" }),
   );
+  removalOpen.addEventListener("click", () =>
+    send({ kind: "removal-review-open" }),
+  );
+  removalClose.addEventListener("click", () =>
+    send({ kind: "removal-review-close" }),
+  );
+  removalConfirm.addEventListener("click", () =>
+    send({ kind: "removal-confirm" }),
+  );
+  removalUndo.addEventListener("click", () =>
+    send({ kind: "removal-undo", surface: "review" }),
+  );
+  removedUndo.addEventListener("click", () =>
+    send({ kind: "removal-undo", surface: "listing" }),
+  );
+  removedOpen.addEventListener("click", () =>
+    send({ kind: "removed-list-open" }),
+  );
+  removedClose.addEventListener("click", () =>
+    send({ kind: "removed-list-close" }),
+  );
+  removedPrevious.addEventListener("click", () =>
+    send({ kind: "removed-page", direction: -1 }),
+  );
+  removedNext.addEventListener("click", () =>
+    send({ kind: "removed-page", direction: 1 }),
+  );
+  removedRetry.addEventListener("click", () => send({ kind: "removed-retry" }));
+  // A close the controller did not start — a native close request, an Escape
+  // from a surface this one yielded to, a destination change — releases the
+  // listing's thumbnails the same way an explicit Close does.
+  removedPanel.addEventListener("close", releaseRemovedRows);
   recoveryPropose.addEventListener("click", () =>
     send({
       kind: "recovery-propose",
@@ -4185,6 +4370,111 @@ export function createLibraryBrowserView(
   // opens. Placing it here would emit an intent while the page model that
   // owns the strip's facts is still being constructed.
 
+  const presentRemovalReview = (model: RemovalReviewViewModel) => {
+    removalSummary.textContent = `${formatPhotoCount(
+      model.reviewed,
+    )} reviewed as Rejected. Removing them takes them out of the Library; they stay recoverable and every Original File stays where it is.`;
+    removalConfirm.hidden = !model.canConfirm;
+    removalConfirm.disabled = model.pending;
+    removalConfirm.textContent = model.pending
+      ? "Removing…"
+      : "Remove from Library";
+    removalUndo.hidden = model.undo === undefined;
+    removalUndo.disabled = model.pending;
+    if (model.message === undefined) {
+      removalMessage.hidden = true;
+      removalMessage.textContent = "";
+      removalMessage.removeAttribute("data-tone");
+      return;
+    }
+    removalMessage.textContent = model.message;
+    removalMessage.hidden = false;
+    if (model.tone) removalMessage.dataset.tone = model.tone;
+    else removalMessage.removeAttribute("data-tone");
+  };
+  const presentRemovedPanel = (model: RemovedPanelViewModel) => {
+    releaseRemovedRows();
+    const shown = Math.min(model.total, model.start + model.items.length);
+    removedStatus.textContent =
+      model.total === 0
+        ? "No Photos are removed from the Library."
+        : `${formatPhotoCount(model.total)} removed from the Library. Showing ${(
+            model.start + 1
+          ).toLocaleString()}–${shown.toLocaleString()}.`;
+    const rows = model.items.map((item) => {
+      const row = document.createElement("li");
+      row.className = "removed-item";
+      const image = document.createElement("img");
+      image.className = "removed-thumb";
+      image.alt = "";
+      const facts = document.createElement("div");
+      facts.className = "removed-facts";
+      const name = document.createElement("p");
+      name.className = "removed-name";
+      name.textContent = item.filename;
+      const when = document.createElement("p");
+      when.className = "removed-when";
+      when.textContent = `Removed ${removalTimestamp(item.removedAtMs)}`;
+      facts.append(name, when);
+      const restore = document.createElement("button");
+      restore.type = "button";
+      restore.className = "quiet";
+      const restoring = model.restoringPhotoId === item.photoId;
+      restore.textContent = restoring ? "Restoring…" : "Restore";
+      restore.disabled = model.pending || restoring;
+      restore.addEventListener("click", () =>
+        send({
+          kind: "removed-restore",
+          photoId: item.photoId,
+          removedAtMs: item.removedAtMs,
+        }),
+      );
+      row.append(image, facts, restore);
+      const binding: GridThumbnailBinding = {
+        photoId: item.photoId,
+        preview: item.preview,
+        target: gridThumbnailTarget(image, (failed) => {
+          image.classList.toggle("delivery-failed", failed);
+        }),
+      };
+      // The listing presents the same Photo facts the Grid does, so it uses
+      // the page's one image-delivery path. A delivery the page drops because
+      // the source moved on leaves the row without its Thumbnail until the
+      // listing is presented again, which is the rule the Grid follows too.
+      bindThumbnail(binding);
+      return { row, binding };
+    });
+    removedListBindings = rows.map((entry) => entry.binding);
+    removedList.replaceChildren(...rows.map((entry) => entry.row));
+    const shownEnd = shown >= model.total;
+    removedPrevious.disabled = model.pending || model.start === 0;
+    removedNext.disabled = model.pending || shownEnd;
+    removedRetry.hidden = !model.canRetry;
+    removedRetry.disabled = model.pending;
+    removedUndo.hidden = model.undo === undefined;
+    removedUndo.disabled = model.pending;
+    removedUndo.textContent =
+      model.undo === undefined
+        ? "Undo the last removal"
+        : `Undo the last removal (${model.undo.removed.toLocaleString()})`;
+    removedPage.textContent =
+      model.total === 0
+        ? ""
+        : `Page ${(
+            Math.floor(model.start / model.limit) + 1
+          ).toLocaleString()} of ${Math.max(
+            1,
+            Math.ceil(model.total / model.limit),
+          ).toLocaleString()}`;
+    if (model.message === undefined) {
+      removedMessage.hidden = true;
+      removedMessage.textContent = "";
+      return;
+    }
+    removedMessage.textContent = model.message;
+    removedMessage.hidden = false;
+  };
+
   return {
     get photoStatusSurface() {
       return photoStatusSurface;
@@ -4372,6 +4662,8 @@ export function createLibraryBrowserView(
       dockPrevious.disabled = !model.previousEnabled;
       dockNext.disabled = !model.nextEnabled;
       photoToolsUndo.disabled = !model.undoEnabled;
+      removalOpen.hidden = !model.removalEnabled;
+      removalOpen.disabled = !model.removalEnabled;
       const wasStripInteractive = filmstripInteractive;
       filmstripInteractive = model.filmstripEnabled;
       const heldElement = document.activeElement as HTMLElement | null;
@@ -4609,6 +4901,34 @@ export function createLibraryBrowserView(
       send({ kind: "album-form-close", formId: form.formId });
       dismissAlbumFormSurface(form);
     },
+    openRemovalReview(model) {
+      if (!alive) return;
+      presentRemovalReview(model);
+      surfaces.open("removal-review", removalOpen);
+      removalClose.focus();
+    },
+    renderRemovalReview(model) {
+      if (!alive) return;
+      presentRemovalReview(model);
+    },
+    closeRemovalReview() {
+      if (!alive) return;
+      surfaces.close("removal-review");
+    },
+    openRemovedPanel(model) {
+      if (!alive) return;
+      presentRemovedPanel(model);
+      surfaces.open("removed-panel", removedOpen);
+      removedClose.focus();
+    },
+    renderRemovedPanel(model) {
+      if (!alive) return;
+      presentRemovedPanel(model);
+    },
+    closeRemovedPanel() {
+      if (!alive) return;
+      surfaces.close("removed-panel");
+    },
     setRecoveryNotice(model) {
       if (!alive) return;
       const parts: string[] = [];
@@ -4746,6 +5066,7 @@ export function createLibraryBrowserView(
       if (!alive) return;
       alive = false;
       resetGestures();
+      releaseRemovedRows();
       stageObserver.disconnect();
       clearFilmstripCells();
       preview.removeEventListener("wheel", wheelZoom);
@@ -4783,6 +5104,15 @@ function selectionLabel(value?: ViewSelectionState): string {
     : value === "rejected"
       ? "Rejected"
       : "Undecided";
+}
+
+/// When a Photo was removed, in the Photographer's own locale. A timestamp the
+/// platform cannot parse is presented verbatim rather than invented.
+/// The removal marker as a local reading. The listing reports the millisecond
+/// the removal was confirmed, so the row shows the same instant the restore
+/// names and no timezone-less text is parsed as if it were local.
+function removalTimestamp(removedAtMs: number): string {
+  return new Date(removedAtMs).toLocaleString();
 }
 
 function gridPhotoFacts(

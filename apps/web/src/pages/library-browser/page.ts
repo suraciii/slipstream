@@ -42,6 +42,13 @@ import {
 } from "./model/source-grid-owner.js";
 import { releaseBrowse, type SourceViewOrder } from "./api/source-grid.js";
 import {
+  fetchRemovedPhotos,
+  type RemovedPhotoItem,
+  type RemovalResult,
+  type RestorationResult,
+} from "./api/removal.js";
+import { createRemovalOwner } from "./model/removal-owner.js";
+import {
   createAlbumActionOwner,
   type AlbumActionAdmission,
   type AlbumActionContext,
@@ -417,6 +424,35 @@ function mountPrivateLibraryBrowser(
     emit: handleApplicationEvent,
   });
   const albumActions = createAlbumActionOwner(fetcher);
+  const removal = createRemovalOwner(fetcher);
+  /// One bounded page of removed Photos. The listing is not a source and
+  /// creates no second browsing model: it presents the recovery path for the
+  /// removals the Library has committed.
+  const REMOVED_PAGE_LIMIT = 50;
+  let removalReviewed = 0;
+  let removalReviewOpen = false;
+  let removalResult:
+    | Readonly<{
+        tone: "success" | "warning" | "failure";
+        message: string;
+      }>
+    | undefined;
+  let removedPage:
+    | Readonly<{
+        start: number;
+        total: number;
+        operation:
+          | Readonly<{ operationId: string; removed: number }>
+          | undefined;
+        items: ReadonlyArray<RemovedPhotoItem>;
+      }>
+    | undefined;
+  let removedLoadFailed = false;
+  let removedPanelOpen = false;
+  let removedAbort: AbortController | undefined;
+  let removedPending = false;
+  let removedRestoringId: string | undefined;
+  let removedMessage: string | undefined;
   type AlbumFormRecord = Readonly<{
     formId: string;
     kind: AlbumFormReference["kind"];
@@ -754,7 +790,8 @@ function mountPrivateLibraryBrowser(
     // cells, so one admission fact gates both: an activation that would be
     // refused silently is never presented as an enabled control.
     const filmstripEnabled = gridEnabled;
-    const interactionBusy = pageBusy || photoRetryPending || photoOwner.busy;
+    const interactionBusy =
+      pageBusy || photoRetryPending || photoOwner.busy || removal.busy;
     const recoveryEnabled =
       !pageBusy &&
       !photoRetryPending &&
@@ -769,6 +806,13 @@ function mountPrivateLibraryBrowser(
       backEnabled: !interactionBusy,
       refreshEnabled: !interactionBusy,
       recoveryEnabled,
+      removalEnabled:
+        connected &&
+        !interactionBusy &&
+        !photoOwner.opening &&
+        sourceGrid.token !== "" &&
+        sourceGrid.selection === "rejected" &&
+        sourceGrid.total > 0,
       previousEnabled:
         !interactionBusy && !photoOwner.opening && photoOwner.currentIndex > 0,
       nextEnabled:
@@ -785,6 +829,9 @@ function mountPrivateLibraryBrowser(
     renderSortControl();
     renderFilterControl();
     renderProgress();
+    // Every state that moves the presented result passes here, so a review
+    // that no longer covers it is withdrawn with the same update.
+    reconcileRemovalReview();
   };
 
   /// Sends one admitted Album mutation and reports truthful outcomes.
@@ -1683,10 +1730,19 @@ function mountPrivateLibraryBrowser(
     return "No supported Photos found. Check the Library Folder or add supported files, then run Check Library.";
   };
 
+  /// Reopens the current source with a fresh Snapshot of the same order and
+  /// filter, keeping the anchor. `reason` names why, because an expired Library
+  /// order is not the only cause: a committed removal or restore also leaves
+  /// the open Snapshot stale, and the status line must not blame the order.
   const reopenExpired = async (
     anchorIndex: number,
     expectedGeneration = sourceGrid.generation,
     preferredPhotoId?: string,
+    reason: Readonly<{ progress: string; settled: string }> = {
+      progress:
+        "Library order expired. Reopening this source from the latest Library…",
+      settled: "Source reopened using the latest published Library order.",
+    },
   ) => {
     if (expectedGeneration !== sourceGrid.generation) return;
     pageBusy = true;
@@ -1785,8 +1841,7 @@ function mountPrivateLibraryBrowser(
       String(generation),
     );
     syncConnection();
-    const notice =
-      "Library order expired. Reopening this source from the latest Library…";
+    const notice = reason.progress;
     setGridStatusText(notice);
     view.setPhotoStatus(notice);
     try {
@@ -1831,9 +1886,18 @@ function mountPrivateLibraryBrowser(
       // rebuilds them, and only the visible Grid may touch its DOM.
       if (view.gridVisible()) view.clearGridCells();
       renderGrid(gridPosition);
-      setGridStatusText(
-        "Source reopened using the latest published Library order.",
-      );
+      // A reopen that leaves the source empty presents the same explained
+      // state the open path presents. Without it an emptied Grid would be
+      // blank, and a blank Grid cannot be told from a broken one.
+      if (sourceGrid.total === 0) {
+        setGridStatusText(formatPhotoCount(0));
+        view.setGridEmpty(
+          sourceGrid.selection === "all"
+            ? emptySourceStatus()
+            : "No Photos match this filter.",
+          sourceGrid.selection === "all" && sourceGrid.kind !== "album",
+        );
+      } else setGridStatusText(reason.settled);
       if (sourceGrid.kind === "folder") releasePublicationLocationRecovery();
       recoveryGate.succeedTransition(sourceTransition);
       sourceGrid.establish(authority);
@@ -3972,6 +4036,38 @@ function mountPrivateLibraryBrowser(
       case "grid-batch-review":
         void reviewChangedPhotos();
         return;
+      case "removal-review-open":
+        openRemovalReview();
+        return;
+      case "removal-review-close":
+        removalReviewOpen = false;
+        view.closeRemovalReview();
+        return;
+      case "removal-confirm":
+        void confirmRemoval();
+        return;
+      case "removal-undo":
+        void undoRemoval(intent.surface);
+        return;
+      case "removed-list-open":
+        openRemovedPanel();
+        return;
+      case "removed-list-close":
+        closeRemovedPanel();
+        return;
+      case "removed-page": {
+        if (removedPending || removedPage === undefined) return;
+        const start = removedPage.start + intent.direction * REMOVED_PAGE_LIMIT;
+        if (start < 0 || start >= removedPage.total) return;
+        void loadRemovedPage(start);
+        return;
+      }
+      case "removed-retry":
+        void loadRemovedPage(removedPage?.start ?? 0);
+        return;
+      case "removed-restore":
+        void restoreRemovedPhoto(intent.photoId, intent.removedAtMs);
+        return;
       case "show-grid":
         returnToSourceGrid();
         return;
@@ -4024,6 +4120,399 @@ function mountPrivateLibraryBrowser(
         refreshMembershipFacts();
     }
   }
+
+  /// The status one reopen presents when a removal or a restore is why the
+  /// current source is read again. The order-expiry texts would describe the
+  /// wrong cause.
+  const REMOVAL_REOPEN = Object.freeze({
+    progress: "Reopening this source after the removal…",
+    settled: "Source reopened after the removal.",
+  });
+  const RESTORE_REOPEN = Object.freeze({
+    progress: "Reopening this source after the restore…",
+    settled: "Source reopened after the restore.",
+  });
+  /// A review the server refused as gone cannot be repeated, so the source is
+  /// read again and the Photographer reviews the current rejected result.
+  const REVIEW_EXPIRED_REOPEN = Object.freeze({
+    progress: "Reopening this source with the current rejected result…",
+    settled: "Source reopened with the current rejected result.",
+  });
+
+  /// Reloads every Folder window the Sources surface presents, so the Folder
+  /// Photo counts it claims are the counts the Library now holds. A window the
+  /// tree does not present is left alone, and reloading never changes which
+  /// Folders are expanded.
+  const refreshFolderCounts = async (parent = ""): Promise<void> => {
+    const retained = fileLocations.window(parent);
+    if (!retained) return;
+    const children = [...retained.children];
+    await loadFolderWindow(parent, retained.page, false);
+    for (const child of children)
+      if (fileLocations.isExpanded(child.location))
+        await refreshFolderCounts(child.location);
+  };
+
+  /// Brings every surface a Library-visibility change touched back to the
+  /// committed Library: the Overview count and Album summaries, the Folder
+  /// Photo counts, and the open source Snapshot. A source that is not loaded
+  /// is not reopened, so an explained state is never replaced by one.
+  const refreshAfterLibraryChange = async (
+    reason: Readonly<{ progress: string; settled: string }>,
+  ): Promise<void> => {
+    await application.refreshOverview().catch(() => {});
+    await refreshFolderCounts();
+    if (sourceGrid.token === "" || !sourceGrid.isReady(sourceGrid.authority))
+      return;
+    const anchor =
+      sourceGrid.readGridPosition(sourceGrid.authority) ??
+      photoOwner.currentIndex;
+    await reopenExpired(anchor, sourceGrid.generation, undefined, reason);
+  };
+
+  const removalOutcomeMessage = (counts: RemovalResult["counts"]): string => {
+    const parts = [
+      counts.removed > 0
+        ? `${photoCountText(counts.removed)} removed from the Library. Their Original Files are unchanged.`
+        : "No Photos were removed.",
+    ];
+    if (counts.changedElsewhere > 0)
+      parts.push(
+        `${photoCountText(counts.changedElsewhere)} no longer rejected, so they stayed in the Library.`,
+      );
+    if (counts.alreadyRemoved > 0)
+      parts.push(
+        `${photoCountText(counts.alreadyRemoved)} already removed by another operation.`,
+      );
+    if (counts.missing > 0)
+      parts.push(`${photoCountText(counts.missing)} no longer in the Library.`);
+    return parts.join(" ");
+  };
+
+  const restorationOutcomeMessage = (
+    counts: RestorationResult["counts"],
+  ): string => {
+    const parts = [
+      counts.restored > 0
+        ? `${photoCountText(counts.restored)} restored to the Library.`
+        : "Nothing was restored.",
+    ];
+    if (counts.changedElsewhere > 0)
+      parts.push(
+        `${photoCountText(counts.changedElsewhere)} could not be restored because their removal state changed elsewhere.`,
+      );
+    if (counts.missing > 0)
+      parts.push(`${photoCountText(counts.missing)} no longer in the Library.`);
+    return parts.join(" ");
+  };
+
+  /// Whether the presented result is still the one a review covers. A review
+  /// names the Snapshot token it was opened on, so a source that was reopened
+  /// or filtered since then cannot be confirmed against a result the
+  /// Photographer no longer sees.
+  const reviewCoversPresentedResult = (): boolean => {
+    const review = removal.review;
+    return (
+      review !== undefined &&
+      sourceGrid.token !== "" &&
+      sourceGrid.token === review.token &&
+      sourceGrid.total === review.reviewed &&
+      sourceGrid.authority === review.sourceAuthority &&
+      sourceGrid.selection === "rejected"
+    );
+  };
+
+  const removalReviewModel = (): Parameters<
+    LibraryBrowserView["renderRemovalReview"]
+  >[0] => {
+    const review = removal.review;
+    return {
+      reviewed: review?.reviewed ?? removalReviewed,
+      pending: removal.busy,
+      canConfirm: reviewCoversPresentedResult(),
+      ...(removalResult
+        ? { tone: removalResult.tone, message: removalResult.message }
+        : {}),
+      ...(removal.operation
+        ? { undo: { removed: removal.operation.removed } }
+        : {}),
+    };
+  };
+
+  const renderRemoval = () => {
+    if (!applicationAlive || !removalReviewOpen) return;
+    view.renderRemovalReview(removalReviewModel());
+  };
+
+  /// Withdraws a review whose result is no longer presented, so the dialog
+  /// never offers a confirmation the server would refuse. The Photographer
+  /// reviews the result that is presented instead.
+  const reconcileRemovalReview = () => {
+    if (!applicationAlive || !removalReviewOpen) return;
+    if (removal.review === undefined || reviewCoversPresentedResult()) return;
+    removal.discardReview();
+    removalResult = {
+      tone: "warning",
+      message:
+        "The reviewed result changed. Review the current rejected result again.",
+    };
+    renderRemoval();
+  };
+
+  /// Opens the review of the current `Rejected` result. The review names the
+  /// count it covers and the operation it would use, and removes nothing.
+  const openRemovalReview = () => {
+    if (
+      !connected ||
+      sourceGrid.selection !== "rejected" ||
+      sourceGrid.token === "" ||
+      sourceGrid.total === 0 ||
+      removal.busy
+    )
+      return;
+    const review = removal.openReview(
+      sourceGrid.token,
+      sourceGrid.total,
+      sourceGrid.authority,
+    );
+    if (!review) return;
+    removalReviewed = review.reviewed;
+    removalResult = undefined;
+    removalReviewOpen = true;
+    view.openRemovalReview(removalReviewModel());
+  };
+
+  const confirmRemoval = async (): Promise<void> => {
+    const admission = removal.confirm();
+    if (!admission) return;
+    renderRemoval();
+    updateControls();
+    const outcome = await admission.settlement;
+    if (outcome.kind === "detached") return;
+    if (outcome.kind === "failed") {
+      // A reviewed Snapshot that is gone cannot be reviewed again: the
+      // Photographer reviews the current rejected result instead of retrying
+      // a request the server would refuse a second time.
+      if (outcome.status === 404) {
+        removal.discardReview();
+        removalResult = {
+          tone: "warning",
+          message:
+            "The reviewed result is no longer available. Review the current rejected result again.",
+        };
+        await refreshAfterLibraryChange(REVIEW_EXPIRED_REOPEN);
+        renderRemoval();
+        updateControls();
+        return;
+      }
+      removalResult = {
+        tone: "failure",
+        message: "The removal could not be confirmed. Retry to continue.",
+      };
+      renderRemoval();
+      updateControls();
+      return;
+    }
+    removalResult = {
+      tone: outcome.result.counts.removed > 0 ? "success" : "warning",
+      message: removalOutcomeMessage(outcome.result.counts),
+    };
+    renderRemoval();
+    await refreshAfterLibraryChange(REMOVAL_REOPEN);
+    renderRemoval();
+    updateControls();
+  };
+
+  /// Restores one confirmed operation. The surface that asked for it reports
+  /// the outcome: the review dialog keeps Undo beside the removal it confirmed,
+  /// and the listing offers it to a Photographer who came back to recover.
+  const undoRemoval = async (surface: "review" | "listing"): Promise<void> => {
+    const admission = removal.undo();
+    if (!admission) return;
+    if (surface === "review") renderRemoval();
+    else renderRemovedPanel();
+    updateControls();
+    const outcome = await admission.settlement;
+    if (outcome.kind === "detached") return;
+    if (outcome.kind === "failed") {
+      const message = "The removal could not be undone. Retry to continue.";
+      if (surface === "review") {
+        removalResult = { tone: "failure", message };
+        renderRemoval();
+      } else {
+        removedMessage = message;
+        renderRemovedPanel();
+      }
+      updateControls();
+      return;
+    }
+    removal.forgetOperation(admission.operationId);
+    const message = restorationOutcomeMessage(outcome.result.counts);
+    const tone = outcome.result.counts.restored > 0 ? "success" : "warning";
+    await application.refreshOverview().catch(() => {});
+    await refreshFolderCounts();
+    if (surface === "review") {
+      removalResult = { tone, message };
+      renderRemoval();
+    } else if (removedPanelOpen) {
+      // The listing reads the Library again before it reports the restore, so
+      // no row outlives the removal it presents.
+      await loadRemovedPage(removedPage?.start ?? 0, message);
+    }
+    if (sourceGrid.token !== "" && sourceGrid.isReady(sourceGrid.authority)) {
+      const anchor =
+        sourceGrid.readGridPosition(sourceGrid.authority) ??
+        photoOwner.currentIndex;
+      await reopenExpired(
+        anchor,
+        sourceGrid.generation,
+        undefined,
+        RESTORE_REOPEN,
+      );
+    }
+    updateControls();
+  };
+
+  const renderRemovedPanel = () => {
+    if (!applicationAlive) return;
+    view.renderRemovedPanel({
+      start: removedPage?.start ?? 0,
+      total: removedPage?.total ?? 0,
+      limit: REMOVED_PAGE_LIMIT,
+      pending: removedPending,
+      canRetry: removedLoadFailed,
+      ...(removal.operation
+        ? { undo: { removed: removal.operation.removed } }
+        : {}),
+      ...(removedRestoringId ? { restoringPhotoId: removedRestoringId } : {}),
+      ...(removedMessage ? { message: removedMessage } : {}),
+      items: (removedPage?.items ?? []).map((item) => ({
+        photoId: item.photo.id,
+        filename: item.photo.originalFilename ?? item.photo.id,
+        removedAtMs: item.removedAtMs,
+        preview: item.photo.preview,
+      })),
+    });
+  };
+
+  const loadRemovedPage = async (
+    start: number,
+    successMessage?: string,
+  ): Promise<void> => {
+    removedAbort?.abort();
+    const controller = new AbortController();
+    removedAbort = controller;
+    removedPending = true;
+    removedLoadFailed = false;
+    removedMessage = undefined;
+    renderRemovedPanel();
+    updateControls();
+    const result = await fetchRemovedPhotos(fetcher, {
+      start,
+      limit: REMOVED_PAGE_LIMIT,
+      signal: controller.signal,
+    });
+    if (controller.signal.aborted || removedAbort !== controller) return;
+    removedAbort = undefined;
+    removedPending = false;
+    if (result.kind === "ok") {
+      const pageStart =
+        result.total === 0
+          ? 0
+          : result.start >= result.total
+            ? Math.floor((result.total - 1) / REMOVED_PAGE_LIMIT) *
+              REMOVED_PAGE_LIMIT
+            : result.start;
+      if (pageStart !== result.start) {
+        void loadRemovedPage(pageStart, successMessage);
+        return;
+      }
+      removal.rememberOperation(result.operation);
+      removedPage = {
+        start: result.start,
+        total: result.total,
+        operation: result.operation,
+        items: result.photos,
+      };
+      removedMessage = successMessage;
+    } else {
+      removedLoadFailed = true;
+      removedMessage =
+        "The removed Photos could not be loaded. Retry to continue.";
+    }
+    renderRemovedPanel();
+    updateControls();
+  };
+
+  const openRemovedPanel = (): void => {
+    removedPanelOpen = true;
+    removedPage = undefined;
+    removedLoadFailed = false;
+    removedRestoringId = undefined;
+    removedMessage = undefined;
+    view.openRemovedPanel({
+      start: 0,
+      total: 0,
+      limit: REMOVED_PAGE_LIMIT,
+      pending: true,
+      canRetry: false,
+      items: [],
+    });
+    void loadRemovedPage(0);
+  };
+
+  const closeRemovedPanel = (): void => {
+    removedPanelOpen = false;
+    removedAbort?.abort();
+    removedAbort = undefined;
+    removedPending = false;
+    removedRestoringId = undefined;
+    view.closeRemovedPanel();
+  };
+
+  const restoreRemovedPhoto = async (
+    photoId: string,
+    removedAtMs: number,
+  ): Promise<void> => {
+    const admission = removal.restorePhotos([{ photoId, removedAtMs }]);
+    if (!admission) return;
+    removedRestoringId = photoId;
+    removedMessage = undefined;
+    renderRemovedPanel();
+    updateControls();
+    const outcome = await admission.settlement;
+    removedRestoringId = undefined;
+    if (outcome.kind === "detached") return;
+    if (outcome.kind === "failed") {
+      removedMessage =
+        outcome.status === 404
+          ? "That Photo is no longer removed from the Library. Reload this listing."
+          : "The Photo could not be restored. Retry to continue.";
+      renderRemovedPanel();
+      updateControls();
+      return;
+    }
+    // The listing reads the Library again before it reports the restore, so a
+    // row never outlives the state it presents.
+    await application.refreshOverview().catch(() => {});
+    await refreshFolderCounts();
+    await loadRemovedPage(
+      removedPage?.start ?? 0,
+      restorationOutcomeMessage(outcome.result.counts),
+    );
+    if (sourceGrid.token !== "" && sourceGrid.isReady(sourceGrid.authority)) {
+      const anchor =
+        sourceGrid.readGridPosition(sourceGrid.authority) ??
+        photoOwner.currentIndex;
+      await reopenExpired(
+        anchor,
+        sourceGrid.generation,
+        undefined,
+        RESTORE_REOPEN,
+      );
+    }
+    updateControls();
+  };
 
   /// The destination the live Snapshot presents, derived from the committed
   /// source, order, and filter. An address is never derived from a retained
@@ -4548,6 +5037,8 @@ function mountPrivateLibraryBrowser(
     applicationAlive = false;
     photoMetadataAbort?.abort();
     membershipAbort?.abort();
+    removedAbort?.abort();
+    removal.dispose();
     view.dispose();
     cancelScheduledGridRender();
     unsubscribeWindowSettled();

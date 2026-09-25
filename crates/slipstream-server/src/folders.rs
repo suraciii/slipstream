@@ -36,13 +36,17 @@ impl FolderIndex {
     ///
     /// A Photo projects through its own Original File's Location, so every
     /// Photo counts once. Remembered unavailable Originals keep their last
-    /// known Location and therefore keep their Folder projection.
+    /// known Location and therefore keep their Folder projection. A removed
+    /// Photo keeps its Folder represented but does not count: removal hides a
+    /// Photo from Library Views without moving its Original File, so a Folder
+    /// whose Photos were all removed still exists and now opens empty.
     pub(crate) fn derive(
         photos: &[slipstream_core::PhotoRecord],
         originals_by_id: &HashMap<String, usize>,
         originals: &[slipstream_core::OriginalRecord],
     ) -> Self {
         let mut direct_counts: HashMap<String, usize> = HashMap::new();
+        let mut located: Vec<String> = Vec::new();
         for photo in photos {
             let ordering_id = photo.original_id.as_str();
             let ordering_id: &str = ordering_id;
@@ -52,11 +56,21 @@ impl FolderIndex {
             let Some(parent) = parent_location(originals[position].relative_path.as_str()) else {
                 continue;
             };
-            *direct_counts.entry(parent.to_owned()).or_insert(0) += 1;
+            located.push(parent.clone());
+            if !photo.removed {
+                *direct_counts.entry(parent).or_insert(0) += 1;
+            }
         }
         // Intermediate ancestor Folders participate without direct Photos.
-        let mut known: Vec<String> = direct_counts.keys().cloned().collect();
-        let mut seen: std::collections::HashSet<String> = known.iter().cloned().collect();
+        // Located Folders repeat once per Photo, so they are deduplicated
+        // before they become Folder identities.
+        let mut known: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for location in located {
+            if seen.insert(location.clone()) {
+                known.push(location);
+            }
+        }
         for location in known.clone() {
             let mut ancestor = parent_location(&location);
             while let Some(current) = ancestor {
@@ -159,6 +173,9 @@ impl FolderIndex {
         };
         let mut ids = Vec::new();
         for photo in photos {
+            if photo.removed {
+                continue;
+            }
             let ordering_id = photo.original_id.as_str();
             let ordering_id: &str = ordering_id;
             let Some(&position) = originals_by_id.get(ordering_id) else {

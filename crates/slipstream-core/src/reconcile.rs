@@ -192,6 +192,7 @@ mod tests {
             selection_state: SelectionState::Undecided,
             rating: 0,
             has_saved_edits: false,
+            removed: false,
         }
     }
 
