@@ -1210,10 +1210,17 @@ test("real-processing: autosaves an exposure, reopens it, compares the baseline,
     !sample || !processingInstance,
     "Set SLIPSTREAM_RAW_SAMPLE and SLIPSTREAM_PROCESSING_INSTANCE for the RAW processing smoke",
   );
+  const cameraSample = sample!;
+  // This scenario runs outside the RAW gate, which validates the sample for
+  // its own runs, so the explicit path is checked here and reported as a skip
+  // rather than as a read failure.
+  test.skip(
+    !(await readableRegularFile(cameraSample)),
+    `SLIPSTREAM_RAW_SAMPLE must identify a readable regular file: ${cameraSample}`,
+  );
   // A cold development of a 61 MP Original takes about a minute, and the
   // scenario renders twice: once as the comparison and once as the Export.
   test.setTimeout(900_000);
-  const cameraSample = sample!;
   const sourceBefore = await originalSnapshot(cameraSample);
   const { base, root } = await fixture();
   const raw = join(root, `camera${extname(cameraSample)}`);
@@ -1235,7 +1242,9 @@ test("real-processing: autosaves an exposure, reopens it, compares the baseline,
   await expect(exposure).toBeEnabled();
   // One committed adjustment is one autosave. The value and its events are one
   // gesture, so a render between them cannot clear the draft the change
-  // commits, and the service's own acknowledgement is the evidence.
+  // commits, and the service's own acknowledgement is the evidence: a 200
+  // whose body is not an acknowledgement leaves the local draft in place, and
+  // a reload could then present that draft instead of the saved recipe.
   const saved = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" &&
@@ -1246,7 +1255,16 @@ test("real-processing: autosaves an exposure, reopens it, compares the baseline,
     element.dispatchEvent(new Event("input", { bubbles: true }));
     element.dispatchEvent(new Event("change", { bubbles: true }));
   });
-  expect((await saved).status()).toBe(200);
+  const acknowledgement = await saved;
+  expect(acknowledgement.status()).toBe(200);
+  const committed = (await acknowledgement.json()) as {
+    outcome?: unknown;
+    recipeVersion?: unknown;
+    sourceRevision?: unknown;
+  };
+  expect(committed.outcome).toBe("saved");
+  expect(typeof committed.recipeVersion).toBe("string");
+  expect(typeof committed.sourceRevision).toBe("string");
   await expect(page.locator("[data-photo-editor-exposure-value]")).toHaveText(
     "0.500 EV",
   );
@@ -1257,29 +1275,68 @@ test("real-processing: autosaves an exposure, reopens it, compares the baseline,
   await expect(page.locator("[data-photo-editor-exposure-value]")).toHaveText(
     "0.500 EV",
   );
+  // A second client moves the saved recipe. Autosave stops with an explicit
+  // conflict instead of overwriting the other client's recipe, and the saved
+  // side the surface adopts is the service's, not this client's older copy.
+  const photoId = new URL(acknowledgement.url()).pathname.split("/")[3];
+  const secondClient = await post(
+    running.url,
+    `/api/photos/${photoId}/edit-recipe`,
+    {
+      requestId: "browser-smoke-second-client",
+      expectedRecipeVersion: committed.recipeVersion,
+      expectedSourceRevision: committed.sourceRevision,
+      settings: { exposureEv: 0.25, whiteBalance: { mode: "as-shot" } },
+    },
+  );
+  expect(secondClient.status).toBe(200);
+  await exposure.evaluate((element: HTMLInputElement) => {
+    element.value = "0.75";
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  const conflict = page.locator("[data-photo-editor-conflict]");
+  await expect(conflict).toBeVisible();
+  await expect(
+    page.locator("[data-photo-editor-conflict-message]"),
+  ).toContainText("The saved recipe changed elsewhere. Autosave stopped;");
+  await page.locator("[data-photo-editor-use-saved]").click();
+  await expect(conflict).toBeHidden();
+  await expect(page.locator("[data-photo-editor-exposure-value]")).toHaveText(
+    "0.250 EV",
+  );
   // The baseline comparison develops the same Original without the saved
   // exposure, so its own rendition is what the note and the image present. The
-  // workspace's own preview follow-up is a short bounded window, and a real
-  // 61 MP development outlives it: reopening the Edit workspace asks for the
-  // same baseline identity again, so the retained rendition is presented once
-  // that development has settled.
+  // workspace re-asks for a bounded window of its own, and a real 61 MP
+  // development outlives it, so the control is pressed again: each press asks
+  // for the same baseline identity, which the service serves from its retained
+  // rendition once that development has settled.
   const previewNote = page.locator("[data-photo-editor-preview-note]");
   const baseline =
     /Develop baseline comparison \d+×\d+: the as-shot\/baseline development of this stage\./;
   const compare = page.locator("[data-photo-editor-compare]");
-  for (let attempt = 0; attempt < 10; attempt += 1) {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
     if (baseline.test((await previewNote.textContent()) ?? "")) break;
-    if ((await compare.getAttribute("aria-pressed")) !== "true") {
+    // Off, then on: the press is what asks for the baseline rendition again.
+    if ((await compare.getAttribute("aria-pressed")) === "true") {
       await compare.click();
-      await expect(compare).toHaveAttribute("aria-pressed", "true");
+      await expect(compare).toHaveAttribute("aria-pressed", "false");
     }
+    await compare.click();
+    await expect(compare).toHaveAttribute("aria-pressed", "true");
     await page.waitForTimeout(20_000);
-    if (baseline.test((await previewNote.textContent()) ?? "")) break;
-    await page.reload();
-    await openPhotoToolsView(page, "edit");
   }
   await expect(previewNote).toContainText(baseline);
   await expect(compare).toHaveAttribute("aria-pressed", "true");
+  // The note alone could describe a rendition the surface never presented, so
+  // the comparison's own image is what the assertion ends on.
+  const comparison = page.locator("[data-photo-editor-preview-image]");
+  await expect(comparison).toBeVisible();
+  expect(
+    await comparison.evaluate(
+      (image: HTMLImageElement) => image.complete && image.naturalWidth > 0,
+    ),
+  ).toBe(true);
   // The Export is the deployment's bounded work: the submission settles, and
   // the retained artifact downloads as a TIFF.
   await page.locator("[data-photo-editor-export-submit]").click();
@@ -1734,6 +1791,22 @@ async function originalSnapshot(path: string): Promise<OriginalSnapshot> {
     group: metadata.gid,
     modifiedNanoseconds: metadata.mtimeNs,
   };
+}
+
+/// True when the explicit path is a readable regular file. The RAW gate
+/// validates the sample for its own runs; a scenario that runs outside the
+/// gate checks it here so an unusable path reports as a skip.
+async function readableRegularFile(path: string): Promise<boolean> {
+  try {
+    const handle = await open(path, "r");
+    try {
+      return (await handle.stat()).isFile();
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return false;
+  }
 }
 
 const filmstripIndices = (page: Page) =>
