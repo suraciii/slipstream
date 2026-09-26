@@ -31,12 +31,18 @@ pub struct RecoveryProgress {
 /// `persisted_fingerprints` must contain every stored fingerprint for the
 /// Originals whose identity could participate: the missing Originals and the
 /// owners of fact-changed Locations.
+///
+/// `excluded_original_ids` names Originals whose Photo was confirmed
+/// permanently deleted. They are not relocation candidates: their bytes were
+/// deleted, and a file that later occupies their reviewed Location is a new
+/// Original instead of a recovered identity.
 pub fn plan_recovery(
     root: &crate::LibraryRoot,
     native_work: &NativeWorkBudget,
     discovered: &[DiscoveredOriginal],
     previous: &ScanSnapshot,
     persisted_fingerprints: &[crate::OriginalFingerprint],
+    excluded_original_ids: &std::collections::HashSet<String>,
     progress: &mut RecoveryProgress,
 ) -> ScanRecoveryPlan {
     let mut discovered_by_path = HashMap::with_capacity(discovered.len());
@@ -54,6 +60,9 @@ pub fn plan_recovery(
     let mut changed_originals = Vec::new();
     let mut missing_originals = Vec::new();
     for original in &previous.originals {
+        if excluded_original_ids.contains(&original.id) {
+            continue;
+        }
         match discovered_by_path.get(original.relative_path.as_str()) {
             Some(discovered) => {
                 if discovered.facts.size == original.facts.size

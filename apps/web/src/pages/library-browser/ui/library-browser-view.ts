@@ -305,13 +305,33 @@ export type LibraryBrowserIntent =
   | Readonly<{ kind: "removed-list-close" }>
   | Readonly<{ kind: "removed-page"; direction: -1 | 1 }>
   | Readonly<{ kind: "removed-retry" }>
+  | Readonly<{ kind: "removed-select-all" }>
+  | Readonly<{ kind: "removed-clear-selection" }>
+  | Readonly<{ kind: "removed-toggle"; photoId: string; selected: boolean }>
+  | Readonly<{ kind: "removed-delete" }>
+  | Readonly<{ kind: "removed-restore-selected" }>
   | Readonly<{
       kind: "removed-restore";
       photoId: string;
-      /// The removal marker the rendered row presented, so the restore names
-      /// the removal the Photographer saw.
       removedAtMs: number;
     }>
+  /// Confirms the open permanent-deletion review. The review, not the
+  /// listing, is the only surface that deletes Original Files.
+  | Readonly<{ kind: "trash-review-confirm" }>
+  /// Closes the permanent-deletion review. Cancel deletes nothing: no
+  /// delete route is called.
+  | Readonly<{ kind: "trash-review-cancel" }>
+  /// Fetches the retained result of the Trash deletion operation whose
+  /// response was lost.
+  | Readonly<{ kind: "trash-check-result" }>
+  /// Re-POSTs the retained Trash deletion operation: the server repeats only
+  /// its unresolved items and never widens the reviewed set.
+  | Readonly<{ kind: "trash-retry-delete" }>
+  /// Fetches the retained result of one listing item's pending
+  /// permanent-deletion operation.
+  | Readonly<{ kind: "trash-row-check"; photoId: string }>
+  /// Re-POSTs one listing item's pending permanent-deletion operation.
+  | Readonly<{ kind: "trash-row-resume"; photoId: string }>
   | Readonly<{
       kind:
         | "show-grid"
@@ -626,6 +646,72 @@ export type RemovalReviewViewModel = Readonly<{
   undo?: Readonly<{ removed: number }>;
 }>;
 
+/// The permanent-deletion review: the reviewed files, their Locations,
+/// kinds, sizes, and affected Albums, and the rejections the server refused.
+/// Opening the surface deletes nothing; only the confirmation does, and
+/// Slipstream cannot undo that confirmation.
+export type TrashReviewViewModel = Readonly<{
+  itemCount: number;
+  /// The summed logical size of the reviewed Originals.
+  totalBytes: number;
+  albumCount: number;
+  albumNames: ReadonlyArray<string>;
+  items: ReadonlyArray<
+    Readonly<{
+      photoId: string;
+      originalLocation: string;
+      originalKind: "raw" | "jpeg";
+      size: number;
+      albumNames: ReadonlyArray<string>;
+    }>
+  >;
+  rejected: ReadonlyArray<Readonly<{ photoId: string; reasonLabel: string }>>;
+  /// False when every selected item was rejected: the rejections are shown
+  /// and the surface offers no delete action.
+  canConfirm: boolean;
+  /// The exact final action label the contract names.
+  confirmLabel: string;
+  deleting: boolean;
+}>;
+
+/// The outcome of one Trash deletion operation, or the state of an operation
+/// whose response was lost. A lost response is never presented as proof of
+/// failure or success: it names only the retained operation id.
+export type TrashOutcomeViewModel =
+  | Readonly<{
+      /// The delete response was lost: the surface offers Check result and
+      /// Retry instead of counts it does not have.
+      unconfirmed: true;
+    }>
+  | Readonly<{
+      unconfirmed?: false;
+      deleted: number;
+      changed: number;
+      missing: number;
+      failed: number;
+      /// The items whose outcome is not settled yet: `pending`, `deleting`,
+      /// and `uncertain` states.
+      pendingVerification: number;
+      /// Logical bytes the server credited to confirmed deletions only.
+      logicalBytesDeleted: number;
+      items: ReadonlyArray<
+        Readonly<{
+          photoId: string;
+          state:
+            | "pending"
+            | "deleting"
+            | "missing"
+            | "changed"
+            | "failed"
+            | "uncertain";
+          originalLocation: string;
+          originalKind: "raw" | "jpeg";
+          size: number | null;
+          message?: string;
+        }>
+      >;
+    }>;
+
 /// One bounded page of removed Photos, newest removal first. Each item carries
 /// the facts the Grid and Photo View already present, so the Photographer
 /// recognizes what is recoverable before restoring it.
@@ -634,20 +720,39 @@ export type RemovedPanelViewModel = Readonly<{
   total: number;
   limit: number;
   pending: boolean;
+  deleting: boolean;
+  selectionCount: number;
+  canDelete: boolean;
+  canRestore: boolean;
   /// Whether the last read of the listing failed, so the surface offers the
   /// one control that repeats it.
   canRetry: boolean;
   restoringPhotoId?: string;
+  restoringSelection: boolean;
   message?: string;
   /// The last confirmed operation, while Undo can still restore it. The
   /// listing is the surface a Photographer returns to, so the operation-level
   /// recovery is offered here and not only beside the confirmation.
   undo?: Readonly<{ removed: number }>;
+  /// The outcome of the last Trash deletion operation this panel confirmed
+  /// or recovered. It stays visible until the panel is reloaded or dismissed.
+  outcome?: TrashOutcomeViewModel;
+  /// The retained-operation action in flight, so its control cannot be
+  /// re-entered while it settles.
+  outcomeBusy?: "check" | "resume";
   items: ReadonlyArray<
     Readonly<{
       photoId: string;
       filename: string;
+      originalLocation: string;
+      originalKind: "raw" | "jpeg";
+      originalSize: number | null;
       removedAtMs: number;
+      /// Non-null while the item's permanent-deletion outcome is not settled:
+      /// the item cannot be selected or restored, and its row offers the
+      /// recovery that names the retained operation id.
+      pendingVerificationOperationId: string | null;
+      selected: boolean;
       preview: GridPhotoViewModel["preview"];
     }>
   >;
@@ -787,6 +892,13 @@ export interface LibraryBrowserView {
   openRemovedPanel(model: RemovedPanelViewModel): void;
   renderRemovedPanel(model: RemovedPanelViewModel): void;
   closeRemovedPanel(): void;
+  /// Opens the permanent-deletion review above the Trash listing. Opening it
+  /// deletes nothing; only its confirmation reaches the delete route.
+  openTrashReview(model: TrashReviewViewModel): void;
+  /// Updates the open review without reopening it, so a settling
+  /// confirmation reaches the surface the Photographer is looking at.
+  renderTrashReview(model: TrashReviewViewModel): void;
+  closeTrashReview(): void;
   /// Presents the committed recovery counts of the last scan and, while
   /// Originals remain unavailable, the one bounded review entry.
   setRecoveryNotice(
@@ -845,7 +957,7 @@ export function createLibraryBrowserView(
         </dialog>
         <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" tabindex="0"></div>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-          <header class="grid-header"><div class="grid-header-row"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false"><span class="source-toggle-name" data-grid-compact-title>All Photos</span><span class="source-toggle-indicator" aria-hidden="true">▾</span></button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-connection" data-grid-connection role="status" hidden></p><div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options>Options</button><span class="options-flag" data-view-options-flag hidden></span><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button><button type="button" class="quiet" data-removal-open hidden>Remove rejected Photos</button><button type="button" class="quiet" data-removed-open>Removed Photos</button></div><div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
+          <header class="grid-header"><div class="grid-header-row"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false"><span class="source-toggle-name" data-grid-compact-title>All Photos</span><span class="source-toggle-indicator" aria-hidden="true">▾</span></button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-connection" data-grid-connection role="status" hidden></p><div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options>Options</button><span class="options-flag" data-view-options-flag hidden></span><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button><button type="button" class="quiet" data-removal-open hidden>Remove rejected Photos</button><button type="button" class="quiet" data-removed-open>Trash</button></div><div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
           <div class="grid-batch" data-grid-batch hidden><div class="grid-batch-result" data-grid-batch-result hidden><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-select>Select</button><button type="button" data-batch-reject>Reject</button><label for="batch-album-select">Add to</label><select id="batch-album-select" data-batch-album-select></select><button type="button" data-batch-album-add>Add to Album</button></div></div>
         </section>
@@ -993,11 +1105,41 @@ export function createLibraryBrowserView(
         </dialog>
         <dialog class="removed-dialog" data-removed-panel aria-labelledby="removed-title">
           <div class="removed-sheet">
-            <header class="removed-header"><h3 id="removed-title">Removed Photos</h3><button type="button" class="quiet" data-removed-close>Close</button></header>
+            <header class="removed-header"><h3 id="removed-title">Trash</h3><button type="button" class="quiet" data-removed-close>Close</button></header>
             <p class="removed-status" data-removed-status role="status"></p>
+            <div class="removed-selection" data-removed-selection>
+              <button type="button" class="quiet" data-removed-select-all>Select all Trash</button>
+              <button type="button" class="quiet" data-removed-clear-selection>Clear selection</button>
+              <span data-removed-selection-count></span>
+              <button type="button" class="quiet" data-removed-restore-selection>Restore selected</button>
+              <button type="button" data-removed-delete>Permanently delete selected Originals</button>
+            </div>
             <ul class="removed-list" data-removed-list></ul>
+            <section class="trash-outcome" data-trash-outcome hidden>
+              <p class="trash-outcome-title" data-trash-outcome-title role="status"></p>
+              <p class="trash-outcome-counts" data-trash-outcome-counts hidden><span data-trash-outcome-deleted></span> <span data-trash-outcome-changed></span> <span data-trash-outcome-missing></span> <span data-trash-outcome-failed></span> <span data-trash-outcome-pending></span></p>
+              <p class="trash-outcome-bytes" data-trash-outcome-bytes hidden></p>
+              <ul class="trash-outcome-items" data-trash-outcome-items></ul>
+              <div class="trash-outcome-actions" data-trash-outcome-actions hidden><button type="button" class="quiet" data-trash-check-result>Check result</button><button type="button" class="quiet" data-trash-retry-delete>Retry</button></div>
+            </section>
             <p class="removed-message" data-removed-message role="alert" hidden></p>
             <footer class="removed-pager"><button type="button" class="quiet" data-removed-previous>Previous</button><span data-removed-page></span><button type="button" class="quiet" data-removed-next>Next</button><button type="button" data-removed-retry hidden>Retry</button></footer><footer class="removed-actions"><button type="button" class="quiet" data-removed-undo hidden>Undo the last removal</button></footer>
+          </div>
+        </dialog>
+        <dialog class="removal-dialog trash-review-dialog" data-trash-review aria-labelledby="trash-review-title">
+          <div class="removal-sheet">
+            <header class="removal-header"><h3 id="trash-review-title">Permanently delete from Trash</h3><button type="button" class="quiet" data-trash-review-close>Close</button></header>
+            <div class="removal-body">
+              <p class="removal-summary" data-trash-review-summary></p>
+              <p class="removal-message trash-review-warning">Deletion removes each Photo from every Album that contains it. Slipstream cannot undo it.</p>
+              <p class="removal-summary" data-trash-review-albums></p>
+              <ul class="trash-review-items" data-trash-review-items></ul>
+              <div class="trash-review-rejected" data-trash-review-rejected hidden>
+                <p class="removal-summary" data-trash-review-rejected-heading></p>
+                <ul class="trash-review-rejected-list" data-trash-review-rejected-list></ul>
+              </div>
+            </div>
+            <footer class="removal-actions"><button type="button" data-trash-confirm hidden></button><button type="button" class="quiet" data-trash-cancel>Cancel</button></footer>
           </div>
         </dialog>
       </section>
@@ -1145,7 +1287,116 @@ export function createLibraryBrowserView(
     root,
     "[data-removed-close]",
   );
+  const removedSelectAll = required<HTMLButtonElement>(
+    root,
+    "[data-removed-select-all]",
+  );
+  const removedClearSelection = required<HTMLButtonElement>(
+    root,
+    "[data-removed-clear-selection]",
+  );
+  const removedSelectionCount = required<HTMLElement>(
+    root,
+    "[data-removed-selection-count]",
+  );
+  const removedDelete = required<HTMLButtonElement>(
+    root,
+    "[data-removed-delete]",
+  );
+  const removedRestoreSelection = required<HTMLButtonElement>(
+    root,
+    "[data-removed-restore-selection]",
+  );
   const removedUndo = required<HTMLButtonElement>(root, "[data-removed-undo]");
+  const trashOutcome = required<HTMLElement>(root, "[data-trash-outcome]");
+  const trashOutcomeTitle = required<HTMLElement>(
+    root,
+    "[data-trash-outcome-title]",
+  );
+  const trashOutcomeCounts = required<HTMLElement>(
+    root,
+    "[data-trash-outcome-counts]",
+  );
+  const trashOutcomeDeleted = required<HTMLElement>(
+    root,
+    "[data-trash-outcome-deleted]",
+  );
+  const trashOutcomeChanged = required<HTMLElement>(
+    root,
+    "[data-trash-outcome-changed]",
+  );
+  const trashOutcomeMissing = required<HTMLElement>(
+    root,
+    "[data-trash-outcome-missing]",
+  );
+  const trashOutcomeFailed = required<HTMLElement>(
+    root,
+    "[data-trash-outcome-failed]",
+  );
+  const trashOutcomePending = required<HTMLElement>(
+    root,
+    "[data-trash-outcome-pending]",
+  );
+  const trashOutcomeBytes = required<HTMLElement>(
+    root,
+    "[data-trash-outcome-bytes]",
+  );
+  const trashOutcomeItems = required<HTMLElement>(
+    root,
+    "[data-trash-outcome-items]",
+  );
+  const trashOutcomeActions = required<HTMLElement>(
+    root,
+    "[data-trash-outcome-actions]",
+  );
+  const trashOutcomeCheck = required<HTMLButtonElement>(
+    root,
+    "[data-trash-check-result]",
+  );
+  const trashOutcomeRetry = required<HTMLButtonElement>(
+    root,
+    "[data-trash-retry-delete]",
+  );
+  const trashReviewDialog = required<HTMLDialogElement>(
+    root,
+    "[data-trash-review]",
+  );
+  const trashReviewSummary = required<HTMLElement>(
+    root,
+    "[data-trash-review-summary]",
+  );
+  const trashReviewAlbums = required<HTMLElement>(
+    root,
+    "[data-trash-review-albums]",
+  );
+  const trashReviewItems = required<HTMLElement>(
+    root,
+    "[data-trash-review-items]",
+  );
+  const trashReviewRejected = required<HTMLElement>(
+    root,
+    "[data-trash-review-rejected]",
+  );
+  const trashReviewRejectedHeading = required<HTMLElement>(
+    root,
+    "[data-trash-review-rejected-heading]",
+  );
+  const trashReviewRejectedList = required<HTMLElement>(
+    root,
+    "[data-trash-review-rejected-list]",
+  );
+  const trashReviewConfirm = required<HTMLButtonElement>(
+    root,
+    "[data-trash-confirm]",
+  );
+  const trashReviewCancel = required<HTMLButtonElement>(
+    root,
+    "[data-trash-cancel]",
+  );
+  const trashReviewClose = required<HTMLButtonElement>(
+    root,
+    "[data-trash-review-close]",
+  );
   /// Thumbnails the Removed Photos listing attached. They are released when
   /// the listing re-renders or closes, so the page's image delivery holds only
   /// the rows that are actually presented.
@@ -1646,6 +1897,10 @@ export function createLibraryBrowserView(
   });
   surfaces.register("removed-panel", {
     dialog: removedPanel,
+    modal: () => true,
+  });
+  surfaces.register("trash-review", {
+    dialog: trashReviewDialog,
     modal: () => true,
   });
 
@@ -4672,6 +4927,18 @@ export function createLibraryBrowserView(
   removedClose.addEventListener("click", () =>
     send({ kind: "removed-list-close" }),
   );
+  removedSelectAll.addEventListener("click", () =>
+    send({ kind: "removed-select-all" }),
+  );
+  removedClearSelection.addEventListener("click", () =>
+    send({ kind: "removed-clear-selection" }),
+  );
+  removedRestoreSelection.addEventListener("click", () =>
+    send({ kind: "removed-restore-selected" }),
+  );
+  removedDelete.addEventListener("click", () =>
+    send({ kind: "removed-delete" }),
+  );
   removedPrevious.addEventListener("click", () =>
     send({ kind: "removed-page", direction: -1 }),
   );
@@ -4679,6 +4946,21 @@ export function createLibraryBrowserView(
     send({ kind: "removed-page", direction: 1 }),
   );
   removedRetry.addEventListener("click", () => send({ kind: "removed-retry" }));
+  trashReviewConfirm.addEventListener("click", () =>
+    send({ kind: "trash-review-confirm" }),
+  );
+  trashReviewCancel.addEventListener("click", () =>
+    send({ kind: "trash-review-cancel" }),
+  );
+  trashReviewClose.addEventListener("click", () =>
+    send({ kind: "trash-review-cancel" }),
+  );
+  trashOutcomeCheck.addEventListener("click", () =>
+    send({ kind: "trash-check-result" }),
+  );
+  trashOutcomeRetry.addEventListener("click", () =>
+    send({ kind: "trash-retry-delete" }),
+  );
   // A close the controller did not start — a native close request, an Escape
   // from a surface this one yielded to, a destination change — releases the
   // listing's thumbnails the same way an explicit Close does.
@@ -5055,18 +5337,165 @@ export function createLibraryBrowserView(
     if (model.tone) removalMessage.dataset.tone = model.tone;
     else removalMessage.removeAttribute("data-tone");
   };
+  /// The outcome label one non-deleted operation item presents. The states
+  /// whose outcome is not settled yet all present as pending verification.
+  const TRASH_OUTCOME_STATE_LABELS: Record<
+    "pending" | "deleting" | "missing" | "changed" | "failed" | "uncertain",
+    string
+  > = {
+    pending: "Pending verification",
+    deleting: "Pending verification",
+    uncertain: "Pending verification",
+    changed: "Changed",
+    missing: "Missing",
+    failed: "Failed",
+  };
+  const presentTrashOutcome = (model: RemovedPanelViewModel) => {
+    const outcome = model.outcome;
+    const busy =
+      model.outcomeBusy !== undefined || model.pending || model.deleting;
+    trashOutcomeCheck.disabled = busy;
+    trashOutcomeRetry.disabled = busy;
+    if (outcome === undefined) {
+      trashOutcome.hidden = true;
+      trashOutcomeTitle.textContent = "";
+      trashOutcomeCounts.hidden = true;
+      trashOutcomeBytes.hidden = true;
+      trashOutcomeItems.replaceChildren();
+      trashOutcomeActions.hidden = true;
+      return;
+    }
+    trashOutcome.hidden = false;
+    trashOutcomeTitle.textContent = outcome.unconfirmed
+      ? "The deletion result could not be confirmed."
+      : "Deletion outcome";
+    // Recovery stays offered while the response is lost or any item is still
+    // pending verification: retry reconciles prior effects before it repeats
+    // the unresolved items.
+    trashOutcomeActions.hidden = !(
+      outcome.unconfirmed || outcome.pendingVerification > 0
+    );
+    if (outcome.unconfirmed) {
+      trashOutcomeCounts.hidden = true;
+      trashOutcomeBytes.hidden = true;
+      trashOutcomeItems.replaceChildren();
+      return;
+    }
+    trashOutcomeCounts.hidden = false;
+    trashOutcomeDeleted.textContent = `Deleted ${outcome.deleted.toLocaleString()}`;
+    trashOutcomeChanged.textContent = `Changed ${outcome.changed.toLocaleString()}`;
+    trashOutcomeMissing.textContent = `Missing ${outcome.missing.toLocaleString()}`;
+    trashOutcomeFailed.textContent = `Failed ${outcome.failed.toLocaleString()}`;
+    trashOutcomePending.textContent = `Pending verification ${outcome.pendingVerification.toLocaleString()}`;
+    trashOutcomeBytes.hidden = false;
+    trashOutcomeBytes.textContent = `Logical bytes deleted: ${outcome.logicalBytesDeleted.toLocaleString()}`;
+    trashOutcomeItems.replaceChildren(
+      ...outcome.items.map((item) => {
+        const row = document.createElement("li");
+        row.className = "trash-outcome-item";
+        row.dataset.trashOutcomeItem = "";
+        row.textContent = `${TRASH_OUTCOME_STATE_LABELS[item.state]} · ${item.originalKind.toUpperCase()} · ${item.originalLocation} · ${
+          item.size === null
+            ? "Size unavailable"
+            : `${item.size.toLocaleString()} bytes`
+        }${item.message ? ` · ${item.message}` : ""}`;
+        return row;
+      }),
+    );
+  };
+  const presentTrashReview = (model: TrashReviewViewModel) => {
+    trashReviewSummary.textContent =
+      model.itemCount === 0
+        ? "None of the selected Trash items can be deleted."
+        : `${formatPhotoCount(model.itemCount)} selected for permanent deletion · ${model.totalBytes.toLocaleString()} logical bytes.`;
+    trashReviewAlbums.textContent =
+      model.albumCount === 0
+        ? "No Album is affected."
+        : `${model.albumCount.toLocaleString()} ${
+            model.albumCount === 1 ? "Album" : "Albums"
+          } affected: ${model.albumNames.join(", ")}.`;
+    trashReviewItems.replaceChildren(
+      ...model.items.map((item) => {
+        const row = document.createElement("li");
+        row.className = "trash-review-item";
+        row.dataset.trashReviewItem = "";
+        const location = document.createElement("span");
+        location.className = "trash-review-location";
+        location.dataset.trashReviewLocation = "";
+        location.textContent = item.originalLocation;
+        const kind = document.createElement("span");
+        kind.className = "trash-review-kind";
+        kind.dataset.trashReviewKind = "";
+        kind.textContent = item.originalKind.toUpperCase();
+        const size = document.createElement("span");
+        size.className = "trash-review-size";
+        size.dataset.trashReviewSize = "";
+        size.textContent = `${item.size.toLocaleString()} bytes`;
+        const albums = document.createElement("span");
+        albums.className = "trash-review-albums";
+        albums.dataset.trashReviewItemAlbums = "";
+        albums.textContent =
+          item.albumNames.length === 0
+            ? "No Albums"
+            : item.albumNames.join(", ");
+        row.append(location, kind, size, albums);
+        return row;
+      }),
+    );
+    trashReviewRejected.hidden = model.rejected.length === 0;
+    trashReviewRejectedHeading.textContent = `${model.rejected.length.toLocaleString()} ${
+      model.rejected.length === 1 ? "item" : "items"
+    } could not be reviewed:`;
+    trashReviewRejectedList.replaceChildren(
+      ...model.rejected.map((item) => {
+        const row = document.createElement("li");
+        row.className = "trash-review-rejected-item";
+        row.dataset.trashReviewRejectedItem = "";
+        const photo = document.createElement("span");
+        photo.dataset.trashReviewRejectedPhoto = "";
+        photo.textContent = item.photoId;
+        const reason = document.createElement("span");
+        reason.dataset.trashReviewRejectedReason = "";
+        reason.textContent = item.reasonLabel;
+        row.append(photo, reason);
+        return row;
+      }),
+    );
+    trashReviewConfirm.hidden = !model.canConfirm;
+    trashReviewConfirm.disabled = model.deleting;
+    trashReviewConfirm.textContent = model.deleting
+      ? "Permanently deleting…"
+      : model.confirmLabel;
+    trashReviewCancel.disabled = model.deleting;
+  };
   const presentRemovedPanel = (model: RemovedPanelViewModel) => {
     releaseRemovedRows();
     const shown = Math.min(model.total, model.start + model.items.length);
     removedStatus.textContent =
       model.total === 0
-        ? "No Photos are removed from the Library."
-        : `${formatPhotoCount(model.total)} removed from the Library. Showing ${(
+        ? "Trash is empty."
+        : `${formatPhotoCount(model.total)} in Trash. Showing ${(
             model.start + 1
           ).toLocaleString()}–${shown.toLocaleString()}.`;
     const rows = model.items.map((item) => {
       const row = document.createElement("li");
       row.className = "removed-item";
+      const pending = item.pendingVerificationOperationId !== null;
+      if (pending) row.dataset.trashPendingItem = "true";
+      const retainedBusy =
+        model.pending || model.deleting || model.outcomeBusy !== undefined;
+      const select = document.createElement("input");
+      select.type = "checkbox";
+      select.checked = item.selected;
+      select.ariaLabel = `Select ${item.filename} for permanent deletion`;
+      select.disabled = model.pending || model.deleting || pending;
+      select.addEventListener("change", () =>
+        send({
+          kind: "removed-toggle",
+          photoId: item.photoId,
+          selected: select.checked,
+        }),
+      );
       const image = document.createElement("img");
       image.className = "removed-thumb";
       image.alt = "";
@@ -5075,16 +5504,28 @@ export function createLibraryBrowserView(
       const name = document.createElement("p");
       name.className = "removed-name";
       name.textContent = item.filename;
+      const details = document.createElement("p");
+      details.className = "removed-when";
+      details.textContent = `${item.originalKind.toUpperCase()} · ${item.originalLocation} · ${
+        item.originalSize === null
+          ? "Size unavailable"
+          : `${item.originalSize.toLocaleString()} bytes`
+      }`;
       const when = document.createElement("p");
       when.className = "removed-when";
       when.textContent = `Removed ${removalTimestamp(item.removedAtMs)}`;
-      facts.append(name, when);
+      facts.append(name, details, when);
       const restore = document.createElement("button");
       restore.type = "button";
       restore.className = "quiet";
       const restoring = model.restoringPhotoId === item.photoId;
       restore.textContent = restoring ? "Restoring…" : "Restore";
-      restore.disabled = model.pending || restoring;
+      restore.disabled =
+        model.pending ||
+        model.deleting ||
+        model.restoringSelection ||
+        restoring ||
+        pending;
       restore.addEventListener("click", () =>
         send({
           kind: "removed-restore",
@@ -5092,7 +5533,39 @@ export function createLibraryBrowserView(
           removedAtMs: item.removedAtMs,
         }),
       );
-      row.append(image, facts, restore);
+      row.append(select, image, facts, restore);
+      if (pending) {
+        // The item's permanent-deletion outcome is not settled. Its row
+        // names the pending state and offers the recovery that names the
+        // retained operation id; Restore and selection stay unavailable.
+        const note = document.createElement("div");
+        note.className = "removed-pending";
+        note.dataset.trashPending = "";
+        const marker = document.createElement("p");
+        marker.className = "removed-pending-marker";
+        marker.textContent =
+          "Pending verification — the deletion outcome is still being verified.";
+        const check = document.createElement("button");
+        check.type = "button";
+        check.className = "quiet";
+        check.dataset.trashRowCheck = "";
+        check.textContent = "Check result";
+        check.disabled = retainedBusy;
+        check.addEventListener("click", () =>
+          send({ kind: "trash-row-check", photoId: item.photoId }),
+        );
+        const resume = document.createElement("button");
+        resume.type = "button";
+        resume.className = "quiet";
+        resume.dataset.trashRowResume = "";
+        resume.textContent = "Resume";
+        resume.disabled = retainedBusy;
+        resume.addEventListener("click", () =>
+          send({ kind: "trash-row-resume", photoId: item.photoId }),
+        );
+        note.append(marker, check, resume);
+        row.append(note);
+      }
       const binding: GridThumbnailBinding = {
         photoId: item.photoId,
         preview: item.preview,
@@ -5109,6 +5582,30 @@ export function createLibraryBrowserView(
     });
     removedListBindings = rows.map((entry) => entry.binding);
     removedList.replaceChildren(...rows.map((entry) => entry.row));
+    removedSelectionCount.textContent =
+      model.selectionCount === 0
+        ? "Nothing selected."
+        : `${model.selectionCount.toLocaleString()} selected.`;
+    removedSelectAll.disabled =
+      model.pending || model.deleting || model.total === 0;
+    removedClearSelection.disabled =
+      model.pending || model.deleting || model.selectionCount === 0;
+    removedRestoreSelection.disabled =
+      model.pending ||
+      model.deleting ||
+      model.restoringSelection ||
+      !model.canRestore;
+    removedRestoreSelection.textContent = model.restoringSelection
+      ? "Restoring selected…"
+      : "Restore selected";
+    removedDelete.disabled =
+      model.pending ||
+      model.deleting ||
+      model.restoringSelection ||
+      !model.canDelete;
+    removedDelete.textContent = model.deleting
+      ? "Permanently deleting…"
+      : "Permanently delete selected Originals";
     const shownEnd = shown >= model.total;
     removedPrevious.disabled = model.pending || model.start === 0;
     removedNext.disabled = model.pending || shownEnd;
@@ -5129,6 +5626,7 @@ export function createLibraryBrowserView(
             1,
             Math.ceil(model.total / model.limit),
           ).toLocaleString()}`;
+    presentTrashOutcome(model);
     if (model.message === undefined) {
       removedMessage.hidden = true;
       removedMessage.textContent = "";
@@ -5595,6 +6093,20 @@ export function createLibraryBrowserView(
     closeRemovedPanel() {
       if (!alive) return;
       surfaces.close("removed-panel");
+    },
+    openTrashReview(model) {
+      if (!alive) return;
+      presentTrashReview(model);
+      surfaces.open("trash-review", removedDelete);
+      trashReviewCancel.focus();
+    },
+    renderTrashReview(model) {
+      if (!alive) return;
+      presentTrashReview(model);
+    },
+    closeTrashReview() {
+      if (!alive) return;
+      surfaces.close("trash-review");
     },
     setRecoveryNotice(model) {
       if (!alive) return;

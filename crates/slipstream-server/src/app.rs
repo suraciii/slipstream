@@ -3,6 +3,43 @@ use crate::config::{MAX_BROWSE_WINDOW, MAX_REMOVED_WINDOW, NEXT_BROWSE_NAMESPACE
 use crate::http::{is_hex_key, valid_id};
 use crate::queries::{CursorSigner, QueryRegistry, RetainedKind};
 use crate::wire::{CliDerivativeFacts, PhotoOperationRemainderWire};
+fn permanent_deletion_state(state: slipstream_core::PermanentDeletionItemState) -> &'static str {
+    match state {
+        slipstream_core::PermanentDeletionItemState::Pending => "pending",
+        slipstream_core::PermanentDeletionItemState::Deleting => "deleting",
+        slipstream_core::PermanentDeletionItemState::Deleted => "deleted",
+        slipstream_core::PermanentDeletionItemState::Missing => "missing",
+        slipstream_core::PermanentDeletionItemState::Changed => "changed",
+        slipstream_core::PermanentDeletionItemState::Failed => "failed",
+        slipstream_core::PermanentDeletionItemState::Uncertain => "uncertain",
+    }
+}
+
+fn permanent_deletion_response(
+    result: slipstream_core::PermanentDeletionResult,
+) -> PermanentDeletionResponse {
+    PermanentDeletionResponse {
+        operation_id: result.operation_id,
+        reviewed: result.reviewed,
+        logical_bytes_deleted: result.logical_bytes_deleted,
+        items: result
+            .items
+            .into_iter()
+            .map(|item| PermanentDeletionItemWire {
+                photo_id: item.photo_id,
+                original_location: item.relative_path.to_string(),
+                original_kind: match item.kind {
+                    slipstream_core::OriginalKind::Raw => "raw",
+                    slipstream_core::OriginalKind::Jpeg => "jpeg",
+                },
+                state: permanent_deletion_state(item.state),
+                size: item.size,
+                message: item.message,
+            })
+            .collect(),
+    }
+}
+
 /// The published Library plus id indices, rebuilt atomically on each snapshot
 /// replacement so bounded window requests never rescan the whole Library.
 pub(crate) struct Published {
@@ -620,6 +657,38 @@ impl SharedLibrary {
                 continue;
             };
             photo.removed = removed;
+        }
+        published.invalidate_folder_index();
+        published.rebuild_query_projection();
+    }
+    /// Permanently deleted Originals leave the published Photo identity
+    /// unavailable and invalidate every derived source without rebuilding the
+    /// whole snapshot.
+    fn patch_permanently_deleted(&self, photo_ids: &[String]) {
+        let mut guard = self.snapshot.write().expect("published Library poisoned");
+        let Some(published) = guard.as_mut() else {
+            return;
+        };
+        for photo_id in photo_ids {
+            let Some(position) = published.photos_by_id.get(photo_id).copied() else {
+                continue;
+            };
+            let Some(photo) = published.snapshot.photos.get_mut(position) else {
+                continue;
+            };
+            photo.available = false;
+            photo.preview_state = slipstream_core::PreviewState::Unavailable;
+            photo.preview_source_revision = None;
+            photo.preview_width = None;
+            photo.preview_height = None;
+            photo.cache_revision = None;
+            if let Some(original_position) = published.originals_by_id.get(&photo.original_id)
+                && let Some(original) = published.snapshot.originals.get_mut(*original_position)
+            {
+                original.available = false;
+                original.error_category = Some(slipstream_core::OriginalErrorCategory::Unreadable);
+                original.error_message = Some("Original permanently deleted".to_owned());
+            }
         }
         published.invalidate_folder_index();
         published.rebuild_query_projection();
@@ -1903,13 +1972,25 @@ impl Application {
                         .collect();
                     Some((
                         record.removed_at_ms,
+                        record.pending_verification,
                         PreviewFacts::from_records(photo.clone(), originals),
                     ))
                 })
                 .collect::<Vec<_>>()
         };
         let mut photos = Vec::with_capacity(facts.len());
-        for (removed_at_ms, facts) in facts {
+        for (removed_at_ms, pending_verification_operation_id, facts) in facts {
+            let Some(original) = facts
+                .originals
+                .iter()
+                .find(|original| original.id == facts.photo.original_id)
+            else {
+                continue;
+            };
+            let original_kind = match original.kind {
+                slipstream_core::OriginalKind::Raw => "raw",
+                slipstream_core::OriginalKind::Jpeg => "jpeg",
+            };
             let (preview_url, thumbnail_url) = self.derivative_urls(&facts).await;
             let originals_by_id = facts
                 .originals
@@ -1919,6 +2000,10 @@ impl Application {
                 .collect::<std::collections::HashMap<_, _>>();
             photos.push(RemovedPhotoWire {
                 removed_at_ms,
+                original_location: original.relative_path.to_string(),
+                original_kind,
+                original_size: original.available.then_some(original.facts.size),
+                pending_verification_operation_id,
                 photo: photo_summary_indexed_with_url(
                     &facts.photo,
                     &facts.originals,
@@ -1932,12 +2017,93 @@ impl Application {
             start,
             limit,
             total,
+            review_maximum: slipstream_core::PERMANENT_DELETION_MAX,
             operation: operation.map(|operation| PhotoOperationRemainderWire {
                 operation_id: operation.operation_id,
                 removed: operation.removed,
             }),
             photos,
         })
+    }
+    pub async fn prepare_permanent_deletion(
+        &self,
+        operation_id: String,
+        selection: slipstream_core::PermanentDeletionSelection,
+    ) -> Result<PermanentDeletionReviewResponse, ServerError> {
+        let _publication = self.shared.publication.lock().await;
+        let review = self
+            .library
+            .prepare_permanent_deletion(operation_id, selection)
+            .await?;
+        Ok(PermanentDeletionReviewResponse {
+            operation_id: review.operation_id,
+            items: review
+                .items
+                .into_iter()
+                .map(|item| PermanentDeletionReviewItemWire {
+                    photo_id: item.photo_id,
+                    removed_at_ms: item.removed_at_ms,
+                    original_id: item.original_id,
+                    original_location: item.relative_path.to_string(),
+                    original_kind: match item.kind {
+                        slipstream_core::OriginalKind::Raw => "raw",
+                        slipstream_core::OriginalKind::Jpeg => "jpeg",
+                    }
+                    .to_owned(),
+                    size: item.size,
+                    albums: item
+                        .albums
+                        .into_iter()
+                        .map(|album| PhotoAlbumMembershipWire {
+                            id: album.album_id,
+                            name: album.album_name,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            rejected: review
+                .rejected
+                .into_iter()
+                .map(|(photo_id, reason)| PermanentDeletionRejectionWire {
+                    photo_id,
+                    reason: match reason {
+                        slipstream_core::PermanentDeletionRejection::Missing => "missing",
+                        slipstream_core::PermanentDeletionRejection::ChangedElsewhere => {
+                            "changed-elsewhere"
+                        }
+                        slipstream_core::PermanentDeletionRejection::PendingVerification => {
+                            "pending-verification"
+                        }
+                    },
+                })
+                .collect(),
+        })
+    }
+
+    pub async fn permanently_delete(
+        &self,
+        operation_id: String,
+    ) -> Result<PermanentDeletionResponse, ServerError> {
+        let _publication = self.shared.publication.lock().await;
+        let result = self.library.permanently_delete(operation_id).await?;
+        let deleted_photo_ids = result
+            .items
+            .iter()
+            .filter(|item| item.state == slipstream_core::PermanentDeletionItemState::Deleted)
+            .map(|item| item.photo_id.clone())
+            .collect::<Vec<_>>();
+        self.shared.patch_permanently_deleted(&deleted_photo_ids);
+        Ok(permanent_deletion_response(result))
+    }
+
+    pub async fn read_permanent_deletion(
+        &self,
+        operation_id: String,
+    ) -> Result<PermanentDeletionResponse, ServerError> {
+        let _publication = self.shared.publication.lock().await;
+        Ok(permanent_deletion_response(
+            self.library.read_permanent_deletion(operation_id).await?,
+        ))
     }
 
     /// Resolves one stable Photo identity against an immutable Browse Snapshot

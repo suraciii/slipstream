@@ -29,7 +29,7 @@ _Avoid_: replace, merge, overwrite
 The optional camera-recorded local date and time used to order Photos in the Photo Library. Capture Time comes from the Photo's own Original File and does not come from filesystem modification time. It does not determine Album membership order.
 
 **Original File**:
-A RAW or JPEG file owned by the Photographer and known to Slipstream under one stable identity. Slipstream must not modify it, and a supported Library expansion or Location Recovery must not create a new identity for it.
+A RAW or JPEG file owned by the Photographer and known to Slipstream under one stable identity. Slipstream must not rewrite it; only explicit Permanent Deletion from Trash may delete it. A supported Library expansion or Location Recovery must not create a new identity for it.
 
 **Original Location**:
 The relative directory and filename used to find an Original File beneath the current Library Folder. A Location is not Original File identity.
@@ -49,7 +49,7 @@ _Avoid_: Photo Set, Collection, Favorites
 
 **Removed Photo**:
 A Photo whose removal marker is set: it keeps its row, identity, Original Location, Rating, Album membership, and Selection State, and it leaves every normal Library source. Removing a Photo never modifies or deletes its Original File.
-_Avoid_: deleted Photo, trashed Photo, purged Photo
+_Avoid_: permanently deleted Photo, purged Photo
 
 **Removal marker**:
 The millisecond a removal was confirmed, stored on the Photo row beside the operation that set it and never reused: every marker is strictly greater than every marker the Library assigned before it. It is what makes Restore a compare-and-set: a restore names the marker it was listed under, so it clears exactly that removal and never a newer one.
@@ -63,9 +63,13 @@ _Avoid_: batch delete, purge, cleanup job
 The removal action that clears removal markers through a compare-and-set, returning Photos to every normal Library source with the facts they never lost. Restore never rescans, renames, moves, or rewrites an Original File, and it is not Location Recovery.
 _Avoid_: undelete, relink, reimport
 
-**Removed Photos listing**:
-The bounded, newest-removal-first listing of Removed Photos, and the only ordinary surface a Removed Photo has. Each row presents the Removal marker it was listed under and offers per-Photo Restore against it; the listing also offers the operation-level Undo of the last removal, for as long as that operation still owns a Removed Photo.
-_Avoid_: Trash, Recycle Bin, Recovery Area
+**Trash**:
+The Library-wide view of Removed Photos that remain available for Restore or explicit Permanent Deletion. Trash retains Original Files in place and includes removals from all sessions. It is not operating-system trash.
+_Avoid_: Recovery Area, Removed Photos listing as a separate destination
+
+**Permanent Deletion**:
+The separately confirmed deletion of a reviewed Original File belonging to a Photo in Trash. It cannot be undone by Slipstream and is distinct from Remove from Library and Restore.
+
 
 ## Metadata
 

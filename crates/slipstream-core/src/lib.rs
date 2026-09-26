@@ -35,7 +35,7 @@ pub use capture::{
     CaptureTimeField, MAXIMUM_CAPTURE_METADATA_BYTES, capture_source_revision,
     inspect_review_metadata,
 };
-pub use confinement::{LibraryRoot, OriginalCapability, ScanLimits};
+pub use confinement::{LibraryRoot, OriginalCapability, OriginalDeletionOutcome, ScanLimits};
 pub use derivative::{
     DEVELOPMENT_PREVIEW_LONG_EDGE, DISPLAY_TRANSFORM_VERSION, Derivative, DerivativeError,
     DerivativeProfile, DerivativeTarget, development_tiff_fixture, process_development_tiff,
@@ -55,7 +55,10 @@ pub use domain::{
     ExportSourceEvidence, ExportState, ExportSubmission, ExportSubmissionResolution,
     ExportSubmitOutcome, ExportSweepResult, MAXIMUM_FOLDER_ALBUM_PHOTOS, MAXIMUM_PHOTO_RATING,
     OriginalErrorCategory, OriginalFacts, OriginalFingerprint, OriginalKind, OriginalRecord,
-    OriginalScanError, PHOTO_STATE_BATCH_MAX, PhotoAlbumMembership, PhotoDecisionFacts,
+    OriginalScanError, PERMANENT_DELETION_MAX, PHOTO_STATE_BATCH_MAX, PermanentDeletionItemResult,
+    PermanentDeletionItemState, PermanentDeletionRejection, PermanentDeletionResult,
+    PermanentDeletionReview, PermanentDeletionReviewItem, PermanentDeletionSelection,
+    PermanentDeletionTarget, PermanentDeletionWorkItem, PhotoAlbumMembership, PhotoDecisionFacts,
     PhotoDecisionSnapshot, PhotoOperationRemainder, PhotoQuery, PhotoQueryCandidate,
     PhotoQueryError, PhotoQueryOrder, PhotoQueryProjection, PhotoQuerySource, PhotoRead,
     PhotoRecord, PhotoRemovalCounts, PhotoRemovalMarker, PhotoRemovalMutation, PhotoRemovalResult,
@@ -64,8 +67,8 @@ pub use domain::{
     PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField, PhotoStateMutation,
     PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult,
     PreviewSource, PreviewState, RebindEditRecipe, RelativeOriginalPath, RemovedPhotoRecord,
-    SaveEditRecipe, ScanResult, ScanSnapshot, SelectionState, WhiteBalanceIntent,
-    export_submission_payload_digest,
+    SaveEditRecipe, ScanResult, ScanSnapshot, SelectionState, TrashPhotoCandidate,
+    WhiteBalanceIntent, export_submission_payload_digest,
 };
 pub use export::{
     ArtifactWriter, ExportError, ExportTarget, ExportWorkspace, MAXIMUM_EXPORT_BYTES,

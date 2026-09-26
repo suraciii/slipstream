@@ -5,11 +5,16 @@ use crate::{
     EditRecipeRead, EditRecipeWriteOutcome, ExportAttempt, ExportLeaseOutcome, ExportRecord,
     ExportRetryOutcome, ExportSettlement, ExportSubmission, ExportSubmissionResolution,
     ExportSubmitOutcome, ExportSweepResult, LibraryRoot, NativeWorkBudget, NativeWorkPermit,
-    OriginalCapability, PhotoAlbumMembership, PhotoOperationRemainder, PhotoQuery, PhotoQueryError,
-    PhotoQueryProjection, PhotoRead, PhotoRemovalMutation, PhotoRemovalResult, PhotoRestoration,
-    PhotoRestorationResult, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateMutation,
-    PhotoStateMutationResult, PreviewSeed, PreviewSeedResult, RebindEditRecipe, RecoverySurvey,
-    RemovedPhotoRecord, RequestedRelocation, SaveEditRecipe, ScanLimits, ScanResult, ScanSnapshot,
+    OriginalCapability, OriginalDeletionOutcome, PermanentDeletionItemState,
+    PermanentDeletionResult, PermanentDeletionReview, PermanentDeletionSelection,
+    PermanentDeletionTarget, PhotoAlbumMembership, PhotoOperationRemainder, PhotoQuery,
+    PhotoQueryError, PhotoQueryProjection, PhotoRead, PhotoRemovalMutation, PhotoRemovalResult,
+    PhotoRestoration, PhotoRestorationResult, PhotoStateBatchMutation, PhotoStateBatchResult,
+    PhotoStateMutation, PhotoStateMutationResult, PreviewSeed, PreviewSeedResult, RebindEditRecipe,
+    RecoverySurvey, RemovedPhotoRecord, RequestedRelocation, SaveEditRecipe, ScanLimits,
+    ScanResult, ScanSnapshot,
+};
+use crate::{
     capture::capture_source_revision,
     persistence::{
         AlbumWriteError, DatabaseName, MutationError, Persistence, PersistenceError,
@@ -1167,6 +1172,182 @@ impl Library {
             .unwrap_or(Err(PersistenceError::OwnerStopped))
             .map_err(Into::into)
     }
+    /// Captures a fixed Permanent Deletion review from the current Trash
+    /// selection. Filesystem facts are read before the owner persists the
+    /// receipt, so the review and later unlink share one exact identity.
+    pub async fn prepare_permanent_deletion(
+        &self,
+        operation_id: String,
+        selection: PermanentDeletionSelection,
+    ) -> Result<PermanentDeletionReview, LibraryError> {
+        let requested_ids = match &selection {
+            PermanentDeletionSelection::Photos(photo_ids) => photo_ids.clone(),
+            PermanentDeletionSelection::All { .. } => Vec::new(),
+        };
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .trash_candidates_receiver(selection)
+                .map_err(LibraryError::from)?
+        };
+        let candidates = receive
+            .await
+            .unwrap_or(Err(MutationError::Persistence))
+            .map_err(LibraryError::from)?;
+        let mut targets = Vec::with_capacity(
+            candidates
+                .len()
+                .saturating_add(requested_ids.len().saturating_sub(candidates.len())),
+        );
+        let mut seen = std::collections::HashSet::with_capacity(candidates.len());
+        for candidate in candidates {
+            let facts = self
+                .root
+                .original(candidate.relative_path.clone())
+                .ok()
+                .and_then(|original| original.facts_if_present().ok().flatten());
+            seen.insert(candidate.photo_id.clone());
+            targets.push(PermanentDeletionTarget {
+                photo_id: candidate.photo_id,
+                removed_at_ms: candidate.removed_at_ms,
+                facts,
+            });
+        }
+        for photo_id in requested_ids {
+            if seen.insert(photo_id.clone()) {
+                targets.push(PermanentDeletionTarget {
+                    photo_id,
+                    removed_at_ms: 0,
+                    facts: None,
+                });
+            }
+        }
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .prepare_permanent_deletion_receiver(operation_id, targets)
+                .map_err(LibraryError::from)?
+        };
+        receive
+            .await
+            .unwrap_or(Err(MutationError::Persistence))
+            .map_err(LibraryError::from)
+    }
+
+    /// Applies a previously reviewed Permanent Deletion one Original at a
+    /// time. A durable `deleting` state makes a crash recoverable as
+    /// `uncertain` rather than silently retrying an unlink.
+    pub async fn permanently_delete(
+        &self,
+        operation_id: String,
+    ) -> Result<PermanentDeletionResult, LibraryError> {
+        let retry_unresolved = self
+            .read_permanent_deletion(operation_id.clone())
+            .await?
+            .items
+            .iter()
+            .any(|item| {
+                matches!(
+                    item.state,
+                    PermanentDeletionItemState::Failed | PermanentDeletionItemState::Uncertain
+                )
+            });
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .permanent_deletion_work_receiver(operation_id.clone(), retry_unresolved)
+                .map_err(LibraryError::from)?
+        };
+        let work = receive
+            .await
+            .unwrap_or(Err(MutationError::Persistence))
+            .map_err(LibraryError::from)?;
+        for item in work {
+            // The durable mark names the unresolved item to every other
+            // surface before the confined unlink is attempted.
+            let receive = {
+                let _admission = self.admit()?;
+                self.persistence
+                    .mark_permanent_deletion_deleting_receiver(
+                        operation_id.clone(),
+                        item.photo_id.clone(),
+                    )
+                    .map_err(LibraryError::from)?
+            };
+            match receive.await.unwrap_or(Err(MutationError::Persistence)) {
+                Ok(()) => {}
+                // Another confirmation settled this item first; its own result
+                // is authoritative and this attempt changes nothing.
+                Err(MutationError::Conflict) => continue,
+                Err(error) => return Err(LibraryError::from(error)),
+            }
+            let (state, message) = match self.root.original(item.relative_path.clone()) {
+                Err(error) => (PermanentDeletionItemState::Failed, Some(error.to_string())),
+                Ok(original) => match original.delete_if_unchanged(item.facts) {
+                    Ok(OriginalDeletionOutcome::Deleted) => {
+                        (PermanentDeletionItemState::Deleted, None)
+                    }
+                    Ok(OriginalDeletionOutcome::Missing) => (
+                        if item.state == PermanentDeletionItemState::Deleting {
+                            PermanentDeletionItemState::Uncertain
+                        } else {
+                            PermanentDeletionItemState::Missing
+                        },
+                        Some("Original was missing before deletion completed".to_owned()),
+                    ),
+                    Ok(OriginalDeletionOutcome::Changed) => (
+                        PermanentDeletionItemState::Changed,
+                        Some("Original facts changed after review".to_owned()),
+                    ),
+                    Ok(OriginalDeletionOutcome::Failed(error)) => {
+                        (PermanentDeletionItemState::Failed, Some(error))
+                    }
+                    Err(error) => (PermanentDeletionItemState::Failed, Some(error.to_string())),
+                },
+            };
+            let receive = {
+                let _admission = self.admit()?;
+                self.persistence
+                    .settle_permanent_deletion_receiver(
+                        operation_id.clone(),
+                        item.photo_id,
+                        state,
+                        message,
+                    )
+                    .map_err(LibraryError::from)?
+            };
+            receive
+                .await
+                .unwrap_or(Err(MutationError::Persistence))
+                .map_err(LibraryError::from)?;
+        }
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .read_permanent_deletion_receiver(operation_id)
+                .map_err(LibraryError::from)?
+        };
+        receive
+            .await
+            .unwrap_or(Err(MutationError::Persistence))
+            .map_err(LibraryError::from)
+    }
+
+    pub async fn read_permanent_deletion(
+        &self,
+        operation_id: String,
+    ) -> Result<PermanentDeletionResult, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .read_permanent_deletion_receiver(operation_id)
+                .map_err(LibraryError::from)?
+        };
+        receive
+            .await
+            .unwrap_or(Err(MutationError::Persistence))
+            .map_err(LibraryError::from)
+    }
 
     pub(crate) fn seed_preview_blocking(
         &self,
@@ -1378,8 +1559,17 @@ fn scanner_main(
                             &previous.originals,
                             &progress,
                         );
-                        let evidence_ids =
+                        let mut evidence_ids =
                             crate::recovery::evidence_original_ids(&result.originals, &previous);
+                        // A permanently deleted Original keeps no relocation
+                        // or identity evidence: its bytes are gone, and a file
+                        // at its reviewed Location is a new Original.
+                        let deleted_originals = persistence
+                            .permanently_deleted_original_ids_blocking()
+                            .map_err(LibraryError::from)?
+                            .into_iter()
+                            .collect::<std::collections::HashSet<_>>();
+                        evidence_ids.retain(|id| !deleted_originals.contains(id));
                         let fingerprints = persistence
                             .recovery_facts_blocking(evidence_ids)
                             .map_err(LibraryError::from)?;
@@ -1394,6 +1584,7 @@ fn scanner_main(
                             &result.originals,
                             &previous,
                             &fingerprints,
+                            &deleted_originals,
                             &mut recovery_progress,
                         );
                         {

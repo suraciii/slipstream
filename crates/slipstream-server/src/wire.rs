@@ -644,6 +644,9 @@ pub struct RemovedPhotosResponse {
     pub start: usize,
     pub limit: usize,
     pub total: usize,
+    /// The most Photos one Permanent Deletion review may capture. A surface
+    /// that selects every Trash result must not exceed it.
+    pub review_maximum: usize,
     pub operation: Option<PhotoOperationRemainderWire>,
     pub photos: Vec<RemovedPhotoWire>,
 }
@@ -655,7 +658,63 @@ pub struct RemovedPhotosResponse {
 #[serde(rename_all = "camelCase")]
 pub struct RemovedPhotoWire {
     pub removed_at_ms: i64,
+    pub original_location: String,
+    pub original_kind: &'static str,
+    pub original_size: Option<u64>,
+    /// The retained Permanent Deletion operation whose outcome for this Photo
+    /// is still unresolved. While it is present, Restore and another
+    /// destructive confirmation are unavailable and the surface can reopen
+    /// that operation.
+    pub pending_verification_operation_id: Option<String>,
     pub photo: PhotoSummary,
+}
+
+/// Fixed review facts and explicit refusals for one Permanent Deletion.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermanentDeletionReviewResponse {
+    pub operation_id: String,
+    pub items: Vec<PermanentDeletionReviewItemWire>,
+    pub rejected: Vec<PermanentDeletionRejectionWire>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermanentDeletionReviewItemWire {
+    pub photo_id: String,
+    pub removed_at_ms: i64,
+    pub original_id: String,
+    pub original_location: String,
+    pub original_kind: String,
+    pub size: u64,
+    pub albums: Vec<PhotoAlbumMembershipWire>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermanentDeletionRejectionWire {
+    pub photo_id: String,
+    pub reason: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermanentDeletionResponse {
+    pub operation_id: String,
+    pub reviewed: usize,
+    pub logical_bytes_deleted: u64,
+    pub items: Vec<PermanentDeletionItemWire>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermanentDeletionItemWire {
+    pub photo_id: String,
+    pub original_location: String,
+    pub original_kind: &'static str,
+    pub state: &'static str,
+    pub size: Option<u64>,
+    pub message: Option<String>,
 }
 
 #[derive(Clone, Debug)]
