@@ -278,6 +278,10 @@ impl LibraryRoot {
         let file = self.open_confined(&relative, true)?;
         Ok(file.into())
     }
+
+    pub(crate) fn sidecar_directory(&self, path: &str) -> Result<OwnedFd, ConfinementError> {
+        self.open_directory(path)
+    }
 }
 
 #[derive(Clone)]
@@ -1024,6 +1028,84 @@ mod sys {
     fn errno() -> libc::c_int {
         // SAFETY: libc exposes thread-local errno storage.
         unsafe { *libc::__errno_location() }
+    }
+}
+
+pub(crate) fn sidecar_names(
+    directory: OwnedFd,
+) -> Result<Vec<std::ffi::OsString>, ConfinementError> {
+    sys::list_directory(directory, 1_000_000)
+        .map(|entries| entries.into_iter().map(|entry| entry.name).collect())
+}
+
+pub(crate) fn sidecar_open(directory: RawFd, name: &CStr) -> io::Result<OwnedFd> {
+    sys::open_confined(directory, name, false)
+}
+
+pub(crate) fn sidecar_stat(fd: RawFd) -> io::Result<libc::stat> {
+    sys::fstat(fd)
+}
+
+pub(crate) fn sidecar_pread(fd: RawFd, bytes: &mut [u8], offset: u64) -> io::Result<usize> {
+    sys::pread(fd, bytes, offset)
+}
+
+pub(crate) fn sidecar_create(directory: RawFd, name: &CStr) -> io::Result<OwnedFd> {
+    // SAFETY: the name is NUL-terminated; success returns a uniquely owned descriptor.
+    let fd = unsafe {
+        libc::openat(
+            directory,
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        // SAFETY: this is the newly created descriptor.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+pub(crate) fn sidecar_rename(
+    directory: RawFd,
+    from: &CStr,
+    to: &CStr,
+    absent: bool,
+) -> io::Result<()> {
+    // SAFETY: both names are NUL-terminated and relative to a retained directory.
+    let result = unsafe {
+        if absent {
+            libc::syscall(
+                libc::SYS_renameat2,
+                directory,
+                from.as_ptr(),
+                directory,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            ) as libc::c_int
+        } else {
+            libc::renameat(directory, from.as_ptr(), directory, to.as_ptr())
+        }
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+pub(crate) fn sidecar_unlink(directory: RawFd, name: &CStr) -> io::Result<()> {
+    sys::unlink_at(directory, name)
+}
+
+pub(crate) fn sidecar_sync(directory: RawFd) -> io::Result<()> {
+    // SAFETY: the caller retains the descriptor for this syscall.
+    if unsafe { libc::fsync(directory) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 

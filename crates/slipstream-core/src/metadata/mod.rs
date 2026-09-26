@@ -4,4 +4,5 @@
 //! embedded source extraction (EXIF capture facts, embedded XMP, IPTC IIM).
 
 pub mod embedded;
+pub mod sidecar;
 pub mod xmp;
