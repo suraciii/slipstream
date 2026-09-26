@@ -45,10 +45,7 @@ const processingEnvironmentOverrides = {
     process.env.SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES?.trim(),
 } as const;
 const noProcessingEnvironment = Object.fromEntries(
-  Object.keys(processingEnvironmentOverrides).map((name) => [
-    name,
-    undefined,
-  ]),
+  Object.keys(processingEnvironmentOverrides).map((name) => [name, undefined]),
 );
 const processingEnvironment = [
   ["SLIPSTREAM_RAW_SAMPLE", sample],
@@ -194,8 +191,9 @@ async function writePhotos(root: string, count: number) {
 async function server(
   base: string,
   root: string,
-  environment: Readonly<Record<string, string | undefined>> =
-    noProcessingEnvironment,
+  environment: Readonly<
+    Record<string, string | undefined>
+  > = noProcessingEnvironment,
 ) {
   const running = await startBrowserServer({ base, root, environment });
   servers.push(running);
@@ -1267,8 +1265,7 @@ test("real-processing: autosaves an exposure, reopens it, compares the baseline,
     dirname(cameraSample),
     `${parse(cameraSample).name}.xmp`,
   );
-  const sourceSidecarBefore =
-    await optionalOriginalSnapshot(sourceSidecarPath);
+  const sourceSidecarBefore = await optionalOriginalSnapshot(sourceSidecarPath);
   const { base, root } = await fixture();
   const raw = join(root, `camera${extname(cameraSample)}`);
   await copyFile(cameraSample, raw);
@@ -1290,11 +1287,7 @@ test("real-processing: autosaves an exposure, reopens it, compares the baseline,
   }
   const copiedSidecarBefore = await originalSnapshot(isolatedSidecarPath);
   const copiedBefore = await originalSnapshot(raw);
-  const running = await server(
-    base,
-    root,
-    processingEnvironmentOverrides,
-  );
+  const running = await server(base, root, processingEnvironmentOverrides);
   await startReview(page, running.url, "All Photos");
   await openPhotoToolsView(page, "edit");
   // The deployment admits this Photo: the capability is the launcher's, and
@@ -1883,7 +1876,6 @@ async function optionalOriginalSnapshot(
     throw error;
   }
 }
-
 
 /// True when the explicit path is a readable regular file. The RAW gate
 /// validates the sample for its own runs; a scenario that runs outside the
