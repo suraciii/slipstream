@@ -217,6 +217,11 @@ campaign row:
   diagnostic unavailable. Parent I/O counters cannot stand in for attempt
   counters unless contemporaneous evidence proves exclusive membership of the
   attempt in that parent for the entire observation interval.
+
+The independent observer parser requires each `io.stat` line to contain a
+decimal `major:minor` device and at least one unique decimal `key=value`
+counter. Device-only or otherwise malformed lines are unavailable diagnostics.
+
 - `observer_window_eligible` requires the predeclared observer window to have
   complete, attributable Web/Album and host/ancestor observations, with no
   unresolved identity or ordering contradiction that affects memory or
