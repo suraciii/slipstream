@@ -2,6 +2,7 @@ use super::{
     DatabaseName, SchemaVersion, StateDirectory, StateError, StateFileIdentity,
     admission::StateDatabaseLock, validate_canonical_schema,
 };
+use crate::identity::classify_name;
 use crate::{
     ALBUM_MEMBERSHIP_BATCH_MAX, AlbumBrowseMember, AlbumBrowseTarget, AlbumCreationResult,
     AlbumMember, AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation,
@@ -15,20 +16,23 @@ use crate::{
     ExportSettlement, ExportSnapshot, ExportSourceEvidence, ExportState, ExportSubmission,
     ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult, LibraryRoot,
     MAXIMUM_FOLDER_ALBUM_PHOTOS, MAXIMUM_PHOTO_RATING, OriginalErrorCategory, OriginalFacts,
-    OriginalFingerprint, OriginalKind, OriginalRecord, OriginalScanError, PhotoAlbumMembership,
-    PhotoDecisionFacts, PhotoDecisionSnapshot, PhotoOperationRemainder, PhotoQuery,
-    PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder, PhotoQueryProjection, PhotoQuerySource,
-    PhotoRead, PhotoRecord, PhotoRemovalCounts, PhotoRemovalMutation, PhotoRemovalResult,
-    PhotoRestoration, PhotoRestorationCounts, PhotoRestorationResult, PhotoStateBatchApplied,
-    PhotoStateBatchChangedElsewhere, PhotoStateBatchMissing, PhotoStateBatchMutation,
-    PhotoStateBatchResult, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult,
-    PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult, PreviewState,
-    RebindEditRecipe, RecoverySurvey, RelativeOriginalPath, RemovedPhotoRecord,
+    OriginalFingerprint, OriginalKind, OriginalRecord, OriginalScanError,
+    PermanentDeletionItemResult, PermanentDeletionItemState, PermanentDeletionRejection,
+    PermanentDeletionResult, PermanentDeletionReview, PermanentDeletionReviewItem,
+    PermanentDeletionSelection, PermanentDeletionTarget, PermanentDeletionWorkItem,
+    PhotoAlbumMembership, PhotoDecisionFacts, PhotoDecisionSnapshot, PhotoOperationRemainder,
+    PhotoQuery, PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder, PhotoQueryProjection,
+    PhotoQuerySource, PhotoRead, PhotoRecord, PhotoRemovalCounts, PhotoRemovalMutation,
+    PhotoRemovalResult, PhotoRestoration, PhotoRestorationCounts, PhotoRestorationResult,
+    PhotoStateBatchApplied, PhotoStateBatchChangedElsewhere, PhotoStateBatchMissing,
+    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField, PhotoStateMutation,
+    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult,
+    PreviewState, RebindEditRecipe, RecoverySurvey, RelativeOriginalPath, RemovedPhotoRecord,
     RequestedRelocation, SaveEditRecipe, ScanLimits, ScanSnapshot, SelectionState,
-    UnavailablePhotoRecord, WhiteBalanceIntent,
-    identity::classify_name,
-    reconcile::{preview_should_preserve, reconcile, selected_source},
+    TrashPhotoCandidate, UnavailablePhotoRecord, WhiteBalanceIntent, preview_should_preserve,
+    reconcile, selected_source,
 };
+
 use rusqlite::{
     Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
     params_from_iter, types::Value,
@@ -96,6 +100,128 @@ enum PhotoRemovalOutcome {
     ChangedElsewhere,
     Missing,
     AlreadyRemoved,
+}
+
+/// One retained Permanent Deletion operation: its fixed reviewed item set and
+/// the candidates the review refused. Written once, when the review is
+/// captured. Per-item progress lives in its own row so confirming one item
+/// never rewrites the whole operation.
+const PERMANENT_DELETION_RECEIPT_PREFIX: &str = "permanent_deletion_operation:";
+/// One reviewed item's durable state: `permanent_deletion_item:<operation>:<photo>`.
+const PERMANENT_DELETION_ITEM_PREFIX: &str = "permanent_deletion_item:";
+/// The operation still owing this Photo an outcome: `permanent_deletion_unsettled:<photo>`.
+/// Present only between the durable `deleting` mark and its settlement, so a
+/// surface can refuse Restore and another destructive confirmation for a Photo
+/// whose deletion is not resolved.
+const PERMANENT_DELETION_UNSETTLED_PREFIX: &str = "permanent_deletion_unsettled:";
+/// The confirmed permanent deletion of this Photo:
+/// `permanent_deletion_deleted:<photo>`. An equality probe on this key is how
+/// Trash, Restore, and removal learn that a Photo is permanently deleted.
+const PERMANENT_DELETION_DELETED_PREFIX: &str = "permanent_deletion_deleted:";
+/// The Original identities a scan must not re-adopt or relocate:
+/// `permanent_deletion_deleted_original:<original>`.
+const PERMANENT_DELETION_DELETED_ORIGINAL_PREFIX: &str = "permanent_deletion_deleted_original:";
+/// Reserved Location that retires the Original row of a permanently deleted
+/// Photo once a scan discovers another file at its reviewed Location. No
+/// basename below it carries a supported Original File extension, so the
+/// scanner never recognizes a retired row as a Library path and cannot collide
+/// with a real Original.
+const PERMANENT_DELETION_RETIRED_LOCATION_PREFIX: &str = ".slipstream-deleted/";
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PermanentDeletionReceipt {
+    operation_id: String,
+    items: Vec<PermanentDeletionStoredItem>,
+    rejected: Vec<PermanentDeletionStoredRejection>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PermanentDeletionStoredItem {
+    photo_id: String,
+    removed_at_ms: i64,
+    original_id: String,
+    relative_path: String,
+    kind: String,
+    size: u64,
+    /// The reviewed mtime in milliseconds, held as its exact bits. A decimal
+    /// round trip through this row's JSON returns a value one ULP away for
+    /// some milliseconds, and the deletion compares the reviewed facts with
+    /// the file's current facts for equality, so only the bits are kept. The
+    /// derivative cache retains the same pair for the same reason.
+    mtime_bits: u64,
+    device: u64,
+    inode: u64,
+    #[serde(default)]
+    albums: Vec<PermanentDeletionStoredAlbum>,
+}
+
+/// One reviewed item's durable progress. It is the only mutable part of an
+/// operation, so it lives in its own metadata row: `state` advances without
+/// rewriting the retained review.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PermanentDeletionStoredItemState {
+    original_id: String,
+    state: PermanentDeletionStoredState,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PermanentDeletionStoredAlbum {
+    album_id: String,
+    album_name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PermanentDeletionStoredRejection {
+    photo_id: String,
+    rejection: PermanentDeletionStoredRejectionKind,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+enum PermanentDeletionStoredRejectionKind {
+    Missing,
+    ChangedElsewhere,
+    PendingVerification,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+enum PermanentDeletionStoredState {
+    Pending,
+    Deleting,
+    Deleted,
+    Missing,
+    Changed,
+    Failed,
+    Uncertain,
+}
+
+impl From<PermanentDeletionStoredState> for PermanentDeletionItemState {
+    fn from(value: PermanentDeletionStoredState) -> Self {
+        match value {
+            PermanentDeletionStoredState::Pending => Self::Pending,
+            PermanentDeletionStoredState::Deleting => Self::Deleting,
+            PermanentDeletionStoredState::Deleted => Self::Deleted,
+            PermanentDeletionStoredState::Missing => Self::Missing,
+            PermanentDeletionStoredState::Changed => Self::Changed,
+            PermanentDeletionStoredState::Failed => Self::Failed,
+            PermanentDeletionStoredState::Uncertain => Self::Uncertain,
+        }
+    }
+}
+
+impl From<PermanentDeletionItemState> for PermanentDeletionStoredState {
+    fn from(value: PermanentDeletionItemState) -> Self {
+        match value {
+            PermanentDeletionItemState::Pending => Self::Pending,
+            PermanentDeletionItemState::Deleting => Self::Deleting,
+            PermanentDeletionItemState::Deleted => Self::Deleted,
+            PermanentDeletionItemState::Missing => Self::Missing,
+            PermanentDeletionItemState::Changed => Self::Changed,
+            PermanentDeletionItemState::Failed => Self::Failed,
+            PermanentDeletionItemState::Uncertain => Self::Uncertain,
+        }
+    }
 }
 
 struct MutationVersions {
@@ -581,6 +707,7 @@ fn normalize_checked_photo_decision_mutation(
     {
         return Err(PhotoDecisionWriteError::Invalid);
     }
+
     if mutation.photos.len() > crate::PHOTO_STATE_BATCH_MAX {
         return Err(PhotoDecisionWriteError::LimitExceeded {
             limit: crate::PHOTO_STATE_BATCH_MAX,
@@ -660,6 +787,11 @@ type RemovedPhotoPage = (
 );
 type RemovedPhotoPageResult = Result<RemovedPhotoPage, PersistenceError>;
 type RemovedPhotoPageReceiver = oneshot::Receiver<RemovedPhotoPageResult>;
+
+type TrashCandidateResult = Result<Vec<TrashPhotoCandidate>, MutationError>;
+type PermanentDeletionReviewResult = Result<PermanentDeletionReview, MutationError>;
+type PermanentDeletionWorkResult = Result<Vec<PermanentDeletionWorkItem>, MutationError>;
+type PermanentDeletionResultReply = Result<PermanentDeletionResult, MutationError>;
 
 enum Command {
     Probe(Reply<u64>),
@@ -768,6 +900,37 @@ enum Command {
         start: usize,
         limit: usize,
         reply: Reply<RemovedPhotoPage>,
+    },
+    TrashCandidates {
+        selection: PermanentDeletionSelection,
+        reply: oneshot::Sender<TrashCandidateResult>,
+    },
+    PreparePermanentDeletion {
+        operation_id: String,
+        targets: Vec<PermanentDeletionTarget>,
+        reply: oneshot::Sender<PermanentDeletionReviewResult>,
+    },
+    PermanentDeletionWork {
+        operation_id: String,
+        retry_unresolved: bool,
+        reply: oneshot::Sender<PermanentDeletionWorkResult>,
+    },
+    MarkPermanentDeletionDeleting {
+        operation_id: String,
+        photo_id: String,
+        reply: oneshot::Sender<Result<(), MutationError>>,
+    },
+    PermanentlyDeletedOriginalIds(Reply<Vec<String>>),
+    SettlePermanentDeletion {
+        operation_id: String,
+        photo_id: String,
+        state: PermanentDeletionItemState,
+        message: Option<String>,
+        reply: oneshot::Sender<Result<(), MutationError>>,
+    },
+    ReadPermanentDeletion {
+        operation_id: String,
+        reply: oneshot::Sender<PermanentDeletionResultReply>,
     },
     WriteProbe(Reply<()>),
     SubmitExport(ExportSubmission, Reply<ExportSubmitOutcome>),
@@ -1734,6 +1897,149 @@ impl Persistence {
         Ok(receive)
     }
 
+    pub(crate) fn trash_candidates_receiver(
+        &self,
+        selection: PermanentDeletionSelection,
+    ) -> Result<oneshot::Receiver<TrashCandidateResult>, MutationError> {
+        let valid = match &selection {
+            PermanentDeletionSelection::Photos(photo_ids) => {
+                !photo_ids.is_empty()
+                    && photo_ids.len() <= crate::PERMANENT_DELETION_MAX
+                    && photo_ids.iter().all(|id| !id.is_empty())
+                    && photo_ids.iter().collect::<HashSet<_>>().len() == photo_ids.len()
+            }
+            PermanentDeletionSelection::All { exclude_photo_ids } => {
+                exclude_photo_ids.len() <= crate::PERMANENT_DELETION_MAX
+                    && exclude_photo_ids.iter().all(|id| !id.is_empty())
+                    && exclude_photo_ids.iter().collect::<HashSet<_>>().len()
+                        == exclude_photo_ids.len()
+            }
+        };
+        if !valid {
+            return Err(MutationError::Invalid);
+        }
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::TrashCandidates {
+            selection,
+            reply: send,
+        })
+        .map_err(mutation_error_from_persistence)?;
+        Ok(receive)
+    }
+
+    pub(crate) fn prepare_permanent_deletion_receiver(
+        &self,
+        operation_id: String,
+        targets: Vec<PermanentDeletionTarget>,
+    ) -> Result<oneshot::Receiver<PermanentDeletionReviewResult>, MutationError> {
+        if operation_id.is_empty()
+            || targets.len() > crate::PERMANENT_DELETION_MAX
+            || targets.iter().any(|target| target.photo_id.is_empty())
+            || targets
+                .iter()
+                .map(|target| &target.photo_id)
+                .collect::<HashSet<_>>()
+                .len()
+                != targets.len()
+        {
+            return Err(MutationError::Invalid);
+        }
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::PreparePermanentDeletion {
+            operation_id,
+            targets,
+            reply: send,
+        })
+        .map_err(mutation_error_from_persistence)?;
+        Ok(receive)
+    }
+
+    pub(crate) fn permanent_deletion_work_receiver(
+        &self,
+        operation_id: String,
+        retry_unresolved: bool,
+    ) -> Result<oneshot::Receiver<PermanentDeletionWorkResult>, MutationError> {
+        if operation_id.is_empty() {
+            return Err(MutationError::Invalid);
+        }
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::PermanentDeletionWork {
+            operation_id,
+            retry_unresolved,
+            reply: send,
+        })
+        .map_err(mutation_error_from_persistence)?;
+        Ok(receive)
+    }
+
+    pub(crate) fn mark_permanent_deletion_deleting_receiver(
+        &self,
+        operation_id: String,
+        photo_id: String,
+    ) -> Result<oneshot::Receiver<Result<(), MutationError>>, MutationError> {
+        if operation_id.is_empty() || photo_id.is_empty() {
+            return Err(MutationError::Invalid);
+        }
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::MarkPermanentDeletionDeleting {
+            operation_id,
+            photo_id,
+            reply: send,
+        })
+        .map_err(mutation_error_from_persistence)?;
+        Ok(receive)
+    }
+
+    /// The Original identities a scan must not re-adopt or relocate: their
+    /// Photo was confirmed permanently deleted.
+    pub(crate) fn permanently_deleted_original_ids_blocking(
+        &self,
+    ) -> Result<Vec<String>, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::PermanentlyDeletedOriginalIds(send))?;
+        receive
+            .blocking_recv()
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+    }
+
+    pub(crate) fn settle_permanent_deletion_receiver(
+        &self,
+        operation_id: String,
+        photo_id: String,
+        state: PermanentDeletionItemState,
+        message: Option<String>,
+    ) -> Result<oneshot::Receiver<Result<(), MutationError>>, MutationError> {
+        if operation_id.is_empty() || photo_id.is_empty() {
+            return Err(MutationError::Invalid);
+        }
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::SettlePermanentDeletion {
+            operation_id,
+            photo_id,
+            state,
+            message,
+            reply: send,
+        })
+        .map_err(mutation_error_from_persistence)?;
+        Ok(receive)
+    }
+
+    pub(crate) fn read_permanent_deletion_receiver(
+        &self,
+        operation_id: String,
+    ) -> Result<oneshot::Receiver<PermanentDeletionResultReply>, MutationError> {
+        if operation_id.is_empty() {
+            return Err(MutationError::Invalid);
+        }
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::ReadPermanentDeletion {
+            operation_id,
+            reply: send,
+        })
+        .map_err(mutation_error_from_persistence)?;
+        Ok(receive)
+    }
+
     pub async fn write_probe(&self) -> Result<(), PersistenceError> {
         let (send, receive) = oneshot::channel();
         self.submit(Command::WriteProbe(send))?;
@@ -2070,6 +2376,75 @@ fn owner_main(
             }
             Command::ReadExport { export_id, reply } => {
                 let _ = reply.send(export_record(&connection, &export_id));
+            }
+            Command::TrashCandidates { selection, reply } => {
+                let _ = reply.send(trash_candidates(&connection, selection));
+            }
+            Command::PreparePermanentDeletion {
+                operation_id,
+                targets,
+                reply,
+            } => {
+                let result = prepare_permanent_deletion(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    operation_id,
+                    targets,
+                );
+                let _ = reply.send(result);
+            }
+            Command::PermanentDeletionWork {
+                operation_id,
+                retry_unresolved,
+                reply,
+            } => {
+                let _ = reply.send(permanent_deletion_work(
+                    &connection,
+                    &operation_id,
+                    retry_unresolved,
+                ));
+            }
+            Command::MarkPermanentDeletionDeleting {
+                operation_id,
+                photo_id,
+                reply,
+            } => {
+                let result = mark_permanent_deletion_deleting(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    &operation_id,
+                    &photo_id,
+                );
+                let _ = reply.send(result);
+            }
+            Command::PermanentlyDeletedOriginalIds(reply) => {
+                let _ = reply.send(permanently_deleted_original_ids(&connection));
+            }
+            Command::SettlePermanentDeletion {
+                operation_id,
+                photo_id,
+                state: item_state,
+                message,
+                reply,
+            } => {
+                let result = settle_permanent_deletion(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    &operation_id,
+                    &photo_id,
+                    item_state,
+                    message,
+                );
+                let _ = reply.send(result);
+            }
+            Command::ReadPermanentDeletion {
+                operation_id,
+                reply,
+            } => {
+                let _ = reply.send(read_permanent_deletion(&connection, &operation_id));
             }
             Command::ListPhotoExports { photo_id, reply } => {
                 let _ = reply.send(list_photo_exports(&connection, &photo_id));
@@ -4038,8 +4413,19 @@ fn apply_scan(
         for original in discovered {
             discovered_by_path.insert(original.path.as_str().to_owned(), original);
         }
+        // Identities whose Photo was confirmed permanently deleted. A scan may
+        // neither relocate one (its bytes are gone by definition) nor let a
+        // file that later appears at its reviewed Location adopt it: the
+        // removed Photo must stay removed evidence, and the new file is a new
+        // Original.
+        let deleted_originals = permanently_deleted_original_ids(transaction)?
+            .into_iter()
+            .collect::<HashSet<_>>();
         let mut relocation_by_id = HashMap::with_capacity(recovery.relocations.len());
         for (new_path, original_id) in &recovery.relocations {
+            if deleted_originals.contains(original_id) {
+                return Err(PersistenceError::InvalidRecovery);
+            }
             let Some(persisted) = persisted_by_id.get(original_id) else {
                 return Err(PersistenceError::InvalidRecovery);
             };
@@ -4095,13 +4481,40 @@ fn apply_scan(
             }
         }
 
+        // A permanently deleted Original whose reviewed Location now holds
+        // some file retires to a reserved Location that no scan recognizes, so
+        // the Library path is free for the file that appears there while the
+        // retained row keeps its facts as evidence.
+        for original in &before.originals {
+            if !deleted_originals.contains(&original.id)
+                || !discovered_by_path.contains_key(original.relative_path.as_str())
+            {
+                continue;
+            }
+            transaction
+                .execute(
+                    "UPDATE original_files SET relative_path=?,available=0 WHERE id=?",
+                    params![
+                        format!(
+                            "{PERMANENT_DELETION_RETIRED_LOCATION_PREFIX}{}",
+                            original.id
+                        ),
+                        original.id
+                    ],
+                )
+                .map_err(|_| PersistenceError::Storage)?;
+        }
+
         let existing_ids = persisted_by_path;
         let mut reserved_ids = HashSet::new();
         let mut original_ids = HashMap::with_capacity(discovered.len());
         for original in discovered {
             let id = if let Some(id) = recovery.relocations.get(original.path.as_str()) {
                 id.clone()
-            } else if let Some(id) = existing_ids.get(original.path.as_str()) {
+            } else if let Some(id) = existing_ids
+                .get(original.path.as_str())
+                .filter(|id| !deleted_originals.contains(*id))
+            {
                 id.clone()
             } else {
                 allocate_library_id(transaction, &mut reserved_ids)?
@@ -6320,6 +6733,8 @@ fn create_photo_query(
         if !location.is_empty() && !valid_folder_location(location) {
             return Err(PhotoQueryError::Invalid);
         }
+        // The Library Folder root always exists, even while no Photo is
+        // present to prove it; every other Folder needs a member.
         if !location.is_empty()
             && !projection
                 .ascending()
@@ -7601,6 +8016,11 @@ fn remove_photos(
                     result.missing.push(photo_id.clone());
                     continue;
                 };
+                if photo_is_permanently_deleted(transaction, photo_id)? {
+                    outcomes.push(PhotoRemovalOutcome::AlreadyRemoved);
+                    result.already_removed.push(photo_id.clone());
+                    continue;
+                }
                 if removed_at.is_some() {
                     // A retried request repeats its own operation, so what
                     // this operation already removed is still its own result.
@@ -7737,6 +8157,15 @@ fn restore_photos(
                     result.missing.push(photo_id.clone());
                     continue;
                 };
+                // A permanently deleted Photo is evidence, and one whose own
+                // deletion has not settled has no known outcome to reverse;
+                // neither may be restored.
+                if photo_is_permanently_deleted(transaction, photo_id)?
+                    || unsettled_permanent_deletion_operation(transaction, photo_id)?.is_some()
+                {
+                    result.changed_elsewhere.push(photo_id.clone());
+                    continue;
+                }
                 // An explicit request restores the removal it reviewed. A
                 // Photo whose marker moved on — restored and removed again, or
                 // removed by another operation — is reported, never cleared.
@@ -7792,6 +8221,7 @@ fn operation_remainders(
             removed: 0,
         })
         .collect::<Vec<_>>();
+    let deleted_prefix = PERMANENT_DELETION_DELETED_PREFIX.to_owned();
     let ids = operation_ids.iter().cloned().collect::<Vec<_>>();
     for chunk in ids.chunks(PHOTO_REMOVAL_CHUNK) {
         let placeholders = std::iter::repeat_n("?", chunk.len())
@@ -7799,80 +8229,934 @@ fn operation_remainders(
             .join(",");
         let mut statement = transaction
             .prepare(&format!(
-                "SELECT removed_operation,count(*) FROM photos
+                "SELECT removed_operation FROM photos p
                  WHERE removed_at_ms IS NOT NULL AND removed_operation IN ({placeholders})
-                 GROUP BY removed_operation"
+                   AND NOT EXISTS (SELECT 1 FROM library_metadata m
+                                   WHERE m.key = ? || p.id)"
             ))
             .map_err(mutation_error_from_sqlite)?;
         let rows = statement
-            .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })
+            .query_map(
+                rusqlite::params_from_iter(chunk.iter().chain(std::iter::once(&deleted_prefix))),
+                |row| row.get::<_, String>(0),
+            )
             .map_err(mutation_error_from_sqlite)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(mutation_error_from_sqlite)?;
-        for (operation_id, remaining) in rows {
+        for operation_id in rows {
             if let Some(remainder) = remainders
                 .iter_mut()
                 .find(|remainder| remainder.operation_id == operation_id)
             {
-                remainder.removed = usize::try_from(remaining).unwrap_or(usize::MAX);
+                remainder.removed = remainder.removed.saturating_add(1);
             }
         }
     }
     Ok(remainders)
 }
 
-/// One bounded page of removed Photos, newest removal first.
+/// One bounded page of removed Photos, newest removal first. Tombstoned Photos
+/// are excluded by their retained key, so the page never has to materialize
+/// every retained operation.
+/// The rows a Trash surface may show: every removed Photo whose Original was
+/// not confirmed permanently deleted. The tombstone set is read once per
+/// statement through the key index, so the cost of a page does not grow with
+/// the number of retained deletions.
+fn trash_rows() -> String {
+    format!(
+        "FROM photos p
+         WHERE p.removed_at_ms IS NOT NULL
+           AND p.id NOT IN (SELECT substr(m.key, {offset}) FROM library_metadata m
+                            WHERE m.key LIKE '{prefix}%')",
+        offset = PERMANENT_DELETION_DELETED_PREFIX.len() + 1,
+        prefix = PERMANENT_DELETION_DELETED_PREFIX,
+    )
+}
+
 fn removed_photos(connection: &Connection, start: usize, limit: usize) -> RemovedPhotoPageResult {
+    let remaining = trash_rows();
     let total: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM photos WHERE removed_at_ms IS NOT NULL",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    let records = connection
-        .prepare(
-            "SELECT id,removed_at_ms FROM photos WHERE removed_at_ms IS NOT NULL
-             ORDER BY removed_at_ms DESC, id LIMIT ? OFFSET ?",
-        )
-        .map_err(|_| PersistenceError::Storage)?
-        .query_map(params![limit as i64, start as i64], |row| {
-            Ok(RemovedPhotoRecord {
-                photo_id: row.get(0)?,
-                removed_at_ms: row.get(1)?,
-            })
+        .query_row(&format!("SELECT COUNT(*) {remaining}"), [], |row| {
+            row.get(0)
         })
+        .map_err(|_| PersistenceError::Storage)?;
+    let total = usize::try_from(total).map_err(|_| PersistenceError::Storage)?;
+    let rows = connection
+        .prepare(&format!(
+            "SELECT p.id,p.removed_at_ms,p.removed_operation {remaining}
+             ORDER BY p.removed_at_ms DESC,p.id
+             LIMIT ? OFFSET ?"
+        ))
+        .map_err(|_| PersistenceError::Storage)?
+        .query_map(
+            params![
+                i64::try_from(limit).map_err(|_| PersistenceError::Storage)?,
+                i64::try_from(start).map_err(|_| PersistenceError::Storage)?,
+            ],
+            |row| {
+                Ok((
+                    RemovedPhotoRecord {
+                        photo_id: row.get(0)?,
+                        removed_at_ms: row.get(1)?,
+                        pending_verification: None,
+                    },
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
         .map_err(|_| PersistenceError::Storage)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| PersistenceError::Storage)?;
+    let mut records = Vec::with_capacity(rows.len());
+    for (mut record, _) in rows {
+        record.pending_verification =
+            unsettled_permanent_deletion_operation(connection, &record.photo_id)
+                .map_err(|_| PersistenceError::Storage)?;
+        records.push(record);
+    }
+    // The remainder surface names the newest removal operation that still owns
+    // Trash items, and counts exactly those Photos.
     let operation = connection
         .query_row(
-            "SELECT removed_operation,count(*)
-             FROM photos
-             WHERE removed_at_ms IS NOT NULL AND removed_operation IS NOT NULL
-             GROUP BY removed_operation
-             ORDER BY max(removed_at_ms) DESC, removed_operation DESC
-             LIMIT 1",
+            &format!(
+                "SELECT p.removed_operation,COUNT(*),MAX(p.removed_at_ms) {remaining}
+                   AND p.removed_operation IS NOT NULL
+                 GROUP BY p.removed_operation
+                 ORDER BY MAX(p.removed_at_ms) DESC,p.removed_operation DESC
+                 LIMIT 1"
+            ),
             [],
             |row| {
-                Ok(PhotoOperationRemainder {
-                    operation_id: row.get(0)?,
-                    removed: row
-                        .get::<_, i64>(1)?
-                        .try_into()
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
             },
         )
         .optional()
+        .map_err(|_| PersistenceError::Storage)?
+        .map(|(operation_id, removed, _)| {
+            let removed = usize::try_from(removed).map_err(|_| PersistenceError::Storage)?;
+            Ok::<PhotoOperationRemainder, PersistenceError>(PhotoOperationRemainder {
+                operation_id,
+                removed,
+            })
+        })
+        .transpose()?;
+    Ok((records, total, operation))
+}
+fn permanent_deletion_receipt_key(operation_id: &str) -> String {
+    format!("{PERMANENT_DELETION_RECEIPT_PREFIX}{operation_id}")
+}
+
+fn read_permanent_deletion_receipt(
+    connection: &Connection,
+    operation_id: &str,
+) -> Result<Option<PermanentDeletionReceipt>, MutationError> {
+    let value = connection
+        .query_row(
+            "SELECT value FROM library_metadata WHERE key=?",
+            [permanent_deletion_receipt_key(operation_id)],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(mutation_error_from_sqlite)?;
+    value
+        .map(|value| serde_json::from_str(&value).map_err(|_| MutationError::Persistence))
+        .transpose()
+}
+
+fn read_permanent_deletion_receipt_transaction(
+    transaction: &Transaction<'_>,
+    operation_id: &str,
+) -> Result<Option<PermanentDeletionReceipt>, MutationError> {
+    let value = transaction
+        .query_row(
+            "SELECT value FROM library_metadata WHERE key=?",
+            [permanent_deletion_receipt_key(operation_id)],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(mutation_error_from_sqlite)?;
+    value
+        .map(|value| serde_json::from_str(&value).map_err(|_| MutationError::Persistence))
+        .transpose()
+}
+
+fn write_permanent_deletion_receipt(
+    transaction: &Transaction<'_>,
+    receipt: &PermanentDeletionReceipt,
+) -> Result<(), MutationError> {
+    let value = serde_json::to_string(receipt).map_err(|_| MutationError::Persistence)?;
+    transaction
+        .execute(
+            "INSERT INTO library_metadata(key,value) VALUES(?,?)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![permanent_deletion_receipt_key(&receipt.operation_id), value],
+        )
+        .map_err(mutation_error_from_sqlite)?;
+    Ok(())
+}
+
+fn permanent_deletion_rejection(
+    value: PermanentDeletionStoredRejectionKind,
+) -> PermanentDeletionRejection {
+    match value {
+        PermanentDeletionStoredRejectionKind::Missing => PermanentDeletionRejection::Missing,
+        PermanentDeletionStoredRejectionKind::ChangedElsewhere => {
+            PermanentDeletionRejection::ChangedElsewhere
+        }
+        PermanentDeletionStoredRejectionKind::PendingVerification => {
+            PermanentDeletionRejection::PendingVerification
+        }
+    }
+}
+
+fn permanent_deletion_review_from_receipt(
+    receipt: PermanentDeletionReceipt,
+) -> Result<PermanentDeletionReview, MutationError> {
+    let items = receipt
+        .items
+        .into_iter()
+        .map(|item| {
+            Ok(PermanentDeletionReviewItem {
+                photo_id: item.photo_id,
+                removed_at_ms: item.removed_at_ms,
+                original_id: item.original_id,
+                relative_path: RelativeOriginalPath::parse(item.relative_path)
+                    .map_err(|_| MutationError::Persistence)?,
+                kind: parse_kind(&item.kind).map_err(|_| MutationError::Persistence)?,
+                size: item.size,
+                albums: item
+                    .albums
+                    .into_iter()
+                    .map(|album| PhotoAlbumMembership {
+                        album_id: album.album_id,
+                        album_name: album.album_name,
+                    })
+                    .collect(),
+            })
+        })
+        .collect::<Result<Vec<_>, MutationError>>()?;
+    let rejected = receipt
+        .rejected
+        .into_iter()
+        .map(|item| (item.photo_id, permanent_deletion_rejection(item.rejection)))
+        .collect();
+    Ok(PermanentDeletionReview {
+        operation_id: receipt.operation_id,
+        items,
+        rejected,
+    })
+}
+
+/// Durable result of one operation: the retained reviewed set in review order,
+/// joined with each item's own durable state.
+fn permanent_deletion_result_from_receipt(
+    connection: &Connection,
+    receipt: PermanentDeletionReceipt,
+) -> Result<PermanentDeletionResult, MutationError> {
+    let mut states = read_permanent_deletion_item_states(connection, &receipt.operation_id)?;
+    let items = receipt
+        .items
+        .into_iter()
+        .map(|item| {
+            let progress = states.remove(&item.photo_id);
+            let state: PermanentDeletionItemState = progress
+                .as_ref()
+                .map_or(PermanentDeletionStoredState::Pending, |progress| {
+                    progress.state
+                })
+                .into();
+            let message = progress.and_then(|progress| progress.message);
+            Ok(PermanentDeletionItemResult {
+                photo_id: item.photo_id,
+                relative_path: RelativeOriginalPath::parse(item.relative_path)
+                    .map_err(|_| MutationError::Persistence)?,
+                kind: parse_kind(&item.kind).map_err(|_| MutationError::Persistence)?,
+                state,
+                size: matches!(state, PermanentDeletionItemState::Deleted).then_some(item.size),
+                message,
+            })
+        })
+        .collect::<Result<Vec<_>, MutationError>>()?;
+    let logical_bytes_deleted = items
+        .iter()
+        .filter_map(|item| item.size)
+        .fold(0_u64, u64::saturating_add);
+    Ok(PermanentDeletionResult {
+        operation_id: receipt.operation_id,
+        reviewed: items.len(),
+        logical_bytes_deleted,
+        items,
+    })
+}
+
+fn permanent_deletion_item_key(operation_id: &str, photo_id: &str) -> String {
+    format!("{PERMANENT_DELETION_ITEM_PREFIX}{operation_id}:{photo_id}")
+}
+
+fn permanent_deletion_item_prefix(operation_id: &str) -> String {
+    format!("{PERMANENT_DELETION_ITEM_PREFIX}{operation_id}:")
+}
+
+fn permanent_deletion_unsettled_key(photo_id: &str) -> String {
+    format!("{PERMANENT_DELETION_UNSETTLED_PREFIX}{photo_id}")
+}
+
+fn permanent_deletion_deleted_key(photo_id: &str) -> String {
+    format!("{PERMANENT_DELETION_DELETED_PREFIX}{photo_id}")
+}
+
+fn permanent_deletion_deleted_original_key(original_id: &str) -> String {
+    format!("{PERMANENT_DELETION_DELETED_ORIGINAL_PREFIX}{original_id}")
+}
+
+/// The Photo identities whose Original was confirmed permanently deleted.
+/// Every surface that must hide one reads this set.
+fn permanently_deleted_photo_ids(
+    connection: &Connection,
+) -> Result<std::collections::HashSet<String>, MutationError> {
+    let mut statement = connection
+        .prepare("SELECT key FROM library_metadata WHERE key LIKE ?")
+        .map_err(mutation_error_from_sqlite)?;
+    let keys = statement
+        .query_map([format!("{PERMANENT_DELETION_DELETED_PREFIX}%")], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(mutation_error_from_sqlite)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(mutation_error_from_sqlite)?;
+    Ok(keys
+        .into_iter()
+        .filter_map(|key| {
+            key.strip_prefix(PERMANENT_DELETION_DELETED_PREFIX)
+                .map(str::to_owned)
+        })
+        .collect())
+}
+
+/// The Photo identities whose deletion started and has not settled. A review
+/// refuses them until their outcome is known.
+fn unsettled_permanent_deletion_photo_ids(
+    connection: &Connection,
+) -> Result<std::collections::HashSet<String>, MutationError> {
+    let mut statement = connection
+        .prepare("SELECT key FROM library_metadata WHERE key LIKE ?")
+        .map_err(mutation_error_from_sqlite)?;
+    let keys = statement
+        .query_map([format!("{PERMANENT_DELETION_UNSETTLED_PREFIX}%")], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(mutation_error_from_sqlite)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(mutation_error_from_sqlite)?;
+    Ok(keys
+        .into_iter()
+        .filter_map(|key| {
+            key.strip_prefix(PERMANENT_DELETION_UNSETTLED_PREFIX)
+                .map(str::to_owned)
+        })
+        .collect())
+}
+
+/// Whether one Photo's Original was confirmed permanently deleted. This is the
+/// equality probe Trash, Restore, and removal use, so their cost does not grow
+/// with the number of retained operations.
+fn photo_is_permanently_deleted(
+    connection: &Connection,
+    photo_id: &str,
+) -> Result<bool, MutationError> {
+    let found = connection
+        .query_row(
+            "SELECT 1 FROM library_metadata WHERE key=?",
+            [permanent_deletion_deleted_key(photo_id)],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(mutation_error_from_sqlite)?;
+    Ok(found.is_some())
+}
+
+/// The Original identities whose Photo was confirmed permanently deleted. A
+/// scan must neither re-adopt nor relocate them.
+fn permanently_deleted_original_ids(
+    connection: &Connection,
+) -> Result<Vec<String>, PersistenceError> {
+    let mut statement = connection
+        .prepare("SELECT key FROM library_metadata WHERE key LIKE ? ORDER BY key")
         .map_err(|_| PersistenceError::Storage)?;
-    Ok((
-        records,
-        usize::try_from(total).unwrap_or(usize::MAX),
-        operation,
-    ))
+    let keys = statement
+        .query_map(
+            [format!("{PERMANENT_DELETION_DELETED_ORIGINAL_PREFIX}%")],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|_| PersistenceError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PersistenceError::Storage)?;
+    Ok(keys
+        .into_iter()
+        .filter_map(|key| {
+            key.strip_prefix(PERMANENT_DELETION_DELETED_ORIGINAL_PREFIX)
+                .map(str::to_owned)
+        })
+        .collect())
+}
+
+/// The retained operation that still owes this Photo an outcome, when its
+/// deletion started and never settled. Restore and another destructive
+/// confirmation stay unavailable while it is present.
+fn unsettled_permanent_deletion_operation(
+    connection: &Connection,
+    photo_id: &str,
+) -> Result<Option<String>, MutationError> {
+    connection
+        .query_row(
+            "SELECT value FROM library_metadata WHERE key=?",
+            [permanent_deletion_unsettled_key(photo_id)],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(mutation_error_from_sqlite)
+}
+
+/// One reviewed item's progress. An item with no row yet has not left
+/// `pending`.
+fn read_permanent_deletion_item_state(
+    connection: &Connection,
+    operation_id: &str,
+    photo_id: &str,
+) -> Result<Option<PermanentDeletionStoredItemState>, MutationError> {
+    let value = connection
+        .query_row(
+            "SELECT value FROM library_metadata WHERE key=?",
+            [permanent_deletion_item_key(operation_id, photo_id)],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(mutation_error_from_sqlite)?;
+    value
+        .map(|value| serde_json::from_str(&value).map_err(|_| MutationError::Persistence))
+        .transpose()
+}
+
+/// Every reviewed item's progress for one operation, keyed by Photo identity.
+/// The rows are small and bounded by the reviewed set.
+fn read_permanent_deletion_item_states(
+    connection: &Connection,
+    operation_id: &str,
+) -> Result<HashMap<String, PermanentDeletionStoredItemState>, MutationError> {
+    let prefix = permanent_deletion_item_prefix(operation_id);
+    let mut statement = connection
+        .prepare("SELECT key,value FROM library_metadata WHERE key LIKE ?")
+        .map_err(mutation_error_from_sqlite)?;
+    let rows = statement
+        .query_map([format!("{prefix}%")], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(mutation_error_from_sqlite)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(mutation_error_from_sqlite)?;
+    let mut states = HashMap::with_capacity(rows.len());
+    for (key, value) in rows {
+        let Some(photo_id) = key.strip_prefix(prefix.as_str()) else {
+            continue;
+        };
+        let state: PermanentDeletionStoredItemState =
+            serde_json::from_str(&value).map_err(|_| MutationError::Persistence)?;
+        states.insert(photo_id.to_owned(), state);
+    }
+    Ok(states)
+}
+
+fn write_permanent_deletion_item_state(
+    transaction: &Transaction<'_>,
+    operation_id: &str,
+    photo_id: &str,
+    state: &PermanentDeletionStoredItemState,
+) -> Result<(), MutationError> {
+    let value = serde_json::to_string(state).map_err(|_| MutationError::Persistence)?;
+    transaction
+        .execute(
+            "INSERT INTO library_metadata(key,value) VALUES(?,?)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![permanent_deletion_item_key(operation_id, photo_id), value],
+        )
+        .map_err(mutation_error_from_sqlite)?;
+    Ok(())
+}
+
+fn delete_metadata_key(transaction: &Transaction<'_>, key: &str) -> Result<(), MutationError> {
+    transaction
+        .execute("DELETE FROM library_metadata WHERE key=?", [key])
+        .map_err(mutation_error_from_sqlite)?;
+    Ok(())
+}
+
+fn trash_candidates(
+    connection: &Connection,
+    selection: PermanentDeletionSelection,
+) -> Result<Vec<TrashPhotoCandidate>, MutationError> {
+    // A permanently deleted Photo is evidence and never returns to a review.
+    // A Photo whose own deletion has not settled stays visible so the review
+    // can refuse it with its own reason instead of dropping it silently.
+    let deleted = permanently_deleted_photo_ids(connection)?;
+    let unsettled = unsettled_permanent_deletion_photo_ids(connection)?;
+    let rows = connection
+        .prepare(
+            "SELECT p.id,p.removed_at_ms,o.id,o.relative_path,o.kind,o.size,o.mtime_ms,o.available
+             FROM photos p JOIN original_files o ON o.id=p.original_id
+             WHERE p.removed_at_ms IS NOT NULL
+             ORDER BY p.removed_at_ms DESC,p.id",
+        )
+        .map_err(mutation_error_from_sqlite)?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, f64>(6)?,
+                row.get::<_, i64>(7)? != 0,
+            ))
+        })
+        .map_err(mutation_error_from_sqlite)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(mutation_error_from_sqlite)?;
+    let mut by_id = HashMap::with_capacity(rows.len());
+    let mut ordered_ids = Vec::with_capacity(rows.len());
+    for (photo_id, removed_at_ms, original_id, relative_path, kind, size, mtime_ms, available) in
+        rows
+    {
+        if deleted.contains(&photo_id) {
+            continue;
+        }
+        let size = size.try_into().map_err(|_| MutationError::Persistence)?;
+        ordered_ids.push(photo_id.clone());
+        let unsettled = unsettled.contains(&photo_id);
+        by_id.insert(
+            photo_id.clone(),
+            TrashPhotoCandidate {
+                photo_id,
+                removed_at_ms,
+                original_id,
+                relative_path: RelativeOriginalPath::parse(relative_path)
+                    .map_err(|_| MutationError::Persistence)?,
+                kind: parse_kind(&kind).map_err(|_| MutationError::Persistence)?,
+                size,
+                mtime_ms,
+                available,
+                unsettled,
+            },
+        );
+    }
+    let candidates: Vec<TrashPhotoCandidate> = match selection {
+        PermanentDeletionSelection::Photos(photo_ids) => photo_ids
+            .into_iter()
+            .filter_map(|photo_id| by_id.remove(&photo_id))
+            .collect(),
+        PermanentDeletionSelection::All { exclude_photo_ids } => ordered_ids
+            .into_iter()
+            .filter_map(|photo_id| by_id.remove(&photo_id))
+            .filter(|candidate| !exclude_photo_ids.contains(&candidate.photo_id))
+            .collect(),
+    };
+    // Every Trash row a review would consider counts against the bound one
+    // review holds, so the retained review and its refusals stay bounded.
+    if candidates.len() > crate::PERMANENT_DELETION_MAX {
+        return Err(MutationError::Conflict);
+    }
+    Ok(candidates)
+}
+
+fn prepare_permanent_deletion(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    operation_id: String,
+    targets: Vec<PermanentDeletionTarget>,
+) -> Result<PermanentDeletionReview, MutationError> {
+    mutation_transaction(state, database_name, connection, |transaction| {
+        if let Some(receipt) =
+            read_permanent_deletion_receipt_transaction(transaction, &operation_id)?
+        {
+            let mut existing_ids = receipt
+                .items
+                .iter()
+                .map(|item| item.photo_id.clone())
+                .collect::<Vec<_>>();
+            existing_ids.extend(receipt.rejected.iter().map(|item| item.photo_id.clone()));
+            let target_ids = targets
+                .iter()
+                .map(|target| target.photo_id.clone())
+                .collect::<Vec<_>>();
+            if receipt.operation_id != operation_id || existing_ids != target_ids {
+                return Err(MutationError::Conflict);
+            }
+            return permanent_deletion_review_from_receipt(receipt);
+        }
+
+        let mut items = Vec::new();
+        let mut rejected = Vec::new();
+        for target in targets {
+            if unsettled_permanent_deletion_operation(transaction, &target.photo_id)?.is_some() {
+                rejected.push(PermanentDeletionStoredRejection {
+                    photo_id: target.photo_id,
+                    rejection: PermanentDeletionStoredRejectionKind::PendingVerification,
+                });
+                continue;
+            }
+            let current = transaction
+                .query_row(
+                    "SELECT p.removed_at_ms,o.id,o.relative_path,o.kind,o.size,o.mtime_ms,o.available
+                     FROM photos p JOIN original_files o ON o.id=p.original_id
+                     WHERE p.id=?",
+                    [&target.photo_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<i64>>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, f64>(5)?,
+                            row.get::<_, i64>(6)? != 0,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(mutation_error_from_sqlite)?;
+            let Some((removed_at_ms, original_id, relative_path, kind, size, mtime_ms, available)) =
+                current
+            else {
+                rejected.push(PermanentDeletionStoredRejection {
+                    photo_id: target.photo_id,
+                    rejection: PermanentDeletionStoredRejectionKind::Missing,
+                });
+                continue;
+            };
+            let Some(facts) = target.facts else {
+                rejected.push(PermanentDeletionStoredRejection {
+                    photo_id: target.photo_id,
+                    rejection: PermanentDeletionStoredRejectionKind::Missing,
+                });
+                continue;
+            };
+            let size: u64 = size.try_into().map_err(|_| MutationError::Persistence)?;
+            if !available
+                || removed_at_ms != Some(target.removed_at_ms)
+                || size != facts.size
+                || mtime_ms != facts.mtime_ms
+            {
+                rejected.push(PermanentDeletionStoredRejection {
+                    photo_id: target.photo_id,
+                    rejection: if !available {
+                        PermanentDeletionStoredRejectionKind::Missing
+                    } else {
+                        PermanentDeletionStoredRejectionKind::ChangedElsewhere
+                    },
+                });
+                continue;
+            }
+            let albums = transaction
+                .prepare(
+                    "SELECT a.id,a.name
+                     FROM album_members m JOIN albums a ON a.id=m.album_id
+                     WHERE m.photo_id=? ORDER BY a.created_at,a.id",
+                )
+                .map_err(mutation_error_from_sqlite)?
+                .query_map([&target.photo_id], |row| {
+                    Ok(PermanentDeletionStoredAlbum {
+                        album_id: row.get(0)?,
+                        album_name: row.get(1)?,
+                    })
+                })
+                .map_err(mutation_error_from_sqlite)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(mutation_error_from_sqlite)?;
+            items.push(PermanentDeletionStoredItem {
+                photo_id: target.photo_id,
+                removed_at_ms: target.removed_at_ms,
+                original_id,
+                relative_path,
+                kind,
+                size: facts.size,
+                mtime_bits: facts.mtime_ms.to_bits(),
+                device: facts.device,
+                inode: facts.inode,
+                albums,
+            });
+        }
+        let receipt = PermanentDeletionReceipt {
+            operation_id,
+            items,
+            rejected,
+        };
+        write_permanent_deletion_receipt(transaction, &receipt)?;
+        // Every reviewed item gets its own progress row here, so confirming
+        // one Original updates one small row instead of rewriting the whole
+        // reviewed set.
+        for item in &receipt.items {
+            write_permanent_deletion_item_state(
+                transaction,
+                &receipt.operation_id,
+                &item.photo_id,
+                &PermanentDeletionStoredItemState {
+                    original_id: item.original_id.clone(),
+                    state: PermanentDeletionStoredState::Pending,
+                    message: None,
+                },
+            )?;
+        }
+        permanent_deletion_review_from_receipt(receipt)
+    })
+}
+
+/// Every item of one operation that still needs a deletion attempt, in the
+/// reviewed order. One read serves the whole confirmation, so a large batch
+/// does not re-read the retained review for every Original.
+/// The exact filesystem facts one retained review recorded. The mtime is
+/// rebuilt from its bits so the equality the deletion performs is the equality
+/// the review observed.
+fn reviewed_facts(size: u64, mtime_bits: u64, device: u64, inode: u64) -> OriginalFacts {
+    OriginalFacts {
+        size,
+        mtime_ms: f64::from_bits(mtime_bits),
+        device,
+        inode,
+    }
+}
+
+fn permanent_deletion_work(
+    connection: &Connection,
+    operation_id: &str,
+    retry_unresolved: bool,
+) -> Result<Vec<PermanentDeletionWorkItem>, MutationError> {
+    let Some(receipt) = read_permanent_deletion_receipt(connection, operation_id)? else {
+        return Err(MutationError::NotFound);
+    };
+    let states = read_permanent_deletion_item_states(connection, operation_id)?;
+    let mut work = Vec::new();
+    for item in &receipt.items {
+        let state = states
+            .get(&item.photo_id)
+            .map_or(PermanentDeletionStoredState::Pending, |state| state.state);
+        let unresolved = matches!(
+            state,
+            PermanentDeletionStoredState::Pending | PermanentDeletionStoredState::Deleting
+        ) || (retry_unresolved
+            && matches!(
+                state,
+                PermanentDeletionStoredState::Failed | PermanentDeletionStoredState::Uncertain
+            ));
+        if !unresolved {
+            continue;
+        }
+        work.push(PermanentDeletionWorkItem {
+            operation_id: receipt.operation_id.clone(),
+            photo_id: item.photo_id.clone(),
+            relative_path: RelativeOriginalPath::parse(item.relative_path.clone())
+                .map_err(|_| MutationError::Persistence)?,
+            facts: reviewed_facts(item.size, item.mtime_bits, item.device, item.inode),
+            state: state.into(),
+        });
+    }
+    Ok(work)
+}
+
+/// Durably marks one reviewed item as being deleted. A Photo that has not
+/// settled carries the operation that owes it an outcome, so every surface can
+/// refuse Restore and a second destructive confirmation until it does.
+fn mark_permanent_deletion_deleting(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    operation_id: &str,
+    photo_id: &str,
+) -> Result<(), MutationError> {
+    mutation_transaction(state, database_name, connection, |transaction| {
+        let Some(current) =
+            read_permanent_deletion_item_state(transaction, operation_id, photo_id)?
+        else {
+            return Err(MutationError::NotFound);
+        };
+        // A settled outcome is authoritative: another confirmation already
+        // owns this item's result. A failed or uncertain item is unresolved
+        // and may be attempted again by an explicit retry.
+        if matches!(
+            current.state,
+            PermanentDeletionStoredState::Deleted
+                | PermanentDeletionStoredState::Missing
+                | PermanentDeletionStoredState::Changed
+        ) {
+            return Err(MutationError::Conflict);
+        }
+        if current.state == PermanentDeletionStoredState::Deleting {
+            return Ok(());
+        }
+        write_permanent_deletion_item_state(
+            transaction,
+            operation_id,
+            photo_id,
+            &PermanentDeletionStoredItemState {
+                original_id: current.original_id,
+                state: PermanentDeletionStoredState::Deleting,
+                message: None,
+            },
+        )?;
+        transaction
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES(?,?)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![permanent_deletion_unsettled_key(photo_id), operation_id],
+            )
+            .map_err(mutation_error_from_sqlite)?;
+        Ok(())
+    })
+}
+
+fn settle_permanent_deletion(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    operation_id: &str,
+    photo_id: &str,
+    item_state: PermanentDeletionItemState,
+    message: Option<String>,
+) -> Result<(), MutationError> {
+    if matches!(
+        item_state,
+        PermanentDeletionItemState::Pending | PermanentDeletionItemState::Deleting
+    ) {
+        return Err(MutationError::Invalid);
+    }
+    mutation_transaction(state, database_name, connection, |transaction| {
+        let Some(current) =
+            read_permanent_deletion_item_state(transaction, operation_id, photo_id)?
+        else {
+            return Err(MutationError::NotFound);
+        };
+        let current_state: PermanentDeletionItemState = current.state.into();
+        if matches!(
+            current_state,
+            PermanentDeletionItemState::Deleted
+                | PermanentDeletionItemState::Missing
+                | PermanentDeletionItemState::Changed
+                | PermanentDeletionItemState::Failed
+                | PermanentDeletionItemState::Uncertain
+        ) {
+            return if current_state == item_state {
+                Ok(())
+            } else {
+                Err(MutationError::Conflict)
+            };
+        }
+        if item_state == PermanentDeletionItemState::Deleted {
+            let memberships = transaction
+                .prepare(
+                    "SELECT album_id,position FROM album_members
+                     WHERE photo_id=? ORDER BY album_id,position",
+                )
+                .map_err(mutation_error_from_sqlite)?
+                .query_map([photo_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(mutation_error_from_sqlite)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(mutation_error_from_sqlite)?;
+            for (album_id, position) in memberships {
+                transaction
+                    .execute(
+                        "DELETE FROM album_members WHERE album_id=? AND photo_id=?",
+                        params![album_id, photo_id],
+                    )
+                    .map_err(mutation_error_from_sqlite)?;
+                transaction
+                    .execute(
+                        "UPDATE album_members SET position=position-1
+                         WHERE album_id=? AND position>?",
+                        params![album_id, position],
+                    )
+                    .map_err(mutation_error_from_sqlite)?;
+            }
+            transaction
+                .execute(
+                    "UPDATE photos SET available=0,preview_state='unavailable',
+                            preview_source_revision=NULL,preview_width=NULL,
+                            preview_height=NULL,cache_revision=NULL
+                     WHERE id=?",
+                    [photo_id],
+                )
+                .map_err(mutation_error_from_sqlite)?;
+            transaction
+                .execute(
+                    "UPDATE original_files SET available=0,error_category='unreadable',
+                            error_message='Original permanently deleted'
+                     WHERE id=?",
+                    [current.original_id.as_str()],
+                )
+                .map_err(mutation_error_from_sqlite)?;
+            // The retained evidence that this Photo is permanently deleted.
+            // Every surface reads this one key, so Trash and Restore never
+            // rescan retained operations.
+            transaction
+                .execute(
+                    "INSERT INTO library_metadata(key,value) VALUES(?,?)
+                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    params![permanent_deletion_deleted_key(photo_id), operation_id],
+                )
+                .map_err(mutation_error_from_sqlite)?;
+            // The same evidence keyed by the Original, so a scan reads the
+            // tombstones it must honour in one bounded pass.
+            transaction
+                .execute(
+                    "INSERT INTO library_metadata(key,value) VALUES(?,?)
+                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    params![
+                        permanent_deletion_deleted_original_key(&current.original_id),
+                        operation_id
+                    ],
+                )
+                .map_err(mutation_error_from_sqlite)?;
+        }
+        write_permanent_deletion_item_state(
+            transaction,
+            operation_id,
+            photo_id,
+            &PermanentDeletionStoredItemState {
+                original_id: current.original_id,
+                state: item_state.into(),
+                message,
+            },
+        )?;
+        if item_state == PermanentDeletionItemState::Uncertain {
+            // The outcome is not known: the operation stays on record as the
+            // one that must reconcile this Photo, and Restore plus another
+            // destructive confirmation stay closed until it does.
+            transaction
+                .execute(
+                    "INSERT INTO library_metadata(key,value) VALUES(?,?)
+                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    params![permanent_deletion_unsettled_key(photo_id), operation_id],
+                )
+                .map_err(mutation_error_from_sqlite)?;
+        } else {
+            delete_metadata_key(transaction, &permanent_deletion_unsettled_key(photo_id))?;
+        }
+        Ok(())
+    })
+}
+
+fn read_permanent_deletion(
+    connection: &Connection,
+    operation_id: &str,
+) -> Result<PermanentDeletionResult, MutationError> {
+    let receipt = read_permanent_deletion_receipt(connection, operation_id)?
+        .ok_or(MutationError::NotFound)?;
+    permanent_deletion_result_from_receipt(connection, receipt)
 }
 
 fn selection_state_value(value: SelectionState) -> &'static str {
@@ -8093,6 +9377,39 @@ mod tests {
     };
 
     static NEXT_TEMP_TREE: AtomicU64 = AtomicU64::new(0);
+
+    /// The retained review is read back from its own JSON row, so the facts it
+    /// compares against the filesystem must survive that round trip exactly.
+    /// A milliseconds mtime needs 17 significant digits for some files, and a
+    /// decimal parse of those returns a neighboring f64, so the row keeps the
+    /// bits.
+    #[test]
+    fn reviewed_facts_survive_the_retained_review_round_trip() {
+        let reviewed = OriginalFacts {
+            size: 629,
+            mtime_ms: 1_790_379_911_790.761_5,
+            device: 64_513,
+            inode: 21_758_498,
+        };
+        let stored = PermanentDeletionStoredItem {
+            photo_id: "photo".to_owned(),
+            removed_at_ms: 1_790_379_911_955,
+            original_id: "original".to_owned(),
+            relative_path: "b.jpg".to_owned(),
+            kind: "jpeg".to_owned(),
+            size: reviewed.size,
+            mtime_bits: reviewed.mtime_ms.to_bits(),
+            device: reviewed.device,
+            inode: reviewed.inode,
+            albums: Vec::new(),
+        };
+        let row = serde_json::to_string(&stored).unwrap();
+        let read: PermanentDeletionStoredItem = serde_json::from_str(&row).unwrap();
+        assert_eq!(
+            reviewed_facts(read.size, read.mtime_bits, read.device, read.inode),
+            reviewed
+        );
+    }
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -9342,6 +10659,68 @@ mod tests {
             assert_eq!(fs::read(&sidecar).unwrap(), b"operator recovery data");
             persistence.shutdown().unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn the_library_folder_root_resolves_while_no_photo_is_projected() {
+        let (_base, library, state, name, _path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .apply_scan(Vec::new(), Vec::new())
+            .await
+            .unwrap();
+        let projection = query_projection(&snapshot);
+        // The Library Folder root is the Library itself, so it stays a valid
+        // source while no Photo is present to prove it; a named Folder still
+        // needs a member.
+        let ids = persistence
+            .create_photo_query_receiver(
+                PhotoQuery {
+                    source: PhotoQuerySource::Folder(String::new()),
+                    selection_state: None,
+                    rating_minimum: None,
+                    rating_maximum: None,
+                    original_kind: None,
+                    original_available: None,
+                    captured_from: None,
+                    captured_before: None,
+                    order: PhotoQueryOrder::CaptureTimeAscending,
+                },
+                Arc::clone(&projection),
+                10,
+            )
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ids.is_empty());
+        assert!(matches!(
+            persistence
+                .create_photo_query_receiver(
+                    PhotoQuery {
+                        source: PhotoQuerySource::Folder("shoot".to_owned()),
+                        selection_state: None,
+                        rating_minimum: None,
+                        rating_maximum: None,
+                        original_kind: None,
+                        original_available: None,
+                        captured_from: None,
+                        captured_before: None,
+                        order: PhotoQueryOrder::CaptureTimeAscending,
+                    },
+                    Arc::clone(&projection),
+                    10,
+                )
+                .unwrap()
+                .await
+                .unwrap(),
+            Err(PhotoQueryError::SourceNotFound)
+        ));
     }
 
     #[tokio::test]

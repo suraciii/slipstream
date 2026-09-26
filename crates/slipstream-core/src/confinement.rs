@@ -109,6 +109,15 @@ impl fmt::Display for ConfinementError {
 
 impl std::error::Error for ConfinementError {}
 
+/// The result of one explicitly confirmed Original deletion attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OriginalDeletionOutcome {
+    Deleted,
+    Missing,
+    Changed,
+    Failed(String),
+}
+
 struct RootInner {
     descriptor: OwnedFd,
     canonical_path: PathBuf,
@@ -297,6 +306,39 @@ impl OriginalCapability {
             return Ok(None);
         };
         facts(file.as_raw_fd()).map(Some)
+    }
+    /// Removes this Original only when the still-open confined file has
+    /// exactly the reviewed filesystem facts. The directory descriptor and
+    /// target descriptor are retained through the unlink admission so a
+    /// replacement is detected before the destructive syscall.
+    pub fn delete_if_unchanged(
+        &self,
+        expected: crate::OriginalFacts,
+    ) -> Result<OriginalDeletionOutcome, ConfinementError> {
+        self.root.ensure_open()?;
+        let (parent, name) = self
+            .path
+            .as_str()
+            .rsplit_once('/')
+            .map_or(("", self.path.as_str()), |(parent, name)| (parent, name));
+        let directory = self.root.open_directory(parent)?;
+        let Some(file) = self.root.open_confined_if_present(&self.path)? else {
+            return Ok(OriginalDeletionOutcome::Missing);
+        };
+        let current = facts(file.as_raw_fd())?;
+        if current != expected {
+            return Ok(OriginalDeletionOutcome::Changed);
+        }
+        let name = CString::new(name).map_err(|_| ConfinementError::InvalidPath)?;
+        match sys::unlink_at(directory.as_raw_fd(), &name) {
+            Ok(()) => Ok(OriginalDeletionOutcome::Deleted),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Ok(OriginalDeletionOutcome::Missing)
+            }
+            Err(_) => Ok(OriginalDeletionOutcome::Failed(
+                "Original File could not be deleted safely".to_owned(),
+            )),
+        }
     }
 
     pub fn read_range(&self, offset: u64, length: usize) -> Result<Vec<u8>, ConfinementError> {
@@ -806,6 +848,7 @@ mod sys {
     #[repr(C)]
     struct OpenHow {
         flags: u64,
+
         mode: u64,
         resolve: u64,
     }
@@ -845,6 +888,16 @@ mod sys {
                 libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY,
             )
         })
+    }
+
+    pub fn unlink_at(root: RawFd, name: &CStr) -> io::Result<()> {
+        // SAFETY: `name` is NUL-terminated and relative to the retained
+        // confined directory descriptor.
+        if unsafe { libc::unlinkat(root, name.as_ptr(), 0) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
 
     pub fn list_directory(
@@ -1548,6 +1601,41 @@ mod tests {
             .unwrap();
         root.close();
         assert!(matches!(captured.facts(), Err(ConfinementError::Closed)));
+    }
+
+    #[test]
+    fn deletes_only_the_reviewed_confined_revision() {
+        let tree = TempTree::new();
+        tree.write("a/photo.JPG", b"one");
+        let root = LibraryRoot::open(tree.path()).unwrap();
+        let path = RelativeOriginalPath::parse("a/photo.JPG").unwrap();
+        let original = root.original(path.clone()).unwrap();
+        let reviewed = original.facts().unwrap();
+
+        fs::write(tree.path().join("a/photo.JPG"), b"changed").unwrap();
+        assert_eq!(
+            original.delete_if_unchanged(reviewed).unwrap(),
+            OriginalDeletionOutcome::Changed
+        );
+        assert!(tree.path().join("a/photo.JPG").exists());
+
+        let current = original.facts().unwrap();
+        assert_eq!(
+            original.delete_if_unchanged(current).unwrap(),
+            OriginalDeletionOutcome::Deleted
+        );
+        assert!(!tree.path().join("a/photo.JPG").exists());
+        assert_eq!(
+            original
+                .delete_if_unchanged(OriginalFacts {
+                    size: 7,
+                    mtime_ms: 0.0,
+                    device: 0,
+                    inode: 0,
+                })
+                .unwrap(),
+            OriginalDeletionOutcome::Missing
+        );
     }
 
     fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>, u32)> {

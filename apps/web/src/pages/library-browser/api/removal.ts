@@ -53,6 +53,14 @@ export type RemovedPhotoItem = Readonly<{
   /// confirmed. A restore names it so a listing read before a newer removal
   /// cannot restore a Photo past the marker it was read under.
   removedAtMs: number;
+  originalLocation: string;
+  originalKind: "raw" | "jpeg";
+  originalSize: number | null;
+  /// Non-null while the Photo's permanent-deletion outcome is not settled
+  /// yet; the value is the retained operation id a `Check result` fetch or a
+  /// `Resume` retry names. Restore and a new permanent deletion stay
+  /// unavailable for the item until an operation settles it.
+  pendingVerificationOperationId: string | null;
   photo: PhotoSummary;
 }>;
 
@@ -70,6 +78,9 @@ export type RemovedPhotosResult =
       limit: number;
       total: number;
       operation: Readonly<{ operationId: string; removed: number }> | undefined;
+      /// The largest number of Photos one permanent-deletion review may
+      /// capture. Select all stops at this bound.
+      reviewMaximum: number;
       photos: ReadonlyArray<RemovedPhotoItem>;
     }>
   | Readonly<{ kind: "failed"; status?: number; malformed?: true }>;
@@ -342,7 +353,7 @@ export async function fetchRemovedPhotos(
   let response: Response;
   try {
     response = await fetcher(
-      `/api/photos/removed?start=${input.start}&limit=${input.limit}`,
+      `/api/trash?start=${input.start}&limit=${input.limit}`,
       { signal: input.signal, priority: "high" },
     );
   } catch {
@@ -360,10 +371,12 @@ export async function fetchRemovedPhotos(
         "total",
         "operation",
         "photos",
+        "reviewMaximum",
       ]) ||
       value.start !== input.start ||
       value.limit !== input.limit ||
       !validCount(value.total) ||
+      !validCount(value.reviewMaximum) ||
       !validRemovedOperation(value.operation) ||
       !Array.isArray(value.photos) ||
       // A page is complete for its position: a response that omits rows it
@@ -382,6 +395,7 @@ export async function fetchRemovedPhotos(
       start: input.start,
       limit: input.limit,
       total: value.total,
+      reviewMaximum: value.reviewMaximum,
       operation:
         value.operation === null
           ? undefined
@@ -391,7 +405,14 @@ export async function fetchRemovedPhotos(
             }),
       photos: Object.freeze(
         photos.map((item) =>
-          Object.freeze({ removedAtMs: item.removedAtMs, photo: item.photo }),
+          Object.freeze({
+            removedAtMs: item.removedAtMs,
+            originalLocation: item.originalLocation,
+            originalKind: item.originalKind,
+            originalSize: item.originalSize,
+            pendingVerificationOperationId: item.pendingVerificationOperationId,
+            photo: item.photo,
+          }),
         ),
       ),
     });
@@ -402,8 +423,25 @@ export async function fetchRemovedPhotos(
 
 const validRemovedPhotoItem = (value: unknown): value is RemovedPhotoItem =>
   isRecord(value) &&
-  hasExactKeys(value, ["removedAtMs", "photo"]) &&
+  hasExactKeys(value, [
+    "removedAtMs",
+    "originalLocation",
+    "originalKind",
+    "originalSize",
+    "pendingVerificationOperationId",
+    "photo",
+  ]) &&
   typeof value.removedAtMs === "number" &&
   Number.isSafeInteger(value.removedAtMs) &&
   value.removedAtMs >= 0 &&
+  typeof value.originalLocation === "string" &&
+  value.originalLocation.length > 0 &&
+  (value.originalKind === "raw" || value.originalKind === "jpeg") &&
+  (value.originalSize === null ||
+    (typeof value.originalSize === "number" &&
+      Number.isSafeInteger(value.originalSize) &&
+      value.originalSize >= 0)) &&
+  (value.pendingVerificationOperationId === null ||
+    (typeof value.pendingVerificationOperationId === "string" &&
+      value.pendingVerificationOperationId.length > 0)) &&
   validPhotoSummary(value.photo);

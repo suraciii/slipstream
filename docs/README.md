@@ -32,3 +32,7 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 
 - [0.1 Support and Release Contract](0.1-support-and-release.md): supported environment, file and camera boundary, recovery, limitations, rollback-artifact retention, and 0.1.0 release notes
 - [Deployment](deployment.md): image, host storage, and supported Compose operator contract
+
+## Library Management
+
+- [Trash and Permanent Deletion](library-management-trash.md): complete Trash browsing, Restore, explicit Original deletion, and truthful batch outcomes
