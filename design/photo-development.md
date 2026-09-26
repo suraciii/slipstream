@@ -187,7 +187,10 @@ and full identity before publication.
 Cancelling computation and ignoring obsolete output are distinct operations.
 Even a process that cannot stop immediately must not publish its stale result.
 Temporary comparison requests must not overwrite the main current preview or
-change the saved recipe.
+change the saved recipe. A comparison is therefore its own owner: its identity
+carries the settings selector it names beside the stage, so its admission,
+supersession, retention and publication are separate from the current
+rendition of that stage.
 
 Changing development settings invalidates both stages. A Film Result must use
 a matching Development Result. Display-only changes must not rerun RAW
@@ -403,12 +406,38 @@ identity pinned by
 A retained rendition generated under a different display transform, or without
 content evidence for its source, is not current and must not be served. The
 first version derives the `develop`
-rendition from the retained Development Result of the current identity. When
-that result is not retained, the service admits one render through the same
-closed production workload as an Export, marked as preview-class work. Preview
-work is ephemeral and latest-intent-wins within its Photo and stage owner; a
-superseded request never publishes, and a completed request republishes only
-while its full identity is still current. A display-only change reuses a
+rendition from the retained Development Result of the current identity. The
+retained Development Result is the published Development TIFF of a succeeded
+Development TIFF Export whose captured snapshot is that identity and whose
+artifact retention has not expired; an artifact of any other identity is not
+retained for the derivation, and the derivation never publishes an Export.
+When that result is not retained, the service admits one render through the
+same closed production workload as an Export, marked as preview-class work. A
+preview-class attempt runs the same workload, policy, and bundle as an Export
+and shares the service's serialized heavy-work admission with Export attempts:
+the two queue behind one another instead of preempting each other, a
+preview-class attempt never cancels or supersedes Export work, and an Export
+submission never cancels an admitted render. At most one render is admitted per
+Photo and stage.
+
+A preview-class attempt is not an Export: it creates no Export record, holds no
+downloadable artifact, and its attempt identity is not an Export identity. Its
+Development TIFF is ephemeral service-private staging: it is never published as
+an artifact, never counted against the retained-output allowance, and is
+deleted when the attempt fails or is cancelled, when a newer intent supersedes
+it, when its ephemeral retention window elapses, or when the service lifetime
+that produced it ends: staging never outlives its owner. While that window is
+live it serves re-derivation of the same identity, so a request after a
+rendition's own expiry rebuilds the rendition instead of repeating the full
+render.
+
+Preview work is ephemeral and latest-intent-wins within its Photo and stage
+owner; a superseded request never publishes, and a completed request
+republishes only while its full identity is still current. Every admission
+settles: completion, failure, and cancellation all free the identity, so a
+later request admits a new attempt instead of reporting `running` for work that
+no longer exists, and a launcher attempt the service gives up on is cancelled
+rather than left for the launcher to reap. A display-only change reuses a
 retained result; an exposure or white-balance change invalidates both stage
 renditions.
 
@@ -581,16 +610,28 @@ with the new `recipeVersion` and `sourceRevision`; its refusal set is
 
 `GET /api/photos/{id}/edit-preview/{stage}` returns 200 as a stream whose
 response headers carry the closed typed metadata `photoId`, `stage`,
-`contentType`, `width`, `height`, `byteLength`, `sha256`, `sourceRevision`,
-`recipeVersion`, `displayTransform`, and `expiresAt`; `displayTransform` is
-the qualified transform identity of
+`settings`, `contentType`, `width`, `height`, `byteLength`, `sha256`,
+`sourceRevision`, `recipeVersion`, `displayTransform`, and `expiresAt`;
+`displayTransform` is the qualified transform identity of
 [Development Color Pipeline](development-color.md#display-and-comparison).
 The typed metadata framing for this route is response headers, and the stream
 follows them. The route also returns 202 with `state` (`queued` or `running`)
 and `stage` for admitted work, or a refusal. Refusals are 404 `unknown_photo`,
-422 `invalid_settings` for a stage outside the closed set, 422
-`unsupported_photo`, 503 `processing_unavailable`, 503
+422 `invalid_settings` for a stage or settings selector outside its closed
+set, 422 `unsupported_photo`, 503 `processing_unavailable`, 503
 `resource_unavailable`, and 500 `outcome_unknown`.
+
+The route takes one optional closed query selector `settings`, whose values are
+`current` (the default when absent) and `baseline`. `current` is the saved Edit
+Recipe's settings. `baseline` is the comparison rendition the
+[Product Spec](../docs/photo-development.md#preview-behavior) requires: the
+as-shot/baseline development settings — the processing baseline of 0 EV and
+as-shot white balance — derived from the Photo rather than from the saved
+recipe, so it stays the same development while the saved recipe moves. A
+baseline rendition reports the empty `recipeVersion`, because no saved recipe
+produced it, and a baseline request never changes the saved recipe. A Photo
+whose saved recipe already is that baseline resolves to the same development
+under either selector.
 
 `POST /api/photos/{id}/exports` takes `requestId`, `expectedRecipeVersion`,
 `expectedSourceRevision`, and `target`. Acceptance returns 201 with `exportId`,

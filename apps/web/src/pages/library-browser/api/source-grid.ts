@@ -87,6 +87,7 @@ export const validPhotoSummary = (value: unknown): value is PhotoSummary => {
     Number.isInteger(value.rating) &&
     Number(value.rating) >= 0 &&
     Number(value.rating) <= 5 &&
+    typeof value.hasSavedEdits === "boolean" &&
     validOptional(
       preview.source,
       (source) => source === "jpeg-original" || source === "raw-embedded-jpeg",

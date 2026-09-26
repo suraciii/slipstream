@@ -34,6 +34,7 @@ const photo = (id: string) => ({
   original: { kind: "jpeg" as const, available: true },
   selectionState: "undecided" as const,
   rating: 0,
+  hasSavedEdits: false,
   preview: { state: "inspection-pending" as const },
 });
 

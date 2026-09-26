@@ -438,7 +438,7 @@ async fn static_files_have_revalidation_and_head_without_a_body() {
         application: Arc::clone(&application),
         web_root: Arc::new(open_web_root(root.clone())),
         processing: None,
-        edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production()),
+        edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production(None)),
     });
     let response = tower::ServiceExt::oneshot(
         app.clone(),
@@ -498,7 +498,7 @@ async fn installation_resources_revalidate_and_never_fall_back_to_html() {
         application: Arc::clone(&application),
         web_root: Arc::new(open_web_root(root.clone())),
         processing: None,
-        edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production()),
+        edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production(None)),
     });
     for (path, content_type, expected) in [
         (
@@ -2360,7 +2360,7 @@ async fn healthz_is_exact_json_and_head_api_has_no_body() {
             application: Arc::clone(&application),
             web_root: Arc::new(open_web_root(missing_web)),
             processing: None,
-            edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production()),
+            edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production(None)),
         });
     let response = tower::ServiceExt::oneshot(
         missing_router,
@@ -11837,6 +11837,10 @@ mod export_routes {
         .await;
         let entries = listed["exports"].as_array().unwrap();
         assert_eq!(entries.len(), 2);
+        // Retention order is newest first, so the Export just submitted heads
+        // the list even when both share a whole-second creation time.
+        assert_eq!(entries[0]["exportId"], fresh_record["exportId"]);
+        assert_eq!(entries[1]["exportId"], created["exportId"]);
         for entry in entries {
             assert!(entry["exportId"].is_string());
             assert!(entry["state"].is_string());
@@ -13190,6 +13194,802 @@ mod export_routes {
         application.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(base);
     }
+
+    async fn edit_preview_request(router: &Router, photo_id: &str) -> Response<Body> {
+        send(
+            router,
+            authenticated_request()
+                .uri(format!(
+                    "http://camera.local/api/photos/{photo_id}/edit-preview/develop"
+                ))
+                .header("slipstream-cli-contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    async fn edit_preview_settings_request(
+        router: &Router,
+        photo_id: &str,
+        settings: &str,
+    ) -> Response<Body> {
+        send(
+            router,
+            authenticated_request()
+                .uri(format!(
+                    "http://camera.local/api/photos/{photo_id}/edit-preview/develop?settings={settings}"
+                ))
+                .header("slipstream-cli-contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    /// The Edit Preview derives the `develop` rendition from the retained
+    /// Development TIFF of a succeeded Export while that Export's captured
+    /// identity is the current one, then admits a preview-class render after a
+    /// later recipe makes the retained result stale.
+    #[tokio::test]
+    async fn edit_preview_derives_from_the_retained_development_tiff_of_an_export() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+        let source_revision = current_source_revision(&application, &photo_id).await;
+        let created = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        let export_id = response_json(created).await["exportId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let artifact_bytes = valid_development_tiff();
+        launcher.with_script(|s| {
+            s.output = Some(artifact_bytes.clone());
+            s.settle_attempt(1, "completed");
+        });
+        wait_for_state(&router, &export_id, "succeeded").await;
+
+        // The published Development TIFF is the retained Development Result of
+        // exactly this identity, so the develop rendition derives from it.
+        let preview = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(preview.status(), StatusCode::OK);
+        let headers = preview.headers();
+        assert_eq!(headers["slipstream-edit-preview-stage"], "develop");
+        assert_eq!(
+            headers["slipstream-edit-preview-recipe-version"],
+            recipe.revision
+        );
+        assert_eq!(
+            headers["slipstream-edit-preview-source-revision"],
+            crate::queries::hex_encode(source_revision.as_bytes())
+        );
+        assert_eq!(headers["slipstream-edit-preview-width"], "2");
+        assert_eq!(headers["slipstream-edit-preview-height"], "1");
+        assert_eq!(headers["content-type"], "image/jpeg");
+        let declared_sha256 = headers["slipstream-edit-preview-sha256"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = axum::body::to_bytes(preview.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body[..2], &[0xff, 0xd8], "the rendition is a JPEG");
+        assert_eq!(
+            declared_sha256,
+            format!("{:x}", Sha256::digest(&body)),
+            "the rendition's content digest is the one it declares"
+        );
+
+        // A later recipe is another identity. The retained Development TIFF is
+        // no longer current, so the service admits a preview-class render
+        // through the same processing workload instead of refusing.
+        let second = save_recipe(
+            &application,
+            &photo_id,
+            "save-2",
+            Some(recipe.revision.clone()),
+            0.25,
+        )
+        .await;
+        assert_ne!(second.revision, recipe.revision);
+        // Make the background attempt settle promptly after the route has
+        // observed its admission; the wire response is independent of the
+        // eventual launcher outcome.
+        launcher.with_script(|s| {
+            s.output = Some(valid_development_tiff());
+        });
+        let admitted = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+        let payload = response_json(admitted).await;
+        assert!(
+            payload["state"] == "queued" || payload["state"] == "running",
+            "preview admission state is queued or running: {payload}"
+        );
+        assert_eq!(payload["stage"], "develop");
+        let repeated = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(repeated.status(), StatusCode::ACCEPTED);
+        let repeated_payload = response_json(repeated).await;
+        assert_eq!(repeated_payload["state"], "running");
+        launcher.with_script(|s| s.settle_attempt(2, "completed"));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let response = edit_preview_request(&router, &photo_id).await;
+            if response.status() == StatusCode::OK {
+                break;
+            }
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "preview-class render did not become a rendition"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let starts = launcher.with_script(|s| {
+            s.ops
+                .iter()
+                .filter(|operation| operation.as_str() == "start")
+                .count()
+        });
+        assert_eq!(starts, 2, "one Export and one coalesced preview attempt");
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// The baseline comparison selector serves the as-shot/baseline
+    /// development from the retained result captured at exactly those
+    /// settings, independently of the saved recipe revision, and it keeps
+    /// serving while the saved recipe moves on.
+    #[tokio::test]
+    async fn edit_preview_serves_the_baseline_comparison_independently_of_the_recipe() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        // The saved recipe is the processing baseline itself: 0 EV, as-shot.
+        let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.0).await;
+        let source_revision = current_source_revision(&application, &photo_id).await;
+        let created = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        let export_id = response_json(created).await["exportId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let artifact_bytes = valid_development_tiff();
+        launcher.with_script(|s| {
+            s.output = Some(artifact_bytes.clone());
+            s.settle_attempt(1, "completed");
+        });
+        wait_for_state(&router, &export_id, "succeeded").await;
+
+        let current = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(current.status(), StatusCode::OK);
+        let current_sha = current.headers()["slipstream-edit-preview-sha256"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            current.headers()["slipstream-edit-preview-settings"],
+            "current"
+        );
+        assert_eq!(
+            current.headers()["slipstream-edit-preview-recipe-version"],
+            recipe.revision
+        );
+
+        // The comparison is the baseline development: the same retained
+        // result, named as the baseline rather than as the saved recipe.
+        let baseline = edit_preview_settings_request(&router, &photo_id, "baseline").await;
+        assert_eq!(baseline.status(), StatusCode::OK);
+        assert_eq!(
+            baseline.headers()["slipstream-edit-preview-settings"],
+            "baseline"
+        );
+        assert_eq!(
+            baseline.headers()["slipstream-edit-preview-recipe-version"],
+            "",
+            "a baseline rendition is not a saved recipe's"
+        );
+        assert_eq!(
+            baseline.headers()["slipstream-edit-preview-sha256"],
+            current_sha,
+            "the baseline of a baseline recipe is the same development"
+        );
+
+        // A later edit moves the current identity. The comparison is
+        // unchanged — it still resolves from the retained baseline result —
+        // while the current rendition is no longer retained and is admitted
+        // as its own render work.
+        let second = save_recipe(
+            &application,
+            &photo_id,
+            "save-2",
+            Some(recipe.revision.clone()),
+            0.5,
+        )
+        .await;
+        assert_ne!(second.revision, recipe.revision);
+        launcher.with_script(|s| {
+            s.output = Some(valid_development_tiff());
+        });
+        let baseline = edit_preview_settings_request(&router, &photo_id, "baseline").await;
+        assert_eq!(baseline.status(), StatusCode::OK);
+        assert_eq!(
+            baseline.headers()["slipstream-edit-preview-sha256"],
+            current_sha
+        );
+        let admitted = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+        let payload = response_json(admitted).await;
+        assert!(
+            payload["state"] == "queued" || payload["state"] == "running",
+            "the edited recipe is new render work: {payload}"
+        );
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// A stored white-balance mode the closed execution payload cannot
+    /// represent is retained intent, not render work: the route refuses it
+    /// before admitting an attempt that could never produce a result, so a
+    /// polling client is told the stage is unavailable instead of being handed
+    /// queued work that fails and is re-admitted forever.
+    #[tokio::test]
+    async fn edit_preview_refuses_a_recipe_the_closed_payload_cannot_execute() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let source_revision = current_source_revision(&application, &photo_id).await;
+        let outcome = application
+            .library
+            .save_edit_recipe(slipstream_core::SaveEditRecipe {
+                photo_id: photo_id.clone(),
+                request_id: "save-temperature-tint".to_owned(),
+                expected_recipe_version: None,
+                expected_source_revision: source_revision,
+                settings: slipstream_core::EditRecipeSettings {
+                    exposure_ev: 0.25,
+                    white_balance: slipstream_core::WhiteBalanceIntent::TemperatureTint {
+                        temperature_kelvin: 6_500,
+                        tint_milli: -12,
+                    },
+                },
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                slipstream_core::EditRecipeWriteOutcome::Saved(_)
+                    | slipstream_core::EditRecipeWriteOutcome::Unchanged(_)
+            ),
+            "an adjustable white balance is accepted as editing intent: {outcome:?}"
+        );
+
+        let refused = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let payload = response_json(refused).await;
+        assert_eq!(payload["error"]["code"], "processing_unavailable");
+        assert_eq!(payload["error"]["details"]["stage"], "develop");
+        assert_eq!(
+            payload["error"]["details"]["reason"],
+            "recipe-not-representable"
+        );
+        let starts = launcher.with_script(|s| {
+            s.ops
+                .iter()
+                .filter(|operation| operation.as_str() == "start")
+                .count()
+        });
+        assert_eq!(starts, 0, "a refused identity starts no processing attempt");
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// A preview-class attempt that fails is released, not remembered: the
+    /// next request admits a new attempt instead of reporting `running` for
+    /// work that no longer exists, and the failed attempt's ephemeral output
+    /// is never served as a rendition.
+    #[tokio::test]
+    async fn edit_preview_re_admits_after_a_failed_render() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        save_recipe(&application, &photo_id, "save-1", None, 0.4).await;
+        // The launcher settles the attempt as failed and transfers no output.
+        launcher.with_script(|s| s.settle_attempt(1, "failed"));
+
+        let admitted = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+        assert_eq!(response_json(admitted).await["state"], "queued");
+
+        // The route keeps answering the admission while the attempt is live,
+        // and once it has failed the next request admits a new one.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let response = edit_preview_request(&router, &photo_id).await;
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            if response_json(response).await["state"] == "queued" {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "a failed render must be released for a new attempt"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let starts = launcher.with_script(|s| {
+            s.ops
+                .iter()
+                .filter(|operation| operation.as_str() == "start")
+                .count()
+        });
+        // The new attempt's Start reaches the launcher from a background task,
+        // so the count is observed rather than assumed.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut starts = starts;
+        while starts < 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the re-admitted attempt must reach the launcher"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            starts = launcher.with_script(|s| {
+                s.ops
+                    .iter()
+                    .filter(|operation| operation.as_str() == "start")
+                    .count()
+            });
+        }
+        assert_eq!(starts, 2, "the failed attempt is re-admitted as new work");
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// A newer intent supersedes a live render: the launcher attempt is
+    /// cancelled, so the stale attempt neither occupies the serialized
+    /// processing slot nor publishes, and the new identity is admitted as
+    /// its own launcher attempt.
+    #[tokio::test]
+    async fn edit_preview_supersedes_a_live_render_with_the_newer_intent() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let first = save_recipe(&application, &photo_id, "save-1", None, 0.2).await;
+        let admitted = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+
+        // The first attempt is live on the launcher before the newer intent
+        // arrives, so the newer intent has to release it.
+        wait_for_launcher_op(&launcher, "start", 1).await;
+
+        let second = save_recipe(
+            &application,
+            &photo_id,
+            "save-2",
+            Some(first.revision.clone()),
+            0.6,
+        )
+        .await;
+        assert_ne!(second.revision, first.revision);
+        let superseded = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(superseded.status(), StatusCode::ACCEPTED);
+        assert_eq!(response_json(superseded).await["state"], "queued");
+
+        // The superseded attempt is cancelled, and the freed slot admits the
+        // newer identity as a second launcher attempt.
+        wait_for_launcher_op(&launcher, "cancel", 1).await;
+        wait_for_launcher_op(&launcher, "start", 2).await;
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// A preview whose validation acknowledgement is lost fails the render
+    /// and abandons the launcher attempt: the launcher must not keep an
+    /// attempt its owner has already given up on.
+    #[tokio::test]
+    async fn edit_preview_abandons_the_attempt_when_the_acknowledgement_is_lost() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        save_recipe(&application, &photo_id, "save-1", None, 0.2).await;
+        launcher.with_script(|s| {
+            s.output = Some(valid_development_tiff());
+            s.settle_attempt(1, "completed");
+            s.refuse_ack = true;
+        });
+        let admitted = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+
+        wait_for_launcher_op(&launcher, "cancel", 1).await;
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// An attempt that completed before its cancellation is released without a
+    /// fabricated rejection: the service holds no collected output, and the
+    /// launcher refuses an acknowledgement that names none.
+    #[tokio::test]
+    async fn edit_preview_releases_a_completed_attempt_it_cannot_collect() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        save_recipe(&application, &photo_id, "save-1", None, 0.2).await;
+        launcher.with_script(|s| {
+            s.output = Some(valid_development_tiff());
+            s.settle_attempt(1, "completed");
+            s.refuse_output = true;
+        });
+        let admitted = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+
+        wait_for_launcher_op(&launcher, "cancel", 1).await;
+        let ops = launcher.with_script(|s| s.ops.clone());
+        assert!(
+            !ops.contains(&"validate".to_owned()),
+            "a preview without a collected output must not acknowledge one: {ops:?}"
+        );
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// Waits until the launcher recorded `count` operations named `op`.
+    async fn wait_for_launcher_op(launcher: &FakeLauncher, op: &str, count: usize) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let observed =
+                launcher.with_script(|s| s.ops.iter().filter(|entry| entry.as_str() == op).count());
+            if observed >= count {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the launcher must record {count} {op} operations: {:?}",
+                launcher.with_script(|s| s.ops.clone())
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+// ------------------------------------ Retained Development Result matching
+
+/// The retained Development TIFF of an Export record: which records are the
+/// retained Development Result of a current identity, and which are not.
+mod retained_development_result {
+    use super::*;
+    use crate::export_manager::{
+        RetainedDevelopmentIdentity, RetainedDevelopmentTiff, retained_development_tiff_of,
+    };
+    use slipstream_core::{
+        EditRecipeSettings, ExportArtifactFacts, ExportRecord, ExportSnapshot, ExportState,
+        OriginalKind, WhiteBalanceIntent,
+    };
+
+    const BUNDLE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const REVISION: &str = "recipe-revision";
+    const SOURCE_REVISION: &str = "source-revision";
+    const EXPOSURE_MILLI_EV: i64 = 500;
+    const ARTIFACT_SHA256: &str =
+        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    fn identity<'a>(exposure_milli_ev: i64) -> RetainedDevelopmentIdentity<'a> {
+        RetainedDevelopmentIdentity {
+            settings: "current",
+            recipe_revision: Some(REVISION),
+            exposure_milli_ev,
+            source_revision: SOURCE_REVISION,
+            bundle_sha256: BUNDLE,
+        }
+    }
+
+    fn record(
+        state: ExportState,
+        white_balance: WhiteBalanceIntent,
+        artifact: Option<ExportArtifactFacts>,
+    ) -> ExportRecord {
+        ExportRecord {
+            id: "export-1".to_owned(),
+            snapshot: ExportSnapshot {
+                photo_id: "photo-1".to_owned(),
+                recipe_revision: REVISION.to_owned(),
+                settings: EditRecipeSettings {
+                    exposure_ev: EXPOSURE_MILLI_EV as f64 / 1_000.0,
+                    white_balance,
+                },
+                source_revision: SOURCE_REVISION.to_owned(),
+                source_kind: OriginalKind::Raw,
+                source_profile_id: "profile".to_owned(),
+                policy_id: "policy".to_owned(),
+                bundle_id: BUNDLE.to_owned(),
+                workload: "development-tiff".to_owned(),
+                recipe_digest: "digest".to_owned(),
+            },
+            source: None,
+            state,
+            outcome: None,
+            attempt: None,
+            artifact,
+            created_at: 0,
+            settled_at: None,
+            retain_until: None,
+        }
+    }
+
+    fn artifact(expires_at: u64) -> ExportArtifactFacts {
+        ExportArtifactFacts {
+            size: 4096,
+            sha256: ARTIFACT_SHA256.to_owned(),
+            expires_at,
+            width: 2,
+            height: 1,
+            profile_identity: "profile-identity".to_owned(),
+        }
+    }
+
+    fn resolve(
+        record: &ExportRecord,
+        identity: &RetainedDevelopmentIdentity<'_>,
+        now: u64,
+    ) -> Option<RetainedDevelopmentTiff> {
+        resolve_all(std::slice::from_ref(record), identity, now)
+    }
+
+    fn resolve_all(
+        records: &[ExportRecord],
+        identity: &RetainedDevelopmentIdentity<'_>,
+        now: u64,
+    ) -> Option<RetainedDevelopmentTiff> {
+        retained_development_tiff_of(records, identity, now, |export_id| {
+            Some(PathBuf::from(format!("/artifacts/{export_id}.tiff")))
+        })
+    }
+
+    #[test]
+    fn a_succeeded_export_retains_the_development_tiff_of_its_identity() {
+        let record = record(
+            ExportState::Succeeded,
+            WhiteBalanceIntent::AsShot,
+            Some(artifact(2_000)),
+        );
+        let retained = resolve(&record, &identity(EXPOSURE_MILLI_EV), 1_000)
+            .expect("the retained Development TIFF of the current identity");
+        assert_eq!(
+            retained.path,
+            PathBuf::from("/artifacts/export-1.tiff"),
+            "the retained artifact is the published Export artifact"
+        );
+        assert_eq!(retained.sha256, ARTIFACT_SHA256);
+        assert_eq!(retained.byte_length, 4096);
+        assert_eq!(retained.recipe_revision, REVISION);
+        assert_eq!(retained.exposure_milli_ev, EXPOSURE_MILLI_EV);
+        assert_eq!(retained.source_revision, SOURCE_REVISION);
+        assert_eq!(retained.bundle_id, BUNDLE);
+    }
+
+    #[test]
+    fn a_result_of_another_identity_is_never_retained_as_current() {
+        let record = record(
+            ExportState::Succeeded,
+            WhiteBalanceIntent::AsShot,
+            Some(artifact(2_000)),
+        );
+        // Another recipe revision, exposure, source revision, or bundle is a
+        // different identity, and a Photo without a saved recipe can never
+        // match a snapshot that captured one.
+        let other_exposure = resolve(&record, &identity(EXPOSURE_MILLI_EV + 1), 1_000);
+        assert!(
+            other_exposure.is_none(),
+            "a different exposure is not current"
+        );
+        let no_recipe = RetainedDevelopmentIdentity {
+            recipe_revision: None,
+            ..identity(EXPOSURE_MILLI_EV)
+        };
+        assert!(
+            resolve(&record, &no_recipe, 1_000).is_none(),
+            "the processing baseline is not the captured recipe"
+        );
+        let other_source = RetainedDevelopmentIdentity {
+            source_revision: "another-source",
+            ..identity(EXPOSURE_MILLI_EV)
+        };
+        assert!(
+            resolve(&record, &other_source, 1_000).is_none(),
+            "a changed source is not current"
+        );
+        let other_bundle = RetainedDevelopmentIdentity {
+            bundle_sha256: "another-bundle",
+            ..identity(EXPOSURE_MILLI_EV)
+        };
+        assert!(
+            resolve(&record, &other_bundle, 1_000).is_none(),
+            "a different bundle is not current"
+        );
+    }
+
+    #[test]
+    fn only_a_succeeded_export_with_a_live_artifact_is_retained() {
+        let now = 1_000;
+        for state in [
+            ExportState::Queued,
+            ExportState::Running,
+            ExportState::Failed,
+            ExportState::Cancelled,
+        ] {
+            let record = record(state, WhiteBalanceIntent::AsShot, Some(artifact(2_000)));
+            assert!(
+                resolve(&record, &identity(EXPOSURE_MILLI_EV), now).is_none(),
+                "{state:?} retains no Development Result"
+            );
+        }
+        let unsettled = record(ExportState::Succeeded, WhiteBalanceIntent::AsShot, None);
+        assert!(
+            resolve(&unsettled, &identity(EXPOSURE_MILLI_EV), now).is_none(),
+            "a succeeded Export without a published artifact retains no result"
+        );
+        // The artifact's disclosed expiry is the retention: an expired
+        // artifact is not retained, and the boundary itself is expired.
+        let expired = record(
+            ExportState::Succeeded,
+            WhiteBalanceIntent::AsShot,
+            Some(artifact(now)),
+        );
+        assert!(resolve(&expired, &identity(EXPOSURE_MILLI_EV), now).is_none());
+        let live = record(
+            ExportState::Succeeded,
+            WhiteBalanceIntent::AsShot,
+            Some(artifact(now + 1)),
+        );
+        assert!(resolve(&live, &identity(EXPOSURE_MILLI_EV), now).is_some());
+    }
+
+    #[test]
+    fn the_retained_result_is_the_first_matching_record_in_retention_order() {
+        // A newer Export of another identity must not hide an older Export
+        // that does match: the selection filters on the identity, not on the
+        // head of the list.
+        let newer_other = {
+            let mut record = record(
+                ExportState::Succeeded,
+                WhiteBalanceIntent::AsShot,
+                Some(artifact(2_000)),
+            );
+            record.id = "export-newer".to_owned();
+            record.snapshot.recipe_revision = "another-revision".to_owned();
+            record
+        };
+        let older_matching = record(
+            ExportState::Succeeded,
+            WhiteBalanceIntent::AsShot,
+            Some(artifact(2_000)),
+        );
+        let retained = resolve_all(
+            &[newer_other, older_matching],
+            &identity(EXPOSURE_MILLI_EV),
+            1_000,
+        )
+        .expect("the matching record behind a newer one is retained");
+        assert_eq!(retained.path, PathBuf::from("/artifacts/export-1.tiff"));
+
+        // Two Exports of one identity are the same Development Result; the
+        // first record in retention order is the one served.
+        let first = record(
+            ExportState::Succeeded,
+            WhiteBalanceIntent::AsShot,
+            Some(artifact(2_000)),
+        );
+        let second = {
+            let mut record = first.clone();
+            record.id = "export-second".to_owned();
+            record
+        };
+        let retained = resolve_all(&[first, second], &identity(EXPOSURE_MILLI_EV), 1_000)
+            .expect("one of the matching records is retained");
+        assert_eq!(retained.path, PathBuf::from("/artifacts/export-1.tiff"));
+    }
+
+    #[test]
+    fn a_baseline_identity_matches_the_captured_baseline_settings() {
+        let mut record = record(
+            ExportState::Succeeded,
+            WhiteBalanceIntent::AsShot,
+            Some(artifact(2_000)),
+        );
+        record.snapshot.settings.exposure_ev = 0.0;
+        // The baseline selector names the processing baseline rather than a
+        // saved recipe, so the captured revision is not part of its identity:
+        // a result produced under exactly the baseline settings is the same
+        // development whatever revision captured it.
+        let baseline = RetainedDevelopmentIdentity {
+            settings: "baseline",
+            recipe_revision: None,
+            exposure_milli_ev: 0,
+            source_revision: SOURCE_REVISION,
+            bundle_sha256: BUNDLE,
+        };
+        assert!(resolve(&record, &baseline, 1_000).is_some());
+        // The current selector still matches the captured revision exactly,
+        // so a request that names no revision is not current.
+        let current = RetainedDevelopmentIdentity {
+            settings: "current",
+            exposure_milli_ev: 0,
+            ..baseline
+        };
+        assert!(resolve(&record, &current, 1_000).is_none());
+        let named = RetainedDevelopmentIdentity {
+            recipe_revision: Some(REVISION),
+            ..current
+        };
+        assert!(resolve(&record, &named, 1_000).is_some());
+        // A result captured at another exposure is a different development,
+        // so it is not the baseline comparison either.
+        let mut other = record.clone();
+        other.snapshot.settings.exposure_ev = EXPOSURE_MILLI_EV as f64 / 1_000.0;
+        assert!(resolve(&other, &baseline, 1_000).is_none());
+    }
+
+    #[test]
+    fn a_snapshot_that_cannot_execute_retains_no_result() {
+        // A temperature-tint snapshot can never produce an execution payload,
+        // so it never ran and cannot be the retained Development Result.
+        let record = record(
+            ExportState::Succeeded,
+            WhiteBalanceIntent::TemperatureTint {
+                temperature_kelvin: 5_000,
+                tint_milli: 0,
+            },
+            Some(artifact(2_000)),
+        );
+        assert!(resolve(&record, &identity(EXPOSURE_MILLI_EV), 1_000).is_none());
+    }
 }
 
 // ---------------------------------------------------------------- Edit Preview
@@ -13205,8 +14005,16 @@ struct ScriptedRetention {
 }
 
 impl crate::edit_preview::DevelopmentResultRetention for ScriptedRetention {
-    fn resolve(&self, _photo_id: &str) -> Option<crate::edit_preview::RetainedDevelopmentResult> {
-        self.record.lock().unwrap().clone()
+    fn resolve<'a>(
+        &'a self,
+        _photo_id: &'a str,
+        _facts: &'a crate::edit_preview::PreviewFacts,
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<Output = Option<crate::edit_preview::RetainedDevelopmentResult>> + Send + 'a,
+        >,
+    > {
+        Box::pin(async { self.record.lock().unwrap().clone() })
     }
 }
 
@@ -13572,6 +14380,83 @@ async fn edit_preview_reports_refusals_and_admissions_with_exact_statuses() {
     let unknown = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
     assert_eq!(unknown.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(error_code(&response_json(unknown).await), "outcome_unknown");
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// The baseline comparison is its own owner: it reaches the gate as its own
+/// admission, never coalesces with the current rendition of the same stage,
+/// and a selector outside the closed set refuses before any admission.
+#[tokio::test]
+async fn edit_preview_owns_the_baseline_comparison_separately_from_the_current_rendition() {
+    let (base, config, application, photo_id, _, _) =
+        approved_photo_with_recipe_and_result("preview-save", 0.25).await;
+    let gate = scripted_gate(std::collections::VecDeque::from([
+        crate::edit_preview::RenderAdmission::Queued,
+        crate::edit_preview::RenderAdmission::Queued,
+    ]));
+    let gate_dyn: Arc<dyn crate::edit_preview::PreviewRenderGate> = gate.clone();
+    let (router, _preview_owner) = preview_router(
+        &application,
+        config.web_root(),
+        scripted_retention(None),
+        gate_dyn,
+    );
+    let baseline_uri = format!("{}?settings=baseline", preview_uri(&photo_id, "develop"));
+
+    // 422 invalid_settings: a selector outside the closed set refuses before
+    // any admission, so a client cannot ask for a rendition the contract does
+    // not define.
+    let refused = get_preview_response(
+        &router,
+        &format!("{}?settings=as-shot", preview_uri(&photo_id, "develop")),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(refused).await;
+    assert_eq!(error_code(&body), "invalid_settings");
+    assert_eq!(body["error"]["details"]["argument"], "settings");
+    assert_eq!(
+        gate.calls.load(Ordering::Relaxed),
+        0,
+        "a refused selector admits nothing"
+    );
+
+    // The current rendition and the comparison are separate owners: each one
+    // is admitted, and neither coalesces into or supersedes the other.
+    let current = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(current.status(), StatusCode::ACCEPTED);
+    let repeated_current = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(
+        response_json(repeated_current).await,
+        serde_json::json!({"state": "running", "stage": "develop"})
+    );
+    let baseline = get_preview_response(&router, &baseline_uri).await;
+    assert_eq!(baseline.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        response_json(baseline).await,
+        serde_json::json!({"state": "queued", "stage": "develop"})
+    );
+    assert_eq!(
+        gate.calls.load(Ordering::Relaxed),
+        2,
+        "the comparison is its own admission"
+    );
+    // The comparison neither superseded the current intent nor admitted
+    // again: each selector still coalesces onto its own live admission.
+    let current_again = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(
+        response_json(current_again).await,
+        serde_json::json!({"state": "running", "stage": "develop"}),
+        "the comparison left the current intent live"
+    );
+    let repeated = get_preview_response(&router, &baseline_uri).await;
+    assert_eq!(
+        response_json(repeated).await,
+        serde_json::json!({"state": "running", "stage": "develop"})
+    );
+    assert_eq!(gate.calls.load(Ordering::Relaxed), 2);
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);

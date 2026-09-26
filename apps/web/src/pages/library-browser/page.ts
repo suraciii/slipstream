@@ -10,6 +10,7 @@ import type {
   SelectionState,
 } from "./api/contracts.js";
 import { fetchPhotoAlbums, fetchPhotoMetadata } from "./api/photo.js";
+
 import {
   applyRelocations,
   fetchUnavailableOriginals,
@@ -69,6 +70,33 @@ import {
   type AlbumFormAuthority,
 } from "./model/album-action-owner.js";
 import { createPhotoOwner, type PhotoAuthority } from "./model/photo-owner.js";
+import {
+  BASELINE_SETTINGS,
+  CURRENT_SETTINGS,
+  comparisonIsCurrent,
+  comparisonRefusal,
+  editPreviewUri,
+  encodedSourceRevision,
+  type Comparison,
+} from "./model/edit-preview.js";
+import {
+  artifactMatchesHeaders,
+  describeExportState,
+  parseExportInspection,
+  type ExportArtifact,
+} from "./model/photo-export.js";
+import {
+  createPhotoEditor,
+  type AdmittedWhiteBalance,
+  type DraftStore,
+  type EditorFacts,
+  type EditorStep,
+  type EditorWhiteBalance,
+  type PhotoEditor,
+  type SaveRefusal,
+  type SaveRequest,
+  type WhiteBalanceRange,
+} from "./model/photo-editor.js";
 import { createSavedPositionOwner } from "./model/saved-position-owner.js";
 import {
   allPhotosDestination,
@@ -82,6 +110,8 @@ import {
 import {
   createLibraryBrowserView,
   type AlbumFormReference,
+  type EditorExportViewModel,
+  type EditorStage,
   type FolderViewModel,
   type LibraryBrowserIntent,
   type LibraryBrowserView,
@@ -91,6 +121,581 @@ import { formatPhotoCount } from "./ui/photo-count.js";
 import { mountAccessBoundary } from "./access-boundary.js";
 import type { BrowserFetch } from "./model/access-session.js";
 
+const isStringArray = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === "string");
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/// The bounded local pending draft store. Session storage holds one
+/// unconfirmed draft per Photo and survives a reload of the tab; a blocked
+/// store is not a reason to withhold a healthy save, so the session keeps the
+/// draft in memory and discloses that reload or closure can lose it.
+const browserDraftStore = (): DraftStore | undefined => {
+  try {
+    window.sessionStorage.setItem("slipstream.draft.probe", "1");
+    window.sessionStorage.removeItem("slipstream.draft.probe");
+  } catch {
+    return undefined;
+  }
+  return {
+    read: (key) => {
+      try {
+        return window.sessionStorage.getItem(key);
+      } catch {
+        return null;
+      }
+    },
+    write: (key, value) => {
+      try {
+        window.sessionStorage.setItem(key, value);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    remove: (key) => {
+      try {
+        window.sessionStorage.removeItem(key);
+      } catch {
+        /* the store is blocked; the in-memory draft still governs this session */
+      }
+    },
+  };
+};
+
+/// The bounded number of Photo editing sessions the page retains. A session
+/// with a write in flight is never dropped; its local draft already carries
+/// every other intent into the next visit.
+const MAXIMUM_EDITOR_SESSIONS = 4;
+
+const formatByteCount = (bytes: number): string => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+};
+
+/// The facts of one `GET /api/processing/capability` report this workspace
+/// uses: the deployment's state, one state per stage, and the adjustable
+/// white-balance ranges its approved profiles admit.
+type ProcessingCapability = Readonly<{
+  state: string;
+  stages: Readonly<{ develop: string; film: string }>;
+  /// The approved source classes the report named, each with its admitted
+  /// white-balance modes and ranges.
+  profiles: ReadonlyArray<Record<string, unknown>>;
+}>;
+
+/// The closed reading of one admitted white-balance range. A report whose
+/// range this client cannot read leaves the mode disabled: the report is the
+/// only source of what an editor may enable.
+const readWhiteBalanceRange = (
+  value: unknown,
+  dimension: "temperature" | "tint",
+): WhiteBalanceRange | undefined => {
+  if (!isRecord(value)) return undefined;
+  const named =
+    dimension === "temperature"
+      ? (value["temperatureKelvin"] ?? value["temperature"])
+      : (value["tintMilli"] ?? value["tint"]);
+  const bound = isRecord(named) ? named : value;
+  const minimum = bound["minimum"];
+  const maximum = bound["maximum"];
+  if (
+    typeof minimum !== "number" ||
+    typeof maximum !== "number" ||
+    !Number.isFinite(minimum) ||
+    !Number.isFinite(maximum) ||
+    minimum > maximum
+  )
+    return undefined;
+  const bounds =
+    dimension === "temperature"
+      ? { minimum: 1000, maximum: 40000 }
+      : { minimum: -150000, maximum: 150000 };
+  return Object.freeze({
+    minimum: Math.max(bounds.minimum, minimum),
+    maximum: Math.min(bounds.maximum, maximum),
+  });
+};
+
+/// The adjustable modes admitted for the source class whose modes the recipe
+/// read reported. The read does not name the Photo's profile, so the modes are
+/// enabled only where every candidate profile admits them with a readable
+/// range: an editor never enables a control the report may not admit.
+const admittedWhiteBalanceFor = (
+  profiles: ReadonlyArray<Record<string, unknown>>,
+  modes: ReadonlyArray<string>,
+): ReadonlyArray<AdmittedWhiteBalance> => {
+  const candidates = profiles.filter((profile) => {
+    const admitted = profile["whiteBalanceModes"];
+    return (
+      Array.isArray(admitted) && modes.every((mode) => admitted.includes(mode))
+    );
+  });
+  if (candidates.length === 0) return Object.freeze([]);
+  const ranges = candidates.map((profile) => profile["whiteBalanceRanges"]);
+  if (ranges.some((value) => !isRecord(value))) return Object.freeze([]);
+  const entries = ranges.map(
+    (value) => (value as Record<string, unknown>)["temperature-tint"],
+  );
+  const temperatureKelvin = entries.map((entry) =>
+    readWhiteBalanceRange(entry, "temperature"),
+  );
+  const tintMilli = entries.map((entry) =>
+    readWhiteBalanceRange(entry, "tint"),
+  );
+  if (
+    temperatureKelvin.some((range) => range === undefined) ||
+    tintMilli.some((range) => range === undefined)
+  )
+    return Object.freeze([]);
+  const temperatures = temperatureKelvin as ReadonlyArray<WhiteBalanceRange>;
+  const tints = tintMilli as ReadonlyArray<WhiteBalanceRange>;
+  const admitted = Object.freeze({
+    mode: "temperature-tint" as const,
+    temperatureKelvin: Object.freeze({
+      minimum: Math.max(...temperatures.map((range) => range.minimum)),
+      maximum: Math.min(...temperatures.map((range) => range.maximum)),
+    }),
+    tintMilli: Object.freeze({
+      minimum: Math.max(...tints.map((range) => range.minimum)),
+      maximum: Math.min(...tints.map((range) => range.maximum)),
+    }),
+  });
+  if (
+    admitted.temperatureKelvin.minimum > admitted.temperatureKelvin.maximum ||
+    admitted.tintMilli.minimum > admitted.tintMilli.maximum
+  )
+    return Object.freeze([]);
+  return Object.freeze([admitted]);
+};
+
+const parseProcessingCapability = (
+  value: unknown,
+): ProcessingCapability | undefined => {
+  if (!isRecord(value)) return undefined;
+  const state = value["state"];
+  const stages = value["stages"];
+  const profiles = value["profiles"];
+  if (
+    typeof state !== "string" ||
+    !isRecord(stages) ||
+    typeof stages["develop"] !== "string" ||
+    typeof stages["film"] !== "string" ||
+    !Array.isArray(profiles)
+  )
+    return undefined;
+  return Object.freeze({
+    state,
+    stages: Object.freeze({
+      develop: stages["develop"],
+      film: stages["film"],
+    }),
+    profiles: Object.freeze(profiles.filter(isRecord)),
+  });
+};
+
+/// The editable facts of one Photo with the deployment's capability applied:
+/// the adjustable white-balance modes are enabled only from the report.
+const withProcessingCapability = (
+  facts: EditorFacts,
+  capability: ProcessingCapability,
+): EditorFacts =>
+  Object.freeze({
+    ...facts,
+    controls: Object.freeze({
+      ...facts.controls,
+      adjustableWhiteBalance: admittedWhiteBalanceFor(
+        capability.profiles,
+        facts.controls.whiteBalanceModes,
+      ),
+    }),
+  });
+
+/// The closed reading of one stored white-balance intent. The service reports
+/// the mode it can read, including one the capability does not admit; a shape
+/// outside the contract is not a recipe this client may present.
+const parseStoredWhiteBalance = (
+  value: unknown,
+): EditorWhiteBalance | undefined => {
+  if (!isRecord(value)) return undefined;
+  const mode = value["mode"];
+  if (mode === "as-shot") return Object.freeze({ mode: "as-shot" });
+  if (mode !== "temperature-tint") return undefined;
+  const temperatureKelvin = value["temperatureKelvin"];
+  const tintMilli = value["tintMilli"];
+  if (
+    typeof temperatureKelvin !== "number" ||
+    typeof tintMilli !== "number" ||
+    !Number.isInteger(temperatureKelvin) ||
+    !Number.isInteger(tintMilli)
+  )
+    return undefined;
+  return Object.freeze({
+    mode: "temperature-tint",
+    temperatureKelvin,
+    tintMilli,
+  });
+};
+
+/// The closed reading of one `GET /api/photos/{id}/edit-recipe` response. The
+/// facts are the model's input, so an incomplete read is a refusal rather than
+/// a partially believed recipe.
+const parseEditFacts = (
+  value: unknown,
+  photoId: string,
+): EditorFacts | undefined => {
+  if (!isRecord(value)) return undefined;
+  const sourceSupport = value["sourceSupport"];
+  const supportReason = value["supportReason"];
+  const sourceRevision = value["sourceRevision"];
+  const recipe = value["recipe"];
+  const processingAvailable = value["processingAvailable"];
+  const controls = value["controls"];
+  if (
+    (sourceSupport !== "supported" &&
+      sourceSupport !== "unsupported" &&
+      sourceSupport !== "unavailable") ||
+    (sourceRevision !== null && typeof sourceRevision !== "string") ||
+    typeof processingAvailable !== "boolean" ||
+    !isRecord(controls) ||
+    (supportReason !== null &&
+      supportReason !== "original-missing" &&
+      supportReason !== "original-unreadable")
+  )
+    return undefined;
+  const exposure = controls["exposure"];
+  const modes = controls["whiteBalanceModes"];
+  if (!isRecord(exposure) || !isStringArray(modes)) return undefined;
+  const minimumEv = exposure["minimumEv"];
+  const maximumEv = exposure["maximumEv"];
+  const stepEv = exposure["stepEv"];
+  if (
+    typeof minimumEv !== "number" ||
+    typeof maximumEv !== "number" ||
+    typeof stepEv !== "number" ||
+    !Number.isFinite(minimumEv) ||
+    !Number.isFinite(maximumEv) ||
+    !Number.isFinite(stepEv) ||
+    stepEv <= 0 ||
+    maximumEv < minimumEv
+  )
+    return undefined;
+  let recipeVersion: string | null = null;
+  let exposureEv = minimumEv;
+  let whiteBalance: EditorWhiteBalance = Object.freeze({ mode: "as-shot" });
+  if (recipe !== null) {
+    if (!isRecord(recipe)) return undefined;
+    const version = recipe["recipeVersion"];
+    const storedExposure = recipe["exposureEv"];
+    const stored = parseStoredWhiteBalance(recipe["whiteBalance"]);
+    if (
+      typeof version !== "string" ||
+      typeof storedExposure !== "number" ||
+      !Number.isFinite(storedExposure) ||
+      stored === undefined
+    )
+      return undefined;
+    recipeVersion = version;
+    exposureEv = Math.min(maximumEv, Math.max(minimumEv, storedExposure));
+    whiteBalance = stored;
+  }
+  if ((sourceSupport === "unavailable") !== (sourceRevision === null))
+    return undefined;
+  return Object.freeze({
+    photoId,
+    sourceRevision,
+    recipeVersion,
+    settings: Object.freeze({ exposureEv, whiteBalance }),
+    sourceSupport,
+    supportReason: typeof supportReason === "string" ? supportReason : "",
+    processingAvailable,
+    controls: Object.freeze({
+      minimumEv,
+      maximumEv,
+      stepEv,
+      whiteBalanceModes: Object.freeze([...modes]),
+      // The capability report is the only source of admitted adjustable
+      // ranges; it is merged into these facts when that report arrives.
+      adjustableWhiteBalance: Object.freeze(
+        [],
+      ) as ReadonlyArray<AdmittedWhiteBalance>,
+    }),
+  });
+};
+
+/// The refusal of one guarded recipe write, with the conflict facts.
+const readEditRefusal = async (response: Response): Promise<SaveRefusal> => {
+  const refusal: {
+    status: number;
+    code: string;
+    message: string;
+    currentRecipeVersion: string | null;
+    currentSourceRevision: string | null;
+  } = {
+    status: response.status,
+    code: `HTTP ${response.status}`,
+    message: "",
+    currentRecipeVersion: null,
+    currentSourceRevision: null,
+  };
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return Object.freeze(refusal);
+  }
+  if (!isRecord(body)) return Object.freeze(refusal);
+  const error = body["error"];
+  if (!isRecord(error)) return Object.freeze(refusal);
+  if (typeof error["code"] === "string") refusal.code = error["code"];
+  if (typeof error["message"] === "string") refusal.message = error["message"];
+  const details = error["details"];
+  if (isRecord(details)) {
+    if (typeof details["currentRecipeVersion"] === "string")
+      refusal.currentRecipeVersion = details["currentRecipeVersion"];
+    if (typeof details["currentSourceRevision"] === "string")
+      refusal.currentSourceRevision = details["currentSourceRevision"];
+  }
+  return Object.freeze(refusal);
+};
+
+type EditFactsOutcome =
+  | Readonly<{ kind: "ok"; facts: EditorFacts }>
+  | Readonly<{ kind: "failed"; message: string }>;
+
+const fetchEditRecipe = async (
+  fetcher: BrowserFetch,
+  photoId: string,
+  signal: AbortSignal,
+): Promise<EditFactsOutcome> => {
+  let response: Response;
+  try {
+    response = await fetcher(
+      `/api/photos/${encodeURIComponent(photoId)}/edit-recipe`,
+      { signal, priority: "high" },
+    );
+  } catch {
+    return {
+      kind: "failed",
+      message: "Current edit facts did not reach the service. Retry Edit.",
+    };
+  }
+  if (!response.ok) {
+    const refusal = await readEditRefusal(response);
+    return {
+      kind: "failed",
+      message:
+        refusal.code === "unknown_photo"
+          ? "This Photo is no longer in the Library."
+          : `Current edit facts could not be read: ${refusal.code}.`,
+    };
+  }
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch {
+    return { kind: "failed", message: "Current edit facts could not be read." };
+  }
+  const facts = parseEditFacts(value, photoId);
+  return facts
+    ? { kind: "ok", facts }
+    : {
+        kind: "failed",
+        message: "Current edit facts are outside the supported shape.",
+      };
+};
+
+type EditWriteOutcome =
+  | Readonly<{ kind: "saved"; recipeVersion: string; sourceRevision: string }>
+  | Readonly<{ kind: "refused"; refusal: SaveRefusal }>;
+
+const saveEditRecipe = async (
+  fetcher: BrowserFetch,
+  request: SaveRequest,
+  signal: AbortSignal,
+): Promise<EditWriteOutcome> => {
+  let response: Response;
+  try {
+    response = await fetcher(
+      `/api/photos/${encodeURIComponent(request.photoId)}/edit-recipe`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal,
+        body: JSON.stringify({
+          requestId: request.id,
+          expectedRecipeVersion: request.expectedRecipeVersion,
+          expectedSourceRevision: request.expectedSourceRevision,
+          settings: {
+            exposureEv: request.settings.exposureEv,
+            whiteBalance:
+              request.settings.whiteBalance.mode === "temperature-tint"
+                ? {
+                    mode: "temperature-tint",
+                    temperatureKelvin:
+                      request.settings.whiteBalance.temperatureKelvin,
+                    tintMilli: request.settings.whiteBalance.tintMilli,
+                  }
+                : { mode: "as-shot" },
+          },
+        }),
+      },
+    );
+  } catch {
+    return {
+      kind: "refused",
+      refusal: Object.freeze({
+        status: 0,
+        code: "transport_lost",
+        message: "The save did not reach the service.",
+        currentRecipeVersion: null,
+        currentSourceRevision: null,
+      }),
+    };
+  }
+  if (!response.ok)
+    return { kind: "refused", refusal: await readEditRefusal(response) };
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return {
+      kind: "refused",
+      refusal: Object.freeze({
+        status: response.status,
+        code: "outcome_unknown",
+        message: "The save outcome could not be read.",
+        currentRecipeVersion: null,
+        currentSourceRevision: null,
+      }),
+    };
+  }
+  if (!isRecord(body)) {
+    return {
+      kind: "refused",
+      refusal: Object.freeze({
+        status: response.status,
+        code: "outcome_unknown",
+        message: "The save outcome is outside the supported shape.",
+        currentRecipeVersion: null,
+        currentSourceRevision: null,
+      }),
+    };
+  }
+  const outcome = body["outcome"];
+  const recipeVersion = body["recipeVersion"];
+  const sourceRevision = body["sourceRevision"];
+  if (
+    (outcome !== "saved" && outcome !== "unchanged") ||
+    typeof recipeVersion !== "string" ||
+    typeof sourceRevision !== "string"
+  ) {
+    return {
+      kind: "refused",
+      refusal: Object.freeze({
+        status: response.status,
+        code: "outcome_unknown",
+        message: "The save outcome is outside the supported shape.",
+        currentRecipeVersion: null,
+        currentSourceRevision: null,
+      }),
+    };
+  }
+  return { kind: "saved", recipeVersion, sourceRevision };
+};
+
+/// Rebinds the stored recipe to the currently observed source revision, the
+/// one reconciliation the workspace offers when a saved recipe is bound to
+/// different content.
+const rebindEditRecipe = async (
+  fetcher: BrowserFetch,
+  photoId: string,
+  expectedRecipeVersion: string,
+  newSourceRevision: string,
+): Promise<EditWriteOutcome> => {
+  let response: Response;
+  try {
+    response = await fetcher(
+      `/api/photos/${encodeURIComponent(photoId)}/edit-recipe/rebind`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requestId: `web-rebind-${crypto.randomUUID().replaceAll("-", "").slice(0, 24)}`,
+          expectedRecipeVersion,
+          newSourceRevision,
+        }),
+      },
+    );
+  } catch {
+    return {
+      kind: "refused",
+      refusal: Object.freeze({
+        status: 0,
+        code: "transport_lost",
+        message: "The rebind did not reach the service.",
+        currentRecipeVersion: null,
+        currentSourceRevision: null,
+      }),
+    };
+  }
+  if (!response.ok)
+    return { kind: "refused", refusal: await readEditRefusal(response) };
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return {
+      kind: "refused",
+      refusal: Object.freeze({
+        status: response.status,
+        code: "outcome_unknown",
+        message: "The rebind outcome could not be read.",
+        currentRecipeVersion: null,
+        currentSourceRevision: null,
+      }),
+    };
+  }
+  if (!isRecord(body)) {
+    return {
+      kind: "refused",
+      refusal: Object.freeze({
+        status: response.status,
+        code: "outcome_unknown",
+        message: "The rebind outcome is outside the supported shape.",
+        currentRecipeVersion: null,
+        currentSourceRevision: null,
+      }),
+    };
+  }
+  const recipeVersion = body["recipeVersion"];
+  const sourceRevision = body["sourceRevision"];
+  if (
+    (body["outcome"] !== "saved" && body["outcome"] !== "unchanged") ||
+    typeof recipeVersion !== "string" ||
+    typeof sourceRevision !== "string"
+  ) {
+    return {
+      kind: "refused",
+      refusal: Object.freeze({
+        status: response.status,
+        code: "outcome_unknown",
+        message: "The rebind outcome is outside the supported shape.",
+        currentRecipeVersion: null,
+        currentSourceRevision: null,
+      }),
+    };
+  }
+  return { kind: "saved", recipeVersion, sourceRevision };
+};
 type GridRangeRetry = Readonly<{
   sourceAuthority: SourceAuthority;
   operationKind: "source" | "grid";
@@ -803,6 +1408,1203 @@ function mountPrivateLibraryBrowser(
     if (!recoveryGate.fail(claim, { transportLost }))
       recoveryGate.discard(claim);
     syncConnection();
+  };
+  /// One editing session per Photo. Each session keeps its own confirmed
+  /// recipe, local intent, session history, and local draft, so navigating to
+  /// another Photo never cancels or rebinds a pending save.
+  const editorSessions = new Map<string, PhotoEditor>();
+  const editorSession = (photoId: string): PhotoEditor => {
+    const existing = editorSessions.get(photoId);
+    if (existing) {
+      editorSessions.delete(photoId);
+      editorSessions.set(photoId, existing);
+      return existing;
+    }
+    const created = createPhotoEditor({ store: browserDraftStore() });
+    editorSessions.set(photoId, created);
+    for (const [key, session] of editorSessions) {
+      if (editorSessions.size <= MAXIMUM_EDITOR_SESSIONS) break;
+      // A session with a write in flight keeps its identity until the service
+      // settles it; the draft in storage already carries every other intent.
+      if (key === photoId || session.presentation().saving) continue;
+      editorSessions.delete(key);
+    }
+    return created;
+  };
+  const currentEditor = (): PhotoEditor | undefined => {
+    const photoId = currentPhoto()?.id;
+    return photoId ? editorSessions.get(photoId) : undefined;
+  };
+  /// The stage the workspace presents. Develop is the default; a deployment
+  /// that reports the Film stage ready opens on Film, the stage whose result
+  /// the Photographer is working toward.
+  let editorStage: EditorStage = "develop";
+  let editorComparing = false;
+  let editorPreviewUrl: string | undefined;
+  let editorPreviewNote = "";
+  let editorPreviewStale = false;
+  let editorPreviewBusy = false;
+  let editorPreviewAbort: AbortController | undefined;
+  let editorPreviewGeneration = 0;
+  /// How many follow-up requests one admitted preview has already made.
+  let editorPreviewAttempts = 0;
+  let editorPreviewTimer: number | undefined;
+  /// The retained as-shot/baseline comparison of the chosen stage, the image
+  /// it was served, and its own progress. A comparison is defined by the Photo,
+  /// the stage, and the source revision, so it is retained across saved-settings
+  /// changes and dropped when one of those moves.
+  let editorComparison: Comparison | undefined;
+  let editorComparisonUrl: string | undefined;
+  let editorComparisonNote = "";
+  let editorComparisonBusy = false;
+  let editorComparisonAbort: AbortController | undefined;
+  let editorComparisonGeneration = 0;
+  /// How many follow-up requests one admitted comparison has already made.
+  let editorComparisonAttempts = 0;
+  let editorComparisonTimer: number | undefined;
+  let editorExportId: string | undefined;
+  let editorExportState: EditorExportViewModel["state"] = "idle";
+  let editorExportNote = "";
+  let editorExportArtifact: ExportArtifact | null = null;
+  let editorExportAbort: AbortController | undefined;
+  let editorExportTimer: number | undefined;
+  let editorWriteAbort: AbortController | undefined;
+  /// Resolves the writers waiting for this Photo's write stream to settle.
+  let editorWriteWaiters: Array<() => void> = [];
+  /// The Export ordering barrier: later edits wait behind an accepted
+  /// submission so they can never retarget the captured snapshot.
+  let editorExportBarrier: Promise<void> | undefined;
+  let releaseEditorExportBarrier: (() => void) | undefined;
+  /// The automatic resolution of a save whose outcome is unknown: at most one
+  /// identical retry per lost response, so a lost receipt cannot spin.
+  let editorUnknownResolution: string | undefined;
+  let filmUnavailableReason =
+    "The Film capability is not enabled in this deployment.";
+  /// The deployment's processing capability report, once one Edit session has
+  /// read it. It is the only source of the admitted adjustable controls.
+  let processingCapability: ProcessingCapability | undefined;
+
+  const settleEditorWriters = (): void => {
+    const waiters = editorWriteWaiters;
+    editorWriteWaiters = [];
+    for (const waiter of waiters) waiter();
+  };
+  const editorOwnsPhoto = (photoId: string): boolean =>
+    applicationAlive &&
+    view.editorVisible() &&
+    photoOwner.isCurrent(photoOwner.authority) &&
+    currentPhoto()?.id === photoId;
+  const clearEditorComparison = (): void => {
+    editorComparisonAbort?.abort();
+    editorComparisonAbort = undefined;
+    editorComparisonGeneration += 1;
+    if (editorComparisonUrl) URL.revokeObjectURL(editorComparisonUrl);
+    editorComparison = undefined;
+    editorComparisonUrl = undefined;
+    editorComparisonNote = "";
+    editorComparisonBusy = false;
+    editorComparisonAttempts = 0;
+    if (editorComparisonTimer !== undefined) {
+      clearTimeout(editorComparisonTimer);
+      editorComparisonTimer = undefined;
+    }
+  };
+  const clearEditorPreview = (): void => {
+    if (editorPreviewUrl) URL.revokeObjectURL(editorPreviewUrl);
+    editorPreviewUrl = undefined;
+    editorPreviewNote = "";
+    editorPreviewStale = false;
+    clearEditorComparison();
+    view.clearEditorPreview();
+  };
+  const renderEditor = (): void => {
+    const photoId = currentPhoto()?.id;
+    const session = currentEditor();
+    if (!photoId || !session) return;
+    const presented = session.presentation();
+    const exportable = presented.canEdit && presented.processingAvailable;
+    view.renderEditor({
+      photoId,
+      loading: presented.photoId === "",
+      stage: editorStage,
+      stageNote: editorStageNote(),
+      filmReason: filmUnavailableReason,
+      sourceSupport: presented.sourceSupport,
+      processingAvailable: presented.processingAvailable,
+      capabilityNote: processingCapability
+        ? capabilityNote(processingCapability.state)
+        : "",
+      exposureEv: presented.settings.exposureEv,
+      savedExposureEv: presented.confirmed.exposureEv,
+      baselineExposureEv: presented.baseline.exposureEv,
+      exposureMinimumEv: presented.controls.minimumEv,
+      exposureMaximumEv: presented.controls.maximumEv,
+      exposureStepEv: presented.controls.stepEv,
+      whiteBalance: presented.whiteBalance,
+      canEdit: presented.canEdit,
+      canPreview: presented.canEdit && presented.processingAvailable,
+      previewing: editorPreviewBusy,
+      // While the comparison is pressed, the presented image is the baseline
+      // development of the chosen stage, so its own note and its own freshness
+      // describe what a Photographer sees.
+      previewNote: editorComparing ? editorComparisonNote : editorPreviewNote,
+      previewStale: !editorComparing && editorPreviewStale,
+      saving: presented.saving,
+      dirty: presented.dirty,
+      canUndo: presented.canUndo,
+      canRedo: presented.canRedo,
+      comparing: editorComparing,
+      conflict: presented.conflict
+        ? { message: presented.conflict.message }
+        : null,
+      draftNote: presented.draft.note,
+      export: {
+        state: editorExportState,
+        note: editorExportNote,
+        artifact: editorExportArtifact,
+        canSubmit: exportable && editorExportState !== "submitting",
+        canCancel:
+          editorExportState === "queued" || editorExportState === "running",
+        // Retry re-submits the retained snapshot, so it needs an accepted
+        // Export: a refused submission has no identity to retry and is
+        // submitted again instead.
+        canRetry:
+          editorExportId !== undefined &&
+          (editorExportState === "failed" || editorExportState === "cancelled"),
+        canDownload:
+          editorExportState === "succeeded" && editorExportArtifact !== null,
+      },
+      status: presented.status,
+    });
+  };
+  /// What the presented image actually is. Every stage names its own
+  /// provenance, so a camera Preview is never presented as a Development or
+  /// Film Result, and a comparison is never presented as the current
+  /// rendition.
+  const editorStageNote = (): string => {
+    if (editorStage === "camera")
+      return "Camera: the camera-produced Preview of this Photo.";
+    const stageName = editorStage === "film" ? "Film" : "Develop";
+    if (editorComparing && editorComparisonUrl) {
+      // A comparison is only a comparison while both images describe the same
+      // development: a current rendition that is absent or older than the
+      // current settings is named instead of being compared as if it were
+      // current.
+      const current = !editorPreviewUrl
+        ? " No current rendition is presented, so the baseline is shown alone."
+        : editorPreviewStale
+          ? " The current rendition is older than the current settings."
+          : "";
+      return `${stageName}: the as-shot/baseline development of this stage, compared with the current settings.${current}`;
+    }
+    if (!editorPreviewUrl)
+      return `${stageName}: no ${stageName} rendition is presented; the presented image is the camera Preview.`;
+    if (editorStage === "film")
+      return "Film: the finished Film Result of the fixed Film Recipe.";
+    const preview = currentPhoto()?.preview;
+    const jpegOriginal =
+      preview?.state === "ready" && preview.source === "jpeg-original"
+        ? " This Photo's camera Preview is a JPEG Original."
+        : "";
+    return `Develop: an Edit Preview of the Development Result at reduced resolution.${jpegOriginal}`;
+  };
+  /// Places the session's next guarded write in its Photo's stream. One write
+  /// is in flight per Photo, and the model coalesces later actions behind it.
+  const placeEditorWrite = async (
+    photoId: string,
+    session: PhotoEditor,
+    step: EditorStep,
+  ): Promise<void> => {
+    // The Export ordering barrier: an edit placed while a submission is
+    // settling waits behind it, so the accepted Export can never be retargeted
+    // by a later write.
+    const barrier = editorExportBarrier;
+    if (barrier) await barrier;
+    const request = step.request;
+    if (!request) {
+      settleEditorWriters();
+      if (currentPhoto()?.id === photoId) renderEditor();
+      return;
+    }
+    const controller = new AbortController();
+    editorWriteAbort = controller;
+    const result = await saveEditRecipe(fetcher, request, controller.signal);
+    if (editorWriteAbort === controller) editorWriteAbort = undefined;
+    const next =
+      result.kind === "saved"
+        ? session.acknowledge(request, {
+            recipeVersion: result.recipeVersion,
+            sourceRevision: result.sourceRevision,
+          })
+        : session.refuse(request, result.refusal);
+    settleEditorWriters();
+    if (currentPhoto()?.id === photoId) renderEditor();
+    if (result.kind === "saved") {
+      // A save that lost its response is resolved through its own identity
+      // before further writes advance: one identical retry, then the explicit
+      // user action. A resolved receipt confirms or refuses that operation.
+      if (next.request === null) editorUnknownResolution = undefined;
+      // The preview follows the settings the service confirmed, so the
+      // rendition that arrives belongs to the recipe now in force.
+      if (next.request === null) void requestEditorPreview(photoId);
+    } else if (
+      result.refusal.code === "outcome_unknown" &&
+      editorUnknownResolution !== request.id
+    ) {
+      editorUnknownResolution = request.id;
+      window.setTimeout(() => {
+        if (!editorOwnsPhoto(photoId)) return;
+        const resolution = session.resolveUnknown();
+        renderEditor();
+        void placeEditorWrite(photoId, session, resolution);
+      }, 750);
+    }
+    await placeEditorWrite(photoId, session, next);
+  };
+  const editorFactsFromWire = (
+    photoId: string,
+    response:
+      | Readonly<{ kind: "ok"; facts: EditorFacts }>
+      | Readonly<{ kind: "failed"; message: string }>,
+    mode: "open" | "refresh",
+  ): void => {
+    const session = editorSession(photoId);
+    if (response.kind === "failed") {
+      if (mode === "open") {
+        session.open({
+          photoId,
+          sourceRevision: null,
+          recipeVersion: null,
+          settings: {
+            exposureEv: 0,
+            whiteBalance: Object.freeze({ mode: "as-shot" }),
+          },
+          sourceSupport: "unavailable",
+          supportReason: "unreadable",
+          processingAvailable: false,
+          controls: {
+            minimumEv: 0,
+            maximumEv: 1,
+            stepEv: 0.001,
+            whiteBalanceModes: ["as-shot"],
+            adjustableWhiteBalance: [],
+          },
+        });
+        session.setStatus(response.message);
+      } else {
+        session.setStatus(response.message);
+      }
+      if (currentPhoto()?.id === photoId) renderEditor();
+      return;
+    }
+    const facts = processingCapability
+      ? withProcessingCapability(response.facts, processingCapability)
+      : response.facts;
+    const step = mode === "open" ? session.open(facts) : session.refresh(facts);
+    // A comparison is of one development: a source revision that moved makes
+    // the retained baseline rendition a comparison of an earlier source, so it
+    // is dropped rather than presented as this Photo's.
+    if (
+      editorComparison &&
+      !comparisonIsCurrent(editorComparison, {
+        photoId,
+        stage: editorStage,
+        sourceRevision: session.facts()?.sourceRevision ?? null,
+      })
+    )
+      clearEditorComparison();
+    if (currentPhoto()?.id === photoId) renderEditor();
+    void placeEditorWrite(photoId, session, step);
+    // The surface opens on the stage's rendition, so the Edit Preview is read
+    // as soon as the facts are known instead of leaving the camera Preview
+    // presented under a Develop provenance.
+    void requestEditorPreview(photoId);
+  };
+  /// Reads the current facts of one Photo. The read is stamped against the
+  /// revisions in force when it starts and discarded when they moved while it
+  /// was in flight, so a slow read can neither overwrite facts a save
+  /// acknowledgement already confirmed nor read as another client's change.
+  const loadEditorFacts = async (
+    photoId: string,
+    mode: "open" | "refresh",
+  ): Promise<void> => {
+    const session = editorSession(photoId);
+    const stampedRecipe = session.presentation().recipeVersion;
+    const stampedSource = session.facts()?.sourceRevision ?? null;
+    const controller = new AbortController();
+    const result = await fetchEditRecipe(fetcher, photoId, controller.signal);
+    if (!applicationAlive) return;
+    const current = editorSessions.get(photoId);
+    if (
+      current &&
+      (current.presentation().recipeVersion !== stampedRecipe ||
+        (current.facts()?.sourceRevision ?? null) !== stampedSource)
+    )
+      return;
+    editorFactsFromWire(photoId, result, mode);
+  };
+  /// Reads the deployment's processing capability once per Edit session. The
+  /// report is the only source of the adjustable white-balance ranges and of
+  /// the state of each stage, so a stage the deployment cannot execute is
+  /// explained instead of attempted.
+  const loadProcessingCapability = async (photoId: string): Promise<void> => {
+    try {
+      const response = await fetcher("/api/processing/capability", {
+        priority: "low",
+      });
+      if (!response.ok) return;
+      const capability = parseProcessingCapability(await response.json());
+      if (!capability) return;
+      processingCapability = capability;
+      filmUnavailableReason = filmStageReason(capability.stages.film);
+      applyProcessingCapability(photoId);
+      if (currentPhoto()?.id === photoId) renderEditor();
+    } catch {
+      /* the deployment's capability report is optional presentation */
+    }
+  };
+  /// The deployment's capability state in the workspace's words. Each closed
+  /// state fixes the client-visible recovery: a deployment defect is named as
+  /// one and never retried, while the finite allowance is named as the lever
+  /// an operator can change.
+  const capabilityNote = (state: string): string => {
+    switch (state) {
+      case "disabled":
+        return "Processing is not enabled in this deployment, so no Edit Preview or Export can run. Only an operator can enable it; saved recipes and retained downloads stay available.";
+      case "launcher-unavailable":
+        return "The processing launcher is unavailable in this deployment, so no Edit Preview or Export can run. Only an operator can restore it; saved recipes and retained downloads stay available.";
+      case "bundle-unavailable":
+        return "The processing bundle is unavailable in this deployment, so no Edit Preview or Export can run. Only an operator can restore it; saved recipes and retained downloads stay available.";
+      case "source-unsupported":
+        return "This deployment has no approved profile for the Photo's source class, so development cannot run for it.";
+      case "resource-unavailable":
+        return "Processing is out of this deployment's finite allowance. An operator can change it, and the work may then be retried.";
+      default:
+        return "";
+    }
+  };
+  /// The deployment's answer for the Film stage, in the workspace's words. A
+  /// stage the deployment does not support for this source class is not the
+  /// same failure as one it has not enabled.
+  const filmStageReason = (state: string): string =>
+    state === "unsupported"
+      ? "The Film stage is not supported for this Photo's source class, so no Film Result is presented."
+      : state === "unavailable"
+        ? "The Film capability is not enabled in this deployment, so no Film Result is presented."
+        : "";
+  /// Applies the capability report to one Photo's editing facts, so the
+  /// adjustable controls follow the report instead of assuming it.
+  const applyProcessingCapability = (photoId: string): void => {
+    const session = editorSessions.get(photoId);
+    const current = session?.facts();
+    if (!session || !current || !processingCapability) return;
+    const step = session.refresh(
+      withProcessingCapability(current, processingCapability),
+    );
+    void placeEditorWrite(photoId, session, step);
+  };
+  const openEditor = (photoId: string): void => {
+    if (!photoId) return;
+    clearEditorPreview();
+    editorComparing = false;
+    editorExportId = undefined;
+    editorExportState = "idle";
+    editorExportNote = "";
+    editorExportArtifact = null;
+    // Film is the default editing view when the deployment can present it;
+    // Develop is the default otherwise.
+    editorStage =
+      processingCapability?.stages.film === "ready" ? "film" : "develop";
+    editorSession(photoId);
+    renderEditor();
+    void loadEditorFacts(photoId, "open");
+    void loadProcessingCapability(photoId);
+    void loadEditorExports(photoId);
+  };
+  const refreshEditor = (photoId: string): void => {
+    void loadEditorFacts(photoId, "refresh");
+    void loadEditorExports(photoId);
+  };
+  /// The presented rendition is older than the settings in force as soon as
+  /// an edit action lands. The matching rendition clears the mark when it
+  /// arrives, so the workspace never presents an image as current after the
+  /// settings it shows have moved.
+  const markEditorPreviewStale = (): void => {
+    if (editorPreviewUrl) editorPreviewStale = true;
+  };
+  const commitEditorExposure = (photoId: string, exposureEv: number): void => {
+    const session = editorSessions.get(photoId);
+    if (!session) return;
+    const step = session.commitExposure(exposureEv);
+    markEditorPreviewStale();
+    renderEditor();
+    void placeEditorWrite(photoId, session, step);
+  };
+  /// One white-balance action: a selected mode, a settled temperature, or a
+  /// settled tint. Each is one edit action with its own guarded write.
+  const commitEditorWhiteBalance = (
+    photoId: string,
+    action:
+      | Readonly<{ kind: "mode"; mode: string }>
+      | Readonly<{ kind: "temperature"; temperatureKelvin: number }>
+      | Readonly<{ kind: "tint"; tintMilli: number }>,
+  ): void => {
+    const session = editorSessions.get(photoId);
+    if (!session) return;
+    const step =
+      action.kind === "mode"
+        ? session.selectWhiteBalanceMode(action.mode)
+        : action.kind === "temperature"
+          ? session.commitTemperature(action.temperatureKelvin)
+          : session.commitTint(action.tintMilli);
+    markEditorPreviewStale();
+    renderEditor();
+    void placeEditorWrite(photoId, session, step);
+  };
+  const stepEditorHistory = (
+    photoId: string,
+    operation:
+      | "undo"
+      | "redo"
+      | "reset"
+      | "resetExposure"
+      | "resetWhiteBalance",
+  ): void => {
+    const session = editorSessions.get(photoId);
+    if (!session) return;
+    const step =
+      operation === "undo"
+        ? session.undo()
+        : operation === "redo"
+          ? session.redo()
+          : operation === "resetExposure"
+            ? session.resetExposure()
+            : operation === "resetWhiteBalance"
+              ? session.resetWhiteBalance()
+              : session.reset();
+    markEditorPreviewStale();
+    renderEditor();
+    void placeEditorWrite(photoId, session, step);
+  };
+  /// Uses the recipe the service holds now. The read is the authoritative
+  /// source of the saved settings, so the conflict resolves to the service's
+  /// recipe instead of this client's older confirmed copy; a read that fails
+  /// leaves the conflict standing for another attempt.
+  const useSavedRecipe = async (photoId: string): Promise<void> => {
+    const session = editorSessions.get(photoId);
+    if (!session) return;
+    await loadEditorFacts(photoId, "refresh");
+    const current = editorSessions.get(photoId);
+    if (!current) return;
+    const step = current.useSavedRecipe();
+    renderEditor();
+    void placeEditorWrite(photoId, current, step);
+    void requestEditorPreview(photoId);
+  };
+  const reapplyLocalSettings = (photoId: string): void => {
+    const session = editorSessions.get(photoId);
+    if (!session) return;
+    const step = session.reapplyLocal();
+    markEditorPreviewStale();
+    renderEditor();
+    void placeEditorWrite(photoId, session, step);
+  };
+  const discardEditorDraft = (photoId: string): void => {
+    const session = editorSessions.get(photoId);
+    if (!session) return;
+    session.discardDraft();
+    renderEditor();
+  };
+  const applyEditorStage = (photoId: string, stage: EditorStage): void => {
+    if (stage === "film" && filmUnavailableReason) return;
+    editorStage = stage;
+    editorComparing = false;
+    // A comparison is of one stage: the rendition of another stage, or of the
+    // other settings selector, is not this stage's comparison.
+    clearEditorComparison();
+    renderEditor();
+    if (stage === "develop") void requestEditorPreview(photoId);
+  };
+  /// The as-shot/baseline development comparison of the chosen stage. Pressing
+  /// the control presents the baseline development of the same stage beside the
+  /// current settings; releasing it presents the current rendition again. The
+  /// comparison never replaces the current rendition, the chosen stage, or the
+  /// saved recipe, and a comparison whose rendition is still being prepared
+  /// says so instead of presenting an unrelated image.
+  const setEditorComparison = (photoId: string, pressed: boolean): void => {
+    if (
+      !photoOwner.isCurrent(photoOwner.authority) ||
+      currentPhoto()?.id !== photoId
+    )
+      return;
+    editorComparing = pressed;
+    if (pressed) {
+      if (editorComparisonUrl) view.presentEditorPreview(editorComparisonUrl);
+      else if (!editorComparisonBusy) {
+        if (!editorComparison)
+          editorComparisonNote = "Preparing the baseline comparison…";
+        void requestEditorComparisonPreview(photoId);
+      }
+    } else if (editorPreviewUrl) view.presentEditorPreview(editorPreviewUrl);
+    else view.clearEditorPreview();
+    renderEditor();
+  };
+  /// The bounded follow-up of an admitted comparison. A baseline render is
+  /// queued or running like any other preview-class render, so the client
+  /// re-asks until the rendition arrives or the bounded attempt count runs out.
+  const scheduleEditorComparisonFollowUp = (photoId: string): void => {
+    if (editorComparisonAttempts >= PREVIEW_POLL_LIMIT) return;
+    editorComparisonAttempts += 1;
+    if (editorComparisonTimer !== undefined)
+      clearTimeout(editorComparisonTimer);
+    editorComparisonTimer = window.setTimeout(() => {
+      editorComparisonTimer = undefined;
+      if (!editorOwnsPhoto(photoId)) return;
+      void requestEditorComparisonPreview(photoId, true);
+    }, PREVIEW_POLL_MS);
+  };
+  /// One comparison request for the chosen stage. The comparison is its own
+  /// rendition: it is requested under the closed `baseline` selector, it never
+  /// replaces the current rendition's image or note, and a rendition served for
+  /// another Photo, stage, settings selector, or source revision is refused
+  /// rather than presented as the comparison.
+  const requestEditorComparisonPreview = async (
+    photoId: string,
+    followUp = false,
+  ): Promise<void> => {
+    const session = editorSessions.get(photoId);
+    const presented = session?.presentation();
+    if (
+      !session ||
+      !presented ||
+      !presented.canEdit ||
+      !presented.processingAvailable ||
+      // The camera stage presents the camera Preview: the baseline of a stage
+      // the deployment does not execute is not a comparison it can render.
+      editorStage === "camera" ||
+      !editorOwnsPhoto(photoId)
+    )
+      return;
+    const stage = editorStage;
+    const expected: Comparison = {
+      photoId,
+      stage,
+      sourceRevision: session.facts()?.sourceRevision ?? null,
+    };
+    if (!followUp) editorComparisonAttempts = 0;
+    const generation = ++editorComparisonGeneration;
+    editorComparisonAbort?.abort();
+    const controller = new AbortController();
+    editorComparisonAbort = controller;
+    editorComparisonBusy = true;
+    editorComparisonNote = "Preparing the baseline comparison…";
+    renderEditor();
+    let response: Response;
+    try {
+      response = await fetcher(
+        editPreviewUri(photoId, stage, BASELINE_SETTINGS),
+        {
+          signal: controller.signal,
+          priority: "high",
+        },
+      );
+    } catch {
+      if (generation === editorComparisonGeneration) {
+        editorComparisonBusy = false;
+        editorComparisonNote =
+          "The baseline comparison request did not reach the service.";
+        renderEditor();
+      }
+      return;
+    }
+    if (generation !== editorComparisonGeneration || !editorOwnsPhoto(photoId))
+      return;
+    editorComparisonBusy = false;
+    if (response.status === 202) {
+      const body: unknown = await response.json().catch(() => undefined);
+      const state =
+        isRecord(body) && typeof body["state"] === "string"
+          ? body["state"]
+          : "queued";
+      editorComparisonNote =
+        state === "running"
+          ? "The baseline comparison is rendering."
+          : "The baseline comparison is waiting for processing capacity.";
+      renderEditor();
+      scheduleEditorComparisonFollowUp(photoId);
+      return;
+    }
+    if (!response.ok) {
+      editorComparisonNote = await describePreviewRefusal(response);
+      renderEditor();
+      return;
+    }
+    let image: Blob;
+    try {
+      image = await response.blob();
+    } catch {
+      editorComparisonNote =
+        "The baseline comparison could not be read. Compare again.";
+      renderEditor();
+      return;
+    }
+    if (generation !== editorComparisonGeneration || !editorOwnsPhoto(photoId))
+      return;
+    const refusal = comparisonRefusal(response.headers, expected);
+    if (refusal) {
+      editorComparisonNote = refusal;
+      renderEditor();
+      return;
+    }
+    if (editorComparisonUrl) URL.revokeObjectURL(editorComparisonUrl);
+    editorComparisonUrl = URL.createObjectURL(image);
+    editorComparison = expected;
+    const width = response.headers.get("slipstream-edit-preview-width") ?? "?";
+    const height =
+      response.headers.get("slipstream-edit-preview-height") ?? "?";
+    const stageName = stage === "film" ? "Film" : "Develop";
+    editorComparisonNote = `${stageName} baseline comparison ${width}×${height}: the as-shot/baseline development of this stage. The current settings are unchanged.`;
+    if (editorComparing) view.presentEditorPreview(editorComparisonUrl);
+    renderEditor();
+  };
+  /// The bounded follow-up of an admitted Edit Preview. Preview-class work is
+  /// queued or running, so the client re-asks until the rendition arrives or
+  /// the bounded attempt count runs out; a superseded request never publishes.
+  const PREVIEW_POLL_MS = 750;
+  const PREVIEW_POLL_LIMIT = 20;
+  const scheduleEditorPreviewFollowUp = (photoId: string): void => {
+    if (editorPreviewAttempts >= PREVIEW_POLL_LIMIT) return;
+    editorPreviewAttempts += 1;
+    if (editorPreviewTimer !== undefined) clearTimeout(editorPreviewTimer);
+    editorPreviewTimer = window.setTimeout(() => {
+      editorPreviewTimer = undefined;
+      void requestEditorPreview(photoId, true);
+    }, PREVIEW_POLL_MS);
+  };
+  /// The closed metadata of one rendition. A rendition whose identity is not
+  /// exactly the requested one, or whose declared metadata is outside the
+  /// closed shape, is never presented.
+  const EDIT_PREVIEW_CONTENT_TYPE = "image/jpeg";
+  /// The qualified display transform of the Development display derivative. A
+  /// rendition under another transform is not the current preview.
+  const EDIT_PREVIEW_DISPLAY_TRANSFORM = "display-transform-v1";
+  const previewRenditionRefusal = (
+    response: Response,
+    photoId: string,
+    stage: EditorStage,
+    image: Blob,
+    expected: Readonly<{
+      sourceRevision: string | null;
+      recipeVersion: string;
+    }>,
+  ): string => {
+    const contentType = (response.headers.get("content-type") ?? "")
+      .split(";")[0]
+      ?.trim();
+    const renderedPhoto =
+      response.headers.get("slipstream-edit-preview-photo-id") ?? "";
+    const renderedStage =
+      response.headers.get("slipstream-edit-preview-stage") ?? "";
+    const width = Number(response.headers.get("slipstream-edit-preview-width"));
+    const height = Number(
+      response.headers.get("slipstream-edit-preview-height"),
+    );
+    const byteLength = Number(response.headers.get("content-length"));
+    const sha256 = response.headers.get("slipstream-edit-preview-sha256") ?? "";
+    const sourceRevision =
+      response.headers.get("slipstream-edit-preview-source-revision") ?? "";
+    const recipeVersion =
+      response.headers.get("slipstream-edit-preview-recipe-version") ?? "";
+    const displayTransform =
+      response.headers.get("slipstream-edit-preview-display-transform") ?? "";
+    const expectedEncodedSource =
+      expected.sourceRevision === null
+        ? ""
+        : encodedSourceRevision(expected.sourceRevision);
+    const wellFormed =
+      contentType === EDIT_PREVIEW_CONTENT_TYPE &&
+      Number.isInteger(width) &&
+      width > 0 &&
+      Number.isInteger(height) &&
+      height > 0 &&
+      Number.isInteger(byteLength) &&
+      byteLength === image.size &&
+      /^[0-9a-f]{64}$/.test(sha256) &&
+      displayTransform === EDIT_PREVIEW_DISPLAY_TRANSFORM;
+    if (!wellFormed)
+      return "An Edit Preview without its complete metadata arrived and was discarded.";
+    if (
+      renderedPhoto !== photoId ||
+      renderedStage !== stage ||
+      sourceRevision !== expectedEncodedSource ||
+      recipeVersion !== expected.recipeVersion
+    )
+      // A successful image for a different source, stage, or settings
+      // snapshot is not the requested preview.
+      return "A preview for other settings or an earlier source arrived and was discarded.";
+    return "";
+  };
+  /// One preview request follows each completed edit action and each settled
+  /// save. A retained image stays presented and is marked out of date until
+  /// the matching rendition arrives, and an image for another source, stage,
+  /// or settings snapshot is refused.
+  const requestEditorPreview = async (
+    photoId: string,
+    followUp = false,
+  ): Promise<void> => {
+    const session = editorSessions.get(photoId);
+    const presented = session?.presentation();
+    if (
+      !session ||
+      !presented ||
+      !presented.canEdit ||
+      !presented.processingAvailable ||
+      // The camera stage presents the camera Preview: it has no rendition of
+      // its own to request, and the closed route admits only Develop and Film.
+      editorStage === "camera" ||
+      !editorOwnsPhoto(photoId)
+    )
+      return;
+    if (!followUp) editorPreviewAttempts = 0;
+    const expectedSource = session.facts()?.sourceRevision ?? null;
+    const expectedRecipe = presented.recipeVersion;
+    const stage = editorStage;
+    const generation = ++editorPreviewGeneration;
+    editorPreviewAbort?.abort();
+    const controller = new AbortController();
+    editorPreviewAbort = controller;
+    editorPreviewBusy = true;
+    if (editorPreviewUrl) {
+      editorPreviewStale = true;
+      editorPreviewNote =
+        "The presented Edit Preview is older than the current settings.";
+    } else {
+      editorPreviewNote = "Preparing the Edit Preview…";
+    }
+    renderEditor();
+    let response: Response;
+    try {
+      response = await fetcher(
+        editPreviewUri(photoId, stage, CURRENT_SETTINGS),
+        { signal: controller.signal, priority: "high" },
+      );
+    } catch {
+      if (generation === editorPreviewGeneration) {
+        editorPreviewBusy = false;
+        editorPreviewNote =
+          "The Edit Preview request did not reach the service.";
+        renderEditor();
+      }
+      return;
+    }
+    if (generation !== editorPreviewGeneration || !editorOwnsPhoto(photoId))
+      return;
+    editorPreviewBusy = false;
+    if (response.status === 202) {
+      const body: unknown = await response.json().catch(() => undefined);
+      const state =
+        isRecord(body) && typeof body["state"] === "string"
+          ? body["state"]
+          : "queued";
+      editorPreviewNote =
+        state === "running"
+          ? "The Edit Preview is rendering. The presented image is older than the current settings."
+          : "The Edit Preview is waiting for processing capacity.";
+      if (editorPreviewUrl) editorPreviewStale = true;
+      renderEditor();
+      scheduleEditorPreviewFollowUp(photoId);
+      return;
+    }
+    if (!response.ok) {
+      editorPreviewNote = await describePreviewRefusal(response);
+      renderEditor();
+      return;
+    }
+    let image: Blob;
+    try {
+      image = await response.blob();
+    } catch {
+      editorPreviewNote =
+        "The Edit Preview could not be read. Request it again.";
+      renderEditor();
+      return;
+    }
+    if (generation !== editorPreviewGeneration || !editorOwnsPhoto(photoId))
+      return;
+    const refusal = previewRenditionRefusal(response, photoId, stage, image, {
+      sourceRevision: expectedSource,
+      recipeVersion: expectedRecipe ?? "",
+    });
+    if (refusal) {
+      editorPreviewNote = refusal;
+      renderEditor();
+      return;
+    }
+    if (editorPreviewUrl) URL.revokeObjectURL(editorPreviewUrl);
+    editorPreviewUrl = URL.createObjectURL(image);
+    editorPreviewStale = false;
+    const width = response.headers.get("slipstream-edit-preview-width") ?? "?";
+    const height =
+      response.headers.get("slipstream-edit-preview-height") ?? "?";
+    const transform =
+      response.headers.get("slipstream-edit-preview-display-transform") ?? "";
+    editorPreviewNote = `${stage === "film" ? "Film" : "Develop"} Edit Preview ${width}×${height} at the current settings${transform ? `, display transform ${transform}` : ""}.`;
+    if (!editorComparing) view.presentEditorPreview(editorPreviewUrl);
+    renderEditor();
+  };
+  /// The closed refusal set of an Edit Preview in the workspace's words. The
+  /// deployment's own limits are named as limits, and a code this client does
+  /// not know is disclosed as the service's own rather than explained away.
+  const describePreviewRefusal = async (
+    response: Response,
+  ): Promise<string> => {
+    const body: unknown = await response.json().catch(() => undefined);
+    const error = isRecord(body) ? body["error"] : undefined;
+    const code =
+      isRecord(error) && typeof error["code"] === "string" ? error["code"] : "";
+    const reason =
+      isRecord(error) &&
+      isRecord(error["details"]) &&
+      typeof error["details"]["reason"] === "string"
+        ? error["details"]["reason"]
+        : "";
+    if (code === "processing_unavailable") {
+      if (reason === "preview-render-admission-unavailable")
+        return "This deployment cannot admit preview renders yet, so no Edit Preview is presented. Editing, Export, and download still work.";
+      return "Processing is not available for this Photo right now, so no Edit Preview is presented.";
+    }
+    if (code === "resource_unavailable")
+      return "The deployment could not render the Edit Preview within its resource allowance. Request it again when the deployment has capacity.";
+    if (code === "unsupported_photo")
+      return "This Photo's source class is not supported for development, so no Edit Preview is presented.";
+    if (code === "unknown_photo")
+      return "This Photo is no longer in the Library, so no Edit Preview is presented.";
+    return code
+      ? `The service refused the Edit Preview: ${code}${reason ? ` (${reason})` : ""}.`
+      : `The Edit Preview request failed with HTTP ${response.status}.`;
+  };
+  const describeEditRefusal = async (
+    response: Response,
+    subject: string,
+  ): Promise<string> => {
+    const body: unknown = await response.json().catch(() => undefined);
+    const error = isRecord(body) ? body["error"] : undefined;
+    const code =
+      isRecord(error) && typeof error["code"] === "string"
+        ? error["code"]
+        : `HTTP ${response.status}`;
+    const reason =
+      isRecord(error) &&
+      isRecord(error["details"]) &&
+      typeof error["details"]["reason"] === "string"
+        ? ` (${error["details"]["reason"]})`
+        : "";
+    return `${subject} is unavailable: ${code}${reason}.`;
+  };
+
+  /// The bounded Export surface of one Photo: submit, inspect, cancel, retry,
+  /// and download. The Export captures the confirmed settings, so submission
+  /// settles this Photo's write stream first.
+  const loadEditorExports = async (photoId: string): Promise<void> => {
+    try {
+      const response = await fetcher(
+        `/api/photos/${encodeURIComponent(photoId)}/exports`,
+        { priority: "low" },
+      );
+      if (response.status !== 200) return;
+      const body: unknown = await response.json();
+      if (!isRecord(body) || !Array.isArray(body["exports"])) return;
+      const entries = body["exports"].filter(isRecord);
+      // The list is in retention order, newest first, so the Export the
+      // Photographer most recently submitted is the head of the list.
+      const latest = entries[0];
+      if (!latest || typeof latest["exportId"] !== "string") {
+        if (currentPhoto()?.id === photoId) renderEditor();
+        return;
+      }
+      await inspectEditorExport(photoId, latest["exportId"]);
+    } catch {
+      /* an absent Export list is no Export yet */
+    }
+  };
+  const inspectEditorExport = async (
+    photoId: string,
+    exportId: string,
+  ): Promise<void> => {
+    const controller = new AbortController();
+    editorExportAbort?.abort();
+    editorExportAbort = controller;
+    let response: Response;
+    try {
+      response = await fetcher(`/api/exports/${encodeURIComponent(exportId)}`, {
+        signal: controller.signal,
+        priority: "low",
+      });
+    } catch {
+      return;
+    }
+    if (response.status !== 200 || !editorOwnsPhoto(photoId)) return;
+    const inspection = parseExportInspection(
+      await response.json().catch(() => undefined),
+    );
+    if (!inspection || inspection.exportId !== exportId) return;
+    editorExportId = exportId;
+    editorExportState = inspection.state;
+    editorExportArtifact = inspection.artifact;
+    editorExportNote = describeExportState(inspection, formatByteCount);
+    if (currentPhoto()?.id === photoId) {
+      renderEditor();
+      scheduleEditorExportPoll(photoId);
+    }
+  };
+  const scheduleEditorExportPoll = (photoId: string): void => {
+    if (editorExportTimer !== undefined) clearTimeout(editorExportTimer);
+    if (editorExportState !== "queued" && editorExportState !== "running")
+      return;
+    editorExportTimer = window.setTimeout(() => {
+      editorExportTimer = undefined;
+      if (!applicationAlive || !editorOwnsPhoto(photoId)) return;
+      if (editorExportId) void inspectEditorExport(photoId, editorExportId);
+    }, 1500);
+  };
+  /// Settles this Photo's write stream before the Export captures settings:
+  /// an Export must never be submitted against settings the service has not
+  /// confirmed.
+  const settleEditorWrites = async (photoId: string): Promise<boolean> => {
+    for (;;) {
+      if (!applicationAlive || !editorOwnsPhoto(photoId)) return false;
+      const presented = editorSessions.get(photoId)?.presentation();
+      if (!presented) return false;
+      if (presented.conflict) return false;
+      if (!presented.saving && !presented.dirty) return true;
+      if (!presented.saving) return false;
+      await new Promise<void>((resolve) => editorWriteWaiters.push(resolve));
+    }
+  };
+  const submitEditorExport = async (photoId: string): Promise<void> => {
+    const session = editorSessions.get(photoId);
+    if (!session || editorExportState === "submitting") return;
+    editorExportState = "submitting";
+    editorExportNote = "Settling the saved settings before the Export…";
+    renderEditor();
+    // The ordering barrier commits the visible intent before it captures a
+    // revision: an Export is accepted against the settings the Photographer
+    // saw, never against older confirmed ones.
+    const captured = session.presentation();
+    if (!captured.conflict && captured.dirty && !captured.saving) {
+      const commit = session.commitCurrent();
+      renderEditor();
+      void placeEditorWrite(photoId, session, commit);
+    }
+    if (!(await settleEditorWrites(photoId))) {
+      editorExportState = "idle";
+      editorExportNote =
+        "The Export waits for the saved settings to be confirmed; resolve the conflict or retry the save first.";
+      renderEditor();
+      return;
+    }
+    const presented = session.presentation();
+    const source = session.facts()?.sourceRevision ?? null;
+    if (!presented.canEdit || !presented.processingAvailable || !source) {
+      editorExportState = "idle";
+      editorExportNote =
+        "This Photo cannot export a Development TIFF right now.";
+      renderEditor();
+      return;
+    }
+    const body = {
+      requestId: `web-export-${crypto.randomUUID().replaceAll("-", "").slice(0, 24)}`,
+      expectedRecipeVersion: presented.recipeVersion,
+      expectedSourceRevision: source,
+      target: "development-tiff",
+    };
+    // Later edits wait behind this submission, so they can never retarget the
+    // snapshot the service accepted.
+    const barrier = Promise.withResolvers<void>();
+    editorExportBarrier = barrier.promise;
+    releaseEditorExportBarrier = barrier.resolve;
+    let response: Response;
+    try {
+      response = await fetcher(
+        `/api/photos/${encodeURIComponent(photoId)}/exports`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+    } catch {
+      editorExportState = "failed";
+      editorExportNote = "The Export request did not reach the service.";
+      renderEditor();
+      return;
+    } finally {
+      const release = releaseEditorExportBarrier;
+      editorExportBarrier = undefined;
+      releaseEditorExportBarrier = undefined;
+      release?.();
+    }
+    if (response.status !== 201 && response.status !== 200) {
+      editorExportState = response.status === 409 ? "failed" : "idle";
+      editorExportNote = await describeEditRefusal(response, "The Export");
+      renderEditor();
+      return;
+    }
+    const accepted: unknown = await response.json().catch(() => undefined);
+    if (!isRecord(accepted) || typeof accepted["exportId"] !== "string") {
+      editorExportState = "failed";
+      editorExportNote = "The Export acceptance could not be read.";
+      renderEditor();
+      return;
+    }
+    editorExportId = accepted["exportId"];
+    editorExportState = "queued";
+    editorExportArtifact = null;
+    const receiptExpiresAt = accepted["receiptExpiresAt"];
+    editorExportNote =
+      typeof receiptExpiresAt === "string"
+        ? `Development TIFF queued; processing has not started. The receipt and its captured snapshot are retained until ${receiptExpiresAt}.`
+        : "Development TIFF queued; processing has not started.";
+    renderEditor();
+    scheduleEditorExportPoll(photoId);
+  };
+  const cancelEditorExport = async (photoId: string): Promise<void> => {
+    if (!editorExportId) return;
+    const exportId = editorExportId;
+    try {
+      const response = await fetcher(
+        `/api/exports/${encodeURIComponent(exportId)}/cancel`,
+        { method: "POST" },
+      );
+      if (response.status !== 200) {
+        editorExportNote = await describeEditRefusal(response, "Cancellation");
+        renderEditor();
+        return;
+      }
+      await inspectEditorExport(photoId, exportId);
+    } catch {
+      editorExportNote = "The cancellation did not reach the service.";
+      renderEditor();
+    }
+  };
+  const retryEditorExport = async (photoId: string): Promise<void> => {
+    if (!editorExportId) return;
+    const exportId = editorExportId;
+    try {
+      const response = await fetcher(
+        `/api/exports/${encodeURIComponent(exportId)}/retry`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            requestId: `web-export-retry-${crypto.randomUUID().replaceAll("-", "").slice(0, 20)}`,
+          }),
+        },
+      );
+      if (response.status !== 202) {
+        editorExportNote = await describeEditRefusal(response, "Retry");
+        renderEditor();
+        return;
+      }
+      editorExportState = "queued";
+      editorExportNote = "Development TIFF queued; processing has not started.";
+      renderEditor();
+      scheduleEditorExportPoll(photoId);
+    } catch {
+      editorExportNote = "The retry did not reach the service.";
+      renderEditor();
+    }
+  };
+  /// Downloads the retained artifact and validates it against the inspected
+  /// metadata field for field before the browser is offered the file.
+  const downloadEditorExport = async (photoId: string): Promise<void> => {
+    if (!editorExportId || !editorExportArtifact) return;
+    const exportId = editorExportId;
+    const expected = editorExportArtifact;
+    let response: Response;
+    try {
+      response = await fetcher(
+        `/api/exports/${encodeURIComponent(exportId)}/artifact`,
+        { priority: "high" },
+      );
+    } catch {
+      editorExportNote = "The download did not reach the service.";
+      renderEditor();
+      return;
+    }
+    if (response.status !== 200) {
+      editorExportNote = await describeEditRefusal(response, "The download");
+      renderEditor();
+      return;
+    }
+    if (!artifactMatchesHeaders(expected, response.headers)) {
+      editorExportNote =
+        "The downloaded artifact does not match the inspected Export; it was discarded.";
+      renderEditor();
+      return;
+    }
+    const image = await response.blob().catch(() => undefined);
+    if (!image) {
+      editorExportNote = "The artifact could not be read.";
+      renderEditor();
+      return;
+    }
+    const url = URL.createObjectURL(image);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `slipstream-development-${exportId}.tif`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    if (!editorOwnsPhoto(photoId)) return;
+    editorExportNote = `Downloaded ${formatByteCount(image.size)} of the Development TIFF.`;
+    renderEditor();
+  };
+  /// Rebinds the stored recipe to the currently observed source. It is the one
+  /// explicit reconciliation the workspace offers when the service reports the
+  /// saved recipe is bound to different content.
+  const rebindEditor = async (photoId: string): Promise<void> => {
+    const session = editorSessions.get(photoId);
+    const facts = session?.facts();
+    const presented = session?.presentation();
+    if (!session || !facts || !presented) return;
+    if (!presented.recipeVersion || !facts.sourceRevision) {
+      session.setStatus("There is no saved recipe to rebind for this Photo.");
+      renderEditor();
+      return;
+    }
+    const result = await rebindEditRecipe(
+      fetcher,
+      photoId,
+      presented.recipeVersion,
+      facts.sourceRevision,
+    );
+    if (!applicationAlive) return;
+    if (result.kind !== "saved") {
+      session.setStatus(
+        result.refusal.message ||
+          "The rebind was refused. Reload the recipe to read the current facts.",
+      );
+      renderEditor();
+      return;
+    }
+    await loadEditorFacts(photoId, "refresh");
+  };
+  /// Leaving Photo View releases the presented image but keeps each Photo's
+  /// session: a pending save still settles under its own identity, and the
+  /// local draft remains for a later visit.
+  const leaveEditor = (): void => {
+    editorPreviewAbort?.abort();
+    editorPreviewAbort = undefined;
+    editorPreviewGeneration += 1;
+    editorPreviewBusy = false;
+    if (editorExportTimer !== undefined) clearTimeout(editorExportTimer);
+    editorExportTimer = undefined;
+    editorExportAbort?.abort();
+    editorExportAbort = undefined;
+    clearEditorPreview();
+    editorComparing = false;
+    editorStage = "develop";
+    settleEditorWriters();
   };
   /// The open source's order is view state: the select shows the order the
   /// open snapshot was built with, and stays disabled while an open is
@@ -2731,6 +4533,7 @@ function mountPrivateLibraryBrowser(
   const leavePhotoView = () => {
     photoMetadataAbort?.abort();
     photoMetadataAbort = undefined;
+    leaveEditor();
     const authority = photoOwner.leave();
     const photoTransition = recoveryGate.beginTransition(
       "photo",
@@ -3929,6 +5732,84 @@ function mountPrivateLibraryBrowser(
   function handleViewIntent(intent: LibraryBrowserIntent): void {
     if (!applicationAlive) return;
     switch (intent.kind) {
+      // The Edit workspace owns one Photo at a time. Every editor intent
+      // re-checks the owner, so a gesture or response for a Photo the
+      // Photographer already left can never write or publish for it.
+      case "editor-open":
+        openEditor(intent.photoId);
+        return;
+      case "editor-refresh":
+        refreshEditor(intent.photoId);
+        return;
+      case "editor-exposure":
+        commitEditorExposure(intent.photoId, intent.exposureEv);
+        return;
+      case "editor-white-balance-mode":
+        commitEditorWhiteBalance(intent.photoId, {
+          kind: "mode",
+          mode: intent.mode,
+        });
+        return;
+      case "editor-temperature":
+        commitEditorWhiteBalance(intent.photoId, {
+          kind: "temperature",
+          temperatureKelvin: intent.temperatureKelvin,
+        });
+        return;
+      case "editor-tint":
+        commitEditorWhiteBalance(intent.photoId, {
+          kind: "tint",
+          tintMilli: intent.tintMilli,
+        });
+        return;
+      case "editor-undo":
+        stepEditorHistory(intent.photoId, "undo");
+        return;
+      case "editor-redo":
+        stepEditorHistory(intent.photoId, "redo");
+        return;
+      case "editor-reset":
+        stepEditorHistory(intent.photoId, "reset");
+        return;
+      case "editor-reset-exposure":
+        stepEditorHistory(intent.photoId, "resetExposure");
+        return;
+      case "editor-reset-white-balance":
+        stepEditorHistory(intent.photoId, "resetWhiteBalance");
+        return;
+      case "editor-preview":
+        void requestEditorPreview(intent.photoId);
+        return;
+      case "editor-stage":
+        applyEditorStage(intent.photoId, intent.stage);
+        return;
+      case "editor-compare":
+        setEditorComparison(intent.photoId, intent.pressed);
+        return;
+      case "editor-use-saved":
+        void useSavedRecipe(intent.photoId);
+        return;
+      case "editor-reapply":
+        reapplyLocalSettings(intent.photoId);
+        return;
+      case "editor-discard-draft":
+        discardEditorDraft(intent.photoId);
+        return;
+      case "editor-rebind":
+        void rebindEditor(intent.photoId);
+        return;
+      case "editor-export-submit":
+        void submitEditorExport(intent.photoId);
+        return;
+      case "editor-export-cancel":
+        void cancelEditorExport(intent.photoId);
+        return;
+      case "editor-export-retry":
+        void retryEditorExport(intent.photoId);
+        return;
+      case "editor-export-download":
+        void downloadEditorExport(intent.photoId);
+        return;
       case "summary-action": {
         const current = summaryAction;
         if (!current || current.presentationId !== intent.presentationId)

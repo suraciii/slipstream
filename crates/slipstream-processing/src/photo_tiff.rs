@@ -37,6 +37,12 @@ const IFD_ENTRIES_MAX: usize = 512;
 /// are as long as the image is tall. The bound stays far above any qualified
 /// geometry while keeping the parsed arrays small.
 const STRIP_ENTRIES_MAX: usize = 65_536;
+/// The qualified writer's strip padding. It writes each compressed strip with
+/// its own buffer, so a written strip can extend one byte past its declared
+/// `StripByteCounts` entry and the artifact can end a few bytes past the last
+/// declared strip. That padding is not payload: the consumer's decode gate is
+/// what proves the compressed strips inflate to the declared geometry.
+const STRIP_PADDING_MAX: u64 = 64;
 const HEAD_MAX: u64 = 1024 * 1024;
 
 struct Reader {
@@ -341,7 +347,7 @@ fn validate_for_icc(
         }
         previous_end = end;
     }
-    if previous_end != metadata.len() {
+    if metadata.len() - previous_end > STRIP_PADDING_MAX {
         // Unaccounted trailing payload is not the qualified artifact shape.
         return Err(ErrorCode::Uncertain);
     }
@@ -818,7 +824,9 @@ mod tests {
         strip_case(&path, Some(2), vec![746, 760], vec![24, 24], &body);
         assert!(validate(&path, 1 << 20).is_err());
 
-        // Unaccounted trailing payload is refused.
+        // The qualified writer pads its strip stream, so a short run of
+        // trailing padding stays the qualified artifact shape while a larger
+        // unaccounted tail is refused.
         let path = dir.join("trailing.tif");
         strip_case(
             &path,
@@ -827,9 +835,14 @@ mod tests {
             vec![48],
             &body,
         );
-        let mut trailing = std::fs::read(&path).unwrap();
-        trailing.push(0);
-        std::fs::write(&path, trailing).unwrap();
+        let complete = std::fs::read(&path).unwrap();
+        let mut padded = complete.clone();
+        padded.push(0);
+        std::fs::write(&path, &padded).unwrap();
+        assert!(accepts(&path));
+        let mut over = complete.clone();
+        over.extend_from_slice(&vec![0u8; 1 + STRIP_PADDING_MAX as usize]);
+        std::fs::write(&path, over).unwrap();
         assert!(validate(&path, 1 << 20).is_err());
 
         // Strip arrays must use SHORT or LONG elements.
