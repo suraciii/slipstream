@@ -21,14 +21,15 @@ export type BrowserServer = Readonly<{
 type BrowserServerOptions = Readonly<{
   base: string;
   root: string;
+  environment?: Readonly<Record<string, string | undefined>>;
 }>;
-
 const startupTimeoutMs = 60_000;
 const maxStartupAttempts = 3;
 
 export async function startBrowserServer({
   base,
   root,
+  environment: environmentOverride,
 }: BrowserServerOptions): Promise<BrowserServer> {
   const webRoot = resolve(process.env.SLIPSTREAM_WEB_ROOT ?? "apps/web/dist");
   const binary = resolve(
@@ -105,19 +106,28 @@ export async function startBrowserServer({
     if (!address || typeof address === "string")
       throw new Error("HTTPS proxy address unavailable");
     const url = `https://127.0.0.1:${address.port}`;
+    const childEnvironment: NodeJS.ProcessEnv = {
+      ...process.env,
+      SLIPSTREAM_PROCESSING_INSTANCE: undefined,
+      SLIPSTREAM_PROCESSING_POLICY_SHA256: undefined,
+      SLIPSTREAM_PROCESSING_BUNDLE_SHA256: undefined,
+      SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES: undefined,
+      ...environmentOverride,
+      SLIPSTREAM_LIBRARY_ROOT: root,
+      SLIPSTREAM_STATE_DIRECTORY: join(base, "state"),
+      SLIPSTREAM_DATABASE_BASENAME: "library.sqlite",
+      SLIPSTREAM_CACHE_DIRECTORY: join(base, "cache"),
+      SLIPSTREAM_WEB_ROOT: webRoot,
+      SLIPSTREAM_HOST: "127.0.0.1",
+      SLIPSTREAM_PORT: String(port),
+      SLIPSTREAM_PUBLIC_ORIGIN: url,
+    };
+    for (const [key, value] of Object.entries(childEnvironment)) {
+      if (value === undefined) delete childEnvironment[key];
+    }
     const child = spawn(binary, [], {
       cwd: process.cwd(),
-      env: {
-        ...process.env,
-        SLIPSTREAM_LIBRARY_ROOT: root,
-        SLIPSTREAM_STATE_DIRECTORY: join(base, "state"),
-        SLIPSTREAM_DATABASE_BASENAME: "library.sqlite",
-        SLIPSTREAM_CACHE_DIRECTORY: join(base, "cache"),
-        SLIPSTREAM_WEB_ROOT: webRoot,
-        SLIPSTREAM_HOST: "127.0.0.1",
-        SLIPSTREAM_PORT: String(port),
-        SLIPSTREAM_PUBLIC_ORIGIN: url,
-      },
+      env: childEnvironment,
       stdio: ["ignore", "pipe", "pipe"],
     });
     const errors: string[] = [];

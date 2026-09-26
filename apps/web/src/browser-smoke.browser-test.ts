@@ -6,13 +6,14 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   rm,
   stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { extname, join, resolve } from "node:path";
+import { extname, dirname, join, parse, resolve } from "node:path";
 
 import {
   expect,
@@ -30,6 +31,42 @@ import {
 } from "./browser-server.js";
 
 const sample = process.env.SLIPSTREAM_RAW_SAMPLE;
+/// The launcher instance of the deployment under test. The scenario below
+/// needs a host with an admitted launcher socket, so it stays skipped
+/// everywhere else, exactly as the RAW sample does.
+const processingInstance = process.env.SLIPSTREAM_PROCESSING_INSTANCE?.trim();
+const processingEnvironmentOverrides = {
+  SLIPSTREAM_PROCESSING_INSTANCE: processingInstance,
+  SLIPSTREAM_PROCESSING_POLICY_SHA256:
+    process.env.SLIPSTREAM_PROCESSING_POLICY_SHA256?.trim(),
+  SLIPSTREAM_PROCESSING_BUNDLE_SHA256:
+    process.env.SLIPSTREAM_PROCESSING_BUNDLE_SHA256?.trim(),
+  SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES:
+    process.env.SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES?.trim(),
+} as const;
+const noProcessingEnvironment = Object.fromEntries(
+  Object.keys(processingEnvironmentOverrides).map((name) => [name, undefined]),
+);
+const processingEnvironment = [
+  ["SLIPSTREAM_RAW_SAMPLE", sample],
+  ["SLIPSTREAM_PROCESSING_INSTANCE", processingInstance],
+  [
+    "SLIPSTREAM_PROCESSING_POLICY_SHA256",
+    processingEnvironmentOverrides.SLIPSTREAM_PROCESSING_POLICY_SHA256,
+  ],
+  [
+    "SLIPSTREAM_PROCESSING_BUNDLE_SHA256",
+    processingEnvironmentOverrides.SLIPSTREAM_PROCESSING_BUNDLE_SHA256,
+  ],
+  [
+    "SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES",
+    processingEnvironmentOverrides.SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES,
+  ],
+] as const;
+const missingProcessingEnvironment = () =>
+  processingEnvironment
+    .filter(([, value]) => !value || !value.trim())
+    .map(([name]) => name);
 const temporary: string[] = [];
 const servers: BrowserServer[] = [];
 const externals: Server[] = [];
@@ -151,8 +188,14 @@ async function writePhotos(root: string, count: number) {
   for (let index = 0; index < count; index += 1)
     await writeFile(join(root, `${String(index).padStart(3, "0")}.jpg`), data);
 }
-async function server(base: string, root: string) {
-  const running = await startBrowserServer({ base, root });
+async function server(
+  base: string,
+  root: string,
+  environment: Readonly<
+    Record<string, string | undefined>
+  > = noProcessingEnvironment,
+) {
+  const running = await startBrowserServer({ base, root, environment });
   servers.push(running);
   const login = await activeContext.request.post(
     `${running.url}/api/access/session`,
@@ -1193,6 +1236,208 @@ test("the Edit surface explains a deployment without processing and attempts no 
   expect(processing).toEqual([]);
 });
 
+/// The opt-in counterpart of the refusal above: a deployment with an admitted
+/// launcher carries one RAW Original through a real Photo Edit Recipe. The
+/// Photographer's own surface proves the saved exposure, the reopened recipe,
+/// the baseline comparison, and the downloaded Development TIFF, and the
+/// Original Files stay untouched.
+test("real-processing: autosaves an exposure, reopens it, compares the baseline, and downloads the Development TIFF", async ({
+  page,
+}) => {
+  const missingEnvironment = missingProcessingEnvironment();
+  test.skip(
+    missingEnvironment.length > 0,
+    `Set ${missingEnvironment.join(", ")} for the RAW processing smoke`,
+  );
+  const cameraSample = sample!;
+  // This scenario runs outside the RAW gate, which validates the sample for
+  // its own runs, so the explicit path is checked here and reported as a skip
+  // rather than as a read failure.
+  test.skip(
+    !(await readableRegularFile(cameraSample)),
+    `SLIPSTREAM_RAW_SAMPLE must identify a readable regular file: ${cameraSample}`,
+  );
+  // A cold development of a 61 MP Original takes about a minute, and the
+  // scenario renders twice: once as the comparison and once as the Export.
+  test.setTimeout(900_000);
+  const sourceBefore = await originalSnapshot(cameraSample);
+  const sourceSidecarPath = join(
+    dirname(cameraSample),
+    `${parse(cameraSample).name}.xmp`,
+  );
+  const sourceSidecarBefore = await optionalOriginalSnapshot(sourceSidecarPath);
+  const { base, root } = await fixture();
+  const raw = join(root, `camera${extname(cameraSample)}`);
+  await copyFile(cameraSample, raw);
+  const isolatedSidecarPath = join(root, "camera.xmp");
+  if (sourceSidecarBefore) {
+    await copyFile(sourceSidecarPath, isolatedSidecarPath);
+  } else {
+    await writeFile(
+      isolatedSidecarPath,
+      `<?xpacket begin="\uFEFF" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Slipstream browser smoke">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="3"/>
+  </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>
+`,
+    );
+  }
+  const copiedSidecarBefore = await originalSnapshot(isolatedSidecarPath);
+  const copiedBefore = await originalSnapshot(raw);
+  const running = await server(base, root, processingEnvironmentOverrides);
+  await startReview(page, running.url, "All Photos");
+  await openPhotoToolsView(page, "edit");
+  // The deployment admits this Photo: the capability is the launcher's, and
+  // the RAW Original is a supported source class.
+  await expect(page.locator("[data-photo-editor-processing]")).toHaveText(
+    "Available",
+    { timeout: 60_000 },
+  );
+  await expect(page.locator("[data-photo-editor-support]")).toHaveText(
+    "supported",
+  );
+  const exposure = page.locator("[data-photo-editor-exposure]");
+  await expect(exposure).toBeEnabled();
+  // One committed adjustment is one autosave. The value and its events are one
+  // gesture, so a render between them cannot clear the draft the change
+  // commits, and the service's own acknowledgement is the evidence: a 200
+  // whose body is not an acknowledgement leaves the local draft in place, and
+  // a reload could then present that draft instead of the saved recipe.
+  const saved = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/edit-recipe"),
+  );
+  await exposure.evaluate((element: HTMLInputElement) => {
+    element.value = "0.5";
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  const acknowledgement = await saved;
+  expect(acknowledgement.status()).toBe(200);
+  const committed = (await acknowledgement.json()) as {
+    outcome?: unknown;
+    recipeVersion?: unknown;
+    sourceRevision?: unknown;
+  };
+  expect(committed.outcome).toBe("saved");
+  expect(typeof committed.recipeVersion).toBe("string");
+  expect(typeof committed.sourceRevision).toBe("string");
+  await expect(page.locator("[data-photo-editor-exposure-value]")).toHaveText(
+    "0.500 EV",
+  );
+  // Reopening the Photo presents the saved recipe rather than a fresh one: the
+  // service's acknowledgement above is what the reopened recipe reflects.
+  await page.reload();
+  await openPhotoToolsView(page, "edit");
+  await expect(page.locator("[data-photo-editor-exposure-value]")).toHaveText(
+    "0.500 EV",
+  );
+  // A second client moves the saved recipe. Autosave stops with an explicit
+  // conflict instead of overwriting the other client's recipe, and the saved
+  // side the surface adopts is the service's, not this client's older copy.
+  const photoId = new URL(acknowledgement.url()).pathname.split("/")[3];
+  const secondClient = await post(
+    running.url,
+    `/api/photos/${photoId}/edit-recipe`,
+    {
+      requestId: "browser-smoke-second-client",
+      expectedRecipeVersion: committed.recipeVersion,
+      expectedSourceRevision: committed.sourceRevision,
+      settings: { exposureEv: 0.25, whiteBalance: { mode: "as-shot" } },
+    },
+  );
+  expect(secondClient.status).toBe(200);
+  await exposure.evaluate((element: HTMLInputElement) => {
+    element.value = "0.75";
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  const conflict = page.locator("[data-photo-editor-conflict]");
+  await expect(conflict).toBeVisible();
+  await expect(
+    page.locator("[data-photo-editor-conflict-message]"),
+  ).toContainText("The saved recipe changed elsewhere. Autosave stopped;");
+  await page.locator("[data-photo-editor-use-saved]").click();
+  await expect(conflict).toBeHidden();
+  await expect(page.locator("[data-photo-editor-exposure-value]")).toHaveText(
+    "0.250 EV",
+  );
+  // The baseline comparison develops the same Original without the saved
+  // exposure, so its own rendition is what the note and the image present. The
+  // workspace re-asks for a bounded window of its own, and a real 61 MP
+  // development outlives it, so the control is pressed again: each press asks
+  // for the same baseline identity, which the service serves from its retained
+  // rendition once that development has settled.
+  const previewNote = page.locator("[data-photo-editor-preview-note]");
+  const baseline =
+    /Develop baseline comparison \d+×\d+: the as-shot\/baseline development of this stage\./;
+  const compare = page.locator("[data-photo-editor-compare]");
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    if (baseline.test((await previewNote.textContent()) ?? "")) break;
+    // Off, then on: the press is what asks for the baseline rendition again.
+    if ((await compare.getAttribute("aria-pressed")) === "true") {
+      await compare.click();
+      await expect(compare).toHaveAttribute("aria-pressed", "false");
+    }
+    await compare.click();
+    await expect(compare).toHaveAttribute("aria-pressed", "true");
+    await page.waitForTimeout(20_000);
+  }
+  await expect(previewNote).toContainText(baseline);
+  await expect(compare).toHaveAttribute("aria-pressed", "true");
+  // The note alone could describe a rendition the surface never presented, so
+  // the comparison's own image is what the assertion ends on.
+  const comparison = page.locator("[data-photo-editor-preview-image]");
+  await expect(comparison).toBeVisible();
+  expect(
+    await comparison.evaluate(
+      (image: HTMLImageElement) => image.complete && image.naturalWidth > 0,
+    ),
+  ).toBe(true);
+  // The Export is the deployment's bounded work: the submission settles, and
+  // the retained artifact downloads as a TIFF.
+  await page.locator("[data-photo-editor-export-submit]").click();
+  await expect(page.locator("[data-photo-editor-export-state]")).toContainText(
+    /Development TIFF ready: [\d.]+ (?:B|KiB|MiB|GiB), \d+×\d+, downloadable until /,
+    { timeout: 300_000 },
+  );
+  const pending = page.waitForEvent("download");
+  await page.locator("[data-photo-editor-export-download]").click();
+  const artifact = await pending;
+  const artifactPath = await artifact.path();
+  expect(artifactPath).not.toBeNull();
+  const handle = await open(artifactPath, "r");
+  try {
+    const header = Buffer.alloc(4);
+    await handle.read(header, 0, header.byteLength, 0);
+    // Either byte order of the TIFF signature: `II*\0` or `MM\0*`.
+    expect([
+      header.equals(Buffer.from([0x49, 0x49, 0x2a, 0x00])),
+      header.equals(Buffer.from([0x4d, 0x4d, 0x00, 0x2a])),
+    ]).toContain(true);
+    const size = (await handle.stat()).size;
+    expect(size).toBeGreaterThan(1_000_000);
+  } finally {
+    await handle.close();
+  }
+  await expect(page.locator("[data-photo-editor-export-state]")).toContainText(
+    "Downloaded",
+  );
+  // Both Original Files are unchanged: neither the sample nor its copy moved.
+  expect(await originalSnapshot(cameraSample)).toEqual(sourceBefore);
+  expect(await originalSnapshot(raw)).toEqual(copiedBefore);
+  expect(await optionalOriginalSnapshot(sourceSidecarPath)).toEqual(
+    sourceSidecarBefore,
+  );
+  expect(await originalSnapshot(isolatedSidecarPath)).toEqual(
+    copiedSidecarBefore,
+  );
+});
+
 test("Photo View shows review capture metadata and explicit missing values", async ({
   page,
 }) => {
@@ -1613,6 +1858,39 @@ async function originalSnapshot(path: string): Promise<OriginalSnapshot> {
     group: metadata.gid,
     modifiedNanoseconds: metadata.mtimeNs,
   };
+}
+async function optionalOriginalSnapshot(
+  path: string,
+): Promise<OriginalSnapshot | null> {
+  try {
+    return await originalSnapshot(path);
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/// True when the explicit path is a readable regular file. The RAW gate
+/// validates the sample for its own runs; a scenario that runs outside the
+/// gate checks it here so an unusable path reports as a skip.
+async function readableRegularFile(path: string): Promise<boolean> {
+  try {
+    const handle = await open(path, "r");
+    try {
+      return (await handle.stat()).isFile();
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return false;
+  }
 }
 
 const filmstripIndices = (page: Page) =>
