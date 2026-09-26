@@ -295,6 +295,50 @@ After any post-publication reporting failure, the caller must inspect the named
 path. An automatic retry cannot overwrite it and must not choose a different
 path silently.
 
+## Standard Photo Metadata
+
+```text literal
+slipstream photos metadata PHOTO_ID
+slipstream photos metadata-save PHOTO_ID --input FILE
+```
+
+`metadata` reads one Photo's standard metadata without changing any Library
+decision or file. The result carries the association status, every supported
+field with its state, provenance, and typed value, the read-only capture
+facts, the Library Rating, the evidence a checked Save requires, and
+`saveAvailable` with an actionable reason when saving is unavailable. The
+effective field value uses the Sidecar when present, then embedded XMP, then
+the IPTC IIM counterpart; the underlying source values stay inspectable. An
+empty Sidecar value suppresses fallback. `FILE` for `metadata-save` is a
+UTF-8 JSON document; `-` reads it from stdin.
+
+The authoritative shapes are the shared vectors under
+`compatibility/metadata/`. A save document contains exactly `evidence` from a
+prior Read and a nonempty `changes` object with one patch per field:
+
+- `set` with the typed value. For language-alternative fields the value is a
+  language map.
+- `setLanguages` with a `languages` map whose null entries remove exactly
+  that alternative; unmentioned languages survive.
+- `clear` for a valid empty value and `remove` to delete the Sidecar
+  property.
+
+The CLI validates the document shape and that the evidence names the same
+Photo before any network access. The service owns field semantics: an
+unsupported field, an invalid patch, or stale evidence is refused before any
+change. Errors use the metadata code table with the same exit codes as HTTP
+status mapping: `invalid_input` and `unsupported_field` exit `2`;
+`photo_missing`, `original_unavailable`, `association_unresolved`, and
+`photo_removed` exit `3`; `evidence_stale` and `metadata_malformed` exit `4`;
+`save_unavailable` and `permission` exit `5`; `resource_limit` exits `6`;
+`storage_failure` and `outcome_unknown` exit `7`.
+
+`metadata-save` writes only the associated XMP Sidecar. A response lost after
+the request was admitted is `outcome_unknown`: the caller must re-read and
+decide, never retry the same save blindly. A success result carries the
+affected fields, the verified values, and fresh evidence for the next
+operation.
+
 ## Photo Decisions
 
 ```text literal
