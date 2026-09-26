@@ -1,0 +1,1911 @@
+[
+  {
+    "name": "eligible-sidecar-full-field-coverage-and-original-capture-facts",
+    "result": {
+      "photoId": "photo-1",
+      "originalLocation": "photos/IMG_0001.CR3",
+      "association": {
+        "state": "eligible",
+        "candidates": [
+          "photos/IMG_0001.xmp"
+        ]
+      },
+      "fields": {
+        "dc:title": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": {
+            "x-default": "Mountain dawn",
+            "en": "Mountain dawn",
+            "fr": "Aube en montagne"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": {
+                "x-default": "Mountain dawn",
+                "en": "Mountain dawn",
+                "fr": "Aube en montagne"
+              }
+            }
+          ]
+        },
+        "dc:description": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": {
+            "x-default": "Morning light",
+            "en": "Morning light"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": {
+                "x-default": "Morning light",
+                "en": "Morning light"
+              }
+            }
+          ]
+        },
+        "photoshop:Headline": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "Morning",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "Morning"
+            }
+          ]
+        },
+        "dc:subject": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": [
+            "mountains",
+            "dawn"
+          ],
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": [
+                "mountains",
+                "dawn"
+              ]
+            }
+          ]
+        },
+        "xmp:Label": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "Review",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "Review"
+            }
+          ]
+        },
+        "xmp:Rating": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": 2.5,
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": 2.5
+            }
+          ]
+        },
+        "dc:creator": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": [
+            "Alex Chen",
+            "Sam Lee"
+          ],
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": [
+                "Alex Chen",
+                "Sam Lee"
+              ]
+            }
+          ]
+        },
+        "photoshop:AuthorsPosition": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "Photographer",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "Photographer"
+            }
+          ]
+        },
+        "photoshop:Credit": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "Studio",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "Studio"
+            }
+          ]
+        },
+        "photoshop:Source": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "Assignment",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "Assignment"
+            }
+          ]
+        },
+        "dc:rights": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": {
+            "x-default": "Copyright Alex Chen",
+            "fr": "Droits reserves"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": {
+                "x-default": "Copyright Alex Chen",
+                "fr": "Droits reserves"
+              }
+            }
+          ]
+        },
+        "xmpRights:UsageTerms": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": {
+            "x-default": "Editorial use only"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": {
+                "x-default": "Editorial use only"
+              }
+            }
+          ]
+        },
+        "xmpRights:Marked": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": false,
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": false
+            }
+          ]
+        },
+        "xmpRights:WebStatement": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "https://example.com/rights",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "https://example.com/rights"
+            }
+          ]
+        }
+      },
+      "captureFacts": {
+        "dateTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:DateTimeOriginal",
+          "unit": "camera-local date/time",
+          "provenance": "original",
+          "writable": false,
+          "value": "2026:09:26 07:30:12"
+        },
+        "subSecTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:SubSecTimeOriginal",
+          "unit": "decimal seconds",
+          "provenance": "original",
+          "writable": false,
+          "value": "123"
+        },
+        "offsetTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:OffsetTimeOriginal",
+          "unit": "UTC offset",
+          "provenance": "original",
+          "writable": false,
+          "value": "+02:00"
+        },
+        "make": {
+          "state": "present",
+          "identifier": "tiff:Make",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "Canon"
+        },
+        "model": {
+          "state": "present",
+          "identifier": "tiff:Model",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "EOS R5"
+        },
+        "lensModel": {
+          "state": "present",
+          "identifier": "exifEX:LensModel",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "RF 24-70mm F2.8 L IS USM"
+        },
+        "width": {
+          "state": "present",
+          "identifier": "exif:PixelXDimension",
+          "unit": "pixels",
+          "provenance": "original",
+          "writable": false,
+          "value": 8192
+        },
+        "height": {
+          "state": "present",
+          "identifier": "exif:PixelYDimension",
+          "unit": "pixels",
+          "provenance": "original",
+          "writable": false,
+          "value": 5464
+        },
+        "orientation": {
+          "state": "present",
+          "identifier": "tiff:Orientation",
+          "unit": "EXIF orientation",
+          "provenance": "original",
+          "writable": false,
+          "value": 1
+        },
+        "exposureTime": {
+          "state": "present",
+          "identifier": "exif:ExposureTime",
+          "unit": "seconds",
+          "provenance": "original",
+          "writable": false,
+          "value": 0.008
+        },
+        "aperture": {
+          "state": "present",
+          "identifier": "exif:FNumber",
+          "unit": "f-number",
+          "provenance": "original",
+          "writable": false,
+          "value": 2.8
+        },
+        "iso": {
+          "state": "present",
+          "identifier": "exif:ISOSpeedRatings",
+          "unit": "ISO",
+          "provenance": "original",
+          "writable": false,
+          "value": 400
+        },
+        "focalLength": {
+          "state": "present",
+          "identifier": "exif:FocalLength",
+          "unit": "millimetres",
+          "provenance": "original",
+          "writable": false,
+          "value": 35
+        }
+      },
+      "libraryRating": 4,
+      "evidence": {
+        "photoId": "photo-1",
+        "originalLocation": "photos/IMG_0001.CR3",
+        "original": {
+          "device": 2049,
+          "inode": 42,
+          "size": 24000000,
+          "modifiedSeconds": 1790409600,
+          "modifiedNanoseconds": 123456789
+        },
+        "sidecar": {
+          "state": "present",
+          "location": "photos/IMG_0001.xmp",
+          "facts": {
+            "device": 2049,
+            "inode": 43,
+            "size": 2048,
+            "modifiedSeconds": 1790409600,
+            "modifiedNanoseconds": 123456789
+          },
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "associationGeneration": 7,
+        "instanceEpoch": "8e8c8e92-61b1-48d0-a97f-43891664c110"
+      },
+      "saveAvailable": true
+    }
+  },
+  {
+    "name": "absent-sidecar-with-embedded-fallback-and-inferred-unrated",
+    "result": {
+      "photoId": "photo-1",
+      "originalLocation": "photos/IMG_0001.CR3",
+      "association": {
+        "state": "eligible",
+        "candidates": []
+      },
+      "fields": {
+        "dc:title": {
+          "state": "present",
+          "writable": true,
+          "provenance": "embedded-xmp",
+          "value": {
+            "x-default": "Embedded title"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "embedded-xmp",
+              "value": {
+                "x-default": "Embedded title"
+              }
+            }
+          ]
+        },
+        "dc:description": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "photoshop:Headline": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "dc:subject": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "xmp:Label": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "xmp:Rating": {
+          "state": "absent",
+          "writable": true,
+          "sources": [],
+          "inferredValue": 0
+        },
+        "dc:creator": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "photoshop:AuthorsPosition": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "photoshop:Credit": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "photoshop:Source": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "dc:rights": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "xmpRights:UsageTerms": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "xmpRights:Marked": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "xmpRights:WebStatement": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        }
+      },
+      "captureFacts": {
+        "dateTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:DateTimeOriginal",
+          "unit": "camera-local date/time",
+          "provenance": "original",
+          "writable": false,
+          "value": "2026:09:26 07:30:12"
+        },
+        "subSecTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:SubSecTimeOriginal",
+          "unit": "decimal seconds",
+          "provenance": "original",
+          "writable": false,
+          "value": "123"
+        },
+        "offsetTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:OffsetTimeOriginal",
+          "unit": "UTC offset",
+          "provenance": "original",
+          "writable": false,
+          "value": "+02:00"
+        },
+        "make": {
+          "state": "present",
+          "identifier": "tiff:Make",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "Canon"
+        },
+        "model": {
+          "state": "present",
+          "identifier": "tiff:Model",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "EOS R5"
+        },
+        "lensModel": {
+          "state": "present",
+          "identifier": "exifEX:LensModel",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "RF 24-70mm F2.8 L IS USM"
+        },
+        "width": {
+          "state": "present",
+          "identifier": "exif:PixelXDimension",
+          "unit": "pixels",
+          "provenance": "original",
+          "writable": false,
+          "value": 8192
+        },
+        "height": {
+          "state": "present",
+          "identifier": "exif:PixelYDimension",
+          "unit": "pixels",
+          "provenance": "original",
+          "writable": false,
+          "value": 5464
+        },
+        "orientation": {
+          "state": "present",
+          "identifier": "tiff:Orientation",
+          "unit": "EXIF orientation",
+          "provenance": "original",
+          "writable": false,
+          "value": 1
+        },
+        "exposureTime": {
+          "state": "present",
+          "identifier": "exif:ExposureTime",
+          "unit": "seconds",
+          "provenance": "original",
+          "writable": false,
+          "value": 0.008
+        },
+        "aperture": {
+          "state": "present",
+          "identifier": "exif:FNumber",
+          "unit": "f-number",
+          "provenance": "original",
+          "writable": false,
+          "value": 2.8
+        },
+        "iso": {
+          "state": "present",
+          "identifier": "exif:ISOSpeedRatings",
+          "unit": "ISO",
+          "provenance": "original",
+          "writable": false,
+          "value": 400
+        },
+        "focalLength": {
+          "state": "present",
+          "identifier": "exif:FocalLength",
+          "unit": "millimetres",
+          "provenance": "original",
+          "writable": false,
+          "value": 35
+        }
+      },
+      "libraryRating": 4,
+      "evidence": {
+        "photoId": "photo-1",
+        "originalLocation": "photos/IMG_0001.CR3",
+        "original": {
+          "device": 2049,
+          "inode": 42,
+          "size": 24000000,
+          "modifiedSeconds": 1790409600,
+          "modifiedNanoseconds": 123456789
+        },
+        "sidecar": {
+          "state": "absent"
+        },
+        "associationGeneration": 7,
+        "instanceEpoch": "8e8c8e92-61b1-48d0-a97f-43891664c110"
+      },
+      "saveAvailable": true
+    }
+  },
+  {
+    "name": "duplicate-xmp-case-variants-ambiguous",
+    "result": {
+      "photoId": "photo-1",
+      "originalLocation": "photos/IMG_0001.CR3",
+      "association": {
+        "state": "ambiguous",
+        "candidates": [
+          "photos/IMG_0001.xmp",
+          "photos/IMG_0001.XMP"
+        ],
+        "reason": "Multiple candidate Sidecars"
+      },
+      "fields": {
+        "dc:title": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": {
+            "x-default": "Mountain dawn",
+            "en": "Mountain dawn",
+            "fr": "Aube en montagne"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": {
+                "x-default": "Mountain dawn",
+                "en": "Mountain dawn",
+                "fr": "Aube en montagne"
+              }
+            }
+          ]
+        },
+        "dc:description": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": {
+            "x-default": "Morning light",
+            "en": "Morning light"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": {
+                "x-default": "Morning light",
+                "en": "Morning light"
+              }
+            }
+          ]
+        },
+        "photoshop:Headline": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "Morning",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "Morning"
+            }
+          ]
+        },
+        "dc:subject": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": [
+            "mountains",
+            "dawn"
+          ],
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": [
+                "mountains",
+                "dawn"
+              ]
+            }
+          ]
+        },
+        "xmp:Label": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "Review",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "Review"
+            }
+          ]
+        },
+        "xmp:Rating": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": 2.5,
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": 2.5
+            }
+          ]
+        },
+        "dc:creator": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": [
+            "Alex Chen",
+            "Sam Lee"
+          ],
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": [
+                "Alex Chen",
+                "Sam Lee"
+              ]
+            }
+          ]
+        },
+        "photoshop:AuthorsPosition": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "Photographer",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "Photographer"
+            }
+          ]
+        },
+        "photoshop:Credit": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "Studio",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "Studio"
+            }
+          ]
+        },
+        "photoshop:Source": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "Assignment",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "Assignment"
+            }
+          ]
+        },
+        "dc:rights": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": {
+            "x-default": "Copyright Alex Chen",
+            "fr": "Droits reserves"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": {
+                "x-default": "Copyright Alex Chen",
+                "fr": "Droits reserves"
+              }
+            }
+          ]
+        },
+        "xmpRights:UsageTerms": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": {
+            "x-default": "Editorial use only"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": {
+                "x-default": "Editorial use only"
+              }
+            }
+          ]
+        },
+        "xmpRights:Marked": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": false,
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": false
+            }
+          ]
+        },
+        "xmpRights:WebStatement": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "https://example.com/rights",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "https://example.com/rights"
+            }
+          ]
+        }
+      },
+      "captureFacts": {
+        "dateTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:DateTimeOriginal",
+          "unit": "camera-local date/time",
+          "provenance": "original",
+          "writable": false,
+          "value": "2026:09:26 07:30:12"
+        },
+        "subSecTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:SubSecTimeOriginal",
+          "unit": "decimal seconds",
+          "provenance": "original",
+          "writable": false,
+          "value": "123"
+        },
+        "offsetTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:OffsetTimeOriginal",
+          "unit": "UTC offset",
+          "provenance": "original",
+          "writable": false,
+          "value": "+02:00"
+        },
+        "make": {
+          "state": "present",
+          "identifier": "tiff:Make",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "Canon"
+        },
+        "model": {
+          "state": "present",
+          "identifier": "tiff:Model",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "EOS R5"
+        },
+        "lensModel": {
+          "state": "present",
+          "identifier": "exifEX:LensModel",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "RF 24-70mm F2.8 L IS USM"
+        },
+        "width": {
+          "state": "present",
+          "identifier": "exif:PixelXDimension",
+          "unit": "pixels",
+          "provenance": "original",
+          "writable": false,
+          "value": 8192
+        },
+        "height": {
+          "state": "present",
+          "identifier": "exif:PixelYDimension",
+          "unit": "pixels",
+          "provenance": "original",
+          "writable": false,
+          "value": 5464
+        },
+        "orientation": {
+          "state": "present",
+          "identifier": "tiff:Orientation",
+          "unit": "EXIF orientation",
+          "provenance": "original",
+          "writable": false,
+          "value": 1
+        },
+        "exposureTime": {
+          "state": "present",
+          "identifier": "exif:ExposureTime",
+          "unit": "seconds",
+          "provenance": "original",
+          "writable": false,
+          "value": 0.008
+        },
+        "aperture": {
+          "state": "present",
+          "identifier": "exif:FNumber",
+          "unit": "f-number",
+          "provenance": "original",
+          "writable": false,
+          "value": 2.8
+        },
+        "iso": {
+          "state": "present",
+          "identifier": "exif:ISOSpeedRatings",
+          "unit": "ISO",
+          "provenance": "original",
+          "writable": false,
+          "value": 400
+        },
+        "focalLength": {
+          "state": "present",
+          "identifier": "exif:FocalLength",
+          "unit": "millimetres",
+          "provenance": "original",
+          "writable": false,
+          "value": 35
+        }
+      },
+      "libraryRating": 4,
+      "evidence": {
+        "photoId": "photo-1",
+        "originalLocation": "photos/IMG_0001.CR3",
+        "original": {
+          "device": 2049,
+          "inode": 42,
+          "size": 24000000,
+          "modifiedSeconds": 1790409600,
+          "modifiedNanoseconds": 123456789
+        },
+        "sidecar": {
+          "state": "present",
+          "location": "photos/IMG_0001.xmp",
+          "facts": {
+            "device": 2049,
+            "inode": 43,
+            "size": 2048,
+            "modifiedSeconds": 1790409600,
+            "modifiedNanoseconds": 123456789
+          },
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "associationGeneration": 7,
+        "instanceEpoch": "8e8c8e92-61b1-48d0-a97f-43891664c110"
+      },
+      "saveAvailable": false,
+      "saveUnavailableReason": "Ambiguous Sidecar association"
+    }
+  },
+  {
+    "name": "retained-orphan-association-unresolved",
+    "result": {
+      "photoId": "photo-1",
+      "originalLocation": "photos/IMG_0001.CR3",
+      "association": {
+        "state": "unresolved",
+        "candidates": [
+          "photos/IMG_0001.xmp"
+        ],
+        "reason": "retained-orphan"
+      },
+      "fields": {
+        "dc:title": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": {
+            "x-default": "Mountain dawn",
+            "en": "Mountain dawn",
+            "fr": "Aube en montagne"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": {
+                "x-default": "Mountain dawn",
+                "en": "Mountain dawn",
+                "fr": "Aube en montagne"
+              }
+            }
+          ]
+        },
+        "dc:description": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": {
+            "x-default": "Morning light",
+            "en": "Morning light"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": {
+                "x-default": "Morning light",
+                "en": "Morning light"
+              }
+            }
+          ]
+        },
+        "photoshop:Headline": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "Morning",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "Morning"
+            }
+          ]
+        },
+        "dc:subject": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": [
+            "mountains",
+            "dawn"
+          ],
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": [
+                "mountains",
+                "dawn"
+              ]
+            }
+          ]
+        },
+        "xmp:Label": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "Review",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "Review"
+            }
+          ]
+        },
+        "xmp:Rating": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": 2.5,
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": 2.5
+            }
+          ]
+        },
+        "dc:creator": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": [
+            "Alex Chen",
+            "Sam Lee"
+          ],
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": [
+                "Alex Chen",
+                "Sam Lee"
+              ]
+            }
+          ]
+        },
+        "photoshop:AuthorsPosition": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "Photographer",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "Photographer"
+            }
+          ]
+        },
+        "photoshop:Credit": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "Studio",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "Studio"
+            }
+          ]
+        },
+        "photoshop:Source": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "Assignment",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "Assignment"
+            }
+          ]
+        },
+        "dc:rights": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": {
+            "x-default": "Copyright Alex Chen",
+            "fr": "Droits reserves"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": {
+                "x-default": "Copyright Alex Chen",
+                "fr": "Droits reserves"
+              }
+            }
+          ]
+        },
+        "xmpRights:UsageTerms": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": {
+            "x-default": "Editorial use only"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": {
+                "x-default": "Editorial use only"
+              }
+            }
+          ]
+        },
+        "xmpRights:Marked": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": false,
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": false
+            }
+          ]
+        },
+        "xmpRights:WebStatement": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "https://example.com/rights",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "https://example.com/rights"
+            }
+          ]
+        }
+      },
+      "captureFacts": {
+        "dateTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:DateTimeOriginal",
+          "unit": "camera-local date/time",
+          "provenance": "original",
+          "writable": false,
+          "value": "2026:09:26 07:30:12"
+        },
+        "subSecTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:SubSecTimeOriginal",
+          "unit": "decimal seconds",
+          "provenance": "original",
+          "writable": false,
+          "value": "123"
+        },
+        "offsetTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:OffsetTimeOriginal",
+          "unit": "UTC offset",
+          "provenance": "original",
+          "writable": false,
+          "value": "+02:00"
+        },
+        "make": {
+          "state": "present",
+          "identifier": "tiff:Make",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "Canon"
+        },
+        "model": {
+          "state": "present",
+          "identifier": "tiff:Model",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "EOS R5"
+        },
+        "lensModel": {
+          "state": "present",
+          "identifier": "exifEX:LensModel",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "RF 24-70mm F2.8 L IS USM"
+        },
+        "width": {
+          "state": "present",
+          "identifier": "exif:PixelXDimension",
+          "unit": "pixels",
+          "provenance": "original",
+          "writable": false,
+          "value": 8192
+        },
+        "height": {
+          "state": "present",
+          "identifier": "exif:PixelYDimension",
+          "unit": "pixels",
+          "provenance": "original",
+          "writable": false,
+          "value": 5464
+        },
+        "orientation": {
+          "state": "present",
+          "identifier": "tiff:Orientation",
+          "unit": "EXIF orientation",
+          "provenance": "original",
+          "writable": false,
+          "value": 1
+        },
+        "exposureTime": {
+          "state": "present",
+          "identifier": "exif:ExposureTime",
+          "unit": "seconds",
+          "provenance": "original",
+          "writable": false,
+          "value": 0.008
+        },
+        "aperture": {
+          "state": "present",
+          "identifier": "exif:FNumber",
+          "unit": "f-number",
+          "provenance": "original",
+          "writable": false,
+          "value": 2.8
+        },
+        "iso": {
+          "state": "present",
+          "identifier": "exif:ISOSpeedRatings",
+          "unit": "ISO",
+          "provenance": "original",
+          "writable": false,
+          "value": 400
+        },
+        "focalLength": {
+          "state": "present",
+          "identifier": "exif:FocalLength",
+          "unit": "millimetres",
+          "provenance": "original",
+          "writable": false,
+          "value": 35
+        }
+      },
+      "libraryRating": 4,
+      "evidence": {
+        "photoId": "photo-1",
+        "originalLocation": "photos/IMG_0001.CR3",
+        "original": {
+          "device": 2049,
+          "inode": 42,
+          "size": 24000000,
+          "modifiedSeconds": 1790409600,
+          "modifiedNanoseconds": 123456789
+        },
+        "sidecar": {
+          "state": "present",
+          "location": "photos/IMG_0001.xmp",
+          "facts": {
+            "device": 2049,
+            "inode": 43,
+            "size": 2048,
+            "modifiedSeconds": 1790409600,
+            "modifiedNanoseconds": 123456789
+          },
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "associationGeneration": 7,
+        "instanceEpoch": "8e8c8e92-61b1-48d0-a97f-43891664c110"
+      },
+      "saveAvailable": false,
+      "saveUnavailableReason": "Retained Sidecar owner was removed or relocated"
+    }
+  },
+  {
+    "name": "jpeg-with-raw-sibling-reads-embedded-only",
+    "result": {
+      "photoId": "photo-1",
+      "originalLocation": "photos/IMG_0001.JPG",
+      "association": {
+        "state": "ineligible",
+        "candidates": [],
+        "reason": "Same-basename RAW owns the Sidecar"
+      },
+      "fields": {
+        "dc:title": {
+          "state": "present",
+          "writable": true,
+          "provenance": "embedded-xmp",
+          "value": {
+            "x-default": "JPEG embedded title"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "embedded-xmp",
+              "value": {
+                "x-default": "JPEG embedded title"
+              }
+            }
+          ]
+        },
+        "dc:description": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "photoshop:Headline": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "dc:subject": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "xmp:Label": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "xmp:Rating": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "dc:creator": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "photoshop:AuthorsPosition": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "photoshop:Credit": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "photoshop:Source": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "dc:rights": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "xmpRights:UsageTerms": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "xmpRights:Marked": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "xmpRights:WebStatement": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        }
+      },
+      "captureFacts": {
+        "dateTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:DateTimeOriginal",
+          "unit": "camera-local date/time",
+          "provenance": "original",
+          "writable": false,
+          "value": "2026:09:26 07:30:12"
+        },
+        "subSecTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:SubSecTimeOriginal",
+          "unit": "decimal seconds",
+          "provenance": "original",
+          "writable": false,
+          "value": "123"
+        },
+        "offsetTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:OffsetTimeOriginal",
+          "unit": "UTC offset",
+          "provenance": "original",
+          "writable": false,
+          "value": "+02:00"
+        },
+        "make": {
+          "state": "present",
+          "identifier": "tiff:Make",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "Canon"
+        },
+        "model": {
+          "state": "present",
+          "identifier": "tiff:Model",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "EOS R5"
+        },
+        "lensModel": {
+          "state": "present",
+          "identifier": "exifEX:LensModel",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "RF 24-70mm F2.8 L IS USM"
+        },
+        "width": {
+          "state": "present",
+          "identifier": "exif:PixelXDimension",
+          "unit": "pixels",
+          "provenance": "original",
+          "writable": false,
+          "value": 8192
+        },
+        "height": {
+          "state": "present",
+          "identifier": "exif:PixelYDimension",
+          "unit": "pixels",
+          "provenance": "original",
+          "writable": false,
+          "value": 5464
+        },
+        "orientation": {
+          "state": "present",
+          "identifier": "tiff:Orientation",
+          "unit": "EXIF orientation",
+          "provenance": "original",
+          "writable": false,
+          "value": 1
+        },
+        "exposureTime": {
+          "state": "present",
+          "identifier": "exif:ExposureTime",
+          "unit": "seconds",
+          "provenance": "original",
+          "writable": false,
+          "value": 0.008
+        },
+        "aperture": {
+          "state": "present",
+          "identifier": "exif:FNumber",
+          "unit": "f-number",
+          "provenance": "original",
+          "writable": false,
+          "value": 2.8
+        },
+        "iso": {
+          "state": "present",
+          "identifier": "exif:ISOSpeedRatings",
+          "unit": "ISO",
+          "provenance": "original",
+          "writable": false,
+          "value": 400
+        },
+        "focalLength": {
+          "state": "present",
+          "identifier": "exif:FocalLength",
+          "unit": "millimetres",
+          "provenance": "original",
+          "writable": false,
+          "value": 35
+        }
+      },
+      "libraryRating": 4,
+      "evidence": {
+        "photoId": "photo-1",
+        "originalLocation": "photos/IMG_0001.JPG",
+        "original": {
+          "device": 2049,
+          "inode": 42,
+          "size": 24000000,
+          "modifiedSeconds": 1790409600,
+          "modifiedNanoseconds": 123456789
+        },
+        "sidecar": {
+          "state": "absent"
+        },
+        "associationGeneration": 7,
+        "instanceEpoch": "8e8c8e92-61b1-48d0-a97f-43891664c110"
+      },
+      "saveAvailable": false,
+      "saveUnavailableReason": "JPEG has a same-basename RAW sibling"
+    }
+  },
+  {
+    "name": "empty-suppresses-fallback-invalid-does-not-fall-back-and-field-failures",
+    "result": {
+      "photoId": "photo-1",
+      "originalLocation": "photos/IMG_0001.CR3",
+      "association": {
+        "state": "eligible",
+        "candidates": [
+          "photos/IMG_0001.xmp"
+        ]
+      },
+      "fields": {
+        "dc:title": {
+          "state": "invalid",
+          "writable": true,
+          "provenance": "sidecar",
+          "problem": "Language alternative has duplicate language",
+          "sources": [
+            {
+              "state": "invalid",
+              "provenance": "sidecar",
+              "problem": "Duplicate en alternative"
+            },
+            {
+              "state": "present",
+              "provenance": "embedded-xmp",
+              "value": {
+                "x-default": "Valid embedded title"
+              }
+            }
+          ]
+        },
+        "dc:description": {
+          "state": "present",
+          "writable": true,
+          "provenance": "iptc-iim",
+          "value": "IIM caption",
+          "sources": [
+            {
+              "state": "absent",
+              "provenance": "sidecar"
+            },
+            {
+              "state": "absent",
+              "provenance": "embedded-xmp"
+            },
+            {
+              "state": "present",
+              "provenance": "iptc-iim",
+              "value": "IIM caption",
+              "languageAlternativesAvailable": false
+            }
+          ]
+        },
+        "photoshop:Headline": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": ""
+            },
+            {
+              "state": "present",
+              "provenance": "embedded-xmp",
+              "value": "Embedded headline"
+            },
+            {
+              "state": "present",
+              "provenance": "iptc-iim",
+              "value": "IIM headline",
+              "languageAlternativesAvailable": false
+            }
+          ]
+        },
+        "dc:subject": {
+          "state": "resource_limit",
+          "writable": true,
+          "provenance": "sidecar",
+          "problem": "Too many keyword items",
+          "sources": [
+            {
+              "state": "resource_limit",
+              "provenance": "sidecar",
+              "problem": "Too many keyword items"
+            }
+          ]
+        },
+        "xmp:Label": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "Review",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "Review"
+            }
+          ]
+        },
+        "xmp:Rating": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": 2.5,
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": 2.5
+            }
+          ]
+        },
+        "dc:creator": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": [
+            "Alex Chen",
+            "Sam Lee"
+          ],
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": [
+                "Alex Chen",
+                "Sam Lee"
+              ]
+            }
+          ]
+        },
+        "photoshop:AuthorsPosition": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "Photographer",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "Photographer"
+            }
+          ]
+        },
+        "photoshop:Credit": {
+          "state": "unavailable",
+          "writable": true,
+          "provenance": "embedded-xmp",
+          "problem": "Embedded packet could not be read",
+          "sources": [
+            {
+              "state": "unavailable",
+              "provenance": "embedded-xmp",
+              "problem": "Embedded packet could not be read"
+            }
+          ]
+        },
+        "photoshop:Source": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "dc:rights": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": {
+            "x-default": "Copyright Alex Chen",
+            "fr": "Droits reserves"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": {
+                "x-default": "Copyright Alex Chen",
+                "fr": "Droits reserves"
+              }
+            }
+          ]
+        },
+        "xmpRights:UsageTerms": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": {
+            "x-default": "Editorial use only"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": {
+                "x-default": "Editorial use only"
+              }
+            }
+          ]
+        },
+        "xmpRights:Marked": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": false,
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": false
+            }
+          ]
+        },
+        "xmpRights:WebStatement": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "https://example.com/rights",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "https://example.com/rights"
+            }
+          ]
+        }
+      },
+      "captureFacts": {
+        "dateTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:DateTimeOriginal",
+          "unit": "camera-local date/time",
+          "provenance": "original",
+          "writable": false,
+          "value": "2026:09:26 07:30:12"
+        },
+        "subSecTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:SubSecTimeOriginal",
+          "unit": "decimal seconds",
+          "provenance": "original",
+          "writable": false,
+          "value": "123"
+        },
+        "offsetTimeOriginal": {
+          "state": "present",
+          "identifier": "exif:OffsetTimeOriginal",
+          "unit": "UTC offset",
+          "provenance": "original",
+          "writable": false,
+          "value": "+02:00"
+        },
+        "make": {
+          "state": "present",
+          "identifier": "tiff:Make",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "Canon"
+        },
+        "model": {
+          "state": "present",
+          "identifier": "tiff:Model",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "EOS R5"
+        },
+        "lensModel": {
+          "state": "present",
+          "identifier": "exifEX:LensModel",
+          "unit": "text",
+          "provenance": "original",
+          "writable": false,
+          "value": "RF 24-70mm F2.8 L IS USM"
+        },
+        "width": {
+          "state": "present",
+          "identifier": "exif:PixelXDimension",
+          "unit": "pixels",
+          "provenance": "original",
+          "writable": false,
+          "value": 8192
+        },
+        "height": {
+          "state": "present",
+          "identifier": "exif:PixelYDimension",
+          "unit": "pixels",
+          "provenance": "original",
+          "writable": false,
+          "value": 5464
+        },
+        "orientation": {
+          "state": "present",
+          "identifier": "tiff:Orientation",
+          "unit": "EXIF orientation",
+          "provenance": "original",
+          "writable": false,
+          "value": 1
+        },
+        "exposureTime": {
+          "state": "present",
+          "identifier": "exif:ExposureTime",
+          "unit": "seconds",
+          "provenance": "original",
+          "writable": false,
+          "value": 0.008
+        },
+        "aperture": {
+          "state": "present",
+          "identifier": "exif:FNumber",
+          "unit": "f-number",
+          "provenance": "original",
+          "writable": false,
+          "value": 2.8
+        },
+        "iso": {
+          "state": "present",
+          "identifier": "exif:ISOSpeedRatings",
+          "unit": "ISO",
+          "provenance": "original",
+          "writable": false,
+          "value": 400
+        },
+        "focalLength": {
+          "state": "present",
+          "identifier": "exif:FocalLength",
+          "unit": "millimetres",
+          "provenance": "original",
+          "writable": false,
+          "value": 35
+        }
+      },
+      "libraryRating": 4,
+      "evidence": {
+        "photoId": "photo-1",
+        "originalLocation": "photos/IMG_0001.CR3",
+        "original": {
+          "device": 2049,
+          "inode": 42,
+          "size": 24000000,
+          "modifiedSeconds": 1790409600,
+          "modifiedNanoseconds": 123456789
+        },
+        "sidecar": {
+          "state": "present",
+          "location": "photos/IMG_0001.xmp",
+          "facts": {
+            "device": 2049,
+            "inode": 43,
+            "size": 2048,
+            "modifiedSeconds": 1790409600,
+            "modifiedNanoseconds": 123456789
+          },
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "associationGeneration": 7,
+        "instanceEpoch": "8e8c8e92-61b1-48d0-a97f-43891664c110"
+      },
+      "saveAvailable": true
+    }
+  }
+]

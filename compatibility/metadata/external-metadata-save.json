@@ -1,0 +1,485 @@
+[
+  {
+    "name": "full-explicit-patch-request",
+    "kind": "request",
+    "request": {
+      "evidence": {
+        "photoId": "photo-1",
+        "originalLocation": "photos/IMG_0001.CR3",
+        "original": {
+          "device": 2049,
+          "inode": 42,
+          "size": 24000000,
+          "modifiedSeconds": 1790409600,
+          "modifiedNanoseconds": 123456789
+        },
+        "sidecar": {
+          "state": "present",
+          "location": "photos/IMG_0001.xmp",
+          "facts": {
+            "device": 2049,
+            "inode": 43,
+            "size": 2048,
+            "modifiedSeconds": 1790409600,
+            "modifiedNanoseconds": 123456789
+          },
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "associationGeneration": 7,
+        "instanceEpoch": "8e8c8e92-61b1-48d0-a97f-43891664c110"
+      },
+      "changes": {
+        "photoshop:Headline": {
+          "op": "set",
+          "value": "New headline"
+        },
+        "dc:subject": {
+          "op": "set",
+          "value": [
+            "mountains",
+            "sunrise"
+          ]
+        },
+        "dc:creator": {
+          "op": "set",
+          "value": [
+            "Sam Lee",
+            "Alex Chen"
+          ]
+        },
+        "xmp:Rating": {
+          "op": "set",
+          "value": 0
+        },
+        "xmpRights:Marked": {
+          "op": "set",
+          "value": false
+        },
+        "xmp:Label": {
+          "op": "clear"
+        },
+        "photoshop:Source": {
+          "op": "remove"
+        },
+        "dc:title": {
+          "op": "setLanguages",
+          "languages": {
+            "x-default": "New title",
+            "en": "New title",
+            "fr": null
+          }
+        },
+        "dc:rights": {
+          "op": "set",
+          "value": {
+            "x-default": "Copyright Sam Lee"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "minimal-single-field-request-observed-absence",
+    "kind": "request",
+    "request": {
+      "evidence": {
+        "photoId": "photo-1",
+        "originalLocation": "photos/IMG_0001.CR3",
+        "original": {
+          "device": 2049,
+          "inode": 42,
+          "size": 24000000,
+          "modifiedSeconds": 1790409600,
+          "modifiedNanoseconds": 123456789
+        },
+        "sidecar": {
+          "state": "absent"
+        },
+        "associationGeneration": 7,
+        "instanceEpoch": "8e8c8e92-61b1-48d0-a97f-43891664c110"
+      },
+      "changes": {
+        "xmp:Rating": {
+          "op": "set",
+          "value": 3
+        }
+      }
+    }
+  },
+  {
+    "name": "verified-success-with-fresh-evidence",
+    "kind": "result",
+    "result": {
+      "photoId": "photo-1",
+      "sidecarLocation": "photos/IMG_0001.xmp",
+      "affectedFields": [
+        "photoshop:Headline",
+        "dc:subject",
+        "dc:creator",
+        "xmp:Rating",
+        "xmpRights:Marked",
+        "xmp:Label",
+        "photoshop:Source",
+        "dc:title",
+        "dc:rights"
+      ],
+      "verifiedValues": {
+        "photoshop:Headline": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "New headline",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": "New headline"
+            }
+          ]
+        },
+        "dc:subject": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": [
+            "mountains",
+            "sunrise"
+          ],
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": [
+                "mountains",
+                "sunrise"
+              ]
+            }
+          ]
+        },
+        "dc:creator": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": [
+            "Sam Lee",
+            "Alex Chen"
+          ],
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": [
+                "Sam Lee",
+                "Alex Chen"
+              ]
+            }
+          ]
+        },
+        "xmp:Rating": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": 0,
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": 0
+            }
+          ]
+        },
+        "xmpRights:Marked": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": false,
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": false
+            }
+          ]
+        },
+        "xmp:Label": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": "",
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": ""
+            }
+          ]
+        },
+        "photoshop:Source": {
+          "state": "absent",
+          "writable": true,
+          "sources": []
+        },
+        "dc:title": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": {
+            "x-default": "New title",
+            "en": "New title"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": {
+                "x-default": "New title",
+                "en": "New title"
+              }
+            }
+          ]
+        },
+        "dc:rights": {
+          "state": "present",
+          "writable": true,
+          "provenance": "sidecar",
+          "value": {
+            "x-default": "Copyright Sam Lee"
+          },
+          "sources": [
+            {
+              "state": "present",
+              "provenance": "sidecar",
+              "value": {
+                "x-default": "Copyright Sam Lee"
+              }
+            }
+          ]
+        }
+      },
+      "evidence": {
+        "photoId": "photo-1",
+        "originalLocation": "photos/IMG_0001.CR3",
+        "original": {
+          "device": 2049,
+          "inode": 42,
+          "size": 24000000,
+          "modifiedSeconds": 1790409600,
+          "modifiedNanoseconds": 123456789
+        },
+        "sidecar": {
+          "state": "present",
+          "location": "photos/IMG_0001.xmp",
+          "facts": {
+            "device": 2049,
+            "inode": 43,
+            "size": 2300,
+            "modifiedSeconds": 1790409601,
+            "modifiedNanoseconds": 123456789
+          },
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "associationGeneration": 7,
+        "instanceEpoch": "8e8c8e92-61b1-48d0-a97f-43891664c110"
+      }
+    }
+  },
+  {
+    "name": "invalid_input",
+    "kind": "error",
+    "response": {
+      "error": {
+        "code": "invalid_input",
+        "message": "Invalid metadata value",
+        "details": {
+          "field": "xmp:Rating",
+          "reason": "Expected -1 or a number from 0 through 5"
+        }
+      }
+    },
+    "httpStatus": 400,
+    "cliExit": 2
+  },
+  {
+    "name": "unsupported_field",
+    "kind": "error",
+    "response": {
+      "error": {
+        "code": "unsupported_field",
+        "message": "Field is not writable",
+        "details": {
+          "field": "exif:ExposureTime"
+        }
+      }
+    },
+    "httpStatus": 400,
+    "cliExit": 2
+  },
+  {
+    "name": "photo_missing",
+    "kind": "error",
+    "response": {
+      "error": {
+        "code": "photo_missing",
+        "message": "Photo does not exist",
+        "details": {
+          "photoId": "photo-1"
+        }
+      }
+    },
+    "httpStatus": 404,
+    "cliExit": 3
+  },
+  {
+    "name": "original_unavailable",
+    "kind": "error",
+    "response": {
+      "error": {
+        "code": "original_unavailable",
+        "message": "Original is unavailable",
+        "details": {
+          "originalLocation": "photos/IMG_0001.CR3"
+        }
+      }
+    },
+    "httpStatus": 404,
+    "cliExit": 3
+  },
+  {
+    "name": "association_unresolved",
+    "kind": "error",
+    "response": {
+      "error": {
+        "code": "association_unresolved",
+        "message": "Sidecar association is unresolved",
+        "details": {
+          "reason": "retained-orphan"
+        }
+      }
+    },
+    "httpStatus": 409,
+    "cliExit": 3
+  },
+  {
+    "name": "photo_removed",
+    "kind": "error",
+    "response": {
+      "error": {
+        "code": "photo_removed",
+        "message": "Restore Photo before saving",
+        "details": {
+          "photoId": "photo-1"
+        }
+      }
+    },
+    "httpStatus": 409,
+    "cliExit": 3
+  },
+  {
+    "name": "metadata_malformed",
+    "kind": "error",
+    "response": {
+      "error": {
+        "code": "metadata_malformed",
+        "message": "Sidecar cannot be safely preserved",
+        "details": {
+          "reason": "Malformed XML"
+        }
+      }
+    },
+    "httpStatus": 422,
+    "cliExit": 4
+  },
+  {
+    "name": "evidence_stale",
+    "kind": "error",
+    "response": {
+      "error": {
+        "code": "evidence_stale",
+        "message": "Read evidence no longer matches",
+        "details": {
+          "component": "sidecar.sha256"
+        }
+      }
+    },
+    "httpStatus": 409,
+    "cliExit": 4
+  },
+  {
+    "name": "save_unavailable",
+    "kind": "error",
+    "response": {
+      "error": {
+        "code": "save_unavailable",
+        "message": "Exclusive save session is unavailable",
+        "details": {
+          "reason": "Backing store cannot enforce exclusivity"
+        }
+      }
+    },
+    "httpStatus": 501,
+    "cliExit": 5
+  },
+  {
+    "name": "permission",
+    "kind": "error",
+    "response": {
+      "error": {
+        "code": "permission",
+        "message": "Permission denied",
+        "details": {
+          "operation": "create-sidecar"
+        }
+      }
+    },
+    "httpStatus": 403,
+    "cliExit": 5
+  },
+  {
+    "name": "resource_limit",
+    "kind": "error",
+    "response": {
+      "error": {
+        "code": "resource_limit",
+        "message": "Metadata exceeds resource limit",
+        "details": {
+          "limit": "sidecarBytes",
+          "maximum": 8388608
+        }
+      }
+    },
+    "httpStatus": 413,
+    "cliExit": 6
+  },
+  {
+    "name": "storage_failure",
+    "kind": "error",
+    "response": {
+      "error": {
+        "code": "storage_failure",
+        "message": "Sidecar publication failed",
+        "details": {
+          "operation": "rename",
+          "published": false
+        }
+      }
+    },
+    "httpStatus": 500,
+    "cliExit": 7
+  },
+  {
+    "name": "outcome_unknown",
+    "kind": "error",
+    "response": {
+      "error": {
+        "code": "outcome_unknown",
+        "message": "Publication durability is unknown",
+        "details": {
+          "operation": "directory-fsync",
+          "published": true
+        }
+      }
+    },
+    "httpStatus": 500,
+    "cliExit": 7
+  }
+]

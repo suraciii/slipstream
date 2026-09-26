@@ -428,6 +428,8 @@ mod tests {
             "identity/vectors.json",
             "metadata/capture-order.json",
             "metadata/capture-time.json",
+            "metadata/external-metadata-read.json",
+            "metadata/external-metadata-save.json",
             "preview/fixtures.json",
             "protocol/batch-workflows.json",
             "protocol/browse-vectors.json",
@@ -481,6 +483,14 @@ mod tests {
             (
                 "metadata/capture-order.json",
                 "crates/slipstream-core/src/capture.rs",
+            ),
+            (
+                "metadata/external-metadata-read.json",
+                "crates/slipstream-server/src/metadata_wire.rs",
+            ),
+            (
+                "metadata/external-metadata-save.json",
+                "crates/slipstream-server/src/metadata_wire.rs",
             ),
             (
                 "protocol/batch-workflows.json",
