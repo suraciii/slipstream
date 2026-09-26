@@ -182,11 +182,14 @@ def film_probe(mode, repetitions):
     simulator, recipe = make_simulator()
     (WORK / "film-recipe.json").write_text(json.dumps(recipe, indent=2))
     emit("film_initialize", seconds=time.monotonic() - start)
-    sizes = [(128, 192)] if mode == "smoke" else [(816, 1224), (1152, 1728)]
+    sizes = [(128, 192)] if mode == "smoke" else [
+        (816, 1225), (1225, 816), (1154, 1732), (1732, 1154),
+    ]
     for height, width in sizes:
         pixels = synthetic(height, width)
         expected = None
         times = []
+        cold_seconds = None
         for index in range(repetitions + 1):
             start = time.monotonic()
             output = render(simulator, pixels)
@@ -195,7 +198,9 @@ def film_probe(mode, repetitions):
             if expected is None:
                 expected = digest
             assert digest == expected, "Repeated Film samples changed"
-            if index:
+            if index == 0:
+                cold_seconds = elapsed
+            else:
                 times.append(elapsed)
             emit("film_render", geometry=[height, width], iteration=index,
                  seconds=elapsed, pixel_sha256=digest,
@@ -203,9 +208,18 @@ def film_probe(mode, repetitions):
         # A different exposure must not contaminate the next render of A.
         render(simulator, pixels * 2)
         assert pixel_digest(render(simulator, pixels)) == expected
+        p95_seconds = sorted(times)[math.ceil(0.95 * len(times)) - 1]
+        target_p95_seconds = 4.0 if height * width <= 1_000_000 else None
         emit("film_distribution", geometry=[height, width], warm_samples=len(times),
-             p50_seconds=float(np.median(times)),
-             p95_seconds=sorted(times)[math.ceil(0.95 * len(times)) - 1],
+             cold_seconds=cold_seconds, p50_seconds=float(np.median(times)),
+             p95_seconds=p95_seconds, target_p95_seconds=target_p95_seconds,
+             target_met=(None if target_p95_seconds is None
+                         else p95_seconds <= target_p95_seconds),
+             latency_scope="warm-inclusive-render",
+             complete_request_latency_measured=False,
+             complete_request_latency_note=(
+                 "This engine probe excludes queue, admission, startup, and transfer"
+             ),
              aba_exact=True)
     from spektrafilm.model.grain import add_micro_structure
     reset_random_state()
@@ -222,8 +236,13 @@ def film_probe(mode, repetitions):
         emit("full_film", seconds=time.monotonic() - start, geometry=list(output.shape),
              pixel_sha256=pixel_digest(output), timings=simulator.get_timings(),
              peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-        from spektrafilm.utils.io import save_image_oiio
-        save_image_oiio(str(WORK / "finished.jpg"), output, color_space="sRGB", cctf_encoding=True)
+        from finished_jpeg import save_finished_jpeg
+        from spektrafilm.utils.bounded_output import JPEG_WORKSPACE_BYTES
+        save_finished_jpeg(
+            str(WORK / "finished.jpg"),
+            output,
+            workspace_bytes=JPEG_WORKSPACE_BYTES,
+        )
 
 
 def main():
@@ -252,8 +271,10 @@ def main():
     emit("probe_complete", qualification="incomplete",
          remaining=["independently authored nonzero-EV/custom-WB reference",
                     "camera WB mapping corpus and temperature/tint mapping",
-                    "LUT accuracy versus direct spectral reference", "fresh-process repeats",
-                    "browse contention and resource defaults", "product latency decision"])
+                    "representative camera-derived/full-resolution LUT quality corpus",
+                    "full-resolution fresh-process repeats",
+                    "complete request latency including queue and transfer",
+                    "browse contention and resource defaults"])
 
 
 if __name__ == "__main__":

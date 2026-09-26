@@ -3,6 +3,11 @@
 import numpy as np
 
 
+LUT_QUALITY_CRITERION = "ciede2000-d65-v1"
+LUT_CIEDE2000_P95_MAX = 0.005
+LUT_CIEDE2000_MAX = 0.01
+
+
 GEOMETRY = (128, 193)
 
 
@@ -35,6 +40,14 @@ def nearest_rank(values, fraction):
         raise ValueError("percentile requires nonempty values and a fraction in [0, 1]")
     rank = max(1, int(np.ceil(fraction * values.size)))
     return float(values[rank - 1])
+
+
+def ciede2000_passes(summary):
+    """Return whether one CIEDE2000 summary meets the selected LUT gate."""
+    return (
+        summary["p95"] <= LUT_CIEDE2000_P95_MAX
+        and summary["max"] <= LUT_CIEDE2000_MAX
+    )
 
 
 def summarize_difference(reference, candidate):

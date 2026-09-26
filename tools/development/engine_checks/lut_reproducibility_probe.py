@@ -168,6 +168,12 @@ def main():
     }:
         raise AssertionError(f"full-effect recipe was not exercised: {effects}")
 
+    from lut_quality import (
+        LUT_CIEDE2000_MAX,
+        LUT_CIEDE2000_P95_MAX,
+        LUT_QUALITY_CRITERION,
+    )
+
     print(json.dumps({
         "comparison": "lut-vs-direct-spectral-reproducibility-v1",
         "procedure": "film-once-empty-cache-v1",
@@ -198,8 +204,14 @@ def main():
             for index, row in enumerate(lut_runs[0]["cases"])
         ],
         "acceptance": False,
-        "criterion": "not-selected",
-        "note": "Repeatability evidence only; the #338 visual criterion and full-resolution envelope remain open.",
+        "criterion": LUT_QUALITY_CRITERION,
+        "criterion_limits": {
+            "ciede2000_p95_max": LUT_CIEDE2000_P95_MAX,
+            "ciede2000_max": LUT_CIEDE2000_MAX,
+        },
+        "criterion_passes": None,
+        "criterion_scope": "not-measured-by-repeatability",
+        "note": "Repeatability evidence only; the selected criterion still requires representative camera-derived and full-resolution quality measurements.",
     }, sort_keys=True))
 
 

@@ -50,7 +50,7 @@ def identity():
         if any(path.suffix in (".nbc", ".nbi") for path in Path(location).rglob("*")):
             raise RuntimeError("Packaged compiler cache is forbidden")
     files = [ROOT / name for name in (
-        "adapter.py", "contract.py", "package.py", "schema.json",
+        "adapter.py", "contract.py", "finished_jpeg.py", "package.py", "schema.json",
         "envelope-schema.json", "requirements.lock", "Dockerfile",
     )]
     files.extend((

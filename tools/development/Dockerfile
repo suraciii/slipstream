@@ -28,7 +28,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY bounded_gamut.py /opt/spektrafilm/src/spektrafilm/utils/bounded_gamut.py
 COPY bounded_output.py /opt/spektrafilm/src/spektrafilm/utils/bounded_output.py
-COPY film.py film_identity.py probe.py bundle.py history.py /opt/probe/
+COPY film.py film_identity.py finished_jpeg.py probe.py bundle.py history.py /opt/probe/
 COPY engine_checks/test_bounded_gamut.py engine_checks/test_buffer_lifetimes.py \
      engine_checks/run.py engine_checks/output_scratch_probe.py \
      engine_checks/cold_lifetime_probe.py \

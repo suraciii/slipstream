@@ -52,9 +52,11 @@ The modes are:
   history, custom raw white-balance coefficients, one-path/manual-exposure
   history checks, database reload, small-image repeated full simulation, A/B/A
   state checks, and the active grain microstructure branch.
-- `benchmark`: the same RAW checks plus approximately 1 MP and 2 MP full-effect
-  simulations. The default is one first call and 20 warm calls per geometry
-  in one reused simulator. This does not measure a fresh process per geometry.
+- `benchmark`: the same RAW checks plus approximately 1 MP geometries
+  `(1225x816)` and `(816x1225)`, and approximately 2 MP geometries `(1732x1154)`
+  and `(1154x1732)`. The default is one cold call and 20 warm calls per
+  geometry in one reused simulator. Warm timing is inclusive render time only;
+  queue, admission, startup, and transfer are not measured by this probe.
 - `full`: adds full-resolution Development TIFF and full-resolution Film output.
   Large camera files can consume the full memory allowance. An OOM or nonzero
   child exit remains a failure in `report.json`.
@@ -81,6 +83,11 @@ and resets Numba's own RNG inside a compiled function before every simulation.
 It does not use Spektrafilm's `preview_mode`, which disables grain. The engine's
 internal enlarger and scanner LUTs are fixed at resolution 33.
 
+Full Film output uses `finished_jpeg.py`, which sets the pinned JPEG quality
+85 and embeds the pinned encoded-sRGB ICC profile while retaining bounded
+scanline conversion. The accepted adapter and qualification reference probes
+use this writer; encoder identity and quality are part of the output contract.
+
 The engine-checks image also runs `lut_quality_probe.py` over a fixed neutral,
 structured-range, and textured-range corpus. It renders the same full-effect
 recipe with both internal LUTs enabled and both LUTs disabled for direct
@@ -88,9 +95,11 @@ spectral evaluation, verifies both paths' repeatability, and reports
 pointwise RGB and D65 CIEDE2000 difference metrics. The runner gives it a fresh
 private empty Numba cache and the report records that cache state plus the
 adapter and qualification recipe identities. An identity mismatch is a blocker,
-not accepted evidence. The probe does not declare acceptance: #338 must choose
-and independently justify the visual criterion before these measurements can
-qualify the LUT optimization.
+not accepted evidence. The selected `ciede2000-d65-v1` criterion requires
+nearest-rank p95 <= 0.005 and maximum <= 0.01 for every pixel in the accepted
+representative corpus. The current synthetic corpus reports whether it meets
+those limits but remains diagnostic smoke evidence; camera-derived and
+full-resolution quality evidence are still required.
 The accepted-runtime `adapter-checks` image also runs this probe against the
 retained numerical bundle used by the Film adapter. That check must report a
 matching recipe identity before its metrics can be considered #338 evidence;
@@ -102,8 +111,8 @@ same-process `lut -> direct -> lut` order. Each fresh child starts with a new
 empty private Numba cache, repeats its own path in-process, and exercises
 active grain, halation, glare, spatial effects, and stochastic effects. It
 requires exact digest equality across fresh processes, the fresh-process LUT
-A/B/A change, and the in-process A/B/A change; the report remains diagnostic
-and does not select the #338 visual criterion.
+A/B/A change, and the in-process A/B/A change. Its report records the selected
+criterion and limits but does not measure visual quality or declare acceptance.
 
 These expensive probes are separate from `bun run verify`, like the existing
 real-camera safety gate. Run that full repository gate before handing off a

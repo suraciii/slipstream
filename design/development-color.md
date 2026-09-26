@@ -119,6 +119,20 @@ threading behavior; setting a global NumPy seed alone is not sufficient proof.
 Uncontrolled variation must be corrected or resolved in the governing Issue
 before that processing configuration is qualified.
 
+LUT qualification compares the internal LUT-enabled recipe with direct
+spectral evaluation of the same input, bundle, geometry, and complete Film
+effects. The fixed visual criterion is D65 CIEDE2000 on the encoded sRGB
+outputs after conversion to CIE Lab with the pinned sRGB colorimetry. Across
+every pixel in the accepted representative corpus, the nearest-rank p95 must
+be at most 0.005 and the maximum must be at most 0.01. Mean difference is
+reported for diagnosis but is not an acceptance substitute. The corpus must
+include neutral, saturated, negative, over-range, structured, textured, and
+representative camera-derived inputs; the small synthetic engine-check corpus
+is a diagnostic smoke check, not full Film quality acceptance. LUT use is not
+qualified until the criterion passes together with exact in-process,
+fresh-process, and LUT/direct/LUT A/B/A repeatability under the accepted
+runtime.
+
 ## Display and Comparison
 
 Development display must operate on a copy of the Development Result through
@@ -203,8 +217,11 @@ quality 85 with the destination profile embedded; the processing bundle must
 record its implementation and version alongside the profile bytes.
 
 Film display must use the Film Result's defined output encoding and a matching
-ICC profile. Comparison must keep the stage, geometry, bundle, and display
-conversion fixed while changing only the compared development settings.
+ICC profile. The initial Finished JPEG is full developed dimensions, encoded
+as sRGB at fixed JPEG quality 85 with the pinned encoder configuration and
+embedded destination profile.
+Comparison must keep the stage, geometry, bundle, and display conversion fixed
+while changing only the compared development settings.
 
 A reduced-resolution simulation must carry its own geometry and cache identity.
 Grain, halation, and physical scale must follow the qualified engine behavior.
