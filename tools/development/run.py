@@ -68,6 +68,12 @@ def main():
         "--repetitions", str(args.repetitions),
     ]
     started = time.monotonic()
+    timing = {
+        "admission_seconds": None,
+        "startup_seconds": None,
+        "execution_seconds": None,
+        "settlement_seconds": None,
+    }
     result = None
     process = None
     inspected = None
@@ -82,26 +88,39 @@ def main():
             raise KeyboardInterrupt(f"Received signal {signum}")
     previous_signals = {s: signal.signal(s, interrupted) for s in (signal.SIGTERM, signal.SIGINT)}
     try:
-        admission = subprocess.run(command, capture_output=True, text=True,
-                                   start_new_session=True, check=True)
+        admission_started = time.monotonic()
+        try:
+            admission = subprocess.run(command, capture_output=True, text=True,
+                                       start_new_session=True, check=True)
+        finally:
+            timing["admission_seconds"] = time.monotonic() - admission_started
         container_id = admission.stdout.strip()
         admission_pending = False
         if interrupted_signal is not None:
             raise KeyboardInterrupt(f"Received signal {interrupted_signal} during admission")
         admission_pending = True
-        subprocess.run(["docker", "start", container_id], check=True,
-                       stdout=subprocess.DEVNULL, start_new_session=True)
+        startup_started = time.monotonic()
+        try:
+            subprocess.run(["docker", "start", container_id], check=True,
+                           stdout=subprocess.DEVNULL, start_new_session=True)
+        finally:
+            timing["startup_seconds"] = time.monotonic() - startup_started
         admission_pending = False
         if interrupted_signal is not None:
             raise KeyboardInterrupt(f"Received signal {interrupted_signal} during start")
-        with (output / "probe.jsonl").open("x") as log:
-            process = subprocess.Popen(["docker", "logs", "--follow", container_id],
-                                       stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-            terminal = subprocess.run(["docker", "wait", container_id], capture_output=True,
-                                      text=True, check=True, start_new_session=True)
-            code = int(terminal.stdout.strip())
-            process.wait()
-            result = subprocess.CompletedProcess(command, code)
+        execution_started = time.monotonic()
+        try:
+            with (output / "probe.jsonl").open("x") as log:
+                process = subprocess.Popen(["docker", "logs", "--follow", container_id],
+                                           stdout=log, stderr=subprocess.STDOUT,
+                                           start_new_session=True)
+                terminal = subprocess.run(["docker", "wait", container_id], capture_output=True,
+                                          text=True, check=True, start_new_session=True)
+                code = int(terminal.stdout.strip())
+                process.wait()
+                result = subprocess.CompletedProcess(command, code)
+        finally:
+            timing["execution_seconds"] = time.monotonic() - execution_started
     finally:
         # docker run's CLI process does not own the daemon's container lifetime.
         # Inspect/stop only this invocation's randomly named container, even on
@@ -115,6 +134,7 @@ def main():
             except Exception as error:
                 errors.append(f"{label}: {type(error).__name__}: {error}")
                 return None
+        settlement_started = time.monotonic()
         try:
             inspected = attempt("inspect container", lambda: json.loads(
                 subprocess.check_output(["docker", "inspect", name], stderr=subprocess.PIPE))[0])
@@ -142,13 +162,21 @@ def main():
                 removed = removal is not None
             else:
                 errors.append("Container settlement is unconfirmed; retained container: " + name)
+            timing["settlement_seconds"] = time.monotonic() - settlement_started
+            complete_runner_seconds = time.monotonic() - started
             report = {
                 "image_id": identity, "mode": args.mode, "stage": args.stage,
                 "exit_code": result.returncode if result else None,
                 "interrupted_signal": interrupted_signal,
                 "container_state": inspected["State"] if inspected else None,
                 "retained_container": None if removed else name,
-                "seconds": time.monotonic() - started,
+                "seconds": complete_runner_seconds,
+                "latency": {
+                    **timing,
+                    "complete_runner_seconds": complete_runner_seconds,
+                    "scope": "host qualification runner from docker create through source checks",
+                    "production_request_latency": False,
+                },
                 "source_sha256": original["sha256"], "source_bytes": original["st_size"],
                 "source_unchanged": original_after == original if original_after else None,
                 "sidecars_unchanged": all(sidecars_after[p] == v for p, v in sidecars.items()),
