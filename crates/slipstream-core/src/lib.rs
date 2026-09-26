@@ -14,6 +14,7 @@ pub mod domain;
 pub mod export;
 pub mod identity;
 pub mod library;
+pub mod metadata;
 mod native;
 pub mod persistence;
 pub mod preview;
