@@ -4208,13 +4208,13 @@ pub(crate) fn expand_library_binding(
         .map_err(|_| PersistenceError::Storage)?;
     transaction
         .execute(
-            "UPDATE sidecar_associations SET sidecar_path=?||sidecar_path",
+            "UPDATE sidecar_associations SET sidecar_path=?||'/'||sidecar_path",
             [&prefix],
         )
         .map_err(|_| PersistenceError::Storage)?;
     transaction
         .execute(
-            "UPDATE retained_sidecar_orphans SET sidecar_path=?||sidecar_path",
+            "UPDATE retained_sidecar_orphans SET sidecar_path=?||'/'||sidecar_path",
             [&prefix],
         )
         .map_err(|_| PersistenceError::Storage)?;
@@ -10839,6 +10839,331 @@ mod tests {
             .unwrap();
         assert_eq!(missing, EditRecipeWriteOutcome::MissingPhoto);
         persistence.shutdown().unwrap();
+    }
+
+    fn sidecar_config(
+        root: &LibraryRoot,
+        state: &StateDirectory,
+        name: &DatabaseName,
+    ) -> crate::LibraryConfig {
+        crate::LibraryConfig {
+            library_root: root.canonical_path().to_owned(),
+            state_directory: state.canonical_path().to_owned(),
+            database_basename: name.as_os_str().to_string_lossy().into_owned(),
+            ..crate::LibraryConfig::default()
+        }
+    }
+
+    fn seed_sidecar(path: &Path, photo: &str, sidecar: &str) {
+        Connection::open(path)
+            .unwrap()
+            .execute(
+                "INSERT INTO sidecar_associations VALUES(?,?,7,1234.5,?)",
+                params![photo, sidecar, "a".repeat(64)],
+            )
+            .unwrap();
+    }
+
+    fn association_generation(path: &Path, photo: &str) -> i64 {
+        Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT association_generation FROM photos WHERE id=?",
+                [photo],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn assert_retired(path: &Path, photo: &str, original: &str, sidecar: &str, generation: i64) {
+        let connection = Connection::open(path).unwrap();
+        let value: (String, String, String, i64, i64, f64, String) = connection.query_row(
+            "SELECT retired_photo_id,retired_original_path,original_kind,retired_generation,observed_size,observed_mtime_ms,observed_digest FROM retained_sidecar_orphans WHERE sidecar_path=?",
+            [sidecar], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        ).unwrap();
+        assert_eq!(
+            value,
+            (
+                photo.to_owned(),
+                original.to_owned(),
+                "jpeg".to_owned(),
+                generation,
+                7,
+                1234.5,
+                "a".repeat(64)
+            )
+        );
+        assert!(
+            !connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sidecar_associations WHERE photo_id=?)",
+                    [photo],
+                    |r| r.get::<_, bool>(0)
+                )
+                .unwrap()
+        );
+    }
+
+    async fn reject_and_remove(library: &crate::Library, photo: &str) {
+        library
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: photo.to_owned(),
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Rejected),
+                expected_current: None,
+                album_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            library
+                .remove_photos(PhotoRemovalMutation {
+                    photo_ids: vec![photo.to_owned()],
+                    operation_id: "remove-sidecar".to_owned(),
+                })
+                .await
+                .unwrap()
+                .removed,
+            vec![photo.to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn removal_and_restore_bump_association_generation() {
+        let (_base, root, state, name, path) = fixture();
+        fs::write(root.canonical_path().join("one.JPG"), b"one").unwrap();
+        fs::write(root.canonical_path().join("two.JPG"), b"two").unwrap();
+        let library = crate::Library::open(sidecar_config(&root, &state, &name)).unwrap();
+        let snapshot = library.scan().await.unwrap();
+        let photo = &snapshot.photos[0].id;
+        let sibling = &snapshot.photos[1].id;
+        seed_sidecar(&path, photo, "dir/photo.xmp");
+        let before = association_generation(&path, photo);
+        let sibling_before = association_generation(&path, sibling);
+        reject_and_remove(&library, photo).await;
+        let removed = association_generation(&path, photo);
+        assert!(removed > before);
+        assert_eq!(association_generation(&path, sibling), sibling_before);
+        assert_eq!(
+            library
+                .restore_photos(PhotoRestoration::Operation("remove-sidecar".to_owned()))
+                .await
+                .unwrap()
+                .restored,
+            vec![photo.clone()]
+        );
+        assert!(association_generation(&path, photo) > removed);
+        assert_eq!(association_generation(&path, sibling), sibling_before);
+        library.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn scan_relocation_retires_sidecar_association() {
+        let (_base, root, state, name, path) = fixture();
+        fs::write(root.canonical_path().join("one.JPG"), b"one").unwrap();
+        let library = crate::Library::open(sidecar_config(&root, &state, &name)).unwrap();
+        let snapshot = library.scan().await.unwrap();
+        let photo = &snapshot.photos[0].id;
+        seed_sidecar(&path, photo, "dir/photo.xmp");
+        let before = association_generation(&path, photo);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while library.fingerprint_counts().enrolled != 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fingerprint enrollment timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        library.shutdown().unwrap();
+        fs::rename(
+            root.canonical_path().join("one.JPG"),
+            root.canonical_path().join("moved.JPG"),
+        )
+        .unwrap();
+        let library = crate::Library::open(sidecar_config(&root, &state, &name)).unwrap();
+        let relocated = library.scan().await.unwrap();
+        assert_eq!(relocated.photos[0].id, *photo);
+        assert_eq!(relocated.originals[0].relative_path.as_str(), "moved.JPG");
+        let after = association_generation(&path, photo);
+        assert!(after > before);
+        assert_retired(&path, photo, "one.JPG", "dir/photo.xmp", after);
+        library.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn permanent_deletion_retirement_and_expansion() {
+        let (_base, parent_root, state, name, path) = fixture();
+        fs::create_dir(parent_root.canonical_path().join("shoot")).unwrap();
+        let root = LibraryRoot::open(parent_root.canonical_path().join("shoot")).unwrap();
+        fs::write(root.canonical_path().join("one.JPG"), b"one").unwrap();
+        fs::write(root.canonical_path().join("two.JPG"), b"two").unwrap();
+        let config = sidecar_config(&root, &state, &name);
+        let library = crate::Library::open(config.clone()).unwrap();
+        let snapshot = library.scan().await.unwrap();
+        let photo = &snapshot.photos[0].id;
+        let sibling = &snapshot.photos[1].id;
+        let original = &snapshot
+            .originals
+            .iter()
+            .find(|o| o.id == snapshot.photos[0].original_id)
+            .unwrap()
+            .relative_path;
+        seed_sidecar(&path, photo, "dir/photo.xmp");
+        seed_sidecar(&path, sibling, "dir/sibling.xmp");
+        reject_and_remove(&library, photo).await;
+        library
+            .prepare_permanent_deletion(
+                "delete-sidecar".to_owned(),
+                PermanentDeletionSelection::Photos(vec![photo.clone()]),
+            )
+            .await
+            .unwrap();
+        let deleted = library
+            .permanently_delete("delete-sidecar".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(deleted.items[0].state, PermanentDeletionItemState::Deleted);
+        let before = association_generation(&path, photo);
+        fs::write(
+            root.canonical_path().join(original.as_str()),
+            b"replacement",
+        )
+        .unwrap();
+        library.scan().await.unwrap();
+        let retired = association_generation(&path, photo);
+        assert!(retired > before);
+        assert_retired(&path, photo, original.as_str(), "dir/photo.xmp", retired);
+        library.shutdown().unwrap();
+
+        // Expansion requires supported Original paths, unlike deletion's reserved Locations.
+        let (_expansion_base, parent_root, state, name, path) = fixture();
+        fs::create_dir(parent_root.canonical_path().join("shoot")).unwrap();
+        let root = LibraryRoot::open(parent_root.canonical_path().join("shoot")).unwrap();
+        let mut config = sidecar_config(&root, &state, &name);
+        fs::write(root.canonical_path().join("one.JPG"), b"one").unwrap();
+        fs::write(root.canonical_path().join("two.JPG"), b"two").unwrap();
+        let library = crate::Library::open(config.clone()).unwrap();
+        let snapshot = library.scan().await.unwrap();
+        let photo = &snapshot.photos[0].id;
+        let sibling = &snapshot.photos[1].id;
+        seed_sidecar(&path, sibling, "dir/sibling.xmp");
+        let retired = association_generation(&path, photo);
+        seed(
+            &path,
+            &format!(
+                "INSERT INTO retained_sidecar_orphans VALUES('dir/photo.xmp','{}','old.JPG','jpeg',{},7,1234.5,'{}')",
+                photo,
+                retired,
+                "a".repeat(64),
+            ),
+        );
+        let connection = Connection::open(&path).unwrap();
+        let generations: Vec<(String, i64)> = connection
+            .prepare("SELECT id,association_generation FROM photos ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        drop(connection);
+        library.shutdown().unwrap();
+        config.library_root = parent_root.canonical_path().to_owned();
+        crate::expand_library(config).unwrap();
+        for (photo, before) in generations {
+            assert_eq!(association_generation(&path, &photo), before + 1);
+        }
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT sidecar_path FROM sidecar_associations WHERE photo_id=?",
+                    [sibling],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "shoot/dir/sibling.xmp"
+        );
+        assert_retired(&path, photo, "old.JPG", "shoot/dir/photo.xmp", retired);
+    }
+
+    #[tokio::test]
+    async fn retire_and_bind_retires_before_delete() {
+        let (_base, root, state, name, path) = fixture();
+        fs::write(root.canonical_path().join("one.JPG"), b"one").unwrap();
+        fs::write(root.canonical_path().join("two.JPG"), b"different").unwrap();
+        let library = crate::Library::open(sidecar_config(&root, &state, &name)).unwrap();
+        let snapshot = library.scan().await.unwrap();
+        let destination = &snapshot.photos[0];
+        let retiring = &snapshot.photos[1];
+        let old_path = snapshot
+            .originals
+            .iter()
+            .find(|o| o.id == destination.original_id)
+            .unwrap()
+            .relative_path
+            .as_str();
+        let new_path = snapshot
+            .originals
+            .iter()
+            .find(|o| o.id == retiring.original_id)
+            .unwrap()
+            .relative_path
+            .clone();
+        seed_sidecar(&path, &destination.id, "dir/source.xmp");
+        seed_sidecar(&path, &retiring.id, "dir/destination.xmp");
+        let destination_before = association_generation(&path, &destination.id);
+        let retiring_before = association_generation(&path, &retiring.id);
+        fs::remove_file(root.canonical_path().join(old_path)).unwrap();
+        library.scan().await.unwrap();
+        let facts = root
+            .original(new_path.clone())
+            .unwrap()
+            .facts_if_present()
+            .unwrap()
+            .unwrap();
+        library
+            .apply_relocations(vec![RequestedRelocation {
+                original_id: destination.original_id.clone(),
+                to_location: new_path.to_string(),
+                facts,
+                retire_destination: true,
+            }])
+            .await
+            .unwrap();
+        let after = association_generation(&path, &destination.id);
+        assert!(after > destination_before);
+        assert_retired(
+            &path,
+            &retiring.id,
+            new_path.as_str(),
+            "dir/destination.xmp",
+            retiring_before + 1,
+        );
+        assert_retired(
+            &path,
+            &destination.id,
+            new_path.as_str(),
+            "dir/source.xmp",
+            after,
+        );
+        let connection = Connection::open(&path).unwrap();
+        assert!(
+            !connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM photos WHERE id=?)",
+                    [&retiring.id],
+                    |r| r.get::<_, bool>(0)
+                )
+                .unwrap()
+        );
+        assert!(
+            !connection
+                .prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        );
+        library.shutdown().unwrap();
     }
 
     #[test]
