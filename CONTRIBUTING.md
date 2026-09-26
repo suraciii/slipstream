@@ -177,7 +177,7 @@ SLIPSTREAM_RAW_SAMPLE=/absolute/path/to/sample.ARW bun run test:raw
 
 `test:raw` runs every native, service, and browser real-camera scenario serially and fails clearly when `SLIPSTREAM_RAW_SAMPLE` is absent or does not identify the configured sample. Each scenario compares the operated Original's SHA-256 digest and stable filesystem metadata before and after its read, LibRaw, or Preview workflow. A scenario that copies the sample into an isolated Library checks both that copy and the source sample.
 
-The opt-in processing smoke needs an admitted launcher in addition to the sample, so it runs outside `test:raw` and skips with its reason wherever the host has none:
+The opt-in processing smoke needs the sample and all four pinned launcher/export inputs, so it runs outside `test:raw` and skips with the missing-variable reason wherever the host has an incomplete configuration:
 
 ```sh
 SLIPSTREAM_RAW_SAMPLE=/absolute/path/to/sample.ARW \
@@ -188,7 +188,7 @@ SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES=<finite Development TIFF allowance> \
 bun x playwright test --grep real-processing --workers=1
 ```
 
-It carries the sample through one Photo Edit Recipe in the real browser: a committed exposure is autosaved, the reopened Photo presents the saved recipe, the baseline comparison presents its own rendition, and a submitted Development TIFF settles and downloads. It checks the sample and its isolated Library copy for unchanged digests and metadata. Budget the launcher's own render time: one full-resolution development of the sample takes about a minute.
+It carries the sample through one Photo Edit Recipe in the real browser: a committed exposure is autosaved, the reopened Photo presents the saved recipe, a second client conflict is recovered with `Use saved recipe`, the baseline comparison presents its own rendition, and a submitted Development TIFF settles and downloads. It checks the sample, its isolated Library copy, and the exercised same-basename external XMP sidecar for unchanged digests and metadata. Budget the launcher's own render time: one full-resolution development of the sample takes about a minute.
 
 The opt-in [development qualification harness](tools/development/README.md)
 exercises pinned darktable and Spektrafilm processes in an isolated CPU container.
