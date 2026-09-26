@@ -10,9 +10,10 @@ pub(crate) struct CapabilitiesResponse {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CapabilityLimitsWire {
+pub struct CapabilityLimitsWire {
     pub list_page_maximum: usize,
     pub mutation_photo_ids_maximum: usize,
+    pub removal_photo_ids_maximum: usize,
     pub album_reorder_members_maximum: usize,
     pub retained_query_ids_maximum: usize,
     pub retained_query_idle_seconds: u64,
@@ -317,7 +318,7 @@ fn photo_decision_snapshot_wire(
 #[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub(crate) enum PhotoListItemWire {
-    Present(CliPhotoItemWire),
+    Present(Box<CliPhotoItemWire>),
     Missing(MissingItemWire),
 }
 
@@ -331,6 +332,7 @@ pub(crate) struct CliPhotoItemWire {
     pub selection_state: &'static str,
     pub rating: u8,
     pub decision_version: String,
+    pub removed_at_ms: Option<i64>,
     pub has_saved_edits: bool,
     pub capture_time: Option<String>,
     pub preview: CliPreviewFactsWire,
@@ -360,6 +362,7 @@ impl From<slipstream_core::PhotoRead> for CliPhotoItemWire {
             selection_state: selection_state(value.selection_state),
             rating: value.rating,
             decision_version: value.decision_version,
+            removed_at_ms: value.removed_at_ms,
             has_saved_edits: value.has_saved_edits,
             capture_time,
             preview: CliPreviewFactsWire {
@@ -607,6 +610,49 @@ pub struct PhotoRemovalCountsWire {
     pub changed_elsewhere: usize,
     pub missing: usize,
     pub already_removed: usize,
+}
+/// Explicit machine-facing removal result. Every requested identity appears
+/// once; a successful item carries the exact marker needed for Restore.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplicitPhotoRemovalResponse {
+    pub operation_id: String,
+    pub counts: PhotoRemovalCountsWire,
+    pub results: Vec<PhotoRemovalItemWire>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoRemovalItemWire {
+    pub photo_id: String,
+    pub outcome: &'static str,
+    pub removed_at_ms: Option<i64>,
+}
+
+/// Explicit machine-facing Restore result. Every requested identity appears
+/// once with the outcome of comparing its observed removal marker.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplicitPhotoRestoreResponse {
+    pub operation_id: String,
+    pub counts: ExplicitPhotoRestoreCountsWire,
+    pub results: Vec<PhotoRestoreItemWire>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplicitPhotoRestoreCountsWire {
+    pub restored: usize,
+    pub already_active: usize,
+    pub changed_elsewhere: usize,
+    pub missing: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoRestoreItemWire {
+    pub photo_id: String,
+    pub outcome: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]

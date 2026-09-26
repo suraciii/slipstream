@@ -35,4 +35,6 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 
 ## Library Management
 
+- [Composable Removal and Restore](library-management-removal-and-restore.md): explicit Photo sets, reversible effects, stale-state protection, and recoverable outcomes
+
 - [Trash and Permanent Deletion](library-management-trash.md): complete Trash browsing, Restore, explicit Original deletion, and truthful batch outcomes

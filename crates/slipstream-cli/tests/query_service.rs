@@ -47,6 +47,7 @@ fn fake_service_with_scan_delay(
                     "limits": {
                         "listPageMaximum": 60,
                         "mutationPhotoIdsMaximum": 100,
+                        "removalPhotoIdsMaximum": 100,
                         "albumReorderMembersMaximum": 100,
                         "retainedQueryIdsMaximum": 1000000,
                         "retainedQueryIdleSeconds": 900
@@ -97,6 +98,7 @@ fn fake_preview_service(
                         "limits": {
                             "listPageMaximum": 60,
                             "mutationPhotoIdsMaximum": 100,
+                            "removalPhotoIdsMaximum": 100,
                             "albumReorderMembersMaximum": 100,
                             "retainedQueryIdsMaximum": 1000000,
                             "retainedQueryIdleSeconds": 900

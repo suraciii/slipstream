@@ -52,6 +52,10 @@ Report the logical bytes of confirmed deleted Originals separately from item cou
 
 ## Human and Agent use
 
+[Composable Removal and Restore](library-management-removal-and-restore.md)
+defines explicit target sets, stale-removal protection, and outcome recovery
+for these reversible actions.
+
 Web and CLI must expose the same Trash eligibility, review scope, explicit confirmation, and outcome rules. A command that marks or removes Photos must not implicitly authorize permanent deletion. Programmatic deletion must express the separate confirmed intent; exact syntax belongs to Build's design.
 
 ## Acceptance examples

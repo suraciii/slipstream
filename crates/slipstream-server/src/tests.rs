@@ -7106,6 +7106,7 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
                 "listPageMaximum": 60,
                 "mutationPhotoIdsMaximum": 100,
                 "albumReorderMembersMaximum": 100,
+                "removalPhotoIdsMaximum": 100,
                 "retainedQueryIdsMaximum": 1_000_000,
                 "retainedQueryIdleSeconds": 900
             }
@@ -7343,6 +7344,7 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
             "originalKind".to_owned(),
             "preview".to_owned(),
             "rating".to_owned(),
+            "removedAtMs".to_owned(),
             "selectionState".to_owned(),
             "webPath".to_owned(),
         ])
@@ -8054,6 +8056,207 @@ async fn removal_requires_a_rejected_snapshot_and_reports_concurrent_changes() {
     let _ = fs::remove_dir_all(base);
 }
 
+#[tokio::test]
+async fn explicit_cli_removal_restore_reconciles_and_web_reads_back_the_same_state() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    jpeg_fixture(&root.join("a.jpg"), 8, 4, [1, 2, 3]);
+    jpeg_fixture(&root.join("b.jpg"), 8, 4, [4, 5, 6]);
+    jpeg_fixture(&root.join("c.jpg"), 8, 4, [7, 8, 9]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = authorized_router(Arc::clone(&application), config.web_root());
+    let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    let by_location = photo_ids_by_location(&application, &ids).await;
+    let first = by_location["a.jpg"].clone();
+    let second = by_location["b.jpg"].clone();
+    let kept = by_location["c.jpg"].clone();
+    for photo_id in [&first, &second] {
+        assert_eq!(
+            post_json(
+                &router,
+                &format!("/api/photos/{photo_id}/state"),
+                serde_json::json!({"field": "selectionState", "value": "rejected"}),
+                Some("https://camera.local"),
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+    }
+    let first_read = cli_photo_read(&router, &first).await;
+    let second_read = cli_photo_read(&router, &second).await;
+    assert_eq!(first_read["removedAtMs"], serde_json::Value::Null);
+    assert_eq!(second_read["removedAtMs"], serde_json::Value::Null);
+
+    assert_eq!(
+        post_json(
+            &router,
+            &format!("/api/photos/{first}/state"),
+            serde_json::json!({"field": "selectionState", "value": "selected"}),
+            Some("https://camera.local"),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let removed = post_cli_json(
+        &router,
+        "/api/photos/remove-explicit",
+        serde_json::json!({
+            "operationId": "00000000-0000-4000-8000-000000000101",
+            "photos": [
+                {
+                    "photoId": first,
+                    "selectionState": "rejected",
+                    "decisionVersion": first_read["decisionVersion"],
+                    "removedAtMs": null
+                },
+                {
+                    "photoId": second,
+                    "selectionState": "rejected",
+                    "decisionVersion": second_read["decisionVersion"],
+                    "removedAtMs": null
+                }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(removed.status(), StatusCode::OK);
+    let removed = response_json(removed).await;
+    assert_eq!(removed["counts"]["removed"], 1);
+    assert_eq!(removed["counts"]["changedElsewhere"], 1);
+    assert_eq!(removed["counts"]["missing"], 0);
+    assert_eq!(removed["counts"]["alreadyRemoved"], 0);
+    assert_eq!(removed["results"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        removed["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["photoId"] == second)
+            .unwrap()["outcome"],
+        "removed"
+    );
+    let removed_marker = removed["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["photoId"] == second)
+        .unwrap()["removedAtMs"]
+        .as_i64()
+        .unwrap();
+
+    let inspected = get_cli_json(
+        &router,
+        "/api/photos/removal-operations/00000000-0000-4000-8000-000000000101",
+    )
+    .await;
+    assert_eq!(inspected.status(), StatusCode::OK);
+    assert_eq!(response_json(inspected).await, removed);
+    let unknown = get_cli_json(
+        &router,
+        "/api/photos/removal-operations/00000000-0000-4000-8000-000000000199",
+    )
+    .await;
+    assert_eq!(unknown.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(unknown).await["error"]["code"],
+        "outcome_unknown"
+    );
+
+    assert_eq!(
+        browse_photo_ids(&application, BrowseSourceRequest::Library).await,
+        vec![first.clone(), kept.clone()]
+    );
+    let (_, trash) = get_json(&router, "/api/photos/removed?start=0&limit=60").await;
+    assert_eq!(trash["total"], 1);
+    assert_eq!(trash["photos"][0]["photo"]["id"], second);
+    assert_eq!(trash["photos"][0]["removedAtMs"], removed_marker);
+
+    let restored = post_cli_json(
+        &router,
+        "/api/photos/restore-explicit",
+        serde_json::json!({
+            "operationId": "00000000-0000-4000-8000-000000000102",
+            "photos": [{"photoId": second, "removedAtMs": removed_marker}]
+        }),
+    )
+    .await;
+    assert_eq!(restored.status(), StatusCode::OK);
+    let restored = response_json(restored).await;
+    assert_eq!(restored["counts"]["restored"], 1);
+    assert_eq!(restored["counts"]["alreadyActive"], 0);
+    assert_eq!(restored["counts"]["changedElsewhere"], 0);
+    assert_eq!(restored["results"][0]["outcome"], "restored");
+    let restore_inspected = get_cli_json(
+        &router,
+        "/api/photos/restore-operations/00000000-0000-4000-8000-000000000102",
+    )
+    .await;
+    assert_eq!(restore_inspected.status(), StatusCode::OK);
+    assert_eq!(response_json(restore_inspected).await, restored);
+    assert_eq!(
+        browse_photo_ids(&application, BrowseSourceRequest::Library).await,
+        vec![first.clone(), second.clone(), kept.clone()]
+    );
+    assert_eq!(
+        cli_photo_read(&router, &second).await["removedAtMs"],
+        serde_json::Value::Null
+    );
+
+    let duplicate = post_cli_json(
+        &router,
+        "/api/photos/remove-explicit",
+        serde_json::json!({
+            "operationId": "00000000-0000-4000-8000-000000000103",
+            "photos": [
+                {
+                    "photoId": first,
+                    "selectionState": "rejected",
+                    "decisionVersion": first_read["decisionVersion"],
+                    "removedAtMs": null
+                },
+                {
+                    "photoId": first,
+                    "selectionState": "rejected",
+                    "decisionVersion": first_read["decisionVersion"],
+                    "removedAtMs": null
+                }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(duplicate.status(), StatusCode::BAD_REQUEST);
+
+    let over_limit = (0..=slipstream_core::PHOTO_REMOVAL_MAX)
+        .map(|index| {
+            serde_json::json!({
+                "photoId": format!("00000000-0000-4000-8000-{index:012}"),
+                "selectionState": "rejected",
+                "decisionVersion": "version",
+                "removedAtMs": null
+            })
+        })
+        .collect::<Vec<_>>();
+    let over_limit = post_cli_json(
+        &router,
+        "/api/photos/remove-explicit",
+        serde_json::json!({
+            "operationId": "00000000-0000-4000-8000-000000000104",
+            "photos": over_limit
+        }),
+    )
+    .await;
+    assert_eq!(over_limit.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        browse_photo_ids(&application, BrowseSourceRequest::Library).await,
+        vec![first, second, kept]
+    );
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
 #[tokio::test]
 async fn removed_photos_leave_folder_counts_and_cli_queries_but_stay_recoverable() {
     let (base, config) = prepare_fixture();

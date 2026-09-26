@@ -2,17 +2,18 @@ use crate::{
     AlbumBrowseTarget, AlbumCreationResult, AlbumMembershipMutation, AlbumMembershipResult,
     AlbumMutation, AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary,
     AppliedRelocations, CaptureFact, CheckedAlbumMutation, CheckedAlbumMutationResult,
-    EditRecipeRead, EditRecipeWriteOutcome, ExportAttempt, ExportLeaseOutcome, ExportRecord,
-    ExportRetryOutcome, ExportSettlement, ExportSubmission, ExportSubmissionResolution,
-    ExportSubmitOutcome, ExportSweepResult, LibraryRoot, NativeWorkBudget, NativeWorkPermit,
-    OriginalCapability, OriginalDeletionOutcome, PermanentDeletionItemState,
-    PermanentDeletionResult, PermanentDeletionReview, PermanentDeletionSelection,
-    PermanentDeletionTarget, PhotoAlbumMembership, PhotoOperationRemainder, PhotoQuery,
-    PhotoQueryError, PhotoQueryProjection, PhotoRead, PhotoRemovalMutation, PhotoRemovalResult,
-    PhotoRestoration, PhotoRestorationResult, PhotoStateBatchMutation, PhotoStateBatchResult,
-    PhotoStateMutation, PhotoStateMutationResult, PreviewSeed, PreviewSeedResult, RebindEditRecipe,
-    RecoverySurvey, RemovedPhotoRecord, RequestedRelocation, SaveEditRecipe, ScanLimits,
-    ScanResult, ScanSnapshot,
+    EditRecipeRead, EditRecipeWriteOutcome, ExplicitPhotoRemovalMutation,
+    ExplicitPhotoRestoreMutation, ExplicitPhotoRestoreResult, ExportAttempt, ExportLeaseOutcome,
+    ExportRecord, ExportRetryOutcome, ExportSettlement, ExportSubmission,
+    ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult, LibraryRoot,
+    NativeWorkBudget, NativeWorkPermit, OriginalCapability, OriginalDeletionOutcome,
+    PermanentDeletionItemState, PermanentDeletionResult, PermanentDeletionReview,
+    PermanentDeletionSelection, PermanentDeletionTarget, PhotoAlbumMembership,
+    PhotoOperationRemainder, PhotoQuery, PhotoQueryError, PhotoQueryProjection, PhotoRead,
+    PhotoRemovalMutation, PhotoRemovalResult, PhotoRestoration, PhotoRestorationResult,
+    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateMutation, PhotoStateMutationResult,
+    PreviewSeed, PreviewSeedResult, RebindEditRecipe, RecoverySurvey, RemovedPhotoRecord,
+    RequestedRelocation, SaveEditRecipe, ScanLimits, ScanResult, ScanSnapshot,
 };
 use crate::{
     capture::capture_source_revision,
@@ -1125,6 +1126,72 @@ impl Library {
         let receive = {
             let _admission = self.admit()?;
             self.persistence.remove_photos_receiver(mutation)
+        }
+        .map_err(LibraryError::from)?;
+        receive
+            .await
+            .unwrap_or(Err(MutationError::Persistence))
+            .map_err(Into::into)
+    }
+    /// Removes an explicit, caller-reviewed Photo set with decision evidence.
+    pub async fn remove_photos_explicit(
+        &self,
+        mutation: ExplicitPhotoRemovalMutation,
+    ) -> Result<PhotoRemovalResult, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.remove_photos_explicit_receiver(mutation)
+        }
+        .map_err(LibraryError::from)?;
+        receive
+            .await
+            .unwrap_or(Err(MutationError::Persistence))
+            .map_err(Into::into)
+    }
+    /// Reads the durable historical result of one removal operation without
+    /// changing Library state.
+    pub async fn photo_removal_operation(
+        &self,
+        operation_id: String,
+    ) -> Result<Option<PhotoRemovalResult>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .photo_removal_operation_receiver(operation_id)
+        }
+        .map_err(LibraryError::from)?;
+        receive
+            .await
+            .unwrap_or(Err(MutationError::Persistence))
+            .map_err(Into::into)
+    }
+    /// Restores an explicit, caller-reviewed Photo set and retains its
+    /// operation result for replay and read-only outcome inspection.
+    pub async fn restore_photos_explicit(
+        &self,
+        mutation: ExplicitPhotoRestoreMutation,
+    ) -> Result<ExplicitPhotoRestoreResult, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.restore_photos_explicit_receiver(mutation)
+        }
+        .map_err(LibraryError::from)?;
+        receive
+            .await
+            .unwrap_or(Err(MutationError::Persistence))
+            .map_err(Into::into)
+    }
+
+    /// Reads the durable historical result of one explicit restore attempt
+    /// without changing Library state.
+    pub async fn photo_restore_operation(
+        &self,
+        operation_id: String,
+    ) -> Result<Option<ExplicitPhotoRestoreResult>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .photo_restore_operation_receiver(operation_id)
         }
         .map_err(LibraryError::from)?;
         receive

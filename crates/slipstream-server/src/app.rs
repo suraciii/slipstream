@@ -39,6 +39,129 @@ fn permanent_deletion_response(
             .collect(),
     }
 }
+fn explicit_photo_removal_response(
+    result: slipstream_core::PhotoRemovalResult,
+) -> ExplicitPhotoRemovalResponse {
+    let slipstream_core::PhotoRemovalResult {
+        operation_id,
+        counts,
+        ordered_photo_ids,
+        removed,
+        removed_markers,
+        changed_elsewhere,
+        missing,
+        already_removed,
+        ..
+    } = result;
+    let markers = removed_markers
+        .into_iter()
+        .map(|marker| (marker.photo_id, marker.removed_at_ms))
+        .collect::<std::collections::HashMap<_, _>>();
+    let removed = removed
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let changed_elsewhere = changed_elsewhere
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let missing = missing
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let already_removed = already_removed
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let results = ordered_photo_ids
+        .into_iter()
+        .map(|photo_id| {
+            let (outcome, removed_at_ms) = if removed.contains(photo_id.as_str()) {
+                ("removed", markers.get(&photo_id).copied())
+            } else if changed_elsewhere.contains(photo_id.as_str()) {
+                ("changed-elsewhere", None)
+            } else if missing.contains(photo_id.as_str()) {
+                ("unavailable", None)
+            } else if already_removed.contains(photo_id.as_str()) {
+                ("already-removed", None)
+            } else {
+                unreachable!("removal result omitted a requested Photo")
+            };
+            PhotoRemovalItemWire {
+                photo_id,
+                outcome,
+                removed_at_ms,
+            }
+        })
+        .collect();
+    ExplicitPhotoRemovalResponse {
+        operation_id,
+        counts: PhotoRemovalCountsWire {
+            removed: counts.removed,
+            changed_elsewhere: counts.changed_elsewhere,
+            missing: counts.missing,
+            already_removed: counts.already_removed,
+        },
+        results,
+    }
+}
+
+fn explicit_photo_restore_response(
+    result: slipstream_core::ExplicitPhotoRestoreResult,
+) -> ExplicitPhotoRestoreResponse {
+    let slipstream_core::ExplicitPhotoRestoreResult {
+        operation_id,
+        ordered_photo_ids,
+        counts,
+        restored,
+        already_active,
+        changed_elsewhere,
+        missing,
+    } = result;
+    let restored = restored
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let already_active = already_active
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let changed_elsewhere = changed_elsewhere
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let missing = missing
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let results = ordered_photo_ids
+        .into_iter()
+        .map(|photo_id| {
+            let outcome = if restored.contains(photo_id.as_str()) {
+                "restored"
+            } else if already_active.contains(photo_id.as_str()) {
+                "already-active"
+            } else if changed_elsewhere.contains(photo_id.as_str()) {
+                "changed-elsewhere"
+            } else if missing.contains(photo_id.as_str()) {
+                "unavailable"
+            } else {
+                unreachable!("restore result omitted a requested Photo")
+            };
+            PhotoRestoreItemWire { photo_id, outcome }
+        })
+        .collect();
+    ExplicitPhotoRestoreResponse {
+        operation_id,
+        counts: ExplicitPhotoRestoreCountsWire {
+            restored: counts.restored,
+            already_active: counts.already_active,
+            changed_elsewhere: counts.changed_elsewhere,
+            missing: counts.missing,
+        },
+        results,
+    }
+}
 
 /// The published Library plus id indices, rebuilt atomically on each snapshot
 /// replacement so bounded window requests never rescan the whole Library.
@@ -1899,6 +2022,54 @@ impl Application {
             missing: result.missing,
             already_removed: result.already_removed,
         })
+    }
+    /// Applies one explicit removal set after rechecking every submitted
+    /// decision and removal-state evidence.
+    pub async fn remove_photos_explicit(
+        &self,
+        mutation: slipstream_core::ExplicitPhotoRemovalMutation,
+    ) -> Result<ExplicitPhotoRemovalResponse, ServerError> {
+        let _publication = self.shared.publication.lock().await;
+        let result = self.library.remove_photos_explicit(mutation).await?;
+        self.shared
+            .patch_photo_removals(&result.newly_removed, true);
+        Ok(explicit_photo_removal_response(result))
+    }
+
+    /// Reads an accepted explicit removal result without changing state.
+    pub async fn photo_removal_operation(
+        &self,
+        operation_id: String,
+    ) -> Result<Option<ExplicitPhotoRemovalResponse>, ServerError> {
+        Ok(self
+            .library
+            .photo_removal_operation(operation_id)
+            .await?
+            .map(explicit_photo_removal_response))
+    }
+
+    /// Applies one explicit Restore attempt and retains its result in the
+    /// persistence owner for replay and inspection.
+    pub async fn restore_photos_explicit(
+        &self,
+        mutation: slipstream_core::ExplicitPhotoRestoreMutation,
+    ) -> Result<ExplicitPhotoRestoreResponse, ServerError> {
+        let _publication = self.shared.publication.lock().await;
+        let result = self.library.restore_photos_explicit(mutation).await?;
+        self.shared.patch_photo_removals(&result.restored, false);
+        Ok(explicit_photo_restore_response(result))
+    }
+
+    /// Reads an accepted explicit Restore result without changing state.
+    pub async fn photo_restore_operation(
+        &self,
+        operation_id: String,
+    ) -> Result<Option<ExplicitPhotoRestoreResponse>, ServerError> {
+        Ok(self
+            .library
+            .photo_restore_operation(operation_id)
+            .await?
+            .map(explicit_photo_restore_response))
     }
 
     /// Restores every Photo one operation still owns, or one explicit bounded

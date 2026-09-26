@@ -34,6 +34,7 @@ fn capabilities_body() -> Value {
         "limits": {
             "listPageMaximum": 60,
             "mutationPhotoIdsMaximum": 100,
+            "removalPhotoIdsMaximum": 100,
             "albumReorderMembersMaximum": 100,
             "retainedQueryIdsMaximum": 1000000,
             "retainedQueryIdleSeconds": 900
@@ -724,6 +725,146 @@ async fn cli_photo_decisions_conflict_with_web_interleaving_and_restart() {
     fs::remove_dir_all(base).unwrap();
 }
 
+#[tokio::test]
+async fn cli_explicit_removal_restore_inspect_survives_restart() {
+    let (base, config) = fixture_with(&["one.JPG", "two.JPG"]);
+    let server = common::start_authenticated_server(config.clone()).await;
+    wait_until_idle(&server.url).await;
+    let (exit, page) = command(&server.url, &["photos", "list", "--limit", "60"]).await;
+    assert_eq!(exit, 0);
+    let items = page["data"]["items"].as_array().unwrap();
+    let first = items[0]["id"].as_str().unwrap().to_owned();
+    let second = items[1]["id"].as_str().unwrap().to_owned();
+    for item in items {
+        let (exit, result) = command(
+            &server.url,
+            &[
+                "photos",
+                "set",
+                item["id"].as_str().unwrap(),
+                "--selection",
+                "rejected",
+                "--if-version",
+                item["decisionVersion"].as_str().unwrap(),
+            ],
+        )
+        .await;
+        assert_eq!(exit, 0, "{result}");
+    }
+    let (exit, rejected) =
+        command(&server.url, &["photos", "list", "--selection", "rejected"]).await;
+    assert_eq!(exit, 0);
+    let first_facts = rejected["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == first)
+        .unwrap();
+    assert_eq!(first_facts["removedAtMs"], Value::Null);
+    let input = write_input(
+        &base,
+        "remove.json",
+        &serde_json::to_string(&json!({
+            "photos": [{
+                "photoId": first,
+                "selectionState": "rejected",
+                "decisionVersion": first_facts["decisionVersion"],
+                "removedAtMs": null
+            }]
+        }))
+        .unwrap(),
+    );
+    let removal_operation = "00000000-0000-4000-8000-000000000201";
+    let (exit, removed) = command(
+        &server.url,
+        &["photos", "remove", removal_operation, "--input", &input],
+    )
+    .await;
+    assert_eq!(exit, 0, "{removed}");
+    assert_eq!(removed["data"]["counts"]["removed"], 1);
+    assert_eq!(removed["data"]["results"][0]["photoId"], first);
+    assert!(
+        removed["data"]["results"][0]["removedAtMs"]
+            .as_i64()
+            .is_some()
+    );
+
+    server.close().await.unwrap();
+    let mut server = start_server(config).await.unwrap();
+    server.url = common::tls_proxy(&server.url);
+    wait_until_idle(&server.url).await;
+
+    let (exit, inspected) = command(
+        &server.url,
+        &["photos", "removal-operation", removal_operation],
+    )
+    .await;
+    assert_eq!(exit, 0, "{inspected}");
+    assert_eq!(inspected["data"], removed["data"]);
+    let (exit, trash) = command(&server.url, &["trash", "list"]).await;
+    assert_eq!(exit, 0);
+    let marker = trash["data"]["photos"][0]["removedAtMs"].as_i64().unwrap();
+    assert_eq!(trash["data"]["photos"][0]["photo"]["id"], first);
+    assert_eq!(
+        trash["data"]["photos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|photo| photo["photo"]["id"] == second)
+            .count(),
+        0
+    );
+
+    let restore_input = write_input(
+        &base,
+        "restore.json",
+        &serde_json::to_string(&json!({
+            "photos": [{"photoId": first, "removedAtMs": marker}]
+        }))
+        .unwrap(),
+    );
+    let restore_operation = "00000000-0000-4000-8000-000000000202";
+    let (exit, restored) = command(
+        &server.url,
+        &[
+            "photos",
+            "restore",
+            restore_operation,
+            "--input",
+            &restore_input,
+        ],
+    )
+    .await;
+    assert_eq!(exit, 0, "{restored}");
+    assert_eq!(restored["data"]["counts"]["restored"], 1);
+    let (exit, restore_inspected) = command(
+        &server.url,
+        &["photos", "restore-operation", restore_operation],
+    )
+    .await;
+    assert_eq!(exit, 0, "{restore_inspected}");
+    assert_eq!(restore_inspected["data"], restored["data"]);
+    let (exit, after) = command(&server.url, &["photos", "list", "--selection", "rejected"]).await;
+    assert_eq!(exit, 0);
+    let after_ids = after["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(after_ids.contains(first.as_str()));
+    assert!(after_ids.contains(second.as_str()));
+    assert!(
+        after["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["removedAtMs"] == Value::Null)
+    );
+
+    server.close().await.unwrap();
+    fs::remove_dir_all(base).unwrap();
+}
 #[tokio::test]
 async fn cli_photo_decisions_validate_input_before_any_network_mutation() {
     let base = std::env::temp_dir().join(format!(
