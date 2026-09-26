@@ -312,6 +312,12 @@ the IPTC IIM counterpart; the underlying source values stay inspectable. An
 empty Sidecar value suppresses fallback. `FILE` for `metadata-save` is a
 UTF-8 JSON document; `-` reads it from stdin.
 
+Read includes Removed Photos whose Original is still available. Save refuses
+a Removed Photo. Sidecar evidence is `absent`, `present`, or `unavailable`;
+`unavailable` includes a reason and cannot authorize Save. A readable XMP
+document with unsupported preservation constructs still exposes its supported
+fields, but Save refuses to rewrite it.
+
 The authoritative shapes are the shared vectors under
 `compatibility/metadata/`. A save document contains exactly `evidence` from a
 prior Read and a nonempty `changes` object with one patch per field:
@@ -326,8 +332,8 @@ prior Read and a nonempty `changes` object with one patch per field:
 The CLI validates the document shape and that the evidence names the same
 Photo before any network access. The service owns field semantics: an
 unsupported field, an invalid patch, or stale evidence is refused before any
-change. Errors use the metadata code table with the same exit codes as HTTP
-status mapping: `invalid_input` and `unsupported_field` exit `2`;
+change. Metadata errors use the shared CLI exit-code table:
+`invalid_input` and `unsupported_field` exit `2`;
 `photo_missing`, `original_unavailable`, `association_unresolved`, and
 `photo_removed` exit `3`; `evidence_stale` and `metadata_malformed` exit `4`;
 `save_unavailable` and `permission` exit `5`; `resource_limit` exits `6`;
