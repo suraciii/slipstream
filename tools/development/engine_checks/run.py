@@ -23,6 +23,7 @@ print(json.dumps({"test_patch_sha256": hashlib.sha256(
 with tempfile.TemporaryDirectory(prefix="lut-quality-jit-", dir="/work") as cache:
     run("/opt/engine_checks/lut_quality_probe.py",
         env={**os.environ, "NUMBA_CACHE_DIR": cache})
+run("/opt/engine_checks/test_lut_quality.py")
 run("/opt/engine_checks/test_bounded_gamut.py")
 run("/opt/engine_checks/test_buffer_lifetimes.py")
 with tempfile.TemporaryDirectory(prefix="reference-jit-", dir="/work") as cache:

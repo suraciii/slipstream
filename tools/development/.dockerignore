@@ -25,3 +25,4 @@ engine_checks/**
 !engine_checks/0001-current-grain-contract.patch
 !engine_checks/lut_quality.py
 !engine_checks/lut_quality_probe.py
+!engine_checks/test_lut_quality.py
