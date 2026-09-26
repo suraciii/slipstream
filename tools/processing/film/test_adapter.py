@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -22,6 +24,33 @@ from spektrafilm.utils.bounded_output import plan_cctf_workspace, plan_jpeg_work
 
 
 class AdapterTests(unittest.TestCase):
+    def test_packaged_recipe_and_lut_probe_share_the_accepted_identity(self):
+        adapter.sys.path.insert(0, "/opt/probe")
+        from film import make_simulator
+        from contract import NUMERICAL_BUNDLE
+
+        _, recipe = make_simulator()
+        packaged_bundle = Path("/opt/processing-bundle.json").read_bytes()
+        self.assertEqual(hashlib.sha256(packaged_bundle).hexdigest(), NUMERICAL_BUNDLE)
+        self.assertEqual(recipe["processing_bundle"], json.loads(packaged_bundle))
+        adapter.check_recipe(recipe)
+
+        with tempfile.TemporaryDirectory(dir="/work", prefix="lut-quality-") as cache:
+            result = subprocess.run(
+                [sys.executable, "/opt/film-checks/lut_quality_probe.py"],
+                check=True, capture_output=True, text=True,
+                env={**os.environ, "NUMBA_CACHE_DIR": cache},
+            )
+        report = json.loads(result.stdout)
+        self.assertTrue(report["recipe_identity_matches"])
+        self.assertEqual(report["blocking_reasons"], [])
+        self.assertFalse(report["acceptance"])
+        self.assertEqual(report["criterion"], "not-selected")
+        self.assertEqual(
+            [case["case"] for case in report["cases"]],
+            ["neutral", "structured-range", "textured-range"],
+        )
+
     def test_qualified_grant_reuses_producer_and_hashes_its_complete_plan(self):
         value = qualified_grant()
         adapter.check_plans(value)
