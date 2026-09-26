@@ -4,7 +4,14 @@ import unittest
 
 import numpy as np
 
-from lut_quality import comparison_corpus, summarize_difference
+from lut_quality import (
+    LUT_CIEDE2000_MAX,
+    LUT_CIEDE2000_P95_MAX,
+    LUT_QUALITY_CRITERION,
+    comparison_corpus,
+    ciede2000_passes,
+    summarize_difference,
+)
 
 
 class LutQualityTests(unittest.TestCase):
@@ -35,12 +42,19 @@ class LutQualityTests(unittest.TestCase):
             "nonzero_channel_count": 5,
         })
 
+    def test_selected_ciede2000_gate_requires_both_limits(self):
+        self.assertEqual(LUT_QUALITY_CRITERION, "ciede2000-d65-v1")
+        self.assertEqual(LUT_CIEDE2000_P95_MAX, 0.005)
+        self.assertEqual(LUT_CIEDE2000_MAX, 0.01)
+        self.assertTrue(ciede2000_passes({"p95": 0.005, "max": 0.01}))
+        self.assertFalse(ciede2000_passes({"p95": 0.005001, "max": 0.01}))
+        self.assertFalse(ciede2000_passes({"p95": 0.005, "max": 0.010001}))
+
     def test_summary_rejects_non_rgb_shapes(self):
         with self.assertRaises(ValueError):
             summarize_difference(np.zeros((2, 3)), np.zeros((2, 3)))
         with self.assertRaises(ValueError):
             summarize_difference(np.zeros((2, 3, 3)), np.zeros((2, 3, 4)))
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

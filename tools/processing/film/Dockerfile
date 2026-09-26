@@ -11,10 +11,11 @@ COPY tools/processing/film/requirements.lock /opt/film-measurement/requirements.
 RUN uv --no-cache pip install --python /opt/runtime/bin/python --target /opt/film-validator-deps \
     --require-hashes --no-compile-bytecode -r /opt/film-measurement/requirements.lock
 COPY tools/processing/film/adapter.py tools/processing/film/contract.py \
-     tools/processing/film/package.py tools/processing/film/Dockerfile /opt/film-measurement/
-COPY design/schemas/processing-film-measurement.schema.json /opt/film-measurement/schema.json
+     tools/processing/film/package.py tools/processing/film/Dockerfile \
+     tools/development/finished_jpeg.py /opt/film-measurement/
 COPY tools/development/film_identity.py /opt/probe/film_identity.py
 COPY design/schemas/processing-film-envelope.schema.json /opt/film-measurement/envelope-schema.json
+COPY design/schemas/processing-film-measurement.schema.json /opt/film-measurement/schema.json
 RUN /opt/runtime/bin/python /opt/probe/bundle.py --verify
 
 FROM adapter-source AS film

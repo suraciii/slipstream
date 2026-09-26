@@ -15,6 +15,7 @@ from contract import (
     ContractError, NUMERICAL_BUNDLE, OUTPUT_ICC, RECIPE,
     digest, read_grant, write_producer,
 )
+from finished_jpeg import save_finished_jpeg
 
 INPUT = Path("/input/input.tif")
 OUTPUT = Path("/output/finished.jpg")
@@ -223,7 +224,6 @@ def produce(grant):
     import OpenImageIO as oiio
     from film import make_simulator, pixel_digest, render
     from spektrafilm.utils.bounded_output import samples_are_finite
-    from spektrafilm.utils.io import save_image_oiio
 
     oiio.attribute("threads", 4)
     check_plans(grant)
@@ -247,8 +247,11 @@ def produce(grant):
     # can classify the kernel's exact file-limit signal even if OIIO drops errno.
     signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
     try:
-        save_image_oiio(str(OUTPUT), result, color_space="sRGB", cctf_encoding=True,
-                        jpeg_workspace_bytes=grant["plan"]["jpeg"]["allowance_bytes"])
+        save_finished_jpeg(
+            str(OUTPUT),
+            result,
+            workspace_bytes=grant["plan"]["jpeg"]["allowance_bytes"],
+        )
     except OSError:
         storage = os.statvfs(OUTPUT.parent)
         if storage.f_bavail == 0 or storage.f_favail == 0:

@@ -25,7 +25,15 @@ from spektrafilm.utils.bounded_gamut import MAX_WORKSPACE_BYTES
 
 from bundle import load_bundle
 from film import make_simulator, pixel_digest, render
-from lut_quality import comparison_corpus, nearest_rank, summarize_difference
+from lut_quality import (
+    LUT_CIEDE2000_MAX,
+    LUT_CIEDE2000_P95_MAX,
+    LUT_QUALITY_CRITERION,
+    comparison_corpus,
+    ciede2000_passes,
+    nearest_rank,
+    summarize_difference,
+)
 
 
 
@@ -123,9 +131,22 @@ def main():
             "metrics": metrics,
         })
 
+    criterion_passes = all(
+        ciede2000_passes(row["metrics"]["ciede2000"])
+        for row in rows
+    )
+    if not criterion_passes:
+        blocking_reasons.append("lut-ciede2000-threshold-exceeded")
+
     print(json.dumps({
         "comparison": "lut-vs-direct-spectral-v1",
-        "criterion": "not-selected",
+        "criterion": LUT_QUALITY_CRITERION,
+        "criterion_limits": {
+            "ciede2000_p95_max": LUT_CIEDE2000_P95_MAX,
+            "ciede2000_max": LUT_CIEDE2000_MAX,
+        },
+        "criterion_passes": criterion_passes,
+        "criterion_scope": "synthetic-smoke",
         "adapter_recipe_sha256": FILM_RECIPE_SHA256,
         "lut_manifest_sha256": lut_manifest_sha,
         "direct_manifest_sha256": recipe_digest(direct_recipe),
@@ -135,7 +156,7 @@ def main():
         "cases": rows,
         "seconds": time.monotonic() - started,
         "acceptance": False,
-        "note": "Metrics are diagnostic evidence only; recipe identity and the governing issue must be satisfied before LUT quality can qualify.",
+        "note": "The selected criterion passes only on this synthetic smoke corpus; representative camera-derived and full-resolution evidence remain required for Film acceptance.",
     }, sort_keys=True))
 
 

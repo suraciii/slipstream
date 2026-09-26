@@ -124,6 +124,16 @@ proof of full-resolution grain or halation detail. Full-detail inspection must
 use a qualified full-resolution result and identify its settings. Slipstream
 must not silently disable effects to make a preview appear faster.
 
+The initial Film Preview responsiveness target is a warm inclusive-render
+95th-percentile latency of at most 4.0 seconds for both approximately 1 MP
+orientations (1225 × 816 and 816 × 1225). The measurement includes the
+simulation wrapper after initialization, uses the qualified thread policy, and
+must retain the complete Film effects. Queueing, admission, process startup,
+and image transfer are measured separately as complete request latency and
+disclosed to the Photographer; they must not be hidden by the simulation
+target. Cold startup and full-resolution Export distributions remain separate
+qualification evidence.
+
 ## Export Targets
 
 A Development TIFF is the independent handoff after exposure and white balance.
@@ -132,8 +142,8 @@ point samples, scene-linear ProPhoto RGB pixels, and a matching embedded ICC
 profile. It must not include film simulation or a display/look transform.
 
 A Finished JPEG must contain the Film Result at full developed dimensions,
-encoded for sRGB with a matching profile and a documented fixed quality setting.
-Finished TIFF and expert output options are outside this capability.
+encoded for sRGB with the pinned destination profile and fixed JPEG quality
+85. Finished TIFF and expert output options are outside this capability.
 
 The export interface must name the intended output and processing stage. It
 must not present an ambiguous TIFF choice that could refer to either an

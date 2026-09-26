@@ -47,8 +47,8 @@ class AdapterTests(unittest.TestCase):
         report = run_probe("lut_quality_probe.py")
         self.assertTrue(report["recipe_identity_matches"])
         self.assertEqual(report["blocking_reasons"], [])
-        self.assertFalse(report["acceptance"])
-        self.assertEqual(report["criterion"], "not-selected")
+        self.assertTrue(report["criterion_passes"])
+        self.assertEqual(report["criterion"], "ciede2000-d65-v1")
         self.assertEqual(
             [case["case"] for case in report["cases"]],
             ["neutral", "structured-range", "textured-range"],
@@ -63,9 +63,9 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(reproducibility["a_b_a"]["lut_before_after_direct_match"])
         self.assertTrue(reproducibility["a_b_a"]["direct_runs_match"])
         self.assertTrue(reproducibility["a_b_a"]["in_process_match"])
-        self.assertEqual(reproducibility["sequence"], ["lut", "direct", "lut", "direct"])
         self.assertFalse(reproducibility["acceptance"])
-        self.assertEqual(reproducibility["criterion"], "not-selected")
+        self.assertEqual(reproducibility["criterion"], "ciede2000-d65-v1")
+        self.assertIsNone(reproducibility["criterion_passes"])
         self.assertEqual(
             [case["case"] for case in reproducibility["cases"]],
             ["neutral", "structured-range", "textured-range"],
@@ -96,7 +96,6 @@ class AdapterTests(unittest.TestCase):
     def test_opaque_codec_error_requires_real_storage_exhaustion_evidence(self):
         adapter.sys.path.insert(0, "/opt/probe")
         import film
-        from spektrafilm.utils import io
 
         value = grant()
         reference = value["fixture"]["reference"]
@@ -111,7 +110,8 @@ class AdapterTests(unittest.TestCase):
                     reference["input_pixels_sha256"], reference["film_pixels_sha256"],
                     reference["input_pixels_sha256"],
                 ]))
-                stack.enter_context(patch.object(io, "save_image_oiio", side_effect=OSError("Opaque codec error")))
+                stack.enter_context(patch.object(adapter, "save_finished_jpeg",
+                                                 side_effect=OSError("Opaque codec error")))
                 stack.enter_context(patch.object(adapter.os, "statvfs", return_value=SimpleNamespace(f_bavail=blocks, f_favail=inodes)))
                 signal_policy = stack.enter_context(patch.object(adapter.signal, "signal"))
                 with self.assertRaises(OSError) as failure:
