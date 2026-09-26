@@ -1199,24 +1199,12 @@ impl Persistence {
         Ok(receive)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn snapshot_blocking(&self) -> Result<ScanSnapshot, PersistenceError> {
         let (send, receive) = oneshot::channel();
         self.submit(Command::Snapshot(send))?;
         receive
             .blocking_recv()
             .unwrap_or(Err(PersistenceError::OwnerStopped))
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn apply_scan_blocking(
-        &self,
-        discovered: Vec<DiscoveredOriginal>,
-        errors: Vec<OriginalScanError>,
-    ) -> Result<ScanSnapshot, PersistenceError> {
-        Ok(self
-            .apply_scan_recovered_blocking(discovered, errors, ScanRecoveryPlan::default())?
-            .snapshot)
     }
 
     pub(crate) fn apply_scan_recovered_blocking(
@@ -1302,18 +1290,6 @@ impl Persistence {
             reply: send,
         })?;
         Ok(receive)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn seed_preview_blocking(
-        &self,
-        preview: PreviewSeed,
-    ) -> Result<PreviewSeedResult, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::Preview(preview, send))?;
-        receive
-            .blocking_recv()
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
     }
 
     pub async fn list_albums(&self) -> Result<Vec<AlbumRecord>, PersistenceError> {
