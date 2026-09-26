@@ -35,20 +35,35 @@ const sample = process.env.SLIPSTREAM_RAW_SAMPLE;
 /// needs a host with an admitted launcher socket, so it stays skipped
 /// everywhere else, exactly as the RAW sample does.
 const processingInstance = process.env.SLIPSTREAM_PROCESSING_INSTANCE?.trim();
+const processingEnvironmentOverrides = {
+  SLIPSTREAM_PROCESSING_INSTANCE: processingInstance,
+  SLIPSTREAM_PROCESSING_POLICY_SHA256:
+    process.env.SLIPSTREAM_PROCESSING_POLICY_SHA256?.trim(),
+  SLIPSTREAM_PROCESSING_BUNDLE_SHA256:
+    process.env.SLIPSTREAM_PROCESSING_BUNDLE_SHA256?.trim(),
+  SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES:
+    process.env.SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES?.trim(),
+} as const;
+const noProcessingEnvironment = Object.fromEntries(
+  Object.keys(processingEnvironmentOverrides).map((name) => [
+    name,
+    undefined,
+  ]),
+);
 const processingEnvironment = [
   ["SLIPSTREAM_RAW_SAMPLE", sample],
   ["SLIPSTREAM_PROCESSING_INSTANCE", processingInstance],
   [
     "SLIPSTREAM_PROCESSING_POLICY_SHA256",
-    process.env.SLIPSTREAM_PROCESSING_POLICY_SHA256?.trim(),
+    processingEnvironmentOverrides.SLIPSTREAM_PROCESSING_POLICY_SHA256,
   ],
   [
     "SLIPSTREAM_PROCESSING_BUNDLE_SHA256",
-    process.env.SLIPSTREAM_PROCESSING_BUNDLE_SHA256?.trim(),
+    processingEnvironmentOverrides.SLIPSTREAM_PROCESSING_BUNDLE_SHA256,
   ],
   [
     "SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES",
-    process.env.SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES?.trim(),
+    processingEnvironmentOverrides.SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES,
   ],
 ] as const;
 const missingProcessingEnvironment = () =>
@@ -176,8 +191,13 @@ async function writePhotos(root: string, count: number) {
   for (let index = 0; index < count; index += 1)
     await writeFile(join(root, `${String(index).padStart(3, "0")}.jpg`), data);
 }
-async function server(base: string, root: string) {
-  const running = await startBrowserServer({ base, root });
+async function server(
+  base: string,
+  root: string,
+  environment: Readonly<Record<string, string | undefined>> =
+    noProcessingEnvironment,
+) {
+  const running = await startBrowserServer({ base, root, environment });
   servers.push(running);
   const login = await activeContext.request.post(
     `${running.url}/api/access/session`,
@@ -1270,7 +1290,11 @@ test("real-processing: autosaves an exposure, reopens it, compares the baseline,
   }
   const copiedSidecarBefore = await originalSnapshot(isolatedSidecarPath);
   const copiedBefore = await originalSnapshot(raw);
-  const running = await server(base, root);
+  const running = await server(
+    base,
+    root,
+    processingEnvironmentOverrides,
+  );
   await startReview(page, running.url, "All Photos");
   await openPhotoToolsView(page, "edit");
   // The deployment admits this Photo: the capability is the launcher's, and
