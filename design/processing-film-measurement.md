@@ -49,8 +49,11 @@ Film mathematics, profiles, physical scale, effects, and stochastic behavior.
 [The JSON Schema](schemas/processing-film-measurement.schema.json) is the sole
 syntax authority. Its named definitions cover configuration, catalogue, resource
 model, all four request operations, responses, receipts, engine grants, stage
-exchange, producer observations, and native worker results. Objects are closed and all listed fields are
-required; nullable fields are explicit. No additional compatibility syntax exists.
+exchange, producer observations, and native worker results. Objects are closed;
+listed fields are required and nullable fields are explicit, except
+`TerminalSnapshot.io_stat_raw`, which may be omitted in older persisted snapshots
+as defined by the
+[executor terminal-evidence rule](processing-executor-protocol.md#responses-and-receipts).
 
 The parser must also reject duplicate keys, trailing JSON, invalid UTF-8,
 non-finite numbers, unpaired UTF-16 surrogates, and integer tokens written as
