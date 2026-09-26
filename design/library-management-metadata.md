@@ -173,9 +173,14 @@ session. A session has five steps, all under the deployment's control:
 
 1. **Quiesce.** Stop every process of the managed file service that exposes
    the Library to external applications, and verify the stop: no service
-   process remains. If the service does not reach a verified stop within the
-   bounded timeout, Save refuses before any mutation and reports Save
-   unavailable with the reason.
+   process remains anywhere in its control group, because signaling only the
+   main process leaves workers alive. The supervisor terminates the whole
+   control group and observes its emptiness. The service must run with
+   client-caching and handle-replay features that could re-apply a write after
+   the restart disabled and qualified: no oplocks, SMB leases, directory
+   leases, or durable or persistent handles for the managed service. If the
+   service does not reach a verified stop within the bounded timeout, Save
+   refuses before any mutation and reports Save unavailable with the reason.
 2. **Final validation.** Recheck the evidence token: Original path, inode,
    size, and modification time; the Association candidate set, generation, and
    Sidecar name; and the Sidecar revision facts and bounded content digest,
@@ -221,15 +226,16 @@ store directly; such access is outside the supported environment.
 
 The supported writable deployment is:
 
-- a backing tree reachable only by the deployment host;
-- one writer identity shared exclusively by the file service's worker
-  processes and the save helper;
-- directories that are sticky and group-writable, with Original Files owned by
-  the deployment identity and read-only to the writer identity, so the writer
-  can create and replace Sidecars but cannot write, replace, or unlink an
-  Original;
+- directories that are sticky, set-group-id, and group-writable, with Original
+  Files owned by the deployment identity and read-only to the writer identity,
+  so the writer can create and replace Sidecars but cannot write, replace, or
+  unlink an Original. Files that arrive as Originals through the file service
+  are re-owned and restricted by deployment provisioning before they are
+  admitted as Original Files, because writer-owned files are writable by the
+  writer identity;
 - the Web application and CLI never writing the backing store; and
-- the save helper as the only component that opens a save session.
+- the save helper as the only component that opens a save session, under a
+  supervisor that owns the file service lifecycle.
 
 A deployment with a read-only Library, including the default Compose shape,
 supports Read and reports Save unavailable with the actionable reason. The
