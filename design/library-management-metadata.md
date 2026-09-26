@@ -171,11 +171,11 @@ would have to change. Removing one alternative never removes the others.
 Save is admitted only when the deployment provides an enforced exclusive save
 session. A session has five steps, all under the deployment's control:
 
-1. **Quiesce.** Stop every process of the managed file service that exposes
-   the Library to external applications, and verify the stop: no service
-   process remains anywhere in its control group, because signaling only the
-   main process leaves workers alive. The supervisor terminates the whole
-   control group and observes its emptiness. The service must run with
+1. **Quiesce.** Fence the managed file service in a fixed order: stop its
+   listener or refuse new external sessions, let in-flight requests drain
+   within a bounded wait, then terminate every service process in its control
+   group — signaling only the main process leaves workers alive — and observe
+   the control group's emptiness as proof. The service must run with
    client-caching and handle-replay features that could re-apply a write after
    the restart disabled and qualified: no oplocks, SMB leases, directory
    leases, or durable or persistent handles for the managed service. If the
@@ -226,13 +226,21 @@ store directly; such access is outside the supported environment.
 
 The supported writable deployment is:
 
+- a backing tree whose host-side ancestors are private to the deployment: not
+  searchable or writable by other host users, so no writer can bypass the
+  managed service;
+- a writer identity distinct from the Web application's identity, used only
+  by the file service's worker processes and the save helper. The Web
+  application reaches the backing tree only through its read-only bind;
 - directories that are sticky, set-group-id, and group-writable, with Original
   Files owned by the deployment identity and read-only to the writer identity,
   so the writer can create and replace Sidecars but cannot write, replace, or
   unlink an Original. Files that arrive as Originals through the file service
   are re-owned and restricted by deployment provisioning before they are
   admitted as Original Files, because writer-owned files are writable by the
-  writer identity;
+  writer identity. Hardlink creation over deployment-owned Originals by the
+  writer identity must be denied — for example by the kernel's protected
+  hardlink policy — as a fail-closed provisioning prerequisite;
 - the Web application and CLI never writing the backing store; and
 - the save helper as the only component that opens a save session, under a
   supervisor that owns the file service lifecycle.
