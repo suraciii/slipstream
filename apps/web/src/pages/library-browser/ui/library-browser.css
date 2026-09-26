@@ -2222,6 +2222,19 @@
   font-size: 0.78rem;
 }
 
+.removed-selection {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.removed-selection [data-removed-selection-count] {
+  color: var(--muted);
+  font-size: 0.75rem;
+  margin-inline-end: auto;
+}
+
 .removed-list {
   list-style: none;
   margin: 0;
@@ -2233,7 +2246,7 @@
 
 .removed-item {
   display: grid;
-  grid-template-columns: 3rem minmax(0, 1fr) auto;
+  grid-template-columns: auto 3rem minmax(0, 1fr) auto;
   align-items: center;
   gap: 0.6rem;
 }
@@ -2270,6 +2283,105 @@
 .removed-message {
   margin: 0;
   font-size: 0.85rem;
+  color: var(--warning);
+}
+
+/* The permanent-deletion review names the reviewed files before the one
+   confirmation that cannot be undone. */
+.trash-review-dialog .removal-sheet {
+  width: min(34rem, 92vw);
+}
+
+.trash-review-items,
+.trash-review-rejected-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+}
+
+.trash-review-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 1.2fr);
+  gap: 0.6rem;
+  align-items: baseline;
+}
+
+.trash-review-location,
+.trash-review-albums {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trash-review-kind,
+.trash-review-size {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.trash-review-rejected-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.6rem;
+  align-items: baseline;
+  color: var(--warning);
+}
+
+/* The Trash deletion outcome: one partition of the operation's items, the
+   logical bytes of the confirmed deletions only, and the recovery actions a
+   lost response offers. */
+.trash-outcome {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.5rem;
+  border: 1px solid var(--raised);
+  border-radius: 0.4rem;
+  font-size: 0.8rem;
+}
+
+.trash-outcome-title {
+  margin: 0;
+}
+
+.trash-outcome-counts,
+.trash-outcome-bytes {
+  margin: 0;
+  color: var(--muted);
+}
+
+.trash-outcome-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.trash-outcome-item {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trash-outcome-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* One listing item whose permanent-deletion outcome is not settled yet. */
+.removed-pending {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 0.3rem;
+  justify-items: start;
+}
+
+.removed-pending-marker {
+  margin: 0;
+  font-size: 0.72rem;
   color: var(--warning);
 }
 

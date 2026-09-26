@@ -21,7 +21,8 @@ export type ModalSurfaceKind =
   | "album-form"
   | "recovery"
   | "removal-review"
-  | "removed-panel";
+  | "removed-panel"
+  | "trash-review";
 
 /// The controls one modal surface cycles through. A hidden or disabled
 /// control takes no focus, so the cycle never stops on it.

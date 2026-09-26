@@ -47,6 +47,20 @@ import {
   type RemovalResult,
   type RestorationResult,
 } from "./api/removal.js";
+import {
+  deleteTrash,
+  fetchTrashOperation,
+  reviewTrash,
+  boundTrashSelection,
+  confirmTrashLabel,
+  partitionTrashOperation,
+  planTrashReview,
+  trashSelectAllNotice,
+  type TrashListingSelectionItem,
+  type TrashOutcomePartition,
+  type TrashReview,
+  type TrashReviewPlan,
+} from "./api/trash.js";
 import { createRemovalOwner } from "./model/removal-owner.js";
 import {
   createAlbumActionOwner,
@@ -452,6 +466,7 @@ function mountPrivateLibraryBrowser(
   let removedAbort: AbortController | undefined;
   let removedPending = false;
   let removedRestoringId: string | undefined;
+  let removedRestoringSelection = false;
   let removedMessage: string | undefined;
   type AlbumFormRecord = Readonly<{
     formId: string;
@@ -460,6 +475,57 @@ function mountPrivateLibraryBrowser(
     albumId?: string;
     initialName: string;
   }>;
+  const removedSelectedIds = new Set<string>();
+  const removedSelectedMarkers = new Map<string, number>();
+  let removedSelectionPending = false;
+  let removedDeleting = false;
+  /// The permanent-deletion review currently presented. It names the one
+  /// operation id the confirmation may use; Cancel discards it and deletes
+  /// nothing.
+  let trashReview:
+    | Readonly<{
+        operationId: string;
+        plan: TrashReviewPlan;
+        deleting: boolean;
+      }>
+    | undefined;
+  /// The Trash deletion operation this panel confirmed or is recovering: its
+  /// partition once a validated response named it, only its id while the
+  /// response is lost. A lost response is never presented as proof of
+  /// failure or success.
+  let trashOperation:
+    | Readonly<{
+        operationId: string;
+        partition?: TrashOutcomePartition;
+      }>
+    | undefined;
+  /// The retained-operation action in flight, so its control cannot be
+  /// re-entered while it settles.
+  let trashOutcomeBusy: "check" | "resume" | undefined;
+  /// This Library's retained Trash deletion operation. The Library Browser
+  /// serves one Library per origin, so this key is the Library's slot. The id
+  /// is kept only while a delete response was lost, so reopening Trash can
+  /// recover the operation's result instead of presenting the loss as proof
+  /// of failure or success.
+  const TRASH_OPERATION_STORAGE_KEY = "slipstream:trash-deletion-operation";
+  const readStoredTrashOperation = (): string | undefined => {
+    try {
+      const value = window.localStorage.getItem(TRASH_OPERATION_STORAGE_KEY);
+      return value === null || value.length === 0 ? undefined : value;
+    } catch {
+      return undefined;
+    }
+  };
+  const storeTrashOperation = (operationId: string | undefined): void => {
+    try {
+      if (operationId === undefined)
+        window.localStorage.removeItem(TRASH_OPERATION_STORAGE_KEY);
+      else
+        window.localStorage.setItem(TRASH_OPERATION_STORAGE_KEY, operationId);
+    } catch {
+      // Storage unavailable: the recovery then lives only in this panel.
+    }
+  };
   let albumForm: AlbumFormRecord | undefined;
   const dismissAlbumForm = (record: AlbumFormRecord): boolean => {
     if (!albumActions.isFormCurrent(record.authority)) return false;
@@ -4056,17 +4122,83 @@ function mountPrivateLibraryBrowser(
         closeRemovedPanel();
         return;
       case "removed-page": {
-        if (removedPending || removedPage === undefined) return;
+        if (
+          removedPending ||
+          removedSelectionPending ||
+          removedDeleting ||
+          removedPage === undefined
+        )
+          return;
         const start = removedPage.start + intent.direction * REMOVED_PAGE_LIMIT;
         if (start < 0 || start >= removedPage.total) return;
         void loadRemovedPage(start);
         return;
       }
       case "removed-retry":
+        if (removedPending || removedSelectionPending || removedDeleting)
+          return;
         void loadRemovedPage(removedPage?.start ?? 0);
         return;
-      case "removed-restore":
+      case "removed-select-all":
+        void selectAllRemoved();
+        return;
+      case "removed-clear-selection":
+        clearRemovedSelection();
+        return;
+      case "removed-toggle": {
+        if (removedPending || removedSelectionPending || removedDeleting)
+          return;
+        const item = removedPage?.items.find(
+          (candidate) => candidate.photo.id === intent.photoId,
+        );
+        if (!item) return;
+        // An item whose permanent-deletion outcome is not settled is never
+        // selected: Restore and a new deletion stay unavailable for it.
+        if (intent.selected && item.pendingVerificationOperationId !== null)
+          return;
+        if (intent.selected) {
+          removedSelectedIds.add(intent.photoId);
+          removedSelectedMarkers.set(intent.photoId, item.removedAtMs);
+        } else {
+          removedSelectedIds.delete(intent.photoId);
+          removedSelectedMarkers.delete(intent.photoId);
+        }
+        renderRemovedPanel();
+        updateControls();
+        return;
+      }
+      case "removed-delete":
+        void deleteSelectedTrash();
+        return;
+      case "removed-restore-selected":
+        void restoreSelectedTrash();
+        return;
+      case "removed-restore": {
+        const item = removedPage?.items.find(
+          (candidate) => candidate.photo.id === intent.photoId,
+        );
+        // An unresolved deletion outcome is never answered with a restore.
+        if (item?.pendingVerificationOperationId != null) return;
         void restoreRemovedPhoto(intent.photoId, intent.removedAtMs);
+        return;
+      }
+      case "trash-review-confirm":
+        void confirmTrashReview();
+        return;
+      case "trash-review-cancel":
+        cancelTrashReview();
+        return;
+      case "trash-check-result":
+        void checkTrashResult();
+        return;
+      case "trash-retry-delete":
+        void retryTrashDelete();
+        return;
+      case "trash-row-check":
+        void checkTrashRow(intent.photoId);
+        return;
+      case "trash-row-resume":
+        void resumeTrashRow(intent.photoId);
         return;
       case "show-grid":
         returnToSourceGrid();
@@ -4372,32 +4504,359 @@ function mountPrivateLibraryBrowser(
     }
     updateControls();
   };
+  const selectAllRemoved = async (): Promise<void> => {
+    if (
+      removedPending ||
+      removedSelectionPending ||
+      removedDeleting ||
+      removedRestoringSelection
+    )
+      return;
+    removedSelectionPending = true;
+    removedMessage = undefined;
+    const controller = new AbortController();
+    removedAbort?.abort();
+    removedAbort = controller;
+    renderRemovedPanel();
+    updateControls();
+    let start = 0;
+    const captured: TrashListingSelectionItem[] = [];
+    let total = 0;
+    let reviewMaximum = 0;
+    let captureFailed = false;
+    try {
+      while (true) {
+        const result = await fetchRemovedPhotos(fetcher, {
+          start,
+          limit: REMOVED_PAGE_LIMIT,
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted || removedAbort !== controller) return;
+        if (result.kind !== "ok") {
+          captureFailed = true;
+          break;
+        }
+        total = result.total;
+        reviewMaximum = result.reviewMaximum;
+        for (const item of result.photos)
+          captured.push({
+            photoId: item.photo.id,
+            removedAtMs: item.removedAtMs,
+            pendingVerificationOperationId: item.pendingVerificationOperationId,
+          });
+        // The capture stops at the review maximum: the listing is
+        // newest-removal-first, so the captured prefix is the deterministic
+        // subset a review may cover.
+        if (
+          captured.length >= Math.min(total, reviewMaximum) ||
+          result.photos.length === 0
+        )
+          break;
+        start += result.photos.length;
+      }
+      if (captureFailed) {
+        // A partial capture is never presented as the complete selection:
+        // the selection is left unchanged and the failure is named.
+        removedMessage =
+          "Trash could not be read while selecting. The selection was not changed. Retry to continue.";
+        return;
+      }
+      const selection = boundTrashSelection(captured, total, reviewMaximum);
+      removedSelectedIds.clear();
+      removedSelectedMarkers.clear();
+      for (const marker of selection.markers) {
+        removedSelectedIds.add(marker.photoId);
+        removedSelectedMarkers.set(marker.photoId, marker.removedAtMs);
+      }
+      removedMessage = trashSelectAllNotice(selection, total, reviewMaximum);
+    } finally {
+      if (removedAbort === controller) removedAbort = undefined;
+      removedSelectionPending = false;
+      renderRemovedPanel();
+      updateControls();
+    }
+  };
+
+  const clearRemovedSelection = (): void => {
+    if (
+      removedPending ||
+      removedSelectionPending ||
+      removedDeleting ||
+      removedRestoringSelection
+    )
+      return;
+    removedSelectedIds.clear();
+    removedSelectedMarkers.clear();
+    removedMessage = undefined;
+    renderRemovedPanel();
+    updateControls();
+  };
+
+  /// Opens the permanent-deletion review for the current selection. The
+  /// review names the files, Locations, kinds, sizes, and affected Albums,
+  /// and offers the one confirmation; Cancel deletes nothing.
+  const deleteSelectedTrash = async (): Promise<void> => {
+    if (
+      removedPending ||
+      removedSelectionPending ||
+      removedDeleting ||
+      removedRestoringSelection ||
+      removedSelectedIds.size === 0
+    )
+      return;
+    const operationId = crypto.randomUUID();
+    const selection = [...removedSelectedIds];
+    const reviewResult = await reviewTrash(fetcher, operationId, {
+      all: false,
+      photoIds: selection,
+      excludePhotoIds: [],
+    });
+    if (reviewResult.kind !== "ok") {
+      removedMessage =
+        reviewResult.kind === "rejected" && reviewResult.status === 409
+          ? "Trash changed while it was being reviewed. Reload and select the files again."
+          : "The permanent deletion review could not be created. Nothing was deleted.";
+      renderRemovedPanel();
+      updateControls();
+      return;
+    }
+    const review: TrashReview = reviewResult.value;
+    trashReview = {
+      operationId: review.operationId,
+      plan: planTrashReview(review),
+      deleting: false,
+    };
+    renderRemovedPanel();
+    updateControls();
+    view.openTrashReview(trashReviewModel());
+  };
+
+  const trashReviewModel = (): Parameters<
+    LibraryBrowserView["renderTrashReview"]
+  >[0] => {
+    const review = trashReview;
+    if (!review)
+      return {
+        itemCount: 0,
+        totalBytes: 0,
+        albumCount: 0,
+        albumNames: [],
+        items: [],
+        rejected: [],
+        canConfirm: false,
+        confirmLabel: confirmTrashLabel(0),
+        deleting: false,
+      };
+    return {
+      itemCount: review.plan.itemCount,
+      totalBytes: review.plan.totalBytes,
+      albumCount: review.plan.albumCount,
+      albumNames: [...review.plan.albumNames],
+      items: review.plan.items.map((item) => ({ ...item })),
+      rejected: review.plan.rejected.map((item) => ({ ...item })),
+      canConfirm: review.plan.canConfirm,
+      confirmLabel: confirmTrashLabel(review.plan.itemCount),
+      deleting: review.deleting,
+    };
+  };
+
+  const cancelTrashReview = (): void => {
+    if (!trashReview) return;
+    trashReview = undefined;
+    // Cancel deletes nothing: the delete route is never called for a
+    // discarded review.
+    view.closeTrashReview();
+    // Closing the review hands focus back into the listing, which had to
+    // close for the review; presenting it again rebinds its thumbnails.
+    renderRemovedPanel();
+    updateControls();
+  };
+
+  /// Confirms the open review. The confirmation names only the reviewed
+  /// operation id, so the delete route can never widen the reviewed set.
+  const confirmTrashReview = async (): Promise<void> => {
+    const review = trashReview;
+    if (!review || review.deleting || !review.plan.canConfirm) return;
+    trashReview = { ...review, deleting: true };
+    renderTrashReview();
+    await settleTrashDelete(review.operationId);
+    trashReview = undefined;
+    view.closeTrashReview();
+    renderRemovedPanel();
+    updateControls();
+  };
+
+  const renderTrashReview = (): void => {
+    if (!applicationAlive || !trashReview) return;
+    view.renderTrashReview(trashReviewModel());
+  };
+
+  /// Confirms one reviewed operation id, or retries it: the server repeats
+  /// only its unresolved items and never changes the reviewed set. A lost
+  /// response keeps the operation id and offers recovery instead of claiming
+  /// failure or success.
+  const settleTrashDelete = async (operationId: string): Promise<void> => {
+    removedDeleting = true;
+    renderRemovedPanel();
+    renderTrashReview();
+    updateControls();
+    const result = await deleteTrash(fetcher, operationId);
+    removedDeleting = false;
+    if (result.kind === "ok") {
+      removedSelectedIds.clear();
+      removedSelectedMarkers.clear();
+      const partition = partitionTrashOperation(result.value);
+      // The result is durable server-side: the retained id is only needed
+      // while an item is still pending verification.
+      storeTrashOperation(partition.settled ? undefined : operationId);
+      trashOperation = { operationId, partition };
+      removedMessage = undefined;
+      // The confirmed deletions leave Trash, so the derived counts and the
+      // listing read again before they report the outcome — the same refresh
+      // the restore path uses.
+      await application.refreshOverview().catch(() => {});
+      await refreshFolderCounts();
+      await loadRemovedPage(removedPage?.start ?? 0, undefined, {
+        keepOutcome: true,
+      });
+      return;
+    }
+    // The response was lost or unusable. The operation id is retained so
+    // reopening Trash can recover the result; nothing is claimed yet.
+    storeTrashOperation(operationId);
+    trashOperation = { operationId };
+    renderRemovedPanel();
+    updateControls();
+  };
+
+  /// Fetches the retained result of the operation whose response was lost.
+  const checkTrashResult = async (): Promise<void> => {
+    const current = trashOperation;
+    if (!current || trashOutcomeBusy || removedDeleting) return;
+    trashOutcomeBusy = "check";
+    renderRemovedPanel();
+    updateControls();
+    const result = await fetchTrashOperation(fetcher, current.operationId);
+    trashOutcomeBusy = undefined;
+    if (result.kind === "ok") {
+      const partition = partitionTrashOperation(result.value);
+      if (partition.settled) storeTrashOperation(undefined);
+      trashOperation = { operationId: current.operationId, partition };
+    }
+    renderRemovedPanel();
+    updateControls();
+  };
+
+  /// Re-POSTs the retained operation: the server repeats only its unresolved
+  /// items and never changes the reviewed set.
+  const retryTrashDelete = async (): Promise<void> => {
+    const current = trashOperation;
+    if (!current || trashOutcomeBusy || removedDeleting) return;
+    await settleTrashDelete(current.operationId);
+    renderRemovedPanel();
+    updateControls();
+  };
+
+  /// The recovery one pending-verification row offers: Check result fetches
+  /// the operation's retained result; Resume re-POSTs it.
+  const checkTrashRow = async (photoId: string): Promise<void> => {
+    if (trashOutcomeBusy || removedDeleting) return;
+    const item = removedPage?.items.find(
+      (candidate) => candidate.photo.id === photoId,
+    );
+    const operationId = item?.pendingVerificationOperationId;
+    if (!operationId) return;
+    trashOutcomeBusy = "check";
+    renderRemovedPanel();
+    updateControls();
+    const result = await fetchTrashOperation(fetcher, operationId);
+    trashOutcomeBusy = undefined;
+    if (result.kind === "ok") {
+      const partition = partitionTrashOperation(result.value);
+      if (partition.settled && readStoredTrashOperation() === operationId)
+        storeTrashOperation(undefined);
+      trashOperation = { operationId, partition };
+    }
+    renderRemovedPanel();
+    updateControls();
+  };
+
+  const resumeTrashRow = async (photoId: string): Promise<void> => {
+    if (trashOutcomeBusy || removedDeleting) return;
+    const item = removedPage?.items.find(
+      (candidate) => candidate.photo.id === photoId,
+    );
+    const operationId = item?.pendingVerificationOperationId;
+    if (!operationId) return;
+    await settleTrashDelete(operationId);
+    renderRemovedPanel();
+    updateControls();
+  };
 
   const renderRemovedPanel = () => {
     if (!applicationAlive) return;
+    const pending = removedPending || removedSelectionPending;
     view.renderRemovedPanel({
       start: removedPage?.start ?? 0,
       total: removedPage?.total ?? 0,
       limit: REMOVED_PAGE_LIMIT,
-      pending: removedPending,
+      pending,
+      deleting: removedDeleting,
+      selectionCount: removedSelectedIds.size,
+      canDelete:
+        removedSelectedIds.size > 0 &&
+        !pending &&
+        !removedDeleting &&
+        !removedRestoringSelection,
+      canRestore:
+        removedSelectedIds.size > 0 &&
+        !pending &&
+        !removedDeleting &&
+        !removedRestoringSelection,
       canRetry: removedLoadFailed,
+      restoringSelection: removedRestoringSelection,
       ...(removal.operation
         ? { undo: { removed: removal.operation.removed } }
         : {}),
       ...(removedRestoringId ? { restoringPhotoId: removedRestoringId } : {}),
       ...(removedMessage ? { message: removedMessage } : {}),
+      ...(trashOutcomeBusy ? { outcomeBusy: trashOutcomeBusy } : {}),
+      ...(trashOperation
+        ? {
+            outcome: trashOperation.partition
+              ? {
+                  deleted: trashOperation.partition.deleted,
+                  changed: trashOperation.partition.changed,
+                  missing: trashOperation.partition.missing,
+                  failed: trashOperation.partition.failed,
+                  pendingVerification:
+                    trashOperation.partition.pendingVerification,
+                  logicalBytesDeleted:
+                    trashOperation.partition.logicalBytesDeleted,
+                  items: trashOperation.partition.unresolved.map((item) => ({
+                    ...item,
+                  })),
+                }
+              : { unconfirmed: true as const },
+          }
+        : {}),
       items: (removedPage?.items ?? []).map((item) => ({
         photoId: item.photo.id,
         filename: item.photo.originalFilename ?? item.photo.id,
+        originalLocation: item.originalLocation,
+        originalKind: item.originalKind,
+        originalSize: item.originalSize,
         removedAtMs: item.removedAtMs,
+        pendingVerificationOperationId: item.pendingVerificationOperationId,
+        selected: removedSelectedIds.has(item.photo.id),
         preview: item.photo.preview,
       })),
     });
   };
-
   const loadRemovedPage = async (
     start: number,
     successMessage?: string,
+    options?: Readonly<{ keepOutcome?: boolean }>,
   ): Promise<void> => {
     removedAbort?.abort();
     const controller = new AbortController();
@@ -4405,6 +4864,9 @@ function mountPrivateLibraryBrowser(
     removedPending = true;
     removedLoadFailed = false;
     removedMessage = undefined;
+    // A reload of the listing dismisses the outcome the panel presented,
+    // unless the reload is the one the deletion itself triggered.
+    if (!options?.keepOutcome) trashOperation = undefined;
     renderRemovedPanel();
     updateControls();
     const result = await fetchRemovedPhotos(fetcher, {
@@ -4424,7 +4886,7 @@ function mountPrivateLibraryBrowser(
               REMOVED_PAGE_LIMIT
             : result.start;
       if (pageStart !== result.start) {
-        void loadRemovedPage(pageStart, successMessage);
+        void loadRemovedPage(pageStart, successMessage, options);
         return;
       }
       removal.rememberOperation(result.operation);
@@ -4434,11 +4896,14 @@ function mountPrivateLibraryBrowser(
         operation: result.operation,
         items: result.photos,
       };
+      for (const item of result.photos) {
+        if (removedSelectedIds.has(item.photo.id))
+          removedSelectedMarkers.set(item.photo.id, item.removedAtMs);
+      }
       removedMessage = successMessage;
     } else {
       removedLoadFailed = true;
-      removedMessage =
-        "The removed Photos could not be loaded. Retry to continue.";
+      removedMessage = "Trash could not be loaded. Retry to continue.";
     }
     renderRemovedPanel();
     updateControls();
@@ -4449,16 +4914,50 @@ function mountPrivateLibraryBrowser(
     removedPage = undefined;
     removedLoadFailed = false;
     removedRestoringId = undefined;
+    removedRestoringSelection = false;
     removedMessage = undefined;
+    removedSelectedIds.clear();
+    removedSelectedMarkers.clear();
+    removedSelectionPending = false;
+    removedDeleting = false;
+    trashReview = undefined;
+    trashOutcomeBusy = undefined;
+    trashOperation = undefined;
     view.openRemovedPanel({
       start: 0,
       total: 0,
       limit: REMOVED_PAGE_LIMIT,
       pending: true,
+      deleting: false,
+      selectionCount: 0,
+      canDelete: false,
+      canRestore: false,
       canRetry: false,
+      restoringSelection: false,
       items: [],
     });
+    void reopenStoredTrashOperation();
     void loadRemovedPage(0);
+  };
+
+  /// Reopening Trash recovers the operation whose response was lost before
+  /// the reload: the retained id is fetched and its outcome or pending state
+  /// is presented. The retained id is cleared once no returned item is
+  /// pending verification.
+  const reopenStoredTrashOperation = async (): Promise<void> => {
+    const stored = readStoredTrashOperation();
+    if (!stored) return;
+    trashOperation = { operationId: stored };
+    renderRemovedPanel();
+    updateControls();
+    const result = await fetchTrashOperation(fetcher, stored);
+    if (result.kind === "ok") {
+      const partition = partitionTrashOperation(result.value);
+      if (partition.settled) storeTrashOperation(undefined);
+      trashOperation = { operationId: stored, partition };
+    }
+    renderRemovedPanel();
+    updateControls();
   };
 
   const closeRemovedPanel = (): void => {
@@ -4466,7 +4965,18 @@ function mountPrivateLibraryBrowser(
     removedAbort?.abort();
     removedAbort = undefined;
     removedPending = false;
+    removedSelectionPending = false;
+    removedDeleting = false;
+    removedRestoringSelection = false;
+    removedSelectedIds.clear();
+    removedSelectedMarkers.clear();
     removedRestoringId = undefined;
+    if (trashReview) {
+      trashReview = undefined;
+      view.closeTrashReview();
+    }
+    trashOperation = undefined;
+    trashOutcomeBusy = undefined;
     view.closeRemovedPanel();
   };
 
@@ -4492,8 +5002,69 @@ function mountPrivateLibraryBrowser(
       updateControls();
       return;
     }
+    removedSelectedIds.delete(photoId);
+    removedSelectedMarkers.delete(photoId);
     // The listing reads the Library again before it reports the restore, so a
     // row never outlives the state it presents.
+    await application.refreshOverview().catch(() => {});
+    await refreshFolderCounts();
+    await loadRemovedPage(
+      removedPage?.start ?? 0,
+      restorationOutcomeMessage(outcome.result.counts),
+    );
+    if (sourceGrid.token !== "" && sourceGrid.isReady(sourceGrid.authority)) {
+      const anchor =
+        sourceGrid.readGridPosition(sourceGrid.authority) ??
+        photoOwner.currentIndex;
+      await reopenExpired(
+        anchor,
+        sourceGrid.generation,
+        undefined,
+        RESTORE_REOPEN,
+      );
+    }
+    updateControls();
+  };
+  const restoreSelectedTrash = async (): Promise<void> => {
+    if (
+      removedPending ||
+      removedSelectionPending ||
+      removedDeleting ||
+      removedRestoringSelection ||
+      removedSelectedIds.size === 0
+    )
+      return;
+    const markers = [...removedSelectedIds].flatMap((photoId) => {
+      const removedAtMs = removedSelectedMarkers.get(photoId);
+      return removedAtMs === undefined ? [] : [{ photoId, removedAtMs }];
+    });
+    if (markers.length !== removedSelectedIds.size) {
+      removedMessage =
+        "Some selected Trash items need a refresh before they can be restored.";
+      renderRemovedPanel();
+      updateControls();
+      return;
+    }
+    const admission = removal.restorePhotos(markers);
+    if (!admission) return;
+    removedRestoringSelection = true;
+    removedMessage = undefined;
+    renderRemovedPanel();
+    updateControls();
+    const outcome = await admission.settlement;
+    removedRestoringSelection = false;
+    if (outcome.kind === "detached") return;
+    if (outcome.kind === "failed") {
+      removedMessage =
+        outcome.status === 404
+          ? "Some selected Trash items are no longer removed. Reload this listing."
+          : "The selected Trash items could not be restored. Retry to continue.";
+      renderRemovedPanel();
+      updateControls();
+      return;
+    }
+    removedSelectedIds.clear();
+    removedSelectedMarkers.clear();
     await application.refreshOverview().catch(() => {});
     await refreshFolderCounts();
     await loadRemovedPage(

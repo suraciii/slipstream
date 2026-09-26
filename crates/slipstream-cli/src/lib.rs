@@ -23,6 +23,7 @@ const CONTRACT_HEADER: &str = "Slipstream-CLI-Contract";
 const MAXIMUM_JSON_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAXIMUM_INPUT_BYTES: usize = 64 * 1024;
 const MAXIMUM_MUTATION_PHOTO_IDS: usize = 100;
+const MAXIMUM_TRASH_IDS: usize = 5_000;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -108,6 +109,54 @@ pub enum Command {
         #[command(subcommand)]
         command: PhotoCommand,
     },
+    /// Inspect and permanently delete files from the persistent Trash.
+    Trash {
+        #[command(subcommand)]
+        command: TrashCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TrashCommand {
+    /// List Trash items in removal order.
+    List(TrashListArgs),
+    /// Capture a fixed Trash review before confirmation and deletion.
+    Review(TrashReviewArgs),
+    /// Permanently delete the reviewed operation and report every outcome.
+    Delete {
+        #[arg(value_parser = nonempty)]
+        operation_id: String,
+    },
+    /// Reopen a durable Permanent Deletion result.
+    Operation {
+        #[arg(value_parser = nonempty)]
+        operation_id: String,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct TrashListArgs {
+    /// Number of items to skip.
+    #[arg(long, default_value_t = 0)]
+    pub start: usize,
+    /// Maximum items in this page (1 through 60).
+    #[arg(long, value_name = "N", value_parser = page_limit, default_value_t = 60)]
+    pub limit: u8,
+}
+
+#[derive(Debug, Args)]
+pub struct TrashReviewArgs {
+    #[arg(value_name = "OPERATION_ID", value_parser = nonempty)]
+    pub operation_id: String,
+    /// Review every current Trash item except IDs in --exclude-input.
+    #[arg(long, conflicts_with = "input")]
+    pub all: bool,
+    /// UTF-8 JSON file holding {"photoIds":[...]} or a bare ID array.
+    #[arg(long, value_name = "FILE", value_parser = nonempty, conflicts_with = "all")]
+    pub input: Option<String>,
+    /// UTF-8 JSON file holding {"photoIds":[...]} or a bare ID array to exclude.
+    #[arg(long, value_name = "FILE", value_parser = nonempty, requires = "all")]
+    pub exclude_input: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -435,6 +484,10 @@ enum Operation {
     AlbumsAdd,
     AlbumsRemove,
     AlbumsReorder,
+    TrashList,
+    TrashReview,
+    TrashDelete,
+    TrashRead,
 }
 
 impl Operation {
@@ -455,6 +508,10 @@ impl Operation {
             Self::AlbumsAdd => "albums-add",
             Self::AlbumsRemove => "albums-remove",
             Self::AlbumsReorder => "albums-reorder",
+            Self::TrashList => "trash-list",
+            Self::TrashReview => "trash-review",
+            Self::TrashDelete => "trash-delete",
+            Self::TrashRead => "trash-operation",
         }
     }
 }
@@ -479,6 +536,12 @@ fn command_operation(command: &Command) -> Operation {
             PhotoCommand::Get { .. } => Operation::PhotosGet,
             PhotoCommand::Preview { .. } => Operation::PhotosPreview,
             PhotoCommand::Set(_) => Operation::PhotosSet,
+        },
+        Command::Trash { command } => match command {
+            TrashCommand::List(_) => Operation::TrashList,
+            TrashCommand::Review(_) => Operation::TrashReview,
+            TrashCommand::Delete { .. } => Operation::TrashDelete,
+            TrashCommand::Operation { .. } => Operation::TrashRead,
         },
     }
 }
@@ -523,6 +586,11 @@ struct MutationIdentity {
     photo_ids: Vec<String>,
     album_id: Option<String>,
     album_name: Option<String>,
+}
+#[derive(Debug)]
+struct PendingTrashReview {
+    photo_ids: Vec<String>,
+    exclude_photo_ids: Vec<String>,
 }
 
 /// Records the point where a mutation request was handed to the transport.
@@ -1867,6 +1935,62 @@ async fn read_membership_ids(
 ) -> Result<Vec<String>, CommandFailure> {
     parse_membership_ids(read_input_bytes(input).await?, limit_name)
 }
+async fn read_trash_ids(input: &str) -> Result<Vec<String>, CommandFailure> {
+    let bytes = read_input_bytes(input).await?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+        CommandFailure::invalid(
+            "input",
+            "The input must be a JSON object with photoIds or a bare ID array.",
+        )
+    })?;
+    let photo_ids = match value {
+        Value::Array(values) => values
+            .into_iter()
+            .map(|value| value.as_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>(),
+        Value::Object(mut object) => {
+            let value = object.remove("photoIds");
+            if !object.is_empty() {
+                None
+            } else {
+                value.and_then(|value| {
+                    value
+                        .as_array()?
+                        .iter()
+                        .map(|value| value.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                })
+            }
+        }
+        _ => None,
+    }
+    .ok_or_else(|| {
+        CommandFailure::invalid(
+            "input",
+            "The Trash ID input must contain only a photoIds string array.",
+        )
+    })?;
+    if photo_ids.len() > MAXIMUM_TRASH_IDS {
+        return Err(CommandFailure::limit_exceeded(
+            "permanentDeletionPhotoIdsMaximum",
+            MAXIMUM_TRASH_IDS,
+            photo_ids.len(),
+        ));
+    }
+    if photo_ids.iter().any(String::is_empty)
+        || photo_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != photo_ids.len()
+    {
+        return Err(CommandFailure::invalid(
+            "input",
+            "Trash Photo IDs must be nonempty and distinct.",
+        ));
+    }
+    Ok(photo_ids)
+}
 
 /// Validates the complete decision document before any write is attempted.
 /// The refusal order mirrors the service's own admission order, so the same
@@ -2317,6 +2441,31 @@ async fn execute(
         },
         _ => None,
     };
+    let pending_trash_review = match &cli.command {
+        Command::Trash {
+            command: TrashCommand::Review(args),
+        } => {
+            let photo_ids = match (&args.all, &args.input) {
+                (true, None) => Vec::new(),
+                (false, Some(input)) => read_trash_ids(input).await?,
+                _ => {
+                    return Err(CommandFailure::invalid(
+                        "input",
+                        "Trash review requires --all or --input, but not both.",
+                    ));
+                }
+            };
+            let exclude_photo_ids = match &args.exclude_input {
+                Some(input) => read_trash_ids(input).await?,
+                None => Vec::new(),
+            };
+            Some(PendingTrashReview {
+                photo_ids,
+                exclude_photo_ids,
+            })
+        }
+        _ => None,
+    };
     let client = ServiceClient::new(origin, token)?;
     client.capabilities(operation).await?;
 
@@ -2728,6 +2877,77 @@ async fn execute(
                     .await?;
                 confirmed_decision_result(&identity, &prepared, result)
             }
+            Command::Trash {
+                command: TrashCommand::List(args),
+            } => {
+                let mut url = client.endpoint(&["api", "trash"]);
+                url.query_pairs_mut()
+                    .append_pair("start", &args.start.to_string())
+                    .append_pair("limit", &args.limit.to_string());
+                let data: Value = client.json(operation, Method::GET, url, None).await?;
+                if !data.is_object() {
+                    return Err(CommandFailure::transport(operation));
+                }
+                Ok(data)
+            }
+            Command::Trash {
+                command: TrashCommand::Review(args),
+            } => {
+                let pending = pending_trash_review
+                    .as_ref()
+                    .expect("Trash review input was prepared");
+                let data: Value = client
+                    .json(
+                        operation,
+                        Method::POST,
+                        client.endpoint(&["api", "trash", "review"]),
+                        Some(json!({
+                            "operationId": args.operation_id,
+                            "all": args.all,
+                            "photoIds": pending.photo_ids,
+                            "excludePhotoIds": pending.exclude_photo_ids,
+                        })),
+                    )
+                    .await?;
+                if !data.is_object() {
+                    return Err(CommandFailure::transport(operation));
+                }
+                Ok(data)
+            }
+            Command::Trash {
+                command: TrashCommand::Delete { operation_id },
+            } => {
+                let identity = MutationIdentity {
+                    operation,
+                    photo_ids: Vec::new(),
+                    album_id: None,
+                    album_name: None,
+                };
+                client
+                    .mutation(
+                        &identity,
+                        admission,
+                        client.endpoint(&["api", "trash", "delete"]),
+                        json!({ "operationId": operation_id }),
+                    )
+                    .await
+            }
+            Command::Trash {
+                command: TrashCommand::Operation { operation_id },
+            } => {
+                let data: Value = client
+                    .json(
+                        operation,
+                        Method::GET,
+                        client.endpoint(&["api", "trash", "operations", operation_id]),
+                        None,
+                    )
+                    .await?;
+                if !data.is_object() {
+                    return Err(CommandFailure::transport(operation));
+                }
+                Ok(data)
+            }
         }
     }
     .await;
@@ -2834,6 +3054,23 @@ fn validate_command(command: &Command) -> Result<(), CommandFailure> {
                 return Err(CommandFailure::invalid(
                     "if-version",
                     "The single-Photo forms need the decision version observed by a prior read.",
+                ));
+            }
+            Ok(())
+        }
+        Command::Trash {
+            command: TrashCommand::Review(args),
+        } => {
+            if args.all == args.input.is_some() {
+                return Err(CommandFailure::invalid(
+                    "arguments",
+                    "trash review needs exactly one of --all or --input.",
+                ));
+            }
+            if args.exclude_input.is_some() && !args.all {
+                return Err(CommandFailure::invalid(
+                    "exclude-input",
+                    "--exclude-input requires --all.",
                 ));
             }
             Ok(())
