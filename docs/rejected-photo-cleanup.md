@@ -19,6 +19,11 @@ Deleting a Photo is a separate capability from marking it. It has two distinct o
 
 ## Remove Rejected Photos
 
+The browser review below is one invocation of the removal capability.
+[Composable Removal and Restore](library-management-removal-and-restore.md)
+also permits explicitly identified Photo sets without a browser view. Both forms
+must enforce the same removal eligibility and preservation rules.
+
 ### Entry and review
 
 The user-facing destination for removed Photos is **Trash**, governed by [Trash and Permanent Deletion](library-management-trash.md). Removal places Photos there; it never deletes their Original Files.

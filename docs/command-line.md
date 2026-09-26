@@ -44,10 +44,16 @@ The CLI must let its caller:
 - download one Photo's thumbnail or review Preview;
 - change Selection State or Rating for identified Photos;
 - create, rename, and delete Albums and add, remove, or order their members;
+- remove explicitly identified eligible Photos into Trash and Restore observed removals;
+- inspect Trash, review and separately confirm permanent deletion, and recover operation outcomes;
 - request a Library check; and
 - return a browser Destination for a Photo or Album.
 
-These capabilities do not include Original download, filesystem mutation, XMP
+[Composable Removal and Restore](library-management-removal-and-restore.md) defines
+explicit-set mutations and their effect recovery. [Trash](library-management-trash.md)
+is the sole product authority for confirmed permanent Original deletion.
+
+These capabilities do not include Original download, arbitrary filesystem mutation, XMP
 synchronization, Library Expansion, or Location Recovery writes. Those operations
 retain their own product and operator boundaries. The CLI does not expose a
 SQL escape hatch or an arbitrary server-path argument.

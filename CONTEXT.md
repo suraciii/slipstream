@@ -56,7 +56,7 @@ The millisecond a removal was confirmed, stored on the Photo row beside the oper
 _Avoid_: deleted flag, timestamp field, tombstone
 
 **Removal Operation**:
-One confirmed removal of one reviewed `Rejected` result, named by a browser-supplied operation id so a retried request repeats one operation instead of creating a second. The operation owns the group of Photos that Undo restores in one transaction.
+One confirmed attempt to remove a reviewed set of eligible Photos into Trash. It identifies its own effects separately from later Photo state, so retrying the attempt does not create another removal. Targets may come from a browser result or an explicitly identified Photo set.
 _Avoid_: batch delete, purge, cleanup job
 
 **Restore**:
