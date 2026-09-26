@@ -223,6 +223,14 @@ campaign row:
   headroom evidence. Missing any required observation makes the window
   ineligible. It does not require terminal I/O counters when those counters are
   unavailable independently of the complete memory observations.
+
+Provisional exit-time `ENOENT` reads from the same attempt may be retained as
+resolved gaps when the exact terminal snapshot supplies valid `io_stat_raw` and
+the terminal identity and cleanup proof match. Such gaps remain visible with
+`terminal_cleanup_proof=true`; they do not make the I/O diagnostic ineligible.
+Without a valid terminal I/O snapshot, the same resolved gap remains
+`unavailable-after-exit` and keeps the I/O and composite row flags false.
+
 - `campaign_row_eligible` is true only when memory-fit, I/O-diagnostic and
   observer-window eligibility all pass. It represents a complete campaign row,
   not the input gate for the memory fitter.
