@@ -1165,6 +1165,9 @@ struct MetadataFileFactsWire {
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 enum MetadataSidecarEvidenceWire {
     Absent,
+    Unavailable {
+        reason: String,
+    },
     Present {
         location: String,
         facts: MetadataFileFactsWire,
@@ -4422,6 +4425,27 @@ fn render_text(envelope: &Envelope) -> String {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn metadata_read_retains_unavailable_evidence_and_reason() {
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../../../compatibility/metadata/external-metadata-read.json"
+        ))
+        .unwrap();
+        let mut result = vectors[0]["result"].clone();
+        result["evidence"]["sidecar"] = json!({
+            "state": "unavailable",
+            "reason": "Sidecar cannot be read without following a link"
+        });
+        result["saveAvailable"] = json!(false);
+        result["saveUnavailableReason"] = json!("Sidecar evidence is unavailable");
+        let read: MetadataReadWire = serde_json::from_value(result.clone()).unwrap();
+        assert!(
+            matches!(&read.evidence.sidecar, MetadataSidecarEvidenceWire::Unavailable { reason }
+            if reason == "Sidecar cannot be read without following a link")
+        );
+        assert_eq!(serde_json::to_value(read).unwrap(), result);
+    }
 
     #[test]
     fn parser_accepts_metadata_commands_and_rejects_empty_ids() {

@@ -300,6 +300,24 @@ impl OriginalCapability {
         facts(file.as_raw_fd())
     }
 
+    /// Captures exact revision facts from one retained, no-follow regular file.
+    pub fn revision_facts(
+        &self,
+    ) -> Result<crate::metadata::sidecar::SidecarFacts, ConfinementError> {
+        let file = self.root.open_confined(&self.path, false)?;
+        let value = stat_regular(file.as_raw_fd())?;
+        Ok(crate::metadata::sidecar::SidecarFacts {
+            device: value.st_dev,
+            inode: value.st_ino,
+            size: validated_size(&value)?,
+            modified_seconds: value.st_mtime,
+            modified_nanoseconds: u32::try_from(value.st_mtime_nsec)
+                .ok()
+                .filter(|nanos| *nanos < 1_000_000_000)
+                .ok_or(ConfinementError::Io("Original File facts are invalid"))?,
+        })
+    }
+
     /// Reports the confined Original File's facts, or `None` when no file
     /// exists at its Location. An `Err` reports a Location whose entry cannot
     /// be opened or inspected as one readable regular file. A capability by
@@ -834,16 +852,16 @@ fn same_revision(left: &libc::stat, right: &libc::stat) -> bool {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum EntryKind {
+pub(crate) enum EntryKind {
     File,
     Directory,
     Symlink,
     Other,
 }
 
-struct DirectoryEntry {
-    name: std::ffi::OsString,
-    kind: EntryKind,
+pub(crate) struct DirectoryEntry {
+    pub(crate) name: std::ffi::OsString,
+    pub(crate) kind: EntryKind,
 }
 
 mod sys {
@@ -1031,11 +1049,11 @@ mod sys {
     }
 }
 
-pub(crate) fn sidecar_names(
-    directory: OwnedFd,
-) -> Result<Vec<std::ffi::OsString>, ConfinementError> {
-    sys::list_directory(directory, 1_000_000)
-        .map(|entries| entries.into_iter().map(|entry| entry.name).collect())
+pub(crate) fn sidecar_entries(directory: RawFd) -> Result<Vec<DirectoryEntry>, ConfinementError> {
+    let dot = CString::new(".").unwrap();
+    let listing =
+        sys::open_at_directory(directory, &dot).map_err(|_| ConfinementError::UnsafeOpen)?;
+    sys::list_directory(listing, 1_000_000)
 }
 
 pub(crate) fn sidecar_open(directory: RawFd, name: &CStr) -> io::Result<OwnedFd> {
@@ -1175,6 +1193,35 @@ mod tests {
             self.resume();
             *TEST_HOOK.get_or_init(|| Mutex::new(None)).lock().unwrap() = None;
         }
+    }
+
+    #[test]
+    fn revision_facts_preserve_nanoseconds_and_refuse_symlinks() {
+        let tree = TempTree::new();
+        tree.write("photo.jpg", b"original");
+        let modified = UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_789);
+        File::open(tree.path().join("photo.jpg"))
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let root = LibraryRoot::open(tree.path()).unwrap();
+        let original = root
+            .original(RelativeOriginalPath::parse("photo.jpg").unwrap())
+            .unwrap();
+        let revision = original.revision_facts().unwrap();
+        assert_eq!(revision.modified_seconds, 1_700_000_000);
+        assert_eq!(revision.modified_nanoseconds, 123_456_789);
+        assert_eq!(revision.size, 8);
+        fs::rename(tree.path().join("photo.jpg"), tree.path().join("moved.jpg")).unwrap();
+        symlink("moved.jpg", tree.path().join("photo.jpg")).unwrap();
+        assert!(matches!(
+            original.revision_facts(),
+            Err(ConfinementError::UnsafeOpen)
+        ));
+        assert_eq!(
+            fs::read(tree.path().join("moved.jpg")).unwrap(),
+            b"original"
+        );
     }
 
     struct TempTree(PathBuf);

@@ -49,9 +49,11 @@ A Read Metadata result contains:
 The evidence token binds the observed state to the Library lifecycle, the
 server instance, and the bounded Sidecar content:
 
-- the Original facts (device, inode, size, modification time);
+- the Original facts (device, inode, size, integer modification seconds and
+  nanoseconds);
 - the Sidecar revision facts and a digest of the bounded Sidecar content, with
-  an explicit absent state; statistics alone do not prove unchanged content,
+  explicit absent and unavailable states; unavailable evidence never permits
+  Save. Statistics alone do not prove unchanged content,
   because an external tool can edit a Sidecar in place while preserving its
   size and modification time;
 - the Association generation: a persisted monotonic counter for the Photo that
@@ -101,12 +103,18 @@ are not Sidecar fields.
 
 ### Association and read ownership
 
-The server derives same-directory, same-basename candidates from the current
-published Originals. One RAW owns the association. A JPEG owns it only when no
-RAW shares the basename. Multiple eligible Originals, duplicate `.xmp`/`.XMP`
-files, and unresolved `retained-orphan` records are ambiguous or unavailable
-and cannot be written. An ineligible JPEG still reads its own embedded metadata
-but never reads or writes the RAW's Sidecar.
+The server derives same-directory, same-basename candidates from actual
+confined directory entries, including supported Originals not yet scanned.
+One regular RAW owns the association. A regular JPEG owns it only when no
+regular RAW shares the basename. Multiple eligible Originals, duplicate
+`.xmp`/`.XMP` files, and unresolved `retained-orphan` records are ambiguous or
+unavailable and cannot be written. The extension comparison is case-insensitive;
+the directory and basename retain their exact spelling. An ineligible JPEG
+still reads its own embedded metadata but never reads or writes the RAW's Sidecar.
+
+Metadata work runs under the state owner's serialization with scan, recovery,
+removal, and restore. Read accepts a Removed Photo; Save checks the current
+removal state under that same gate. Library Rating remains a separate fact.
 
 Read opens the Original through `LibraryRoot` and reads bounded embedded XMP,
 EXIF capture facts, and IPTC IIM data. Sidecar bytes are opened only through
@@ -153,6 +161,12 @@ does not represent, or entity declarations — makes the Sidecar
 `unpreservable`: Read still reports supported fields, and Save refuses before
 any mutation rather than rebuild a reduced document.
 
+Read-only parsing retains the preservation error while inspecting unrelated
+supported fields. It never resolves external entities or expands declared
+entities. Mutation and serialization reject a document with a preservation
+error. Capture representations retain present, absent, and invalid states for
+all thirteen capture fields, separately from the Original facts.
+
 ### Language alternatives
 
 `dc:title`, `dc:description`, `dc:rights`, and `xmpRights:UsageTerms` are
@@ -196,6 +210,9 @@ session. A session has five steps, all under the deployment's control:
    `RENAME_NOREPLACE` semantics and refused. A failed write before publication
    removes only this session's temporary file and leaves the previous Sidecar
    intact.
+   The publisher derives ownership again through one retained parent directory
+   descriptor and requires the current facts and digest to match the evidence.
+   An update retains the observed Sidecar filename, including extension case.
 4. **Verify.** Re-open the published Sidecar without following links and
    confirm its content is the staged document and that the requested values
    are present. Derive the reported result from that committed snapshot.
@@ -316,11 +333,10 @@ Rejected for updates: it narrows but does not remove the lost-update window.
 
 External access flows through one managed file service. The save session stops
 that service, verifies the stop, validates, publishes, verifies, and restarts
-it, with a supervisor guaranteeing the restart. This is the selected target:
-the deployment profile — control-group fence with observed emptiness,
-disabled client caching, writer-identity isolation, and interruption
-recovery — must be implemented and qualified before any supported-deployment
-claim is made; no environment has demonstrated it yet.
+it, with a supervisor guaranteeing the restart. Qualification must establish
+the control-group fence with observed emptiness, disabled client caching,
+writer-identity isolation, and interruption recovery before the deployment
+admits Save.
 Rejected alternative within this option — excluding external applications
 permanently — violates interoperability and is not used.
 

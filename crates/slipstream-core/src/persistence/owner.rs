@@ -863,6 +863,8 @@ pub struct MetadataRecord {
     pub relative_path: String,
     pub kind: &'static str,
     pub association_generation: u64,
+    pub removed: bool,
+    pub library_rating: u8,
     pub active: Option<ActiveAssociation>,
     pub orphan: Option<RetainedOrphan>,
 }
@@ -976,7 +978,9 @@ impl MetadataContext<'_> {
             ObservedSidecarState::Changed => {
                 transaction
                     .execute(
-                        "DELETE FROM retained_sidecar_orphans WHERE sidecar_path=?",
+                        "DELETE FROM retained_sidecar_orphans WHERE
+                         substr(sidecar_path,1,length(sidecar_path)-4)=substr(?1,1,length(?1)-4)
+                         AND lower(substr(sidecar_path,-4))='.xmp'",
                         [&self.candidate_path],
                     )
                     .map_err(|_| MetadataStoreError::Storage)?;
@@ -993,14 +997,11 @@ fn metadata_context<'a>(
     photo_id: &str,
 ) -> Result<MetadataContext<'a>, MetadataStoreError> {
     let row = connection.query_row(
-        "SELECT p.original_id,o.relative_path,o.kind,p.association_generation,p.removed_at_ms,o.available
+        "SELECT p.original_id,o.relative_path,o.kind,p.association_generation,p.removed_at_ms,o.available,p.rating
          FROM photos p JOIN original_files o ON o.id=p.original_id WHERE p.id=?", [photo_id],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
-                  row.get::<_, i64>(3)?, row.get::<_, Option<i64>>(4)?, row.get::<_, bool>(5)?)),
+                  row.get::<_, i64>(3)?, row.get::<_, Option<i64>>(4)?, row.get::<_, bool>(5)?, row.get::<_, u8>(6)?)),
     ).optional().map_err(|_| MetadataStoreError::Storage)?.ok_or(MetadataStoreError::PhotoMissing)?;
-    if row.4.is_some() {
-        return Err(MetadataStoreError::PhotoRemoved);
-    }
     if !row.5 {
         return Err(MetadataStoreError::OriginalUnavailable);
     }
@@ -1021,7 +1022,9 @@ fn metadata_context<'a>(
     ).optional().map_err(|_| MetadataStoreError::Storage)?;
     let orphan = connection.query_row(
         "SELECT sidecar_path,retired_photo_id,retired_original_path,original_kind,retired_generation,observed_size,observed_mtime_ms,observed_digest
-         FROM retained_sidecar_orphans WHERE sidecar_path=?", [&candidate_path],
+         FROM retained_sidecar_orphans WHERE
+         substr(sidecar_path,1,length(sidecar_path)-4)=substr(?1,1,length(?1)-4)
+         AND lower(substr(sidecar_path,-4))='.xmp' ORDER BY sidecar_path LIMIT 1", [&candidate_path],
         |row| Ok(RetainedOrphan { sidecar_path: row.get(0)?, retired_photo_id: row.get(1)?, retired_original_path: row.get(2)?, original_kind: row.get(3)?,
             retired_generation: row.get::<_, i64>(4)? as u64, observed_size: row.get::<_, Option<i64>>(5)?.map(|size| size as u64), observed_mtime_ms: row.get(6)?, observed_digest: row.get(7)? }),
     ).optional().map_err(|_| MetadataStoreError::Storage)?;
@@ -1034,6 +1037,8 @@ fn metadata_context<'a>(
             relative_path: row.1,
             kind,
             association_generation: row.3 as u64,
+            removed: row.4.is_some(),
+            library_rating: row.6,
             active,
             orphan,
         },
@@ -10420,7 +10425,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_metadata_rejects_missing_removed_and_unavailable() {
+    async fn with_metadata_reads_removed_but_rejects_missing_and_unavailable() {
         let (_base, persistence, path) = metadata_fixture();
         assert_eq!(
             persistence
@@ -10432,19 +10437,19 @@ mod tests {
         );
         seed(
             &path,
-            "UPDATE photos SET removed_at_ms=1,removed_operation='remove' WHERE id='photo'; UPDATE original_files SET available=0 WHERE id='original';",
+            "UPDATE photos SET removed_at_ms=1,removed_operation='remove',rating=4 WHERE id='photo';",
         );
-        assert_eq!(
-            persistence
-                .with_metadata_receiver("photo".into(), |_| Ok(()))
-                .unwrap()
-                .await
-                .unwrap(),
-            Err(MetadataStoreError::PhotoRemoved)
-        );
+        let removed = persistence
+            .with_metadata_receiver("photo".into(), |context| Ok(context.record().clone()))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(removed.removed);
+        assert_eq!(removed.library_rating, 4);
         seed(
             &path,
-            "UPDATE photos SET removed_at_ms=NULL,removed_operation=NULL WHERE id='photo';",
+            "UPDATE original_files SET available=0 WHERE id='original';",
         );
         assert_eq!(
             persistence
@@ -10618,6 +10623,58 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap()
+        );
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn with_metadata_retains_uppercase_orphans_without_folding_basename() {
+        let (_base, persistence, path) = metadata_fixture();
+        seed(&path, &format!(
+            "INSERT INTO retained_sidecar_orphans VALUES('dir/photo.XMP','retired','old.JPG','jpeg',3,7,1234.5,'{}');
+             INSERT INTO retained_sidecar_orphans VALUES('dir/Photo.xmp','other','other.JPG','jpeg',3,7,1234.5,'{}');",
+            "a".repeat(64), "a".repeat(64)
+        ));
+        let orphan = persistence
+            .with_metadata_receiver("photo".into(), |context| {
+                Ok(context.record().orphan.clone())
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(orphan.sidecar_path, "dir/photo.XMP");
+        persistence
+            .with_metadata_receiver("photo".into(), |context| {
+                context.record_observation(&ObservedSidecar {
+                    state: ObservedSidecarState::Changed,
+                })
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            persistence
+                .with_metadata_receiver("photo".into(), |context| {
+                    Ok(context.record().orphan.is_none())
+                })
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        assert_eq!(
+            Connection::open(&path)
+                .unwrap()
+                .query_row(
+                    "SELECT sidecar_path FROM retained_sidecar_orphans",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "dir/Photo.xmp"
         );
         persistence.shutdown().unwrap();
     }

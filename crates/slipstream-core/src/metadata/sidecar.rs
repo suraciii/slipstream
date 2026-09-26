@@ -132,30 +132,38 @@ pub fn observe(
     original: &RelativeOriginalPath,
     kind: OriginalKind,
 ) -> Result<SidecarObservation, ConfinementError> {
+    let directory = root.sidecar_directory(parts(original).0)?;
+    observe_in(directory.as_raw_fd(), original, kind)
+}
+
+fn observe_in(
+    directory: i32,
+    original: &RelativeOriginalPath,
+    kind: OriginalKind,
+) -> Result<SidecarObservation, ConfinementError> {
     let (parent, name) = parts(original);
     let stem = pairing_stem(name);
-    let directory = root.sidecar_directory(parent)?;
-    let names = confinement::sidecar_names(root.sidecar_directory(parent)?)?;
+    let entries = confinement::sidecar_entries(directory)?;
     let mut raws = Vec::new();
     let mut jpegs = Vec::new();
     let mut candidates = Vec::new();
-    for entry in &names {
-        let Some(entry) = entry.to_str() else {
+    for entry in &entries {
+        let Some(name) = entry.name.to_str() else {
             continue;
         };
-        if pairing_stem(entry) != stem {
+        if pairing_stem(name) != stem {
             continue;
         }
-        match classify_name(entry) {
-            Some(OriginalKind::Raw) => raws.push(location(parent, entry)),
-            Some(OriginalKind::Jpeg) => jpegs.push(location(parent, entry)),
-            None => {
-                if entry
-                    .rsplit_once('.')
-                    .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("xmp"))
-                {
-                    candidates.push(location(parent, entry));
-                }
+        if name
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("xmp"))
+        {
+            candidates.push(location(parent, name));
+        } else if entry.kind == confinement::EntryKind::File {
+            match classify_name(name) {
+                Some(OriginalKind::Raw) => raws.push(location(parent, name)),
+                Some(OriginalKind::Jpeg) => jpegs.push(location(parent, name)),
+                None => {}
             }
         }
     }
@@ -166,9 +174,7 @@ pub fn observe(
     }
     let owners = if raws.is_empty() { &jpegs } else { &raws };
     if owners.len() != 1 || !owners.iter().any(|owner| owner == original.as_str()) {
-        return Ok(SidecarObservation::Ambiguous {
-            candidates: owners.clone(),
-        });
+        return Ok(SidecarObservation::Ambiguous { candidates });
     }
     if candidates.len() > 1 {
         return Ok(SidecarObservation::Ambiguous { candidates });
@@ -177,7 +183,7 @@ pub fn observe(
         return Ok(SidecarObservation::Absent);
     };
     let filename = candidate.rsplit('/').next().unwrap();
-    Ok(match read_candidate(directory.as_raw_fd(), filename) {
+    Ok(match read_candidate(directory, filename) {
         Ok(published) => SidecarObservation::Eligible {
             location: candidate,
             facts: published.facts,
@@ -315,12 +321,34 @@ fn publish_inner(
         return Err(PublishError::StorageUnavailable);
     }
     let (parent, name) = parts(original);
-    let target_name = format!("{}.xmp", pairing_stem(name));
-    let target =
-        CString::new(target_name.as_str()).map_err(|_| PublishError::StorageUnavailable)?;
+    let kind = classify_name(name).ok_or(PublishError::Conflict)?;
     let directory = root
         .sidecar_directory(parent)
         .map_err(|_| PublishError::StorageUnavailable)?;
+    let observed = observe_in(directory.as_raw_fd(), original, kind)
+        .map_err(|_| PublishError::StorageUnavailable)?;
+    let target_name = match (evidence, observed) {
+        (SidecarEvidence::Absent, SidecarObservation::Absent) => {
+            format!("{}.xmp", pairing_stem(name))
+        }
+        (
+            SidecarEvidence::Present { facts, sha256 },
+            SidecarObservation::Eligible {
+                location,
+                facts: current_facts,
+                sha256: current_sha256,
+            },
+        ) if *facts == current_facts && *sha256 == current_sha256 => {
+            location.rsplit('/').next().unwrap().to_owned()
+        }
+        (_, SidecarObservation::ResourceLimit { .. }) => {
+            return Err(PublishError::ResourceLimit("Sidecar exceeds 16 MiB".into()));
+        }
+        (_, SidecarObservation::Unreadable { .. }) => return Err(PublishError::StorageUnavailable),
+        _ => return Err(PublishError::Conflict),
+    };
+    let target =
+        CString::new(target_name.as_str()).map_err(|_| PublishError::StorageUnavailable)?;
     let mut random = [0; 32];
     File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut random))
@@ -464,7 +492,7 @@ mod tests {
         ));
         tree.write("foo.cr2", b"raw");
         assert!(
-            matches!(tree.observe(), SidecarObservation::Ambiguous { candidates } if candidates == vec!["foo.cr2", "foo.nef"])
+            matches!(tree.observe(), SidecarObservation::Ambiguous { candidates } if candidates == vec!["foo.xmp"])
         );
     }
     #[test]
@@ -582,6 +610,59 @@ mod tests {
         );
     }
     #[test]
+    fn sidecar_publish_preserves_case_and_rejects_stale_evidence() {
+        let tree = TempTree::new();
+        tree.write("foo.XMP", b"old");
+        let observed = evidence(tree.observe());
+        publish(&tree.root(), &original(), &observed, &lease(), b"new").unwrap();
+        assert_eq!(fs::read(tree.0.join("foo.XMP")).unwrap(), b"new");
+        assert!(!tree.0.join("foo.xmp").exists());
+        assert_eq!(
+            publish(&tree.root(), &original(), &observed, &lease(), b"stale"),
+            Err(PublishError::Conflict)
+        );
+        assert_eq!(fs::read(tree.0.join("foo.XMP")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn sidecar_publish_refuses_new_owners_and_case_variant_candidates() {
+        let tree = TempTree::new();
+        let absent = evidence(tree.observe());
+        tree.write("foo.XMP", b"external");
+        assert_eq!(
+            publish(&tree.root(), &original(), &absent, &lease(), b"new"),
+            Err(PublishError::Conflict)
+        );
+        let observed = evidence(tree.observe());
+        tree.write("foo.cr2", b"second raw");
+        assert_eq!(
+            publish(&tree.root(), &original(), &observed, &lease(), b"new"),
+            Err(PublishError::Conflict)
+        );
+        assert_eq!(fs::read(tree.0.join("foo.XMP")).unwrap(), b"external");
+        assert!(!tree.0.join("foo.xmp").exists());
+    }
+
+    #[test]
+    fn sidecar_observation_uses_retained_parent_and_regular_owners() {
+        let tree = TempTree::new();
+        fs::create_dir(tree.0.join("nested")).unwrap();
+        fs::write(tree.0.join("nested/photo.jpg"), b"jpeg").unwrap();
+        fs::write(tree.0.join("nested/photo.XMP"), b"retained").unwrap();
+        fs::create_dir(tree.0.join("nested/photo.nef")).unwrap();
+        symlink("photo.jpg", tree.0.join("nested/photo.cr2")).unwrap();
+        let root = tree.root();
+        let parent = root.sidecar_directory("nested").unwrap();
+        fs::rename(tree.0.join("nested"), tree.0.join("moved")).unwrap();
+        fs::create_dir(tree.0.join("nested")).unwrap();
+        let path = RelativeOriginalPath::parse("nested/photo.jpg").unwrap();
+        assert!(matches!(
+            observe_in(parent.as_raw_fd(), &path, OriginalKind::Jpeg).unwrap(),
+            SidecarObservation::Eligible { location, .. } if location == "nested/photo.XMP"
+        ));
+    }
+
+    #[test]
     fn sidecar_post_rename_failure_keeps_target() {
         let tree = TempTree::new();
         tree.write("foo.xmp", b"old");
@@ -595,12 +676,6 @@ mod tests {
         assert_eq!(result, Err(PublishError::OutcomeUnknown));
         assert_eq!(fs::read(tree.0.join("foo.xmp")).unwrap(), b"tampered");
         assert_eq!(fs::read_dir(&tree.0).unwrap().count(), 2);
-    }
-    #[test]
-    fn sidecar_lease_requires_supervisor_token() {
-        let token = SupervisorLeaseToken("opaque".into());
-        let proof = ExclusiveSaveLease::from_supervisor_token(token);
-        assert_eq!(proof._token.0, "opaque");
     }
 }
 

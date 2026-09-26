@@ -101,6 +101,7 @@ enum Node {
     CData(String),
     Comment(String),
     Pi(String),
+    UnresolvedReference(String),
 }
 #[derive(Clone, Debug)]
 struct Element {
@@ -180,7 +181,7 @@ fn check_node(
     ns: &Namespaces,
     item_count: &mut usize,
     lang_count: &mut usize,
-) -> Result<(), XmpParseError> {
+) -> Result<bool, XmpParseError> {
     let text_bytes: usize = node
         .children
         .iter()
@@ -192,6 +193,7 @@ fn check_node(
     if text_bytes > MAX_TEXT {
         return Err(XmpParseError::ResourceLimit);
     }
+    let mut preservable = true;
     for (name, value) in &node.attrs {
         if let Some((uri, local)) = expanded(name, ns, true) {
             if uri == RDF
@@ -199,16 +201,16 @@ fn check_node(
                     || local == "parseType" && value != "Resource"
                     || local == "about" && (value.starts_with('#') || value.contains("xpointer(")))
             {
-                return Err(XmpParseError::Unpreservable);
+                preservable = false;
             }
         } else if !name.starts_with("xmlns:") && name != "xmlns" {
-            return Err(XmpParseError::Unpreservable);
+            preservable = false;
         }
     }
     // Unbound names cannot be interpreted, but structurally malformed XML is
     // diagnosed by the event reader before preservation rules apply.
     if expanded(&node.name, ns, false).is_none() && node.name.contains(':') {
-        return Err(XmpParseError::Unpreservable);
+        preservable = false;
     }
     if is_element(node, ns, RDF, "li") {
         *item_count += 1;
@@ -222,7 +224,7 @@ fn check_node(
             }
         }
     }
-    Ok(())
+    Ok(preservable)
 }
 fn escape_text(value: &str, attribute: bool, out: &mut String) {
     for c in value.chars() {
@@ -255,6 +257,11 @@ fn serialize(node: &Node, out: &mut String) {
             out.push_str("<?");
             out.push_str(t);
             out.push_str("?>");
+        }
+        Node::UnresolvedReference(reference) => {
+            out.push('&');
+            out.push_str(reference);
+            out.push(';');
         }
         Node::Element(e) => {
             out.push('<');
@@ -515,9 +522,23 @@ fn first_description<'a>(nodes: &'a mut [Node], parent: &Namespaces) -> Option<&
 #[derive(Clone, Debug)]
 pub struct XmpDocument {
     roots: Vec<Node>,
+    preservation_error: Option<XmpParseError>,
 }
 impl XmpDocument {
     pub fn parse(bytes: &[u8]) -> Result<Self, XmpParseError> {
+        Self::parse_inner(bytes, false)
+    }
+
+    /// Inspects supported fields even when unrelated RDF cannot be saved losslessly.
+    pub fn parse_for_read(bytes: &[u8]) -> Result<Self, XmpParseError> {
+        Self::parse_inner(bytes, true)
+    }
+
+    pub fn preservation_error(&self) -> Option<XmpParseError> {
+        self.preservation_error
+    }
+
+    fn parse_inner(bytes: &[u8], read_only: bool) -> Result<Self, XmpParseError> {
         if bytes.len() as u64 > MAXIMUM_XMP_PACKET_BYTES {
             return Err(XmpParseError::ResourceLimit);
         }
@@ -539,6 +560,7 @@ impl XmpDocument {
         let mut lang_count = 0;
         let mut root_seen = false;
         let mut root_closed = false;
+        let mut preservation_error = None;
         let version = XmlVersion::Implicit1_0;
         loop {
             buf.clear();
@@ -564,7 +586,12 @@ impl XmpDocument {
                     }
                     let e = parse_element(&start, version)?;
                     let ns = scope(scopes.last().unwrap_or(&Namespaces::new()), &e);
-                    check_node(&e, &ns, &mut item_count, &mut lang_count)?;
+                    if !check_node(&e, &ns, &mut item_count, &mut lang_count)? {
+                        if !read_only {
+                            return Err(XmpParseError::Unpreservable);
+                        }
+                        preservation_error = Some(XmpParseError::Unpreservable);
+                    }
                     if empty {
                         append(&mut stack, &mut roots, Node::Element(e));
                         if stack.is_empty() {
@@ -615,7 +642,20 @@ impl XmpDocument {
                 Event::GeneralRef(r) => {
                     let raw = r.as_ref();
                     let reference = format!("&{raw};");
-                    let decoded = unescape(&reference).map_err(|_| XmpParseError::Malformed)?;
+                    let decoded = match unescape(&reference) {
+                        Ok(decoded) => decoded,
+                        Err(_)
+                            if read_only && preservation_error.is_some() && !stack.is_empty() =>
+                        {
+                            append(
+                                &mut stack,
+                                &mut roots,
+                                Node::UnresolvedReference(raw.into()),
+                            );
+                            continue;
+                        }
+                        Err(_) => return Err(XmpParseError::Malformed),
+                    };
                     if decoded.len() > MAX_TEXT {
                         return Err(XmpParseError::ResourceLimit);
                     }
@@ -665,6 +705,10 @@ impl XmpDocument {
                         }
                     }
                 }
+                Event::DocType(_) if read_only => {
+                    // Never load external subsets or expand declared entities.
+                    preservation_error = Some(XmpParseError::Unpreservable);
+                }
                 Event::DocType(_) => return Err(XmpParseError::Unpreservable),
                 Event::Eof => break,
             }
@@ -672,7 +716,10 @@ impl XmpDocument {
         if !stack.is_empty() || !root_seen || !root_closed {
             return Err(XmpParseError::Malformed);
         }
-        let doc = Self { roots };
+        let doc = Self {
+            roots,
+            preservation_error,
+        };
         if !doc.roots.iter().any(|node| match node {
             Node::Element(e) => {
                 let ns = scope(&Namespaces::new(), e);
@@ -684,7 +731,10 @@ impl XmpDocument {
         }
         Ok(doc)
     }
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, XmpParseError> {
+        if let Some(error) = self.preservation_error {
+            return Err(error);
+        }
         let mut out =
             String::from("<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n");
         let wrapped = self.roots.iter().any(|node| match node {
@@ -719,7 +769,7 @@ impl XmpDocument {
             out.push_str("</x:xmpmeta>");
         }
         out.push_str("<?xpacket end=\"w\"?>");
-        out.into_bytes()
+        Ok(out.into_bytes())
     }
     fn properties(&self, name: &str) -> Vec<Property<'_>> {
         let (uri, local) = name_parts(name);
@@ -823,21 +873,24 @@ impl XmpDocument {
             FieldState::Invalid => FieldState::Invalid,
         }
     }
-    pub fn capture_representations(&self) -> Vec<(&'static str, String)> {
+    pub fn capture_representations(&self) -> Vec<(&'static str, FieldState<String>)> {
         [
             "exif:DateTimeOriginal",
+            "exif:SubSecTimeOriginal",
+            "exif:OffsetTimeOriginal",
+            "tiff:Make",
+            "tiff:Model",
+            "exif:LensModel",
             "exif:PixelXDimension",
             "exif:PixelYDimension",
             "tiff:Orientation",
-            "exif:LensModel",
-            "tiff:Make",
-            "tiff:Model",
+            "exif:ExposureTime",
+            "exif:FNumber",
+            "exif:ISOSpeedRatings",
+            "exif:FocalLength",
         ]
         .into_iter()
-        .filter_map(|name| match self.simple(name) {
-            FieldState::Present(value) => Some((name, value)),
-            _ => None,
-        })
+        .map(|name| (name, self.simple(name)))
         .collect()
     }
     /// Validate the entire request first; only a fully valid request mutates this document.
@@ -855,6 +908,12 @@ impl XmpDocument {
                 refuse(&mut refusal, name);
             }
             edits.push((name, candidate));
+        }
+        if self.preservation_error.is_some() {
+            for (name, _) in &edits {
+                refuse(&mut refusal, name);
+            }
+            return Err(refusal);
         }
         if !refusal.fields.is_empty() {
             return Err(refusal);
@@ -1226,7 +1285,7 @@ mod tests {
         XmpDocument::parse(format!("<rdf:RDF xmlns:rdf=\"{RDF}\"/>").as_bytes()).unwrap()
     }
     fn reread(doc: &XmpDocument) -> XmpDocument {
-        XmpDocument::parse(&doc.to_bytes()).unwrap()
+        XmpDocument::parse(&doc.to_bytes().unwrap()).unwrap()
     }
     fn lang(values: &[(&str, &str)]) -> LangAltValue {
         values
@@ -1249,7 +1308,7 @@ mod tests {
         );
         d.apply(&[FieldPatch::Headline(PatchValue::Set("News".into()))])
             .unwrap();
-        let xml = String::from_utf8(d.to_bytes()).unwrap();
+        let xml = String::from_utf8(d.to_bytes().unwrap()).unwrap();
         for fragment in [
             "rdf:about=\"urn:photo:second\"",
             "rdf:parseType=\"Resource\"",
@@ -1456,16 +1515,14 @@ mod tests {
     fn alternative_patch_preserves_others_and_requires_named_default() {
         let mut d = doc();
         let before = d.to_bytes();
-        let refusal = d
-            .apply(&[
-                FieldPatch::Title(PatchValue::Set(lang(&[
-                    ("X-DEFAULT", "Hello"),
-                    ("FR-fr", "Salut"),
-                ]))),
-                FieldPatch::Description(PatchValue::Set(lang(&[("de", "Beschreibung")]))),
-            ])
-            .unwrap();
-        assert_eq!(refusal, ());
+        d.apply(&[
+            FieldPatch::Title(PatchValue::Set(lang(&[
+                ("X-DEFAULT", "Hello"),
+                ("FR-fr", "Salut"),
+            ]))),
+            FieldPatch::Description(PatchValue::Set(lang(&[("de", "Beschreibung")]))),
+        ])
+        .unwrap();
         assert_eq!(
             d.title(),
             FieldState::Present(lang(&[("x-default", "Hello"), ("fr-fr", "Salut")]))
@@ -1559,7 +1616,7 @@ mod tests {
             "en-us", "Hello",
         )])))])
         .unwrap();
-        let bytes = d.to_bytes();
+        let bytes = d.to_bytes().unwrap();
         let out = String::from_utf8(bytes.clone()).unwrap();
         assert!(out.contains("xml:lang=\"fr-FR\" q:quality=\"human\""));
         assert!(out.contains("q:property=\"keep\""));
@@ -1714,24 +1771,69 @@ mod tests {
     }
 
     #[test]
-    fn captures_only_present_sidecar_representations() {
-        let d = doc();
+    fn capture_representations_keep_present_absent_and_invalid_states() {
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{RDF}\" xmlns:exif=\"{EXIF}\" xmlns:tiff=\"{TIFF}\"><rdf:Description exif:SubSecTimeOriginal=\"123\" exif:OffsetTimeOriginal=\"+02:00\" exif:ExposureTime=\"1/125\" exif:FNumber=\"28/10\" exif:ISOSpeedRatings=\"400\" exif:FocalLength=\"50/1\"><tiff:Orientation><rdf:Bag/></tiff:Orientation></rdf:Description></rdf:RDF>"
+        );
+        let d = XmpDocument::parse(xml.as_bytes()).unwrap();
+        let values: BTreeMap<_, _> = d.capture_representations().into_iter().collect();
+        for (name, expected) in [
+            ("exif:SubSecTimeOriginal", "123"),
+            ("exif:OffsetTimeOriginal", "+02:00"),
+            ("exif:ExposureTime", "1/125"),
+            ("exif:FNumber", "28/10"),
+            ("exif:ISOSpeedRatings", "400"),
+            ("exif:FocalLength", "50/1"),
+        ] {
+            assert_eq!(values[name], FieldState::Present(expected.into()));
+        }
+        assert_eq!(values["tiff:Orientation"], FieldState::Invalid);
+        assert_eq!(values["exif:DateTimeOriginal"], FieldState::Absent);
+        assert_eq!(values["tiff:Make"], FieldState::Absent);
+    }
+
+    #[test]
+    fn readonly_unpreservable_rdf_exposes_fields_and_refuses_all_writes() {
+        for attribute in [
+            "rdf:ID=\"id\"",
+            "rdf:nodeID=\"id\"",
+            "rdf:parseType=\"Collection\"",
+        ] {
+            let xml = format!(
+                "<rdf:RDF xmlns:rdf=\"{RDF}\" xmlns:xmp=\"{XMP}\"><rdf:Description xmp:Label=\"Review\"><rdf:other {attribute}/></rdf:Description></rdf:RDF>"
+            );
+            assert_eq!(
+                XmpDocument::parse(xml.as_bytes()).unwrap_err(),
+                XmpParseError::Unpreservable
+            );
+            let mut d = XmpDocument::parse_for_read(xml.as_bytes()).unwrap();
+            assert_eq!(d.label(), FieldState::Present("Review".into()));
+            assert_eq!(d.preservation_error(), Some(XmpParseError::Unpreservable));
+            assert!(
+                d.apply(&[FieldPatch::Label(PatchValue::Set("changed".into()))])
+                    .is_err()
+            );
+            assert_eq!(d.label(), FieldState::Present("Review".into()));
+            assert_eq!(d.to_bytes(), Err(XmpParseError::Unpreservable));
+        }
+        let excessive = format!(
+            "<rdf:RDF xmlns:rdf=\"{RDF}\"><rdf:Description rdf:ID=\"id\"><rdf:Bag>{}</rdf:Bag></rdf:Description></rdf:RDF>",
+            "<rdf:li rdf:ID=\"item\"/>".repeat(MAX_ITEMS + 1)
+        );
         assert_eq!(
-            d.capture_representations(),
-            vec![
-                ("exif:DateTimeOriginal", "2020:01:02 03:04:05".into()),
-                ("tiff:Make", "Camera".into())
-            ]
+            XmpDocument::parse_for_read(excessive.as_bytes()).unwrap_err(),
+            XmpParseError::ResourceLimit
         );
-        let all = format!(
-            "<rdf:RDF xmlns:rdf=\"{RDF}\" xmlns:exif=\"{EXIF}\" xmlns:tiff=\"{TIFF}\"><rdf:Description exif:PixelXDimension=\"1200\" exif:PixelYDimension=\"800\" tiff:Orientation=\"1\" exif:LensModel=\"Glass\" tiff:Model=\"Model\"/></rdf:RDF>"
+    }
+
+    #[test]
+    fn readonly_dtd_keeps_unrelated_fields_without_expanding_entities() {
+        let xml = format!(
+            "<!DOCTYPE rdf:RDF [<!ENTITY secret SYSTEM 'file:///does-not-exist'>]><rdf:RDF xmlns:rdf=\"{RDF}\" xmlns:xmp=\"{XMP}\" xmlns:photoshop=\"{PHOTOSHOP}\"><rdf:Description xmp:Label=\"Review\"><photoshop:Headline>&secret;</photoshop:Headline></rdf:Description></rdf:RDF>"
         );
-        assert_eq!(
-            XmpDocument::parse(all.as_bytes())
-                .unwrap()
-                .capture_representations()
-                .len(),
-            5
-        );
+        let d = XmpDocument::parse_for_read(xml.as_bytes()).unwrap();
+        assert_eq!(d.label(), FieldState::Present("Review".into()));
+        assert_eq!(d.headline(), FieldState::Invalid);
+        assert_eq!(d.to_bytes(), Err(XmpParseError::Unpreservable));
     }
 }
