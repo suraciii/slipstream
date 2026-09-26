@@ -4,6 +4,7 @@
 !film.py
 !film_identity.py
 !probe.py
+!telemetry.py
 !history.py
 !bounded_gamut.py
 !bounded_output.py

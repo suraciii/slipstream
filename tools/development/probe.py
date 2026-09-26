@@ -21,6 +21,7 @@ import tifffile
 from film import make_simulator, pixel_digest, render, reset_random_state
 from bundle import load_bundle
 from history import generated_history, validate_imported_history
+from telemetry import RenderTelemetry, workspace_file_bytes
 
 WORK = Path("/work")
 RAW = Path("/input") / os.environ["PROBE_RAW_NAME"]
@@ -191,9 +192,10 @@ def film_probe(mode, repetitions):
         times = []
         cold_seconds = None
         for index in range(repetitions + 1):
-            start = time.monotonic()
-            output = render(simulator, pixels)
-            elapsed = time.monotonic() - start
+            with RenderTelemetry() as telemetry:
+                start = time.monotonic()
+                output = render(simulator, pixels)
+                elapsed = time.monotonic() - start
             digest = pixel_digest(output)
             if expected is None:
                 expected = digest
@@ -204,6 +206,8 @@ def film_probe(mode, repetitions):
                 times.append(elapsed)
             emit("film_render", geometry=[height, width], iteration=index,
                  seconds=elapsed, pixel_sha256=digest,
+                 observed_threads=telemetry.observed_threads,
+                 workspace_file_bytes=workspace_file_bytes(WORK),
                  peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
         # A different exposure must not contaminate the next render of A.
         render(simulator, pixels * 2)
@@ -231,11 +235,12 @@ def film_probe(mode, repetitions):
     emit("microstructure", repeatable=True, standard_deviation=float(first.std()))
     if mode == "full":
         pixels = read_image(WORK / "development.tif")
-        start = time.monotonic()
-        output = render(simulator, pixels)
-        emit("full_film", seconds=time.monotonic() - start, geometry=list(output.shape),
-             pixel_sha256=pixel_digest(output), timings=simulator.get_timings(),
-             peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        workspace_before = workspace_file_bytes(WORK)
+        with RenderTelemetry() as telemetry:
+            start = time.monotonic()
+            output = render(simulator, pixels)
+            render_seconds = time.monotonic() - start
+        film_digest = pixel_digest(output)
         from finished_jpeg import save_finished_jpeg
         from spektrafilm.utils.bounded_output import JPEG_WORKSPACE_BYTES
         save_finished_jpeg(
@@ -243,6 +248,13 @@ def film_probe(mode, repetitions):
             output,
             workspace_bytes=JPEG_WORKSPACE_BYTES,
         )
+        emit("full_film", seconds=render_seconds, geometry=list(output.shape),
+             pixel_sha256=film_digest, timings=simulator.get_timings(),
+             observed_threads=telemetry.observed_threads,
+             workspace_file_bytes_before=workspace_before,
+             workspace_file_bytes_after=workspace_file_bytes(WORK),
+             finished_jpeg_bytes=(WORK / "finished.jpg").stat().st_size,
+             peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
 
 
 def main():
