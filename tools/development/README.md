@@ -84,10 +84,13 @@ internal enlarger and scanner LUTs are fixed at resolution 33.
 The engine-checks image also runs `lut_quality_probe.py` over a fixed neutral,
 structured-range, and textured-range corpus. It renders the same full-effect
 recipe with both internal LUTs enabled and both LUTs disabled for direct
-spectral evaluation, verifies the direct path's repeatability, and reports
-pointwise RGB and D65 CIEDE2000 difference metrics plus both recipe identities. It
-does not declare acceptance: #338 must choose and independently justify the
-visual criterion before these measurements can qualify the LUT optimization.
+spectral evaluation, verifies both paths' repeatability, and reports
+pointwise RGB and D65 CIEDE2000 difference metrics. The runner gives it a fresh
+private empty Numba cache and the report records that cache state plus the
+adapter and qualification recipe identities. An identity mismatch is a blocker,
+not accepted evidence. The probe does not declare acceptance: #338 must choose
+and independently justify the visual criterion before these measurements can
+qualify the LUT optimization.
 
 These expensive probes are separate from `bun run verify`, like the existing
 real-camera safety gate. Run that full repository gate before handing off a

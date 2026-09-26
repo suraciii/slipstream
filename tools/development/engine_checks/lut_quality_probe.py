@@ -4,13 +4,20 @@ from copy import deepcopy
 from dataclasses import asdict
 import hashlib
 import json
+import os
+from pathlib import Path
 import sys
 import time
 
+sys.path.insert(0, "/opt/probe")
+
+_CACHE_DIR = Path(os.environ.get("NUMBA_CACHE_DIR", ""))
+assert _CACHE_DIR.is_dir() and not any(_CACHE_DIR.iterdir()), (
+    "LUT quality comparison requires an empty private Numba cache"
+)
+
 import colour
 import numpy as np
-
-sys.path.insert(0, "/opt/probe")
 
 from film_identity import FILM_RECIPE_SHA256
 from spektrafilm import Simulator, digest_params, init_params
@@ -88,34 +95,47 @@ def main():
     expected_direct_recipe["settings"]["use_scanner_lut"] = False
     assert direct_recipe == expected_direct_recipe, "direct comparison changed more than LUT settings"
 
+    lut_manifest_sha = recipe_digest(lut_recipe)
+    recipe_identity_matches = lut_manifest_sha == FILM_RECIPE_SHA256
+    blocking_reasons = []
+    if not recipe_identity_matches:
+        blocking_reasons.append("qualification recipe differs from adapter recipe identity")
+
     rows = []
     for name, pixels in comparison_corpus():
         direct_first = render(direct_simulator, pixels)
-        lut_output = render(lut_simulator, pixels)
         direct_second = render(direct_simulator, pixels)
+        lut_first = render(lut_simulator, pixels)
+        lut_second = render(lut_simulator, pixels)
         assert pixel_digest(direct_first) == pixel_digest(direct_second), (
             f"direct spectral output changed on repeat: {name}"
         )
-        metrics = summarize_difference(direct_first, lut_output)
-        metrics["ciede2000"] = ciede2000_summary(direct_first, lut_output)
+        assert pixel_digest(lut_first) == pixel_digest(lut_second), (
+            f"LUT output changed on repeat: {name}"
+        )
+        metrics = summarize_difference(direct_first, lut_first)
+        metrics["ciede2000"] = ciede2000_summary(direct_first, lut_first)
         rows.append({
             "case": name,
             "geometry": list(pixels.shape[:2]),
             "direct_spectral_pixel_sha256": pixel_digest(direct_first),
-            "lut_pixel_sha256": pixel_digest(lut_output),
+            "lut_pixel_sha256": pixel_digest(lut_first),
             "metrics": metrics,
         })
 
     print(json.dumps({
         "comparison": "lut-vs-direct-spectral-v1",
         "criterion": "not-selected",
-        "accepted_film_recipe_sha256": FILM_RECIPE_SHA256,
-        "lut_manifest_sha256": recipe_digest(lut_recipe),
+        "adapter_recipe_sha256": FILM_RECIPE_SHA256,
+        "lut_manifest_sha256": lut_manifest_sha,
         "direct_manifest_sha256": recipe_digest(direct_recipe),
+        "recipe_identity_matches": recipe_identity_matches,
+        "blocking_reasons": blocking_reasons,
+        "cache_state": "empty-at-process-start",
         "cases": rows,
         "seconds": time.monotonic() - started,
         "acceptance": False,
-        "note": "Metrics are qualification evidence only; the governing issue must set and justify the visual criterion.",
+        "note": "Metrics are diagnostic evidence only; recipe identity and the governing issue must be satisfied before LUT quality can qualify.",
     }, sort_keys=True))
 
 
