@@ -13,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { extname, join, resolve } from "node:path";
+import { extname, dirname, join, parse, resolve } from "node:path";
 
 import {
   expect,
@@ -35,6 +35,26 @@ const sample = process.env.SLIPSTREAM_RAW_SAMPLE;
 /// needs a host with an admitted launcher socket, so it stays skipped
 /// everywhere else, exactly as the RAW sample does.
 const processingInstance = process.env.SLIPSTREAM_PROCESSING_INSTANCE?.trim();
+const processingEnvironment = [
+  ["SLIPSTREAM_RAW_SAMPLE", sample],
+  ["SLIPSTREAM_PROCESSING_INSTANCE", processingInstance],
+  [
+    "SLIPSTREAM_PROCESSING_POLICY_SHA256",
+    process.env.SLIPSTREAM_PROCESSING_POLICY_SHA256?.trim(),
+  ],
+  [
+    "SLIPSTREAM_PROCESSING_BUNDLE_SHA256",
+    process.env.SLIPSTREAM_PROCESSING_BUNDLE_SHA256?.trim(),
+  ],
+  [
+    "SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES",
+    process.env.SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES?.trim(),
+  ],
+] as const;
+const missingProcessingEnvironment = () =>
+  processingEnvironment
+    .filter(([, value]) => !value || !value.trim())
+    .map(([name]) => name);
 const temporary: string[] = [];
 const servers: BrowserServer[] = [];
 const externals: Server[] = [];
@@ -1206,9 +1226,10 @@ test("the Edit surface explains a deployment without processing and attempts no 
 test("real-processing: autosaves an exposure, reopens it, compares the baseline, and downloads the Development TIFF", async ({
   page,
 }) => {
+  const missingEnvironment = missingProcessingEnvironment();
   test.skip(
-    !sample || !processingInstance,
-    "Set SLIPSTREAM_RAW_SAMPLE and SLIPSTREAM_PROCESSING_INSTANCE for the RAW processing smoke",
+    missingEnvironment.length > 0,
+    `Set ${missingEnvironment.join(", ")} for the RAW processing smoke`,
   );
   const cameraSample = sample!;
   // This scenario runs outside the RAW gate, which validates the sample for
@@ -1222,9 +1243,32 @@ test("real-processing: autosaves an exposure, reopens it, compares the baseline,
   // scenario renders twice: once as the comparison and once as the Export.
   test.setTimeout(900_000);
   const sourceBefore = await originalSnapshot(cameraSample);
+  const sourceSidecarPath = join(
+    dirname(cameraSample),
+    `${parse(cameraSample).name}.xmp`,
+  );
+  const sourceSidecarBefore =
+    await optionalOriginalSnapshot(sourceSidecarPath);
   const { base, root } = await fixture();
   const raw = join(root, `camera${extname(cameraSample)}`);
   await copyFile(cameraSample, raw);
+  const isolatedSidecarPath = join(root, "camera.xmp");
+  if (sourceSidecarBefore) {
+    await copyFile(sourceSidecarPath, isolatedSidecarPath);
+  } else {
+    await writeFile(
+      isolatedSidecarPath,
+      `<?xpacket begin="\uFEFF" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Slipstream browser smoke">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="3"/>
+  </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>
+`,
+    );
+  }
+  const copiedSidecarBefore = await originalSnapshot(isolatedSidecarPath);
   const copiedBefore = await originalSnapshot(raw);
   const running = await server(base, root);
   await startReview(page, running.url, "All Photos");
@@ -1369,6 +1413,12 @@ test("real-processing: autosaves an exposure, reopens it, compares the baseline,
   // Both Original Files are unchanged: neither the sample nor its copy moved.
   expect(await originalSnapshot(cameraSample)).toEqual(sourceBefore);
   expect(await originalSnapshot(raw)).toEqual(copiedBefore);
+  expect(await optionalOriginalSnapshot(sourceSidecarPath)).toEqual(
+    sourceSidecarBefore,
+  );
+  expect(await originalSnapshot(isolatedSidecarPath)).toEqual(
+    copiedSidecarBefore,
+  );
 });
 
 test("Photo View shows review capture metadata and explicit missing values", async ({
@@ -1792,6 +1842,24 @@ async function originalSnapshot(path: string): Promise<OriginalSnapshot> {
     modifiedNanoseconds: metadata.mtimeNs,
   };
 }
+async function optionalOriginalSnapshot(
+  path: string,
+): Promise<OriginalSnapshot | null> {
+  try {
+    return await originalSnapshot(path);
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 
 /// True when the explicit path is a readable regular file. The RAW gate
 /// validates the sample for its own runs; a scenario that runs outside the
