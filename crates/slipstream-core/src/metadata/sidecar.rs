@@ -297,6 +297,31 @@ pub fn read_observed(
     })
 }
 
+/// Reads one Original's identity facts through its confined parent directory,
+/// with the same second/nanosecond precision as Sidecar evidence.
+pub fn original_facts(
+    root: &LibraryRoot,
+    original: &RelativeOriginalPath,
+) -> Result<SidecarFacts, ConfinementError> {
+    let (parent, name) = parts(original);
+    let directory = root.sidecar_directory(parent)?;
+    let name = CString::new(name).map_err(|_| ConfinementError::InvalidPath)?;
+    let file = confinement::sidecar_open(directory.as_raw_fd(), &name)
+        .map_err(|_| ConfinementError::UnsafeOpen)?;
+    let facts =
+        confinement::sidecar_stat(file.as_raw_fd()).map_err(|_| ConfinementError::UnsafeOpen)?;
+    if facts.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(ConfinementError::UnsafeOpen);
+    }
+    Ok(SidecarFacts {
+        size: facts.st_size.max(0) as u64,
+        device: facts.st_dev,
+        inode: facts.st_ino,
+        modified_seconds: facts.st_mtime,
+        modified_nanoseconds: facts.st_mtime_nsec as u32,
+    })
+}
+
 pub fn publish(
     root: &LibraryRoot,
     original: &RelativeOriginalPath,

@@ -133,11 +133,14 @@ Read reports each supported source per Original kind:
 | TIFF-based RAW | IFD0 and Exif IFD                         | IFD0 tag `0x02BC` (XMP packet)             | IFD0 tag `0x83BB` (IIM)     |
 | Non-TIFF RAW   | LibRaw fallback, as used for Capture Time | unavailable by kind                        | unavailable by kind         |
 
-For every kind, dimensions and orientation come from the primary IFD
-(`ImageWidth`, `ImageLength`, `Orientation`) or the JPEG's `SOF` marker when
-the IFD omits them. A source that exists but exceeds parse limits reports
-`resource_limit`; a kind without the source reports `unavailable` with the
-kind, never as absent. The reader never fetches a `WebStatement` URL.
+Dimensions are selected per axis: the Exif IFD's `PixelXDimension` and
+`PixelYDimension` first, the primary IFD's `ImageWidth` and `ImageLength`
+second, and the JPEG's `SOF` marker last, with the reported identifier naming
+the selected source. A higher-priority source that is present but invalid,
+duplicate, zero, or over its parse limit blocks fallback to the lower-priority
+source and reports that state. Orientation comes from the primary IFD only. A
+kind without a source reports `unavailable` with the kind, never as absent.
+The reader never fetches a `WebStatement` URL.
 
 ### XMP document model and preservation
 

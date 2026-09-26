@@ -40,6 +40,7 @@ fn test_config(base: &Path, web_root: PathBuf, port: u16) -> Config {
         web_root: Some(web_root),
         processing: None,
         export_retained_output_bytes: None,
+        metadata_supervisor: None,
     }
 }
 

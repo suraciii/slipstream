@@ -7,6 +7,134 @@ defines the supported Linux-local Docker deployment contract. Backup,
 acceptance, and rollback step-by-step procedures are operator material and live
 with the deployment, not in this repository.
 
+## Optional Standard Metadata Save
+
+The default read-only Compose Library supports Read Metadata, not Save. Save
+requires the exclusive deployment described in
+[Standard Metadata design](../design/library-management-metadata.md#supported-deployment-shape).
+The host supervisor is a trusted root component; the Web service must receive
+only its private Unix socket and a read-only bind of the Library Folder. It
+must not receive the backing tree directly, host root privilege, the systemd
+bus, or the Docker socket. Keep the writer identity distinct from Web and
+reserve it for this instance's Samba workers and metadata helper.
+
+The repository supplies the Python standard-library
+[`supervisor.py`](../tools/metadata/supervisor.py),
+[`provision.py`](../tools/metadata/provision.py), and the
+[`supervisor`](../systemd/slipstream-metadata-supervisor%40.service) and
+[`Samba`](../systemd/slipstream-metadata-smb%40.service) systemd templates.
+Install on a systemd/cgroup-v2 host with Python 3, Samba (`smbd`, `testparm`,
+`smbpasswd`), util-linux (`findmnt`), and an ext2/ext3/ext4, XFS, or Btrfs
+backing filesystem. Set `fs.protected_hardlinks=1`. Samba must recognize
+`smb3 directory leases`; unknown parameters make Save unavailable rather than
+silently weakening the boundary. Do not install template overrides or replace
+the supplied `KillMode=control-group` and `ExecStopPost` recovery.
+
+For an isolated disposable instance, place the built save helper at a
+root-owned executable path with root-owned, non-writable ancestors, and run:
+
+```sh
+sudo python3 tools/metadata/provision.py --instance metadata-qa \
+  --source /srv/disposable-photo-fixtures \
+  --helper /usr/local/libexec/slipstream-metadata-save-helper \
+  --web-user slipstream-web --listen-address 127.0.0.1 --smb-port 1445
+sudo smbpasswd -c /etc/slipstream-metadata/metadata-qa/smb.conf \
+  -a ssmeta-metadata-qa
+sudo systemctl start slipstream-metadata-smb@metadata-qa.service \
+  slipstream-metadata-supervisor@metadata-qa.service
+```
+
+The Web account must already exist and be non-root. Provisioning copies the
+source into a new private instance; it never changes the source or an existing
+instance and never stops the host's ordinary Samba service. It creates a
+dedicated non-login writer account, root-owned sticky/setgid `3770`
+directories, root-owned `0440` Originals, and writer-owned Sidecars. It refuses
+source symlinks in every path component before resolving them and rejects
+hardlinks and special files. The private backing parent is exactly root:writer
+`0710`, and every host-side ancestor must be traversable without extended
+attributes. Inside the tree, only Samba's own `user.DOSATTRIB` attribute is
+admitted so ordinary external attribute edits do not invalidate admission;
+any other extended attribute or ACL must be removed before Save is admitted.
+Shared installed templates and supervisor code must be identical when
+provisioning additional instances.
+The units are installed below `/usr/local/lib/systemd/system`, so a runtime
+mask can actually override them. Do not install a higher-priority instance or
+template unit under `/etc/systemd/system`.
+
+Configure the server with `SLIPSTREAM_METADATA_SUPERVISOR` set to the socket
+`/run/slipstream-metadata/metadata-qa/supervisor.sock` and mount
+`/var/lib/slipstream-metadata/metadata-qa/library` read-only into its container.
+Make the bind as root; Web cannot traverse the private host ancestor. Preserve
+the configured numeric Web UID/GID in the container. Restrict the socket bind
+to this Web deployment. External applications use only the isolated SMB share
+`library`; for a non-disposable deployment select a private/Tailscale listen
+address and restrict its port accordingly. The supplied profile disables
+oplocks, kernel oplocks, SMB and directory leases, durable handles, and
+clustering (therefore persistent handles); status checks `testparm`'s effective
+values and rejects unrecognized configuration. Do not grant direct backing
+access to another account, reuse the writer account in another service or
+container, enable extra shares, or give Samba restart authority to Web.
+
+The provisioned copy is the admitted Library. New Originals or directories
+created through SMB are not automatically admitted: stop this instance's SMB
+service and supervisor, then have the deployment administrator inspect and
+re-own the new Originals as root:writer `0440` and directories as root:writer
+`3770` before scanning. Sidecars remain writer-owned with no access for others.
+Reject links, nested filesystems, ACLs, and extended attributes. Status and Save
+reinspect the entire tree and refuse until these invariants hold. Originals
+remain readable but cannot be rewritten, replaced, unlinked, or hardlinked by
+the writer. Back up SQLite state and the backing tree together according to
+the ordinary deployment's backup policy.
+
+### Supervisor Protocol and Recovery
+
+The root-owned immutable JSON at
+`/etc/slipstream-metadata/INSTANCE/config.json` contains exactly `backingRoot`,
+`writerUid`, `writerGid`, `webUid`, `webGid`, `serviceUnit`, `helper`, and
+`smbConfig`. Paths are absolute; the service unit is fixed to
+`slipstream-metadata-smb@INSTANCE.service`. Requests cannot select executable,
+unit, or path. Only the configured Web UID passes Unix `SO_PEERCRED` admission;
+other peers are disconnected without a response. One UTF-8 JSON object plus a
+newline is accepted per connection, at most 2 MiB including the newline; one
+JSON response plus newline is returned, at most 32 MiB. Connection input/output
+has a five-second timeout.
+
+`{"operation":"status"}` returns `{"available":true}` or
+`{"available":false,"reason":"actionable prerequisite failure"}`. This is a
+prerequisite check, not a qualification certificate. A save request is
+`{"operation":"save","request":HELPER_REQUEST}`. The nested request is opaque
+to the supervisor; the helper owns its validation. Save returns the helper's
+single `{"ok":VALUE}` or `{"error":{"code":CODE,"message":MESSAGE,"details":VALUE}}`
+object. Supervisor-generated errors use `details:null`: malformed requests use
+`invalid_input`, failure before helper invocation uses `save_unavailable`, and
+timeout, crash, malformed/oversized helper output, or recovery failure after
+invocation uses `outcome_unknown`. A lost connection does not prove no change;
+refresh metadata evidence before another save.
+
+Save holds an instance-level `flock`, creates a recovery marker, runtime-masks
+the managed SMB service, verifies the mask, stops it with a bounded timeout,
+and reads its retained cgroup-v2 `cgroup.events` to prove `populated=0`. After
+rechecking identities and the tree, it launches the fixed helper as writer
+with no supplementary groups and an inherited Unix socketpair lease whose
+peer credentials identify root. The supervisor holds the peer until helper
+exit. Helper input/output is bounded and the helper has a 30-second deadline.
+The helper's entire descendant cgroup is killed and observed empty before
+unmasking and restarting SMB. Systemctl operations each have a ten-second
+deadline. A supervisor SIGKILL invokes systemd `ExecStopPost`, which proves
+helper descendants exited before releasing the mask; ordinary restarts use
+the same recovery. If descendants cannot be stopped, recovery retains the
+mask and refuses, rather than admitting concurrent writers. The persistent
+runtime marker also drives recovery after supervisor restart.
+
+Before treating a deployment as writable, independently exercise real helper
+publication and refusal, concurrent SMB writes and restart attempts during the
+fence, helper timeout/crash, supervisor SIGKILL and ordinary restart, and
+automatic SMB recovery. Inspect actual cgroup emptiness, Original hashes, and
+external-tool Sidecar read-back. A reachable socket, `available:true`, or active
+units alone does not qualify the environment. Lightroom interoperability must
+not be claimed without exercising Lightroom. The default Compose deployment
+remains read-only; this profile does not silently make it writable.
+
 ## Optional Photo Processing
 
 Photo processing requires a separate digest-pinned engine image and an

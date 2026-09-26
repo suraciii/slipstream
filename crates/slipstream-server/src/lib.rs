@@ -50,6 +50,8 @@ mod edit_recipe;
 mod export_manager;
 pub(crate) mod folders;
 mod http;
+mod metadata_fields;
+pub mod metadata_service;
 pub mod metadata_wire;
 mod processing_capability;
 mod queries;

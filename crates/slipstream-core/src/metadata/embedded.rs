@@ -242,6 +242,16 @@ impl EmbeddedCaptureFacts {
         }
         self.iso.value = None;
         self.iso.state = state;
+        self.image_width = CaptureField {
+            value: None,
+            state,
+            exif_identifier: "PixelXDimension",
+        };
+        self.image_height = CaptureField {
+            value: None,
+            state,
+            exif_identifier: "PixelYDimension",
+        };
     }
 }
 fn empty(kind: OriginalKind) -> EmbeddedMetadata {
@@ -262,6 +272,20 @@ fn empty(kind: OriginalKind) -> EmbeddedMetadata {
             IimProvenance::TiffIfd0Tag83bb
         }),
     }
+}
+
+/// Builds an all-fields-degraded view for an Original whose bounded extraction
+/// cannot run at all. Read still reports every supported field with this state.
+pub fn degraded(kind: OriginalKind, state: FieldState) -> EmbeddedMetadata {
+    let mut metadata = empty(kind);
+    metadata.capture.mark(state);
+    metadata.iim.mark(state);
+    metadata.xmp_packet.state = match state {
+        FieldState::Invalid => PacketState::Invalid,
+        FieldState::ResourceLimit => PacketState::ResourceLimit,
+        _ => PacketState::Unavailable,
+    };
+    metadata
 }
 
 struct Reader<'a> {
@@ -480,19 +504,27 @@ fn extract_jpeg(reader: &mut Reader<'_>) -> Result<EmbeddedMetadata, EmbeddedExt
             }
             0xc0 | 0xc2 | 0xc3 if length >= 7 => {
                 let dimensions = reader.read(position, 5)?;
-                if output.capture.image_height.state == FieldState::Absent {
-                    output.capture.image_height.value = Some(u32::from(u16::from_be_bytes([
-                        dimensions[1],
-                        dimensions[2],
-                    ])));
-                    output.capture.image_height.state = FieldState::Present;
-                }
-                if output.capture.image_width.state == FieldState::Absent {
-                    output.capture.image_width.value = Some(u32::from(u16::from_be_bytes([
-                        dimensions[3],
-                        dimensions[4],
-                    ])));
-                    output.capture.image_width.state = FieldState::Present;
+                for (field, identifier, bytes) in [
+                    (
+                        &mut output.capture.image_width,
+                        "SOF:ImageWidth",
+                        [dimensions[3], dimensions[4]],
+                    ),
+                    (
+                        &mut output.capture.image_height,
+                        "SOF:ImageHeight",
+                        [dimensions[1], dimensions[2]],
+                    ),
+                ] {
+                    if select_dimension_source(field, identifier) {
+                        let value = u32::from(u16::from_be_bytes(bytes));
+                        field.value = (value != 0).then_some(value);
+                        field.state = if value == 0 {
+                            FieldState::Invalid
+                        } else {
+                            FieldState::Present
+                        };
+                    }
                 }
             }
             _ => {}
@@ -731,6 +763,33 @@ fn number(bytes: &[u8], order: Order) -> Option<u32> {
         _ => None,
     }
 }
+fn dimension(bytes: &[u8], order: Order) -> Option<u32> {
+    number(bytes, order).filter(|value| *value != 0)
+}
+
+// A present higher-priority source wins even when invalid or resource-limited.
+fn select_dimension_source(field: &mut CaptureField<u32>, identifier: &'static str) -> bool {
+    let priority = |id| match id {
+        "PixelXDimension" | "PixelYDimension" => 3,
+        "ImageWidth" | "ImageLength" => 2,
+        _ => 1,
+    };
+    if field.state != FieldState::Absent {
+        match priority(identifier).cmp(&priority(field.exif_identifier)) {
+            std::cmp::Ordering::Less => return false,
+            std::cmp::Ordering::Equal => {
+                field.value = None;
+                field.state = FieldState::Invalid;
+                return false;
+            }
+            std::cmp::Ordering::Greater => {}
+        }
+    }
+    field.value = None;
+    field.state = FieldState::Absent;
+    field.exif_identifier = identifier;
+    true
+}
 fn short(bytes: &[u8], order: Order) -> Option<u16> {
     if bytes.len() != 2 {
         return None;
@@ -796,8 +855,26 @@ fn offset(bytes: &[u8], order: Order) -> Option<String> {
 fn apply_entry(tiff: &mut Tiff<'_, '_>, entry: Entry, exif: bool, output: &mut EmbeddedMetadata) {
     let c = &mut output.capture;
     match (exif, entry.tag) {
-        (false, 0x0100) => assign(&mut c.image_width, entry, tiff, &[3, 4], number),
-        (false, 0x0101) => assign(&mut c.image_height, entry, tiff, &[3, 4], number),
+        (false, 0x0100) | (true, 0xa002) => {
+            let identifier = if exif {
+                "PixelXDimension"
+            } else {
+                "ImageWidth"
+            };
+            if select_dimension_source(&mut c.image_width, identifier) {
+                assign(&mut c.image_width, entry, tiff, &[3, 4], dimension);
+            }
+        }
+        (false, 0x0101) | (true, 0xa003) => {
+            let identifier = if exif {
+                "PixelYDimension"
+            } else {
+                "ImageLength"
+            };
+            if select_dimension_source(&mut c.image_height, identifier) {
+                assign(&mut c.image_height, entry, tiff, &[3, 4], dimension);
+            }
+        }
         (false, 0x0112) => assign(&mut c.orientation, entry, tiff, &[3], short),
         (false, 0x010f) => assign(&mut c.camera_make, entry, tiff, &[2], ascii),
         (false, 0x0110) => assign(&mut c.camera_model, entry, tiff, &[2], ascii),
@@ -1101,7 +1178,7 @@ mod tests {
             let mut resource = b"8BIM\x04\x04\0\0".to_vec();
             resource.extend_from_slice(&(iim.len() as u32).to_be_bytes());
             resource.extend_from_slice(iim);
-            if iim.len() % 2 != 0 {
+            if !iim.len().is_multiple_of(2) {
                 resource.push(0);
             }
             result.extend(segment(0xed, &[PS_HEADER, &resource].concat()));
@@ -1165,6 +1242,130 @@ mod tests {
     }
     fn fraction(n: u32, d: u32) -> Vec<u8> {
         [n.to_le_bytes(), d.to_le_bytes()].concat()
+    }
+    #[test]
+    fn capture_dimensions_prefer_exif_over_primary_and_sof_in_any_marker_order() {
+        let exif = tiff(
+            &[
+                (0x0100, 4, 7040u32.to_le_bytes().to_vec()),
+                (0x0101, 4, 4688u32.to_le_bytes().to_vec()),
+            ],
+            &[
+                (0xa002, 4, 7008u32.to_le_bytes().to_vec()),
+                (0xa003, 3, 4672u16.to_le_bytes().to_vec()),
+            ],
+        );
+        let raw = inspect(OriginalKind::Raw, &exif, 16 * 1024 * 1024).unwrap();
+        assert_eq!(raw.capture.image_width.value, Some(7008));
+        assert_eq!(raw.capture.image_height.value, Some(4672));
+        assert_eq!(raw.capture.image_width.exif_identifier, "PixelXDimension");
+        assert_eq!(raw.capture.image_height.exif_identifier, "PixelYDimension");
+        for sof_first in [false, true] {
+            let mut bytes = jpeg(&exif, &[], &[]);
+            let position = if sof_first { 2 } else { bytes.len() - 2 };
+            bytes.splice(position..position, segment(0xc0, &[8, 0, 100, 1, 44]));
+            let result = inspect(OriginalKind::Jpeg, &bytes, 16 * 1024 * 1024).unwrap();
+            assert_eq!(result.capture, raw.capture);
+        }
+    }
+
+    #[test]
+    fn dimension_fallback_is_per_axis_and_identifies_the_selected_source() {
+        let exif = tiff(
+            &[(0x0101, 4, 4688u32.to_le_bytes().to_vec())],
+            &[(0xa002, 4, 7008u32.to_le_bytes().to_vec())],
+        );
+        let result = inspect(OriginalKind::Raw, &exif, 16 * 1024 * 1024).unwrap();
+        assert_eq!(result.capture.image_width.value, Some(7008));
+        assert_eq!(
+            result.capture.image_width.exif_identifier,
+            "PixelXDimension"
+        );
+        assert_eq!(result.capture.image_height.value, Some(4688));
+        assert_eq!(result.capture.image_height.exif_identifier, "ImageLength");
+        for sof_first in [false, true] {
+            let mut bytes = jpeg(
+                &tiff(&[(0x0100, 4, 640u32.to_le_bytes().to_vec())], &[]),
+                &[],
+                &[],
+            );
+            let position = if sof_first { 2 } else { bytes.len() - 2 };
+            bytes.splice(position..position, segment(0xc0, &[8, 0, 100, 1, 44]));
+            let result = inspect(OriginalKind::Jpeg, &bytes, 16 * 1024 * 1024).unwrap();
+            assert_eq!(result.capture.image_width.value, Some(640));
+            assert_eq!(result.capture.image_width.exif_identifier, "ImageWidth");
+            assert_eq!(result.capture.image_height.value, Some(100));
+            assert_eq!(
+                result.capture.image_height.exif_identifier,
+                "SOF:ImageHeight"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_and_limited_exif_dimensions_do_not_fall_back() {
+        for (entries, expected) in [
+            (
+                vec![(0xa002, 4, 0u32.to_le_bytes().to_vec())],
+                FieldState::Invalid,
+            ),
+            (vec![(0xa002, 2, b"7008\0".to_vec())], FieldState::Invalid),
+            (
+                vec![
+                    (0xa002, 4, 7008u32.to_le_bytes().to_vec()),
+                    (0xa002, 4, 7008u32.to_le_bytes().to_vec()),
+                ],
+                FieldState::Invalid,
+            ),
+            (
+                vec![(0xa002, 4, vec![0; MAX_VALUE + 4])],
+                FieldState::ResourceLimit,
+            ),
+        ] {
+            let exif = tiff(&[(0x0100, 4, 7040u32.to_le_bytes().to_vec())], &entries);
+            let result = inspect(OriginalKind::Raw, &exif, 16 * 1024 * 1024).unwrap();
+            assert_eq!(result.capture.image_width.state, expected);
+            assert_eq!(result.capture.image_width.value, None);
+            assert_eq!(
+                result.capture.image_width.exif_identifier,
+                "PixelXDimension"
+            );
+            if expected == FieldState::Invalid {
+                let mut bytes = jpeg(&exif, &[], &[]);
+                let position = bytes.len() - 2;
+                bytes.splice(position..position, segment(0xc0, &[8, 0, 100, 1, 44]));
+                let result = inspect(OriginalKind::Jpeg, &bytes, 16 * 1024 * 1024).unwrap();
+                assert_eq!(result.capture.image_width.state, FieldState::Invalid);
+                assert_eq!(result.capture.image_width.value, None);
+                assert_eq!(
+                    result.capture.image_width.exif_identifier,
+                    "PixelXDimension"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unreadable_exif_ifd_does_not_report_primary_dimensions_as_capture_facts() {
+        let bytes = tiff(
+            &[
+                (0x0100, 4, 7040u32.to_le_bytes().to_vec()),
+                (0x8769, 4, u32::MAX.to_le_bytes().to_vec()),
+            ],
+            &[],
+        );
+        let result = inspect(OriginalKind::Raw, &bytes, 16 * 1024 * 1024).unwrap();
+        assert_eq!(result.capture.image_width.state, FieldState::Invalid);
+        assert_eq!(result.capture.image_width.value, None);
+        assert_eq!(
+            result.capture.image_width.exif_identifier,
+            "PixelXDimension"
+        );
+        assert_eq!(result.capture.image_height.state, FieldState::Invalid);
+        assert_eq!(
+            result.capture.image_height.exif_identifier,
+            "PixelYDimension"
+        );
     }
     #[test]
     fn tiff_exposes_every_capture_fact_and_original_sources() {
@@ -1251,6 +1452,11 @@ mod tests {
         let result = inspect(OriginalKind::Jpeg, &bytes, 16 * 1024 * 1024).unwrap();
         assert_eq!(result.capture.image_width.value, Some(300));
         assert_eq!(result.capture.image_height.value, Some(100));
+        assert_eq!(result.capture.image_width.exif_identifier, "SOF:ImageWidth");
+        assert_eq!(
+            result.capture.image_height.exif_identifier,
+            "SOF:ImageHeight"
+        );
         assert_eq!(
             result.xmp_packet.state,
             PacketState::Present(b"packet".to_vec())
@@ -1345,7 +1551,7 @@ mod tests {
     }
     #[test]
     fn iim_length_and_singleton_multiplicity_limits_are_visible() {
-        let mut iim = dataset(2, 5, &vec![b'x'; 65]);
+        let mut iim = dataset(2, 5, &[b'x'; 65]);
         iim.extend(dataset(2, 105, b"first"));
         iim.extend(dataset(2, 105, b"second"));
         let result = inspect(OriginalKind::Jpeg, &jpeg(&[], &[], &iim), 16 * 1024 * 1024).unwrap();

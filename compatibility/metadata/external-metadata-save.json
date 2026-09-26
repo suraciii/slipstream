@@ -35,17 +35,11 @@
         },
         "dc:subject": {
           "op": "set",
-          "value": [
-            "mountains",
-            "sunrise"
-          ]
+          "value": ["mountains", "sunrise"]
         },
         "dc:creator": {
           "op": "set",
-          "value": [
-            "Sam Lee",
-            "Alex Chen"
-          ]
+          "value": ["Sam Lee", "Alex Chen"]
         },
         "xmp:Rating": {
           "op": "set",
@@ -141,18 +135,12 @@
           "state": "present",
           "writable": true,
           "provenance": "sidecar",
-          "value": [
-            "mountains",
-            "sunrise"
-          ],
+          "value": ["mountains", "sunrise"],
           "sources": [
             {
               "state": "present",
               "provenance": "sidecar",
-              "value": [
-                "mountains",
-                "sunrise"
-              ]
+              "value": ["mountains", "sunrise"]
             }
           ]
         },
@@ -160,18 +148,12 @@
           "state": "present",
           "writable": true,
           "provenance": "sidecar",
-          "value": [
-            "Sam Lee",
-            "Alex Chen"
-          ],
+          "value": ["Sam Lee", "Alex Chen"],
           "sources": [
             {
               "state": "present",
               "provenance": "sidecar",
-              "value": [
-                "Sam Lee",
-                "Alex Chen"
-              ]
+              "value": ["Sam Lee", "Alex Chen"]
             }
           ]
         },

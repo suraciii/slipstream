@@ -1,0 +1,25 @@
+[Unit]
+Description=Slipstream exclusive metadata supervisor (%i)
+After=local-fs.target
+ConditionPathExists=/etc/slipstream-metadata/%i/config.json
+
+[Service]
+Type=simple
+; Runs as the default root without a User= credential transition: an
+; explicit User= marks the supervisor non-dumpable, which makes the helper's
+; privileged child credential switch fail with EPERM.
+UMask=0077
+ExecStart=/usr/bin/python3 /usr/local/libexec/slipstream-metadata-supervisor.py --instance %i
+ExecStopPost=/usr/bin/python3 /usr/local/libexec/slipstream-metadata-supervisor.py --instance %i --recover
+KillMode=control-group
+TimeoutStopSec=45s
+Restart=on-failure
+RestartSec=1s
+RuntimeDirectory=slipstream-metadata/%i
+RuntimeDirectoryMode=0710
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

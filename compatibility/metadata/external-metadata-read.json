@@ -6,9 +6,7 @@
       "originalLocation": "photos/IMG_0001.CR3",
       "association": {
         "state": "eligible",
-        "candidates": [
-          "photos/IMG_0001.xmp"
-        ]
+        "candidates": ["photos/IMG_0001.xmp"]
       },
       "fields": {
         "dc:title": {
@@ -68,18 +66,12 @@
           "state": "present",
           "writable": true,
           "provenance": "sidecar",
-          "value": [
-            "mountains",
-            "dawn"
-          ],
+          "value": ["mountains", "dawn"],
           "sources": [
             {
               "state": "present",
               "provenance": "sidecar",
-              "value": [
-                "mountains",
-                "dawn"
-              ]
+              "value": ["mountains", "dawn"]
             }
           ]
         },
@@ -113,18 +105,12 @@
           "state": "present",
           "writable": true,
           "provenance": "sidecar",
-          "value": [
-            "Alex Chen",
-            "Sam Lee"
-          ],
+          "value": ["Alex Chen", "Sam Lee"],
           "sources": [
             {
               "state": "present",
               "provenance": "sidecar",
-              "value": [
-                "Alex Chen",
-                "Sam Lee"
-              ]
+              "value": ["Alex Chen", "Sam Lee"]
             }
           ]
         },
@@ -592,10 +578,7 @@
       "originalLocation": "photos/IMG_0001.CR3",
       "association": {
         "state": "ambiguous",
-        "candidates": [
-          "photos/IMG_0001.xmp",
-          "photos/IMG_0001.XMP"
-        ],
+        "candidates": ["photos/IMG_0001.xmp", "photos/IMG_0001.XMP"],
         "reason": "Multiple candidate Sidecars"
       },
       "fields": {
@@ -656,18 +639,12 @@
           "state": "present",
           "writable": true,
           "provenance": "sidecar",
-          "value": [
-            "mountains",
-            "dawn"
-          ],
+          "value": ["mountains", "dawn"],
           "sources": [
             {
               "state": "present",
               "provenance": "sidecar",
-              "value": [
-                "mountains",
-                "dawn"
-              ]
+              "value": ["mountains", "dawn"]
             }
           ]
         },
@@ -701,18 +678,12 @@
           "state": "present",
           "writable": true,
           "provenance": "sidecar",
-          "value": [
-            "Alex Chen",
-            "Sam Lee"
-          ],
+          "value": ["Alex Chen", "Sam Lee"],
           "sources": [
             {
               "state": "present",
               "provenance": "sidecar",
-              "value": [
-                "Alex Chen",
-                "Sam Lee"
-              ]
+              "value": ["Alex Chen", "Sam Lee"]
             }
           ]
         },
@@ -961,9 +932,7 @@
       "originalLocation": "photos/IMG_0001.CR3",
       "association": {
         "state": "unresolved",
-        "candidates": [
-          "photos/IMG_0001.xmp"
-        ],
+        "candidates": ["photos/IMG_0001.xmp"],
         "reason": "retained-orphan"
       },
       "fields": {
@@ -1024,18 +993,12 @@
           "state": "present",
           "writable": true,
           "provenance": "sidecar",
-          "value": [
-            "mountains",
-            "dawn"
-          ],
+          "value": ["mountains", "dawn"],
           "sources": [
             {
               "state": "present",
               "provenance": "sidecar",
-              "value": [
-                "mountains",
-                "dawn"
-              ]
+              "value": ["mountains", "dawn"]
             }
           ]
         },
@@ -1069,18 +1032,12 @@
           "state": "present",
           "writable": true,
           "provenance": "sidecar",
-          "value": [
-            "Alex Chen",
-            "Sam Lee"
-          ],
+          "value": ["Alex Chen", "Sam Lee"],
           "sources": [
             {
               "state": "present",
               "provenance": "sidecar",
-              "value": [
-                "Alex Chen",
-                "Sam Lee"
-              ]
+              "value": ["Alex Chen", "Sam Lee"]
             }
           ]
         },
@@ -1550,9 +1507,7 @@
       "originalLocation": "photos/IMG_0001.CR3",
       "association": {
         "state": "eligible",
-        "candidates": [
-          "photos/IMG_0001.xmp"
-        ]
+        "candidates": ["photos/IMG_0001.xmp"]
       },
       "fields": {
         "dc:title": {
@@ -1664,18 +1619,12 @@
           "state": "present",
           "writable": true,
           "provenance": "sidecar",
-          "value": [
-            "Alex Chen",
-            "Sam Lee"
-          ],
+          "value": ["Alex Chen", "Sam Lee"],
           "sources": [
             {
               "state": "present",
               "provenance": "sidecar",
-              "value": [
-                "Alex Chen",
-                "Sam Lee"
-              ]
+              "value": ["Alex Chen", "Sam Lee"]
             }
           ]
         },

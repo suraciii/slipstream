@@ -651,6 +651,7 @@ mod tests {
                 web_root: Some(base.join("web")),
                 processing: None,
                 export_retained_output_bytes: None,
+                metadata_supervisor: None,
             };
             Self { base, config }
         }

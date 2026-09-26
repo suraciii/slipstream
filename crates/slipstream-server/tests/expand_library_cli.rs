@@ -100,8 +100,8 @@ fn expand_library_command_updates_binding_and_location_then_scans() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        // Issue #416 added the removal marker to the Photo row as schema v9.
-        9
+        // Issue #276 added sidecar association records as schema v10.
+        10
     );
     assert_eq!(
         connection

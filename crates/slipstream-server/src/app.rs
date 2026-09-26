@@ -893,6 +893,13 @@ impl SharedLibrary {
     }
 }
 
+fn metadata_busy() -> crate::metadata_wire::MetadataError {
+    crate::metadata_wire::MetadataError {
+        code: crate::metadata_wire::MetadataErrorCode::ResourceLimit,
+        message: "The Library is busy with native work. Retry the metadata operation.".into(),
+        details: serde_json::Value::Null,
+    }
+}
 pub struct Application {
     pub(crate) access: crate::access::Access,
     pub(crate) library: Arc<Library>,
@@ -905,6 +912,10 @@ pub struct Application {
     pub(crate) retained_queries: Mutex<QueryRegistry>,
     pub(crate) browse_namespace: u128,
     pub(crate) browse_counter: AtomicU64,
+    /// Random per-startup identifier; no metadata evidence survives a restart.
+    instance_epoch: String,
+    /// Unix socket of the exclusive metadata save supervisor, when deployed.
+    metadata_supervisor: Option<PathBuf>,
     pub(crate) cursor_signer: CursorSigner,
     pub(crate) shutdown: Mutex<bool>,
 }
@@ -1098,8 +1109,14 @@ impl Application {
             exports,
             scan_cycle: ScanCycle::new(),
             retained_queries: Mutex::new(QueryRegistry::production()),
-            browse_namespace,
             browse_counter: AtomicU64::new(0),
+            browse_namespace,
+            instance_epoch: {
+                let mut bytes = [0u8; 16];
+                getrandom::fill(&mut bytes).expect("system randomness is available");
+                bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+            },
+            metadata_supervisor: config.metadata_supervisor.clone(),
             cursor_signer: CursorSigner::new(),
             shutdown: Mutex::new(false),
         });
@@ -1140,6 +1157,50 @@ impl Application {
             published.photo_metadata_source(photo_id)
         };
         self.inspect_metadata_source(source).await
+    }
+
+    /// Reads one Photo's embedded metadata, Sidecar, provenance, and evidence.
+    pub async fn external_metadata_read(
+        &self,
+        photo_id: &str,
+    ) -> Result<crate::metadata_wire::MetadataReadResult, crate::metadata_wire::MetadataError> {
+        let Some(permit) = self.library.try_admit_native_work() else {
+            return Err(metadata_busy());
+        };
+        let result = crate::metadata_service::read_metadata(
+            &self.library,
+            &self.library_root,
+            &self.instance_epoch,
+            self.metadata_supervisor.as_deref(),
+            photo_id,
+        )
+        .await;
+        drop(permit);
+        result
+    }
+
+    /// Performs one checked Sidecar save through the exclusive save
+    /// supervisor, refusing before any mutation when the boundary cannot be
+    /// established.
+    pub async fn external_metadata_save(
+        &self,
+        photo_id: &str,
+        request: crate::metadata_wire::MetadataSaveRequest,
+    ) -> Result<crate::metadata_wire::MetadataSaveResult, crate::metadata_wire::MetadataError> {
+        let Some(permit) = self.library.try_admit_native_work() else {
+            return Err(metadata_busy());
+        };
+        let result = crate::metadata_service::save_metadata(
+            &self.library,
+            &self.library_root,
+            &self.instance_epoch,
+            self.metadata_supervisor.as_deref(),
+            photo_id,
+            request,
+        )
+        .await;
+        drop(permit);
+        result
     }
 
     async fn inspect_metadata_source(

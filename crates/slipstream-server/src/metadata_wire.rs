@@ -122,6 +122,9 @@ pub struct MetadataFileFacts {
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MetadataSidecarEvidence {
     Absent,
+    Unavailable {
+        reason: String,
+    },
     Present {
         location: String,
         facts: MetadataFileFacts,
