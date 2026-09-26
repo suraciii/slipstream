@@ -119,6 +119,10 @@ emits this identity and saves it with the complete Film Recipe. The inspected
 container image ID remains the identity of the complete tested filesystem.
 The manifest records patches in application order and includes the additional
 `bounded_output.py` engine module.
+The Film recipe, ICC, and procedure identities consumed by adapter grant
+validation are defined once in `film_identity.py`. The qualification image and
+Film adapter image carry that same module; the numerical bundle digest remains
+owned by `bundle.py` and `package.py`.
 
 The local `cam16ucs-srgb-f64-v1` workspace model admits only the fixed CAM16-UCS
 compression recipe, sRGB output, and nonempty C-contiguous native float64 RGB

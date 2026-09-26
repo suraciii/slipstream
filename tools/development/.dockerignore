@@ -2,6 +2,7 @@
 !Dockerfile
 !requirements.lock
 !film.py
+!film_identity.py
 !probe.py
 !history.py
 !bounded_gamut.py

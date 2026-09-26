@@ -18,6 +18,9 @@ tools/**
 !tools/processing/
 tools/processing/**
 !tools/processing/film/
+!tools/development/
+tools/development/**
+!tools/development/film_identity.py
 tools/processing/film/**
 !tools/processing/film/Dockerfile
 !tools/processing/film/adapter.py

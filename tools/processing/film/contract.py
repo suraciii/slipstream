@@ -16,6 +16,18 @@ VALIDATOR_DEPS = Path("/opt/film-validator-deps")
 if VALIDATOR_DEPS.is_dir():
     sys.path.insert(0, str(VALIDATOR_DEPS))
 
+PROBE = Path("/opt/probe")
+if (PROBE / "film_identity.py").is_file():
+    sys.path.insert(0, str(PROBE))
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "development"))
+
+from film_identity import (
+    FILM_RECIPE_SHA256 as RECIPE,
+    INPUT_ICC_SHA256 as INPUT_ICC,
+    OUTPUT_ICC_SHA256 as OUTPUT_ICC,
+    PROCEDURE,
+)
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
@@ -23,10 +35,6 @@ from referencing import Registry, Resource
 MAX_BYTES = 16 * 1024
 U64_MAX = (1 << 64) - 1
 NUMERICAL_BUNDLE = "0bf4af15d4f5323d060d4e6543e0e97d1a2fe6014d27c1cd81db440e4f46a152"
-RECIPE = "a2dabe2581df7ed97b2af2ffe9bd4a80e579e0f49fd9627af49d86267a33ea7d"
-INPUT_ICC = "7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe"
-OUTPUT_ICC = "b44e86e44d44993a3a9a880626f9832e9c37e2234caba501548f9114bada6d21"
-PROCEDURE = "film-once-empty-cache-v1"
 GRANT = Path("/input/grant.json")
 
 
