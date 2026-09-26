@@ -96,6 +96,14 @@ retained numerical bundle used by the Film adapter. That check must report a
 matching recipe identity before its metrics can be considered #338 evidence;
 the development image's diagnostic remains useful for detecting qualification
 image drift but does not override the accepted-runtime identity.
+`lut_reproducibility_probe.py` runs separate fresh processes in the
+`lut -> direct -> lut -> direct` order and one additional process through the
+same-process `lut -> direct -> lut` order. Each fresh child starts with a new
+empty private Numba cache, repeats its own path in-process, and exercises
+active grain, halation, glare, spatial effects, and stochastic effects. It
+requires exact digest equality across fresh processes, the fresh-process LUT
+A/B/A change, and the in-process A/B/A change; the report remains diagnostic
+and does not select the #338 visual criterion.
 
 These expensive probes are separate from `bun run verify`, like the existing
 real-camera safety gate. Run that full repository gate before handing off a
