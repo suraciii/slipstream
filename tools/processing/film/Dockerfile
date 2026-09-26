@@ -13,6 +13,7 @@ RUN uv --no-cache pip install --python /opt/runtime/bin/python --target /opt/fil
 COPY tools/processing/film/adapter.py tools/processing/film/contract.py \
      tools/processing/film/package.py tools/processing/film/Dockerfile /opt/film-measurement/
 COPY design/schemas/processing-film-measurement.schema.json /opt/film-measurement/schema.json
+COPY tools/development/film_identity.py /opt/probe/film_identity.py
 COPY design/schemas/processing-film-envelope.schema.json /opt/film-measurement/envelope-schema.json
 RUN /opt/runtime/bin/python /opt/probe/bundle.py --verify
 
