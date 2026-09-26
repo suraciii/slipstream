@@ -24,7 +24,8 @@ def bundle_identity():
     files = [
         Path("/opt/requirements.lock"), Path("/opt/os-packages.txt"),
         Path("/opt/development-Dockerfile"), Path("/opt/probe/film.py"),
-        Path("/opt/probe/probe.py"), Path("/opt/probe/bundle.py"),
+        Path("/opt/probe/probe.py"), Path("/opt/probe/telemetry.py"),
+        Path("/opt/probe/bundle.py"),
         Path("/opt/patches/0001-bounded-output-gamut.patch"),
         Path("/opt/patches/0002-buffer-lifetimes-and-output.patch"),
         *[ROOT / "src/spektrafilm" / path for path in (

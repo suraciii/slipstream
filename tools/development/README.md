@@ -57,7 +57,10 @@ The modes are:
   and `(1154x1732)`. The default is one cold call and 20 warm calls per
   geometry in one reused simulator. Warm timing is inclusive render time only;
   queue, admission, startup, and transfer are not measured by this probe.
-- `full`: adds full-resolution Development TIFF and full-resolution Film output.
+  Each render records the observed process-thread maximum and regular-file
+  bytes below `/work`; these are diagnostic measurements, not cgroup limits.
+  `full` also records the finished JPEG byte length and workspace bytes before
+  and after encoding.
   Large camera files can consume the full memory allowance. An OOM or nonzero
   child exit remains a failure in `report.json`.
 
