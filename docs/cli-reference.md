@@ -163,7 +163,8 @@ Order defaults to `album-order` for an Album and `capture-time-asc` otherwise.
 Filters never rewrite Album order. The list pagination rules above apply.
 
 Each ordinary Photo item uses the `PhotoItem` shape defined under
-[Result Schemas](#result-schemas), including the complete `preview` object.
+[Result Schemas](#result-schemas), including the complete `preview` object and
+nullable `removedAtMs`. An active Library Photo has `removedAtMs: null`.
 `get` adds the bounded `metadata` object; use `albums list --photo` for
 membership. Absolute server paths never appear. Missing metadata fields are
 `null`, with their inspection state, rather than guessed.
@@ -173,6 +174,86 @@ A Photo removed after query creation occupies its original result position as
 Photo still returns the Photo's ordinary facts. `total` is the original match
 count and includes missing placeholders. It is not the count of currently
 matching Photo facts. `get` for a removed Photo is `not_found`.
+
+## Reversible Photo Removal and Restore
+
+The explicit removal and Restore commands operate on a caller-selected set of
+Photo IDs. They do not infer identity from a path, filename, Album, live query,
+or current Selection State. Query the Photos first and preserve the returned
+`selectionState`, `decisionVersion`, and `removedAtMs` as removal evidence.
+
+```text literal
+slipstream photos remove OPERATION_ID --input FILE
+slipstream photos removal-operation OPERATION_ID
+slipstream photos restore OPERATION_ID --input FILE
+slipstream photos restore-operation OPERATION_ID
+```
+
+`OPERATION_ID` is a nonempty caller-generated identifier. A removal input has
+exactly one `photos` array. Each item has exactly `photoId`,
+`selectionState: "rejected"`, nonempty `decisionVersion`, and
+`removedAtMs`, which is either `null` or a nonnegative integer:
+
+```json
+{
+  "photos": [
+    {
+      "photoId": "00000000-0000-4000-8000-000000000001",
+      "selectionState": "rejected",
+      "decisionVersion": "opaque-version-from-photo-query",
+      "removedAtMs": null
+    }
+  ]
+}
+```
+
+The target list must be nonempty, distinct, and no larger than the advertised
+`removalPhotoIdsMaximum` capability. The CLI validates the complete document
+before network access. The service validates all request-wide constraints
+before admitting the attempt. A stale decision or removal marker affects only
+that target; valid siblings may still be removed.
+
+Removal returns one result per requested Photo in request order. Outcomes are
+`removed`, `changed-elsewhere`, `unavailable`, or `already-removed`.
+`removed` includes a nonnegative `removedAtMs`; all other outcomes include
+`removedAtMs: null`. Counts contain `removed`, `changedElsewhere`, `missing`,
+and `alreadyRemoved`, and equal the result partition. A successful removal
+does not change the Original File, Album membership, rating, or decision.
+
+`photos removal-operation` is read-only and returns the durable result for the
+specified operation. Repeating the same operation ID with identical intent
+replays that result. Reusing it with different targets or evidence is a
+`conflict`. A missing receipt, incomplete response, or invalid response is
+`outcome_unknown`; inspect the original operation before submitting a
+replacement.
+
+Restore has a separate operation ID and uses the removal marker as its
+compare-and-set identity. Its input has exactly one `photos` array containing
+distinct IDs and nonnegative markers:
+
+```json
+{
+  "photos": [
+    {
+      "photoId": "00000000-0000-4000-8000-000000000001",
+      "removedAtMs": 1735689600000
+    }
+  ]
+}
+```
+
+Restore results use `restored`, `already-active`, `changed-elsewhere`, or
+`unavailable`. Counts contain `restored`, `alreadyActive`,
+`changedElsewhere`, and `missing`. A Restore clears only the matching
+removal marker. It does not authorize or perform permanent deletion.
+`photos restore-operation` is read-only and follows the same receipt replay and
+`outcome_unknown` rules. Permanent deletion remains a separate reviewed Trash
+operation.
+
+When at least one target changed and another target was conflicting or
+unavailable, the CLI returns `partial_result` with the complete result in
+`data`. An all-conflict result uses `conflict`; an all-unavailable result uses
+`not_found`. Inspect the original operation before retrying either command.
 
 ## Preview Download
 
@@ -392,9 +473,10 @@ They are null when no current derivative facts exist. `PhotoItem` contains
 string `id` and `filename`, `originalKind` of `raw` or `jpeg`, boolean
 `originalAvailable`, `selectionState` of `undecided`, `selected`, or `rejected`,
 integer `rating` from 0 through 5, opaque string `decisionVersion`, nullable
-camera-local string `captureTime`, `preview: PreviewFacts`, and absolute HTTP or
-HTTPS string `webUrl`. A Photo list item is either a `PhotoItem` or exactly an
-object with string `id` and `state: "missing"`.
+nonnegative integer `removedAtMs`, nullable camera-local string `captureTime`,
+`preview: PreviewFacts`, and absolute HTTP or HTTPS string `webUrl`. A Photo
+list item is either a `PhotoItem` or exactly an object with string `id` and
+`state: "missing"`.
 
 `photos get` data contains every `PhotoItem` key plus `metadata`. `metadata`
 contains `state` of `pending`, `known`, `missing`, `invalid`, or `failed`,
@@ -421,6 +503,23 @@ through 5, and opaque string `decisionVersion`. Photo decision data contains
 - `conflict`: `outcome: "conflict"` and `current` with a complete Photo decision
   object; or
 - `missing`: only `outcome: "missing"`.
+
+Explicit removal data contains string `operationId`, `counts`, and `results`.
+`counts` has `removed`, `changedElsewhere`, `missing`, and `alreadyRemoved`.
+`results` has one item per requested Photo in request order. Each item contains
+`photoId`, `outcome`, and nullable `removedAtMs`. The exact outcome rules are:
+
+- `removed`: `removedAtMs` is a nonnegative integer;
+- `changed-elsewhere`, `unavailable`, and `already-removed`:
+  `removedAtMs` is `null`.
+
+Explicit Restore data contains string `operationId`, `counts`, and `results`.
+`counts` has `restored`, `alreadyActive`, `changedElsewhere`, and `missing`.
+`results` has one item per requested Photo in request order. Each result
+contains `photoId` and one of `restored`, `already-active`, `changed-elsewhere`,
+or `unavailable`. Counts must equal the result partition. The
+operation-inspection commands return the same data shape without changing
+Library state.
 
 Album mutation data shapes are:
 

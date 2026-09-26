@@ -22,6 +22,26 @@ does not ask a model to judge a Photo.
    inspect in the Web. Links expose the current view, not a snapshot or an
    authorization grant.
 
+For explicit rejected-Photo removal, query the target Photos and preserve each
+returned `photoId`, `selectionState`, `decisionVersion`, and `removedAtMs`.
+Write only those exact evidence records to a bounded removal input file:
+
+1. Run `photos remove OPERATION_ID --input FILE` with the caller-generated
+   operation ID.
+2. Inspect `photos removal-operation OPERATION_ID`, even after a successful
+   response, and reconcile every per-Photo outcome. Use the returned
+   `removedAtMs` for each `removed` Photo.
+3. Read `trash list` to confirm the Web-visible removed set. A Restore uses a
+   new operation ID and an input file containing only `{photoId, removedAtMs}`
+   pairs from the confirmed removal result.
+4. Run `photos restore OPERATION_ID --input FILE`, then inspect
+   `photos restore-operation OPERATION_ID` and query the Photos again. A
+   `changed-elsewhere` or `unavailable` result is not proof of restoration.
+
+Permanent deletion is a separate reviewed Trash operation. Do not substitute
+current query membership, filenames, paths, Album names, or a retry with a new
+operation ID for missing removal or Restore evidence.
+
 For image inspection, run `photos preview PHOTO_ID --file NEW_PATH --size
 review`; inspect the downloaded JPEG and its `sourceRevision`, `source`, and
 dimensions. A non-vision Agent can still organize metadata without opening an

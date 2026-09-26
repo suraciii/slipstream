@@ -290,8 +290,24 @@ pub(crate) fn create_router_with_preview(
             get(method_not_allowed).post(remove_photos),
         )
         .route(
+            "/api/photos/remove-explicit",
+            get(method_not_allowed).post(remove_photos_explicit),
+        )
+        .route(
+            "/api/photos/removal-operations/{id}",
+            get(get_photo_removal_operation),
+        )
+        .route(
             "/api/photos/restore",
             get(method_not_allowed).post(restore_photos),
+        )
+        .route(
+            "/api/photos/restore-explicit",
+            get(method_not_allowed).post(restore_photos_explicit),
+        )
+        .route(
+            "/api/photos/restore-operations/{id}",
+            get(get_photo_restore_operation),
         )
         .route("/api/photos/removed", get(get_removed_photos))
         .route("/api/trash", get(get_removed_photos))
@@ -470,6 +486,7 @@ pub(crate) async fn capabilities(request: Request<Body>) -> Response<Body> {
             limits: CapabilityLimitsWire {
                 list_page_maximum: MAXIMUM_LIST_PAGE,
                 mutation_photo_ids_maximum: slipstream_core::PHOTO_STATE_BATCH_MAX,
+                removal_photo_ids_maximum: slipstream_core::PHOTO_REMOVAL_MAX,
                 album_reorder_members_maximum: ALBUM_PHOTO_IDS_MAX,
                 retained_query_ids_maximum: MAXIMUM_RETAINED_IDS,
                 retained_query_idle_seconds: QUERY_IDLE.as_secs(),
@@ -1121,7 +1138,7 @@ async fn photo_list_response(
         .into_iter()
         .zip(facts)
         .map(|(id, photo)| match photo {
-            Some(photo) => PhotoListItemWire::Present(CliPhotoItemWire::from(photo)),
+            Some(photo) => PhotoListItemWire::Present(Box::new(CliPhotoItemWire::from(photo))),
             None => PhotoListItemWire::Missing(MissingItemWire {
                 id,
                 state: "missing",
@@ -1318,8 +1335,275 @@ pub(crate) async fn remove_photos(
         Err(error) => ApiError::from(error).into_response(),
     }
 }
+/// Applies an explicit, caller-reviewed Photo set. This route is CLI-only so
+/// its operation and evidence are always authenticated as one client attempt.
+pub(crate) async fn remove_photos_explicit(
+    State(state): State<HttpState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    if let Err(response) = require_cli_contract(&request) {
+        return *response;
+    }
+    if let Err(response) = require_published(&state.application) {
+        return *response;
+    }
+    let body = match read_json_body(request).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let Some(body) = body.as_object() else {
+        return invalid_cli("input", "The explicit removal request must be an object.");
+    };
+    if !has_exact_keys(body, &["operationId", "photos"]) {
+        return invalid_cli(
+            "input",
+            "The explicit removal request must contain operationId and photos only.",
+        );
+    }
+    let Some(operation_id) = body
+        .get("operationId")
+        .and_then(Value::as_str)
+        .filter(|value| valid_id(value))
+    else {
+        return invalid_cli("operationId", "The operation ID is invalid.");
+    };
+    let Some(items) = body.get("photos").and_then(Value::as_array) else {
+        return invalid_cli("photos", "The explicit target list is invalid.");
+    };
+    if items.is_empty() {
+        return invalid_cli("photos", "The explicit target list must not be empty.");
+    }
+    if items.len() > slipstream_core::PHOTO_REMOVAL_MAX {
+        return cli_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "limit_exceeded",
+            "Reduce the Photo target set and try again.",
+            serde_json::json!({
+                "limitName": "removalPhotoIdsMaximum",
+                "limit": slipstream_core::PHOTO_REMOVAL_MAX,
+                "actual": items.len(),
+            }),
+        );
+    }
+    let mut photos = Vec::with_capacity(items.len());
+    let mut ids = std::collections::BTreeSet::new();
+    for item in items {
+        let Some(item) = item.as_object() else {
+            return invalid_cli("photos", "Each target must be an object.");
+        };
+        if !has_exact_keys(
+            item,
+            &[
+                "photoId",
+                "selectionState",
+                "decisionVersion",
+                "removedAtMs",
+            ],
+        ) {
+            return invalid_cli(
+                "photos",
+                "Each target must contain exactly its evidence fields.",
+            );
+        }
+        let Some(photo_id) = item
+            .get("photoId")
+            .and_then(Value::as_str)
+            .filter(|value| valid_id(value))
+        else {
+            return invalid_cli("photoId", "The Photo ID is invalid.");
+        };
+        if !ids.insert(photo_id) {
+            return invalid_cli("photos", "Photo IDs must be distinct.");
+        }
+        let Some(selection_state) = item
+            .get("selectionState")
+            .and_then(valid_selection)
+            .filter(|value| *value == SelectionState::Rejected)
+        else {
+            return invalid_cli("selectionState", "Removal requires rejected evidence.");
+        };
+        let Some(decision_version) = item
+            .get("decisionVersion")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        else {
+            return invalid_cli("decisionVersion", "The decision version is required.");
+        };
+        let removed_at_ms = match item.get("removedAtMs") {
+            Some(Value::Null) => None,
+            Some(value) => match value.as_i64().filter(|value| *value >= 0) {
+                Some(value) => Some(value),
+                None => return invalid_cli("removedAtMs", "The removal marker is invalid."),
+            },
+            None => return invalid_cli("removedAtMs", "The removal state is required."),
+        };
+        photos.push(slipstream_core::PhotoRemovalTarget {
+            photo_id: photo_id.to_owned(),
+            expected_selection_state: selection_state,
+            expected_decision_version: decision_version.to_owned(),
+            expected_removed_at_ms: removed_at_ms,
+        });
+    }
+    match state
+        .application
+        .remove_photos_explicit(slipstream_core::ExplicitPhotoRemovalMutation {
+            operation_id: operation_id.to_owned(),
+            photos,
+        })
+        .await
+    {
+        Ok(result) => json_response(StatusCode::OK, &result),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+pub(crate) async fn get_photo_removal_operation(
+    State(state): State<HttpState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    request: Request<Body>,
+) -> Response<Body> {
+    if let Err(response) = require_cli_contract(&request) {
+        return *response;
+    }
+    if !valid_id(&id) {
+        return invalid_cli("operationId", "The operation ID is invalid.");
+    }
+    match state.application.photo_removal_operation(id.clone()).await {
+        Ok(Some(result)) => json_response(StatusCode::OK, &result),
+        Ok(None) => cli_error(
+            StatusCode::CONFLICT,
+            "outcome_unknown",
+            "Inspect the original operation before submitting a replacement.",
+            serde_json::json!({"operationId": id}),
+        ),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
 
 /// Restores one removal operation or one explicit bounded list of Photos.
+/// Applies one explicit, caller-reviewed Restore attempt. This route is
+/// CLI-only and retains the attempt identity for read-only reconciliation.
+pub(crate) async fn restore_photos_explicit(
+    State(state): State<HttpState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    if let Err(response) = require_cli_contract(&request) {
+        return *response;
+    }
+    if let Err(response) = require_published(&state.application) {
+        return *response;
+    }
+    let body = match read_json_body(request).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let Some(body) = body.as_object() else {
+        return invalid_cli("input", "The explicit Restore request must be an object.");
+    };
+    if !has_exact_keys(body, &["operationId", "photos"]) {
+        return invalid_cli(
+            "input",
+            "The explicit Restore request must contain operationId and photos only.",
+        );
+    }
+    let Some(operation_id) = body
+        .get("operationId")
+        .and_then(Value::as_str)
+        .filter(|value| valid_id(value))
+    else {
+        return invalid_cli("operationId", "The operation ID is invalid.");
+    };
+    let Some(items) = body.get("photos").and_then(Value::as_array) else {
+        return invalid_cli("photos", "The explicit Restore target list is invalid.");
+    };
+    if items.is_empty() {
+        return invalid_cli(
+            "photos",
+            "The explicit Restore target list must not be empty.",
+        );
+    }
+    if items.len() > slipstream_core::PHOTO_REMOVAL_MAX {
+        return cli_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "limit_exceeded",
+            "Reduce the Photo target set and try again.",
+            serde_json::json!({
+                "limitName": "removalPhotoIdsMaximum",
+                "limit": slipstream_core::PHOTO_REMOVAL_MAX,
+                "actual": items.len(),
+            }),
+        );
+    }
+    let mut photos = Vec::with_capacity(items.len());
+    let mut ids = std::collections::BTreeSet::new();
+    for item in items {
+        let Some(item) = item.as_object() else {
+            return invalid_cli("photos", "Each Restore target must be an object.");
+        };
+        if !has_exact_keys(item, &["photoId", "removedAtMs"]) {
+            return invalid_cli(
+                "photos",
+                "Each Restore target must contain its marker fields.",
+            );
+        }
+        let Some(photo_id) = item
+            .get("photoId")
+            .and_then(Value::as_str)
+            .filter(|value| valid_id(value))
+        else {
+            return invalid_cli("photoId", "The Photo ID is invalid.");
+        };
+        if !ids.insert(photo_id) {
+            return invalid_cli("photos", "Photo IDs must be distinct.");
+        }
+        let Some(removed_at_ms) = item
+            .get("removedAtMs")
+            .and_then(Value::as_i64)
+            .filter(|value| *value >= 0)
+        else {
+            return invalid_cli("removedAtMs", "The removal marker is invalid.");
+        };
+        photos.push(slipstream_core::PhotoRemovalMarker {
+            photo_id: photo_id.to_owned(),
+            removed_at_ms,
+        });
+    }
+    match state
+        .application
+        .restore_photos_explicit(slipstream_core::ExplicitPhotoRestoreMutation {
+            operation_id: operation_id.to_owned(),
+            photos,
+        })
+        .await
+    {
+        Ok(result) => json_response(StatusCode::OK, &result),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+pub(crate) async fn get_photo_restore_operation(
+    State(state): State<HttpState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    request: Request<Body>,
+) -> Response<Body> {
+    if let Err(response) = require_cli_contract(&request) {
+        return *response;
+    }
+    if !valid_id(&id) {
+        return invalid_cli("operationId", "The operation ID is invalid.");
+    }
+    match state.application.photo_restore_operation(id.clone()).await {
+        Ok(Some(result)) => json_response(StatusCode::OK, &result),
+        Ok(None) => cli_error(
+            StatusCode::CONFLICT,
+            "outcome_unknown",
+            "Inspect the original Restore attempt before submitting a replacement.",
+            serde_json::json!({"operationId": id}),
+        ),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
 pub(crate) async fn restore_photos(
     State(state): State<HttpState>,
     request: Request<Body>,

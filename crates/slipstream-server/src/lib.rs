@@ -72,12 +72,14 @@ pub use wire::{
     AlbumMembershipAddResponse, AlbumMembershipRemoveResponse, AlbumSummaryListResponse,
     AlbumSummaryWire, BrowseOpenResponse, BrowsePositionResponse, BrowseSelectionFilter,
     BrowseSourceRequest, BrowseViewOrder, BrowseWindowResponse, DerivativeDelivery,
+    ExplicitPhotoRemovalResponse, ExplicitPhotoRestoreCountsWire, ExplicitPhotoRestoreResponse,
     FileLocationsResponse, FolderAlbumMutationResponse, FolderChildWire, LibraryOverviewResponse,
     OriginalWire, PermanentDeletionItemWire, PermanentDeletionRejectionWire,
     PermanentDeletionResponse, PermanentDeletionReviewItemWire, PermanentDeletionReviewResponse,
     PhotoAlbumMembershipWire, PhotoAlbumsResponse, PhotoMetadataWire, PhotoRemovalCountsWire,
-    PhotoRemovalResponse, PhotoRestorationCountsWire, PhotoRestorationResponse, PhotoSummary,
-    PreviewResponse, RemovedPhotoWire, RemovedPhotosResponse, ScanStatusWire, SelectionCountsWire,
+    PhotoRemovalItemWire, PhotoRemovalResponse, PhotoRestorationCountsWire,
+    PhotoRestorationResponse, PhotoRestoreItemWire, PhotoSummary, PreviewResponse,
+    RemovedPhotoWire, RemovedPhotosResponse, ScanStatusWire, SelectionCountsWire,
 };
 pub(crate) use wire::{
     FingerprintProgressWire, RecoveryApplyResponseWire, RecoveryProposalWire,

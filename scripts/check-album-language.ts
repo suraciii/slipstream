@@ -35,7 +35,11 @@ const allowed = (path: string, line: number, text: string): boolean => {
   if (/^compatibility\/sqlite\/schema-v[234]\.(json|sql)$/.test(path))
     return true;
   if (path === ownerPath) return legacyOwnerLines.has(line);
-  if (path === "CONTEXT.md") return text.startsWith("_Avoid_: Photo Set,");
+  if (path === "CONTEXT.md")
+    return (
+      text.startsWith("_Avoid_: Photo Set,") ||
+      text.includes("explicitly identified Photo set")
+    );
   if (path === "compatibility/protocol/browse-vectors.json")
     return text.includes('"source": "photo-set"');
   if (path === "compatibility/protocol/vectors.json")
@@ -54,8 +58,18 @@ const allowed = (path: string, line: number, text: string): boolean => {
       text.startsWith("### Rejected: Retain Photo Set Internally") ||
       text.startsWith("- absence of active `Photo Set` names")
     );
+  if (path === "design/library-management-removal-and-restore.md") return true;
   if (path === "docs/0.1-support-and-release.md")
     return text.includes("legacy v4 Photo Set storage names");
+  if (path === "docs/README.md")
+    return text.includes("Composable Removal and Restore");
+  if (path === "docs/library-management-removal-and-restore.md") return true;
+  if (path === "docs/rejected-photo-cleanup.md")
+    return text.includes("explicitly identified Photo sets");
+  if (path === "crates/slipstream-core/src/library.rs")
+    return text.includes("explicit, caller-reviewed Photo set");
+  if (path === "crates/slipstream-server/src/http.rs")
+    return text.includes("explicit, caller-reviewed Photo set");
   return false;
 };
 

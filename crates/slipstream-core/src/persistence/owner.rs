@@ -11,23 +11,25 @@ use crate::{
     CheckedAlbumMutationResult, CheckedPhotoDecisionCounts, CheckedPhotoDecisionItemResult,
     CheckedPhotoDecisionMutation, CheckedPhotoDecisionOutcome, CheckedPhotoDecisionResult,
     DiscoveredOriginal, EXPORT_DEVELOPMENT_TIFF_WORKLOAD, EXPORT_RETENTION_SECONDS, EditRecipe,
-    EditRecipeRead, EditRecipeSettings, EditRecipeWriteOutcome, ExportArtifactFacts, ExportAttempt,
-    ExportExposureRange, ExportLeaseOutcome, ExportRecipePayload, ExportRecord, ExportRetryOutcome,
-    ExportSettlement, ExportSnapshot, ExportSourceEvidence, ExportState, ExportSubmission,
-    ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult, LibraryRoot,
-    MAXIMUM_FOLDER_ALBUM_PHOTOS, MAXIMUM_PHOTO_RATING, OriginalErrorCategory, OriginalFacts,
-    OriginalFingerprint, OriginalKind, OriginalRecord, OriginalScanError,
-    PermanentDeletionItemResult, PermanentDeletionItemState, PermanentDeletionRejection,
-    PermanentDeletionResult, PermanentDeletionReview, PermanentDeletionReviewItem,
-    PermanentDeletionSelection, PermanentDeletionTarget, PermanentDeletionWorkItem,
-    PhotoAlbumMembership, PhotoDecisionFacts, PhotoDecisionSnapshot, PhotoOperationRemainder,
-    PhotoQuery, PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder, PhotoQueryProjection,
-    PhotoQuerySource, PhotoRead, PhotoRecord, PhotoRemovalCounts, PhotoRemovalMutation,
-    PhotoRemovalResult, PhotoRestoration, PhotoRestorationCounts, PhotoRestorationResult,
-    PhotoStateBatchApplied, PhotoStateBatchChangedElsewhere, PhotoStateBatchMissing,
-    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField, PhotoStateMutation,
-    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult,
-    PreviewState, RebindEditRecipe, RecoverySurvey, RelativeOriginalPath, RemovedPhotoRecord,
+    EditRecipeRead, EditRecipeSettings, EditRecipeWriteOutcome, ExplicitPhotoRemovalMutation,
+    ExplicitPhotoRestoreCounts, ExplicitPhotoRestoreMutation, ExplicitPhotoRestoreResult,
+    ExportArtifactFacts, ExportAttempt, ExportExposureRange, ExportLeaseOutcome,
+    ExportRecipePayload, ExportRecord, ExportRetryOutcome, ExportSettlement, ExportSnapshot,
+    ExportSourceEvidence, ExportState, ExportSubmission, ExportSubmissionResolution,
+    ExportSubmitOutcome, ExportSweepResult, LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS,
+    MAXIMUM_PHOTO_RATING, OriginalErrorCategory, OriginalFacts, OriginalFingerprint, OriginalKind,
+    OriginalRecord, OriginalScanError, PermanentDeletionItemResult, PermanentDeletionItemState,
+    PermanentDeletionRejection, PermanentDeletionResult, PermanentDeletionReview,
+    PermanentDeletionReviewItem, PermanentDeletionSelection, PermanentDeletionTarget,
+    PermanentDeletionWorkItem, PhotoAlbumMembership, PhotoDecisionFacts, PhotoDecisionSnapshot,
+    PhotoOperationRemainder, PhotoQuery, PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder,
+    PhotoQueryProjection, PhotoQuerySource, PhotoRead, PhotoRecord, PhotoRemovalCounts,
+    PhotoRemovalMarker, PhotoRemovalMutation, PhotoRemovalResult, PhotoRestoration,
+    PhotoRestorationCounts, PhotoRestorationResult, PhotoStateBatchApplied,
+    PhotoStateBatchChangedElsewhere, PhotoStateBatchMissing, PhotoStateBatchMutation,
+    PhotoStateBatchResult, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult,
+    PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult, PreviewState,
+    RebindEditRecipe, RecoverySurvey, RelativeOriginalPath, RemovedPhotoRecord,
     RequestedRelocation, SaveEditRecipe, ScanLimits, ScanSnapshot, SelectionState,
     TrashPhotoCandidate, UnavailablePhotoRecord, WhiteBalanceIntent, preview_should_preserve,
     reconcile, selected_source,
@@ -88,10 +90,29 @@ enum EditRecipeReceiptOutcome {
 
 const PHOTO_REMOVAL_RECEIPT_PREFIX: &str = "photo_removal_receipt:";
 
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+struct PhotoRemovalIntent {
+    kind: PhotoRemovalIntentKind,
+    photo_ids: Vec<String>,
+    expected_selection_states: Vec<String>,
+    expected_decision_versions: Vec<String>,
+    expected_removed_at_ms: Vec<Option<i64>>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+enum PhotoRemovalIntentKind {
+    Browse,
+    Explicit,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct PhotoRemovalReceipt {
     photo_ids: Vec<String>,
     outcomes: Vec<PhotoRemovalOutcome>,
+    #[serde(default)]
+    removed_at_ms: Vec<Option<i64>>,
+    #[serde(default)]
+    intent: Option<PhotoRemovalIntent>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -101,6 +122,22 @@ enum PhotoRemovalOutcome {
     Missing,
     AlreadyRemoved,
 }
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PhotoRestoreReceipt {
+    photo_ids: Vec<String>,
+    removed_at_ms: Vec<i64>,
+    outcomes: Vec<PhotoRestoreOutcome>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+enum PhotoRestoreOutcome {
+    Restored,
+    AlreadyActive,
+    ChangedElsewhere,
+    Missing,
+}
+
+const PHOTO_RESTORE_RECEIPT_PREFIX: &str = "photo_restore_receipt:";
 
 /// One retained Permanent Deletion operation: its fixed reviewed item set and
 /// the candidates the review refused. Written once, when the review is
@@ -793,6 +830,31 @@ type PermanentDeletionReviewResult = Result<PermanentDeletionReview, MutationErr
 type PermanentDeletionWorkResult = Result<Vec<PermanentDeletionWorkItem>, MutationError>;
 type PermanentDeletionResultReply = Result<PermanentDeletionResult, MutationError>;
 
+enum PhotoRemovalRequest {
+    Browse(PhotoRemovalMutation),
+    Explicit(ExplicitPhotoRemovalMutation),
+}
+
+impl PhotoRemovalRequest {
+    fn operation_id(&self) -> &str {
+        match self {
+            Self::Browse(mutation) => &mutation.operation_id,
+            Self::Explicit(mutation) => &mutation.operation_id,
+        }
+    }
+
+    fn photo_ids(&self) -> Vec<String> {
+        match self {
+            Self::Browse(mutation) => mutation.photo_ids.clone(),
+            Self::Explicit(mutation) => mutation
+                .photos
+                .iter()
+                .map(|photo| photo.photo_id.clone())
+                .collect(),
+        }
+    }
+}
+
 enum Command {
     Probe(Reply<u64>),
     Snapshot(Reply<ScanSnapshot>),
@@ -889,9 +951,21 @@ enum Command {
         oneshot::Sender<Result<PhotoStateBatchResult, MutationError>>,
     ),
     RemovePhotos(
-        PhotoRemovalMutation,
+        PhotoRemovalRequest,
         oneshot::Sender<Result<PhotoRemovalResult, MutationError>>,
     ),
+    ReadPhotoRemovalOperation {
+        operation_id: String,
+        reply: oneshot::Sender<Result<Option<PhotoRemovalResult>, MutationError>>,
+    },
+    RestorePhotosExplicit(
+        ExplicitPhotoRestoreMutation,
+        oneshot::Sender<Result<ExplicitPhotoRestoreResult, MutationError>>,
+    ),
+    ReadPhotoRestoreOperation {
+        operation_id: String,
+        reply: oneshot::Sender<Result<Option<ExplicitPhotoRestoreResult>, MutationError>>,
+    },
     RestorePhotos(
         PhotoRestoration,
         oneshot::Sender<Result<PhotoRestorationResult, MutationError>>,
@@ -1838,8 +1912,105 @@ impl Persistence {
             return Err(MutationError::Invalid);
         }
         let (send, receive) = oneshot::channel();
-        self.submit(Command::RemovePhotos(mutation, send))
+        self.submit(Command::RemovePhotos(
+            PhotoRemovalRequest::Browse(mutation),
+            send,
+        ))
+        .map_err(mutation_error_from_persistence)?;
+        Ok(receive)
+    }
+    pub(crate) fn remove_photos_explicit_receiver(
+        &self,
+        mutation: ExplicitPhotoRemovalMutation,
+    ) -> Result<oneshot::Receiver<Result<PhotoRemovalResult, MutationError>>, MutationError> {
+        if mutation.operation_id.is_empty()
+            || mutation.photos.is_empty()
+            || mutation.photos.len() > crate::PHOTO_REMOVAL_MAX
+            || mutation
+                .photos
+                .iter()
+                .map(|photo| &photo.photo_id)
+                .collect::<HashSet<_>>()
+                .len()
+                != mutation.photos.len()
+            || mutation.photos.iter().any(|photo| {
+                photo.photo_id.is_empty()
+                    || photo.expected_decision_version.is_empty()
+                    || photo.expected_selection_state != SelectionState::Rejected
+                    || photo.expected_removed_at_ms.is_some_and(|value| value < 0)
+            })
+        {
+            return Err(MutationError::Invalid);
+        }
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::RemovePhotos(
+            PhotoRemovalRequest::Explicit(mutation),
+            send,
+        ))
+        .map_err(mutation_error_from_persistence)?;
+        Ok(receive)
+    }
+    pub(crate) fn photo_removal_operation_receiver(
+        &self,
+        operation_id: String,
+    ) -> Result<oneshot::Receiver<Result<Option<PhotoRemovalResult>, MutationError>>, MutationError>
+    {
+        if operation_id.is_empty() {
+            return Err(MutationError::Invalid);
+        }
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::ReadPhotoRemovalOperation {
+            operation_id,
+            reply: send,
+        })
+        .map_err(mutation_error_from_persistence)?;
+        Ok(receive)
+    }
+
+    pub(crate) fn restore_photos_explicit_receiver(
+        &self,
+        mutation: ExplicitPhotoRestoreMutation,
+    ) -> Result<oneshot::Receiver<Result<ExplicitPhotoRestoreResult, MutationError>>, MutationError>
+    {
+        if mutation.operation_id.is_empty()
+            || mutation.photos.is_empty()
+            || mutation.photos.len() > crate::PHOTO_REMOVAL_MAX
+            || mutation
+                .photos
+                .iter()
+                .map(|photo| &photo.photo_id)
+                .collect::<HashSet<_>>()
+                .len()
+                != mutation.photos.len()
+            || mutation
+                .photos
+                .iter()
+                .any(|photo| photo.photo_id.is_empty() || photo.removed_at_ms < 0)
+        {
+            return Err(MutationError::Invalid);
+        }
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::RestorePhotosExplicit(mutation, send))
             .map_err(mutation_error_from_persistence)?;
+        Ok(receive)
+    }
+
+    pub(crate) fn photo_restore_operation_receiver(
+        &self,
+        operation_id: String,
+    ) -> Result<
+        oneshot::Receiver<Result<Option<ExplicitPhotoRestoreResult>, MutationError>>,
+        MutationError,
+    > {
+        if operation_id.is_empty() {
+            return Err(MutationError::Invalid);
+        }
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::ReadPhotoRestoreOperation {
+            operation_id,
+            reply: send,
+        })
+        .map_err(mutation_error_from_persistence)?;
         Ok(receive)
     }
 
@@ -2327,12 +2498,61 @@ fn owner_main(
                 }
                 let _ = reply.send(result);
             }
-            Command::RemovePhotos(mutation, reply) => {
-                let result = remove_photos(&state, &database_name, &mut connection, mutation);
+            Command::RemovePhotos(request, reply) => {
+                let result =
+                    remove_photos(&state, &database_name, &mut connection, &versions, request);
+                if let Ok(result) = &result {
+                    for photo_id in &result.newly_removed {
+                        let _ = versions.advance_photo(photo_id);
+                    }
+                }
+                let _ = reply.send(result);
+            }
+            Command::ReadPhotoRemovalOperation {
+                operation_id,
+                reply,
+            } => {
+                let result =
+                    read_photo_removal_operation(&connection, &operation_id).and_then(|receipt| {
+                        receipt
+                            .map(|receipt| {
+                                photo_removal_result_from_receipt(&operation_id, receipt)
+                            })
+                            .transpose()
+                    });
+                let _ = reply.send(result);
+            }
+            Command::RestorePhotosExplicit(mutation, reply) => {
+                let result =
+                    restore_photos_explicit(&state, &database_name, &mut connection, mutation);
+                if let Ok(result) = &result {
+                    for photo_id in &result.restored {
+                        let _ = versions.advance_photo(photo_id);
+                    }
+                }
+                let _ = reply.send(result);
+            }
+            Command::ReadPhotoRestoreOperation {
+                operation_id,
+                reply,
+            } => {
+                let result =
+                    read_photo_restore_operation(&connection, &operation_id).and_then(|receipt| {
+                        receipt
+                            .map(|receipt| {
+                                photo_restore_result_from_receipt(&operation_id, receipt)
+                            })
+                            .transpose()
+                    });
                 let _ = reply.send(result);
             }
             Command::RestorePhotos(restoration, reply) => {
                 let result = restore_photos(&state, &database_name, &mut connection, restoration);
+                if let Ok(result) = &result {
+                    for photo_id in &result.restored {
+                        let _ = versions.advance_photo(photo_id);
+                    }
+                }
                 let _ = reply.send(result);
             }
             Command::RemovedPhotos {
@@ -6516,7 +6736,7 @@ fn read_photo(
     let row = connection
         .query_row(
             "SELECT p.id,o.relative_path,o.kind,o.available,p.selection_state,p.rating,
-                    o.capture_metadata_state,o.capture_order_key,o.capture_time_field,
+                    p.removed_at_ms,o.capture_metadata_state,o.capture_order_key,o.capture_time_field,
                     o.capture_offset_minutes,o.capture_source_revision,p.preview_state,
                     p.preview_source_revision,p.preview_width,p.preview_height,
                     EXISTS(SELECT 1 FROM edit_recipes e WHERE e.photo_id=p.id)
@@ -6525,10 +6745,10 @@ fn read_photo(
             |row| {
                 let path = row.get::<_, String>(1)?;
                 let kind = parse_kind(&row.get::<_, String>(2)?)?;
-                let preview_state = parse_preview_state(&row.get::<_, String>(11)?)?;
-                let preview_source_revision: Option<String> = row.get(12)?;
-                let preview_width = parse_dimension(row.get(13)?)?;
-                let preview_height = parse_dimension(row.get(14)?)?;
+                let preview_state = parse_preview_state(&row.get::<_, String>(12)?)?;
+                let preview_source_revision: Option<String> = row.get(13)?;
+                let preview_width = parse_dimension(row.get(14)?)?;
+                let preview_height = parse_dimension(row.get(15)?)?;
                 let ready = preview_state == PreviewState::Ready;
                 Ok(PhotoRead {
                     decision_version: versions.photo(photo_id),
@@ -6537,23 +6757,24 @@ fn read_photo(
                     original_kind: kind,
                     original_available: row.get::<_, i64>(3)? != 0,
                     selection_state: parse_selection_state(&row.get::<_, String>(4)?)?,
+                    removed_at_ms: row.get(6)?,
                     rating: row
                         .get::<_, i64>(5)?
                         .try_into()
                         .map_err(|_| rusqlite::Error::InvalidQuery)?,
                     capture: parse_capture_fact(
-                        row.get(6)?,
                         row.get(7)?,
                         row.get(8)?,
                         row.get(9)?,
                         row.get(10)?,
+                        row.get(11)?,
                     )?,
                     preview_state,
                     preview_source: ready.then(|| kind.preview_source()),
                     preview_source_revision: ready.then_some(preview_source_revision).flatten(),
                     preview_width: ready.then_some(preview_width).flatten(),
                     preview_height: ready.then_some(preview_height).flatten(),
-                    has_saved_edits: row.get::<_, i64>(15)? != 0,
+                    has_saved_edits: row.get::<_, i64>(16)? != 0,
                 })
             },
         )
@@ -6573,7 +6794,7 @@ fn read_projected_photo(
     };
     let decisions = connection
         .query_row(
-            "SELECT p.selection_state,p.rating,
+            "SELECT p.selection_state,p.rating,p.removed_at_ms,
                     EXISTS(SELECT 1 FROM edit_recipes e WHERE e.photo_id=p.id)
              FROM photos p WHERE p.id=?",
             [photo_id],
@@ -6581,13 +6802,14 @@ fn read_projected_photo(
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)? != 0,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, i64>(3)? != 0,
                 ))
             },
         )
         .optional()
         .map_err(|_| PersistenceError::Storage)?;
-    let Some((selection_state, rating, has_saved_edits)) = decisions else {
+    let Some((selection_state, rating, removed_at_ms, has_saved_edits)) = decisions else {
         return Ok(None);
     };
     let selection_state =
@@ -6605,6 +6827,7 @@ fn read_projected_photo(
         original_kind: candidate.original_kind,
         original_available: candidate.original_available,
         selection_state,
+        removed_at_ms,
         rating,
         decision_version: versions.photo(photo_id),
         capture: candidate.capture.clone(),
@@ -7862,6 +8085,23 @@ fn photo_removal_receipt_key(operation_id: &str) -> String {
     format!("{PHOTO_REMOVAL_RECEIPT_PREFIX}{operation_id}")
 }
 
+fn read_photo_removal_operation(
+    connection: &Connection,
+    operation_id: &str,
+) -> Result<Option<PhotoRemovalReceipt>, MutationError> {
+    let value = connection
+        .query_row(
+            "SELECT value FROM library_metadata WHERE key=?",
+            [photo_removal_receipt_key(operation_id)],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(mutation_error_from_sqlite)?;
+    value
+        .map(|value| serde_json::from_str(&value).map_err(|_| MutationError::Persistence))
+        .transpose()
+}
+
 fn read_photo_removal_receipt(
     transaction: &Transaction<'_>,
     operation_id: &str,
@@ -7899,21 +8139,45 @@ fn photo_removal_result_from_receipt(
     operation_id: &str,
     receipt: PhotoRemovalReceipt,
 ) -> Result<PhotoRemovalResult, MutationError> {
-    if receipt.photo_ids.len() != receipt.outcomes.len() {
+    if receipt.photo_ids.len() != receipt.outcomes.len()
+        || (!receipt.removed_at_ms.is_empty()
+            && receipt.photo_ids.len() != receipt.removed_at_ms.len())
+    {
         return Err(MutationError::Persistence);
     }
+    let markers = if receipt.removed_at_ms.is_empty() {
+        vec![None; receipt.photo_ids.len()]
+    } else {
+        receipt.removed_at_ms.clone()
+    };
+    let ordered_photo_ids = receipt.photo_ids.clone();
     let mut result = PhotoRemovalResult {
         operation_id: operation_id.to_owned(),
         counts: PhotoRemovalCounts::default(),
+        ordered_photo_ids,
         removed: Vec::new(),
+        removed_markers: Vec::new(),
         newly_removed: Vec::new(),
         changed_elsewhere: Vec::new(),
         missing: Vec::new(),
         already_removed: Vec::new(),
     };
-    for (photo_id, outcome) in receipt.photo_ids.into_iter().zip(receipt.outcomes) {
+    for ((photo_id, outcome), removed_at_ms) in receipt
+        .photo_ids
+        .into_iter()
+        .zip(receipt.outcomes)
+        .zip(markers)
+    {
         match outcome {
-            PhotoRemovalOutcome::Removed => result.removed.push(photo_id),
+            PhotoRemovalOutcome::Removed => {
+                result.removed.push(photo_id.clone());
+                if let Some(removed_at_ms) = removed_at_ms {
+                    result.removed_markers.push(PhotoRemovalMarker {
+                        photo_id,
+                        removed_at_ms,
+                    });
+                }
+            }
             PhotoRemovalOutcome::ChangedElsewhere => result.changed_elsewhere.push(photo_id),
             PhotoRemovalOutcome::Missing => result.missing.push(photo_id),
             PhotoRemovalOutcome::AlreadyRemoved => result.already_removed.push(photo_id),
@@ -7928,38 +8192,102 @@ fn photo_removal_result_from_receipt(
     Ok(result)
 }
 
-/// One confirmed removal of a reviewed rejected result. Every requested Photo
-/// is resolved inside one transaction and reports exactly one outcome, so a
-/// Photo that changed elsewhere stays in the Library instead of being removed
-/// silently.
+fn removal_intent(request: &PhotoRemovalRequest) -> PhotoRemovalIntent {
+    match request {
+        PhotoRemovalRequest::Browse(_) => PhotoRemovalIntent {
+            kind: PhotoRemovalIntentKind::Browse,
+            photo_ids: request.photo_ids(),
+            expected_selection_states: Vec::new(),
+            expected_decision_versions: Vec::new(),
+            expected_removed_at_ms: Vec::new(),
+        },
+        PhotoRemovalRequest::Explicit(mutation) => PhotoRemovalIntent {
+            kind: PhotoRemovalIntentKind::Explicit,
+            photo_ids: mutation
+                .photos
+                .iter()
+                .map(|photo| photo.photo_id.clone())
+                .collect(),
+            expected_selection_states: mutation
+                .photos
+                .iter()
+                .map(|photo| selection_state_value(photo.expected_selection_state).to_owned())
+                .collect(),
+            expected_decision_versions: mutation
+                .photos
+                .iter()
+                .map(|photo| photo.expected_decision_version.clone())
+                .collect(),
+            expected_removed_at_ms: mutation
+                .photos
+                .iter()
+                .map(|photo| photo.expected_removed_at_ms)
+                .collect(),
+        },
+    }
+}
+
+fn removal_intent_matches(
+    request: &PhotoRemovalRequest,
+    stored: Option<&PhotoRemovalIntent>,
+) -> bool {
+    match (request, stored) {
+        (PhotoRemovalRequest::Browse(_), None) => true,
+        (PhotoRemovalRequest::Browse(_), Some(intent)) => {
+            intent.kind == PhotoRemovalIntentKind::Browse && intent.photo_ids == request.photo_ids()
+        }
+        (PhotoRemovalRequest::Explicit(_), Some(intent)) => intent == &removal_intent(request),
+        (PhotoRemovalRequest::Explicit(_), None) => false,
+    }
+}
+
+/// One confirmed removal. Every requested Photo is resolved inside one
+/// transaction and reports exactly one outcome.
 fn remove_photos(
     state: &StateDirectory,
     database_name: &DatabaseName,
     connection: &mut Connection,
-    mutation: PhotoRemovalMutation,
+    versions: &MutationVersions,
+    request: PhotoRemovalRequest,
 ) -> Result<PhotoRemovalResult, MutationError> {
+    let operation_id = request.operation_id().to_owned();
+    let photo_ids = request.photo_ids();
+    let intent = removal_intent(&request);
     mutation_transaction(state, database_name, connection, |transaction| {
-        if let Some(receipt) = read_photo_removal_receipt(transaction, &mutation.operation_id)? {
-            if receipt.photo_ids != mutation.photo_ids {
+        if let Some(receipt) = read_photo_removal_receipt(transaction, &operation_id)? {
+            if receipt.photo_ids != photo_ids
+                || !removal_intent_matches(&request, receipt.intent.as_ref())
+            {
                 return Err(MutationError::Conflict);
             }
-            return photo_removal_result_from_receipt(&mutation.operation_id, receipt);
+            return photo_removal_result_from_receipt(&operation_id, receipt);
         }
 
-        // The marker is assigned on the first Photo this request removes, so a
-        // request that removes nothing leaves the Library exactly as it was.
+        let explicit_targets = match &request {
+            PhotoRemovalRequest::Browse(_) => None,
+            PhotoRemovalRequest::Explicit(mutation) => Some(
+                mutation
+                    .photos
+                    .iter()
+                    .map(|photo| (photo.photo_id.as_str(), photo))
+                    .collect::<std::collections::HashMap<_, _>>(),
+            ),
+        };
         let mut marker: Option<i64> = None;
-        let mut outcomes = Vec::with_capacity(mutation.photo_ids.len());
+        let mut outcomes = Vec::with_capacity(photo_ids.len());
+        let mut stored_markers = vec![None; photo_ids.len()];
         let mut result = PhotoRemovalResult {
-            operation_id: mutation.operation_id.clone(),
+            operation_id: operation_id.clone(),
             counts: PhotoRemovalCounts::default(),
+            ordered_photo_ids: photo_ids.clone(),
             removed: Vec::new(),
+            removed_markers: Vec::new(),
             newly_removed: Vec::new(),
             changed_elsewhere: Vec::new(),
             missing: Vec::new(),
             already_removed: Vec::new(),
         };
-        for chunk in mutation.photo_ids.chunks(PHOTO_REMOVAL_CHUNK) {
+        for chunk in photo_ids.chunks(PHOTO_REMOVAL_CHUNK) {
             let placeholders = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(",");
@@ -7998,25 +8326,47 @@ fn remove_photos(
                     continue;
                 }
                 if removed_at.is_some() {
-                    // A retried request repeats its own operation, so what
-                    // this operation already removed is still its own result.
-                    if removed_operation.as_deref() == Some(result.operation_id.as_str()) {
+                    if removed_operation.as_deref() == Some(operation_id.as_str()) {
                         outcomes.push(PhotoRemovalOutcome::Removed);
                         result.removed.push(photo_id.clone());
+                        if let Some(marker_value) = *removed_at {
+                            result.removed_markers.push(PhotoRemovalMarker {
+                                photo_id: photo_id.clone(),
+                                removed_at_ms: marker_value,
+                            });
+                            if let Some(index) = photo_ids.iter().position(|id| id == photo_id) {
+                                stored_markers[index] = Some(marker_value);
+                            }
+                        }
                     } else {
                         outcomes.push(PhotoRemovalOutcome::AlreadyRemoved);
                         result.already_removed.push(photo_id.clone());
                     }
                     continue;
                 }
-                if parse_selection_state(selection_state).map_err(|_| MutationError::Persistence)?
+                if let Some(target) = explicit_targets
+                    .as_ref()
+                    .and_then(|targets| targets.get(photo_id.as_str()))
+                {
+                    if target.expected_removed_at_ms.is_some()
+                        || target.expected_decision_version != versions.photo(photo_id)
+                        || target.expected_selection_state
+                            != parse_selection_state(selection_state)
+                                .map_err(|_| MutationError::Persistence)?
+                    {
+                        outcomes.push(PhotoRemovalOutcome::ChangedElsewhere);
+                        result.changed_elsewhere.push(photo_id.clone());
+                        continue;
+                    }
+                } else if parse_selection_state(selection_state)
+                    .map_err(|_| MutationError::Persistence)?
                     != SelectionState::Rejected
                 {
                     outcomes.push(PhotoRemovalOutcome::ChangedElsewhere);
                     result.changed_elsewhere.push(photo_id.clone());
                     continue;
                 }
-                let removed_at_ms = match marker {
+                let removed_at = match marker {
                     Some(marker) => marker,
                     None => {
                         let assigned = next_removal_marker(transaction)?;
@@ -8027,16 +8377,21 @@ fn remove_photos(
                 transaction
                     .execute(
                         "UPDATE photos SET removed_at_ms=?,removed_operation=? WHERE id=?",
-                        params![removed_at_ms, result.operation_id, photo_id],
+                        params![removed_at, operation_id, photo_id],
                     )
                     .map_err(mutation_error_from_sqlite)?;
                 outcomes.push(PhotoRemovalOutcome::Removed);
                 result.removed.push(photo_id.clone());
+                result.removed_markers.push(PhotoRemovalMarker {
+                    photo_id: photo_id.clone(),
+                    removed_at_ms: removed_at,
+                });
                 result.newly_removed.push(photo_id.clone());
+                if let Some(index) = photo_ids.iter().position(|id| id == photo_id) {
+                    stored_markers[index] = Some(removed_at);
+                }
             }
         }
-        // One outcome per requested Photo: the counts are the lists, so a
-        // request can never report a total its identities contradict.
         result.counts = PhotoRemovalCounts {
             removed: result.removed.len(),
             changed_elsewhere: result.changed_elsewhere.len(),
@@ -8045,9 +8400,184 @@ fn remove_photos(
         };
         write_photo_removal_receipt(
             transaction,
-            &result.operation_id,
+            &operation_id,
             &PhotoRemovalReceipt {
-                photo_ids: mutation.photo_ids,
+                photo_ids,
+                outcomes,
+                removed_at_ms: stored_markers,
+                intent: Some(intent),
+            },
+        )?;
+        Ok(result)
+    })
+}
+
+fn photo_restore_receipt_key(operation_id: &str) -> String {
+    format!("{PHOTO_RESTORE_RECEIPT_PREFIX}{operation_id}")
+}
+
+fn read_photo_restore_operation(
+    connection: &Connection,
+    operation_id: &str,
+) -> Result<Option<PhotoRestoreReceipt>, MutationError> {
+    let value = connection
+        .query_row(
+            "SELECT value FROM library_metadata WHERE key=?",
+            [photo_restore_receipt_key(operation_id)],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(mutation_error_from_sqlite)?;
+    value
+        .map(|value| serde_json::from_str(&value).map_err(|_| MutationError::Persistence))
+        .transpose()
+}
+
+fn write_photo_restore_receipt(
+    transaction: &Transaction<'_>,
+    operation_id: &str,
+    receipt: &PhotoRestoreReceipt,
+) -> Result<(), MutationError> {
+    let value = serde_json::to_string(receipt).map_err(|_| MutationError::Persistence)?;
+    transaction
+        .execute(
+            "INSERT INTO library_metadata(key,value) VALUES(?,?)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![photo_restore_receipt_key(operation_id), value],
+        )
+        .map_err(mutation_error_from_sqlite)?;
+    Ok(())
+}
+
+fn photo_restore_result_from_receipt(
+    operation_id: &str,
+    receipt: PhotoRestoreReceipt,
+) -> Result<ExplicitPhotoRestoreResult, MutationError> {
+    if receipt.photo_ids.len() != receipt.removed_at_ms.len()
+        || receipt.photo_ids.len() != receipt.outcomes.len()
+    {
+        return Err(MutationError::Persistence);
+    }
+    let ordered_photo_ids = receipt.photo_ids.clone();
+    let mut result = ExplicitPhotoRestoreResult {
+        operation_id: operation_id.to_owned(),
+        ordered_photo_ids,
+        counts: ExplicitPhotoRestoreCounts::default(),
+        restored: Vec::new(),
+        already_active: Vec::new(),
+        changed_elsewhere: Vec::new(),
+        missing: Vec::new(),
+    };
+    for (photo_id, outcome) in receipt.photo_ids.into_iter().zip(receipt.outcomes) {
+        match outcome {
+            PhotoRestoreOutcome::Restored => result.restored.push(photo_id),
+            PhotoRestoreOutcome::AlreadyActive => result.already_active.push(photo_id),
+            PhotoRestoreOutcome::ChangedElsewhere => result.changed_elsewhere.push(photo_id),
+            PhotoRestoreOutcome::Missing => result.missing.push(photo_id),
+        }
+    }
+    result.counts = ExplicitPhotoRestoreCounts {
+        restored: result.restored.len(),
+        already_active: result.already_active.len(),
+        changed_elsewhere: result.changed_elsewhere.len(),
+        missing: result.missing.len(),
+    };
+    Ok(result)
+}
+
+fn restore_photos_explicit(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    mutation: ExplicitPhotoRestoreMutation,
+) -> Result<ExplicitPhotoRestoreResult, MutationError> {
+    let operation_id = mutation.operation_id.clone();
+    let photo_ids = mutation
+        .photos
+        .iter()
+        .map(|photo| photo.photo_id.clone())
+        .collect::<Vec<_>>();
+    let removed_at_ms = mutation
+        .photos
+        .iter()
+        .map(|photo| photo.removed_at_ms)
+        .collect::<Vec<_>>();
+    mutation_transaction(state, database_name, connection, |transaction| {
+        if let Some(receipt) = read_photo_restore_operation(transaction, &operation_id)? {
+            if receipt.photo_ids != photo_ids || receipt.removed_at_ms != removed_at_ms {
+                return Err(MutationError::Conflict);
+            }
+            return photo_restore_result_from_receipt(&operation_id, receipt);
+        }
+
+        let mut outcomes = Vec::with_capacity(photo_ids.len());
+        let mut result = ExplicitPhotoRestoreResult {
+            operation_id: operation_id.clone(),
+            ordered_photo_ids: photo_ids.clone(),
+            counts: ExplicitPhotoRestoreCounts::default(),
+            restored: Vec::new(),
+            already_active: Vec::new(),
+            changed_elsewhere: Vec::new(),
+            missing: Vec::new(),
+        };
+        for photo in mutation.photos {
+            let current = transaction
+                .query_row(
+                    "SELECT removed_at_ms FROM photos WHERE id=?",
+                    [&photo.photo_id],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .optional()
+                .map_err(mutation_error_from_sqlite)?;
+            let Some(current) = current else {
+                outcomes.push(PhotoRestoreOutcome::Missing);
+                result.missing.push(photo.photo_id);
+                continue;
+            };
+            if photo_is_permanently_deleted(transaction, &photo.photo_id)?
+                || unsettled_permanent_deletion_operation(transaction, &photo.photo_id)?.is_some()
+            {
+                outcomes.push(PhotoRestoreOutcome::ChangedElsewhere);
+                result.changed_elsewhere.push(photo.photo_id);
+                continue;
+            }
+            let Some(current_marker) = current else {
+                outcomes.push(PhotoRestoreOutcome::AlreadyActive);
+                result.already_active.push(photo.photo_id);
+                continue;
+            };
+            if current_marker != photo.removed_at_ms {
+                outcomes.push(PhotoRestoreOutcome::ChangedElsewhere);
+                result.changed_elsewhere.push(photo.photo_id);
+                continue;
+            }
+            let updated = transaction
+                .execute(
+                    "UPDATE photos SET removed_at_ms=NULL,removed_operation=NULL
+                     WHERE id=? AND removed_at_ms=?",
+                    params![&photo.photo_id, current_marker],
+                )
+                .map_err(mutation_error_from_sqlite)?;
+            if updated == 0 {
+                outcomes.push(PhotoRestoreOutcome::ChangedElsewhere);
+                result.changed_elsewhere.push(photo.photo_id);
+                continue;
+            }
+            outcomes.push(PhotoRestoreOutcome::Restored);
+            result.restored.push(photo.photo_id);
+        }
+        result.counts = ExplicitPhotoRestoreCounts {
+            restored: result.restored.len(),
+            already_active: result.already_active.len(),
+            changed_elsewhere: result.changed_elsewhere.len(),
+            missing: result.missing.len(),
+        };
+        write_photo_restore_receipt(
+            transaction,
+            &operation_id,
+            &PhotoRestoreReceipt {
+                photo_ids,
+                removed_at_ms,
                 outcomes,
             },
         )?;
@@ -9342,7 +9872,7 @@ mod tests {
     use crate::identity::source_revision;
     use crate::{
         CaptureTimeBound, CheckedPhotoDecisionItem, LibraryRoot, PhotoRemovalMarker,
-        PhotoStateBatchItem, identity::original_id,
+        PhotoRemovalTarget, PhotoStateBatchItem, identity::original_id,
     };
     use serde::Deserialize;
     use std::{
@@ -14684,6 +15214,198 @@ mod tests {
         persistence.shutdown().unwrap();
     }
 
+    #[tokio::test]
+    async fn explicit_removal_and_restore_replay_stale_evidence_and_restart_safe_receipts() {
+        let (base, library, state, name, path) = fixture();
+        let canonical_root = library.canonical_path().to_string_lossy().into_owned();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v8.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [&canonical_root],
+            )
+            .unwrap();
+        for index in 1..=2 {
+            add_recipe_test_photo(
+                &connection,
+                RecipeTestPhoto {
+                    original_id: &format!("original-{index}"),
+                    photo_id: &format!("photo-{index}"),
+                    relative_path: &format!("shoot/one-{index}.ARW"),
+                    kind: "raw",
+                    available: true,
+                    size: 17,
+                    mtime_ms: 1_000.0,
+                },
+            );
+            connection
+                .execute(
+                    "UPDATE photos SET selection_state='rejected' WHERE id=?",
+                    [format!("photo-{index}")],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let persistence = Persistence::open(state, name.clone(), canonical_root.clone()).unwrap();
+        let stale = persistence
+            .photo_receiver("photo-1")
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        persistence
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: "photo-1".to_owned(),
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Selected),
+                expected_current: Some(PhotoStateValue::Selection(SelectionState::Rejected)),
+                album_id: None,
+            })
+            .await
+            .unwrap();
+        persistence
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: "photo-1".to_owned(),
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Rejected),
+                expected_current: Some(PhotoStateValue::Selection(SelectionState::Selected)),
+                album_id: None,
+            })
+            .await
+            .unwrap();
+        let stale_result = persistence
+            .remove_photos_explicit_receiver(ExplicitPhotoRemovalMutation {
+                operation_id: "remove-stale".to_owned(),
+                photos: vec![PhotoRemovalTarget {
+                    photo_id: "photo-1".to_owned(),
+                    expected_selection_state: SelectionState::Rejected,
+                    expected_decision_version: stale.decision_version,
+                    expected_removed_at_ms: None,
+                }],
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stale_result.counts.changed_elsewhere, 1);
+        assert!(stale_result.removed.is_empty());
+
+        let current = persistence
+            .photo_receiver("photo-1")
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let remove = persistence
+            .remove_photos_explicit_receiver(ExplicitPhotoRemovalMutation {
+                operation_id: "remove-explicit".to_owned(),
+                photos: vec![PhotoRemovalTarget {
+                    photo_id: current.id.clone(),
+                    expected_selection_state: current.selection_state,
+                    expected_decision_version: current.decision_version,
+                    expected_removed_at_ms: None,
+                }],
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(remove.counts.removed, 1);
+        let marker = remove.removed_markers[0].clone();
+        persistence.shutdown().unwrap();
+        let reopened_state =
+            StateDirectory::open_or_create(&library, base.0.join("state")).unwrap();
+        let persistence = Persistence::open(reopened_state, name, canonical_root).unwrap();
+        let replay = persistence
+            .photo_removal_operation_receiver("remove-explicit".to_owned())
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.removed, remove.removed);
+        assert_eq!(replay.removed_markers, remove.removed_markers);
+        assert_eq!(replay.counts, remove.counts);
+
+        let restore_mutation = ExplicitPhotoRestoreMutation {
+            operation_id: "restore-explicit".to_owned(),
+            photos: vec![marker.clone()],
+        };
+        let restored = persistence
+            .restore_photos_explicit_receiver(restore_mutation.clone())
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.counts.restored, 1);
+        let restore_replay = persistence
+            .photo_restore_operation_receiver("restore-explicit".to_owned())
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(restore_replay, restored);
+
+        let removed_after_restore = persistence
+            .removed_photos_receiver(0, 10)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(removed_after_restore.0.is_empty());
+
+        let current = persistence
+            .photo_receiver("photo-1")
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let second = persistence
+            .remove_photos_explicit_receiver(ExplicitPhotoRemovalMutation {
+                operation_id: "remove-again".to_owned(),
+                photos: vec![PhotoRemovalTarget {
+                    photo_id: current.id,
+                    expected_selection_state: current.selection_state,
+                    expected_decision_version: current.decision_version,
+                    expected_removed_at_ms: None,
+                }],
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.counts.removed, 1);
+        assert!(second.removed_markers[0].removed_at_ms > marker.removed_at_ms);
+
+        let old_restore_replay = persistence
+            .restore_photos_explicit_receiver(restore_mutation)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(old_restore_replay, restored);
+        let current_removed = persistence
+            .removed_photos_receiver(0, 10)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current_removed.0.len(), 1);
+        assert_eq!(
+            current_removed.0[0].removed_at_ms,
+            second.removed_markers[0].removed_at_ms
+        );
+        persistence.shutdown().unwrap();
+    }
     /// A removed Photo leaves every normal source and Album count while its
     /// membership rows stay intact for restore.
     #[tokio::test]

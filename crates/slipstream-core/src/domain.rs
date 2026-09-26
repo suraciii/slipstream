@@ -231,6 +231,9 @@ pub struct PhotoRead {
     pub original_kind: OriginalKind,
     pub original_available: bool,
     pub selection_state: SelectionState,
+    /// The current reversible removal marker, or `None` while the Photo is
+    /// active in the Library.
+    pub removed_at_ms: Option<i64>,
     pub rating: u8,
     pub decision_version: String,
     pub capture: CaptureFact,
@@ -794,6 +797,28 @@ pub struct PhotoStateBatchResult {
     pub missing: Vec<PhotoStateBatchMissing>,
 }
 
+/// One caller-owned removal target. The decision and removal evidence are
+/// checked again by the persistence owner when the operation is applied.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhotoRemovalTarget {
+    pub photo_id: String,
+    pub expected_selection_state: SelectionState,
+    pub expected_decision_version: String,
+    pub expected_removed_at_ms: Option<i64>,
+}
+
+/// The explicit machine-facing removal request. Its ordered target list is
+/// part of the operation identity and is retained for replay validation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExplicitPhotoRemovalMutation {
+    pub operation_id: String,
+    pub photos: Vec<PhotoRemovalTarget>,
+}
+
+/// The largest number of Photos one explicit removal or Restore request may
+/// address. A caller composes larger jobs from separate operation IDs.
+pub const PHOTO_REMOVAL_MAX: usize = 100;
+
 /// One confirmed removal of one reviewed rejected result. The operation id
 /// comes from the browser so a retried request repeats the same operation
 /// instead of creating a second one, and so Undo can name the whole group
@@ -812,15 +837,17 @@ pub struct PhotoRemovalCounts {
     pub already_removed: usize,
 }
 
-/// One outcome per requested Photo, with the identities that were not newly
-/// removed. Removed Photos are reported by count on the wire because the
-/// operation id is what restores them; the server patches only
-/// `newly_removed` into its published Library.
+/// One outcome per requested Photo. `removed_markers` is aligned with
+/// `removed`, including historical replay, so an explicit caller can Restore
+/// the exact removal it observed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PhotoRemovalResult {
     pub operation_id: String,
     pub counts: PhotoRemovalCounts,
+    /// Every requested Photo ID in the caller's order.
+    pub ordered_photo_ids: Vec<String>,
     pub removed: Vec<String>,
+    pub removed_markers: Vec<PhotoRemovalMarker>,
     pub newly_removed: Vec<String>,
     pub changed_elsewhere: Vec<String>,
     pub missing: Vec<String>,
@@ -833,6 +860,36 @@ pub struct PhotoRemovalResult {
 pub enum PhotoRestoration {
     Operation(String),
     Photos(Vec<PhotoRemovalMarker>),
+}
+
+/// One explicit restore attempt. Its operation identity and ordered marker
+/// list are retained for durable replay and outcome inspection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExplicitPhotoRestoreMutation {
+    pub operation_id: String,
+    pub photos: Vec<PhotoRemovalMarker>,
+}
+
+/// One explicit restore result partition.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExplicitPhotoRestoreCounts {
+    pub restored: usize,
+    pub already_active: usize,
+    pub changed_elsewhere: usize,
+    pub missing: usize,
+}
+
+/// Historical result of one explicit restore attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExplicitPhotoRestoreResult {
+    pub operation_id: String,
+    /// Every requested Photo ID in the caller's order.
+    pub ordered_photo_ids: Vec<String>,
+    pub counts: ExplicitPhotoRestoreCounts,
+    pub restored: Vec<String>,
+    pub already_active: Vec<String>,
+    pub changed_elsewhere: Vec<String>,
+    pub missing: Vec<String>,
 }
 
 /// One Photo an explicit restore names together with the removal marker the

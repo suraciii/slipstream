@@ -268,6 +268,21 @@ pub enum PhotoCommand {
     /// decision versions observed by a prior read. One command changes one
     /// field and reports changed, unchanged, conflict, or missing per Photo.
     Set(PhotoDecisionArgs),
+    /// Remove exactly the reviewed Photo IDs in one bounded operation. The
+    /// input must contain current rejected decision and removal evidence.
+    Remove(PhotoRemovalArgs),
+    /// Read the durable result of one explicit removal operation.
+    RemovalOperation {
+        #[arg(value_parser = nonempty)]
+        operation_id: String,
+    },
+    /// Restore one observed removal operation or explicit reviewed markers.
+    Restore(PhotoRestoreArgs),
+    /// Read the durable result of one explicit Restore attempt.
+    RestoreOperation {
+        #[arg(value_parser = nonempty)]
+        operation_id: String,
+    },
     /// Download one current Photo Preview to a new local JPEG file (at most 64 MiB).
     Preview {
         #[arg(value_parser = nonempty)]
@@ -279,6 +294,25 @@ pub enum PhotoCommand {
         #[arg(long, value_enum, default_value_t = PreviewSize::Review)]
         size: PreviewSize,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct PhotoRemovalArgs {
+    #[arg(value_name = "OPERATION_ID", value_parser = nonempty)]
+    pub operation_id: String,
+    /// UTF-8 JSON file holding one complete explicit removal document; `-`
+    /// reads it from stdin.
+    #[arg(long, value_name = "FILE", value_parser = nonempty)]
+    pub input: String,
+}
+#[derive(Debug, Args)]
+pub struct PhotoRestoreArgs {
+    #[arg(value_name = "OPERATION_ID", value_parser = nonempty)]
+    pub operation_id: String,
+    /// UTF-8 JSON file holding {"photos":[{"photoId","removedAtMs"}]}.
+    /// Omit it to restore the complete named removal operation.
+    #[arg(long, value_name = "FILE", value_parser = nonempty)]
+    pub input: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -478,6 +512,10 @@ enum Operation {
     PhotosGet,
     PhotosPreview,
     PhotosSet,
+    PhotosRemove,
+    PhotosRemovalInspect,
+    PhotosRestore,
+    PhotosRestoreInspect,
     AlbumsCreate,
     AlbumsRename,
     AlbumsDelete,
@@ -502,6 +540,10 @@ impl Operation {
             Self::PhotosGet => "photos-get",
             Self::PhotosPreview => "photos-preview",
             Self::PhotosSet => "photos-set",
+            Self::PhotosRemove => "photos-remove",
+            Self::PhotosRemovalInspect => "photos-removal-operation",
+            Self::PhotosRestore => "photos-restore",
+            Self::PhotosRestoreInspect => "photos-restore-operation",
             Self::AlbumsCreate => "albums-create",
             Self::AlbumsRename => "albums-rename",
             Self::AlbumsDelete => "albums-delete",
@@ -536,6 +578,10 @@ fn command_operation(command: &Command) -> Operation {
             PhotoCommand::Get { .. } => Operation::PhotosGet,
             PhotoCommand::Preview { .. } => Operation::PhotosPreview,
             PhotoCommand::Set(_) => Operation::PhotosSet,
+            PhotoCommand::Remove(_) => Operation::PhotosRemove,
+            PhotoCommand::RemovalOperation { .. } => Operation::PhotosRemovalInspect,
+            PhotoCommand::Restore(_) => Operation::PhotosRestore,
+            PhotoCommand::RestoreOperation { .. } => Operation::PhotosRestoreInspect,
         },
         Command::Trash { command } => match command {
             TrashCommand::List(_) => Operation::TrashList,
@@ -1005,6 +1051,7 @@ struct Capabilities {
 struct CapabilityLimits {
     list_page_maximum: u64,
     mutation_photo_ids_maximum: u64,
+    removal_photo_ids_maximum: u64,
     album_reorder_members_maximum: u64,
     retained_query_ids_maximum: u64,
     retained_query_idle_seconds: u64,
@@ -1144,6 +1191,7 @@ struct PhotoItem {
     selection_state: SelectionState,
     rating: u8,
     decision_version: String,
+    removed_at_ms: Option<i64>,
     capture_time: Option<String>,
     preview: PreviewFacts,
     #[serde(rename = "webPath")]
@@ -1202,6 +1250,7 @@ struct PhotoGet {
     selection_state: SelectionState,
     rating: u8,
     decision_version: String,
+    removed_at_ms: Option<i64>,
     capture_time: Option<String>,
     preview: PreviewFacts,
     #[serde(rename = "webPath")]
@@ -1273,6 +1322,82 @@ enum PhotoSource<'a> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MembershipInput {
     photo_ids: Vec<String>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemovalInput {
+    photos: Vec<RemovalInputPhoto>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemovalInputPhoto {
+    photo_id: String,
+    selection_state: String,
+    decision_version: String,
+    removed_at_ms: Value,
+}
+
+#[derive(Debug)]
+struct PreparedRemoval {
+    photos: Vec<RemovalTarget>,
+}
+
+#[derive(Clone, Debug)]
+struct RemovalTarget {
+    photo_id: String,
+    selection_state: String,
+    decision_version: String,
+    removed_at_ms: Option<i64>,
+}
+
+impl PreparedRemoval {
+    fn body(&self, operation_id: &str) -> Value {
+        json!({
+            "operationId": operation_id,
+            "photos": self.photos.iter().map(|photo| json!({
+                "photoId": photo.photo_id,
+                "selectionState": photo.selection_state,
+                "decisionVersion": photo.decision_version,
+                "removedAtMs": photo.removed_at_ms,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RestoreInput {
+    photos: Vec<RestoreInputPhoto>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RestoreInputPhoto {
+    photo_id: String,
+    removed_at_ms: i64,
+}
+
+#[derive(Debug)]
+struct PreparedRestore {
+    markers: Vec<RestoreMarker>,
+}
+
+#[derive(Clone, Debug)]
+struct RestoreMarker {
+    photo_id: String,
+    removed_at_ms: i64,
+}
+
+impl PreparedRestore {
+    fn body(&self, operation_id: &str) -> Value {
+        json!({
+            "operationId": operation_id,
+            "photos": self.markers.iter().map(|marker| json!({
+                "photoId": marker.photo_id,
+                "removedAtMs": marker.removed_at_ms,
+            })).collect::<Vec<_>>(),
+        })
+    }
 }
 
 /// One identified Photo together with the decision version the caller
@@ -1424,7 +1549,54 @@ struct PhotoDecisionSnapshotWire {
     rating: u8,
     decision_version: String,
 }
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PhotoRemovalWire {
+    operation_id: String,
+    counts: PhotoRemovalCountsWire,
+    results: Vec<PhotoRemovalItemWire>,
+}
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PhotoRemovalCountsWire {
+    removed: usize,
+    changed_elsewhere: usize,
+    missing: usize,
+    already_removed: usize,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PhotoRemovalItemWire {
+    photo_id: String,
+    outcome: String,
+    removed_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PhotoRestoreWire {
+    operation_id: String,
+    counts: PhotoRestoreCountsWire,
+    results: Vec<PhotoRestoreItemWire>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PhotoRestoreCountsWire {
+    restored: usize,
+    already_active: usize,
+    changed_elsewhere: usize,
+    missing: usize,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PhotoRestoreItemWire {
+    photo_id: String,
+    outcome: String,
+}
 struct ServiceClient {
     origin: Url,
     client: Client,
@@ -1504,6 +1676,7 @@ impl ServiceClient {
             serde_json::from_slice(&bytes).map_err(|_| CommandFailure::incompatible(Vec::new()))?;
         let valid_limits = capabilities.limits.list_page_maximum == 60
             && capabilities.limits.mutation_photo_ids_maximum > 0
+            && capabilities.limits.removal_photo_ids_maximum > 0
             && capabilities.limits.album_reorder_members_maximum > 0
             && capabilities.limits.retained_query_ids_maximum > 0
             && capabilities.limits.retained_query_idle_seconds > 0;
@@ -2012,6 +2185,7 @@ fn parse_decision_input(bytes: Vec<u8>) -> Result<PreparedDecision, CommandFailu
             ));
         }
     };
+
     let value_matches_field = match field {
         DecisionField::SelectionState => document
             .value
@@ -2066,6 +2240,114 @@ fn parse_decision_input(bytes: Vec<u8>) -> Result<PreparedDecision, CommandFailu
 
 async fn read_decision_input(input: &str) -> Result<PreparedDecision, CommandFailure> {
     parse_decision_input(read_input_bytes(input).await?)
+}
+fn parse_removal_input(bytes: Vec<u8>) -> Result<PreparedRemoval, CommandFailure> {
+    let document: RemovalInput = serde_json::from_slice(&bytes).map_err(|_| {
+        CommandFailure::invalid(
+            "input",
+            "The input must be one object with a distinct photos evidence array.",
+        )
+    })?;
+    if document.photos.is_empty() {
+        return Err(CommandFailure::invalid(
+            "photos",
+            "The explicit removal target list must not be empty.",
+        ));
+    }
+    if document.photos.len() > MAXIMUM_MUTATION_PHOTO_IDS {
+        return Err(CommandFailure::limit_exceeded(
+            "removalPhotoIdsMaximum",
+            MAXIMUM_MUTATION_PHOTO_IDS,
+            document.photos.len(),
+        ));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let mut photos = Vec::with_capacity(document.photos.len());
+    for photo in document.photos {
+        if photo.photo_id.is_empty()
+            || !ids.insert(photo.photo_id.clone())
+            || photo.selection_state != "rejected"
+            || photo.decision_version.is_empty()
+        {
+            return Err(CommandFailure::invalid(
+                "photos",
+                "Each target must have a distinct ID, rejected Selection State, and nonempty decision version.",
+            ));
+        }
+        let removed_at_ms = match photo.removed_at_ms {
+            Value::Null => None,
+            Value::Number(value) => match value.as_i64().filter(|value| *value >= 0) {
+                Some(value) => Some(value),
+                None => {
+                    return Err(CommandFailure::invalid(
+                        "removedAtMs",
+                        "The removal marker must be null or nonnegative.",
+                    ));
+                }
+            },
+            _ => {
+                return Err(CommandFailure::invalid(
+                    "removedAtMs",
+                    "The removal marker must be null or nonnegative.",
+                ));
+            }
+        };
+        photos.push(RemovalTarget {
+            photo_id: photo.photo_id,
+            selection_state: photo.selection_state,
+            decision_version: photo.decision_version,
+            removed_at_ms,
+        });
+    }
+    Ok(PreparedRemoval { photos })
+}
+
+async fn read_removal_input(input: &str) -> Result<PreparedRemoval, CommandFailure> {
+    parse_removal_input(read_input_bytes(input).await?)
+}
+fn parse_restore_input(bytes: Vec<u8>) -> Result<PreparedRestore, CommandFailure> {
+    let document: RestoreInput = serde_json::from_slice(&bytes).map_err(|_| {
+        CommandFailure::invalid(
+            "input",
+            "The input must be one object with a distinct photos marker array.",
+        )
+    })?;
+    if document.photos.is_empty() || document.photos.len() > MAXIMUM_MUTATION_PHOTO_IDS {
+        return Err(if document.photos.is_empty() {
+            CommandFailure::invalid(
+                "photos",
+                "The explicit Restore target list must not be empty.",
+            )
+        } else {
+            CommandFailure::limit_exceeded(
+                "removalPhotoIdsMaximum",
+                MAXIMUM_MUTATION_PHOTO_IDS,
+                document.photos.len(),
+            )
+        });
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let mut markers = Vec::with_capacity(document.photos.len());
+    for photo in document.photos {
+        if photo.photo_id.is_empty()
+            || !ids.insert(photo.photo_id.clone())
+            || photo.removed_at_ms < 0
+        {
+            return Err(CommandFailure::invalid(
+                "photos",
+                "Restore markers must have distinct IDs and nonnegative removal identities.",
+            ));
+        }
+        markers.push(RestoreMarker {
+            photo_id: photo.photo_id,
+            removed_at_ms: photo.removed_at_ms,
+        });
+    }
+    Ok(PreparedRestore { markers })
+}
+
+async fn read_restore_input(input: &str) -> Result<PreparedRestore, CommandFailure> {
+    parse_restore_input(read_input_bytes(input).await?)
 }
 
 /// Builds the one-item batch shared by the single-Photo forms. The command
@@ -2348,6 +2630,254 @@ fn confirmed_decision_result(
     Err(CommandFailure::photo_batch_missing(&reference).with_data(data))
 }
 
+fn confirmed_removal_result(
+    identity: &MutationIdentity,
+    operation_id: &str,
+    prepared: &PreparedRemoval,
+    result: PhotoRemovalWire,
+) -> Result<Value, CommandFailure> {
+    if result.operation_id != operation_id || result.results.len() != prepared.photos.len() {
+        return Err(CommandFailure::unknown(identity));
+    }
+    let submitted = prepared
+        .photos
+        .iter()
+        .map(|photo| photo.photo_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut counts = PhotoRemovalCountsWire {
+        removed: 0,
+        changed_elsewhere: 0,
+        missing: 0,
+        already_removed: 0,
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut items = Vec::with_capacity(result.results.len());
+    for item in result.results {
+        if !submitted.contains(item.photo_id.as_str()) || !seen.insert(item.photo_id.clone()) {
+            return Err(CommandFailure::unknown(identity));
+        }
+        match item.outcome.as_str() {
+            "removed" => {
+                if item.removed_at_ms.is_none_or(|value| value < 0) {
+                    return Err(CommandFailure::unknown(identity));
+                }
+                counts.removed += 1;
+            }
+            "changed-elsewhere" => {
+                if item.removed_at_ms.is_some() {
+                    return Err(CommandFailure::unknown(identity));
+                }
+                counts.changed_elsewhere += 1;
+            }
+            "unavailable" => {
+                if item.removed_at_ms.is_some() {
+                    return Err(CommandFailure::unknown(identity));
+                }
+                counts.missing += 1;
+            }
+            "already-removed" => {
+                if item.removed_at_ms.is_some() {
+                    return Err(CommandFailure::unknown(identity));
+                }
+                counts.already_removed += 1;
+            }
+            _ => return Err(CommandFailure::unknown(identity)),
+        };
+        items.push(json!({
+            "photoId": item.photo_id,
+            "outcome": item.outcome,
+            "removedAtMs": item.removed_at_ms,
+        }));
+    }
+    if seen.len() != submitted.len()
+        || counts.removed != result.counts.removed
+        || counts.changed_elsewhere != result.counts.changed_elsewhere
+        || counts.missing != result.counts.missing
+        || counts.already_removed != result.counts.already_removed
+    {
+        return Err(CommandFailure::unknown(identity));
+    }
+    let data = json!({
+        "operationId": result.operation_id,
+        "counts": {
+            "removed": counts.removed,
+            "changedElsewhere": counts.changed_elsewhere,
+            "missing": counts.missing,
+            "alreadyRemoved": counts.already_removed,
+        },
+        "results": items,
+    });
+    if counts.changed_elsewhere == 0 && counts.missing == 0 {
+        return Ok(data);
+    }
+    let code = if counts.changed_elsewhere > 0 {
+        "conflict"
+    } else {
+        "not_found"
+    };
+    let message = if code == "conflict" {
+        "Read current Photo evidence before submitting a replacement removal."
+    } else {
+        "Query Photos and use current Photo IDs before submitting a replacement removal."
+    };
+    let effect = if counts.removed + counts.already_removed > 0 {
+        "partial"
+    } else {
+        "none"
+    };
+    Err(CommandFailure::from_payload(
+        if code == "conflict" { 4 } else { 3 },
+        ErrorPayload {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            effect: effect.to_owned(),
+            details: json!({"operationId": operation_id}),
+        },
+    )
+    .with_data(data))
+}
+
+fn confirmed_restore_result(
+    identity: &MutationIdentity,
+    operation_id: &str,
+    prepared: &PreparedRestore,
+    result: PhotoRestoreWire,
+) -> Result<Value, CommandFailure> {
+    if result.operation_id != operation_id || result.results.len() != prepared.markers.len() {
+        return Err(CommandFailure::unknown(identity));
+    }
+    let submitted = prepared
+        .markers
+        .iter()
+        .map(|marker| marker.photo_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut counts = PhotoRestoreCountsWire {
+        restored: 0,
+        already_active: 0,
+        changed_elsewhere: 0,
+        missing: 0,
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut items = Vec::with_capacity(result.results.len());
+    for item in result.results {
+        if !submitted.contains(item.photo_id.as_str()) || !seen.insert(item.photo_id.clone()) {
+            return Err(CommandFailure::unknown(identity));
+        }
+        match item.outcome.as_str() {
+            "restored" => counts.restored += 1,
+            "already-active" => counts.already_active += 1,
+            "changed-elsewhere" => counts.changed_elsewhere += 1,
+            "unavailable" => counts.missing += 1,
+            _ => return Err(CommandFailure::unknown(identity)),
+        }
+        items.push(json!({
+            "photoId": item.photo_id,
+            "outcome": item.outcome,
+        }));
+    }
+    if seen.len() != submitted.len()
+        || counts.restored != result.counts.restored
+        || counts.already_active != result.counts.already_active
+        || counts.changed_elsewhere != result.counts.changed_elsewhere
+        || counts.missing != result.counts.missing
+    {
+        return Err(CommandFailure::unknown(identity));
+    }
+    let data = json!({
+        "operationId": result.operation_id,
+        "counts": {
+            "restored": counts.restored,
+            "alreadyActive": counts.already_active,
+            "changedElsewhere": counts.changed_elsewhere,
+            "missing": counts.missing,
+        },
+        "results": items,
+    });
+    if counts.changed_elsewhere == 0 && counts.missing == 0 {
+        return Ok(data);
+    }
+    let code = if counts.changed_elsewhere > 0 {
+        "conflict"
+    } else {
+        "not_found"
+    };
+    let message = if code == "conflict" {
+        "Read current Trash evidence before submitting a replacement Restore."
+    } else {
+        "Query Trash and use current Photo IDs before submitting a replacement Restore."
+    };
+    let effect = if counts.restored + counts.already_active > 0 {
+        "partial"
+    } else {
+        "none"
+    };
+    Err(CommandFailure::from_payload(
+        if code == "conflict" { 4 } else { 3 },
+        ErrorPayload {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            effect: effect.to_owned(),
+            details: json!({"operationId": operation_id}),
+        },
+    )
+    .with_data(data))
+}
+
+fn restore_wire_value(
+    result: PhotoRestoreWire,
+    operation: Operation,
+) -> Result<Value, CommandFailure> {
+    let total = result
+        .counts
+        .restored
+        .checked_add(result.counts.already_active)
+        .and_then(|value| value.checked_add(result.counts.changed_elsewhere))
+        .and_then(|value| value.checked_add(result.counts.missing));
+    if result.operation_id.is_empty() || total != Some(result.results.len()) {
+        return Err(CommandFailure::transport(operation));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for item in &result.results {
+        if item.photo_id.is_empty() || !ids.insert(item.photo_id.as_str()) {
+            return Err(CommandFailure::transport(operation));
+        }
+        if !matches!(
+            item.outcome.as_str(),
+            "restored" | "already-active" | "changed-elsewhere" | "unavailable"
+        ) {
+            return Err(CommandFailure::transport(operation));
+        }
+    }
+    serde_json::to_value(result).map_err(|_| CommandFailure::transport(operation))
+}
+fn removal_wire_value(
+    result: PhotoRemovalWire,
+    operation: Operation,
+) -> Result<Value, CommandFailure> {
+    if result.operation_id.is_empty()
+        || result.counts.removed
+            + result.counts.changed_elsewhere
+            + result.counts.missing
+            + result.counts.already_removed
+            != result.results.len()
+    {
+        return Err(CommandFailure::transport(operation));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for item in &result.results {
+        if item.photo_id.is_empty() || !ids.insert(item.photo_id.as_str()) {
+            return Err(CommandFailure::transport(operation));
+        }
+        match item.outcome.as_str() {
+            "removed" if item.removed_at_ms.is_some_and(|value| value >= 0) => {}
+            "changed-elsewhere" | "unavailable" | "already-removed"
+                if item.removed_at_ms.is_none() => {}
+            _ => return Err(CommandFailure::transport(operation)),
+        }
+    }
+    serde_json::to_value(result).map_err(|_| CommandFailure::transport(operation))
+}
+
 fn preview_valid(preview: &PreviewFacts) -> bool {
     match preview.state {
         PreviewState::Ready => {
@@ -2437,6 +2967,21 @@ async fn execute(
             command: PhotoCommand::Set(args),
         } => match &args.input {
             Some(input) => Some(read_decision_input(input).await?),
+            None => None,
+        },
+        _ => None,
+    };
+    let pending_removal = match &cli.command {
+        Command::Photos {
+            command: PhotoCommand::Remove(args),
+        } => Some(read_removal_input(&args.input).await?),
+        _ => None,
+    };
+    let pending_restore = match &cli.command {
+        Command::Photos {
+            command: PhotoCommand::Restore(args),
+        } => match &args.input {
+            Some(input) => Some(read_restore_input(input).await?),
             None => None,
         },
         _ => None,
@@ -2794,6 +3339,7 @@ async fn execute(
                     selection_state,
                     rating,
                     decision_version,
+                    removed_at_ms,
                     capture_time,
                     preview,
                     web_path,
@@ -2820,6 +3366,7 @@ async fn execute(
                     selection_state,
                     rating,
                     decision_version,
+                    removed_at_ms,
                     capture_time,
                     preview,
                     web_path,
@@ -2876,6 +3423,105 @@ async fn execute(
                     )
                     .await?;
                 confirmed_decision_result(&identity, &prepared, result)
+            }
+            Command::Photos {
+                command: PhotoCommand::Remove(args),
+            } => {
+                let prepared = pending_removal
+                    .as_ref()
+                    .expect("removal input was prepared");
+                let identity = MutationIdentity {
+                    operation,
+                    photo_ids: prepared
+                        .photos
+                        .iter()
+                        .map(|photo| photo.photo_id.clone())
+                        .collect(),
+                    album_id: None,
+                    album_name: None,
+                };
+                let result: PhotoRemovalWire = client
+                    .mutation(
+                        &identity,
+                        admission,
+                        client.endpoint(&["api", "photos", "remove-explicit"]),
+                        prepared.body(&args.operation_id),
+                    )
+                    .await?;
+                confirmed_removal_result(&identity, &args.operation_id, prepared, result)
+            }
+            Command::Photos {
+                command: PhotoCommand::RemovalOperation { operation_id },
+            } => {
+                let result: PhotoRemovalWire = client
+                    .json(
+                        operation,
+                        Method::GET,
+                        client.endpoint(&["api", "photos", "removal-operations", operation_id]),
+                        None,
+                    )
+                    .await?;
+                removal_wire_value(result, operation)
+            }
+            Command::Photos {
+                command: PhotoCommand::RestoreOperation { operation_id },
+            } => {
+                let result: PhotoRestoreWire = client
+                    .json(
+                        operation,
+                        Method::GET,
+                        client.endpoint(&["api", "photos", "restore-operations", operation_id]),
+                        None,
+                    )
+                    .await?;
+                restore_wire_value(result, operation)
+            }
+            Command::Photos {
+                command: PhotoCommand::Restore(args),
+            } => {
+                let photo_ids = pending_restore
+                    .as_ref()
+                    .map(|prepared| {
+                        prepared
+                            .markers
+                            .iter()
+                            .map(|marker| marker.photo_id.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let identity = MutationIdentity {
+                    operation,
+                    photo_ids,
+                    album_id: None,
+                    album_name: None,
+                };
+                match pending_restore.as_ref() {
+                    Some(prepared) => {
+                        let result: PhotoRestoreWire = client
+                            .mutation(
+                                &identity,
+                                admission,
+                                client.endpoint(&["api", "photos", "restore-explicit"]),
+                                prepared.body(&args.operation_id),
+                            )
+                            .await?;
+                        confirmed_restore_result(&identity, &args.operation_id, prepared, result)
+                    }
+                    None => {
+                        let data: Value = client
+                            .mutation(
+                                &identity,
+                                admission,
+                                client.endpoint(&["api", "photos", "restore"]),
+                                json!({ "operation": args.operation_id }),
+                            )
+                            .await?;
+                        if !data.is_object() {
+                            return Err(CommandFailure::unknown(&identity));
+                        }
+                        Ok(data)
+                    }
+                }
             }
             Command::Trash {
                 command: TrashCommand::List(args),
