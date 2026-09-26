@@ -216,6 +216,33 @@ report Save as unavailable. Complete delivery must include a supported deploymen
 that can save adjacent Sidecars while preserving the Original safety boundary;
 read-only operation alone does not satisfy delivery.
 
+### Exclusive Save Environment
+
+The supported Save environment must enforce exclusive access against every writer
+that can change the target Sidecar or replace its directory entry, from final
+validation through publication and verification. This includes external tools,
+not only Slipstream clients. Checking a revision followed by replacement is not
+by itself a guarantee against concurrent external changes.
+
+Read and Save must expose whether safe saving is available and an actionable
+reason when it is not. Save must refuse before mutation when the required boundary
+cannot be established. A checkbox, an instruction to close another application,
+or a lock ignored by external writers must not count as enforcement. Loss of
+exclusivity during an admitted operation must not produce a confirmed success
+without evidence; uncertain effects follow the failure-recovery rules above.
+
+External applications may read or edit the Sidecar outside Slipstream's exclusive
+save interval. A supported handoff must let them use standard Sidecars without
+implementing a Slipstream-specific protocol. Every later Save must inspect and
+validate their changes. The product does not guarantee safe simultaneous writes
+by software that bypasses the supported environment's enforcement boundary.
+
+Complete delivery must demonstrate this environment and the external-tool handoff,
+including restoration of external access after success, failure, or interruption.
+An environment that permanently prevents external applications from using the
+Sidecars does not satisfy interoperability. Enforcement mechanisms belong in the
+Design Spec and must not broaden permission to rewrite Originals.
+
 Library expansion, Location Recovery, rescan, and restart must not apply Sidecar
 values to Library decisions or reuse obsolete save evidence. Backups must identify
 Sidecars as Photographer-owned files separate from application state. Restoring
@@ -235,6 +262,9 @@ restore must establish current external content before any save.
 - Verify new Sidecar creation, safe updates, preservation of unknown structured
   properties, absent-versus-empty fallback, malformed metadata, permissions,
   bounded parsing, and Original bytes unchanged.
+- Prove that the supported environment prevents bypass writes and directory-entry
+  replacement during Save, rejects Save when enforcement is unavailable, and
+  permits external-tool editing again after the operation.
 - Change or replace the Sidecar between Read and Save, race two saves, interrupt
   a save, and restart. Observe a confirmed complete result, a refusal preserving
   prior content, or explicit uncertainty; never a false success.
