@@ -655,9 +655,7 @@ impl XmpDocument {
                         return Err(XmpParseError::Malformed);
                     }
                     let v = decl.version().map_err(|_| XmpParseError::Malformed)?;
-                    if v.as_ref() == "1.1" {
-                        return Err(XmpParseError::Unpreservable);
-                    } else if v.as_ref() != "1.0" {
+                    if v.as_ref() != "1.0" {
                         return Err(XmpParseError::Unpreservable);
                     }
                     if decl.encoding().is_some() {
@@ -1144,52 +1142,50 @@ impl XmpDocument {
                 None
             }
         } else {
-            if !matches!(patch, PatchValue::Clear) {
-                if let [Property::Element(original, ns)] = self.properties(name).as_slice() {
-                    let mut property = (*original).clone();
-                    for (prefix, uri) in ns {
-                        let key = if prefix.is_empty() {
-                            "xmlns".into()
-                        } else {
-                            format!("xmlns:{prefix}")
-                        };
-                        if !property.attrs.iter().any(|(name, _)| name == &key) {
-                            property.attrs.push((key, uri.clone()));
-                        }
+            if !matches!(patch, PatchValue::Clear)
+                && let [Property::Element(original, ns)] = self.properties(name).as_slice()
+            {
+                let mut property = (*original).clone();
+                for (prefix, uri) in ns {
+                    let key = if prefix.is_empty() {
+                        "xmlns".into()
+                    } else {
+                        format!("xmlns:{prefix}")
+                    };
+                    if !property.attrs.iter().any(|(name, _)| name == &key) {
+                        property.attrs.push((key, uri.clone()));
                     }
-                    if let Some((_, container_ns)) = single_container(original, ns, "Alt") {
-                        if let Some(Node::Element(container)) = property
-                            .children
-                            .iter_mut()
-                            .find(|node| matches!(node, Node::Element(_)))
-                        {
-                            container.children.retain(|node| {
-                                let Node::Element(li) = node else { return true };
-                                let li_ns = scope(&container_ns, li);
-                                let tag =
-                                    attribute(li, &li_ns, XML, "lang").and_then(canonical_lang);
-                                !tag.as_ref().is_some_and(|tag| changed.contains(tag))
-                            });
-                            for tag in &changed {
-                                if let Some(value) = existing.get(tag) {
-                                    let item = child(
-                                        "rdf:li",
-                                        vec![
-                                            ("xmlns:rdf".into(), RDF.into()),
-                                            ("xml:lang".into(), tag.clone()),
-                                        ],
-                                        vec![Node::Text(value.clone())],
-                                    );
-                                    if tag == "x-default" {
-                                        container.children.insert(0, item);
-                                    } else {
-                                        container.children.push(item);
-                                    }
-                                }
+                }
+                if let Some((_, container_ns)) = single_container(original, ns, "Alt")
+                    && let Some(Node::Element(container)) = property
+                        .children
+                        .iter_mut()
+                        .find(|node| matches!(node, Node::Element(_)))
+                {
+                    container.children.retain(|node| {
+                        let Node::Element(li) = node else { return true };
+                        let li_ns = scope(&container_ns, li);
+                        let tag = attribute(li, &li_ns, XML, "lang").and_then(canonical_lang);
+                        !tag.as_ref().is_some_and(|tag| changed.contains(tag))
+                    });
+                    for tag in &changed {
+                        if let Some(value) = existing.get(tag) {
+                            let item = child(
+                                "rdf:li",
+                                vec![
+                                    ("xmlns:rdf".into(), RDF.into()),
+                                    ("xml:lang".into(), tag.clone()),
+                                ],
+                                vec![Node::Text(value.clone())],
+                            );
+                            if tag == "x-default" {
+                                container.children.insert(0, item);
+                            } else {
+                                container.children.push(item);
                             }
-                            return Some(Node::Element(property));
                         }
                     }
+                    return Some(Node::Element(property));
                 }
             }
             Some(alt_child(name, existing))
