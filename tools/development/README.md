@@ -57,9 +57,19 @@ The modes are:
   and `(1154x1732)`. The default is one cold call and 20 warm calls per
   geometry in one reused simulator. Warm timing is inclusive render time only;
   queue, admission, startup, and transfer are not measured by this probe.
+  Each render records the observed process-thread maximum and regular-file
+  bytes below `/work`; these are diagnostic measurements, not cgroup limits.
+  `full` also records the finished JPEG byte length and workspace bytes before
+  and after encoding.
 - `full`: adds full-resolution Development TIFF and full-resolution Film output.
   Large camera files can consume the full memory allowance. An OOM or nonzero
   child exit remains a failure in `report.json`.
+
+The host runner also writes `report.json.latency` with separate admission,
+startup, execution, settlement, and complete-runner durations. These timings
+cover the qualification container lifecycle and source checks only; the
+`production_request_latency` field is always false. They do not measure the
+production HTTP queue, service admission, or artifact transfer path.
 
 Use `--stage raw --mode full` to qualify full-size RAW/TIFF independently of
 Film processing. The default `--stage pipeline` runs both stages. An interrupted

@@ -101,10 +101,26 @@ class RunnerTests(unittest.TestCase):
                 self.assertFalse((root / "started").exists(), "Cancelled admission must not start heavy work")
             self.assertTrue(report["source_unchanged"])
             self.assertTrue(report["sidecars_unchanged"])
+            latency = report["latency"]
+            self.assertFalse(latency["production_request_latency"])
+            self.assertEqual(report["seconds"], latency["complete_runner_seconds"])
+            phase_seconds = [
+                latency[name]
+                for name in (
+                    "admission_seconds", "startup_seconds",
+                    "execution_seconds", "settlement_seconds",
+                )
+                if latency[name] is not None
+            ]
+            self.assertGreaterEqual(latency["complete_runner_seconds"], 0)
+            self.assertTrue(all(value >= 0 for value in phase_seconds))
+            self.assertGreaterEqual(
+                latency["complete_runner_seconds"],
+                sum(phase_seconds),
+            )
             self.assertEqual(raw.read_bytes(), b"private fixture bytes")
             self.assertEqual(raw.stat().st_mtime_ns, original_stat.st_mtime_ns)
             self.assertEqual(sidecar.read_bytes(), b"private external XMP")
-
     def test_failed_container_retains_failure_and_originals(self):
         self.run_case("fail")
 
