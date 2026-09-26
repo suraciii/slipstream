@@ -2830,7 +2830,7 @@ fn open_connection(
 }
 
 fn preflight_schema(connection: &Connection, canonical_root: &str) -> Result<(), PersistenceError> {
-    preflight_schema_for_max_version(connection, canonical_root, 9)
+    preflight_schema_for_max_version(connection, canonical_root, 10)
 }
 
 fn preflight_schema_for_max_version(
@@ -2865,6 +2865,8 @@ fn preflight_schema_for_max_version(
         8 => validate_canonical_schema(connection, SchemaVersion::V8)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         9 => validate_canonical_schema(connection, SchemaVersion::V9)
+            .map_err(|_| PersistenceError::UnsupportedSchema),
+        10 => validate_canonical_schema(connection, SchemaVersion::V10)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         _ => unreachable!(),
     }
@@ -2902,7 +2904,7 @@ fn startup_schema(
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| PersistenceError::Storage)?;
-    if version > 9 {
+    if version > 10 {
         return Err(PersistenceError::NewerSchema);
     }
     validate_root_binding(connection, canonical_root)?;
@@ -2953,6 +2955,8 @@ fn startup_schema(
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
         9 => validate_canonical_schema(&transaction, SchemaVersion::V9)
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
+        10 => validate_canonical_schema(&transaction, SchemaVersion::V10)
+            .map_err(|_| PersistenceError::UnsupportedSchema)?,
         _ => unreachable!(),
     }
     if version < 6 {
@@ -2966,6 +2970,9 @@ fn startup_schema(
     }
     if version < 9 {
         migrate_v8(&transaction)?;
+    }
+    if version < 10 {
+        migrate_v9(&transaction)?;
     }
     let stored: Option<String> = transaction
         .query_row(
@@ -2984,7 +2991,7 @@ fn startup_schema(
             .map_err(|_| PersistenceError::Storage)?;
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V9)
+    validate_canonical_schema(&transaction, SchemaVersion::V10)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -3452,7 +3459,38 @@ fn migrate_v8(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
     validate_canonical_schema(transaction, SchemaVersion::V9)
         .map_err(|_| PersistenceError::UnsupportedSchema)
 }
-
+fn migrate_v9(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
+    validate_canonical_schema(transaction, SchemaVersion::V9)
+        .map_err(|_| PersistenceError::UnsupportedSchema)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE photos ADD COLUMN association_generation INTEGER NOT NULL DEFAULT 1
+               CHECK(association_generation > 0);
+             CREATE TABLE sidecar_associations(
+               photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE RESTRICT,
+               sidecar_path TEXT NOT NULL UNIQUE,
+               observed_size INTEGER CHECK(observed_size IS NULL OR observed_size >= 0),
+               observed_mtime_ms REAL CHECK(observed_mtime_ms IS NULL OR observed_mtime_ms >= 0),
+               observed_digest TEXT CHECK(observed_digest IS NULL OR length(observed_digest) = 64),
+               CHECK((observed_size IS NULL) = (observed_mtime_ms IS NULL))
+             );
+             CREATE TABLE retained_sidecar_orphans(
+               sidecar_path TEXT PRIMARY KEY,
+               retired_photo_id TEXT NOT NULL,
+               retired_original_path TEXT NOT NULL,
+               original_kind TEXT NOT NULL CHECK(original_kind IN ('raw','jpeg')),
+               retired_generation INTEGER NOT NULL CHECK(retired_generation > 0),
+               observed_size INTEGER CHECK(observed_size IS NULL OR observed_size >= 0),
+               observed_mtime_ms REAL CHECK(observed_mtime_ms IS NULL OR observed_mtime_ms >= 0),
+               observed_digest TEXT CHECK(observed_digest IS NULL OR length(observed_digest) = 64),
+               CHECK((observed_size IS NULL) = (observed_mtime_ms IS NULL))
+             );
+             PRAGMA user_version = 10;",
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    validate_canonical_schema(transaction, SchemaVersion::V10)
+        .map_err(|_| PersistenceError::UnsupportedSchema)
+}
 struct LegacyPhotoRow {
     id: String,
     raw_original_id: Option<String>,
@@ -3869,6 +3907,21 @@ fn apply_manual_relocations(
                         });
                     }
                     transaction
+                        .execute(
+                            "UPDATE photos SET association_generation=association_generation+1 WHERE id=?",
+                            params![photo_id],
+                        )
+                        .map_err(|_| PersistenceError::Storage)?;
+                    retire_sidecar_association(
+                        transaction,
+                        &photo_id,
+                        &to.to_string(),
+                        match kind {
+                            crate::OriginalKind::Raw => "raw",
+                            crate::OriginalKind::Jpeg => "jpeg",
+                        },
+                    )?;
+                    transaction
                         .execute("DELETE FROM photos WHERE id=?", params![photo_id])
                         .map_err(|_| PersistenceError::Storage)?;
                 }
@@ -3897,6 +3950,23 @@ fn apply_manual_relocations(
                     reason: "invalid-location",
                 }
             })?;
+            let destination_photo: Option<(String, String)> = transaction
+                .query_row(
+                    "SELECT p.id,o.kind FROM photos p JOIN original_files o ON o.id=p.original_id WHERE o.id=?",
+                    [&relocation.original_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|_| PersistenceError::Storage)?;
+            if let Some((photo_id, kind)) = destination_photo {
+                transaction
+                    .execute(
+                        "UPDATE photos SET association_generation=association_generation+1 WHERE id=?",
+                        [&photo_id],
+                    )
+                    .map_err(|_| PersistenceError::Storage)?;
+                retire_sidecar_association(transaction, &photo_id, to.as_str(), &kind)?;
+            }
             let size =
                 i64::try_from(relocation.facts.size).map_err(|_| PersistenceError::Storage)?;
             let changed = transaction
@@ -4005,7 +4075,6 @@ type PreservedOriginal = (
     Option<String>,
 );
 type PreservedPhoto = (String, String, i64, String, i64);
-
 #[derive(Debug, PartialEq)]
 struct ExpansionProjection {
     originals: Vec<PreservedOriginal>,
@@ -4039,7 +4108,8 @@ pub(crate) fn expand_library_binding(
     // The read-only preflight accepts every schema the writable pass can
     // migrate or use. In particular, an already current V9 database must
     // reach startup_schema instead of being rejected here.
-    if validate_canonical_schema(&readonly, SchemaVersion::V9).is_err()
+    if validate_canonical_schema(&readonly, SchemaVersion::V10).is_err()
+        && validate_canonical_schema(&readonly, SchemaVersion::V9).is_err()
         && validate_canonical_schema(&readonly, SchemaVersion::V8).is_err()
         && validate_canonical_schema(&readonly, SchemaVersion::V7).is_err()
     {
@@ -4109,7 +4179,7 @@ pub(crate) fn expand_library_binding(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V9)
+    validate_canonical_schema(&transaction, SchemaVersion::V10)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     if required_root_binding(&transaction)? != stored_root
         || expansion_projection(&transaction)? != preserved
@@ -4130,6 +4200,24 @@ pub(crate) fn expand_library_binding(
             return Err(PersistenceError::Storage);
         }
     }
+    transaction
+        .execute(
+            "UPDATE photos SET association_generation=association_generation+1",
+            [],
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    transaction
+        .execute(
+            "UPDATE sidecar_associations SET sidecar_path=?||sidecar_path",
+            [&prefix],
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    transaction
+        .execute(
+            "UPDATE retained_sidecar_orphans SET sidecar_path=?||sidecar_path",
+            [&prefix],
+        )
+        .map_err(|_| PersistenceError::Storage)?;
     for (id, sort_path) in &plan.photo_sort_paths {
         let changed = transaction
             .execute(
@@ -4159,7 +4247,7 @@ pub(crate) fn expand_library_binding(
         return Err(PersistenceError::InvalidExpansion);
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V9)
+    validate_canonical_schema(&transaction, SchemaVersion::V10)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -4578,6 +4666,62 @@ pub struct FingerprintCounts {
     pub pending: usize,
 }
 
+fn retire_sidecar_association(
+    transaction: &Transaction<'_>,
+    photo_id: &str,
+    retired_original_path: &str,
+    kind: &str,
+) -> Result<(), PersistenceError> {
+    let association = transaction
+        .query_row(
+            "SELECT sidecar_path,observed_size,observed_mtime_ms,observed_digest,
+                    (SELECT association_generation FROM photos WHERE id=?)
+             FROM sidecar_associations WHERE photo_id=?",
+            params![photo_id, photo_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| PersistenceError::Storage)?;
+    let Some((sidecar_path, observed_size, observed_mtime_ms, observed_digest, generation)) =
+        association
+    else {
+        return Ok(());
+    };
+    transaction
+        .execute(
+            "INSERT OR REPLACE INTO retained_sidecar_orphans(
+                sidecar_path,retired_photo_id,retired_original_path,original_kind,
+                retired_generation,observed_size,observed_mtime_ms,observed_digest)
+             VALUES(?,?,?,?,?,?,?,?)",
+            params![
+                sidecar_path,
+                photo_id,
+                retired_original_path,
+                kind,
+                generation,
+                observed_size,
+                observed_mtime_ms,
+                observed_digest
+            ],
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    transaction
+        .execute(
+            "DELETE FROM sidecar_associations WHERE photo_id=?",
+            [photo_id],
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    Ok(())
+}
+
 fn apply_scan(
     state: &StateDirectory,
     database_name: &DatabaseName,
@@ -4651,6 +4795,35 @@ fn apply_scan(
             }
         }
 
+        for original_id in relocation_by_id.keys() {
+            let persisted = persisted_by_id
+                .get(original_id)
+                .ok_or(PersistenceError::InvalidRecovery)?;
+            transaction
+                .execute(
+                    "UPDATE photos SET association_generation=association_generation+1
+                     WHERE original_id=?",
+                    [original_id],
+                )
+                .map_err(|_| PersistenceError::Storage)?;
+            let photo_id: String = transaction
+                .query_row(
+                    "SELECT id FROM photos WHERE original_id=?",
+                    [original_id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| PersistenceError::Storage)?;
+            let kind = match persisted.kind {
+                crate::OriginalKind::Raw => "raw",
+                crate::OriginalKind::Jpeg => "jpeg",
+            };
+            retire_sidecar_association(
+                transaction,
+                &photo_id,
+                persisted.relative_path.as_str(),
+                kind,
+            )?;
+        }
         // Move every relocated Original to a temporary unique Location first
         // so direct swaps cannot violate the UNIQUE(relative_path) constraint.
         for original_id in relocation_by_id.keys() {
@@ -4687,6 +4860,30 @@ fn apply_scan(
             {
                 continue;
             }
+            transaction
+                .execute(
+                    "UPDATE photos SET association_generation=association_generation+1
+                     WHERE original_id=?",
+                    [original.id.as_str()],
+                )
+                .map_err(|_| PersistenceError::Storage)?;
+            let photo_id: String = transaction
+                .query_row(
+                    "SELECT id FROM photos WHERE original_id=?",
+                    [&original.id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| PersistenceError::Storage)?;
+            let kind = match original.kind {
+                crate::OriginalKind::Raw => "raw",
+                crate::OriginalKind::Jpeg => "jpeg",
+            };
+            retire_sidecar_association(
+                transaction,
+                &photo_id,
+                original.relative_path.as_str(),
+                kind,
+            )?;
             transaction
                 .execute(
                     "UPDATE original_files SET relative_path=?,available=0 WHERE id=?",
@@ -8376,7 +8573,7 @@ fn remove_photos(
                 };
                 transaction
                     .execute(
-                        "UPDATE photos SET removed_at_ms=?,removed_operation=? WHERE id=?",
+                        "UPDATE photos SET removed_at_ms=?,removed_operation=?,association_generation=association_generation+1 WHERE id=? AND removed_at_ms IS NULL",
                         params![removed_at, operation_id, photo_id],
                     )
                     .map_err(mutation_error_from_sqlite)?;
@@ -8553,7 +8750,7 @@ fn restore_photos_explicit(
             }
             let updated = transaction
                 .execute(
-                    "UPDATE photos SET removed_at_ms=NULL,removed_operation=NULL
+                    "UPDATE photos SET removed_at_ms=NULL,removed_operation=NULL,association_generation=association_generation+1
                      WHERE id=? AND removed_at_ms=?",
                     params![&photo.photo_id, current_marker],
                 )
@@ -8688,7 +8885,7 @@ fn restore_photos(
                 };
                 let updated = transaction
                     .execute(
-                        "UPDATE photos SET removed_at_ms=NULL,removed_operation=NULL
+                        "UPDATE photos SET removed_at_ms=NULL,removed_operation=NULL,association_generation=association_generation+1
                          WHERE id=? AND removed_at_ms=?",
                         params![photo_id, removed_at],
                     )
@@ -10053,7 +10250,7 @@ mod tests {
         );
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V9).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V10).unwrap();
     }
 
     #[tokio::test]
@@ -10134,12 +10331,12 @@ mod tests {
         persistence.shutdown().unwrap();
 
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V9).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V10).unwrap();
         assert_eq!(
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            9
+            10
         );
         assert_eq!(
             connection
@@ -10842,9 +11039,9 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            9
+            10
         );
-        validate_canonical_schema(&connection, SchemaVersion::V9).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V10).unwrap();
         // The legacy photo-set tables are gone rather than left as aliases.
         for legacy in ["photo_sets", "photo_set_members", "review_progress"] {
             assert!(!table_exists(&connection, legacy).unwrap(), "{legacy}");
@@ -10853,7 +11050,7 @@ mod tests {
     // album-language-legacy:end v4-migration-test
 
     #[test]
-    fn newer_v10_database_is_rejected_without_changes() {
+    fn newer_v11_database_is_rejected_without_changes() {
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
@@ -10861,7 +11058,7 @@ mod tests {
         );
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 10)
+            .pragma_update(None, "user_version", 11)
             .unwrap();
         let before = fs::read(&path).unwrap();
         assert!(matches!(
@@ -10939,7 +11136,7 @@ mod tests {
             .unwrap();
             persistence.shutdown().unwrap();
             let connection = Connection::open(path).unwrap();
-            validate_canonical_schema(&connection, SchemaVersion::V9).unwrap();
+            validate_canonical_schema(&connection, SchemaVersion::V10).unwrap();
         }
         let (_base, library, state, name, path) = fixture();
         seed(
@@ -11110,7 +11307,7 @@ mod tests {
         assert_eq!(album.last_reviewed_photo_id.as_deref(), Some(photo_id));
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V9).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V10).unwrap();
     }
     // album-language-legacy:end v3-migration-test
 
@@ -14689,7 +14886,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            9
+            10
         );
         assert_eq!(
             connection

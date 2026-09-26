@@ -455,6 +455,8 @@ mod tests {
             "sqlite/schema-v8.sql",
             "sqlite/schema-v9.json",
             "sqlite/schema-v9.sql",
+            "sqlite/schema-v10.json",
+            "sqlite/schema-v10.sql",
             "sqlite/v0.sql",
             "sqlite/v1.sql",
             "startup/vectors.json",
