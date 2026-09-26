@@ -5,7 +5,8 @@ Photographer-owned XMP Sidecars. The Product Spec in
 [`docs/library-management-metadata.md`](../docs/library-management-metadata.md)
 is authoritative for supported fields and user-visible behavior. This design
 makes that capability durable without turning the Library state store into an
-external metadata cache.
+external metadata cache, and it defines the only environment in which Save is
+admitted.
 
 ## Design Drivers
 
@@ -13,7 +14,7 @@ external metadata cache.
 - A Photo is the identity boundary. A same-basename RAW and JPEG remain
   independent, and a Sidecar must not cross that boundary.
 - Read evidence must reject a stale Save rather than overwrite another
-  application's change.
+  application's change, including across restarts and Location changes.
 - Unknown XMP properties, namespaces, structures, and language alternatives
   must survive a Save of supported fields.
 - A malformed or unsupported Sidecar must remain visible as a problem; Save
@@ -21,14 +22,19 @@ external metadata cache.
 - CLI and Web need one semantic operation, not two implementations with
   different fallback or conflict behavior.
 - Metadata parsing is bounded and must not follow URLs, execute values, or
-  depend on a helper executable being installed.
+  depend on a helper executable being installed for Read.
+- Concurrent external writers cannot be coordinated by advisory mechanisms on
+  an ordinary writable filesystem. Save therefore runs only inside an enforced
+  exclusive save session, defined below.
 
 ## Model
 
 A `MetadataTarget` names one current Photo, its Original Location and kind, and
 its Sidecar Association. The server derives it from the published Library
-snapshot. The core metadata service then revalidates the Original through the
-confined Library root before reading or saving.
+snapshot. The metadata service revalidates the Original through the confined
+Library Folder before reading or saving.
+
+### Read evidence
 
 A Read Metadata result contains:
 
@@ -38,25 +44,50 @@ A Read Metadata result contains:
   provenance;
 - capture facts from the Original, marked read-only;
 - Library Rating as a separate Library fact; and
-- an evidence token containing the Original revision, the persisted Photo and
-  association generation, a startup-bound session epoch, and the Sidecar
-  revision. Missing Sidecar is represented by an explicit absent revision, not
-  by an empty file. Every removal, restore, ownership, identity, or Location
-  transition increments the persisted generation, and each process start
-  mints a new session epoch, so recovery back-and-forth and restart cannot
-  make old evidence pass.
+- an evidence token.
+
+The evidence token binds the observed state to the Library lifecycle, the
+server instance, and the bounded Sidecar content:
+
+- the Original facts (device, inode, size, modification time);
+- the Sidecar revision facts and a digest of the bounded Sidecar content, with
+  an explicit absent state; statistics alone do not prove unchanged content,
+  because an external tool can edit a Sidecar in place while preserving its
+  size and modification time;
+- the Association generation: a persisted monotonic counter for the Photo that
+  every removal, restore, Permanent Deletion, ownership transition, Location
+  change, or Library expansion increments; and
+- the server instance epoch: a random identifier generated at startup from
+  state that survives restarts of the operating system process.
+
+Save accepts a token only when every component still matches. A relocated
+Original that later returns to the same Location has a higher Association
+generation, so recovery cannot reuse an old token, and no token survives a
+server restart.
+
+### Sidecar association record
+
+The Library state store persists one Sidecar Association record per retained
+Sidecar: its relative path, the owning Photo, the Sidecar revision last
+observed, and a state of `active` or `retained-orphan`. When the owning
+Original leaves its Location through Permanent Deletion or a recovery
+relocation, the record becomes `retained-orphan` instead of being deleted.
+
+A later eligible Original at the same basename does not inherit the Sidecar.
+Read reports the Association as unresolved while a `retained-orphan` record
+matches the candidate, and Save refuses it. The state clears only after a fresh
+Read observes the Sidecar following an operator's external correction (the
+Sidecar changed, disappeared, or was explicitly re-associated through that
+inspection); Slipstream never moves, renames, or deletes the Sidecar itself.
+
+### Patches
 
 Supported writable fields are represented as typed patches. A patch has one of
 `set`, `clear`, or `remove`. `clear` is a valid empty value and remains a
 property in XMP; `remove` deletes the Sidecar property and reveals fallback
 content. Lists preserve order where the field is ordered and collapse exact
 duplicates only for Keywords. Language alternatives name each language being
-changed; an omitted language is not changed. Language tags compare by
-canonical BCP-47 matching, duplicate alternatives within one request are
-rejected, and `x-default` is addressed only when explicitly named. When
-preserving standard language-alternative validity would require changing a
-language the request did not name, Save refuses with the exact required
-correction.
+changed; an omitted language is not changed.
 
 The supported field set is exactly the Product Spec's writable set:
 `dc:title`, `dc:description`, `photoshop:Headline`, `dc:subject`,
@@ -73,18 +104,9 @@ are not Sidecar fields.
 The server derives same-directory, same-basename candidates from the current
 published Originals. One RAW owns the association. A JPEG owns it only when no
 RAW shares the basename. Multiple eligible Originals, duplicate `.xmp`/`.XMP`
-files, and unresolved retained associations are ambiguous or unavailable and
-cannot be written. An ineligible JPEG still reads its own embedded metadata but
-never reads or writes the RAW's Sidecar.
-
-Association ownership outlives the files it named. Permanent Deletion and
-Location Recovery record a durable tombstone for the retired Original's known
-Sidecar association, keyed by the retired Original or Photo identity and the
-prior association. A retained Sidecar whose owner was removed or moved stays
-unresolved until an external correction followed by a fresh inspection
-establishes a new unambiguous association; a later eligible Original at the
-same basename must not silently inherit the Sidecar. The tombstone clears only
-through that explicit fresh-inspection transition.
+files, and unresolved `retained-orphan` records are ambiguous or unavailable
+and cannot be written. An ineligible JPEG still reads its own embedded metadata
+but never reads or writes the RAW's Sidecar.
 
 Read opens the Original through `LibraryRoot` and reads bounded embedded XMP,
 EXIF capture facts, and IPTC IIM data. Sidecar bytes are opened only through
@@ -93,92 +115,127 @@ fallback. An invalid Sidecar property is reported invalid rather than silently
 falling back. The effective value is Sidecar, then embedded XMP, then the
 specified IIM counterpart; the underlying source values remain in the result.
 
-The parser accepts UTF-8 XML, validates element nesting and namespace structure,
-and limits packet, node, string, array, and language-entry sizes. It stores
-unknown XML nodes and attributes in a lossless semantic tree. Serialization may
-change whitespace or attribute order, but it preserves unknown values and
-structure. The reader never fetches a `WebStatement` URL.
+### Embedded extraction matrix
 
-Embedded extraction coverage is explicit per Original format: where bounded
-XMP, EXIF, and IPTC IIM segments are read from JPEG and from each supported
-RAW extension, and how each missing or unreadable segment reports per-field
-`unavailable` rather than silently narrowing coverage. The capture source
-model exposes every required capture fact, including image dimensions and
-orientation, with its EXIF identifier, unit, and source.
+Read reports each supported source per Original kind:
 
-The preservation model covers the RDF/XML forms a Sidecar may contain:
-`rdf:resource` attributes, `rdf:parseType="Resource"`, nested structures,
-Bag/Seq/Alt containers, namespace redeclarations, and multiple
-`rdf:Description` elements. The round-trip invariant is semantic: an
-unmodified property must keep its values, types, and structure. A construct
-the model cannot represent losslessly makes Save refuse before any change
-rather than reserialize a reduced tree.
+| Kind           | EXIF capture facts                        | Embedded XMP                               | IPTC IIM                    |
+| -------------- | ----------------------------------------- | ------------------------------------------ | --------------------------- |
+| JPEG           | APP1 Exif segment                         | APP1 `http://ns.adobe.com/xap/1.0/` packet | APP13 Photoshop IIM segment |
+| TIFF-based RAW | IFD0 and Exif IFD                         | IFD0 tag `0x02BC` (XMP packet)             | IFD0 tag `0x83BB` (IIM)     |
+| Non-TIFF RAW   | LibRaw fallback, as used for Capture Time | unavailable by kind                        | unavailable by kind         |
 
-### Save transaction
+For every kind, dimensions and orientation come from the primary IFD
+(`ImageWidth`, `ImageLength`, `Orientation`) or the JPEG's `SOF` marker when
+the IFD omits them. A source that exists but exceeds parse limits reports
+`resource_limit`; a kind without the source reports `unavailable` with the
+kind, never as absent. The reader never fetches a `WebStatement` URL.
 
-Save is admitted only for an active Photo with an available Original and an
-eligible, unambiguous Sidecar Association. The request must include the exact
-Read evidence and explicit changes.
+### XMP document model and preservation
 
-The write runs inside one exclusive metadata editing session. Admission of
-the session is the safety boundary, not the revision check: an ordinary
-`stat`-compare-then-`rename` sequence has an unavoidable window in which an
-external writer can publish newer content that the rename then destroys, for
-updates and for creations alike. Before a session is admitted, every external
-writer must be quiesced: external applications are closed or drained, and
-already-open writable descriptors and mappings do not survive admission. The
-session owns a fresh epoch; a new session or a restart invalidates all prior
-evidence. Sessions are sequential by design; concurrent unrestricted external
-editing is not a supported environment for Save.
+The parser accepts UTF-8 XML and limits packet, node, string, array, and
+language-entry sizes. The document model retains, losslessly and semantically:
 
-Inside the session, before writing, core rechecks:
+- every namespace declaration, element, and attribute of `x:xmpmeta` and its
+  descendants, including unknown namespaces;
+- multiple `rdf:Description` nodes, their `rdf:about` values and shorthand
+  property attributes;
+- property value forms: element text, `rdf:resource` references,
+  `rdf:parseType="Resource"` structures, and nested `rdf:Bag`, `rdf:Seq`, and
+  `rdf:Alt` containers with `rdf:li` items and `xml:lang` qualifiers;
+- namespace redeclarations on any element.
 
-1. the Original path, inode, size, modification time, and a content digest
-   when the facts are inconclusive;
-2. the Association candidate set and selected Sidecar name; and
-3. the Sidecar's exact observed content, including the explicit missing state.
+Serialization may change whitespace and attribute order; it may not change
+names, values, structure, container types, qualifiers, or language tags. Any
+construct outside this model — `rdf:ID`, `rdf:nodeID`, XPointer `rdf:about`,
+`rdf:parseType` values other than `Resource`, shorthand attributes the model
+does not represent, or entity declarations — makes the Sidecar
+`unpreservable`: Read still reports supported fields, and Save refuses before
+any mutation rather than rebuild a reduced document.
 
-Every requested patch is validated before a document is changed. Existing
-Sidecar XML is parsed and edited in memory. A missing Sidecar is created only
-when the observed evidence also said missing, using
-`renameat2(RENAME_NOREPLACE)`; `EEXIST` is a conflict that preserves the
-racing file. An existing malformed Sidecar is refused. The output is staged
-under an exclusive unpredictable temporary name, flushed and synced, then
-atomically renamed. On backends without the required primitives, Save fails
-closed instead of falling back to an unchecked rename. A failed write leaves
-the previous Sidecar intact.
+### Language alternatives
 
-The application holds its publication/mutation lock while the checked Sidecar
-write runs. That serializes Slipstream writes and keeps the Web publication
-from claiming a result before the write is confirmed. A successful write
-performs a fresh read and returns the verified values and new evidence. A
-post-write verification failure is `outcome_unknown`; it is never reported as
-no change.
+`dc:title`, `dc:description`, `dc:rights`, and `xmpRights:UsageTerms` are
+language-alternative properties. Language tags are compared by their canonical
+BCP 47 form: case-insensitive, with the canonical casing of `x-default`.
+Duplicate alternatives in one existing property are reported invalid. A patch
+names the exact languages it changes, including `x-default`.
 
-The database remains the owner of Library decisions and Photo identity. It does
-not cache Sidecar fields. Restart therefore requires a fresh Read and cannot
-reuse stale Save evidence. Scan, Restore, Permanent Deletion, and Location
-Recovery do not apply Sidecar values to Library decisions.
+When applying a patch would require changing an unrequested language — for
+example, updating the alternative that `x-default` mirrors, when XMP validity
+requires the default to follow it — Save refuses and lists every language that
+would have to change. Removing one alternative never removes the others.
 
-### Operating environment and write authority
+### Save session and exclusive environment
 
-The Web process keeps its read-only Original access. Adjacent Sidecar writes
-are executed by one narrow Sidecar broker: a separately confined component
-that receives bounded, association-authorized operations, derives every
-destination from an admitted Photo and association, and owns staging and
-commit. Callers cannot name arbitrary filesystem destinations, and the broker
-exposes no general writable directory capability. The broker is a trusted
-component inside the operator boundary; protecting Originals from a
-compromised broker requires an additional enforced filesystem or ownership
-policy and is not claimed by this design.
+Save is admitted only when the deployment provides an enforced exclusive save
+session. A session has five steps, all under the deployment's control:
 
-The supported deployment requires an identified operator actor who can
-quiesce external writers for each editing session and keep the Original and
-association topology stable while a checked operation commits. A deployment
-with read-only Sidecar access still supports Read and reports Save as
-unavailable. Making the Library bind writable for the Web process instead of
-deploying the broker is rejected: it would trade an enforced kernel protection
-boundary for an in-process promise.
+1. **Quiesce.** Stop every process of the managed file service that exposes
+   the Library to external applications, and verify the stop: no service
+   process remains. If the service does not reach a verified stop within the
+   bounded timeout, Save refuses before any mutation and reports Save
+   unavailable with the reason.
+2. **Final validation.** Recheck the evidence token: Original path, inode,
+   size, and modification time; the Association candidate set, generation, and
+   Sidecar name; and the Sidecar revision facts and bounded content digest,
+   including the explicit missing state. Validate every requested patch
+   against the parsed document. Validation happens inside the session, so no
+   external writer can change the Sidecar between this comparison and
+   publication.
+3. **Publish.** Stage the new document in the same directory under a fresh
+   exclusive temporary name, write and flush it, and sync it. Then atomically
+   rename it over the observed Sidecar and sync the parent directory so the
+   entry itself is durable. A missing Sidecar is created only when the
+   evidence also said missing; a raced creation is detected by
+   `RENAME_NOREPLACE` semantics and refused. A failed write before publication
+   removes only this session's temporary file and leaves the previous Sidecar
+   intact.
+4. **Verify.** Re-open the published Sidecar without following links and
+   confirm its content is the staged document and that the requested values
+   are present. Derive the reported result from that committed snapshot.
+5. **Release.** Restart the file service regardless of outcome. The supervisor
+   that owns the session guarantees the restart on success, on failure, and on
+   crash of any session participant. If exclusivity is lost during the session
+   or the outcome cannot be confirmed, the result is `outcome_unknown`, never
+   a false success, a claimed no-change, or an automatic rollback.
+
+The conflict guarantee is content-identity under exclusivity: the session
+publishes only when the Sidecar's current bounded content still matches the
+observed evidence, and no external writer can intervene between that
+comparison and publication. An external change that is later reverted to
+byte-identical content is indistinguishable from no change and is treated as
+no change. Network filesystems are outside the supported backing stores,
+because a failed rename there may still have taken effect and cannot be
+classified as a pre-publication refusal.
+
+External applications read and edit the Sidecar through the file service
+outside the save session, with no Slipstream protocol. Every later Save
+inspects and validates their changes. The file service must apply the writer
+identity to every file it creates, so Sidecar ownership stays continuous
+between external edits and Save publication. The product does not protect
+writes from software that bypasses the managed service and writes the backing
+store directly; such access is outside the supported environment.
+
+### Supported deployment shape
+
+The supported writable deployment is:
+
+- a backing tree reachable only by the deployment host;
+- one writer identity shared exclusively by the file service's worker
+  processes and the save helper;
+- directories that are sticky and group-writable, with Original Files owned by
+  the deployment identity and read-only to the writer identity, so the writer
+  can create and replace Sidecars but cannot write, replace, or unlink an
+  Original;
+- the Web application and CLI never writing the backing store; and
+- the save helper as the only component that opens a save session.
+
+A deployment with a read-only Library, including the default Compose shape,
+supports Read and reports Save unavailable with the actionable reason. The
+unsupported coordination mechanisms — advisory locks, file leases, and
+check-then-rename on a shared writable tree — were probed and defeated by
+external writers; they are not part of this design (see Options).
 
 ### API boundary
 
@@ -187,65 +244,85 @@ The shared server operations are:
 - `GET /api/photos/{id}/external-metadata` for Read Metadata;
 - `POST /api/photos/{id}/external-metadata` for checked Save Metadata.
 
-The existing review-capture endpoint remains available for the Photo View's
-small capture display. The new endpoint is the complete metadata contract.
+The read result, save request, save result, and error envelope are pinned by
+JSON vectors in `compatibility/metadata/` and are the single contract for Web
+and CLI:
+
+- The read result carries per-field entries with `state`
+  (`present` | `absent` | `invalid` | `unavailable` | `resource_limit`),
+  provenance (`sidecar` | `embedded-xmp` | `iptc-iim` | `original`), the value
+  in its typed shape, `writable`, and, for language alternatives, the full
+  language map. Capture facts carry their standard EXIF identifiers, units,
+  and source. The result carries the association status, the evidence token,
+  and `save_available` with a reason when false.
+- The save request carries the evidence token and explicit `changes`: one
+  patch per field, with `set` carrying the typed value (including language
+  maps), `clear`, or `remove`. It cannot name a filesystem path.
+- The save result carries the affected fields, the verified values, and fresh
+  read evidence.
+- The error envelope carries one code from the product's failure
+  distinctions: `invalid_input`, `unsupported_field`, `photo_missing`,
+  `original_unavailable`, `association_unresolved`, `photo_removed`,
+  `metadata_malformed`, `evidence_stale`, `save_unavailable`, `permission`,
+  `resource_limit`, `storage_failure`, and `outcome_unknown`. HTTP status
+  mapping and CLI exit codes derive from the same code table.
 
 The CLI exposes the same operations as `photos metadata PHOTO_ID` and
-`photos metadata-save PHOTO_ID --input FILE`. The save input contains one
-`evidence` object and explicit `changes`; it cannot name a filesystem path.
-Web uses the same read result, displays provenance and pending patches, and
-refreshes after a conflict. Neither path creates an import or synchronization
-workflow.
+`photos metadata-save PHOTO_ID --input FILE`. Web uses the same read result,
+displays provenance and pending patches, and refreshes after a conflict.
+Neither path creates an import or synchronization workflow.
 
-The wire contract is normative and shared: one serializable schema defines the
-read result, every field patch shape, language maps, the evidence token, and
-each field's `present`, `absent`, `invalid`, and `unavailable` state with its
-writable flag. One error mapping defines the Product Spec's failure categories
-— invalid input, unsupported field, missing Photo, unavailable Original,
-unresolved association, Removed Photo, malformed or unreadable metadata, stale
-evidence, permission denial, resource limit, storage failure, and unknown
-outcome — as stable codes for HTTP and CLI alike. Web and CLI send and report
-the same shapes; neither invents a private subset.
+### Library ownership
+
+The database remains the owner of Library decisions and Photo identity. It
+does not cache Sidecar fields; the Sidecar Association record is ownership and
+conflict state, not metadata. Scan, Restore, Permanent Deletion, and Location
+Recovery do not apply Sidecar values to Library decisions. The confined
+publishing operation is reachable only through the metadata service's
+association owner, which derives the Sidecar destination from an admitted
+Photo; no general write-by-Library-path entry point is exposed to metadata
+callers.
 
 ## Options
 
-### Option A: delegate to ExifTool or Exiv2
+### Option A: advisory locks or file leases around check-then-rename
+
+`flock` does not bind writers that do not take the lock, and Linux file leases
+do not block external `rename` of the directory entry. Probes with disposable
+files reproduced both defeats, including data loss for the newly created
+Sidecar case. Rejected: the boundary is not enforced against external writers.
+
+### Option B: `RENAME_NOREPLACE` plus revision recheck
+
+This closes silent replacement of a raced creation but cannot make the
+publish step conditional on the observed revision of an existing file.
+Rejected for updates: it narrows but does not remove the lost-update window.
+
+### Option C: managed file service with an enforced quiesce window — selected
+
+External access flows through one managed file service. The save session stops
+that service, verifies the stop, validates, publishes, verifies, and restarts
+it, with a supervisor guaranteeing the restart. A disposable-environment probe
+demonstrated every step, including Original immutability under the writer
+identity, blocked external writes during the window, restored external access
+after success and after a mid-window crash, and unchanged Original bytes.
+Rejected alternative within this option — excluding external applications
+permanently — violates interoperability and is not used.
+
+### Option D: a cluster or cooperating filesystem
+
+A filesystem that enforces writer exclusion for uncoordinated writers would
+allow in-place sessions, but it constrains the deployment to a specific
+filesystem and still needs a writer identity policy. Rejected: Option C
+delivers the same guarantee on ordinary storage with a smaller contract.
+
+### Option E: delegate parsing to ExifTool or Exiv2
 
 A subprocess or system library would provide broad format support quickly.
-It is rejected because the supported deployment does not require either tool,
-process execution would complicate confinement and resource limits, and helper
-versions would make preservation and failure semantics deployment-dependent.
-
-### Option B: parse and edit a bounded XMP tree in Slipstream — selected
-
-A small in-process parser handles the declared fields and retains unknown
-nodes, attributes, namespaces, and values. The Original parser supplies the
-existing bounded EXIF facts, while a narrow IPTC IIM reader supplies the
-specified fallback fields. This keeps ownership, limits, and checked atomic
-writes in one implementation. It costs more field-specific code, but that
-cost is explicit and testable against standards fixtures.
-
-### Option C: rebuild a new Sidecar from the declared fields
-
-This is simpler to serialize but would discard unknown namespaces, structured
-properties, and another application's edit settings. It violates the Product
-Spec's preservation rule and is rejected.
-
-### Option D: stat-compare-then-rename without an exclusion authority
-
-This is the inherited draft algorithm. It is rejected: a separate process can
-publish newer Sidecar content between the revision check and the rename, and
-the rename destroys it. The violation cannot be repaired by post-write
-verification, and the same window lets a creation overwrite a Sidecar that
-appeared after the observed absence.
-
-### Option E: advisory locks or file leases as the only exclusion
-
-`flock`, `fcntl` locks, and `F_SETLEASE` are rejected as the sole boundary.
-They are advisory or open-based; a writer that does not participate bypasses
-them, and a read lease on the old inode does not prevent replacement of the
-directory entry. They remain useful only inside an environment where every
-writer is already forced to participate.
+Rejected for the in-process contract: Read must not depend on a helper
+executable, helper versions would make preservation and failure semantics
+deployment-dependent, and process execution complicates confinement. ExifTool
+remains an acceptance fixture, not a runtime dependency.
 
 ## Verification
 
@@ -254,29 +331,27 @@ Permanent tests must prove observable behavior rather than parser wiring:
 - every declared writable field can be set, cleared, removed, read back, and
   inspected through both CLI and Web;
 - language alternatives, ordered Creators, unordered Keywords, Unicode, zero,
-  false, fractional Rating, `-1`, and missing values retain their semantics;
+  false, fractional Rating, `-1`, and missing values retain their semantics,
+  including BCP 47 matching and the `x-default` refusal rule;
 - embedded, Sidecar, and IIM provenance plus absent-versus-empty fallback are
-  visible;
-- RAW/JPEG association cases, duplicate Sidecars, orphaned Sidecars, moved
-  Originals, and unresolved associations refuse unsafe writes;
-- unknown XMP structures survive, malformed and permission failures preserve
-  prior content, concurrent saves produce one success and one conflict, and a
-  restart requires fresh evidence;
+  visible for every kind in the extraction matrix;
+- RAW/JPEG association cases, duplicate Sidecars, retained orphan records, and
+  moved Originals refuse unsafe writes, and the `retained-orphan` state blocks
+  and clears through fresh inspection only;
+- evidence tokens are rejected after removal, restore, Permanent Deletion,
+  relocation that returns to the same Location, Association generation bumps,
+  and server restart;
+- unknown XMP structures survive saves, every construct outside the document
+  model makes Save refuse before mutation, malformed Sidecars are never
+  replaced, and one Photo's failed multi-field save leaves the prior Sidecar
+  unchanged;
+- the save session refuses when the file service cannot be quiesced, publishes
+  only while exclusive, reports `outcome_unknown` when verification cannot
+  confirm, and restores external access after success, failure, and mid-window
+  crash;
 - Original bytes, Library Rating, Selection State, Albums, Capture Time
-  ordering, and Preview state remain unchanged;
-- session admission excludes or refuses already-open external writers, and a
-  Save attempted outside an admitted session is refused;
-- a racing `.XMP` creation, an equal-length in-place external edit with a
-  preserved modification time, and an Original replacement during a session
-  each produce a precommit refusal that preserves newer content;
-- injected failures before, during, and after the commit point leave either
-  the prior Sidecar intact or an explicitly unknown outcome, never a false
-  success or a rollback over a later writer; and
-- direct write, truncate, chmod, unlink, rename, and replace attempts against
-  Originals from the Web UID fail, and the broker derives destinations only
-  from admitted associations; and
+  ordering, and Preview state remain unchanged throughout; and
 - ExifTool and Lightroom Classic fixtures are inspected with recorded tool
-  versions when those tools are available, including the ownership and
-  permission state after a Slipstream save that the next external edit
-  depends on. Unsupported or embedded-only JPEG workflows are recorded per
-  field rather than generalized into a universal compatibility claim.
+  versions when those tools are available. Unsupported or embedded-only JPEG
+  workflows are recorded per field rather than generalized into a universal
+  compatibility claim.
