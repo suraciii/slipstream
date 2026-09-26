@@ -1116,6 +1116,31 @@ impl Library {
             .map_err(Into::into)
     }
 
+    /// Runs metadata inspection and publication without interleaved state mutations.
+    pub async fn with_metadata<R: Send + 'static>(
+        &self,
+        photo_id: String,
+        work: impl FnOnce(
+            &crate::persistence::MetadataContext<'_>,
+        ) -> Result<R, crate::persistence::MetadataStoreError>
+        + Send
+        + 'static,
+    ) -> Result<R, crate::persistence::MetadataStoreError> {
+        let receive = {
+            let _admission = self
+                .admit()
+                .map_err(|_| crate::persistence::MetadataStoreError::Storage)?;
+            self.persistence.with_metadata_receiver(photo_id, work)?
+        };
+        tokio::task::spawn_blocking(move || {
+            receive
+                .blocking_recv()
+                .unwrap_or(Err(crate::persistence::MetadataStoreError::Storage))
+        })
+        .await
+        .unwrap_or(Err(crate::persistence::MetadataStoreError::Storage))
+    }
+
     /// Removes one reviewed result's Photos from the Library in one
     /// transaction. Each requested Photo reports exactly one outcome, and the
     /// operation id groups what Undo restores.
