@@ -140,6 +140,12 @@ value used for fitting. The receipt peak and its six hierarchical
 and local OOM fields (`oom`, `oom_kill`, `oom_group_kill`) must equal the parsed
 snapshot values, and all six OOM fields must be zero.
 
+The transient attempt slice enables systemd `IOAccounting` so its `io.stat`
+source is available while the slice exists. The launcher retains an open
+directory descriptor through the terminal read; unit teardown cannot redirect
+the read to a different cgroup. Neither measure makes missing I/O counters
+acceptable as a complete campaign I/O diagnostic.
+
 The same snapshot may retain the exact raw `io.stat` text from that exact
 verified attempt cgroup, inside the existing post-exit, unpopulated and
 identity-checked read. It shares the per-file cap and uses only the aggregate
