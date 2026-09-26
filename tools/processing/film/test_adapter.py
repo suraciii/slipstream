@@ -24,7 +24,7 @@ from spektrafilm.utils.bounded_output import plan_cctf_workspace, plan_jpeg_work
 
 
 class AdapterTests(unittest.TestCase):
-    def test_packaged_recipe_and_lut_probe_share_the_accepted_identity(self):
+    def test_packaged_recipe_and_lut_probes_share_the_accepted_identity(self):
         adapter.sys.path.insert(0, "/opt/probe")
         from film import make_simulator
         from contract import NUMERICAL_BUNDLE
@@ -35,19 +35,39 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(recipe["processing_bundle"], json.loads(packaged_bundle))
         adapter.check_recipe(recipe)
 
-        with tempfile.TemporaryDirectory(dir="/work", prefix="lut-quality-") as cache:
-            result = subprocess.run(
-                [sys.executable, "/opt/film-checks/lut_quality_probe.py"],
-                check=True, capture_output=True, text=True,
-                env={**os.environ, "NUMBA_CACHE_DIR": cache},
-            )
-        report = json.loads(result.stdout)
+        def run_probe(name):
+            with tempfile.TemporaryDirectory(dir="/work", prefix="lut-quality-") as cache:
+                result = subprocess.run(
+                    [sys.executable, f"/opt/film-checks/{name}"],
+                    check=True, capture_output=True, text=True,
+                    env={**os.environ, "NUMBA_CACHE_DIR": cache},
+                )
+            return json.loads(result.stdout)
+
+        report = run_probe("lut_quality_probe.py")
         self.assertTrue(report["recipe_identity_matches"])
         self.assertEqual(report["blocking_reasons"], [])
         self.assertFalse(report["acceptance"])
         self.assertEqual(report["criterion"], "not-selected")
         self.assertEqual(
             [case["case"] for case in report["cases"]],
+            ["neutral", "structured-range", "textured-range"],
+        )
+
+        reproducibility = run_probe("lut_reproducibility_probe.py")
+        self.assertTrue(reproducibility["recipe_identity_matches"])
+        self.assertEqual(reproducibility["blocking_reasons"], [])
+        self.assertTrue(reproducibility["fresh_process_repeatability"]["lut"])
+        self.assertTrue(reproducibility["fresh_process_repeatability"]["direct"])
+        self.assertTrue(reproducibility["in_process_repeatability"])
+        self.assertTrue(reproducibility["a_b_a"]["lut_before_after_direct_match"])
+        self.assertTrue(reproducibility["a_b_a"]["direct_runs_match"])
+        self.assertTrue(reproducibility["a_b_a"]["in_process_match"])
+        self.assertEqual(reproducibility["sequence"], ["lut", "direct", "lut", "direct"])
+        self.assertFalse(reproducibility["acceptance"])
+        self.assertEqual(reproducibility["criterion"], "not-selected")
+        self.assertEqual(
+            [case["case"] for case in reproducibility["cases"]],
             ["neutral", "structured-range", "textured-range"],
         )
 

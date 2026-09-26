@@ -34,7 +34,8 @@ COPY engine_checks/test_bounded_gamut.py engine_checks/test_buffer_lifetimes.py 
      engine_checks/cold_lifetime_probe.py \
      engine_checks/pipeline_reference_probe.py \
      engine_checks/scratch_probe.py engine_checks/lut_quality.py \
-     engine_checks/lut_quality_probe.py engine_checks/test_lut_quality.py \
+     engine_checks/lut_quality_probe.py engine_checks/lut_reproducibility_probe.py \
+     engine_checks/test_lut_quality.py \
      engine_checks/requirements.lock \
      engine_checks/0001-current-grain-contract.patch /opt/engine_checks/
 COPY Dockerfile /opt/development-Dockerfile

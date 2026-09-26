@@ -35,7 +35,8 @@ COPY tools/processing/film/test_contract.py tools/processing/film/test_adapter.p
      tools/processing/film/local-plan-vectors.json tools/processing/film/references.json \
      /opt/film-checks/
 COPY tools/development/engine_checks/lut_quality.py \
-     tools/development/engine_checks/lut_quality_probe.py /opt/film-checks/
+     tools/development/engine_checks/lut_quality_probe.py \
+     tools/development/engine_checks/lut_reproducibility_probe.py /opt/film-checks/
 COPY design/schemas/processing-film-measurement-canonical-vectors.json /opt/film-checks/canonical-vectors.json
 COPY design/schemas/processing-film-envelope-vectors.json /opt/film-checks/envelope-vectors.json
 ENV PYTHONPATH=/opt/film-measurement:/opt/spektrafilm/src
