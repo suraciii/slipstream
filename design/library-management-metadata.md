@@ -316,10 +316,11 @@ Rejected for updates: it narrows but does not remove the lost-update window.
 
 External access flows through one managed file service. The save session stops
 that service, verifies the stop, validates, publishes, verifies, and restarts
-it, with a supervisor guaranteeing the restart. A disposable-environment probe
-demonstrated every step, including Original immutability under the writer
-identity, blocked external writes during the window, restored external access
-after success and after a mid-window crash, and unchanged Original bytes.
+it, with a supervisor guaranteeing the restart. This is the selected target:
+the deployment profile — control-group fence with observed emptiness,
+disabled client caching, writer-identity isolation, and interruption
+recovery — must be implemented and qualified before any supported-deployment
+claim is made; no environment has demonstrated it yet.
 Rejected alternative within this option — excluding external applications
 permanently — violates interoperability and is not used.
 
