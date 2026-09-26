@@ -91,6 +91,11 @@ adapter and qualification recipe identities. An identity mismatch is a blocker,
 not accepted evidence. The probe does not declare acceptance: #338 must choose
 and independently justify the visual criterion before these measurements can
 qualify the LUT optimization.
+The accepted-runtime `adapter-checks` image also runs this probe against the
+retained numerical bundle used by the Film adapter. That check must report a
+matching recipe identity before its metrics can be considered #338 evidence;
+the development image's diagnostic remains useful for detecting qualification
+image drift but does not override the accepted-runtime identity.
 
 These expensive probes are separate from `bun run verify`, like the existing
 real-camera safety gate. Run that full repository gate before handing off a

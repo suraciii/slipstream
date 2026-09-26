@@ -21,6 +21,8 @@ tools/processing/**
 !tools/development/
 tools/development/**
 !tools/development/film_identity.py
+!tools/development/engine_checks/lut_quality.py
+!tools/development/engine_checks/lut_quality_probe.py
 tools/processing/film/**
 !tools/processing/film/Dockerfile
 !tools/processing/film/adapter.py
