@@ -13,6 +13,8 @@ use std::{
 };
 use url::Url;
 
+mod development;
+mod edit_preview_download;
 mod export_download;
 mod preview_download;
 
@@ -90,6 +92,11 @@ pub fn parse_error_preferences(arguments: &[OsString]) -> ParseErrorPreferences 
 pub enum Command {
     /// Inspect service compatibility and current Library status.
     Status,
+    /// Discover admitted processing stages, source profiles, and controls.
+    Processing {
+        #[command(subcommand)]
+        command: ProcessingCommand,
+    },
     /// Request one Library check through the service-owned scan cycle.
     Library {
         #[command(subcommand)]
@@ -115,6 +122,12 @@ pub enum Command {
         #[command(subcommand)]
         command: TrashCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProcessingCommand {
+    /// Read the service's current processing capability report.
+    Capability,
 }
 
 #[derive(Debug, Subcommand)]
@@ -295,6 +308,13 @@ pub enum PhotoCommand {
         #[arg(long, value_enum, default_value_t = PreviewSize::Review)]
         size: PreviewSize,
     },
+    /// Read, save, or explicitly rebind one Photo's Edit Recipe.
+    Recipe {
+        #[command(subcommand)]
+        command: development::RecipeCommand,
+    },
+    /// Request a Develop Edit Preview or download its ready rendition.
+    EditPreview(edit_preview_download::EditPreviewArgs),
     /// Submit, inspect, and download a developed Photo Export.
     Export {
         #[command(subcommand)]
@@ -346,7 +366,7 @@ pub struct PhotoExportDownloadArgs {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExportTargetArg {
-    /// Developed 16-bit TIFF of the saved Edit Recipe.
+    /// Full-resolution float32 RGB TIFF of the saved Edit Recipe.
     DevelopmentTiff,
     /// Finished JPEG rendered through the qualified film pipeline.
     FilmJpeg,
@@ -586,6 +606,11 @@ pub struct InvocationResult {
 #[derive(Clone, Copy, Debug)]
 enum Operation {
     Status,
+    ProcessingCapability,
+    PhotosRecipeGet,
+    PhotosRecipeSave,
+    PhotosRecipeRebind,
+    PhotosEditPreview,
     LibraryCheck,
     FoldersList,
     AlbumsList,
@@ -618,6 +643,11 @@ impl Operation {
     fn wire(self) -> &'static str {
         match self {
             Self::Status => "status",
+            Self::ProcessingCapability => "processing-capability",
+            Self::PhotosRecipeGet => "photos-recipe-get",
+            Self::PhotosRecipeSave => "photos-recipe-save",
+            Self::PhotosRecipeRebind => "photos-recipe-rebind",
+            Self::PhotosEditPreview => "photos-edit-preview",
             Self::LibraryCheck => "library-check",
             Self::FoldersList => "folders-list",
             Self::AlbumsList => "albums-list",
@@ -651,6 +681,7 @@ impl Operation {
 fn command_operation(command: &Command) -> Operation {
     match command {
         Command::Status => Operation::Status,
+        Command::Processing { .. } => Operation::ProcessingCapability,
         Command::Library { .. } => Operation::LibraryCheck,
         Command::Folders { .. } => Operation::FoldersList,
         Command::Albums { command } => match command {
@@ -667,6 +698,12 @@ fn command_operation(command: &Command) -> Operation {
             PhotoCommand::List(_) => Operation::PhotosList,
             PhotoCommand::Get { .. } => Operation::PhotosGet,
             PhotoCommand::Preview { .. } => Operation::PhotosPreview,
+            PhotoCommand::EditPreview(_) => Operation::PhotosEditPreview,
+            PhotoCommand::Recipe { command } => match command {
+                development::RecipeCommand::Get { .. } => Operation::PhotosRecipeGet,
+                development::RecipeCommand::Save(_) => Operation::PhotosRecipeSave,
+                development::RecipeCommand::Rebind(_) => Operation::PhotosRecipeRebind,
+            },
             PhotoCommand::Set(_) => Operation::PhotosSet,
             PhotoCommand::Remove(_) => Operation::PhotosRemove,
             PhotoCommand::RemovalOperation { .. } => Operation::PhotosRemovalInspect,
@@ -1146,23 +1183,71 @@ fn is_access_unavailable(body: &[u8]) -> bool {
         )
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Capabilities {
-    server_version: String,
-    supported_cli_contract_versions: Vec<u16>,
-    limits: CapabilityLimits,
+fn validate_capabilities(bytes: &[u8]) -> Result<(), CommandFailure> {
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|_| capability_shape_failure(Vec::new(), "invalid-json", None))?;
+    let versions = value
+        .get("supportedCliContractVersions")
+        .and_then(Value::as_array);
+    let supported: Vec<u16> = versions
+        .into_iter()
+        .flatten()
+        .filter_map(|version| u16::try_from(version.as_u64()?).ok())
+        .collect();
+    let failure = |field| {
+        capability_shape_failure(supported.clone(), "missing-or-invalid-field", Some(field))
+    };
+    if versions.is_none_or(|versions| versions.len() != supported.len()) {
+        return Err(failure("supportedCliContractVersions"));
+    }
+    if !supported.contains(&CLI_CONTRACT_VERSION) {
+        return Err(CommandFailure::incompatible(supported));
+    }
+    if value
+        .get("serverVersion")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        return Err(failure("serverVersion"));
+    }
+    let limits = value
+        .get("limits")
+        .and_then(Value::as_object)
+        .ok_or_else(|| failure("limits"))?;
+    for (name, field) in [
+        ("listPageMaximum", "limits.listPageMaximum"),
+        ("mutationPhotoIdsMaximum", "limits.mutationPhotoIdsMaximum"),
+        ("removalPhotoIdsMaximum", "limits.removalPhotoIdsMaximum"),
+        (
+            "albumReorderMembersMaximum",
+            "limits.albumReorderMembersMaximum",
+        ),
+        ("retainedQueryIdsMaximum", "limits.retainedQueryIdsMaximum"),
+        (
+            "retainedQueryIdleSeconds",
+            "limits.retainedQueryIdleSeconds",
+        ),
+    ] {
+        let limit = limits.get(name).and_then(Value::as_u64);
+        if limit.is_none_or(|limit| limit == 0)
+            || (name == "listPageMaximum" && limit != Some(MAXIMUM_LIST_PAGE as u64))
+        {
+            return Err(failure(field));
+        }
+    }
+    Ok(())
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CapabilityLimits {
-    list_page_maximum: u64,
-    mutation_photo_ids_maximum: u64,
-    removal_photo_ids_maximum: u64,
-    album_reorder_members_maximum: u64,
-    retained_query_ids_maximum: u64,
-    retained_query_idle_seconds: u64,
+fn capability_shape_failure(
+    supported: Vec<u16>,
+    reason: &str,
+    field: Option<&str>,
+) -> CommandFailure {
+    let mut failure = CommandFailure::incompatible(supported);
+    failure.payload.message = "The service capability response is incomplete or invalid. Install a client and service from the same candidate revision.".to_owned();
+    failure.payload.details["reason"] = json!(reason);
+    failure.payload.details["field"] = json!(field);
+    failure
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1909,7 +1994,7 @@ impl ServiceClient {
         url
     }
 
-    async fn capabilities(&self, operation: Operation) -> Result<Capabilities, CommandFailure> {
+    async fn capabilities(&self, operation: Operation) -> Result<(), CommandFailure> {
         let url = self.endpoint(&["api", "capabilities"]);
         let response = self
             .client
@@ -1942,28 +2027,7 @@ impl ServiceClient {
             }
             return Err(CommandFailure::incompatible(Vec::new()));
         }
-        let capabilities: Capabilities =
-            serde_json::from_slice(&bytes).map_err(|_| CommandFailure::incompatible(Vec::new()))?;
-        let valid_limits = capabilities.limits.list_page_maximum == 60
-            && capabilities.limits.mutation_photo_ids_maximum > 0
-            && capabilities.limits.removal_photo_ids_maximum > 0
-            && capabilities.limits.album_reorder_members_maximum > 0
-            && capabilities.limits.retained_query_ids_maximum > 0
-            && capabilities.limits.retained_query_idle_seconds > 0;
-        if capabilities.server_version.is_empty() || !valid_limits {
-            return Err(CommandFailure::incompatible(
-                capabilities.supported_cli_contract_versions,
-            ));
-        }
-        if !capabilities
-            .supported_cli_contract_versions
-            .contains(&CLI_CONTRACT_VERSION)
-        {
-            return Err(CommandFailure::incompatible(
-                capabilities.supported_cli_contract_versions,
-            ));
-        }
-        Ok(capabilities)
+        validate_capabilities(&bytes)
     }
 
     async fn json<T: DeserializeOwned>(
@@ -2188,26 +2252,38 @@ fn validated_route_failure(
         "storage_failed" => {
             required_keys(&["operation"]) && string("operation") == Some(operation.wire())
         }
-        // The Photo Development routes carry their closed refusal codes with
-        // an empty details object, so validity here is the code set itself.
-        // `outcome_unknown` stays unvalidated: a possibly admitted write
-        // keeps its unknown outcome and a read reports transport failure.
-        "invalid_settings"
-        | "unsupported_photo"
-        | "unknown_photo"
-        | "unknown_export"
-        | "missing_recipe"
-        | "recipe_conflict"
-        | "source_changed"
-        | "requires_rebind"
-        | "request_conflict"
+        // Development routes carry structured recovery facts. A missing or
+        // malformed conflict guard is not evidence of a confirmed refusal.
+        "recipe_conflict" | "source_changed" | "requires_rebind" => {
+            details.is_empty()
+                || (string("currentSourceRevision").is_some()
+                    && details.get("currentRecipeVersion").is_some_and(|value| {
+                        value.is_null() || value.as_str().is_some_and(|value| !value.is_empty())
+                    }))
+        }
+        "invalid_settings" => {
+            details.is_empty() || (string("argument").is_some() && string("reason").is_some())
+        }
+        "unknown_photo" => {
+            details.is_empty()
+                || (string("resource") == Some("photo") && string("reference").is_some())
+        }
+        "unsupported_photo" | "missing_recipe" | "request_conflict" => {
+            details.is_empty() || string("photoId").is_some()
+        }
+        "resource_unavailable" | "processing_unavailable" => {
+            details.is_empty()
+                || string("operation").is_some()
+                || string("photoId").is_some()
+                || string("reason").is_some()
+        }
+        // An outcome_unknown response never proves refusal of a write.
+        "unknown_export"
         | "export_conflict"
         | "output_unavailable"
         | "export_expired"
         | "receipt_expired"
         | "artifact_expired"
-        | "processing_unavailable"
-        | "resource_unavailable"
         | "retained_output_full" => details.is_empty(),
         _ => return None,
     };
@@ -3387,6 +3463,12 @@ async fn execute(
             preview_download::DestinationKind::Export,
             &args.file,
         )?),
+        Command::Photos {
+            command: PhotoCommand::EditPreview(args),
+        } => Some(preview_download::Destination::preflight(
+            preview_download::DestinationKind::EditPreview,
+            &args.file,
+        )?),
         _ => None,
     };
     let origin = service_origin(cli, environment)?;
@@ -3456,11 +3538,32 @@ async fn execute(
         }
         _ => None,
     };
+    let pending_recipe = match &cli.command {
+        Command::Photos {
+            command: PhotoCommand::Recipe { command },
+        } => development::prepare(command).await?,
+        _ => None,
+    };
     let client = ServiceClient::new(origin, token)?;
     client.capabilities(operation).await?;
 
     let result = async {
         match &cli.command {
+            Command::Processing { .. } => development::capability(&client).await,
+            Command::Photos {
+                command: PhotoCommand::Recipe { command },
+            } => development::execute(&client, admission, command, pending_recipe).await,
+            Command::Photos {
+                command: PhotoCommand::EditPreview(args),
+            } => {
+                edit_preview_download::download(
+                    &client,
+                    args,
+                    preview_destination.expect("Edit Preview destination was checked"),
+                    publication,
+                )
+                .await
+            }
             Command::Status => {
                 let data: StatusData = client
                     .json(
@@ -5638,12 +5741,5 @@ mod tests {
         let confirmed = mapped("export_conflict");
         assert_eq!(confirmed.payload.effect, "none");
         assert_eq!(confirmed.payload.details, json!({}));
-        // A nonempty details object is outside the development surface's
-        // closed shapes and cannot be trusted.
-        let decorated = ErrorPayload {
-            details: json!({"operation": "photos-export-submit"}),
-            ..refusal("processing_unavailable")
-        };
-        assert!(validated_route_failure(decorated, Operation::PhotosExportSubmit, "").is_none());
     }
 }

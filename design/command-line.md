@@ -113,13 +113,15 @@ messages. States, outcomes, snapshot identity, receipt expiry, disclosure
 rules, and the closed wire contract with every request field, response field,
 HTTP status mapping, and outcome/error code are owned by
 [Photo Development Architecture](photo-development.md#service-surface).
-The CLI exposes the same operations as:
-
-- `photos export submit PHOTO_ID --target development-tiff|film-jpeg
---request-id REQUEST_ID`;
-- `photos export list PHOTO_ID`;
-- `photos export status EXPORT_ID`; and
-- `photos export download EXPORT_ID --file PATH`.
+The [CLI Reference](../docs/cli-reference.md#photo-development) owns the public
+command grammar and normalized results. Recipe writes use complete JSON input
+with caller-observed guards. Implicitly reading fresh guards during save would
+overwrite a concurrent edit the caller has not observed. Explicit input also
+preserves the exact payload for receipt reconciliation after transport loss.
+Capability discovery and recipe reads preserve the shared wire facts. An Edit
+Preview request returns either pending admission or a validated local rendition;
+it never blocks in a hidden polling loop or substitutes Camera Preview.
+The existing no-replace file owner handles both Camera and Edit Preview output.
 
 Every CLI request identifies contract version 1 through
 `Slipstream-CLI-Contract: 1`. A server that advertises version 1 must validate
@@ -128,6 +130,13 @@ admission. An unsupported value fails without a mutation. The client checks
 capabilities before its command's operational request. An older service that
 lacks capabilities is incompatible; the client must not guess based on HTML,
 a health response, or a version string.
+
+Capability decoding preserves valid advertised versions even when a required
+field is missing or invalid. Version membership and representation validity are
+separate checks. Refuse incompatible representations before domain admission
+and identify the field in the diagnostic. Supporting an older partial service
+by filling missing limits with defaults would hide missing operations; a matching
+client/service candidate is the supported pairing.
 
 HTTP does not expose the CLI process envelope on existing Web routes. The
 client normalizes typed route results into the CLI envelope. New routes must

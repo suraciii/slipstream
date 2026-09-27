@@ -89,6 +89,13 @@ published availability, Photo count, and the existing scan facts. A reachable
 service with an initializing or failed scan is a successful status query; the
 scan state remains explicit. An incompatible service is an error.
 
+Compatibility is checked before any operational request. Use a client and service
+built from the same candidate source revision. Contract version 1 alone does not
+prove that a service implements all required capability fields. An invalid or
+incomplete capability response is `incompatible_server`, exit 6, effect `none`.
+The diagnostic preserves any valid advertised versions and identifies the
+missing or invalid field. Install a matching candidate; do not bypass negotiation.
+
 `library check` waits within the command timeout for the existing scan cycle's
 terminal result. A failed scan is a command error with its last confirmed status.
 A timeout tells the caller to query `status`; it does not claim cancellation.
@@ -385,6 +392,127 @@ name conflict when applicable. A name conflict includes the existing Album ID.
 No `--force`, implicit name reuse, automatic retry, or generic `undo` command
 exists.
 
+## Photo Development
+
+Camera Preview (`photos preview`) remains independent of saved editing intent.
+The following commands use the shared Photo Development operations:
+
+```text literal
+slipstream processing capability
+slipstream photos recipe get PHOTO_ID
+slipstream photos recipe save PHOTO_ID --input FILE
+slipstream photos recipe rebind PHOTO_ID --input FILE
+slipstream photos edit-preview PHOTO_ID --stage develop --file PATH [--settings current|baseline]
+slipstream photos export submit PHOTO_ID --target development-tiff|film-jpeg --request-id REQUEST_ID
+slipstream photos export list PHOTO_ID
+slipstream photos export status EXPORT_ID
+slipstream photos export download EXPORT_ID --file PATH
+```
+
+`film-jpeg` is an existing service target. Its presence in help is not evidence
+of native or deployment qualification. Use it only with a separately qualified
+Film deployment; a Develop workflow pass does not qualify Film.
+
+`processing capability` returns the service's processing capability report,
+including state, observed bundle and incarnation, profiles, exposure range and
+step, white-balance modes and ranges, and per-stage availability. These facts
+control admissible processing; the client must not infer support from a camera
+name or a previously successful operation.
+
+`recipe get` returns `photoId`, nullable `sourceRevision`, nullable `recipe`,
+`sourceSupport`, nullable `supportReason`, `processingAvailable`, and `controls`.
+Their meanings and closed values are defined by the shared
+[Edit Recipe wire contract](../design/photo-development.md#wire-contract).
+The CLI adds `webUrl`, the Photo Destination. An absent recipe is a successful
+read with `recipe: null`, not a saved baseline. Retained unsupported settings
+remain readable and must not be presented as currently executable.
+
+`recipe save` takes exactly this JSON object. Replace the example revisions
+with the observed values; `expectedRecipeVersion: null` explicitly requires
+that no recipe exists. All keys are required, including that nullable key.
+
+```json
+{
+  "requestId": "edit-001",
+  "expectedRecipeVersion": null,
+  "expectedSourceRevision": "observed-source-revision",
+  "settings": {
+    "exposureEv": 1.0,
+    "whiteBalance": { "mode": "as-shot" }
+  }
+}
+```
+
+Input uses the shared wire types, request-identity grammar and white-balance
+payload bounds. Exposure must satisfy the current reported range and step.
+The service remains authoritative for source, revision and processing checks.
+The CLI never fetches a newer recipe version to replace the caller's guard.
+Reset is an ordinary guarded save of `exposureEv: 0` and as-shot white balance.
+It preserves Photo identity and is not deletion of the recipe.
+
+`recipe rebind` takes exactly `requestId`, `expectedRecipeVersion`, and
+`newSourceRevision`, all nonempty strings with the shared wire meanings. It
+explicitly adopts the observed new source while preserving saved settings.
+Both writes return `photoId`, `requestId`, `outcome` (`saved` or `unchanged`),
+`recipeVersion`, `sourceRevision`, and `webUrl`. A lost or invalid response after
+admission is `outcome_unknown`, exit 7. Reconcile by reading the recipe or
+explicitly repeating the identical input and request ID before dependent work.
+A repeated ID with different input is `request_conflict`; no write retries are
+automatic. A replay confirms its retained receipt, not that no later edit exists.
+
+`edit-preview` selects `current` by default. `baseline` uses 0 EV and as-shot
+without saving. It performs one request, without polling. Accepted pending work
+returns success with `photoId`, `stage`, `settings`, `state` (`queued` or
+`running`), `fileCommitted: false`, and `webUrl`; no output file exists. Invoke
+the same read later. A ready rendition returns `state: "ready"`, the same
+identity fields, `sourceRevision`, `recipeVersion`, `displayTransform`,
+`contentType: "image/jpeg"`, `width`, `height`, `byteLength`, `sha256`,
+`expiresAt`, `detailLimited: true`, `path`, and `fileCommitted: true`.
+Baseline has an empty `recipeVersion`; current can also be empty when no recipe
+exists. Source and recipe revisions identify the returned rendition, which may
+become stale after a later edit or source change. An Edit Preview is bounded to
+64 MiB and is not a full-resolution Export. The client validates identity,
+length, digest and JPEG structure before publishing without replacement, using
+the same local-file safety rules as Camera Preview. Pending or failed work must
+not leave a completed-looking file. A refused stage never falls back to Camera.
+A service-reported indeterminate render admission is `outcome_unknown`, exit 7,
+effect `unknown`; request the preview again to reconcile it. It does not imply
+a local file was published.
+
+`export submit` reads current source and saved-recipe revisions, then submits
+exactly those guards with the caller's request ID. Absence is `missing_recipe`.
+A Development TIFF contains full-resolution float32 RGB, not 16-bit samples.
+Submission success reports `exportId`, `state`, `target`, `recipeVersion`,
+`sourceRevision`, nullable `receiptExpiresAt`, and nullable `artifactExpiresAt`.
+It confirms admission or replay, not completion. List returns `exports` of
+`exportId`, `state`, and `target`. Status returns the shared
+[Export inspection representation](../design/photo-development.md#wire-contract),
+including captured recipe/source revisions, terminal outcome, failure code and
+retained artifact. Keep the confirmed recipe read beside the Export receipt
+when reporting captured settings; status does not return those settings.
+Queued and running are successful inspections; the caller inspects again later.
+Submitting the same ID only replays when the captured request still matches;
+after a later Photo edit, inspect the original Export instead of resubmitting.
+
+`export download` requires a retained completed artifact. Its data contains
+`exportId`, `path`, `target`, `stage`, `contentType`, `width`, `height`,
+`profileIdentity`, `byteLength`, `sha256`, `expiresAt`, and `fileCommitted: true`.
+The SHA-256 is the service receipt digest. Transfer binds all artifact headers
+and length to that receipt and publishes without replacement. Independently hash
+and decode downloaded bytes for acceptance. Receipt/artifact expiry is reported
+separately; a successful submit or status must not be reported as a local download.
+
+Development errors retain the shared service code and structured details:
+`invalid_settings` and `unsupported_photo` exit 2; `unknown_photo`,
+`unknown_export`, and `missing_recipe` exit 3; `recipe_conflict`, `source_changed`,
+`requires_rebind`, `request_conflict`, `export_conflict`, and `output_unavailable`
+exit 4; `receipt_expired`, `export_expired`, `artifact_expired`,
+`processing_unavailable`, `resource_unavailable`, and `retained_output_full`
+exit 6. Confirmed refusals have effect `none`; unusable write responses retain
+effect `unknown`. Conflict details carry current revisions when the service
+provides them. No command silently rebinds a source, changes decisions or Albums,
+enables an unavailable stage, or submits an Export after an uncertain save.
+
 ## Output Envelope
 
 In JSON mode, every operational command emits one JSON document followed by a
@@ -546,8 +674,14 @@ Known error codes are `invalid_input`, `not_found`, `conflict`, `name_conflict`,
 `limit_exceeded`, `cursor_expired`, `incompatible_server`, `library_unavailable`,
 `preview_unavailable`, `server_busy`, `storage_failed`, `partial_result`,
 `transport_failed`, `outcome_unknown`, `local_io_failed`,
-`authentication_required`, and `access_denied`. Their `details`
-objects have these required shapes:
+`authentication_required`, and `access_denied`, plus the development codes
+listed in [Photo Development](#photo-development). Development `details` uses
+the shared route's recovery facts: conflict-family errors can carry nonempty
+`currentSourceRevision` and nullable `currentRecipeVersion`; request conflicts,
+missing recipes and unsupported Photos can carry `photoId`; invalid settings
+can carry `argument` and `reason`; unavailable processing can carry `photoId`,
+`operation`, or `reason`. Export routes can return an empty details object.
+The other codes have these required shapes:
 
 - `authentication_required` and `access_denied`: string `operation`;
 - `invalid_input`: string `argument` and string `reason`;
@@ -560,7 +694,8 @@ objects have these required shapes:
 - `cursor_expired`: `cursorKind` of `folder`, `album`, or `photo`, and `reason`
   of `publication_replaced`, `process_restarted`, or `idle_or_evicted`;
 - `incompatible_server`: integer `requestedContractVersion` and an integer array
-  `supportedContractVersions`;
+  `supportedContractVersions`; capability-shape failures also include string
+  `reason` and nullable string `field`;
 - `library_unavailable`: `scan: ScanStatus`;
 - `preview_unavailable`: string `photoId` and `state` of `inspection-pending`,
   `failed`, or `unavailable`;
@@ -577,9 +712,14 @@ For `authentication_required`, `access_denied`, `server_busy`, `storage_failed`,
 `operation` is one of `status`, `library-check`, `folders-list`, `albums-list`,
 `albums-get`, `photos-list`, `photos-get`, `photos-preview`, `photos-set`,
 `albums-create`, `albums-rename`, `albums-delete`, `albums-add`, `albums-remove`,
-or `albums-reorder`. `photoIds` in `outcome_unknown` contains all submitted Photo
-IDs in request order. The Album fields identify the submitted target when one
-exists. They are null for other operations.
+`albums-reorder`, `processing-capability`, `photos-recipe-get`,
+`photos-recipe-save`, `photos-recipe-rebind`, `photos-edit-preview`,
+`photos-export-submit`, `photos-export-list`, `photos-export-status`, or
+`photos-export-download`. `photoIds` in `outcome_unknown` contains all submitted
+Photo IDs in request order. The Album fields identify the submitted target when
+one exists and are null otherwise. Recipe writes and Export submission can
+have unknown mutation outcomes; capability, recipe reads and download transfers
+use read/transfer errors and do not claim a saved mutation.
 
 Command failures select codes as follows:
 

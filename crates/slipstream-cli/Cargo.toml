@@ -16,6 +16,7 @@ libc.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["time", "io-util"] }
 url.workspace = true
 zune-core.workspace = true
@@ -26,5 +27,4 @@ image.workspace = true
 rusqlite.workspace = true
 rustls = "=0.23.45"
 rustls-pemfile = "=2.2.0"
-sha2.workspace = true
 slipstream-server = { path = "../slipstream-server" }
