@@ -1,6 +1,6 @@
 use super::{
     DatabaseName, SchemaVersion, StateDirectory, StateError, StateFileIdentity,
-    admission::StateDatabaseLock, validate_canonical_schema,
+    admission::StateDatabaseLock, edit_recipe, export, migrations, validate_canonical_schema,
 };
 use crate::identity::classify_name;
 use crate::{
@@ -10,15 +10,12 @@ use crate::{
     CaptureFact, CaptureMetadataState, CaptureTimeField, CheckedAlbumMutation,
     CheckedAlbumMutationResult, CheckedPhotoDecisionCounts, CheckedPhotoDecisionItemResult,
     CheckedPhotoDecisionMutation, CheckedPhotoDecisionOutcome, CheckedPhotoDecisionResult,
-    DiscoveredOriginal, EXPORT_DEVELOPMENT_TIFF_WORKLOAD, EXPORT_FILM_JPEG_WORKLOAD,
-    EXPORT_RETENTION_SECONDS, EditRecipe, EditRecipeRead, EditRecipeSettings,
-    EditRecipeWriteOutcome, ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreCounts,
-    ExplicitPhotoRestoreMutation, ExplicitPhotoRestoreResult, ExportArtifactFacts, ExportAttempt,
-    ExportExposureRange, ExportLeaseOutcome, ExportRecipePayload, ExportRecord, ExportRetryOutcome,
-    ExportSettlement, ExportSnapshot, ExportSourceEvidence, ExportState, ExportSubmission,
-    ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult, LibraryRoot,
-    MAXIMUM_FOLDER_ALBUM_PHOTOS, MAXIMUM_PHOTO_RATING, OriginalErrorCategory, OriginalFacts,
-    OriginalFingerprint, OriginalKind, OriginalRecord, OriginalScanError,
+    DiscoveredOriginal, EditRecipeRead, EditRecipeWriteOutcome, ExplicitPhotoRemovalMutation,
+    ExplicitPhotoRestoreCounts, ExplicitPhotoRestoreMutation, ExplicitPhotoRestoreResult,
+    ExportAttempt, ExportLeaseOutcome, ExportRecord, ExportRetryOutcome, ExportSettlement,
+    ExportSubmission, ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult,
+    LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS, MAXIMUM_PHOTO_RATING, OriginalErrorCategory,
+    OriginalFacts, OriginalFingerprint, OriginalKind, OriginalRecord, OriginalScanError,
     PermanentDeletionItemResult, PermanentDeletionItemState, PermanentDeletionRejection,
     PermanentDeletionResult, PermanentDeletionReview, PermanentDeletionReviewItem,
     PermanentDeletionSelection, PermanentDeletionTarget, PermanentDeletionWorkItem,
@@ -40,7 +37,6 @@ use rusqlite::{
     params_from_iter, types::Value,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fmt,
@@ -59,34 +55,6 @@ const DEFAULT_QUEUE_CAPACITY: usize = 64;
 const STATE_OPEN: u8 = 0;
 const STATE_CLOSING: u8 = 1;
 const STATE_CLOSED: u8 = 2;
-const SCHEMA_V1_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v1.sql");
-// Save receipts stay durable at this internal boundary. Before Web or CLI
-// exposes request identities, the protocol must add an explicit age, expiry,
-// and expired-identity outcome; deleting keys without that contract could
-// allow an old identity to be reused for a different save.
-const EDIT_RECIPE_RECEIPT_PREFIX: &str = "edit_recipe_receipt:";
-const MAXIMUM_EDIT_RECIPE_REQUEST_ID_BYTES: usize = 128;
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct EditRecipeReceipt {
-    photo_id: String,
-    payload_digest: String,
-    outcome: EditRecipeReceiptOutcome,
-    revision: String,
-    source_revision: String,
-    exposure_ev: f64,
-    white_balance_mode: String,
-    #[serde(default)]
-    temperature_kelvin: Option<i32>,
-    #[serde(default)]
-    tint_milli: Option<i32>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-enum EditRecipeReceiptOutcome {
-    Saved,
-    Unchanged,
-}
 
 const PHOTO_REMOVAL_RECEIPT_PREFIX: &str = "photo_removal_receipt:";
 
@@ -815,6 +783,7 @@ type PhotoReadWindow = Result<Vec<Option<PhotoRead>>, PersistenceError>;
 type PhotoReadWindowReceiver = oneshot::Receiver<PhotoReadWindow>;
 type PhotoExports = Result<Option<Vec<ExportRecord>>, PersistenceError>;
 type PhotoExportsReceiver = oneshot::Receiver<PhotoExports>;
+pub(super) type ExportPublicationClaimReply = Result<Option<(String, u64)>, PersistenceError>;
 /// One bounded page of removed Photos with the complete removed count and the
 /// newest removal operation that still owns at least one Photo.
 type RemovedPhotoPage = (
@@ -855,8 +824,261 @@ impl PhotoRemovalRequest {
     }
 }
 
+/// Metadata work runs on the state owner, excluding lifecycle mutations.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MetadataRecord {
+    pub photo_id: String,
+    pub original_id: String,
+    pub relative_path: String,
+    pub kind: &'static str,
+    pub association_generation: u64,
+    pub removed: bool,
+    pub library_rating: u8,
+    pub active: Option<ActiveAssociation>,
+    pub orphan: Option<RetainedOrphan>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActiveAssociation {
+    pub sidecar_path: String,
+    pub observed_size: Option<u64>,
+    pub observed_mtime_ms: Option<f64>,
+    pub observed_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RetainedOrphan {
+    pub sidecar_path: String,
+    pub retired_photo_id: String,
+    pub retired_original_path: String,
+    pub original_kind: String,
+    pub retired_generation: u64,
+    pub observed_size: Option<u64>,
+    pub observed_mtime_ms: Option<f64>,
+    pub observed_digest: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetadataStoreError {
+    PhotoMissing,
+    PhotoRemoved,
+    OriginalUnavailable,
+    Storage,
+}
+
+#[derive(Clone, Debug)]
+pub struct ObservedSidecar {
+    pub state: ObservedSidecarState,
+}
+
+#[derive(Clone, Debug)]
+pub enum ObservedSidecarState {
+    Eligible {
+        path: String,
+        size: u64,
+        mtime_ms: f64,
+        digest: String,
+    },
+    Absent,
+    Changed,
+}
+
+pub struct MetadataContext<'a> {
+    connection: &'a Connection,
+    record: MetadataRecord,
+    candidate_path: String,
+}
+
+impl MetadataContext<'_> {
+    pub fn record(&self) -> &MetadataRecord {
+        &self.record
+    }
+
+    pub fn record_observation(
+        &self,
+        observation: &ObservedSidecar,
+    ) -> Result<u64, MetadataStoreError> {
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|_| MetadataStoreError::Storage)?;
+        match &observation.state {
+            ObservedSidecarState::Eligible {
+                path,
+                size,
+                mtime_ms,
+                digest,
+            } => {
+                let owner: Option<String> = transaction
+                    .query_row(
+                        "SELECT photo_id FROM sidecar_associations WHERE sidecar_path=?",
+                        [path],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|_| MetadataStoreError::Storage)?;
+                if let Some(owner) = owner.filter(|owner| owner != &self.record.photo_id) {
+                    // Sidecar ownership follows the eligible Original: a RAW
+                    // claim displaces a standing JPEG owner, and an owner whose
+                    // Original is no longer available cannot write anyway.
+                    // Every other standing owner is still the unambiguous
+                    // writer, so the claim stays a conflict. The displaced
+                    // owner's generation moves so its held evidence fails the
+                    // next check.
+                    let (owner_kind, owner_available): (String, bool) = transaction
+                        .query_row(
+                            "SELECT o.kind,o.available FROM photos p
+                             JOIN original_files o ON o.id=p.original_id WHERE p.id=?",
+                            [&owner],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()
+                        .map_err(|_| MetadataStoreError::Storage)?
+                        .ok_or(MetadataStoreError::Storage)?;
+                    let displaces =
+                        (self.record.kind == "raw" && owner_kind == "jpeg") || !owner_available;
+                    if !displaces {
+                        return Err(MetadataStoreError::Storage);
+                    }
+                    transaction
+                        .execute(
+                            "UPDATE photos SET association_generation=association_generation+1
+                             WHERE id=?",
+                            [&owner],
+                        )
+                        .map_err(|_| MetadataStoreError::Storage)?;
+                    transaction
+                        .execute(
+                            "DELETE FROM sidecar_associations WHERE photo_id=?",
+                            [&owner],
+                        )
+                        .map_err(|_| MetadataStoreError::Storage)?;
+                }
+                let size = i64::try_from(*size).map_err(|_| MetadataStoreError::Storage)?;
+                transaction.execute(
+                    "INSERT INTO sidecar_associations(photo_id,sidecar_path,observed_size,observed_mtime_ms,observed_digest)
+                     VALUES(?,?,?,?,?) ON CONFLICT(photo_id) DO UPDATE SET sidecar_path=excluded.sidecar_path,
+                     observed_size=excluded.observed_size,observed_mtime_ms=excluded.observed_mtime_ms,observed_digest=excluded.observed_digest",
+                    params![self.record.photo_id, path, size, mtime_ms, digest],
+                ).map_err(|_| MetadataStoreError::Storage)?;
+                transaction.execute(
+                    "DELETE FROM retained_sidecar_orphans WHERE sidecar_path=? AND
+                     (observed_size IS NOT ? OR observed_mtime_ms IS NOT ? OR observed_digest IS NOT ?)",
+                    params![path, size, mtime_ms, digest],
+                ).map_err(|_| MetadataStoreError::Storage)?;
+            }
+            ObservedSidecarState::Absent => {
+                transaction
+                    .execute(
+                        "DELETE FROM sidecar_associations WHERE photo_id=?",
+                        [&self.record.photo_id],
+                    )
+                    .map_err(|_| MetadataStoreError::Storage)?;
+            }
+            ObservedSidecarState::Changed => {
+                transaction
+                    .execute(
+                        "DELETE FROM retained_sidecar_orphans WHERE
+                         substr(sidecar_path,1,length(sidecar_path)-4)=substr(?1,1,length(?1)-4)
+                         AND lower(substr(sidecar_path,-4))='.xmp'",
+                        [&self.candidate_path],
+                    )
+                    .map_err(|_| MetadataStoreError::Storage)?;
+                // The Sidecar at this stem no longer reads as recorded, so no
+                // active association at the stem keeps standing evidence: each
+                // displaced owner's generation moves and its claim is dropped.
+                transaction
+                    .execute(
+                        "UPDATE photos SET association_generation=association_generation+1
+                         WHERE id IN (
+                             SELECT photo_id FROM sidecar_associations WHERE
+                             substr(sidecar_path,1,length(sidecar_path)-4)=substr(?1,1,length(?1)-4)
+                             AND lower(substr(sidecar_path,-4))='.xmp')",
+                        [&self.candidate_path],
+                    )
+                    .map_err(|_| MetadataStoreError::Storage)?;
+                transaction
+                    .execute(
+                        "DELETE FROM sidecar_associations WHERE
+                         substr(sidecar_path,1,length(sidecar_path)-4)=substr(?1,1,length(?1)-4)
+                         AND lower(substr(sidecar_path,-4))='.xmp'",
+                        [&self.candidate_path],
+                    )
+                    .map_err(|_| MetadataStoreError::Storage)?;
+            }
+        }
+        let generation: i64 = transaction
+            .query_row(
+                "SELECT association_generation FROM photos WHERE id=?",
+                [&self.record.photo_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| MetadataStoreError::Storage)?;
+        transaction
+            .commit()
+            .map_err(|_| MetadataStoreError::Storage)?;
+        Ok(generation as u64)
+    }
+}
+
+fn metadata_context<'a>(
+    connection: &'a Connection,
+    photo_id: &str,
+) -> Result<MetadataContext<'a>, MetadataStoreError> {
+    let row = connection.query_row(
+        "SELECT p.original_id,o.relative_path,o.kind,p.association_generation,p.removed_at_ms,o.available,p.rating
+         FROM photos p JOIN original_files o ON o.id=p.original_id WHERE p.id=?", [photo_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+                  row.get::<_, i64>(3)?, row.get::<_, Option<i64>>(4)?, row.get::<_, bool>(5)?, row.get::<_, u8>(6)?)),
+    ).optional().map_err(|_| MetadataStoreError::Storage)?.ok_or(MetadataStoreError::PhotoMissing)?;
+    if !row.5 {
+        return Err(MetadataStoreError::OriginalUnavailable);
+    }
+    let kind = match row.2.as_str() {
+        "raw" => "raw",
+        "jpeg" => "jpeg",
+        _ => return Err(MetadataStoreError::Storage),
+    };
+    let candidate_path = format!(
+        "{}.xmp",
+        row.1
+            .rsplit_once('.')
+            .map_or(row.1.as_str(), |(stem, _)| stem)
+    );
+    let active = connection.query_row(
+        "SELECT sidecar_path,observed_size,observed_mtime_ms,observed_digest FROM sidecar_associations WHERE photo_id=?", [photo_id],
+        |row| Ok(ActiveAssociation { sidecar_path: row.get(0)?, observed_size: row.get::<_, Option<i64>>(1)?.map(|size| size as u64), observed_mtime_ms: row.get(2)?, observed_digest: row.get(3)? }),
+    ).optional().map_err(|_| MetadataStoreError::Storage)?;
+    let orphan = connection.query_row(
+        "SELECT sidecar_path,retired_photo_id,retired_original_path,original_kind,retired_generation,observed_size,observed_mtime_ms,observed_digest
+         FROM retained_sidecar_orphans WHERE
+         substr(sidecar_path,1,length(sidecar_path)-4)=substr(?1,1,length(?1)-4)
+         AND lower(substr(sidecar_path,-4))='.xmp' ORDER BY sidecar_path LIMIT 1", [&candidate_path],
+        |row| Ok(RetainedOrphan { sidecar_path: row.get(0)?, retired_photo_id: row.get(1)?, retired_original_path: row.get(2)?, original_kind: row.get(3)?,
+            retired_generation: row.get::<_, i64>(4)? as u64, observed_size: row.get::<_, Option<i64>>(5)?.map(|size| size as u64), observed_mtime_ms: row.get(6)?, observed_digest: row.get(7)? }),
+    ).optional().map_err(|_| MetadataStoreError::Storage)?;
+    Ok(MetadataContext {
+        connection,
+        candidate_path,
+        record: MetadataRecord {
+            photo_id: photo_id.to_owned(),
+            original_id: row.0,
+            relative_path: row.1,
+            kind,
+            association_generation: row.3 as u64,
+            removed: row.4.is_some(),
+            library_rating: row.6,
+            active,
+            orphan,
+        },
+    })
+}
+
+type MetadataWork = Box<dyn FnOnce(&Connection) + Send>;
+
 enum Command {
     Probe(Reply<u64>),
+    Metadata(MetadataWork),
     Snapshot(Reply<ScanSnapshot>),
     ApplyScan {
         discovered: Vec<DiscoveredOriginal>,
@@ -1105,6 +1327,20 @@ pub struct Persistence {
 }
 
 impl Persistence {
+    pub(crate) fn with_metadata_receiver<R: Send + 'static>(
+        &self,
+        photo_id: String,
+        work: impl FnOnce(&MetadataContext<'_>) -> Result<R, MetadataStoreError> + Send + 'static,
+    ) -> Result<oneshot::Receiver<Result<R, MetadataStoreError>>, MetadataStoreError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::Metadata(Box::new(move |connection| {
+            let result = metadata_context(connection, &photo_id).and_then(|context| work(&context));
+            let _ = send.send(result);
+        })))
+        .map_err(|_| MetadataStoreError::Storage)?;
+        Ok(receive)
+    }
+
     #[cfg(test)]
     pub(crate) fn open(
         state: StateDirectory,
@@ -2273,6 +2509,7 @@ fn owner_main(
     for command in receiver {
         sequence += 1;
         match command {
+            Command::Metadata(work) => work(&connection),
             Command::Probe(reply) => {
                 let _ = reply.send(Ok(sequence));
             }
@@ -2358,14 +2595,24 @@ fn owner_main(
                 let _ = reply.send(read_photo(&connection, &versions, &photo_id));
             }
             Command::ReadEditRecipe { photo_id, reply } => {
-                let _ = reply.send(read_edit_recipe(&connection, &photo_id));
+                let _ = reply.send(edit_recipe::read_edit_recipe(&connection, &photo_id));
             }
             Command::SaveEditRecipe(mutation, reply) => {
-                let result = save_edit_recipe(&state, &database_name, &mut connection, mutation);
+                let result = edit_recipe::save_edit_recipe(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    mutation,
+                );
                 let _ = reply.send(result);
             }
             Command::RebindEditRecipe(mutation, reply) => {
-                let result = rebind_edit_recipe(&state, &database_name, &mut connection, mutation);
+                let result = edit_recipe::rebind_edit_recipe(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    mutation,
+                );
                 let _ = reply.send(result);
             }
             Command::ReadPhotos {
@@ -2567,11 +2814,12 @@ fn owner_main(
                 let _ = reply.send(result);
             }
             Command::SubmitExport(submission, reply) => {
-                let result = submit_export(&state, &database_name, &mut connection, submission);
+                let result =
+                    export::submit_export(&state, &database_name, &mut connection, submission);
                 let _ = reply.send(result);
             }
             Command::ReadExport { export_id, reply } => {
-                let _ = reply.send(export_record(&connection, &export_id));
+                let _ = reply.send(export::export_record(&connection, &export_id));
             }
             Command::TrashCandidates { selection, reply } => {
                 let _ = reply.send(trash_candidates(&connection, selection));
@@ -2643,10 +2891,11 @@ fn owner_main(
                 let _ = reply.send(read_permanent_deletion(&connection, &operation_id));
             }
             Command::ListPhotoExports { photo_id, reply } => {
-                let _ = reply.send(list_photo_exports(&connection, &photo_id));
+                let _ = reply.send(export::list_photo_exports(&connection, &photo_id));
             }
             Command::CancelExport { export_id, reply } => {
-                let result = cancel_export(&state, &database_name, &mut connection, &export_id);
+                let result =
+                    export::cancel_export(&state, &database_name, &mut connection, &export_id);
                 let _ = reply.send(result);
             }
             Command::SettleExport {
@@ -2654,7 +2903,7 @@ fn owner_main(
                 settlement,
                 reply,
             } => {
-                let result = settle_export(
+                let result = export::settle_export(
                     &state,
                     &database_name,
                     &mut connection,
@@ -2668,7 +2917,7 @@ fn owner_main(
                 attempt,
                 reply,
             } => {
-                let result = begin_export_attempt(
+                let result = export::begin_export_attempt(
                     &state,
                     &database_name,
                     &mut connection,
@@ -2683,7 +2932,7 @@ fn owner_main(
                 sha256,
                 reply,
             } => {
-                let result = record_export_source(
+                let result = export::record_export_source(
                     &state,
                     &database_name,
                     &mut connection,
@@ -2700,7 +2949,7 @@ fn owner_main(
                 allowance,
                 reply,
             } => {
-                let result = retry_export(
+                let result = export::retry_export(
                     &state,
                     &database_name,
                     &mut connection,
@@ -2717,7 +2966,7 @@ fn owner_main(
                 payload_digest,
                 reply,
             } => {
-                let _ = reply.send(Ok(resolve_export_submission(
+                let _ = reply.send(Ok(export::resolve_export_submission(
                     &connection,
                     &photo_id,
                     &request_id,
@@ -2730,7 +2979,7 @@ fn owner_main(
                 sequence,
                 reply,
             } => {
-                let _ = reply.send(claim_export_publication(
+                let _ = reply.send(export::claim_export_publication(
                     &mut connection,
                     &export_id,
                     &incarnation,
@@ -2738,34 +2987,51 @@ fn owner_main(
                 ));
             }
             Command::ExportPublicationClaim { export_id, reply } => {
-                let _ = reply.send(Ok(export_publication_claim(&connection, &export_id)));
+                let _ = reply.send(Ok(export::export_publication_claim(
+                    &connection,
+                    &export_id,
+                )));
             }
             Command::RenewExportLease {
                 lease_id,
                 now,
                 reply,
             } => {
-                let _ = reply.send(Ok(renew_export_lease(&mut connection, &lease_id, now)));
+                let _ = reply.send(Ok(export::renew_export_lease(
+                    &mut connection,
+                    &lease_id,
+                    now,
+                )));
             }
             Command::SweepExportExpiry { now, reply } => {
-                let result = sweep_export_expiry(&state, &database_name, &mut connection, now);
+                let result =
+                    export::sweep_export_expiry(&state, &database_name, &mut connection, now);
                 let _ = reply.send(result);
             }
             Command::UnfinishedExports(reply) => {
-                let _ = reply.send(unfinished_exports(&connection));
+                let _ = reply.send(export::unfinished_exports(&connection));
             }
             Command::AcquireExportLease {
                 export_id,
                 now,
                 reply,
             } => {
-                let result =
-                    acquire_export_lease(&state, &database_name, &mut connection, &export_id, now);
+                let result = export::acquire_export_lease(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    &export_id,
+                    now,
+                );
                 let _ = reply.send(result);
             }
             Command::ReleaseExportLease { lease_id, reply } => {
-                let result =
-                    release_export_lease(&state, &database_name, &mut connection, &lease_id);
+                let result = export::release_export_lease(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    &lease_id,
+                );
                 let _ = reply.send(result);
             }
             #[cfg(test)]
@@ -2810,14 +3076,14 @@ fn open_connection(
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(|_| PersistenceError::Storage)?;
-    preflight_schema(&readonly, canonical_root)?;
+    migrations::preflight_schema(&readonly, canonical_root)?;
     drop(readonly);
     state.admit_sidecars(database_name)?;
     let mut connection = Connection::open(state.sqlite_path(database_name))
         .map_err(|_| PersistenceError::Storage)?;
     state.verify_database(database_name, identity)?;
     state.admit_sidecars(database_name)?;
-    validate_root_binding(&connection, canonical_root)?;
+    migrations::validate_root_binding(&connection, canonical_root)?;
     connection
         .pragma_update(None, "journal_mode", "DELETE")
         .map_err(|_| PersistenceError::Storage)?;
@@ -2825,837 +3091,8 @@ fn open_connection(
     connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(|_| PersistenceError::Storage)?;
-    startup_schema(state, database_name, &mut connection, canonical_root)?;
+    migrations::startup_schema(state, database_name, &mut connection, canonical_root)?;
     Ok(connection)
-}
-
-fn preflight_schema(connection: &Connection, canonical_root: &str) -> Result<(), PersistenceError> {
-    preflight_schema_for_max_version(connection, canonical_root, 10)
-}
-
-fn preflight_schema_for_max_version(
-    connection: &Connection,
-    canonical_root: &str,
-    maximum_version: u32,
-) -> Result<(), PersistenceError> {
-    let version: u32 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|_| PersistenceError::Storage)?;
-    if version > maximum_version {
-        return Err(PersistenceError::NewerSchema);
-    }
-    validate_root_binding(connection, canonical_root)?;
-    match version {
-        0 if table_exists(connection, "original_files")? => validate_legacy_v0(connection),
-        0 => Ok(()),
-        1 => validate_canonical_schema(connection, SchemaVersion::V1)
-            .map_err(|_| PersistenceError::UnsupportedSchema),
-        2 => validate_canonical_schema(connection, SchemaVersion::V2)
-            .map_err(|_| PersistenceError::UnsupportedSchema),
-        3 => validate_canonical_schema(connection, SchemaVersion::V3)
-            .map_err(|_| PersistenceError::UnsupportedSchema),
-        4 => validate_canonical_schema(connection, SchemaVersion::V4)
-            .map_err(|_| PersistenceError::UnsupportedSchema),
-        5 => validate_canonical_schema(connection, SchemaVersion::V5)
-            .map_err(|_| PersistenceError::UnsupportedSchema),
-        6 => validate_canonical_schema(connection, SchemaVersion::V6)
-            .map_err(|_| PersistenceError::UnsupportedSchema),
-        7 => validate_canonical_schema(connection, SchemaVersion::V7)
-            .map_err(|_| PersistenceError::UnsupportedSchema),
-        8 => validate_canonical_schema(connection, SchemaVersion::V8)
-            .map_err(|_| PersistenceError::UnsupportedSchema),
-        9 => validate_canonical_schema(connection, SchemaVersion::V9)
-            .map_err(|_| PersistenceError::UnsupportedSchema),
-        10 => validate_canonical_schema(connection, SchemaVersion::V10)
-            .map_err(|_| PersistenceError::UnsupportedSchema),
-        _ => unreachable!(),
-    }
-}
-
-fn validate_root_binding(
-    connection: &Connection,
-    canonical_root: &str,
-) -> Result<(), PersistenceError> {
-    if table_exists(connection, "library_metadata")? {
-        let stored: Option<String> = connection
-            .query_row(
-                "SELECT value FROM library_metadata WHERE key='canonical_root'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|_| PersistenceError::Storage)?;
-        if stored
-            .as_deref()
-            .is_some_and(|stored| stored != canonical_root)
-        {
-            return Err(PersistenceError::RootMismatch);
-        }
-    }
-    Ok(())
-}
-
-fn startup_schema(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
-    canonical_root: &str,
-) -> Result<(), PersistenceError> {
-    let version: u32 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|_| PersistenceError::Storage)?;
-    if version > 10 {
-        return Err(PersistenceError::NewerSchema);
-    }
-    validate_root_binding(connection, canonical_root)?;
-    state.admit_sidecars(database_name)?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|_| PersistenceError::Storage)?;
-    match version {
-        0 => {
-            migrate_v0(&transaction)?;
-            migrate_v2(&transaction)?;
-            migrate_v3(&transaction)?;
-            migrate_v4(&transaction)?;
-        }
-        1 => {
-            validate_canonical_schema(&transaction, SchemaVersion::V1)
-                .map_err(|_| PersistenceError::UnsupportedSchema)?;
-            migrate_v1(&transaction)?;
-            migrate_v2(&transaction)?;
-            migrate_v3(&transaction)?;
-            migrate_v4(&transaction)?;
-        }
-        2 => {
-            validate_canonical_schema(&transaction, SchemaVersion::V2)
-                .map_err(|_| PersistenceError::UnsupportedSchema)?;
-            migrate_v2(&transaction)?;
-            migrate_v3(&transaction)?;
-            migrate_v4(&transaction)?;
-        }
-        3 => {
-            validate_canonical_schema(&transaction, SchemaVersion::V3)
-                .map_err(|_| PersistenceError::UnsupportedSchema)?;
-            migrate_v3(&transaction)?;
-            migrate_v4(&transaction)?;
-        }
-        4 => {
-            validate_canonical_schema(&transaction, SchemaVersion::V4)
-                .map_err(|_| PersistenceError::UnsupportedSchema)?;
-            migrate_v4(&transaction)?;
-        }
-        5 => validate_canonical_schema(&transaction, SchemaVersion::V5)
-            .map_err(|_| PersistenceError::UnsupportedSchema)?,
-        6 => validate_canonical_schema(&transaction, SchemaVersion::V6)
-            .map_err(|_| PersistenceError::UnsupportedSchema)?,
-        7 => validate_canonical_schema(&transaction, SchemaVersion::V7)
-            .map_err(|_| PersistenceError::UnsupportedSchema)?,
-        8 => validate_canonical_schema(&transaction, SchemaVersion::V8)
-            .map_err(|_| PersistenceError::UnsupportedSchema)?,
-        9 => validate_canonical_schema(&transaction, SchemaVersion::V9)
-            .map_err(|_| PersistenceError::UnsupportedSchema)?,
-        10 => validate_canonical_schema(&transaction, SchemaVersion::V10)
-            .map_err(|_| PersistenceError::UnsupportedSchema)?,
-        _ => unreachable!(),
-    }
-    if version < 6 {
-        migrate_v5(&transaction)?;
-    }
-    if version < 7 {
-        migrate_v6(&transaction)?;
-    }
-    if version < 8 {
-        migrate_v7(&transaction)?;
-    }
-    if version < 9 {
-        migrate_v8(&transaction)?;
-    }
-    if version < 10 {
-        migrate_v9(&transaction)?;
-    }
-    let stored: Option<String> = transaction
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key='canonical_root'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
-    if stored.is_none() {
-        transaction
-            .execute(
-                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
-                [canonical_root],
-            )
-            .map_err(|_| PersistenceError::Storage)?;
-    }
-    validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V10)
-        .map_err(|_| PersistenceError::UnsupportedSchema)?;
-    transaction.commit().map_err(|_| PersistenceError::Storage)
-}
-
-fn migrate_v0(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
-    if table_exists(transaction, "original_files")? {
-        validate_legacy_v0(transaction)?;
-        transaction
-            .execute_batch(
-                "ALTER TABLE original_files RENAME TO original_files_legacy;
-                 ALTER TABLE photos RENAME TO photos_legacy;
-                 CREATE TABLE original_files(
-                   id TEXT PRIMARY KEY, relative_path TEXT NOT NULL UNIQUE,
-                   kind TEXT NOT NULL CHECK(kind IN ('raw','jpeg')),
-                   size INTEGER NOT NULL CHECK(size >= 0), mtime_ms REAL NOT NULL CHECK(mtime_ms >= 0),
-                   available INTEGER NOT NULL CHECK(available IN (0,1)),
-                   error_category TEXT CHECK(error_category IS NULL OR error_category IN ('unreadable','changed')),
-                   error_message TEXT CHECK(error_message IS NULL OR length(error_message) <= 120));
-                 CREATE TABLE photos(
-                   id TEXT PRIMARY KEY, raw_original_id TEXT REFERENCES original_files(id), jpeg_original_id TEXT REFERENCES original_files(id),
-                   ambiguous INTEGER NOT NULL CHECK(ambiguous IN (0,1)), available INTEGER NOT NULL CHECK(available IN (0,1)),
-                   preview_state TEXT NOT NULL CHECK(preview_state IN ('inspection-pending','ready','failed','unavailable')),
-                   preview_candidate TEXT CHECK(preview_candidate IS NULL OR preview_candidate IN ('matching-jpeg','embedded-raw-jpeg')),
-                   preview_source TEXT CHECK(preview_source IS NULL OR preview_source IN ('matching-jpeg','embedded-raw-jpeg')),
-                   preview_source_revision TEXT, preview_width INTEGER CHECK(preview_width IS NULL OR preview_width > 0),
-                   preview_height INTEGER CHECK(preview_height IS NULL OR preview_height > 0), cache_revision TEXT, sort_path TEXT NOT NULL);
-                 INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,error_category,error_message)
-                   SELECT id,relative_path,kind,size,mtime_ms,available,NULL,NULL FROM original_files_legacy;
-                 INSERT INTO photos(id,raw_original_id,jpeg_original_id,ambiguous,available,preview_state,preview_source,sort_path)
-                   SELECT id,raw_original_id,jpeg_original_id,ambiguous,available,preview_state,preview_source,sort_path FROM photos_legacy;
-                 DROP TABLE photos_legacy; DROP TABLE original_files_legacy;
-                 CREATE INDEX photos_raw ON photos(raw_original_id);
-                 CREATE INDEX photos_jpeg ON photos(jpeg_original_id);
-                 PRAGMA user_version = 1;",
-            )
-            .map_err(|_| PersistenceError::Storage)?;
-    } else {
-        transaction
-            .execute_batch(SCHEMA_V1_SQL)
-            .map_err(|_| PersistenceError::Storage)?;
-    }
-    validate_canonical_schema(transaction, SchemaVersion::V1)
-        .map_err(|_| PersistenceError::UnsupportedSchema)?;
-    migrate_v1(transaction)
-}
-
-// album-language-legacy:start migrate-v1
-fn migrate_v1(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
-    // Creates schema v2 state: the legacy photo-set table names are part of
-    // the immutable v2-v4 contracts and are renamed to albums by migrate_v4.
-    transaction
-        .execute_batch(
-            "ALTER TABLE photos ADD COLUMN selection_state TEXT NOT NULL DEFAULT 'undecided'
-               CHECK(selection_state IN ('undecided','selected','rejected'));
-             ALTER TABLE photos ADD COLUMN rating INTEGER NOT NULL DEFAULT 0
-               CHECK(rating BETWEEN 0 AND 5);
-             CREATE TABLE photo_sets(
-               id TEXT PRIMARY KEY,
-               name TEXT NOT NULL UNIQUE COLLATE NOCASE CHECK(length(name) BETWEEN 1 AND 120),
-               created_at INTEGER NOT NULL);
-             CREATE TABLE photo_set_members(
-               photo_set_id TEXT NOT NULL REFERENCES photo_sets(id) ON DELETE CASCADE,
-               photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE RESTRICT,
-               position INTEGER NOT NULL CHECK(position >= 0),
-               PRIMARY KEY(photo_set_id, photo_id),
-               UNIQUE(photo_set_id, position));
-             CREATE TABLE review_progress(
-               photo_set_id TEXT PRIMARY KEY REFERENCES photo_sets(id) ON DELETE CASCADE,
-               photo_id TEXT NOT NULL,
-               FOREIGN KEY(photo_set_id, photo_id)
-                 REFERENCES photo_set_members(photo_set_id, photo_id) ON DELETE CASCADE);
-             CREATE INDEX photo_set_members_photo ON photo_set_members(photo_id);
-             PRAGMA user_version = 2;",
-        )
-        .map_err(|_| PersistenceError::Storage)
-}
-// album-language-legacy:end migrate-v1
-
-fn migrate_v2(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
-    transaction
-        .execute_batch(
-            "ALTER TABLE original_files ADD COLUMN capture_metadata_state TEXT NOT NULL DEFAULT 'pending'
-               CHECK(capture_metadata_state IN ('pending','known','missing','invalid','failed'));
-             ALTER TABLE original_files ADD COLUMN capture_order_key TEXT CHECK(capture_order_key IS NULL OR (
-               length(capture_order_key)=29 AND substr(capture_order_key,5,1)='-' AND
-               substr(capture_order_key,8,1)='-' AND substr(capture_order_key,11,1)='T' AND
-               substr(capture_order_key,14,1)=':' AND substr(capture_order_key,17,1)=':' AND
-               substr(capture_order_key,20,1)='.' AND
-               replace(replace(replace(replace(capture_order_key,'-',''),':',''),'T',''),'.','')
-                 NOT GLOB '*[^0-9]*'
-             ));
-             ALTER TABLE original_files ADD COLUMN capture_time_field TEXT CHECK(capture_time_field IS NULL OR capture_time_field IN ('date-time-original','date-time-digitized'));
-             ALTER TABLE original_files ADD COLUMN capture_offset_minutes INTEGER CHECK(capture_offset_minutes IS NULL OR capture_offset_minutes BETWEEN -840 AND 840);
-             ALTER TABLE original_files ADD COLUMN capture_source_revision TEXT;
-             PRAGMA user_version = 3;",
-        )
-        .map_err(|_| PersistenceError::Storage)
-}
-
-fn migrate_v3(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
-    transaction
-        .execute_batch("PRAGMA user_version = 4;")
-        .map_err(|_| PersistenceError::Storage)
-}
-
-// album-language-legacy:start migrate-v4
-fn migrate_v4(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
-    // Issue #95: rename the legacy v4 photo-set storage to canonical albums in
-    // one transaction. The new tables use DDL text identical to
-    // compatibility/sqlite/schema-v5.sql so the migrated database satisfies
-    // the exact schema-v5 manifest. Every album id, name, creation order,
-    // membership position, and saved position is copied unchanged.
-    transaction
-        .execute_batch(
-            "CREATE TABLE albums(
-               id TEXT PRIMARY KEY,
-               name TEXT NOT NULL UNIQUE COLLATE NOCASE CHECK(length(name) BETWEEN 1 AND 120),
-               created_at INTEGER NOT NULL);
-             CREATE TABLE album_members(
-               album_id TEXT NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
-               photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE RESTRICT,
-               position INTEGER NOT NULL CHECK(position >= 0),
-               PRIMARY KEY(album_id, photo_id),
-               UNIQUE(album_id, position));
-             CREATE TABLE album_progress(
-               album_id TEXT PRIMARY KEY REFERENCES albums(id) ON DELETE CASCADE,
-               photo_id TEXT NOT NULL,
-               FOREIGN KEY(album_id, photo_id)
-                 REFERENCES album_members(album_id, photo_id) ON DELETE CASCADE);
-             CREATE INDEX album_members_photo ON album_members(photo_id);
-             INSERT INTO albums(id,name,created_at)
-               SELECT id,name,created_at FROM photo_sets;
-             INSERT INTO album_members(album_id,photo_id,position)
-               SELECT photo_set_id,photo_id,position FROM photo_set_members;
-             INSERT INTO album_progress(album_id,photo_id)
-               SELECT photo_set_id,photo_id FROM review_progress;
-             DROP TABLE review_progress;
-             DROP TABLE photo_set_members;
-             DROP TABLE photo_sets;
-             PRAGMA user_version = 5;",
-        )
-        .map_err(|_| PersistenceError::Storage)
-}
-// album-language-legacy:end migrate-v4
-
-// independent-photos-legacy:start migrate-v5
-fn migrate_v5(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
-    // Issue #304: one independently managed Original File per Photo. A legacy
-    // RAW/JPEG pair keeps its Photo identity, decisions, Album references,
-    // and saved position on the RAW Original; its JPEG Original receives a new
-    // independent Photo with default decisions. Content fingerprints start
-    // empty and are enrolled in the background after migration.
-    transaction
-        .execute_batch(
-            "CREATE TABLE original_fingerprints(
-               original_id TEXT PRIMARY KEY REFERENCES original_files(id) ON DELETE CASCADE,
-               digest TEXT NOT NULL CHECK(length(digest) = 64),
-               size INTEGER NOT NULL CHECK(size >= 0),
-               mtime_ms REAL NOT NULL CHECK(mtime_ms >= 0));
-             CREATE INDEX original_fingerprints_digest ON original_fingerprints(digest);
-             CREATE TABLE photos_v6(
-               id TEXT PRIMARY KEY,
-               original_id TEXT NOT NULL UNIQUE REFERENCES original_files(id) ON DELETE RESTRICT,
-               available INTEGER NOT NULL CHECK(available IN (0,1)),
-               preview_state TEXT NOT NULL CHECK(preview_state IN ('inspection-pending','ready','failed','unavailable')),
-               preview_source_revision TEXT,
-               preview_width INTEGER CHECK(preview_width IS NULL OR preview_width > 0),
-               preview_height INTEGER CHECK(preview_height IS NULL OR preview_height > 0),
-               cache_revision TEXT,
-               sort_path TEXT NOT NULL,
-               selection_state TEXT NOT NULL DEFAULT 'undecided' CHECK(selection_state IN ('undecided','selected','rejected')),
-               rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5));",
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-
-    let originals = original_facts_by_id(transaction)?;
-    let photos = transaction
-        .prepare(
-            "SELECT id,raw_original_id,jpeg_original_id,preview_state,preview_source,
-                    preview_source_revision,preview_width,preview_height,cache_revision,
-                    sort_path,selection_state,rating
-             FROM photos ORDER BY id",
-        )
-        .map_err(|_| PersistenceError::Storage)?
-        .query_map([], |row| {
-            Ok(LegacyPhotoRow {
-                id: row.get(0)?,
-                raw_original_id: row.get(1)?,
-                jpeg_original_id: row.get(2)?,
-                preview_state: row.get(3)?,
-                preview_source: row.get(4)?,
-                preview_source_revision: row.get(5)?,
-                preview_width: row.get(6)?,
-                preview_height: row.get(7)?,
-                cache_revision: row.get(8)?,
-                sort_path: row.get(9)?,
-                selection_state: row.get(10)?,
-                rating: row.get(11)?,
-            })
-        })
-        .map_err(|_| PersistenceError::Storage)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| PersistenceError::InvalidLegacyData)?;
-    let mut insert = transaction
-        .prepare(
-            "INSERT INTO photos_v6(id,original_id,available,preview_state,preview_source_revision,
-               preview_width,preview_height,cache_revision,sort_path,selection_state,rating)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    let mut reserved_ids = HashSet::new();
-    for photo in photos {
-        let kept = photo
-            .raw_original_id
-            .clone()
-            .or_else(|| photo.jpeg_original_id.clone());
-        let Some(kept) = kept else {
-            // A Photo with no Original is unusable; album references, if any,
-            // fail closed through the RESTRICT foreign key.
-            transaction
-                .execute("DELETE FROM photos WHERE id=?", [&photo.id])
-                .map_err(|_| PersistenceError::InvalidLegacyData)?;
-            continue;
-        };
-        let Some((kept_available, kept_path, kept_size, kept_mtime, kept_kind)) =
-            originals.get(&kept).cloned()
-        else {
-            return Err(PersistenceError::InvalidLegacyData);
-        };
-        let preserved = Some(kept_kind.preview_source().legacy_database_name())
-            == photo.preview_source.as_deref()
-            && revision_matches(
-                photo.preview_source_revision.as_deref(),
-                &kept_path,
-                kept_size,
-                kept_mtime,
-            );
-        let preview_state = if preserved {
-            photo.preview_state
-        } else {
-            "inspection-pending".to_owned()
-        };
-        insert
-            .execute(params![
-                photo.id,
-                kept,
-                i64::from(kept_available),
-                preview_state,
-                preserved.then_some(photo.preview_source_revision).flatten(),
-                preserved.then_some(photo.preview_width).flatten(),
-                preserved.then_some(photo.preview_height).flatten(),
-                preserved.then_some(photo.cache_revision).flatten(),
-                photo.sort_path,
-                photo.selection_state,
-                photo.rating,
-            ])
-            .map_err(|_| PersistenceError::InvalidLegacyData)?;
-        if let Some(jpeg_id) = photo.jpeg_original_id {
-            if photo.raw_original_id.is_none() {
-                continue;
-            }
-            let Some((jpeg_available, jpeg_path, _size, _mtime, _kind)) =
-                originals.get(&jpeg_id).cloned()
-            else {
-                return Err(PersistenceError::InvalidLegacyData);
-            };
-            let new_id = allocate_library_id(transaction, &mut reserved_ids)?;
-            insert
-                .execute(params![
-                    new_id,
-                    jpeg_id,
-                    i64::from(jpeg_available),
-                    "inspection-pending",
-                    Option::<String>::None,
-                    Option::<i64>::None,
-                    Option::<i64>::None,
-                    Option::<String>::None,
-                    jpeg_path,
-                    "undecided",
-                    0,
-                ])
-                .map_err(|_| PersistenceError::InvalidLegacyData)?;
-        }
-    }
-    // Rebuild photos without violating the album foreign keys: unload the
-    // album tables, replace photos, then recreate them with identical DDL and
-    // every original row. One transaction keeps the migration atomic.
-    let albums: Vec<(String, String, i64)> = transaction
-        .prepare("SELECT id,name,created_at FROM albums ORDER BY created_at,id")
-        .map_err(|_| PersistenceError::Storage)?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .map_err(|_| PersistenceError::Storage)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| PersistenceError::InvalidLegacyData)?;
-    let members: Vec<(String, String, i64)> = transaction
-        .prepare("SELECT album_id,photo_id,position FROM album_members ORDER BY album_id,position")
-        .map_err(|_| PersistenceError::Storage)?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .map_err(|_| PersistenceError::Storage)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| PersistenceError::InvalidLegacyData)?;
-    let progress: Vec<(String, String)> = transaction
-        .prepare("SELECT album_id,photo_id FROM album_progress ORDER BY album_id")
-        .map_err(|_| PersistenceError::Storage)?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .map_err(|_| PersistenceError::Storage)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| PersistenceError::InvalidLegacyData)?;
-    transaction
-        .execute_batch(
-            "DROP TABLE album_progress;
-             DROP TABLE album_members;
-             DROP TABLE albums;
-             DROP TABLE photos;
-             ALTER TABLE photos_v6 RENAME TO photos;
-             CREATE INDEX photos_original ON photos(original_id);
-             CREATE TABLE albums(
-               id TEXT PRIMARY KEY,
-               name TEXT NOT NULL UNIQUE COLLATE NOCASE CHECK(length(name) BETWEEN 1 AND 120),
-               created_at INTEGER NOT NULL);
-             CREATE TABLE album_members(
-               album_id TEXT NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
-               photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE RESTRICT,
-               position INTEGER NOT NULL CHECK(position >= 0),
-               PRIMARY KEY(album_id, photo_id),
-               UNIQUE(album_id, position));
-             CREATE TABLE album_progress(
-               album_id TEXT PRIMARY KEY REFERENCES albums(id) ON DELETE CASCADE,
-               photo_id TEXT NOT NULL,
-               FOREIGN KEY(album_id, photo_id) REFERENCES album_members(album_id, photo_id) ON DELETE CASCADE);
-             CREATE INDEX album_members_photo ON album_members(photo_id);
-             PRAGMA user_version = 6;",
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    {
-        let mut insert_album = transaction
-            .prepare("INSERT INTO albums(id,name,created_at) VALUES(?,?,?)")
-            .map_err(|_| PersistenceError::Storage)?;
-        for (id, name, created_at) in &albums {
-            insert_album
-                .execute(params![id, name, created_at])
-                .map_err(|_| PersistenceError::InvalidLegacyData)?;
-        }
-        let mut insert_member = transaction
-            .prepare("INSERT INTO album_members(album_id,photo_id,position) VALUES(?,?,?)")
-            .map_err(|_| PersistenceError::Storage)?;
-        for (album_id, photo_id, position) in &members {
-            insert_member
-                .execute(params![album_id, photo_id, position])
-                .map_err(|_| PersistenceError::InvalidLegacyData)?;
-        }
-        let mut insert_progress = transaction
-            .prepare("INSERT INTO album_progress(album_id,photo_id) VALUES(?,?)")
-            .map_err(|_| PersistenceError::Storage)?;
-        for (album_id, photo_id) in &progress {
-            insert_progress
-                .execute(params![album_id, photo_id])
-                .map_err(|_| PersistenceError::InvalidLegacyData)?;
-        }
-    }
-    validate_canonical_schema(transaction, SchemaVersion::V6)
-        .map_err(|_| PersistenceError::UnsupportedSchema)
-}
-
-fn migrate_v6(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
-    validate_canonical_schema(transaction, SchemaVersion::V6)
-        .map_err(|_| PersistenceError::UnsupportedSchema)?;
-    transaction
-        .execute_batch(
-            "CREATE TABLE edit_recipes(
-               photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE RESTRICT,
-               revision TEXT NOT NULL CHECK(length(revision) > 0),
-               source_revision TEXT NOT NULL CHECK(length(source_revision) > 0),
-               exposure_ev REAL NOT NULL CHECK(exposure_ev BETWEEN -1.7976931348623157e308 AND 1.7976931348623157e308),
-               white_balance_mode TEXT NOT NULL CHECK(white_balance_mode = 'as-shot')
-             );
-             PRAGMA user_version = 7;",
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(transaction, SchemaVersion::V7)
-        .map_err(|_| PersistenceError::UnsupportedSchema)
-}
-
-fn migrate_v7(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
-    validate_canonical_schema(transaction, SchemaVersion::V7)
-        .map_err(|_| PersistenceError::UnsupportedSchema)?;
-    // The closed white-balance payload bounds are published independent of
-    // admission, so a recipe can retain a temperature-tint editing intent
-    // that no capability admits for execution. The rebuild widens the mode
-    // column and adds the two nullable intent values; existing as-shot rows
-    // keep null values.
-    transaction
-        .execute_batch(
-            "ALTER TABLE edit_recipes RENAME TO edit_recipes_v7;
-             CREATE TABLE edit_recipes(
-               photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE RESTRICT,
-               revision TEXT NOT NULL CHECK(length(revision) > 0),
-               source_revision TEXT NOT NULL CHECK(length(source_revision) > 0),
-               exposure_ev REAL NOT NULL CHECK(exposure_ev BETWEEN -1.7976931348623157e308 AND 1.7976931348623157e308),
-               white_balance_mode TEXT NOT NULL CHECK(white_balance_mode IN ('as-shot','temperature-tint')),
-               temperature_kelvin INTEGER CHECK(temperature_kelvin IS NULL OR temperature_kelvin BETWEEN 1000 AND 40000),
-               tint_milli INTEGER CHECK(tint_milli IS NULL OR tint_milli BETWEEN -150000 AND 150000)
-             );
-             INSERT INTO edit_recipes(photo_id,revision,source_revision,exposure_ev,white_balance_mode)
-               SELECT photo_id,revision,source_revision,exposure_ev,white_balance_mode FROM edit_recipes_v7;
-             DROP TABLE edit_recipes_v7;
-             CREATE TABLE exports(
-               id TEXT PRIMARY KEY,
-               photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE RESTRICT,
-               target TEXT NOT NULL CHECK(target = 'development-tiff'),
-               state TEXT NOT NULL CHECK(state IN ('queued','running','succeeded','failed','cancelled')),
-               outcome TEXT CHECK(outcome IS NULL OR length(outcome) BETWEEN 1 AND 200),
-               recipe_revision TEXT NOT NULL CHECK(length(recipe_revision) > 0),
-               exposure_ev REAL NOT NULL,
-               white_balance_mode TEXT NOT NULL CHECK(white_balance_mode = 'as-shot'),
-               source_revision TEXT NOT NULL CHECK(length(source_revision) > 0),
-               source_profile_id TEXT NOT NULL CHECK(length(source_profile_id) BETWEEN 1 AND 64),
-               source_kind TEXT NOT NULL CHECK(source_kind = 'raw'),
-               source_size INTEGER CHECK(source_size IS NULL OR source_size > 0),
-               source_sha256 TEXT CHECK(source_sha256 IS NULL OR length(source_sha256) = 64),
-               recipe_digest TEXT NOT NULL CHECK(length(recipe_digest) = 64),
-               policy_id TEXT NOT NULL CHECK(length(policy_id) = 64),
-               bundle_id TEXT NOT NULL CHECK(length(bundle_id) = 64),
-               workload TEXT NOT NULL CHECK(workload = 'development-tiff'),
-               attempt_incarnation TEXT CHECK(attempt_incarnation IS NULL OR length(attempt_incarnation) = 32),
-               attempt_sequence INTEGER CHECK(attempt_sequence IS NULL OR attempt_sequence > 0),
-               artifact_size INTEGER CHECK(artifact_size IS NULL OR artifact_size > 0),
-               artifact_sha256 TEXT CHECK(artifact_sha256 IS NULL OR length(artifact_sha256) = 64),
-               artifact_expires_at INTEGER CHECK(artifact_expires_at IS NULL OR artifact_expires_at >= 0),
-               artifact_width INTEGER CHECK(artifact_width IS NULL OR artifact_width > 0),
-               artifact_height INTEGER CHECK(artifact_height IS NULL OR artifact_height > 0),
-               artifact_profile_identity TEXT CHECK(artifact_profile_identity IS NULL OR length(artifact_profile_identity) = 64),
-               created_at INTEGER NOT NULL CHECK(created_at >= 0),
-               settled_at INTEGER CHECK(settled_at IS NULL OR settled_at >= 0),
-               retain_until INTEGER CHECK(retain_until IS NULL OR retain_until >= 0)
-             );
-             CREATE INDEX exports_photo ON exports(photo_id);
-             CREATE TABLE export_download_leases(
-               id TEXT PRIMARY KEY,
-               export_id TEXT NOT NULL REFERENCES exports(id) ON DELETE CASCADE,
-               created_at INTEGER NOT NULL CHECK(created_at >= 0)
-             );
-             PRAGMA user_version = 8;",
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(transaction, SchemaVersion::V8)
-        .map_err(|_| PersistenceError::UnsupportedSchema)
-}
-
-/// Issue #416: a removed Photo keeps its row and every retained fact. The
-/// removal marker is application-owned Library state, so it is added to the
-/// Photo row instead of a separate recovery record.
-fn migrate_v8(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
-    validate_canonical_schema(transaction, SchemaVersion::V8)
-        .map_err(|_| PersistenceError::UnsupportedSchema)?;
-    transaction
-        .execute_batch(
-            "ALTER TABLE photos ADD COLUMN removed_at_ms INTEGER
-               CHECK(removed_at_ms IS NULL OR removed_at_ms >= 0);
-             ALTER TABLE photos ADD COLUMN removed_operation TEXT
-               CHECK((removed_at_ms IS NULL) = (removed_operation IS NULL));
-             PRAGMA user_version = 9;",
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(transaction, SchemaVersion::V9)
-        .map_err(|_| PersistenceError::UnsupportedSchema)
-}
-
-/// Issue #327: allow the first production Film workload without changing the
-/// durable Export row shape. Rebuild only the two tables whose closed checks
-/// widen from the V9 development workload to V10's two workloads.
-fn migrate_v9(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
-    validate_canonical_schema(transaction, SchemaVersion::V9)
-        .map_err(|_| PersistenceError::UnsupportedSchema)?;
-    transaction
-        .execute_batch(
-            "ALTER TABLE export_download_leases RENAME TO export_download_leases_v9;
-             DROP INDEX exports_photo;
-             ALTER TABLE exports RENAME TO exports_v9;
-             CREATE TABLE exports(
-               id TEXT PRIMARY KEY,
-               photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE RESTRICT,
-               target TEXT NOT NULL CHECK(target IN ('development-tiff','film-jpeg')),
-               state TEXT NOT NULL CHECK(state IN ('queued','running','succeeded','failed','cancelled')),
-               outcome TEXT CHECK(outcome IS NULL OR length(outcome) BETWEEN 1 AND 200),
-               recipe_revision TEXT NOT NULL CHECK(length(recipe_revision) > 0),
-               exposure_ev REAL NOT NULL,
-               white_balance_mode TEXT NOT NULL CHECK(white_balance_mode = 'as-shot'),
-               source_revision TEXT NOT NULL CHECK(length(source_revision) > 0),
-               source_profile_id TEXT NOT NULL CHECK(length(source_profile_id) BETWEEN 1 AND 64),
-               source_kind TEXT NOT NULL CHECK(source_kind = 'raw'),
-               source_size INTEGER CHECK(source_size IS NULL OR source_size > 0),
-               source_sha256 TEXT CHECK(source_sha256 IS NULL OR length(source_sha256) = 64),
-               recipe_digest TEXT NOT NULL CHECK(length(recipe_digest) = 64),
-               policy_id TEXT NOT NULL CHECK(length(policy_id) = 64),
-               bundle_id TEXT NOT NULL CHECK(length(bundle_id) = 64),
-               workload TEXT NOT NULL CHECK(workload IN ('development-tiff','film-jpeg')),
-               attempt_incarnation TEXT CHECK(attempt_incarnation IS NULL OR length(attempt_incarnation) = 32),
-               attempt_sequence INTEGER CHECK(attempt_sequence IS NULL OR attempt_sequence > 0),
-               artifact_size INTEGER CHECK(artifact_size IS NULL OR artifact_size > 0),
-               artifact_sha256 TEXT CHECK(artifact_sha256 IS NULL OR length(artifact_sha256) = 64),
-               artifact_expires_at INTEGER CHECK(artifact_expires_at IS NULL OR artifact_expires_at >= 0),
-               artifact_width INTEGER CHECK(artifact_width IS NULL OR artifact_width > 0),
-               artifact_height INTEGER CHECK(artifact_height IS NULL OR artifact_height > 0),
-               artifact_profile_identity TEXT CHECK(artifact_profile_identity IS NULL OR length(artifact_profile_identity) = 64),
-               created_at INTEGER NOT NULL CHECK(created_at >= 0),
-               settled_at INTEGER CHECK(settled_at IS NULL OR settled_at >= 0),
-               retain_until INTEGER CHECK(retain_until IS NULL OR retain_until >= 0)
-             );
-             INSERT INTO exports(
-               id,photo_id,target,state,outcome,recipe_revision,exposure_ev,
-               white_balance_mode,source_revision,source_profile_id,source_kind,
-               source_size,source_sha256,recipe_digest,policy_id,bundle_id,
-               workload,attempt_incarnation,attempt_sequence,artifact_size,
-               artifact_sha256,artifact_expires_at,artifact_width,artifact_height,
-               artifact_profile_identity,created_at,settled_at,retain_until
-             )
-             SELECT
-               id,photo_id,target,state,outcome,recipe_revision,exposure_ev,
-               white_balance_mode,source_revision,source_profile_id,source_kind,
-               source_size,source_sha256,recipe_digest,policy_id,bundle_id,
-               workload,attempt_incarnation,attempt_sequence,artifact_size,
-               artifact_sha256,artifact_expires_at,artifact_width,artifact_height,
-               artifact_profile_identity,created_at,settled_at,retain_until
-             FROM exports_v9;
-             CREATE INDEX exports_photo ON exports(photo_id);
-             CREATE TABLE export_download_leases_new(
-               id TEXT PRIMARY KEY,
-               export_id TEXT NOT NULL REFERENCES exports(id) ON DELETE CASCADE,
-               created_at INTEGER NOT NULL CHECK(created_at >= 0)
-             );
-             INSERT INTO export_download_leases_new(id,export_id,created_at)
-               SELECT id,export_id,created_at FROM export_download_leases_v9;
-             DROP TABLE export_download_leases_v9;
-             DROP TABLE exports_v9;
-             ALTER TABLE export_download_leases_new RENAME TO export_download_leases;
-             PRAGMA user_version = 10;",
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(transaction, SchemaVersion::V10)
-        .map_err(|_| PersistenceError::UnsupportedSchema)
-}
-
-struct LegacyPhotoRow {
-    id: String,
-    raw_original_id: Option<String>,
-    jpeg_original_id: Option<String>,
-    preview_state: String,
-    preview_source: Option<String>,
-    preview_source_revision: Option<String>,
-    preview_width: Option<i64>,
-    preview_height: Option<i64>,
-    cache_revision: Option<String>,
-    sort_path: String,
-    selection_state: String,
-    rating: i64,
-}
-
-type LegacyOriginalFacts = (bool, String, u64, f64, crate::OriginalKind);
-
-fn original_facts_by_id(
-    transaction: &Transaction<'_>,
-) -> Result<HashMap<String, LegacyOriginalFacts>, PersistenceError> {
-    transaction
-        .prepare("SELECT id,available,relative_path,size,mtime_ms,kind FROM original_files")
-        .map_err(|_| PersistenceError::Storage)?
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                (
-                    row.get::<_, i64>(1)? != 0,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?
-                        .try_into()
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                    row.get::<_, f64>(4)?,
-                    row.get::<_, String>(5)?,
-                ),
-            ))
-        })
-        .map_err(|_| PersistenceError::Storage)?
-        .collect::<Result<HashMap<_, _>, _>>()
-        .map_err(|_| PersistenceError::Storage)?
-        .into_iter()
-        .map(|(id, (available, path, size, mtime_ms, kind))| {
-            let kind = match kind.as_str() {
-                "raw" => crate::OriginalKind::Raw,
-                "jpeg" => crate::OriginalKind::Jpeg,
-                _ => return Err(PersistenceError::InvalidLegacyData),
-            };
-            Ok((id, (available, path, size, mtime_ms, kind)))
-        })
-        .collect()
-}
-
-fn revision_matches(stored: Option<&str>, path: &str, size: u64, mtime_ms: f64) -> bool {
-    let Some(stored) = stored else { return false };
-    crate::source_revision(path, size, mtime_ms).is_ok_and(|current| current == stored)
-}
-// independent-photos-legacy:end migrate-v5
-
-fn validate_legacy_v0(connection: &Connection) -> Result<(), PersistenceError> {
-    let tables = names(connection, "table")?;
-    if tables != ["library_metadata", "original_files", "photos"] {
-        return Err(PersistenceError::UnsupportedSchema);
-    }
-    let expected = [
-        ("library_metadata", &["key", "value"][..]),
-        (
-            "original_files",
-            &[
-                "id",
-                "relative_path",
-                "kind",
-                "size",
-                "mtime_ms",
-                "available",
-                "inspection_error",
-            ][..],
-        ),
-        (
-            "photos",
-            &[
-                "id",
-                "raw_original_id",
-                "jpeg_original_id",
-                "ambiguous",
-                "available",
-                "preview_state",
-                "preview_source",
-                "sort_path",
-            ][..],
-        ),
-    ];
-    for (table, columns) in expected {
-        if table_columns(connection, table)? != columns {
-            return Err(PersistenceError::UnsupportedSchema);
-        }
-    }
-    let invalid_original: Option<u8> = connection
-        .query_row(
-            "SELECT 1 FROM original_files WHERE
-             typeof(id) != 'text' OR id = '' OR typeof(relative_path) != 'text' OR relative_path = '' OR
-             kind NOT IN ('raw','jpeg') OR typeof(size) != 'integer' OR size < 0 OR
-             typeof(mtime_ms) NOT IN ('integer','real') OR mtime_ms < 0 OR
-             typeof(available) != 'integer' OR available NOT IN (0,1) LIMIT 1",
-            [], |row| row.get(0),
-        ).optional().map_err(|_| PersistenceError::Storage)?;
-    let invalid_photo: Option<u8> = connection
-        .query_row(
-            "SELECT 1 FROM photos WHERE
-             typeof(id) != 'text' OR id = '' OR typeof(ambiguous) != 'integer' OR ambiguous NOT IN (0,1) OR
-             typeof(available) != 'integer' OR available NOT IN (0,1) OR
-             preview_state NOT IN ('inspection-pending','ready','failed','unavailable') OR
-             (preview_source IS NOT NULL AND preview_source NOT IN ('matching-jpeg','embedded-raw-jpeg')) OR
-             typeof(sort_path) != 'text' OR
-             (raw_original_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM original_files o WHERE o.id=photos.raw_original_id)) OR
-             (jpeg_original_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM original_files o WHERE o.id=photos.jpeg_original_id)) LIMIT 1",
-            [], |row| row.get(0),
-        ).optional().map_err(|_| PersistenceError::Storage)?;
-    if invalid_original.is_some() || invalid_photo.is_some() {
-        return Err(PersistenceError::InvalidLegacyData);
-    }
-    Ok(())
 }
 
 fn recovery_facts(
@@ -3951,6 +3388,21 @@ fn apply_manual_relocations(
                         });
                     }
                     transaction
+                        .execute(
+                            "UPDATE photos SET association_generation=association_generation+1 WHERE id=?",
+                            params![photo_id],
+                        )
+                        .map_err(|_| PersistenceError::Storage)?;
+                    retire_sidecar_association(
+                        transaction,
+                        &photo_id,
+                        &to.to_string(),
+                        match kind {
+                            crate::OriginalKind::Raw => "raw",
+                            crate::OriginalKind::Jpeg => "jpeg",
+                        },
+                    )?;
+                    transaction
                         .execute("DELETE FROM photos WHERE id=?", params![photo_id])
                         .map_err(|_| PersistenceError::Storage)?;
                 }
@@ -3979,6 +3431,23 @@ fn apply_manual_relocations(
                     reason: "invalid-location",
                 }
             })?;
+            let destination_photo: Option<(String, String)> = transaction
+                .query_row(
+                    "SELECT p.id,o.kind FROM photos p JOIN original_files o ON o.id=p.original_id WHERE o.id=?",
+                    [&relocation.original_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|_| PersistenceError::Storage)?;
+            if let Some((photo_id, kind)) = destination_photo {
+                transaction
+                    .execute(
+                        "UPDATE photos SET association_generation=association_generation+1 WHERE id=?",
+                        [&photo_id],
+                    )
+                    .map_err(|_| PersistenceError::Storage)?;
+                retire_sidecar_association(transaction, &photo_id, to.as_str(), &kind)?;
+            }
             let size =
                 i64::try_from(relocation.facts.size).map_err(|_| PersistenceError::Storage)?;
             let changed = transaction
@@ -4060,7 +3529,7 @@ fn fingerprint_counts(connection: &Connection) -> Result<FingerprintCounts, Pers
         .map_err(|_| PersistenceError::Storage)
 }
 
-fn validate_database(connection: &Connection) -> Result<(), PersistenceError> {
+pub(super) fn validate_database(connection: &Connection) -> Result<(), PersistenceError> {
     if connection
         .prepare("PRAGMA foreign_key_check")
         .and_then(|mut statement| statement.exists([]))
@@ -4087,7 +3556,6 @@ type PreservedOriginal = (
     Option<String>,
 );
 type PreservedPhoto = (String, String, i64, String, i64);
-
 #[derive(Debug, PartialEq)]
 struct ExpansionProjection {
     originals: Vec<PreservedOriginal>,
@@ -4119,9 +3587,10 @@ pub(crate) fn expand_library_binding(
     )
     .map_err(|_| PersistenceError::Storage)?;
     // The read-only preflight accepts every schema the writable pass can
-    // migrate or use. In particular, an already current V10 database must
+    // migrate or use. In particular, an already current V11 database must
     // reach startup_schema instead of being rejected here.
-    if validate_canonical_schema(&readonly, SchemaVersion::V10).is_err()
+    if validate_canonical_schema(&readonly, SchemaVersion::V11).is_err()
+        && validate_canonical_schema(&readonly, SchemaVersion::V10).is_err()
         && validate_canonical_schema(&readonly, SchemaVersion::V9).is_err()
         && validate_canonical_schema(&readonly, SchemaVersion::V8).is_err()
         && validate_canonical_schema(&readonly, SchemaVersion::V7).is_err()
@@ -4180,7 +3649,7 @@ pub(crate) fn expand_library_binding(
     // Bring a previous-release schema up to the current one with the same
     // migration chain startup uses, so the expansion writes against the
     // canonical current tables.
-    startup_schema(&state, &database_name, &mut connection, &stored_root)?;
+    migrations::startup_schema(&state, &database_name, &mut connection, &stored_root)?;
     if required_root_binding(&connection)? != stored_root {
         return Err(PersistenceError::RootMismatch);
     }
@@ -4192,7 +3661,7 @@ pub(crate) fn expand_library_binding(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V10)
+    validate_canonical_schema(&transaction, SchemaVersion::V11)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     if required_root_binding(&transaction)? != stored_root
         || expansion_projection(&transaction)? != preserved
@@ -4213,6 +3682,24 @@ pub(crate) fn expand_library_binding(
             return Err(PersistenceError::Storage);
         }
     }
+    transaction
+        .execute(
+            "UPDATE photos SET association_generation=association_generation+1",
+            [],
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    transaction
+        .execute(
+            "UPDATE sidecar_associations SET sidecar_path=?||'/'||sidecar_path",
+            [&prefix],
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    transaction
+        .execute(
+            "UPDATE retained_sidecar_orphans SET sidecar_path=?||'/'||sidecar_path",
+            [&prefix],
+        )
+        .map_err(|_| PersistenceError::Storage)?;
     for (id, sort_path) in &plan.photo_sort_paths {
         let changed = transaction
             .execute(
@@ -4242,7 +3729,7 @@ pub(crate) fn expand_library_binding(
         return Err(PersistenceError::InvalidExpansion);
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V10)
+    validate_canonical_schema(&transaction, SchemaVersion::V11)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -4661,6 +4148,62 @@ pub struct FingerprintCounts {
     pub pending: usize,
 }
 
+fn retire_sidecar_association(
+    transaction: &Transaction<'_>,
+    photo_id: &str,
+    retired_original_path: &str,
+    kind: &str,
+) -> Result<(), PersistenceError> {
+    let association = transaction
+        .query_row(
+            "SELECT sidecar_path,observed_size,observed_mtime_ms,observed_digest,
+                    (SELECT association_generation FROM photos WHERE id=?)
+             FROM sidecar_associations WHERE photo_id=?",
+            params![photo_id, photo_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| PersistenceError::Storage)?;
+    let Some((sidecar_path, observed_size, observed_mtime_ms, observed_digest, generation)) =
+        association
+    else {
+        return Ok(());
+    };
+    transaction
+        .execute(
+            "INSERT OR REPLACE INTO retained_sidecar_orphans(
+                sidecar_path,retired_photo_id,retired_original_path,original_kind,
+                retired_generation,observed_size,observed_mtime_ms,observed_digest)
+             VALUES(?,?,?,?,?,?,?,?)",
+            params![
+                sidecar_path,
+                photo_id,
+                retired_original_path,
+                kind,
+                generation,
+                observed_size,
+                observed_mtime_ms,
+                observed_digest
+            ],
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    transaction
+        .execute(
+            "DELETE FROM sidecar_associations WHERE photo_id=?",
+            [photo_id],
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    Ok(())
+}
+
 fn apply_scan(
     state: &StateDirectory,
     database_name: &DatabaseName,
@@ -4734,6 +4277,35 @@ fn apply_scan(
             }
         }
 
+        for original_id in relocation_by_id.keys() {
+            let persisted = persisted_by_id
+                .get(original_id)
+                .ok_or(PersistenceError::InvalidRecovery)?;
+            transaction
+                .execute(
+                    "UPDATE photos SET association_generation=association_generation+1
+                     WHERE original_id=?",
+                    [original_id],
+                )
+                .map_err(|_| PersistenceError::Storage)?;
+            let photo_id: String = transaction
+                .query_row(
+                    "SELECT id FROM photos WHERE original_id=?",
+                    [original_id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| PersistenceError::Storage)?;
+            let kind = match persisted.kind {
+                crate::OriginalKind::Raw => "raw",
+                crate::OriginalKind::Jpeg => "jpeg",
+            };
+            retire_sidecar_association(
+                transaction,
+                &photo_id,
+                persisted.relative_path.as_str(),
+                kind,
+            )?;
+        }
         // Move every relocated Original to a temporary unique Location first
         // so direct swaps cannot violate the UNIQUE(relative_path) constraint.
         for original_id in relocation_by_id.keys() {
@@ -4770,6 +4342,30 @@ fn apply_scan(
             {
                 continue;
             }
+            transaction
+                .execute(
+                    "UPDATE photos SET association_generation=association_generation+1
+                     WHERE original_id=?",
+                    [original.id.as_str()],
+                )
+                .map_err(|_| PersistenceError::Storage)?;
+            let photo_id: String = transaction
+                .query_row(
+                    "SELECT id FROM photos WHERE original_id=?",
+                    [&original.id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| PersistenceError::Storage)?;
+            let kind = match original.kind {
+                crate::OriginalKind::Raw => "raw",
+                crate::OriginalKind::Jpeg => "jpeg",
+            };
+            retire_sidecar_association(
+                transaction,
+                &photo_id,
+                original.relative_path.as_str(),
+                kind,
+            )?;
             transaction
                 .execute(
                     "UPDATE original_files SET relative_path=?,available=0 WHERE id=?",
@@ -5046,7 +4642,7 @@ fn seed_preview(
     })
 }
 
-fn write_transaction<T>(
+pub(super) fn write_transaction<T>(
     state: &StateDirectory,
     database_name: &DatabaseName,
     connection: &mut Connection,
@@ -5063,1403 +4659,7 @@ fn write_transaction<T>(
     Ok(result)
 }
 
-fn read_edit_recipe(
-    connection: &Connection,
-    photo_id: &str,
-) -> Result<Option<EditRecipeRead>, PersistenceError> {
-    let row = connection
-        .query_row(
-            "SELECT o.relative_path,o.size,o.mtime_ms,o.available,p.available,
-                    e.revision,e.source_revision,e.exposure_ev,e.white_balance_mode,
-                    e.temperature_kelvin,e.tint_milli
-             FROM photos p JOIN original_files o ON o.id=p.original_id
-             LEFT JOIN edit_recipes e ON e.photo_id=p.id WHERE p.id=?",
-            [photo_id],
-            |row| {
-                let relative_path: String = row.get(0)?;
-                let size = u64::try_from(row.get::<_, i64>(1)?)
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
-                let mtime_ms: f64 = row.get(2)?;
-                let source_available = row.get::<_, i64>(3)? != 0 && row.get::<_, i64>(4)? != 0;
-                let recipe_revision: Option<String> = row.get(5)?;
-                let recipe_source_revision: Option<String> = row.get(6)?;
-                let exposure_ev: Option<f64> = row.get(7)?;
-                let white_balance_mode: Option<String> = row.get(8)?;
-                let temperature_kelvin: Option<i32> = row.get(9)?;
-                let tint_milli: Option<i32> = row.get(10)?;
-                let recipe = match (
-                    recipe_revision,
-                    recipe_source_revision,
-                    exposure_ev,
-                    white_balance_mode,
-                ) {
-                    (None, None, None, None) => None,
-                    (Some(revision), Some(source_revision), Some(exposure_ev), Some(mode)) => {
-                        Some(EditRecipe {
-                            photo_id: photo_id.to_owned(),
-                            revision,
-                            source_revision,
-                            settings: EditRecipeSettings {
-                                exposure_ev,
-                                white_balance: parse_white_balance_intent(
-                                    &mode,
-                                    temperature_kelvin,
-                                    tint_milli,
-                                )?,
-                            },
-                        })
-                    }
-                    _ => return Err(rusqlite::Error::InvalidQuery),
-                };
-                Ok((relative_path, size, mtime_ms, source_available, recipe))
-            },
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
-    let Some((relative_path, size, mtime_ms, source_available, recipe)) = row else {
-        return Ok(None);
-    };
-    let current_source_revision = crate::source_revision(&relative_path, size, mtime_ms)
-        .map_err(|_| PersistenceError::Storage)?;
-    Ok(Some(EditRecipeRead {
-        recipe,
-        current_source_revision,
-        source_available,
-    }))
-}
-
-fn validate_edit_recipe_request_id(request_id: &str) -> bool {
-    !request_id.is_empty()
-        && request_id.len() <= MAXIMUM_EDIT_RECIPE_REQUEST_ID_BYTES
-        && !request_id.chars().any(char::is_control)
-}
-
-fn edit_recipe_payload_digest(mutation: &SaveEditRecipe) -> Result<String, PersistenceError> {
-    // The digest formula is durable, not a wire field: receipts written by
-    // earlier releases hold digests over these exact serialized keys, so the
-    // internal rename of the recipe-version field must not change them.
-    // The as-shot white-balance value stays a bare string for the same
-    // reason; a value-carrying intent serializes its values because two
-    // different payloads under one request identity must never collide.
-    let white_balance = match mutation.settings.white_balance {
-        WhiteBalanceIntent::AsShot => serde_json::json!("as-shot"),
-        WhiteBalanceIntent::TemperatureTint {
-            temperature_kelvin,
-            tint_milli,
-        } => serde_json::json!({
-            "mode": "temperature-tint",
-            "temperature_kelvin": temperature_kelvin,
-            "tint_milli": tint_milli,
-        }),
-    };
-    let payload = serde_json::json!({
-        "photo_id": mutation.photo_id,
-        "expected_recipe_revision": mutation.expected_recipe_version,
-        "expected_source_revision": mutation.expected_source_revision,
-        "exposure_ev": mutation.settings.exposure_ev,
-        "white_balance": white_balance,
-    });
-    let bytes = serde_json::to_vec(&payload).map_err(|_| PersistenceError::Storage)?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
-}
-
-fn edit_recipe_receipt_key(request_id: &str) -> String {
-    format!("{EDIT_RECIPE_RECEIPT_PREFIX}{request_id}")
-}
-
-fn read_edit_recipe_receipt(
-    connection: &Connection,
-    request_id: &str,
-) -> Result<Option<EditRecipeReceipt>, PersistenceError> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [edit_recipe_receipt_key(request_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
-    value
-        .map(|value| serde_json::from_str(&value).map_err(|_| PersistenceError::Storage))
-        .transpose()
-}
-
-fn write_edit_recipe_receipt(
-    transaction: &Transaction<'_>,
-    request_id: &str,
-    receipt: &EditRecipeReceipt,
-) -> Result<(), PersistenceError> {
-    let value = serde_json::to_string(receipt).map_err(|_| PersistenceError::Storage)?;
-    transaction
-        .execute(
-            "INSERT INTO library_metadata(key,value) VALUES(?,?)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![edit_recipe_receipt_key(request_id), value],
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    Ok(())
-}
-
-fn receipt_recipe(receipt: EditRecipeReceipt) -> Result<EditRecipe, PersistenceError> {
-    let white_balance = parse_white_balance_intent(
-        &receipt.white_balance_mode,
-        receipt.temperature_kelvin,
-        receipt.tint_milli,
-    )
-    .map_err(|_| PersistenceError::Storage)?;
-    Ok(EditRecipe {
-        photo_id: receipt.photo_id,
-        revision: receipt.revision,
-        source_revision: receipt.source_revision,
-        settings: EditRecipeSettings {
-            exposure_ev: receipt.exposure_ev,
-            white_balance,
-        },
-    })
-}
-
-fn save_edit_recipe(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
-    mutation: SaveEditRecipe,
-) -> Result<EditRecipeWriteOutcome, PersistenceError> {
-    if !mutation.settings.exposure_ev.is_finite()
-        || !mutation.settings.white_balance.within_payload_bounds()
-        || mutation.expected_source_revision.is_empty()
-        || !validate_edit_recipe_request_id(&mutation.request_id)
-    {
-        return Ok(EditRecipeWriteOutcome::InvalidSettings);
-    }
-    let payload_digest = edit_recipe_payload_digest(&mutation)?;
-    write_transaction(state, database_name, connection, |transaction| {
-        if let Some(receipt) = read_edit_recipe_receipt(transaction, &mutation.request_id)? {
-            if receipt.photo_id != mutation.photo_id || receipt.payload_digest != payload_digest {
-                return Ok(EditRecipeWriteOutcome::RequestConflict);
-            }
-            let recipe = receipt_recipe(receipt.clone())?;
-            return Ok(match receipt.outcome {
-                EditRecipeReceiptOutcome::Saved => EditRecipeWriteOutcome::Replayed(recipe),
-                EditRecipeReceiptOutcome::Unchanged => EditRecipeWriteOutcome::Unchanged(recipe),
-            });
-        }
-        let Some(current) = read_edit_recipe(transaction, &mutation.photo_id)? else {
-            return Ok(EditRecipeWriteOutcome::MissingPhoto);
-        };
-        let Some((kind, available)) = photo_processing_source(transaction, &mutation.photo_id)?
-        else {
-            return Ok(EditRecipeWriteOutcome::MissingPhoto);
-        };
-        if kind != crate::OriginalKind::Raw {
-            return Ok(EditRecipeWriteOutcome::UnsupportedPhoto);
-        }
-        if !available || !current.source_available {
-            return Ok(EditRecipeWriteOutcome::Unavailable);
-        }
-        if current.current_source_revision != mutation.expected_source_revision {
-            return Ok(EditRecipeWriteOutcome::SourceChanged(current));
-        }
-        if current
-            .recipe
-            .as_ref()
-            .map(|recipe| recipe.revision.as_str())
-            != mutation.expected_recipe_version.as_deref()
-        {
-            return Ok(EditRecipeWriteOutcome::Conflict(current));
-        }
-        if current
-            .recipe
-            .as_ref()
-            .is_some_and(|recipe| recipe.source_revision != mutation.expected_source_revision)
-        {
-            return Ok(EditRecipeWriteOutcome::RequiresRebind(current));
-        }
-        if let Some(recipe) = &current.recipe
-            && recipe.settings == mutation.settings
-        {
-            let (temperature_kelvin, tint_milli) =
-                white_balance_intent_values(recipe.settings.white_balance);
-            write_edit_recipe_receipt(
-                transaction,
-                &mutation.request_id,
-                &EditRecipeReceipt {
-                    photo_id: recipe.photo_id.clone(),
-                    payload_digest,
-                    outcome: EditRecipeReceiptOutcome::Unchanged,
-                    revision: recipe.revision.clone(),
-                    source_revision: recipe.source_revision.clone(),
-                    exposure_ev: recipe.settings.exposure_ev,
-                    white_balance_mode: white_balance_intent_name(recipe.settings.white_balance)
-                        .to_owned(),
-                    temperature_kelvin,
-                    tint_milli,
-                },
-            )?;
-            return Ok(EditRecipeWriteOutcome::Unchanged(recipe.clone()));
-        }
-
-        let revision = random_uuid_v4()?;
-        let (temperature_kelvin, tint_milli) =
-            white_balance_intent_values(mutation.settings.white_balance);
-        transaction
-            .execute(
-                "INSERT INTO edit_recipes(photo_id,revision,source_revision,exposure_ev,white_balance_mode,temperature_kelvin,tint_milli)
-                 VALUES(?,?,?,?,?,?,?)
-                 ON CONFLICT(photo_id) DO UPDATE SET revision=excluded.revision,
-                    source_revision=excluded.source_revision,exposure_ev=excluded.exposure_ev,
-                    white_balance_mode=excluded.white_balance_mode,
-                    temperature_kelvin=excluded.temperature_kelvin,tint_milli=excluded.tint_milli",
-                params![
-                    mutation.photo_id,
-                    revision,
-                    mutation.expected_source_revision,
-                    mutation.settings.exposure_ev,
-                    white_balance_intent_name(mutation.settings.white_balance),
-                    temperature_kelvin,
-                    tint_milli,
-                ],
-            )
-            .map_err(|_| PersistenceError::Storage)?;
-        let recipe = EditRecipe {
-            photo_id: mutation.photo_id,
-            revision,
-            source_revision: mutation.expected_source_revision,
-            settings: mutation.settings,
-        };
-        let (temperature_kelvin, tint_milli) =
-            white_balance_intent_values(recipe.settings.white_balance);
-        write_edit_recipe_receipt(
-            transaction,
-            &mutation.request_id,
-            &EditRecipeReceipt {
-                photo_id: recipe.photo_id.clone(),
-                payload_digest,
-                outcome: EditRecipeReceiptOutcome::Saved,
-                revision: recipe.revision.clone(),
-                source_revision: recipe.source_revision.clone(),
-                exposure_ev: recipe.settings.exposure_ev,
-                white_balance_mode: white_balance_intent_name(recipe.settings.white_balance)
-                    .to_owned(),
-                temperature_kelvin,
-                tint_milli,
-            },
-        )?;
-        Ok(EditRecipeWriteOutcome::Saved(recipe))
-    })
-}
-
-fn edit_recipe_rebind_payload_digest(
-    mutation: &RebindEditRecipe,
-) -> Result<String, PersistenceError> {
-    let payload = serde_json::json!({
-        "kind": "rebind",
-        "photo_id": mutation.photo_id,
-        "expected_recipe_version": mutation.expected_recipe_version,
-        "new_source_revision": mutation.new_source_revision,
-    });
-    let bytes = serde_json::to_vec(&payload).map_err(|_| PersistenceError::Storage)?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
-}
-
-fn rebind_edit_recipe(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
-    mutation: RebindEditRecipe,
-) -> Result<EditRecipeWriteOutcome, PersistenceError> {
-    if mutation.new_source_revision.is_empty()
-        || !validate_edit_recipe_request_id(&mutation.request_id)
-    {
-        return Ok(EditRecipeWriteOutcome::InvalidSettings);
-    }
-    let payload_digest = edit_recipe_rebind_payload_digest(&mutation)?;
-    write_transaction(state, database_name, connection, |transaction| {
-        // The rebind identity follows the save rules: the same identity and
-        // payload replays the committed receipt, and the same identity with
-        // a different payload is refused.
-        if let Some(receipt) = read_edit_recipe_receipt(transaction, &mutation.request_id)? {
-            if receipt.photo_id != mutation.photo_id || receipt.payload_digest != payload_digest {
-                return Ok(EditRecipeWriteOutcome::RequestConflict);
-            }
-            let recipe = receipt_recipe(receipt.clone())?;
-            return Ok(match receipt.outcome {
-                EditRecipeReceiptOutcome::Saved => EditRecipeWriteOutcome::Replayed(recipe),
-                EditRecipeReceiptOutcome::Unchanged => EditRecipeWriteOutcome::Unchanged(recipe),
-            });
-        }
-        let Some(current) = read_edit_recipe(transaction, &mutation.photo_id)? else {
-            return Ok(EditRecipeWriteOutcome::MissingPhoto);
-        };
-        let Some((kind, available)) = photo_processing_source(transaction, &mutation.photo_id)?
-        else {
-            return Ok(EditRecipeWriteOutcome::MissingPhoto);
-        };
-        if kind != crate::OriginalKind::Raw {
-            return Ok(EditRecipeWriteOutcome::UnsupportedPhoto);
-        }
-        if !available || !current.source_available {
-            return Ok(EditRecipeWriteOutcome::Unavailable);
-        }
-        let Some(recipe) = current.recipe.as_ref() else {
-            return Ok(EditRecipeWriteOutcome::MissingRecipe);
-        };
-        if recipe.revision != mutation.expected_recipe_version {
-            return Ok(EditRecipeWriteOutcome::Conflict(current));
-        }
-        if current.current_source_revision != mutation.new_source_revision {
-            return Ok(EditRecipeWriteOutcome::SourceChanged(current));
-        }
-        if recipe.source_revision == mutation.new_source_revision {
-            let (temperature_kelvin, tint_milli) =
-                white_balance_intent_values(recipe.settings.white_balance);
-            write_edit_recipe_receipt(
-                transaction,
-                &mutation.request_id,
-                &EditRecipeReceipt {
-                    photo_id: recipe.photo_id.clone(),
-                    payload_digest,
-                    outcome: EditRecipeReceiptOutcome::Unchanged,
-                    revision: recipe.revision.clone(),
-                    source_revision: recipe.source_revision.clone(),
-                    exposure_ev: recipe.settings.exposure_ev,
-                    white_balance_mode: white_balance_intent_name(recipe.settings.white_balance)
-                        .to_owned(),
-                    temperature_kelvin,
-                    tint_milli,
-                },
-            )?;
-            return Ok(EditRecipeWriteOutcome::Unchanged(recipe.clone()));
-        }
-        let revision = random_uuid_v4()?;
-        let changed = transaction
-            .execute(
-                "UPDATE edit_recipes SET revision=?,source_revision=?
-                 WHERE photo_id=? AND revision=?",
-                params![
-                    revision,
-                    mutation.new_source_revision,
-                    mutation.photo_id,
-                    mutation.expected_recipe_version,
-                ],
-            )
-            .map_err(|_| PersistenceError::Storage)?;
-        if changed != 1 {
-            return Ok(EditRecipeWriteOutcome::Conflict(current));
-        }
-        let rebound = EditRecipe {
-            photo_id: mutation.photo_id,
-            revision,
-            source_revision: mutation.new_source_revision,
-            settings: recipe.settings,
-        };
-        let (temperature_kelvin, tint_milli) =
-            white_balance_intent_values(rebound.settings.white_balance);
-        write_edit_recipe_receipt(
-            transaction,
-            &mutation.request_id,
-            &EditRecipeReceipt {
-                photo_id: rebound.photo_id.clone(),
-                payload_digest,
-                outcome: EditRecipeReceiptOutcome::Saved,
-                revision: rebound.revision.clone(),
-                source_revision: rebound.source_revision.clone(),
-                exposure_ev: rebound.settings.exposure_ev,
-                white_balance_mode: white_balance_intent_name(rebound.settings.white_balance)
-                    .to_owned(),
-                temperature_kelvin,
-                tint_milli,
-            },
-        )?;
-        Ok(EditRecipeWriteOutcome::Saved(rebound))
-    })
-}
-
-// Export lifecycle: durable records, request-identity receipts, exactly-once
-// settlement, bounded retention, and download leases. Every write runs in the
-// serialized owner so a racing cancel and completion settle exactly once.
-
-const EXPORT_RECEIPT_PREFIX: &str = "export_receipt:";
-const MAXIMUM_EXPORT_REQUEST_ID_BYTES: usize = 128;
-const MAXIMUM_EXPORT_OUTCOME_BYTES: usize = 200;
-/// Bounded per-Photo list returned by the retained-export listing.
-const EXPORT_LIST_LIMIT: usize = 60;
-/// A lease protects an artifact for the duration of one download stream. This
-/// bound only reclaims leases leaked by a crashed process; ordinary downloads
-/// release their lease when the stream settles.
-const EXPORT_LEASE_STALE_SECONDS: u64 = 24 * 60 * 60;
-
-type ExportPublicationClaimReply = Result<Option<(String, u64)>, PersistenceError>;
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ExportPublicationClaimRow {
-    incarnation: String,
-    sequence: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct ExportReceipt {
-    payload_digest: String,
-    export_id: String,
-    created_at: u64,
-    settled_at: Option<u64>,
-}
-
-fn export_unix_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn validate_export_request_id(request_id: &str) -> bool {
-    !request_id.is_empty()
-        && request_id.len() <= MAXIMUM_EXPORT_REQUEST_ID_BYTES
-        && !request_id.chars().any(char::is_control)
-}
-
-/// Durably records that `attempt` is about to publish `export_id`'s
-/// artifact, before the rename: a restart can then tell a file published by
-/// this very attempt from a stale leftover of a superseded one.
-fn claim_export_publication(
-    connection: &mut Connection,
-    export_id: &str,
-    incarnation: &str,
-    sequence: u64,
-) -> Result<bool, PersistenceError> {
-    let transaction = connection
-        .transaction()
-        .map_err(|_| PersistenceError::Storage)?;
-    let claim = serde_json::json!({
-        "incarnation": incarnation,
-        "sequence": sequence,
-    });
-    transaction
-        .execute(
-            "INSERT OR REPLACE INTO library_metadata(key,value) VALUES(?1,?2)",
-            params![export_publication_claim_key(export_id), claim.to_string()],
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    transaction
-        .commit()
-        .map_err(|_| PersistenceError::Storage)?;
-    Ok(true)
-}
-
-/// The durable publication claim of an Export: the attempt whose validated
-/// artifact is (about to be) renamed into place, if any.
-fn export_publication_claim(connection: &Connection, export_id: &str) -> Option<(String, u64)> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [export_publication_claim_key(export_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .ok()
-        .flatten()?;
-    let claim: ExportPublicationClaimRow = serde_json::from_str(&value).ok()?;
-    Some((claim.incarnation, claim.sequence))
-}
-
-fn export_publication_claim_key(export_id: &str) -> String {
-    format!("export_publication:{export_id}")
-}
-
-/// Export request identities are unique per Photo; the receipt key carries
-/// the Photo identity next to the caller's request identity.
-fn export_receipt_key(photo_id: &str, request_id: &str) -> String {
-    format!("{EXPORT_RECEIPT_PREFIX}{photo_id}\0{request_id}")
-}
-
-/// A post-retention identity marker: the Export row is gone, but its
-/// identity stays expired forever.
-fn export_expiry_tombstone_key(export_id: &str) -> String {
-    format!("export_expired:{export_id}")
-}
-
-fn read_export_expiry_tombstone(
-    transaction: &Transaction<'_>,
-    export_id: &str,
-) -> Result<bool, PersistenceError> {
-    transaction
-        .query_row(
-            "SELECT 1 FROM library_metadata WHERE key=?",
-            [export_expiry_tombstone_key(export_id)],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
-        .map(|found| found.is_some())
-        .map_err(|_| PersistenceError::Storage)
-}
-
-fn read_export_receipt(
-    transaction: &Transaction<'_>,
-    photo_id: &str,
-    request_id: &str,
-) -> Result<Option<ExportReceipt>, PersistenceError> {
-    let value = transaction
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [export_receipt_key(photo_id, request_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
-    value
-        .map(|value| serde_json::from_str(&value).map_err(|_| PersistenceError::Storage))
-        .transpose()
-}
-
-fn write_export_receipt(
-    transaction: &Transaction<'_>,
-    photo_id: &str,
-    request_id: &str,
-    receipt: &ExportReceipt,
-) -> Result<(), PersistenceError> {
-    let value = serde_json::to_string(receipt).map_err(|_| PersistenceError::Storage)?;
-    transaction
-        .execute(
-            "INSERT INTO library_metadata(key,value) VALUES(?,?)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![export_receipt_key(photo_id, request_id), value],
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    Ok(())
-}
-
-struct ExportRow {
-    id: String,
-    photo_id: String,
-    state: ExportState,
-    outcome: Option<String>,
-    recipe_revision: String,
-    exposure_ev: f64,
-    source_revision: String,
-    source_profile_id: String,
-    source_size: Option<u64>,
-    source_sha256: Option<String>,
-    recipe_digest: String,
-    policy_id: String,
-    bundle_id: String,
-    workload: String,
-    attempt_incarnation: Option<String>,
-    attempt_sequence: Option<u64>,
-    artifact_size: Option<u64>,
-    artifact_sha256: Option<String>,
-    artifact_expires_at: Option<u64>,
-    artifact_width: Option<u32>,
-    artifact_height: Option<u32>,
-    artifact_profile_identity: Option<String>,
-    created_at: u64,
-    settled_at: Option<u64>,
-    retain_until: Option<u64>,
-}
-
-const EXPORT_ROW_COLUMNS: &str = "id,photo_id,state,outcome,recipe_revision,exposure_ev,
-    source_revision,source_profile_id,source_size,source_sha256,recipe_digest,policy_id,
-    bundle_id,attempt_incarnation,attempt_sequence,artifact_size,artifact_sha256,
-    artifact_expires_at,artifact_width,artifact_height,artifact_profile_identity,
-    created_at,settled_at,retain_until,workload";
-
-fn export_row(_connection: &Connection, row: &rusqlite::Row<'_>) -> rusqlite::Result<ExportRow> {
-    let state_name: String = row.get(2)?;
-    let state = ExportState::parse_name(&state_name).ok_or(rusqlite::Error::InvalidQuery)?;
-    let source_size = match row.get::<_, Option<i64>>(8)? {
-        None => None,
-        Some(value) => Some(u64::try_from(value).map_err(|_| rusqlite::Error::InvalidQuery)?),
-    };
-    let attempt_sequence: Option<u64> = match row.get::<_, Option<i64>>(14)? {
-        None => None,
-        Some(value) => Some(u64::try_from(value).map_err(|_| rusqlite::Error::InvalidQuery)?),
-    };
-    let artifact_size = match row.get::<_, Option<i64>>(15)? {
-        None => None,
-        Some(value) => Some(u64::try_from(value).map_err(|_| rusqlite::Error::InvalidQuery)?),
-    };
-    let artifact_width = match row.get::<_, Option<i64>>(18)? {
-        None => None,
-        Some(value) => u32::try_from(value)
-            .map(Some)
-            .map_err(|_| rusqlite::Error::InvalidQuery)?,
-    };
-    let artifact_height = match row.get::<_, Option<i64>>(19)? {
-        None => None,
-        Some(value) => u32::try_from(value)
-            .map(Some)
-            .map_err(|_| rusqlite::Error::InvalidQuery)?,
-    };
-    let created_at =
-        u64::try_from(row.get::<_, i64>(21)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
-    let settled_at = match row.get::<_, Option<i64>>(22)? {
-        None => None,
-        Some(value) => Some(u64::try_from(value).map_err(|_| rusqlite::Error::InvalidQuery)?),
-    };
-    let retain_until = match row.get::<_, Option<i64>>(23)? {
-        None => None,
-        Some(value) => Some(u64::try_from(value).map_err(|_| rusqlite::Error::InvalidQuery)?),
-    };
-    Ok(ExportRow {
-        id: row.get(0)?,
-        photo_id: row.get(1)?,
-        state,
-        outcome: row.get(3)?,
-        recipe_revision: row.get(4)?,
-        exposure_ev: row.get(5)?,
-        source_revision: row.get(6)?,
-        source_profile_id: row.get(7)?,
-        source_size,
-        source_sha256: row.get(9)?,
-        recipe_digest: row.get(10)?,
-        policy_id: row.get(11)?,
-        bundle_id: row.get(12)?,
-        workload: row.get(24)?,
-        attempt_incarnation: row.get(13)?,
-        attempt_sequence,
-        artifact_size,
-        artifact_sha256: row.get(16)?,
-        artifact_expires_at: row
-            .get::<_, Option<i64>>(17)?
-            .map(|value| u64::try_from(value).map_err(|_| rusqlite::Error::InvalidQuery))
-            .transpose()?,
-        artifact_width,
-        artifact_height,
-        artifact_profile_identity: row.get(20)?,
-        created_at,
-        settled_at,
-        retain_until,
-    })
-}
-
-fn export_record_from_row(row: ExportRow) -> Result<ExportRecord, PersistenceError> {
-    let settings = EditRecipeSettings {
-        exposure_ev: row.exposure_ev,
-        white_balance: WhiteBalanceIntent::AsShot,
-    };
-    let attempt = match (&row.attempt_incarnation, row.attempt_sequence) {
-        (Some(incarnation), Some(sequence)) => Some(ExportAttempt {
-            incarnation: incarnation.clone(),
-            sequence,
-        }),
-        (None, None) => None,
-        _ => return Err(PersistenceError::Storage),
-    };
-    let artifact = match (
-        row.artifact_size,
-        row.artifact_sha256,
-        row.artifact_expires_at,
-        row.artifact_width,
-        row.artifact_height,
-        &row.artifact_profile_identity,
-    ) {
-        (
-            Some(size),
-            Some(sha256),
-            Some(expires_at),
-            Some(width),
-            Some(height),
-            Some(profile_identity),
-        ) => Some(ExportArtifactFacts {
-            size,
-            sha256,
-            expires_at,
-            width,
-            height,
-            profile_identity: profile_identity.clone(),
-        }),
-        (None, None, None, None, None, None) => None,
-        // A partial artifact row can never be served as validated metadata.
-        _ => return Err(PersistenceError::Storage),
-    };
-    let source = match (row.source_size, row.source_sha256) {
-        (Some(size), Some(sha256)) => Some(ExportSourceEvidence { size, sha256 }),
-        (None, None) => None,
-        _ => return Err(PersistenceError::Storage),
-    };
-    let payload = ExportRecipePayload::capture(
-        &settings,
-        ExportExposureRange {
-            minimum_milli_ev: i64::MIN,
-            maximum_milli_ev: i64::MAX,
-        },
-    )
-    .map_err(|_| PersistenceError::Storage)?;
-    if payload.digest() != row.recipe_digest
-        || !matches!(
-            row.workload.as_str(),
-            EXPORT_DEVELOPMENT_TIFF_WORKLOAD | EXPORT_FILM_JPEG_WORKLOAD
-        )
-    {
-        return Err(PersistenceError::Storage);
-    }
-    Ok(ExportRecord {
-        id: row.id,
-        snapshot: ExportSnapshot {
-            photo_id: row.photo_id,
-            recipe_revision: row.recipe_revision,
-            settings,
-            source_revision: row.source_revision,
-            source_kind: OriginalKind::Raw,
-            source_profile_id: row.source_profile_id,
-            policy_id: row.policy_id,
-            bundle_id: row.bundle_id,
-            workload: row.workload,
-            recipe_digest: row.recipe_digest,
-        },
-        source,
-        state: row.state,
-        outcome: row.outcome,
-        attempt,
-        artifact,
-        created_at: row.created_at,
-        settled_at: row.settled_at,
-        retain_until: row.retain_until,
-    })
-}
-
-fn read_export_row(
-    transaction: &Transaction<'_>,
-    export_id: &str,
-) -> Result<Option<ExportRecord>, PersistenceError> {
-    let row = transaction
-        .query_row(
-            &format!("SELECT {EXPORT_ROW_COLUMNS} FROM exports WHERE id=?"),
-            [export_id],
-            |row| export_row(transaction, row),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
-    row.map(export_record_from_row).transpose()
-}
-
-/// Bytes of the finite retained-output allowance already committed. Unsettled
-/// work reserves the complete bounded artifact; a published artifact counts by
-/// its actual size until its disclosed expiry passes and its leases release.
-fn reserved_retained_bytes(
-    transaction: &Transaction<'_>,
-    now: u64,
-) -> Result<u64, PersistenceError> {
-    let reserved: i64 = transaction
-        .query_row(
-            "SELECT COALESCE(SUM(reserved),0) FROM (
-               SELECT CASE
-                 WHEN state IN ('queued','running') THEN ?1
-                 WHEN state = 'succeeded'
-                      AND EXISTS(SELECT 1 FROM export_download_leases l WHERE l.export_id = exports.id)
-                   THEN COALESCE(artifact_size, 0)
-                 WHEN state = 'succeeded' AND artifact_expires_at > ?2
-                   THEN COALESCE(artifact_size, 0)
-                 ELSE 0
-               END AS reserved
-               FROM exports
-             )",
-            params![crate::MAXIMUM_EXPORT_BYTES as i64, now as i64],
-            |row| row.get(0),
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    u64::try_from(reserved).map_err(|_| PersistenceError::Storage)
-}
-
-fn reservable(
-    transaction: &Transaction<'_>,
-    now: u64,
-    allowance: u64,
-) -> Result<bool, PersistenceError> {
-    let reserved = reserved_retained_bytes(transaction, now)?;
-    let requested = reserved.saturating_add(crate::MAXIMUM_EXPORT_BYTES);
-    Ok(requested <= allowance && requested >= crate::MAXIMUM_EXPORT_BYTES)
-}
-
-fn submit_export(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
-    submission: ExportSubmission,
-) -> Result<ExportSubmitOutcome, PersistenceError> {
-    if !validate_export_request_id(&submission.request_id)
-        || submission.source_profile_id.is_empty()
-        || !matches!(
-            submission.workload.as_str(),
-            EXPORT_DEVELOPMENT_TIFF_WORKLOAD | EXPORT_FILM_JPEG_WORKLOAD
-        )
-    {
-        return Ok(ExportSubmitOutcome::InvalidSettings);
-    }
-    let payload_digest = submission.payload_digest();
-    write_transaction(state, database_name, connection, |transaction| {
-        if let Some(receipt) =
-            read_export_receipt(transaction, &submission.photo_id, &submission.request_id)?
-        {
-            if receipt.payload_digest != payload_digest {
-                return Ok(ExportSubmitOutcome::RequestConflict);
-            }
-            return Ok(match read_export_row(transaction, &receipt.export_id)? {
-                Some(record) => ExportSubmitOutcome::Existing(record),
-                // The export row is removed exactly when its retention window
-                // passes, so a surviving receipt without a row is expired and
-                // can never start new work.
-                None => ExportSubmitOutcome::Expired,
-            });
-        }
-        let Some(current) = read_edit_recipe(transaction, &submission.photo_id)? else {
-            return Ok(ExportSubmitOutcome::UnknownPhoto);
-        };
-        let Some((kind, available)) = photo_processing_source(transaction, &submission.photo_id)?
-        else {
-            return Ok(ExportSubmitOutcome::UnknownPhoto);
-        };
-        if kind != OriginalKind::Raw {
-            return Ok(ExportSubmitOutcome::UnsupportedPhoto);
-        }
-        if !available || !current.source_available {
-            return Ok(ExportSubmitOutcome::Unavailable);
-        }
-        let Some(recipe) = current.recipe.as_ref() else {
-            return Ok(ExportSubmitOutcome::MissingRecipe);
-        };
-        if current.current_source_revision != submission.expected_source_revision {
-            return Ok(ExportSubmitOutcome::SourceChanged(current));
-        }
-        if recipe.source_revision != submission.expected_source_revision {
-            // The stored recipe is bound to a source other than the current
-            // published revision; an Export must never execute a payload
-            // captured against the old binding. A stale binding outranks a
-            // stale expected recipe revision.
-            return Ok(ExportSubmitOutcome::RequiresRebind);
-        }
-        if recipe.revision != submission.expected_recipe_revision {
-            return Ok(ExportSubmitOutcome::RecipeConflict(current));
-        }
-        // A saved recipe outside the approved range is invalid input for the
-        // Export, not a storage failure.
-        let payload =
-            match ExportRecipePayload::capture(&recipe.settings, submission.exposure_range) {
-                Ok(payload) => payload,
-                Err(_) => return Ok(ExportSubmitOutcome::InvalidSettings),
-            };
-        let now = export_unix_seconds();
-        if !reservable(transaction, now, submission.retained_output_bytes_max)? {
-            return Ok(ExportSubmitOutcome::RetainedOutputFull);
-        }
-        let export_id = format!("exp-{}", random_uuid_v4()?);
-        transaction
-            .execute(
-                "INSERT INTO exports(id,photo_id,target,state,outcome,recipe_revision,
-                   exposure_ev,white_balance_mode,source_revision,source_profile_id,
-                   source_kind,source_size,source_sha256,recipe_digest,policy_id,bundle_id,
-                   workload,created_at)
-                 VALUES(?1,?2,?3,'queued',NULL,?4,?5,'as-shot',?6,?7,'raw',
-                   NULL,NULL,?8,?9,?10,?3,?11)",
-                params![
-                    export_id,
-                    submission.photo_id,
-                    submission.workload,
-                    recipe.revision,
-                    recipe.settings.exposure_ev,
-                    submission.expected_source_revision,
-                    submission.source_profile_id,
-                    payload.digest(),
-                    submission.policy_id,
-                    submission.bundle_id,
-                    now as i64,
-                ],
-            )
-            .map_err(|_| PersistenceError::Storage)?;
-        write_export_receipt(
-            transaction,
-            &submission.photo_id,
-            &submission.request_id,
-            &ExportReceipt {
-                payload_digest,
-                export_id: export_id.clone(),
-                created_at: now,
-                settled_at: None,
-            },
-        )?;
-        let record = read_export_row(transaction, &export_id)?.ok_or(PersistenceError::Storage)?;
-        Ok(ExportSubmitOutcome::Created(record))
-    })
-}
-
-fn export_record(
-    connection: &Connection,
-    export_id: &str,
-) -> Result<Option<ExportRecord>, PersistenceError> {
-    let row = connection
-        .query_row(
-            &format!("SELECT {EXPORT_ROW_COLUMNS} FROM exports WHERE id=?"),
-            [export_id],
-            |row| export_row(connection, row),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
-    row.map(export_record_from_row).transpose()
-}
-
-/// Resolves a request identity from its receipt without any state change.
-/// `None` means the identity was never recorded and submission may proceed.
-fn resolve_export_submission(
-    connection: &Connection,
-    photo_id: &str,
-    request_id: &str,
-    payload_digest: &str,
-) -> Option<ExportSubmissionResolution> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [export_receipt_key(photo_id, request_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .ok()
-        .flatten()?;
-    let receipt: ExportReceipt = serde_json::from_str(&value).ok()?;
-    if receipt.payload_digest != payload_digest {
-        return Some(ExportSubmissionResolution::Conflict);
-    }
-    match export_record(connection, &receipt.export_id) {
-        Ok(Some(record)) => Some(ExportSubmissionResolution::Existing(Box::new(record))),
-        // The export row is removed exactly when its retention window
-        // passes, so a surviving receipt without a row is expired.
-        Ok(None) => Some(ExportSubmissionResolution::Expired),
-        Err(_) => None,
-    }
-}
-
-/// Refreshes one download lease's liveness anchor. `false` means the lease
-/// is gone and the stream must stop renewing.
-fn renew_export_lease(connection: &mut Connection, lease_id: &str, now: u64) -> bool {
-    connection
-        .execute(
-            "UPDATE export_download_leases SET created_at=?1 WHERE id=?2",
-            params![now as i64, lease_id],
-        )
-        .map(|updated| updated > 0)
-        .unwrap_or(false)
-}
-
-fn list_photo_exports(
-    connection: &Connection,
-    photo_id: &str,
-) -> Result<Option<Vec<ExportRecord>>, PersistenceError> {
-    let known = connection
-        .query_row("SELECT 1 FROM photos WHERE id=?", [photo_id], |row| {
-            row.get::<_, i64>(0)
-        })
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
-    if known.is_none() {
-        return Ok(None);
-    }
-    let rows = connection
-        .prepare(&format!(
-            // `created_at` has one-second resolution, so the implicit rowid
-            // breaks a tie by insertion order: the head of the list is the
-            // Export submitted last.
-            "SELECT {EXPORT_ROW_COLUMNS} FROM exports WHERE photo_id=?
-             ORDER BY created_at DESC, rowid DESC LIMIT {EXPORT_LIST_LIMIT}"
-        ))
-        .map_err(|_| PersistenceError::Storage)?
-        .query_map([photo_id], |row| export_row(connection, row))
-        .map_err(|_| PersistenceError::Storage)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| PersistenceError::Storage)?;
-    let records = rows
-        .into_iter()
-        .map(export_record_from_row)
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(Some(records))
-}
-
-/// Records the verified staged source bytes between acceptance and launch.
-/// Only unfinished work accepts them, so a settled Export can never grow
-/// source evidence after the fact.
-fn record_export_source(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
-    export_id: &str,
-    size: u64,
-    sha256: &str,
-) -> Result<Option<ExportRecord>, PersistenceError> {
-    if size == 0 || size > crate::MAXIMUM_EXPORT_BYTES || sha256.len() != 64 {
-        return Err(PersistenceError::Storage);
-    }
-    write_transaction(state, database_name, connection, |transaction| {
-        let Some(current) = read_export_row(transaction, export_id)? else {
-            return Ok(None);
-        };
-        if current.state.is_terminal() {
-            return Ok(Some(current));
-        }
-        transaction
-            .execute(
-                "UPDATE exports SET source_size=?,source_sha256=? WHERE id=?",
-                params![size as i64, sha256, export_id],
-            )
-            .map_err(|_| PersistenceError::Storage)?;
-        read_export_row(transaction, export_id)?.map(Ok).transpose()
-    })
-}
-
-fn settle_export(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
-    export_id: &str,
-    settlement: ExportSettlement,
-) -> Result<Option<ExportRecord>, PersistenceError> {
-    let outcome_is_bounded = match &settlement {
-        ExportSettlement::Succeeded { .. } => true,
-        ExportSettlement::Failed { outcome, .. } => {
-            !outcome.is_empty() && outcome.len() <= MAXIMUM_EXPORT_OUTCOME_BYTES
-        }
-    };
-    if !outcome_is_bounded {
-        return Err(PersistenceError::Storage);
-    }
-    write_transaction(state, database_name, connection, |transaction| {
-        let Some(current) = read_export_row(transaction, export_id)? else {
-            return Ok(None);
-        };
-        // Exactly-once settlement: a racing cancel or completion already
-        // decided the terminal state and is never rewritten here.
-        if current.state.is_terminal() {
-            return Ok(Some(current));
-        }
-        match settlement {
-            ExportSettlement::Succeeded {
-                artifact_size,
-                artifact_sha256,
-                published_at,
-                artifact_width,
-                artifact_height,
-                artifact_profile_identity,
-            } => {
-                let expiry = published_at.saturating_add(EXPORT_RETENTION_SECONDS);
-                transaction
-                    .execute(
-                        "UPDATE exports SET state='succeeded',outcome=NULL,
-                           artifact_size=?,artifact_sha256=?,artifact_expires_at=?,
-                           artifact_width=?,artifact_height=?,artifact_profile_identity=?,
-                           settled_at=?,retain_until=? WHERE id=?",
-                        params![
-                            artifact_size as i64,
-                            artifact_sha256,
-                            expiry as i64,
-                            artifact_width as i64,
-                            artifact_height as i64,
-                            artifact_profile_identity,
-                            published_at as i64,
-                            expiry as i64,
-                            export_id
-                        ],
-                    )
-                    .map_err(|_| PersistenceError::Storage)?;
-            }
-            ExportSettlement::Failed {
-                outcome,
-                settled_at,
-            } => {
-                let retain = settled_at.saturating_add(EXPORT_RETENTION_SECONDS);
-                transaction
-                    .execute(
-                        "UPDATE exports SET state='failed',outcome=?,artifact_size=NULL,
-                           artifact_sha256=NULL,artifact_expires_at=NULL,settled_at=?,
-                           retain_until=? WHERE id=?",
-                        params![outcome, settled_at as i64, retain as i64, export_id],
-                    )
-                    .map_err(|_| PersistenceError::Storage)?;
-            }
-        }
-        read_export_row(transaction, export_id)?.map(Ok).transpose()
-    })
-}
-
-fn cancel_export(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
-    export_id: &str,
-) -> Result<Option<ExportRecord>, PersistenceError> {
-    write_transaction(state, database_name, connection, |transaction| {
-        let Some(current) = read_export_row(transaction, export_id)? else {
-            return Ok(None);
-        };
-        // Cancellation settles exactly once against the actual completion
-        // state and never rewrites or undoes a published artifact.
-        if current.state.is_terminal() {
-            return Ok(Some(current));
-        }
-        let now = export_unix_seconds();
-        transaction
-            .execute(
-                "UPDATE exports SET state='cancelled',artifact_size=NULL,
-                   artifact_sha256=NULL,artifact_expires_at=NULL,settled_at=?,retain_until=?
-                 WHERE id=?",
-                params![
-                    now as i64,
-                    now.saturating_add(EXPORT_RETENTION_SECONDS) as i64,
-                    export_id
-                ],
-            )
-            .map_err(|_| PersistenceError::Storage)?;
-        read_export_row(transaction, export_id)?.map(Ok).transpose()
-    })
-}
-
-/// Persists the launcher attempt identity and marks the attempt running. A
-/// terminal record is returned untouched so a caller that lost a race with
-/// cancellation aborts before any work.
-fn begin_export_attempt(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
-    export_id: &str,
-    attempt: ExportAttempt,
-) -> Result<Option<ExportRecord>, PersistenceError> {
-    // The launcher-owned incarnation is 32 lowercase hex characters, exactly
-    // as the production Photo protocol validates it.
-    if attempt.sequence == 0
-        || attempt.incarnation.len() != 32
-        || !attempt
-            .incarnation
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(PersistenceError::Storage);
-    }
-    write_transaction(state, database_name, connection, |transaction| {
-        let Some(current) = read_export_row(transaction, export_id)? else {
-            return Ok(None);
-        };
-        if current.state.is_terminal() {
-            return Ok(Some(current));
-        }
-        transaction
-            .execute(
-                "UPDATE exports SET state='running',attempt_incarnation=?,attempt_sequence=?
-                 WHERE id=?",
-                params![attempt.incarnation, attempt.sequence as i64, export_id],
-            )
-            .map_err(|_| PersistenceError::Storage)?;
-        read_export_row(transaction, export_id)?.map(Ok).transpose()
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn retry_export(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
-    export_id: &str,
-    request_id: &str,
-    expected_bundle_id: &str,
-    allowance: u64,
-) -> Result<ExportRetryOutcome, PersistenceError> {
-    if !validate_export_request_id(request_id) {
-        return Err(PersistenceError::Storage);
-    }
-    let retry_digest = format!(
-        "{:x}",
-        Sha256::digest(format!("retry\0{export_id}").as_bytes())
-    );
-    write_transaction(state, database_name, connection, |transaction| {
-        let Some(current) = read_export_row(transaction, export_id)? else {
-            // A reclaimed record keeps its expired identity: retry reports
-            // the explicit expired outcome instead of unknown.
-            if read_export_expiry_tombstone(transaction, export_id)? {
-                return Ok(ExportRetryOutcome::Expired);
-            }
-            return Ok(ExportRetryOutcome::Unknown);
-        };
-        // An accepted retry identity resolves to its Export and starts no
-        // work; a different payload under that identity is a conflict.
-        if let Some(receipt) =
-            read_export_receipt(transaction, &current.snapshot.photo_id, request_id)?
-        {
-            if receipt.export_id == export_id && receipt.payload_digest == retry_digest {
-                return Ok(ExportRetryOutcome::Replayed(Box::new(current)));
-            }
-            return Ok(ExportRetryOutcome::RequestConflict);
-        }
-        // Only a settled failure or cancellation carries a retryable
-        // snapshot; a succeeded artifact is never silently re-rendered and
-        // an active attempt is never replaced.
-        if !matches!(current.state, ExportState::Failed | ExportState::Cancelled) {
-            return Ok(ExportRetryOutcome::NotRetriable);
-        }
-        let now = export_unix_seconds();
-        let Some(retain_until) = current.retain_until else {
-            return Ok(ExportRetryOutcome::Unknown);
-        };
-        if retain_until <= now {
-            return Ok(ExportRetryOutcome::Expired);
-        }
-        // Availability is validated again against the retained snapshot: a
-        // swapped approved bundle or a changed/unreadable source means the
-        // captured work can never execute again.
-        if current.snapshot.bundle_id != expected_bundle_id {
-            return Ok(ExportRetryOutcome::OutputUnavailable);
-        }
-        let Some(recipe) = read_edit_recipe(transaction, &current.snapshot.photo_id)? else {
-            return Ok(ExportRetryOutcome::OutputUnavailable);
-        };
-        if !recipe.source_available {
-            return Ok(ExportRetryOutcome::ResourceUnavailable);
-        }
-        if recipe.current_source_revision != current.snapshot.source_revision {
-            return Ok(ExportRetryOutcome::OutputUnavailable);
-        }
-        if !reservable(transaction, now, allowance)? {
-            return Ok(ExportRetryOutcome::RetainedOutputFull);
-        }
-        transaction
-            .execute(
-                "UPDATE exports SET state='queued',outcome=NULL,attempt_incarnation=NULL,
-                   attempt_sequence=NULL WHERE id=?",
-                [export_id],
-            )
-            .map_err(|_| PersistenceError::Storage)?;
-        write_export_receipt(
-            transaction,
-            &current.snapshot.photo_id,
-            request_id,
-            &ExportReceipt {
-                payload_digest: retry_digest,
-                export_id: export_id.to_owned(),
-                created_at: now,
-                settled_at: None,
-            },
-        )?;
-        Ok(read_export_row(transaction, export_id)?
-            .map(|record| ExportRetryOutcome::Retried(Box::new(record)))
-            .unwrap_or(ExportRetryOutcome::Unknown))
-    })
-}
-
-fn sweep_export_expiry(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
-    now: u64,
-) -> Result<ExportSweepResult, PersistenceError> {
-    write_transaction(state, database_name, connection, |transaction| {
-        transaction
-            .execute(
-                "DELETE FROM export_download_leases WHERE created_at < ?1",
-                [now.saturating_sub(EXPORT_LEASE_STALE_SECONDS) as i64],
-            )
-            .map_err(|_| PersistenceError::Storage)?;
-        let mut result = ExportSweepResult::default();
-        let expired_artifacts = transaction
-            .prepare(
-                "SELECT id FROM exports WHERE state='succeeded'
-                 AND artifact_expires_at IS NOT NULL AND artifact_expires_at <= ?1
-                 AND NOT EXISTS(SELECT 1 FROM export_download_leases l WHERE l.export_id=exports.id)",
-            )
-            .map_err(|_| PersistenceError::Storage)?
-            .query_map([now as i64], |row| row.get::<_, String>(0))
-            .map_err(|_| PersistenceError::Storage)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| PersistenceError::Storage)?;
-        for export_id in expired_artifacts {
-            transaction
-                .execute(
-                    "UPDATE exports SET artifact_size=NULL,artifact_sha256=NULL,
-                       artifact_expires_at=NULL WHERE id=?",
-                    [&export_id],
-                )
-                .map_err(|_| PersistenceError::Storage)?;
-            result.artifact_expiry_ids.push(export_id);
-        }
-        let expired_records = transaction
-            .prepare(
-                "SELECT id FROM exports WHERE retain_until IS NOT NULL AND retain_until <= ?1
-                 AND NOT EXISTS(SELECT 1 FROM export_download_leases l WHERE l.export_id=exports.id)",
-            )
-            .map_err(|_| PersistenceError::Storage)?
-            .query_map([now as i64], |row| row.get::<_, String>(0))
-            .map_err(|_| PersistenceError::Storage)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| PersistenceError::Storage)?;
-        for export_id in expired_records {
-            transaction
-                .execute("DELETE FROM exports WHERE id=?", [&export_id])
-                .map_err(|_| PersistenceError::Storage)?;
-            // The identity stays expired forever: it can never start new
-            // work and retry keeps reporting the explicit expired outcome.
-            transaction
-                .execute(
-                    "INSERT OR REPLACE INTO library_metadata(key,value) VALUES(?1,?2)",
-                    params![export_expiry_tombstone_key(&export_id), "expired"],
-                )
-                .map_err(|_| PersistenceError::Storage)?;
-            result.record_expiry_ids.push(export_id);
-        }
-        Ok(result)
-    })
-}
-
-fn unfinished_exports(connection: &Connection) -> Result<Vec<ExportRecord>, PersistenceError> {
-    let rows = connection
-        .prepare(&format!(
-            "SELECT {EXPORT_ROW_COLUMNS} FROM exports
-             WHERE state IN ('queued','running') ORDER BY created_at, id"
-        ))
-        .map_err(|_| PersistenceError::Storage)?
-        .query_map([], |row| export_row(connection, row))
-        .map_err(|_| PersistenceError::Storage)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| PersistenceError::Storage)?;
-    rows.into_iter().map(export_record_from_row).collect()
-}
-
-fn acquire_export_lease(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
-    export_id: &str,
-    now: u64,
-) -> Result<ExportLeaseOutcome, PersistenceError> {
-    write_transaction(state, database_name, connection, |transaction| {
-        let Some(current) = read_export_row(transaction, export_id)? else {
-            return Ok(ExportLeaseOutcome::Unknown);
-        };
-        let Some(artifact) = current.artifact.as_ref() else {
-            return Ok(ExportLeaseOutcome::Unknown);
-        };
-        if artifact.expires_at <= now {
-            return Ok(ExportLeaseOutcome::Expired);
-        }
-        let lease_id = format!("lease-{}", random_uuid_v4()?);
-        transaction
-            .execute(
-                "INSERT INTO export_download_leases(id,export_id,created_at) VALUES(?,?,?)",
-                params![lease_id, export_id, now as i64],
-            )
-            .map_err(|_| PersistenceError::Storage)?;
-        Ok(ExportLeaseOutcome::Acquired {
-            lease_id,
-            artifact: artifact.clone(),
-        })
-    })
-}
-
-fn release_export_lease(
-    state: &StateDirectory,
-    database_name: &DatabaseName,
-    connection: &mut Connection,
-    lease_id: &str,
-) -> Result<bool, PersistenceError> {
-    write_transaction(state, database_name, connection, |transaction| {
-        let changed = transaction
-            .execute("DELETE FROM export_download_leases WHERE id=?", [lease_id])
-            .map_err(|_| PersistenceError::Storage)?;
-        Ok(changed == 1)
-    })
-}
-
-fn photo_processing_source(
+pub(super) fn photo_processing_source(
     connection: &Connection,
     photo_id: &str,
 ) -> Result<Option<(crate::OriginalKind, bool)>, PersistenceError> {
@@ -6479,11 +4679,13 @@ fn photo_processing_source(
         .map_err(|_| PersistenceError::Storage)
 }
 
-fn white_balance_intent_name(intent: WhiteBalanceIntent) -> &'static str {
+pub(super) fn white_balance_intent_name(intent: WhiteBalanceIntent) -> &'static str {
     intent.mode_name()
 }
 
-fn white_balance_intent_values(intent: WhiteBalanceIntent) -> (Option<i32>, Option<i32>) {
+pub(super) fn white_balance_intent_values(
+    intent: WhiteBalanceIntent,
+) -> (Option<i32>, Option<i32>) {
     match intent {
         WhiteBalanceIntent::AsShot => (None, None),
         WhiteBalanceIntent::TemperatureTint {
@@ -6493,7 +4695,7 @@ fn white_balance_intent_values(intent: WhiteBalanceIntent) -> (Option<i32>, Opti
     }
 }
 
-fn parse_white_balance_intent(
+pub(super) fn parse_white_balance_intent(
     mode: &str,
     temperature_kelvin: Option<i32>,
     tint_milli: Option<i32>,
@@ -6515,7 +4717,7 @@ fn parse_white_balance_intent(
     }
 }
 
-fn random_uuid_v4() -> Result<String, PersistenceError> {
+pub(super) fn random_uuid_v4() -> Result<String, PersistenceError> {
     let mut bytes = [0_u8; 16];
     let mut offset = 0;
     while offset < bytes.len() {
@@ -6558,7 +4760,7 @@ fn random_uuid_v4() -> Result<String, PersistenceError> {
     ))
 }
 
-fn allocate_library_id(
+pub(super) fn allocate_library_id(
     transaction: &Transaction<'_>,
     reserved: &mut HashSet<String>,
 ) -> Result<String, PersistenceError> {
@@ -8467,7 +6669,7 @@ fn remove_photos(
                 };
                 transaction
                     .execute(
-                        "UPDATE photos SET removed_at_ms=?,removed_operation=? WHERE id=?",
+                        "UPDATE photos SET removed_at_ms=?,removed_operation=?,association_generation=association_generation+1 WHERE id=? AND removed_at_ms IS NULL",
                         params![removed_at, operation_id, photo_id],
                     )
                     .map_err(mutation_error_from_sqlite)?;
@@ -8644,7 +6846,7 @@ fn restore_photos_explicit(
             }
             let updated = transaction
                 .execute(
-                    "UPDATE photos SET removed_at_ms=NULL,removed_operation=NULL
+                    "UPDATE photos SET removed_at_ms=NULL,removed_operation=NULL,association_generation=association_generation+1
                      WHERE id=? AND removed_at_ms=?",
                     params![&photo.photo_id, current_marker],
                 )
@@ -8779,7 +6981,7 @@ fn restore_photos(
                 };
                 let updated = transaction
                     .execute(
-                        "UPDATE photos SET removed_at_ms=NULL,removed_operation=NULL
+                        "UPDATE photos SET removed_at_ms=NULL,removed_operation=NULL,association_generation=association_generation+1
                          WHERE id=? AND removed_at_ms=?",
                         params![photo_id, removed_at],
                     )
@@ -9923,7 +8125,7 @@ fn mutate_photo_decision_checked(
     Ok(CheckedPhotoDecisionResult { results, counts })
 }
 
-fn table_exists(connection: &Connection, name: &str) -> Result<bool, PersistenceError> {
+pub(super) fn table_exists(connection: &Connection, name: &str) -> Result<bool, PersistenceError> {
     connection
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
@@ -9935,7 +8137,7 @@ fn table_exists(connection: &Connection, name: &str) -> Result<bool, Persistence
         .map_err(|_| PersistenceError::Storage)
 }
 
-fn names(connection: &Connection, kind: &str) -> Result<Vec<String>, PersistenceError> {
+pub(super) fn names(connection: &Connection, kind: &str) -> Result<Vec<String>, PersistenceError> {
     connection
         .prepare("SELECT name FROM sqlite_master WHERE type=? AND name NOT LIKE 'sqlite_%' ORDER BY name")
         .and_then(|mut statement| {
@@ -9946,7 +8148,10 @@ fn names(connection: &Connection, kind: &str) -> Result<Vec<String>, Persistence
         .map_err(|_| PersistenceError::Storage)
 }
 
-fn table_columns(connection: &Connection, table: &str) -> Result<Vec<String>, PersistenceError> {
+pub(super) fn table_columns(
+    connection: &Connection,
+    table: &str,
+) -> Result<Vec<String>, PersistenceError> {
     connection
         .prepare(&format!("PRAGMA table_info(\"{table}\")"))
         .and_then(|mut statement| {
@@ -9962,10 +8167,13 @@ mod tests {
     use super::*;
     use crate::identity::source_revision;
     use crate::{
-        CaptureTimeBound, CheckedPhotoDecisionItem, LibraryRoot, PhotoRemovalMarker,
-        PhotoRemovalTarget, PhotoStateBatchItem, identity::original_id,
+        CaptureTimeBound, CheckedPhotoDecisionItem, EXPORT_DEVELOPMENT_TIFF_WORKLOAD,
+        EXPORT_RETENTION_SECONDS, EditRecipe, EditRecipeSettings, ExportExposureRange,
+        ExportRecipePayload, ExportState, LibraryRoot, PhotoRemovalMarker, PhotoRemovalTarget,
+        PhotoStateBatchItem, identity::original_id,
     };
     use serde::Deserialize;
+    use sha2::{Digest, Sha256};
     use std::{
         fs,
         os::unix::fs::PermissionsExt,
@@ -10083,6 +8291,532 @@ mod tests {
         connection.execute_batch(sql).unwrap();
     }
 
+    fn metadata_fixture() -> (TempTree, Persistence, PathBuf) {
+        let (base, root, state, name, path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            root.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        seed(&path, "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state)
+             VALUES('original','dir/photo.JPG','jpeg',1,1,1,'pending'),('other-original','other.JPG','jpeg',1,1,1,'pending');
+             INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating)
+             VALUES('photo','original',1,'inspection-pending','dir/photo.JPG','undecided',0),
+             ('other','other-original',1,'inspection-pending','other.JPG','undecided',0);");
+        (base, persistence, path)
+    }
+
+    fn metadata_observation(size: u64) -> ObservedSidecar {
+        ObservedSidecar {
+            state: ObservedSidecarState::Eligible {
+                path: "dir/photo.xmp".to_owned(),
+                size,
+                mtime_ms: 1234.5,
+                digest: "a".repeat(64),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn with_metadata_reads_removed_but_rejects_missing_and_unavailable() {
+        let (_base, persistence, path) = metadata_fixture();
+        assert_eq!(
+            persistence
+                .with_metadata_receiver("missing".into(), |_| Ok(()))
+                .unwrap()
+                .await
+                .unwrap(),
+            Err(MetadataStoreError::PhotoMissing)
+        );
+        seed(
+            &path,
+            "UPDATE photos SET removed_at_ms=1,removed_operation='remove',rating=4 WHERE id='photo';",
+        );
+        let removed = persistence
+            .with_metadata_receiver("photo".into(), |context| Ok(context.record().clone()))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(removed.removed);
+        assert_eq!(removed.library_rating, 4);
+        seed(
+            &path,
+            "UPDATE original_files SET available=0 WHERE id='original';",
+        );
+        assert_eq!(
+            persistence
+                .with_metadata_receiver("photo".into(), |_| Ok(()))
+                .unwrap()
+                .await
+                .unwrap(),
+            Err(MetadataStoreError::OriginalUnavailable)
+        );
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn with_metadata_observation_round_trips_and_protects_foreign_owner() {
+        let (_base, persistence, path) = metadata_fixture();
+        persistence
+            .with_metadata_receiver("photo".into(), |context| {
+                context.record_observation(&metadata_observation(7))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let record = persistence
+            .with_metadata_receiver("photo".into(), |context| Ok(context.record().clone()))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.kind, "jpeg");
+        assert_eq!(record.original_id, "original");
+        assert_eq!(record.relative_path, "dir/photo.JPG");
+        assert_eq!(
+            record.active,
+            Some(ActiveAssociation {
+                sidecar_path: "dir/photo.xmp".into(),
+                observed_size: Some(7),
+                observed_mtime_ms: Some(1234.5),
+                observed_digest: Some("a".repeat(64))
+            })
+        );
+        assert_eq!(
+            persistence
+                .with_metadata_receiver("other".into(), |context| context
+                    .record_observation(&metadata_observation(8)))
+                .unwrap()
+                .await
+                .unwrap(),
+            Err(MetadataStoreError::Storage)
+        );
+        assert_eq!(
+            Connection::open(&path)
+                .unwrap()
+                .query_row(
+                    "SELECT observed_size FROM sidecar_associations WHERE photo_id='photo'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            7
+        );
+        persistence
+            .with_metadata_receiver("photo".into(), |context| {
+                context.record_observation(&ObservedSidecar {
+                    state: ObservedSidecarState::Absent,
+                })
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            persistence
+                .with_metadata_receiver("photo".into(), |context| Ok(context
+                    .record()
+                    .active
+                    .is_none()))
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn with_metadata_raw_claim_displaces_jpeg_owner_and_invalidates_evidence() {
+        let (_base, persistence, path) = metadata_fixture();
+        seed(
+            &path,
+            "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state)
+             VALUES('raw-original','dir/photo.ARW','raw',1,1,1,'pending'),
+                   ('raw-twin-original','dir/photo.CR2','raw',1,1,1,'pending');
+             INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating)
+             VALUES('raw-photo','raw-original',1,'inspection-pending','dir/photo.ARW','undecided',0),
+                   ('raw-twin','raw-twin-original',1,'inspection-pending','dir/photo.CR2','undecided',0);",
+        );
+        persistence
+            .with_metadata_receiver("photo".into(), |context| {
+                context.record_observation(&metadata_observation(7))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        // RAW priority hands the Sidecar to the RAW Photo; the displaced JPEG
+        // owner loses its claim and its held evidence fails the generation.
+        persistence
+            .with_metadata_receiver("raw-photo".into(), |context| {
+                context.record_observation(&metadata_observation(7))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT photo_id FROM sidecar_associations WHERE sidecar_path='dir/photo.xmp'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "raw-photo"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sidecar_associations WHERE photo_id='photo'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        drop(connection);
+        assert_eq!(association_generation(&path, "photo"), 2);
+        assert_eq!(association_generation(&path, "raw-photo"), 1);
+        // The displaced JPEG cannot reclaim while the RAW owner stands.
+        assert_eq!(
+            persistence
+                .with_metadata_receiver("photo".into(), |context| context
+                    .record_observation(&metadata_observation(8)))
+                .unwrap()
+                .await
+                .unwrap(),
+            Err(MetadataStoreError::Storage)
+        );
+        // A second available RAW of the same basename is a standing conflict.
+        assert_eq!(
+            persistence
+                .with_metadata_receiver("raw-twin".into(), |context| context
+                    .record_observation(&metadata_observation(8)))
+                .unwrap()
+                .await
+                .unwrap(),
+            Err(MetadataStoreError::Storage)
+        );
+        // The owner keeps updating its own claim.
+        persistence
+            .with_metadata_receiver("raw-photo".into(), |context| {
+                context.record_observation(&metadata_observation(8))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn with_metadata_claim_displaces_unavailable_owner_and_raw_claims_back() {
+        let (_base, persistence, path) = metadata_fixture();
+        seed(
+            &path,
+            "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state)
+             VALUES('raw-original','dir/photo.ARW','raw',1,1,1,'pending');
+             INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating)
+             VALUES('raw-photo','raw-original',1,'inspection-pending','dir/photo.ARW','undecided',0);",
+        );
+        persistence
+            .with_metadata_receiver("raw-photo".into(), |context| {
+                context.record_observation(&metadata_observation(7))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        seed(
+            &path,
+            "UPDATE original_files SET available=0 WHERE id='raw-original';",
+        );
+        // Without its Original the owner cannot write: the JPEG claim at the
+        // stem displaces it and invalidates its evidence.
+        persistence
+            .with_metadata_receiver("photo".into(), |context| {
+                context.record_observation(&metadata_observation(8))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT photo_id FROM sidecar_associations WHERE sidecar_path='dir/photo.xmp'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "photo"
+        );
+        drop(connection);
+        assert_eq!(association_generation(&path, "raw-photo"), 2);
+        assert_eq!(association_generation(&path, "photo"), 1);
+        // Once the RAW Original is available again, RAW priority reclaims the
+        // Sidecar and the displaced JPEG's evidence fails.
+        seed(
+            &path,
+            "UPDATE original_files SET available=1 WHERE id='raw-original';",
+        );
+        persistence
+            .with_metadata_receiver("raw-photo".into(), |context| {
+                context.record_observation(&metadata_observation(9))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(association_generation(&path, "photo"), 2);
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn with_metadata_changed_clears_stale_claim_at_the_stem() {
+        let (_base, persistence, path) = metadata_fixture();
+        seed(
+            &path,
+            "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state)
+             VALUES('raw-original','dir/photo.ARW','raw',1,1,1,'pending');
+             INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating)
+             VALUES('raw-photo','raw-original',1,'inspection-pending','dir/photo.ARW','undecided',0);",
+        );
+        persistence
+            .with_metadata_receiver("photo".into(), |context| {
+                context.record_observation(&metadata_observation(7))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        // A Sidecar that no longer reads as recorded drops the stale JPEG
+        // claim at the stem and invalidates its held evidence.
+        persistence
+            .with_metadata_receiver("raw-photo".into(), |context| {
+                context.record_observation(&ObservedSidecar {
+                    state: ObservedSidecarState::Changed,
+                })
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let record = persistence
+            .with_metadata_receiver("photo".into(), |context| Ok(context.record().clone()))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.active, None);
+        assert_eq!(association_generation(&path, "photo"), 2);
+        // The next readable inspection claims the Sidecar without a conflict.
+        persistence
+            .with_metadata_receiver("raw-photo".into(), |context| {
+                context.record_observation(&metadata_observation(7))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT photo_id FROM sidecar_associations WHERE sidecar_path='dir/photo.xmp'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "raw-photo"
+        );
+        drop(connection);
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn with_metadata_retains_unchanged_orphan_and_clears_corrections() {
+        let (_base, persistence, path) = metadata_fixture();
+        let sql = format!(
+            "INSERT INTO retained_sidecar_orphans VALUES('dir/photo.xmp','retired','old.JPG','jpeg',3,7,1234.5,'{}');",
+            "a".repeat(64)
+        );
+        seed(&path, &sql);
+        persistence
+            .with_metadata_receiver("photo".into(), |context| {
+                context.record_observation(&metadata_observation(7))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let orphan = persistence
+            .with_metadata_receiver("photo".into(), |context| {
+                Ok(context.record().orphan.clone())
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(orphan.retired_photo_id, "retired");
+        assert_eq!(orphan.retired_generation, 3);
+        persistence
+            .with_metadata_receiver("photo".into(), |context| {
+                context.record_observation(&ObservedSidecar {
+                    state: ObservedSidecarState::Absent,
+                })
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            persistence
+                .with_metadata_receiver("photo".into(), |context| Ok(context
+                    .record()
+                    .orphan
+                    .is_some()))
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        persistence
+            .with_metadata_receiver("photo".into(), |context| {
+                context.record_observation(&metadata_observation(8))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            persistence
+                .with_metadata_receiver("photo".into(), |context| Ok(context
+                    .record()
+                    .orphan
+                    .is_none()))
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        seed(&path, &sql);
+        persistence
+            .with_metadata_receiver("photo".into(), |context| {
+                context.record_observation(&ObservedSidecar {
+                    state: ObservedSidecarState::Changed,
+                })
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            persistence
+                .with_metadata_receiver("photo".into(), |context| Ok(context
+                    .record()
+                    .orphan
+                    .is_none()))
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn with_metadata_retains_uppercase_orphans_without_folding_basename() {
+        let (_base, persistence, path) = metadata_fixture();
+        seed(&path, &format!(
+            "INSERT INTO retained_sidecar_orphans VALUES('dir/photo.XMP','retired','old.JPG','jpeg',3,7,1234.5,'{}');
+             INSERT INTO retained_sidecar_orphans VALUES('dir/Photo.xmp','other','other.JPG','jpeg',3,7,1234.5,'{}');",
+            "a".repeat(64), "a".repeat(64)
+        ));
+        let orphan = persistence
+            .with_metadata_receiver("photo".into(), |context| {
+                Ok(context.record().orphan.clone())
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(orphan.sidecar_path, "dir/photo.XMP");
+        persistence
+            .with_metadata_receiver("photo".into(), |context| {
+                context.record_observation(&ObservedSidecar {
+                    state: ObservedSidecarState::Changed,
+                })
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            persistence
+                .with_metadata_receiver("photo".into(), |context| {
+                    Ok(context.record().orphan.is_none())
+                })
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        assert_eq!(
+            Connection::open(&path)
+                .unwrap()
+                .query_row(
+                    "SELECT sidecar_path FROM retained_sidecar_orphans",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "dir/Photo.xmp"
+        );
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn with_metadata_save_serializes_before_concurrent_remove() {
+        let (_base, persistence, path) = metadata_fixture();
+        seed(
+            &path,
+            "UPDATE photos SET selection_state='rejected' WHERE id='photo';",
+        );
+        let (started_send, started_receive) = oneshot::channel();
+        let (release_send, release_receive) = std::sync::mpsc::channel();
+        let save = persistence
+            .with_metadata_receiver("photo".into(), move |context| {
+                started_send.send(()).unwrap();
+                release_receive.recv().unwrap();
+                context.record_observation(&metadata_observation(7))?;
+                Ok(context.record().association_generation)
+            })
+            .unwrap();
+        started_receive.await.unwrap();
+        let remove = persistence
+            .remove_photos_receiver(PhotoRemovalMutation {
+                photo_ids: vec!["photo".into()],
+                operation_id: "remove".into(),
+            })
+            .unwrap();
+        assert_eq!(association_generation(&path, "photo"), 1);
+        release_send.send(()).unwrap();
+        assert_eq!(save.await.unwrap().unwrap(), 1);
+        assert_eq!(remove.await.unwrap().unwrap().newly_removed, vec!["photo"]);
+        assert_eq!(association_generation(&path, "photo"), 2);
+        persistence.shutdown().unwrap();
+    }
+
     struct RecipeTestPhoto<'a> {
         original_id: &'a str,
         photo_id: &'a str,
@@ -10144,7 +8878,7 @@ mod tests {
         );
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V10).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
     }
 
     #[tokio::test]
@@ -10224,12 +8958,12 @@ mod tests {
         );
         persistence.shutdown().unwrap();
         let connection = Connection::open(&path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V10).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
         assert_eq!(
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            10
+            11
         );
         assert_eq!(
             connection
@@ -10734,6 +9468,365 @@ mod tests {
         persistence.shutdown().unwrap();
     }
 
+    fn sidecar_config(
+        root: &LibraryRoot,
+        state: &StateDirectory,
+        name: &DatabaseName,
+    ) -> crate::LibraryConfig {
+        crate::LibraryConfig {
+            library_root: root.canonical_path().to_owned(),
+            state_directory: state.canonical_path().to_owned(),
+            database_basename: name.as_os_str().to_string_lossy().into_owned(),
+            ..crate::LibraryConfig::default()
+        }
+    }
+
+    fn seed_sidecar(path: &Path, photo: &str, sidecar: &str) {
+        Connection::open(path)
+            .unwrap()
+            .execute(
+                "INSERT INTO sidecar_associations VALUES(?,?,7,1234.5,?)",
+                params![photo, sidecar, "a".repeat(64)],
+            )
+            .unwrap();
+    }
+
+    fn association_generation(path: &Path, photo: &str) -> i64 {
+        Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT association_generation FROM photos WHERE id=?",
+                [photo],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn assert_retired(path: &Path, photo: &str, original: &str, sidecar: &str, generation: i64) {
+        let connection = Connection::open(path).unwrap();
+        let value: (String, String, String, i64, i64, f64, String) = connection.query_row(
+            "SELECT retired_photo_id,retired_original_path,original_kind,retired_generation,observed_size,observed_mtime_ms,observed_digest FROM retained_sidecar_orphans WHERE sidecar_path=?",
+            [sidecar], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        ).unwrap();
+        assert_eq!(
+            value,
+            (
+                photo.to_owned(),
+                original.to_owned(),
+                "jpeg".to_owned(),
+                generation,
+                7,
+                1234.5,
+                "a".repeat(64)
+            )
+        );
+        assert!(
+            !connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sidecar_associations WHERE photo_id=?)",
+                    [photo],
+                    |r| r.get::<_, bool>(0)
+                )
+                .unwrap()
+        );
+    }
+
+    async fn reject_and_remove(library: &crate::Library, photo: &str) {
+        library
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: photo.to_owned(),
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Rejected),
+                expected_current: None,
+                album_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            library
+                .remove_photos(PhotoRemovalMutation {
+                    photo_ids: vec![photo.to_owned()],
+                    operation_id: "remove-sidecar".to_owned(),
+                })
+                .await
+                .unwrap()
+                .removed,
+            vec![photo.to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn with_metadata_library_round_trip() {
+        let (_base, root, state, name, _path) = fixture();
+        fs::write(root.canonical_path().join("one.JPG"), b"one").unwrap();
+        let library = crate::Library::open(sidecar_config(&root, &state, &name)).unwrap();
+        let snapshot = library.scan().await.unwrap();
+        let photo = snapshot.photos[0].id.clone();
+        library
+            .with_metadata(photo.clone(), |context| {
+                context.record_observation(&ObservedSidecar {
+                    state: ObservedSidecarState::Eligible {
+                        path: "one.xmp".into(),
+                        size: 7,
+                        mtime_ms: 1234.5,
+                        digest: "a".repeat(64),
+                    },
+                })
+            })
+            .await
+            .unwrap();
+        let record = library
+            .with_metadata(photo.clone(), |context| Ok(context.record().clone()))
+            .await
+            .unwrap();
+        assert_eq!(record.photo_id, photo);
+        assert_eq!(record.relative_path, "one.JPG");
+        assert_eq!(record.active.unwrap().sidecar_path, "one.xmp");
+        library.shutdown().unwrap();
+        assert_eq!(
+            library.with_metadata(photo, |_| Ok(())).await,
+            Err(MetadataStoreError::Storage)
+        );
+    }
+
+    #[tokio::test]
+    async fn removal_and_restore_bump_association_generation() {
+        let (_base, root, state, name, path) = fixture();
+        fs::write(root.canonical_path().join("one.JPG"), b"one").unwrap();
+        fs::write(root.canonical_path().join("two.JPG"), b"two").unwrap();
+        let library = crate::Library::open(sidecar_config(&root, &state, &name)).unwrap();
+        let snapshot = library.scan().await.unwrap();
+        let photo = &snapshot.photos[0].id;
+        let sibling = &snapshot.photos[1].id;
+        seed_sidecar(&path, photo, "dir/photo.xmp");
+        let before = association_generation(&path, photo);
+        let sibling_before = association_generation(&path, sibling);
+        reject_and_remove(&library, photo).await;
+        let removed = association_generation(&path, photo);
+        assert!(removed > before);
+        assert_eq!(association_generation(&path, sibling), sibling_before);
+        assert_eq!(
+            library
+                .restore_photos(PhotoRestoration::Operation("remove-sidecar".to_owned()))
+                .await
+                .unwrap()
+                .restored,
+            vec![photo.clone()]
+        );
+        assert!(association_generation(&path, photo) > removed);
+        assert_eq!(association_generation(&path, sibling), sibling_before);
+        library.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn scan_relocation_retires_sidecar_association() {
+        let (_base, root, state, name, path) = fixture();
+        fs::write(root.canonical_path().join("one.JPG"), b"one").unwrap();
+        let library = crate::Library::open(sidecar_config(&root, &state, &name)).unwrap();
+        let snapshot = library.scan().await.unwrap();
+        let photo = &snapshot.photos[0].id;
+        seed_sidecar(&path, photo, "dir/photo.xmp");
+        let before = association_generation(&path, photo);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while library.fingerprint_counts().enrolled != 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fingerprint enrollment timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        library.shutdown().unwrap();
+        fs::rename(
+            root.canonical_path().join("one.JPG"),
+            root.canonical_path().join("moved.JPG"),
+        )
+        .unwrap();
+        let library = crate::Library::open(sidecar_config(&root, &state, &name)).unwrap();
+        let relocated = library.scan().await.unwrap();
+        assert_eq!(relocated.photos[0].id, *photo);
+        assert_eq!(relocated.originals[0].relative_path.as_str(), "moved.JPG");
+        let after = association_generation(&path, photo);
+        assert!(after > before);
+        assert_retired(&path, photo, "one.JPG", "dir/photo.xmp", after);
+        library.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn permanent_deletion_retirement_and_expansion() {
+        let (_base, parent_root, state, name, path) = fixture();
+        fs::create_dir(parent_root.canonical_path().join("shoot")).unwrap();
+        let root = LibraryRoot::open(parent_root.canonical_path().join("shoot")).unwrap();
+        fs::write(root.canonical_path().join("one.JPG"), b"one").unwrap();
+        fs::write(root.canonical_path().join("two.JPG"), b"two").unwrap();
+        let config = sidecar_config(&root, &state, &name);
+        let library = crate::Library::open(config.clone()).unwrap();
+        let snapshot = library.scan().await.unwrap();
+        let photo = &snapshot.photos[0].id;
+        let sibling = &snapshot.photos[1].id;
+        let original = &snapshot
+            .originals
+            .iter()
+            .find(|o| o.id == snapshot.photos[0].original_id)
+            .unwrap()
+            .relative_path;
+        seed_sidecar(&path, photo, "dir/photo.xmp");
+        seed_sidecar(&path, sibling, "dir/sibling.xmp");
+        reject_and_remove(&library, photo).await;
+        library
+            .prepare_permanent_deletion(
+                "delete-sidecar".to_owned(),
+                PermanentDeletionSelection::Photos(vec![photo.clone()]),
+            )
+            .await
+            .unwrap();
+        let deleted = library
+            .permanently_delete("delete-sidecar".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(deleted.items[0].state, PermanentDeletionItemState::Deleted);
+        let before = association_generation(&path, photo);
+        fs::write(
+            root.canonical_path().join(original.as_str()),
+            b"replacement",
+        )
+        .unwrap();
+        library.scan().await.unwrap();
+        let retired = association_generation(&path, photo);
+        assert!(retired > before);
+        assert_retired(&path, photo, original.as_str(), "dir/photo.xmp", retired);
+        library.shutdown().unwrap();
+
+        // Expansion requires supported Original paths, unlike deletion's reserved Locations.
+        let (_expansion_base, parent_root, state, name, path) = fixture();
+        fs::create_dir(parent_root.canonical_path().join("shoot")).unwrap();
+        let root = LibraryRoot::open(parent_root.canonical_path().join("shoot")).unwrap();
+        let mut config = sidecar_config(&root, &state, &name);
+        fs::write(root.canonical_path().join("one.JPG"), b"one").unwrap();
+        fs::write(root.canonical_path().join("two.JPG"), b"two").unwrap();
+        let library = crate::Library::open(config.clone()).unwrap();
+        let snapshot = library.scan().await.unwrap();
+        let photo = &snapshot.photos[0].id;
+        let sibling = &snapshot.photos[1].id;
+        seed_sidecar(&path, sibling, "dir/sibling.xmp");
+        let retired = association_generation(&path, photo);
+        seed(
+            &path,
+            &format!(
+                "INSERT INTO retained_sidecar_orphans VALUES('dir/photo.xmp','{}','old.JPG','jpeg',{},7,1234.5,'{}')",
+                photo,
+                retired,
+                "a".repeat(64),
+            ),
+        );
+        let connection = Connection::open(&path).unwrap();
+        let generations: Vec<(String, i64)> = connection
+            .prepare("SELECT id,association_generation FROM photos ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        drop(connection);
+        library.shutdown().unwrap();
+        config.library_root = parent_root.canonical_path().to_owned();
+        crate::expand_library(config).unwrap();
+        for (photo, before) in generations {
+            assert_eq!(association_generation(&path, &photo), before + 1);
+        }
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT sidecar_path FROM sidecar_associations WHERE photo_id=?",
+                    [sibling],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "shoot/dir/sibling.xmp"
+        );
+        assert_retired(&path, photo, "old.JPG", "shoot/dir/photo.xmp", retired);
+    }
+
+    #[tokio::test]
+    async fn retire_and_bind_retires_before_delete() {
+        let (_base, root, state, name, path) = fixture();
+        fs::write(root.canonical_path().join("one.JPG"), b"one").unwrap();
+        fs::write(root.canonical_path().join("two.JPG"), b"different").unwrap();
+        let library = crate::Library::open(sidecar_config(&root, &state, &name)).unwrap();
+        let snapshot = library.scan().await.unwrap();
+        let destination = &snapshot.photos[0];
+        let retiring = &snapshot.photos[1];
+        let old_path = snapshot
+            .originals
+            .iter()
+            .find(|o| o.id == destination.original_id)
+            .unwrap()
+            .relative_path
+            .as_str();
+        let new_path = snapshot
+            .originals
+            .iter()
+            .find(|o| o.id == retiring.original_id)
+            .unwrap()
+            .relative_path
+            .clone();
+        seed_sidecar(&path, &destination.id, "dir/source.xmp");
+        seed_sidecar(&path, &retiring.id, "dir/destination.xmp");
+        let destination_before = association_generation(&path, &destination.id);
+        let retiring_before = association_generation(&path, &retiring.id);
+        fs::remove_file(root.canonical_path().join(old_path)).unwrap();
+        library.scan().await.unwrap();
+        let facts = root
+            .original(new_path.clone())
+            .unwrap()
+            .facts_if_present()
+            .unwrap()
+            .unwrap();
+        library
+            .apply_relocations(vec![RequestedRelocation {
+                original_id: destination.original_id.clone(),
+                to_location: new_path.to_string(),
+                facts,
+                retire_destination: true,
+            }])
+            .await
+            .unwrap();
+        let after = association_generation(&path, &destination.id);
+        assert!(after > destination_before);
+        assert_retired(
+            &path,
+            &retiring.id,
+            new_path.as_str(),
+            "dir/destination.xmp",
+            retiring_before + 1,
+        );
+        assert_retired(
+            &path,
+            &destination.id,
+            new_path.as_str(),
+            "dir/source.xmp",
+            after,
+        );
+        let connection = Connection::open(&path).unwrap();
+        assert!(
+            !connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM photos WHERE id=?)",
+                    [&retiring.id],
+                    |r| r.get::<_, bool>(0)
+                )
+                .unwrap()
+        );
+        assert!(
+            !connection
+                .prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        );
+        library.shutdown().unwrap();
+    }
+
     #[test]
     fn retire_and_bind_refuses_a_photo_with_saved_recipe() {
         let (_base, library, state, name, path) = fixture();
@@ -10932,9 +10025,9 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            10
+            11
         );
-        validate_canonical_schema(&connection, SchemaVersion::V10).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
         // The legacy photo-set tables are gone rather than left as aliases.
         for legacy in ["photo_sets", "photo_set_members", "review_progress"] {
             assert!(!table_exists(&connection, legacy).unwrap(), "{legacy}");
@@ -10943,7 +10036,7 @@ mod tests {
     // album-language-legacy:end v4-migration-test
 
     #[test]
-    fn newer_v11_database_is_rejected_without_changes() {
+    fn newer_v12_database_is_rejected_without_changes() {
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
@@ -10951,7 +10044,7 @@ mod tests {
         );
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 11)
+            .pragma_update(None, "user_version", 12)
             .unwrap();
         let before = fs::read(&path).unwrap();
         assert!(matches!(
@@ -10997,7 +10090,7 @@ mod tests {
                 .collect::<Vec<_>>();
 
             assert!(matches!(
-                preflight_schema_for_max_version(
+                migrations::preflight_schema_for_max_version(
                     &connection,
                     library.canonical_path().to_str().unwrap(),
                     max_version,
@@ -11029,7 +10122,7 @@ mod tests {
             .unwrap();
             persistence.shutdown().unwrap();
             let connection = Connection::open(&path).unwrap();
-            validate_canonical_schema(&connection, SchemaVersion::V10).unwrap();
+            validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
         }
         let (_base, library, state, name, path) = fixture();
         seed(
@@ -11200,7 +10293,7 @@ mod tests {
         assert_eq!(album.last_reviewed_photo_id.as_deref(), Some(photo_id));
         persistence.shutdown().unwrap();
         let connection = Connection::open(&path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V10).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
     }
     // album-language-legacy:end v3-migration-test
 
@@ -14779,7 +13872,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            10
+            11
         );
         assert_eq!(
             connection
@@ -14796,6 +13889,141 @@ mod tests {
         );
         drop(connection);
         persistence.shutdown().unwrap();
+    }
+
+    // Issue #276 metadata records join the Film v10 schema as v11. The
+    // migration must add the sidecar records without disturbing the Film
+    // export rows, their download leases, or any Photo's identity and
+    // user-owned state, and every Photo starts at the first generation.
+    #[tokio::test]
+    async fn v10_to_v11_migration_preserves_film_export_state_and_starts_generation() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v10.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "raw-original",
+                photo_id: "raw-photo",
+                relative_path: "shoot/one.ARW",
+                kind: "raw",
+                available: true,
+                size: 17,
+                mtime_ms: 1_000.0,
+            },
+        );
+        connection
+            .execute(
+                "UPDATE photos SET selection_state='selected',rating=4 WHERE id='raw-photo'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO exports(id,photo_id,target,state,recipe_revision,exposure_ev,white_balance_mode,source_revision,source_profile_id,source_kind,recipe_digest,policy_id,bundle_id,workload,created_at)
+                 VALUES('export-one','raw-photo','film-jpeg','succeeded','recipe-1',0.25,'as-shot','source-1','profile-1','raw',?,?,?,'film-jpeg',1)",
+                params!["d".repeat(64), "e".repeat(64), "f".repeat(64)],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO export_download_leases(id,export_id,created_at) VALUES('lease-one','export-one',2)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        persistence.shutdown().unwrap();
+
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            11
+        );
+        validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT target,state,workload,recipe_digest,policy_id,bundle_id,exposure_ev,white_balance_mode
+                     FROM exports WHERE id='export-one'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, f64>(6)?,
+                            row.get::<_, String>(7)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                "film-jpeg".to_owned(),
+                "succeeded".to_owned(),
+                "film-jpeg".to_owned(),
+                "d".repeat(64),
+                "e".repeat(64),
+                "f".repeat(64),
+                0.25,
+                "as-shot".to_owned(),
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT export_id,created_at FROM export_download_leases WHERE id='lease-one'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .unwrap(),
+            ("export-one".to_owned(), 2)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT id,sort_path,selection_state,rating,association_generation
+                     FROM photos WHERE id='raw-photo'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                "raw-photo".to_owned(),
+                "shoot/one.ARW".to_owned(),
+                "selected".to_owned(),
+                4,
+                1,
+            )
+        );
     }
 
     /// One removal reports exactly one outcome per requested Photo, a retried
@@ -15983,7 +15211,7 @@ mod tests {
                 ExportSettlement::Succeeded {
                     artifact_size: 10,
                     artifact_sha256: "c".repeat(64),
-                    published_at: export_unix_seconds(),
+                    published_at: export::export_unix_seconds(),
                     artifact_width: 2,
                     artifact_height: 1,
                     artifact_profile_identity: "e".repeat(64),
@@ -16002,7 +15230,7 @@ mod tests {
                 &failed.id,
                 ExportSettlement::Failed {
                     outcome: "processing attempt did not complete: engine-failed".to_owned(),
-                    settled_at: export_unix_seconds(),
+                    settled_at: export::export_unix_seconds(),
                 },
             )
             .unwrap()
@@ -16103,7 +15331,7 @@ mod tests {
         let ExportSubmitOutcome::Created(record) = outcome else {
             panic!("submission must be created");
         };
-        let published_at = export_unix_seconds();
+        let published_at = export::export_unix_seconds();
         let settled = persistence
             .settle_export_receiver(
                 &record.id,

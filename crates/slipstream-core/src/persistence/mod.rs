@@ -1,6 +1,9 @@
 //! SQLite state ownership for the production Library core.
 
 mod admission;
+mod edit_recipe;
+mod export;
+mod migrations;
 mod owner;
 mod schema;
 
@@ -20,7 +23,9 @@ pub use admission::{
 };
 pub(crate) use owner::expand_library_binding;
 pub use owner::{
-    AlbumWriteError, DiscoveredFingerprint, FingerprintCounts, FingerprintTarget, MutationError,
-    Persistence, PersistenceError, PhotoDecisionWriteError, ScanApplication, ScanRecoveryPlan,
+    ActiveAssociation, AlbumWriteError, DiscoveredFingerprint, FingerprintCounts,
+    FingerprintTarget, MetadataContext, MetadataRecord, MetadataStoreError, MutationError,
+    ObservedSidecar, ObservedSidecarState, Persistence, PersistenceError, PhotoDecisionWriteError,
+    RetainedOrphan, ScanApplication, ScanRecoveryPlan,
 };
 pub use schema::{SchemaError, SchemaVersion, validate_canonical_schema};

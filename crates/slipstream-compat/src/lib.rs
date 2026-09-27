@@ -428,6 +428,8 @@ mod tests {
             "identity/vectors.json",
             "metadata/capture-order.json",
             "metadata/capture-time.json",
+            "metadata/external-metadata-read.json",
+            "metadata/external-metadata-save.json",
             "preview/fixtures.json",
             "protocol/batch-workflows.json",
             "protocol/browse-vectors.json",
@@ -457,6 +459,8 @@ mod tests {
             "sqlite/schema-v9.sql",
             "sqlite/schema-v10.json",
             "sqlite/schema-v10.sql",
+            "sqlite/schema-v11.json",
+            "sqlite/schema-v11.sql",
             "sqlite/v0.sql",
             "sqlite/v1.sql",
             "startup/vectors.json",
@@ -483,32 +487,40 @@ mod tests {
                 "crates/slipstream-core/src/capture.rs",
             ),
             (
+                "metadata/external-metadata-read.json",
+                "crates/slipstream-server/src/metadata_wire.rs",
+            ),
+            (
+                "metadata/external-metadata-save.json",
+                "crates/slipstream-server/src/metadata_wire.rs",
+            ),
+            (
                 "protocol/batch-workflows.json",
                 "crates/slipstream-compat/src/lib.rs",
             ),
             (
                 "protocol/browse-vectors.json",
-                "crates/slipstream-server/src/tests.rs",
+                "crates/slipstream-server/src/tests/protocol.rs",
             ),
             (
                 "protocol/cache-vectors.json",
-                "crates/slipstream-server/src/tests.rs",
+                "crates/slipstream-server/src/tests/protocol.rs",
             ),
             (
                 "protocol/capture-order-omission.json",
-                "crates/slipstream-server/src/tests.rs",
+                "crates/slipstream-server/src/tests/protocol.rs",
             ),
             (
                 "protocol/responses.json",
-                "crates/slipstream-server/src/tests.rs",
+                "crates/slipstream-server/src/tests/protocol.rs",
             ),
             (
                 "protocol/vectors.json",
-                "crates/slipstream-server/src/tests.rs",
+                "crates/slipstream-server/src/tests/protocol.rs",
             ),
             (
                 "startup/vectors.json",
-                "crates/slipstream-server/src/tests.rs",
+                "crates/slipstream-server/src/tests/startup.rs",
             ),
             (
                 "sqlite/malformed-v2.sql",
@@ -534,7 +546,7 @@ mod tests {
                 "{file} lost its executing consumer {source}"
             );
         }
-        for version in 1..=10 {
+        for version in 1..=11 {
             let schema = fs::read_to_string(
                 repository.join("crates/slipstream-core/src/persistence/schema.rs"),
             )

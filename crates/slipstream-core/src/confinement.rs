@@ -278,6 +278,10 @@ impl LibraryRoot {
         let file = self.open_confined(&relative, true)?;
         Ok(file.into())
     }
+
+    pub(crate) fn sidecar_directory(&self, path: &str) -> Result<OwnedFd, ConfinementError> {
+        self.open_directory(path)
+    }
 }
 
 #[derive(Clone)]
@@ -294,6 +298,24 @@ impl OriginalCapability {
     pub fn facts(&self) -> Result<OriginalFacts, ConfinementError> {
         let file = self.root.open_confined(&self.path, false)?;
         facts(file.as_raw_fd())
+    }
+
+    /// Captures exact revision facts from one retained, no-follow regular file.
+    pub fn revision_facts(
+        &self,
+    ) -> Result<crate::metadata::sidecar::SidecarFacts, ConfinementError> {
+        let file = self.root.open_confined(&self.path, false)?;
+        let value = stat_regular(file.as_raw_fd())?;
+        Ok(crate::metadata::sidecar::SidecarFacts {
+            device: value.st_dev,
+            inode: value.st_ino,
+            size: validated_size(&value)?,
+            modified_seconds: value.st_mtime,
+            modified_nanoseconds: u32::try_from(value.st_mtime_nsec)
+                .ok()
+                .filter(|nanos| *nanos < 1_000_000_000)
+                .ok_or(ConfinementError::Io("Original File facts are invalid"))?,
+        })
     }
 
     /// Reports the confined Original File's facts, or `None` when no file
@@ -830,16 +852,16 @@ fn same_revision(left: &libc::stat, right: &libc::stat) -> bool {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum EntryKind {
+pub(crate) enum EntryKind {
     File,
     Directory,
     Symlink,
     Other,
 }
 
-struct DirectoryEntry {
-    name: std::ffi::OsString,
-    kind: EntryKind,
+pub(crate) struct DirectoryEntry {
+    pub(crate) name: std::ffi::OsString,
+    pub(crate) kind: EntryKind,
 }
 
 mod sys {
@@ -1027,6 +1049,84 @@ mod sys {
     }
 }
 
+pub(crate) fn sidecar_entries(directory: RawFd) -> Result<Vec<DirectoryEntry>, ConfinementError> {
+    let dot = CString::new(".").unwrap();
+    let listing =
+        sys::open_at_directory(directory, &dot).map_err(|_| ConfinementError::UnsafeOpen)?;
+    sys::list_directory(listing, 1_000_000)
+}
+
+pub(crate) fn sidecar_open(directory: RawFd, name: &CStr) -> io::Result<OwnedFd> {
+    sys::open_confined(directory, name, false)
+}
+
+pub(crate) fn sidecar_stat(fd: RawFd) -> io::Result<libc::stat> {
+    sys::fstat(fd)
+}
+
+pub(crate) fn sidecar_pread(fd: RawFd, bytes: &mut [u8], offset: u64) -> io::Result<usize> {
+    sys::pread(fd, bytes, offset)
+}
+
+pub(crate) fn sidecar_create(directory: RawFd, name: &CStr) -> io::Result<OwnedFd> {
+    // SAFETY: the name is NUL-terminated; success returns a uniquely owned descriptor.
+    let fd = unsafe {
+        libc::openat(
+            directory,
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        // SAFETY: this is the newly created descriptor.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+pub(crate) fn sidecar_rename(
+    directory: RawFd,
+    from: &CStr,
+    to: &CStr,
+    absent: bool,
+) -> io::Result<()> {
+    // SAFETY: both names are NUL-terminated and relative to a retained directory.
+    let result = unsafe {
+        if absent {
+            libc::syscall(
+                libc::SYS_renameat2,
+                directory,
+                from.as_ptr(),
+                directory,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            ) as libc::c_int
+        } else {
+            libc::renameat(directory, from.as_ptr(), directory, to.as_ptr())
+        }
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+pub(crate) fn sidecar_unlink(directory: RawFd, name: &CStr) -> io::Result<()> {
+    sys::unlink_at(directory, name)
+}
+
+pub(crate) fn sidecar_sync(directory: RawFd) -> io::Result<()> {
+    // SAFETY: the caller retains the descriptor for this syscall.
+    if unsafe { libc::fsync(directory) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1093,6 +1193,35 @@ mod tests {
             self.resume();
             *TEST_HOOK.get_or_init(|| Mutex::new(None)).lock().unwrap() = None;
         }
+    }
+
+    #[test]
+    fn revision_facts_preserve_nanoseconds_and_refuse_symlinks() {
+        let tree = TempTree::new();
+        tree.write("photo.jpg", b"original");
+        let modified = UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_789);
+        File::open(tree.path().join("photo.jpg"))
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let root = LibraryRoot::open(tree.path()).unwrap();
+        let original = root
+            .original(RelativeOriginalPath::parse("photo.jpg").unwrap())
+            .unwrap();
+        let revision = original.revision_facts().unwrap();
+        assert_eq!(revision.modified_seconds, 1_700_000_000);
+        assert_eq!(revision.modified_nanoseconds, 123_456_789);
+        assert_eq!(revision.size, 8);
+        fs::rename(tree.path().join("photo.jpg"), tree.path().join("moved.jpg")).unwrap();
+        symlink("moved.jpg", tree.path().join("photo.jpg")).unwrap();
+        assert!(matches!(
+            original.revision_facts(),
+            Err(ConfinementError::UnsafeOpen)
+        ));
+        assert_eq!(
+            fs::read(tree.path().join("moved.jpg")).unwrap(),
+            b"original"
+        );
     }
 
     struct TempTree(PathBuf);

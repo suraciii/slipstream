@@ -77,6 +77,7 @@ impl Fixture {
             web_root: Some(self.0.join("web")),
             processing: None,
             export_retained_output_bytes: None,
+            metadata_supervisor: None,
         }
     }
 }
