@@ -15,6 +15,7 @@ import {
 import { createViewOptions, type ViewOptionsElements } from "./view-options.js";
 import { createRatingControls } from "./rating-controls.js";
 import { createPhotoToolsController } from "./photo-tools.js";
+import { createSourceSurfaceController } from "./source-surface.js";
 import { createAlbumForm } from "./album-form.js";
 import {
   addressFor,
@@ -1584,13 +1585,8 @@ export function createLibraryBrowserView(
   /// supporting surface registers its dialog here, so at most one is active
   /// and every dismissal converges on one cleanup path.
   const surfaces = createModalSurfaces();
-  /// True while the Sources surface presents as a modal rather than the wide
-  /// resizable sidebar: a narrow Grid, or any Photo View.
-  const sourcesAreModal = () => compactSources.matches || !photoView.hidden;
-  /// The disclosure state of the two Photo View entries mirrors the surface
-  /// itself, so a native close request, an explicit Close, a destination
-  /// change, and a surface the controller reopens on an invoker's behalf all
-  /// leave both entries in the same state.
+  /// The disclosure state of the two Photo View entries mirrors the active
+  /// surface, so every supporting-surface transition updates both controls.
   const syncSecondarySurface = () => {
     dockMore.setAttribute(
       "aria-expanded",
@@ -1601,10 +1597,6 @@ export function createLibraryBrowserView(
       String(surfaces.isActive("rating")),
     );
   };
-  surfaces.register("sources", {
-    dialog: sourceDialog,
-    modal: sourcesAreModal,
-  });
   const recoveryPanelController = createRecoveryPanel({
     elements: {
       recoveryNotice: required<HTMLElement>(root, "[data-recovery-notice]"),
@@ -1824,35 +1816,6 @@ export function createLibraryBrowserView(
         photoId: string;
       }
     | undefined;
-  let sourceWidth = 224;
-  const setSourceWidth = (width: number) => {
-    sourceWidth = clamp(width, 176, 360);
-    browser.style.setProperty("--source-width", `${sourceWidth}px`);
-  };
-  let resizing = false;
-  sourceResizer.addEventListener("pointerdown", (event) => {
-    if (compactSources.matches) return;
-    resizing = true;
-    sourceResizer.setPointerCapture(event.pointerId);
-    sourceResizer.classList.add("active");
-  });
-  sourceResizer.addEventListener("pointermove", (event) => {
-    if (resizing)
-      setSourceWidth(event.clientX - browser.getBoundingClientRect().left);
-  });
-  const stopResize = () => {
-    resizing = false;
-    sourceResizer.classList.remove("active");
-  };
-  sourceResizer.addEventListener("pointerup", stopResize);
-  sourceResizer.addEventListener("pointercancel", stopResize);
-  sourceResizer.addEventListener("keydown", (event) => {
-    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-      event.preventDefault();
-      setSourceWidth(sourceWidth + (event.key === "ArrowRight" ? 16 : -16));
-    }
-  });
-  setSourceWidth(sourceWidth);
 
   const compactSources = window.matchMedia("(max-width: 760px)");
   const mobileActionHierarchy = window.matchMedia(
@@ -1866,16 +1829,6 @@ export function createLibraryBrowserView(
   // decision controls keep their space; the view mirrors that condition so a
   // hidden strip binds no thumbnails and rebuilds when the space returns.
   const shortViewport = window.matchMedia("(max-height: 480px)");
-  /// Reflects which layout the Sources surface uses: the wide resizable
-  /// sidebar keeps it in the Grid, and a narrow or Photo View layout opens it
-  /// as one native modal surface.
-  const syncSourceLayout = () => {
-    const modal = sourcesAreModal();
-    browser.classList.toggle("sources-drawer", modal);
-    sourceToggle.hidden = !modal;
-    photoSourceToggle.hidden = !modal;
-    if (!modal) closeSources(false);
-  };
   /// The last neighbor facts the page model reported. A disclosure rebuilds
   /// the strip from them, so a closed strip holds no image demand at all.
   let filmstripModel: FilmstripViewModel | undefined;
@@ -2148,50 +2101,6 @@ export function createLibraryBrowserView(
     if (!alive) return;
     ratingControls.closeChoices(restoreFocus);
   };
-  /// The disclosure's expanded state always mirrors the surface itself, so a
-  /// native close request and an explicit Close leave it in the same state.
-  const syncSourcesExpanded = () => {
-    const expanded = sourceDialog.open;
-    sourceToggle.setAttribute("aria-expanded", String(expanded));
-    photoSourceToggle.setAttribute("aria-expanded", String(expanded));
-  };
-  /// Opens the Sources surface. A wide Grid already shows it as the resizable
-  /// sidebar, so only a narrow Grid or a Photo View opens it as a modal.
-  const openSources = () => {
-    if (!alive || !sourcesAreModal()) return;
-    // The invoker is read before any surface closes. Closing the surface that
-    // holds the activating control moves focus out of it, and the invoker is
-    // what closing this surface returns focus to — reopening the surface that
-    // holds it when that surface had to close for this one.
-    const invoker =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : undefined;
-    // A pending gesture must never compete with the surface that takes over
-    // the pointer and the keyboard.
-    resetGestures();
-    photoToolsController.close(false);
-    closeRatingChoices(false);
-    surfaces.open("sources", invoker);
-    syncSourceLayout();
-    syncSourcesExpanded();
-    sourceClose.focus();
-  };
-  /// Closes the Sources surface, returning focus to the disclosure that opened
-  /// it unless the caller names a different owner.
-  const closeSources = (restoreFocus = true) => {
-    if (!alive) return;
-    surfaces.close("sources", restoreFocus);
-    syncSourcesExpanded();
-  };
-  const onSourceViewportChange = () => {
-    if (!alive) return;
-    syncSourcesExpanded();
-    syncSourceLayout();
-    presentConnection();
-    syncSecondarySurface();
-    syncFilmstripHost();
-  };
   const cellBox = () => GRID_THUMBNAIL_SIZE_STEPS[thumbnailSize];
   /// The column and row pitch of the virtualized layout: one cell box plus
   /// the ordinary inter-cell gap. Every geometry calculation derives from
@@ -2276,7 +2185,7 @@ export function createLibraryBrowserView(
     resetGestures,
     syncFilmstripHost,
     syncSecondarySurface,
-    openSources,
+    openSources: () => sourceController.open(),
     openEditor,
   });
   const ratingControls = createRatingControls({
@@ -2296,6 +2205,29 @@ export function createLibraryBrowserView(
     send,
     onSurfaceChange: syncSecondarySurface,
   });
+  const sourceController = createSourceSurfaceController({
+    elements: {
+      browser,
+      sourceDialog,
+      sourceResizer,
+      sourceToggle,
+      photoSourceToggle,
+      sourceClose,
+    },
+    surfaces,
+    isModal: () => compactSources.matches || !photoView.hidden,
+    resetGestures,
+    closePhotoTools: (restoreFocus) => photoToolsController.close(restoreFocus),
+    closeRatingChoices: (restoreFocus) =>
+      ratingControls.closeChoices(restoreFocus),
+  });
+  const onSourceViewportChange = () => {
+    if (!alive) return;
+    sourceController.syncLayout();
+    presentConnection();
+    syncSecondarySurface();
+    syncFilmstripHost();
+  };
   const viewOptionsController = createViewOptions({
     elements: {
       viewOptionsDialog: required<HTMLDialogElement>(
@@ -4064,14 +3996,7 @@ export function createLibraryBrowserView(
     syncFilmstripHost();
     send({ kind: "filmstrip-resize" });
   };
-  // A native close request reaches the surface before the controller's
-  // cleanup, so the disclosure state is synced from both events.
-  sourceDialog.addEventListener("cancel", syncSourcesExpanded);
-  sourceDialog.addEventListener("close", syncSourcesExpanded);
   shortViewport.addEventListener("change", onShortViewportChange);
-  sourceToggle.addEventListener("click", () => openSources());
-  photoSourceToggle.addEventListener("click", () => openSources());
-  sourceClose.addEventListener("click", () => closeSources());
   gridViewport.addEventListener("scroll", onScroll);
   window.addEventListener("resize", onResize);
   window.addEventListener("keydown", keydown);
@@ -4319,8 +4244,7 @@ export function createLibraryBrowserView(
   preview.addEventListener("lostpointercapture", (event) =>
     finishPointer(event, true),
   );
-  syncSourceLayout();
-  syncSourcesExpanded();
+  sourceController.syncLayout();
   syncSecondarySurface();
   // The strip's home is only placed once a Photo can present it: the markup
   // already holds it beside the Preview, which is where a wide layout shows
@@ -4503,8 +4427,8 @@ export function createLibraryBrowserView(
       photoView.hidden = true;
       clearGridCells();
       clearFilmstripCells();
-      closeSources(false);
-      syncSourceLayout();
+      sourceController.close(false);
+      sourceController.syncLayout();
       if (returnFocus) gridViewport.focus();
       presentSourceTitle(name);
       folderAlbumControls.hidden = true;
@@ -4626,8 +4550,8 @@ export function createLibraryBrowserView(
       // rebuilds its cells and re-attaches every thumbnail it still shows.
       clearGridCells();
       clearFilmstripCells();
-      closeSources(false);
-      syncSourceLayout();
+      sourceController.close(false);
+      sourceController.syncLayout();
       presentConnection();
       gridViewport.focus();
       // Returning from Photo View returns the Grid keyboard to that Photo
@@ -4646,7 +4570,7 @@ export function createLibraryBrowserView(
       gridView.hidden = true;
       photoView.hidden = false;
       photoView.scrollTop = 0;
-      syncSourceLayout();
+      sourceController.syncLayout();
       syncFilmstripHost();
       presentConnection();
       photoView.focus();
@@ -4766,6 +4690,7 @@ export function createLibraryBrowserView(
       clearFilmstripCells();
       preview.removeEventListener("wheel", wheelZoom);
       preview.removeEventListener("contextmenu", onPreviewContextMenu);
+      sourceController.dispose();
       cancelGridRender();
       compactSources.removeEventListener("change", onSourceViewportChange);
       mobileActionHierarchy.removeEventListener(
