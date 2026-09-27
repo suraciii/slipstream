@@ -7,6 +7,7 @@ import {
   type RemovalReviewViewModel,
   type TrashReviewViewModel,
 } from "./removed-panels.js";
+import { createRecoveryPanel } from "./recovery-panel.js";
 import {
   addressFor,
   type NavigationGridRestoration,
@@ -1094,57 +1095,6 @@ export function createLibraryBrowserView(
   const albumFormBody = required<HTMLElement>(root, "[data-album-form-body]");
   const albumResume = required<HTMLButtonElement>(root, "[data-album-resume]");
   const summaryStatus = required<HTMLElement>(root, "[data-summary-status]");
-  const recoveryNotice = required<HTMLElement>(root, "[data-recovery-notice]");
-  const recoveryPanel = required<HTMLDialogElement>(
-    root,
-    "[data-recovery-panel]",
-  );
-  const recoverySummary = required<HTMLElement>(
-    root,
-    "[data-recovery-summary]",
-  );
-  const recoveryList = required<HTMLElement>(root, "[data-recovery-list]");
-  const recoveryOldPrefix = required<HTMLInputElement>(
-    root,
-    "[data-recovery-old-prefix]",
-  );
-  const recoveryNewPrefix = required<HTMLInputElement>(
-    root,
-    "[data-recovery-new-prefix]",
-  );
-  const recoveryPropose = required<HTMLButtonElement>(
-    root,
-    "[data-recovery-propose]",
-  );
-  const recoverySingleOriginal = required<HTMLSelectElement>(
-    root,
-    "[data-recovery-single-original]",
-  );
-  const recoverySingleLocation = required<HTMLInputElement>(
-    root,
-    "[data-recovery-single-location]",
-  );
-  const recoveryProposeSingle = required<HTMLButtonElement>(
-    root,
-    "[data-recovery-propose-single]",
-  );
-  const recoveryNote = required<HTMLElement>(root, "[data-recovery-note]");
-  const recoveryProposalList = required<HTMLElement>(
-    root,
-    "[data-recovery-proposals]",
-  );
-  const recoveryApply = required<HTMLButtonElement>(
-    root,
-    "[data-recovery-apply]",
-  );
-  const recoveryMessage = required<HTMLElement>(
-    root,
-    "[data-recovery-message]",
-  );
-  const recoveryClose = required<HTMLButtonElement>(
-    root,
-    "[data-recovery-close]",
-  );
   const removalOpen = required<HTMLButtonElement>(root, "[data-removal-open]");
   const removalDialog = required<HTMLDialogElement>(
     root,
@@ -1293,34 +1243,6 @@ export function createLibraryBrowserView(
     root,
     "[data-trash-review-close]",
   );
-  let recoveryCurrentProposals: ReadonlyArray<RecoveryProposalViewModel> = [];
-  const recoveryRetireSelection = new Map<string, boolean>();
-  const recoveryOutcomeLabel = (
-    outcome: RecoveryProposalViewModel["outcome"],
-  ): string =>
-    ({
-      matched: "Ready to recover",
-      "content-mismatch": "Content differs from the remembered fingerprint",
-      missing: "No file at the destination",
-      "kind-mismatch": "Destination format differs",
-      unreadable: "Destination cannot be read",
-      occupied: "Destination already holds another Photo",
-      colliding: "Another mapping targets this destination",
-    })[outcome];
-  const updateRecoveryApply = (): void => {
-    const applicable = recoveryCurrentProposals.filter(
-      (proposal) =>
-        proposal.outcome === "matched" ||
-        (proposal.outcome === "occupied" &&
-          proposal.retire &&
-          recoveryRetireSelection.get(proposal.originalId)),
-    );
-    recoveryApply.textContent =
-      applicable.length === 1
-        ? "Apply 1 mapping"
-        : `Apply ${applicable.length} mappings`;
-    recoveryApply.hidden = applicable.length === 0;
-  };
   const sourceList = required<HTMLElement>(root, "[data-source-list]");
   const retry = required<HTMLButtonElement>(root, "[data-retry]");
   const signOut = required<HTMLButtonElement>(root, "[data-access-sign-out]");
@@ -1778,9 +1700,48 @@ export function createLibraryBrowserView(
     dialog: albumFormDialog,
     modal: () => true,
   });
-  surfaces.register("recovery", {
-    dialog: recoveryPanel,
-    modal: () => true,
+  const recoveryPanelController = createRecoveryPanel({
+    elements: {
+      recoveryNotice: required<HTMLElement>(root, "[data-recovery-notice]"),
+      recoveryPanel: required<HTMLDialogElement>(root, "[data-recovery-panel]"),
+      recoverySummary: required<HTMLElement>(root, "[data-recovery-summary]"),
+      recoveryList: required<HTMLElement>(root, "[data-recovery-list]"),
+      recoveryOldPrefix: required<HTMLInputElement>(
+        root,
+        "[data-recovery-old-prefix]",
+      ),
+      recoveryNewPrefix: required<HTMLInputElement>(
+        root,
+        "[data-recovery-new-prefix]",
+      ),
+      recoveryPropose: required<HTMLButtonElement>(
+        root,
+        "[data-recovery-propose]",
+      ),
+      recoverySingleOriginal: required<HTMLSelectElement>(
+        root,
+        "[data-recovery-single-original]",
+      ),
+      recoverySingleLocation: required<HTMLInputElement>(
+        root,
+        "[data-recovery-single-location]",
+      ),
+      recoveryProposeSingle: required<HTMLButtonElement>(
+        root,
+        "[data-recovery-propose-single]",
+      ),
+      recoveryNote: required<HTMLElement>(root, "[data-recovery-note]"),
+      recoveryProposalList: required<HTMLElement>(
+        root,
+        "[data-recovery-proposals]",
+      ),
+      recoveryApply: required<HTMLButtonElement>(root, "[data-recovery-apply]"),
+      recoveryMessage: required<HTMLElement>(root, "[data-recovery-message]"),
+      recoveryClose: required<HTMLButtonElement>(root, "[data-recovery-close]"),
+    },
+    send,
+    surfaces,
+    selectionLabel,
   });
   /// The removal review, the Removed Photos listing, and the
   /// permanent-deletion review present through their own controller, which
@@ -4845,40 +4806,6 @@ export function createLibraryBrowserView(
   stageObserver.observe(stage);
   back.addEventListener("click", () => send({ kind: "show-grid" }));
   refresh.addEventListener("click", () => send({ kind: "refresh" }));
-  recoveryClose.addEventListener("click", () =>
-    send({ kind: "recovery-close" }),
-  );
-  recoveryPropose.addEventListener("click", () =>
-    send({
-      kind: "recovery-propose",
-      oldPrefix: recoveryOldPrefix.value.trim(),
-      newPrefix: recoveryNewPrefix.value.trim(),
-    }),
-  );
-  recoveryProposeSingle.addEventListener("click", () =>
-    send({
-      kind: "recovery-propose-single",
-      originalId: recoverySingleOriginal.value,
-      newLocation: recoverySingleLocation.value.trim(),
-    }),
-  );
-  recoveryApply.addEventListener("click", () => {
-    const items = recoveryCurrentProposals
-      .filter(
-        (proposal) =>
-          proposal.outcome === "matched" ||
-          (proposal.outcome === "occupied" &&
-            proposal.retire &&
-            recoveryRetireSelection.get(proposal.originalId)),
-      )
-      .map((proposal) => ({
-        originalId: proposal.originalId,
-        newLocation: proposal.toLocation,
-        retireDestination: proposal.outcome === "occupied",
-      }));
-    if (items.length === 0) return;
-    send({ kind: "recovery-apply", items });
-  });
   // The empty-state action is explained by the state that shows it: the
   // Library check for an empty source, and the one explicit action an
   // explained destination state offers.
@@ -5665,142 +5592,34 @@ export function createLibraryBrowserView(
     },
     setRecoveryNotice(model) {
       if (!alive) return;
-      const parts: string[] = [];
-      if (model.relocatedPhotos > 0)
-        parts.push(
-          `Updated locations for ${formatPhotoCount(model.relocatedPhotos)}.`,
-        );
-      if (model.unavailablePhotos > 0)
-        parts.push(
-          `${formatPhotoCount(model.unavailablePhotos)} still unavailable.`,
-        );
-      recoveryNotice.replaceChildren();
-      if (parts.length === 0) {
-        recoveryNotice.hidden = true;
-        return;
-      }
-      recoveryNotice.append(document.createTextNode(parts.join(" ")));
-      if (model.unavailablePhotos > 0) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "summary-action";
-        button.textContent = "Review unavailable originals";
-        button.addEventListener("click", () =>
-          send({ kind: "recovery-entry" }),
-        );
-        recoveryNotice.append(" ", button);
-      }
-      recoveryNotice.hidden = false;
+      recoveryPanelController.setRecoveryNotice(model);
     },
     openRecoveryPanel(entries) {
       if (!alive) return;
-      recoveryCurrentProposals = [];
-      recoveryRetireSelection.clear();
-      recoverySummary.textContent = `${formatPhotoCount(entries.length)} unavailable`;
-      const rows = entries.slice(0, 100).map((entry) => {
-        const item = document.createElement("li");
-        const decisions = [
-          selectionLabel(entry.selectionState),
-          entry.rating > 0 ? `${entry.rating} stars` : null,
-          entry.albumCount > 0
-            ? `${entry.albumCount} album${entry.albumCount === 1 ? "" : "s"}`
-            : null,
-        ]
-          .filter(Boolean)
-          .join(" · ");
-        const fingerprint = entry.fingerprintEnrolled
-          ? "Fingerprint on file"
-          : "No fingerprint";
-        item.textContent = `${entry.location} — ${entry.kind.toUpperCase()} — ${decisions} — ${fingerprint}`;
-        return item;
-      });
-      if (entries.length > 100) {
-        const more = document.createElement("li");
-        more.textContent = `…and ${entries.length - 100} more`;
-        rows.push(more);
-      }
-      recoveryList.replaceChildren(...rows);
-      recoverySingleOriginal.replaceChildren(
-        ...entries.map((entry) =>
-          Object.assign(document.createElement("option"), {
-            value: entry.originalId,
-            textContent: entry.location,
-          }),
-        ),
-      );
-      recoveryProposalList.replaceChildren();
-      recoveryProposalList.hidden = true;
-      recoveryNote.hidden = true;
-      recoveryApply.hidden = true;
-      recoveryMessage.hidden = true;
-      recoverySingleLocation.value = "";
-      surfaces.open("recovery");
-      recoveryClose.focus();
+      recoveryPanelController.openRecoveryPanel(entries);
     },
     renderRecoveryProposals(proposals) {
       if (!alive) return;
-      recoveryCurrentProposals = proposals;
-      recoveryNote.hidden = !proposals.some((proposal) => !proposal.verified);
-      const rows = proposals.map((proposal) => {
-        const item = document.createElement("li");
-        const heading = document.createElement("p");
-        heading.className = "recovery-proposal-path";
-        heading.textContent = `${proposal.fromLocation} → ${proposal.toLocation}`;
-        const facts = document.createElement("p");
-        facts.className = "recovery-proposal-facts";
-        facts.textContent = `${recoveryOutcomeLabel(proposal.outcome)} · ${
-          proposal.verified
-            ? "Content verified"
-            : "Old content cannot be verified"
-        }`;
-        item.append(heading, facts);
-        if (proposal.outcome === "occupied" && proposal.retire) {
-          const retireLabel = document.createElement("label");
-          retireLabel.className = "recovery-retire";
-          const checkbox = document.createElement("input");
-          checkbox.type = "checkbox";
-          checkbox.addEventListener("change", () => {
-            recoveryRetireSelection.set(proposal.originalId, checkbox.checked);
-            updateRecoveryApply();
-          });
-          retireLabel.append(
-            checkbox,
-            document.createTextNode(
-              `Replace the discovered Photo at ${proposal.retire.location}`,
-            ),
-          );
-          item.append(retireLabel);
-        }
-        return item;
-      });
-      recoveryProposalList.replaceChildren(...rows);
-      recoveryProposalList.hidden = proposals.length === 0;
-      updateRecoveryApply();
+      recoveryPanelController.renderRecoveryProposals(proposals);
     },
     setRecoveryPending(pending) {
       if (!alive) return;
-      recoveryPropose.disabled = pending;
-      recoveryProposeSingle.disabled = pending;
-      recoveryApply.disabled = pending;
+      recoveryPanelController.setRecoveryPending(pending);
     },
     setRecoveryMessage(text) {
       if (!alive) return;
-      if (!text) {
-        recoveryMessage.hidden = true;
-        return;
-      }
-      recoveryMessage.textContent = text;
-      recoveryMessage.hidden = false;
+      recoveryPanelController.setRecoveryMessage(text);
     },
     closeRecoveryPanel() {
       if (!alive) return;
-      surfaces.close("recovery");
+      recoveryPanelController.closeRecoveryPanel();
     },
     dispose() {
       if (!alive) return;
       alive = false;
       resetGestures();
       removedPanels.dispose();
+      recoveryPanelController.dispose();
       stageObserver.disconnect();
       clearFilmstripCells();
       preview.removeEventListener("wheel", wheelZoom);
