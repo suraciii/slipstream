@@ -3,10 +3,13 @@
 mod admission;
 mod decisions;
 mod edit_recipe;
+mod expansion;
 mod export;
+mod metadata;
 mod migrations;
 mod owner;
 mod removal;
+mod scan;
 mod schema;
 
 pub use crate::domain::{
@@ -23,11 +26,15 @@ pub use crate::domain::{
 pub use admission::{
     DatabaseName, StateDatabaseLock, StateDirectory, StateError, StateFileIdentity,
 };
-pub(crate) use owner::expand_library_binding;
+pub(crate) use expansion::expand_library_binding;
+pub use metadata::{
+    ActiveAssociation, MetadataContext, MetadataRecord, MetadataStoreError, ObservedSidecar,
+    ObservedSidecarState, RetainedOrphan,
+};
 pub use owner::{
-    ActiveAssociation, AlbumWriteError, DiscoveredFingerprint, FingerprintCounts,
-    FingerprintTarget, MetadataContext, MetadataRecord, MetadataStoreError, MutationError,
-    ObservedSidecar, ObservedSidecarState, Persistence, PersistenceError, PhotoDecisionWriteError,
-    RetainedOrphan, ScanApplication, ScanRecoveryPlan,
+    AlbumWriteError, MutationError, Persistence, PersistenceError, PhotoDecisionWriteError,
+};
+pub use scan::{
+    DiscoveredFingerprint, FingerprintCounts, FingerprintTarget, ScanApplication, ScanRecoveryPlan,
 };
 pub use schema::{SchemaError, SchemaVersion, validate_canonical_schema};

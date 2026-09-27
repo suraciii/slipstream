@@ -4,9 +4,10 @@
 
 use super::owner::{
     MutationError, MutationVersions, PERMANENT_DELETION_DELETED_ORIGINAL_PREFIX, PersistenceError,
-    RemovedPhotoPageResult, mutation_error_from_sqlite, mutation_transaction, parse_kind,
+    RemovedPhotoPageResult, mutation_error_from_sqlite, mutation_transaction,
     parse_selection_state, selection_state_value, unix_millis,
 };
+use super::scan::parse_kind;
 use super::{DatabaseName, StateDirectory};
 use crate::{
     ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreCounts, ExplicitPhotoRestoreMutation,
