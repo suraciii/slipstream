@@ -47,12 +47,9 @@ fn read_header(path: &Path) -> Result<Vec<u8>, ErrorCode> {
     // the parsed head stays small and bounded; anything longer is not the
     // qualified artifact shape.
     let mut buffer = Vec::new();
-    file.take(HEAD_MAX as u64 + 1)
+    file.take(HEAD_MAX as u64)
         .read_to_end(&mut buffer)
         .map_err(|_| ErrorCode::Uncertain)?;
-    if buffer.len() > HEAD_MAX {
-        return Err(ErrorCode::Uncertain);
-    }
     Ok(buffer)
 }
 
@@ -88,7 +85,7 @@ fn segments(head: &[u8]) -> Result<Vec<Segment>, ErrorCode> {
                     payload: None,
                 });
                 if marker == 0xD9 {
-                    break;
+                    return Err(ErrorCode::Uncertain);
                 }
             }
             // Stuffed bytes and a repeated SOI are never marker positions.
@@ -110,12 +107,12 @@ fn segments(head: &[u8]) -> Result<Vec<Segment>, ErrorCode> {
                 // The first scan ends the structured header region: what
                 // follows is entropy-coded data with no marker semantics.
                 if marker == 0xDA {
-                    break;
+                    return Ok(segments);
                 }
             }
         }
     }
-    Ok(segments)
+    Err(ErrorCode::Uncertain)
 }
 
 /// Assemble the embedded ICC profile from the ordered APP2 `ICC_PROFILE`
@@ -335,6 +332,38 @@ mod tests {
         assert_eq!(identity.sha256, digest(&bytes));
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir_all(&_root).unwrap();
+    }
+
+    #[test]
+    fn a_large_scan_does_not_count_against_the_header_bound() {
+        let profile = profile_bytes(620, 7);
+        let mut stream = Stream::new()
+            .icc(1, 1, &profile)
+            .frame(7032, 4688, 3, 8)
+            .scan();
+        stream.bytes.resize(2 * HEAD_MAX, 0x51);
+        let bytes = stream.finish();
+        let (root, path) = write("large-scan", &bytes);
+        let identity = validate_for_icc(&path, 64 * 1024 * 1024, &digest(&profile)).unwrap();
+        assert_eq!((identity.width, identity.height), (7032, 4688));
+        assert_eq!(identity.size, bytes.len() as u64);
+        assert_eq!(identity.sha256, digest(&bytes));
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_header_without_a_scan_inside_the_bound_is_refused() {
+        let profile = profile_bytes(620, 7);
+        let mut stream = Stream::new().icc(1, 1, &profile).frame(64, 48, 3, 8);
+        let padding = vec![0; 60 * 1024];
+        for _ in 0..18 {
+            stream = stream.segment(0xE1, &padding);
+        }
+        let (root, path) = write("large-header", &stream.scan().finish());
+        assert!(validate_for_icc(&path, 64 * 1024 * 1024, &digest(&profile)).is_err());
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

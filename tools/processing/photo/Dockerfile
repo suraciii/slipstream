@@ -10,6 +10,12 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 RUN cargo build --locked --release --package slipstream-processing --bin slipstream-processing-photo-worker
 
+# Retain the numerical runtime whose complete manifest is bound into the fixed
+# Film recipe. Refuse a moved local tag before copying any runtime payload.
+FROM slipstream:344-buffer-lifetimes AS film-runtime
+RUN echo '0bf4af15d4f5323d060d4e6543e0e97d1a2fe6014d27c1cd81db440e4f46a152  /opt/processing-bundle.json' | sha256sum --check \
+    && /opt/runtime/bin/python /opt/probe/bundle.py --verify
+
 # Same pinned base and darktable version as the qualification image, so the
 # module versions validated by the adapter are the ones the executor was
 # qualified against.
@@ -25,29 +31,33 @@ COPY tools/processing/photo/film_adapter.py /opt/slipstream-photo/film_adapter.p
 # The linear ProPhoto RGB handoff profile comes verbatim from the qualified
 # image; the worker copies it into the container configdir before exec, and
 # darktable only resolves --icc-file against that registered copy.
-COPY --from=slipstream:development-qualification \
+COPY --from=film-runtime \
      /opt/spektrafilm/src/spektrafilm/data/icc/ellelstone/LargeRGB-elle-V2-g10.icc \
      /opt/slipstream-photo/icc/LargeRGB-elle-V2-g10.icc
 # The fixed Film stage renders the handoff TIFF with the pinned numerical
 # runtime. The locked interpreter (the venv and the uv-managed CPython it
 # links), the patched spektrafilm source, and the shared development modules
-# come verbatim from the same qualified image, so the recipe identity pinned
-# by film_identity.py is the identity that renders here.
-COPY --from=slipstream:development-qualification /opt/python /opt/python
-COPY --from=slipstream:development-qualification /opt/runtime /opt/runtime
-COPY --from=slipstream:development-qualification /opt/spektrafilm /opt/spektrafilm
-COPY --from=slipstream:development-qualification \
+# come verbatim from the verified numerical image. The final image checks the
+# constructed recipe against film_identity.py before it can be published.
+COPY --from=film-runtime /opt/python /opt/python
+COPY --from=film-runtime /opt/runtime /opt/runtime
+COPY --from=film-runtime /opt/spektrafilm /opt/spektrafilm
+COPY --from=film-runtime \
      /opt/probe/film.py \
      /opt/probe/bundle.py \
      /opt/probe/
 COPY tools/development/finished_jpeg.py \
      tools/development/film_identity.py \
      /opt/probe/
-COPY --from=slipstream:development-qualification \
+COPY --from=film-runtime \
      /opt/processing-bundle.json /opt/processing-bundle.json
+RUN PYTHONPATH=/opt/slipstream-photo:/opt/spektrafilm/src:/opt/probe \
+    /opt/runtime/bin/python -c 'import film, film_adapter; _, recipe = film.make_simulator(); film_adapter.check_recipe(recipe)'
 RUN sha256sum /opt/slipstream-photo/icc/LargeRGB-elle-V2-g10.icc \
         /opt/slipstream-photo/adapter.py /opt/slipstream-photo/film_adapter.py \
-        /opt/os-packages.txt \
+        /usr/local/bin/slipstream-processing-photo-worker \
+        /opt/processing-bundle.json /opt/probe/film.py /opt/probe/bundle.py \
+        /opt/probe/film_identity.py /opt/probe/finished_jpeg.py /opt/os-packages.txt \
         | sed 's#  /#  #g' | sha256sum | cut -d' ' -f1 > /opt/slipstream-photo/bundle \
     && cat /opt/slipstream-photo/bundle
 # The deploy pipeline pins the numerical bundle recorded by the build:

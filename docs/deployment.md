@@ -205,6 +205,16 @@ the container would bind empty placeholder storage and the worker could not
 write its result. `verify-deployment.py` checks both effective unit properties
 and the running launcher's mount namespace against PID 1.
 
+The Photo worker requires the retained `slipstream:344-buffer-lifetimes`
+numerical image used by the fixed Film recipe. The build verifies its bundle
+manifest (`0bf4af15d4f5323d060d4e6543e0e97d1a2fe6014d27c1cd81db440e4f46a152`)
+and complete numerical inventory, then checks the constructed Film recipe in
+the final image. A different qualification image is not interchangeable.
+The Photo bundle digest includes the worker, adapters, numerical manifest,
+shared Film modules, ICC asset, and operating-system package inventory.
+The launcher bounds JPEG header parsing to 1 MiB through the first scan;
+compressed image data remains subject to the configured artifact-size limit.
+
 Build the worker image in two passes so the image records its own bundle
 identity. The first build produces the engine payload and the derived bundle
 digest in `/opt/slipstream-photo/bundle`. The second build pins that digest as
