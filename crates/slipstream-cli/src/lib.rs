@@ -17,6 +17,7 @@ mod compatibility;
 mod development;
 mod edit_preview_download;
 mod export_download;
+mod export_lifecycle;
 mod preview_download;
 
 const CLI_CONTRACT_VERSION: u16 = 1;
@@ -314,7 +315,8 @@ pub enum PhotoCommand {
         #[command(subcommand)]
         command: development::RecipeCommand,
     },
-    /// Request a Develop Edit Preview or download its ready rendition.
+    /// Request an Edit Preview of one development stage or download its
+    /// ready rendition.
     EditPreview(edit_preview_download::EditPreviewArgs),
     /// Read one Photo's standard metadata with provenance, capture facts,
     /// association status, and the evidence a checked Save requires.
@@ -358,8 +360,26 @@ pub enum PhotoExportCommand {
         #[arg(value_name = "EXPORT_ID", value_parser = nonempty)]
         export_id: String,
     },
+    /// Cancel one Export, settling it once against its actual completion.
+    Cancel {
+        #[arg(value_name = "EXPORT_ID", value_parser = nonempty)]
+        export_id: String,
+    },
+    /// Retry one failed or cancelled Export against its retained snapshot
+    /// with a new caller-chosen request identity.
+    Retry(PhotoExportRetryArgs),
     /// Download one settled Export's artifact to a new local file.
     Download(PhotoExportDownloadArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PhotoExportRetryArgs {
+    #[arg(value_name = "EXPORT_ID", value_parser = nonempty)]
+    pub export_id: String,
+    /// Caller-generated exactly-once identity: 1 through 128 characters of
+    /// ASCII letters, digits, '.', '_', or '-'.
+    #[arg(long, value_name = "REQUEST_ID", value_parser = nonempty)]
+    pub request_id: String,
 }
 
 #[derive(Debug, Args)]
@@ -649,6 +669,8 @@ enum Operation {
     PhotosExportSubmit,
     PhotosExportList,
     PhotosExportStatus,
+    PhotosExportCancel,
+    PhotosExportRetry,
     PhotosExportDownload,
     AlbumsCreate,
     AlbumsRename,
@@ -688,6 +710,8 @@ impl Operation {
             Self::PhotosExportSubmit => "photos-export-submit",
             Self::PhotosExportList => "photos-export-list",
             Self::PhotosExportStatus => "photos-export-status",
+            Self::PhotosExportCancel => "photos-export-cancel",
+            Self::PhotosExportRetry => "photos-export-retry",
             Self::PhotosExportDownload => "photos-export-download",
             Self::AlbumsCreate => "albums-create",
             Self::AlbumsRename => "albums-rename",
@@ -740,6 +764,8 @@ fn command_operation(command: &Command) -> Operation {
                 PhotoExportCommand::Submit(_) => Operation::PhotosExportSubmit,
                 PhotoExportCommand::List { .. } => Operation::PhotosExportList,
                 PhotoExportCommand::Status { .. } => Operation::PhotosExportStatus,
+                PhotoExportCommand::Cancel { .. } => Operation::PhotosExportCancel,
+                PhotoExportCommand::Retry(_) => Operation::PhotosExportRetry,
                 PhotoExportCommand::Download(_) => Operation::PhotosExportDownload,
             },
         },
@@ -1948,165 +1974,8 @@ struct PhotoRestoreItemWire {
     outcome: String,
 }
 
-/// The body of one accepted Export submission or replay. The response must
-/// echo the revisions this command submitted, because the service captured
-/// exactly those revisions for the admitted work.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExportSubmitWire {
-    export_id: String,
-    state: String,
-    target: String,
-    recipe_version: String,
-    source_revision: String,
-    receipt_expires_at: Option<String>,
-    artifact_expires_at: Option<String>,
-}
-
-/// One bounded list entry of a Photo's retained Exports.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExportSummaryWire {
-    export_id: String,
-    state: String,
-    target: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExportListWire {
-    exports: Vec<ExportSummaryWire>,
-}
-
-/// One Export's full inspectable state with the closed artifact object.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExportInspectWire {
-    export_id: String,
-    photo_id: String,
-    state: String,
-    target: String,
-    recipe_version: String,
-    source_revision: String,
-    bundle_id: String,
-    terminal_outcome: Option<String>,
-    failure_reason: Option<String>,
-    receipt_expires_at: Option<String>,
-    artifact: Option<ExportArtifactWire>,
-}
-
-/// The closed artifact metadata object. Its fields are exactly the download
-/// response headers, so a download is validated field for field against it.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExportArtifactWire {
-    export_id: String,
-    target: String,
-    stage: String,
-    content_type: String,
-    width: u32,
-    height: u32,
-    profile_identity: String,
-    byte_length: u64,
-    sha256: String,
-    expires_at: String,
-}
-
-/// The one Edit Recipe read an Export submission resolves first: the
-/// observed source revision and the saved recipe version to submit against.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ExportRecipeSourceWire {
-    photo_id: String,
-    source_revision: Option<String>,
-    recipe: Option<ExportRecipeVersionWire>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ExportRecipeVersionWire {
-    recipe_version: String,
-}
-
-fn valid_export_state(state: &str) -> bool {
-    matches!(
-        state,
-        "queued" | "running" | "succeeded" | "failed" | "cancelled"
-    )
-}
-
-/// The terminal outcome an Export state must report: itself when terminal,
-/// otherwise none.
-fn export_terminal_outcome(state: &str) -> Option<&'static str> {
-    match state {
-        "succeeded" => Some("succeeded"),
-        "failed" => Some("failed"),
-        "cancelled" => Some("cancelled"),
-        _ => None,
-    }
-}
-
 fn valid_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-/// Validates one artifact object against the Export it belongs to and the
-/// closed per-target stage and media type.
-fn validated_export_artifact(
-    artifact: &ExportArtifactWire,
-    export_id: &str,
-    target: &ExportTargetArg,
-) -> bool {
-    let (stage, content_type) = match target {
-        ExportTargetArg::DevelopmentTiff => ("develop", "image/tiff"),
-        ExportTargetArg::FilmJpeg => ("film", "image/jpeg"),
-    };
-    artifact.export_id == export_id
-        && ExportTargetArg::parse(&artifact.target).is_some()
-        && artifact.stage == stage
-        && artifact.content_type == content_type
-        && artifact.width > 0
-        && artifact.height > 0
-        && !artifact.profile_identity.is_empty()
-        && artifact.byte_length > 0
-        && valid_sha256(&artifact.sha256)
-        && valid_utc_time(&artifact.expires_at)
-}
-
-/// Validates one inspect response against the requested Export identity and
-/// the closed state machine, so the status report only repeats trustworthy
-/// facts. An invalid response is a transport failure, not a claimed state.
-fn validated_export_inspect(
-    data: ExportInspectWire,
-    export_id: &str,
-    operation: Operation,
-) -> Result<ExportInspectWire, CommandFailure> {
-    let untrusted = || CommandFailure::transport(operation);
-    if data.export_id != export_id
-        || data.photo_id.is_empty()
-        || !valid_export_state(&data.state)
-        || !matches!(
-            ExportTargetArg::parse(&data.target),
-            Some(ExportTargetArg::DevelopmentTiff | ExportTargetArg::FilmJpeg)
-        )
-        || data.recipe_version.is_empty()
-        || data.source_revision.is_empty()
-        || data.bundle_id.is_empty()
-        || data.terminal_outcome.as_deref() != export_terminal_outcome(&data.state)
-        || data
-            .receipt_expires_at
-            .as_deref()
-            .is_some_and(|time| !valid_utc_time(time))
-    {
-        return Err(untrusted());
-    }
-    if let Some(artifact) = &data.artifact {
-        let target = ExportTargetArg::parse(&data.target).ok_or_else(untrusted)?;
-        if !validated_export_artifact(artifact, export_id, &target) {
-            return Err(untrusted());
-        }
-    }
-    Ok(data)
 }
 
 struct ServiceClient {
@@ -2203,7 +2072,7 @@ impl ServiceClient {
         url: Url,
         body: Value,
     ) -> Result<T, CommandFailure> {
-        self.mutation_admitting(identity, admission, url, body, &[StatusCode::OK])
+        self.mutation_admitting(identity, admission, url, Some(body), &[StatusCode::OK])
             .await
     }
 
@@ -2215,7 +2084,7 @@ impl ServiceClient {
         identity: &MutationIdentity,
         admission: &AdmissionState,
         url: Url,
-        body: Value,
+        body: Option<Value>,
         accepted: &[StatusCode],
     ) -> Result<T, CommandFailure> {
         let operation = identity.operation;
@@ -2223,8 +2092,11 @@ impl ServiceClient {
             .client
             .request(Method::POST, url)
             .header(CONTRACT_HEADER, CLI_CONTRACT_VERSION)
-            .bearer_auth(&self.token)
-            .json(&body);
+            .bearer_auth(&self.token);
+        let request = match body {
+            Some(body) => request.json(&body),
+            None => request,
+        };
         admission.admit(identity.clone());
         let response = request.send().await.map_err(|error| {
             if error.is_connect() {
@@ -3563,132 +3435,6 @@ fn removal_wire_value(
     serde_json::to_value(result).map_err(|_| CommandFailure::transport(operation))
 }
 
-/// One confirmed development-surface refusal synthesized locally under the
-/// same closed code the service uses for the same outcome.
-fn export_refusal(exit_code: u8, code: &'static str, message: &'static str) -> CommandFailure {
-    CommandFailure::from_payload(
-        exit_code,
-        ErrorPayload {
-            code: code.to_owned(),
-            message: message.to_owned(),
-            effect: "none".to_owned(),
-            details: json!({}),
-        },
-    )
-}
-
-/// Resolves the current Edit Recipe and source revision, then submits the
-/// Export against exactly those observed revisions, so the service captures
-/// what this command saw instead of whatever is current at admission. The
-/// submission is a write: any unusable response stays an unknown outcome.
-async fn export_submission(
-    client: &ServiceClient,
-    admission: &AdmissionState,
-    args: &PhotoExportSubmitArgs,
-    operation: Operation,
-) -> Result<Value, CommandFailure> {
-    let read: ExportRecipeSourceWire = client
-        .json(
-            operation,
-            Method::GET,
-            client.endpoint(&["api", "photos", &args.photo_id, "edit-recipe"]),
-            None,
-        )
-        .await?;
-    if read.photo_id != args.photo_id {
-        return Err(CommandFailure::transport(operation));
-    }
-    let Some(recipe) = read.recipe else {
-        return Err(export_refusal(
-            3,
-            "missing_recipe",
-            "Save an Edit Recipe for this Photo before submitting an Export.",
-        ));
-    };
-    if recipe.recipe_version.is_empty() {
-        return Err(CommandFailure::transport(operation));
-    }
-    let Some(source_revision) = read.source_revision.filter(|revision| !revision.is_empty()) else {
-        return Err(export_refusal(
-            6,
-            "resource_unavailable",
-            "The current source revision cannot be read; retry when the Library reports the source as available.",
-        ));
-    };
-    let identity = MutationIdentity {
-        operation,
-        photo_ids: vec![args.photo_id.clone()],
-        album_id: None,
-        album_name: None,
-    };
-    let result: ExportSubmitWire = client
-        .mutation_admitting(
-            &identity,
-            admission,
-            client.endpoint(&["api", "photos", &args.photo_id, "exports"]),
-            json!({
-                "requestId": args.request_id,
-                "expectedRecipeVersion": recipe.recipe_version,
-                "expectedSourceRevision": source_revision,
-                "target": args.target.wire(),
-            }),
-            &[StatusCode::OK, StatusCode::CREATED],
-        )
-        .await?;
-    confirmed_export_submit(
-        &identity,
-        args.target.wire(),
-        &recipe.recipe_version,
-        &source_revision,
-        result,
-    )
-}
-
-/// Validates one confirmed submit response against the submitted request.
-/// The response must repeat the requested target and the exact revisions
-/// this command submitted; anything else is an unknown outcome rather than
-/// a claimed receipt.
-fn confirmed_export_submit(
-    identity: &MutationIdentity,
-    target: &str,
-    recipe_version: &str,
-    source_revision: &str,
-    result: ExportSubmitWire,
-) -> Result<Value, CommandFailure> {
-    let unknown = || CommandFailure::unknown(identity);
-    if !valid_request_identity(&result.export_id)
-        || !valid_export_state(&result.state)
-        || result.target != target
-        || result.recipe_version != recipe_version
-        || result.source_revision != source_revision
-        || result
-            .receipt_expires_at
-            .as_deref()
-            .is_some_and(|time| !valid_utc_time(time))
-        || result
-            .artifact_expires_at
-            .as_deref()
-            .is_some_and(|time| !valid_utc_time(time))
-    {
-        return Err(unknown());
-    }
-    serde_json::to_value(result).map_err(|_| unknown())
-}
-
-/// Renders one validated retained-Export list. Every entry must carry a
-/// closed state and target; an invalid entry is a transport failure.
-fn export_list_value(data: ExportListWire, operation: Operation) -> Result<Value, CommandFailure> {
-    for export in &data.exports {
-        if !valid_request_identity(&export.export_id)
-            || !valid_export_state(&export.state)
-            || ExportTargetArg::parse(&export.target).is_none()
-        {
-            return Err(CommandFailure::transport(operation));
-        }
-    }
-    serde_json::to_value(data).map_err(|_| CommandFailure::transport(operation))
-}
-
 fn preview_valid(preview: &PreviewFacts) -> bool {
     match preview.state {
         PreviewState::Ready => {
@@ -4429,40 +4175,31 @@ async fn execute(
                     PhotoCommand::Export {
                         command: PhotoExportCommand::Submit(args),
                     },
-            } => export_submission(&client, admission, args, operation).await,
+            } => export_lifecycle::submit(&client, admission, args, operation).await,
             Command::Photos {
                 command:
                     PhotoCommand::Export {
                         command: PhotoExportCommand::List { photo_id },
                     },
-            } => {
-                let data: ExportListWire = client
-                    .json(
-                        operation,
-                        Method::GET,
-                        client.endpoint(&["api", "photos", photo_id, "exports"]),
-                        None,
-                    )
-                    .await?;
-                export_list_value(data, operation)
-            }
+            } => export_lifecycle::list(&client, photo_id, operation).await,
             Command::Photos {
                 command:
                     PhotoCommand::Export {
                         command: PhotoExportCommand::Status { export_id },
                     },
-            } => {
-                let data: ExportInspectWire = client
-                    .json(
-                        operation,
-                        Method::GET,
-                        client.endpoint(&["api", "exports", export_id]),
-                        None,
-                    )
-                    .await?;
-                let inspected = validated_export_inspect(data, export_id, operation)?;
-                serde_json::to_value(inspected).map_err(|_| CommandFailure::transport(operation))
-            }
+            } => export_lifecycle::status(&client, export_id, operation).await,
+            Command::Photos {
+                command:
+                    PhotoCommand::Export {
+                        command: PhotoExportCommand::Cancel { export_id },
+                    },
+            } => export_lifecycle::cancel(&client, admission, export_id, operation).await,
+            Command::Photos {
+                command:
+                    PhotoCommand::Export {
+                        command: PhotoExportCommand::Retry(args),
+                    },
+            } => export_lifecycle::retry(&client, admission, args, operation).await,
             Command::Photos {
                 command:
                     PhotoCommand::Export {
@@ -4654,6 +4391,20 @@ fn validate_command(command: &Command) -> Result<(), CommandFailure> {
                 return Err(CommandFailure::invalid(
                     "if-version",
                     "The single-Photo forms need the decision version observed by a prior read.",
+                ));
+            }
+            Ok(())
+        }
+        Command::Photos {
+            command:
+                PhotoCommand::Export {
+                    command: PhotoExportCommand::Retry(args),
+                },
+        } => {
+            if !valid_request_identity(&args.request_id) {
+                return Err(CommandFailure::invalid(
+                    "request-id",
+                    "The request identity must be 1 through 128 characters of ASCII letters, digits, '.', '_', or '-'.",
                 ));
             }
             Ok(())
@@ -6013,13 +5764,17 @@ mod tests {
             Cli::try_parse_from(invocation)
         };
         assert!(export(&["status", "e1"]).is_ok());
+        assert!(export(&["cancel", "e1"]).is_ok());
+        assert!(export(&["cancel"]).is_err());
+        assert!(export(&["retry", "e1", "--request-id", "r2"]).is_ok());
+        assert!(export(&["retry", "e1"]).is_err());
         assert!(export(&["list", "p1"]).is_ok());
         assert!(export(&["download", "e1", "--file", "out.tiff"]).is_ok());
         assert!(export(&["download", "e1"]).is_err());
         assert!(export(&["status"]).is_err());
 
-        // The submit request identity shares the service's closed rule, and
-        // it is checked before any network access.
+        // The submit and retry request identities share the service's closed
+        // rule, and both are checked before any network access.
         let valid = |request_id: &str| {
             let parsed =
                 submit(&["--target", "film-jpeg", "--request-id", request_id]).expect("parses");
@@ -6034,199 +5789,13 @@ mod tests {
         assert!(valid(&too_long).is_err());
         let exactly_128 = "a".repeat(128);
         assert!(valid(&exactly_128).is_ok());
-    }
-
-    #[test]
-    fn export_submit_response_must_echo_the_captured_revisions() {
-        let identity = MutationIdentity {
-            operation: Operation::PhotosExportSubmit,
-            photo_ids: vec!["p1".to_owned()],
-            album_id: None,
-            album_name: None,
+        let valid_retry = |request_id: &str| {
+            let parsed = export(&["retry", "e1", "--request-id", request_id]).expect("parses");
+            validate_command(&parsed.command)
         };
-        let confirmed = |result: ExportSubmitWire| {
-            confirmed_export_submit(&identity, "film-jpeg", "recipe-2", "source-7", result)
-        };
-        let submit = |target: &str, recipe: &str, source: &str| ExportSubmitWire {
-            export_id: "e1".to_owned(),
-            state: "queued".to_owned(),
-            target: target.to_owned(),
-            recipe_version: recipe.to_owned(),
-            source_revision: source.to_owned(),
-            receipt_expires_at: None,
-            artifact_expires_at: None,
-        };
-        let confirmed_value =
-            confirmed(submit("film-jpeg", "recipe-2", "source-7")).expect("echoes submission");
-        assert_eq!(confirmed_value["exportId"], "e1");
-        assert_eq!(confirmed_value["target"], "film-jpeg");
-        assert_eq!(confirmed_value["receiptExpiresAt"], Value::Null);
-        for label in [
-            ("target", submit("development-tiff", "recipe-2", "source-7")),
-            ("recipe", submit("film-jpeg", "recipe-1", "source-7")),
-            ("source", submit("film-jpeg", "recipe-2", "source-8")),
-        ] {
-            let failure = confirmed(label.1).unwrap_err();
-            assert_eq!(failure.exit_code, 7, "for {}", label.0);
-            assert_eq!(failure.payload.code, "outcome_unknown", "for {}", label.0);
-        }
-        let unknown_identity = submit("film-jpeg", "recipe-2", "source-7");
-        let unknown = confirmed(ExportSubmitWire {
-            export_id: "space id".to_owned(),
-            ..unknown_identity
-        })
-        .unwrap_err();
-        assert_eq!(unknown.exit_code, 7);
-        let stale_time = confirmed(ExportSubmitWire {
-            receipt_expires_at: Some("yesterday".to_owned()),
-            ..submit("film-jpeg", "recipe-2", "source-7")
-        })
-        .unwrap_err();
-        assert_eq!(stale_time.exit_code, 7);
-    }
-
-    #[test]
-    fn export_inspection_is_validated_against_the_closed_state_machine() {
-        let artifact = ExportArtifactWire {
-            export_id: "e1".to_owned(),
-            target: "development-tiff".to_owned(),
-            stage: "develop".to_owned(),
-            content_type: "image/tiff".to_owned(),
-            width: 5542,
-            height: 3696,
-            profile_identity: "profile".to_owned(),
-            byte_length: 4096,
-            sha256: "a".repeat(64),
-            expires_at: "2026-01-01T12:00:00Z".to_owned(),
-        };
-        let inspect =
-            |state: &str, terminal: Option<&str>, artifact: Option<ExportArtifactWire>| {
-                ExportInspectWire {
-                    export_id: "e1".to_owned(),
-                    photo_id: "p1".to_owned(),
-                    state: state.to_owned(),
-                    target: "development-tiff".to_owned(),
-                    recipe_version: "recipe-2".to_owned(),
-                    source_revision: "source-7".to_owned(),
-                    bundle_id: "bundle".to_owned(),
-                    terminal_outcome: terminal.map(str::to_owned),
-                    failure_reason: None,
-                    receipt_expires_at: None,
-                    artifact,
-                }
-            };
-        let value = validated_export_inspect(
-            inspect("running", None, None),
-            "e1",
-            Operation::PhotosExportStatus,
-        )
-        .expect("running inspection is valid");
-        assert_eq!(value.state, "running");
-        validated_export_inspect(
-            inspect("succeeded", Some("succeeded"), Some(artifact.clone())),
-            "e1",
-            Operation::PhotosExportStatus,
-        )
-        .expect("succeeded inspection is valid");
-
-        let transport = |data: ExportInspectWire| {
-            validated_export_inspect(data, "e1", Operation::PhotosExportStatus).unwrap_err()
-        };
-        for label in [
-            ("unknown state", inspect("expired", None, None)),
-            ("wrong terminal", inspect("failed", Some("succeeded"), None)),
-            (
-                "terminal on active",
-                inspect("queued", Some("queued"), None),
-            ),
-            ("unknown target", {
-                let mut data = inspect("succeeded", Some("succeeded"), None);
-                data.target = "gallery-print".to_owned();
-                data
-            }),
-        ] {
-            let failure = transport(label.1);
-            assert_eq!(failure.payload.code, "transport_failed", "for {}", label.0);
-        }
-        // The artifact object must name its own Export with the closed
-        // per-target stage and media type.
-        for label in [
-            ("wrong export", {
-                let mut artifact = artifact.clone();
-                artifact.export_id = "other".to_owned();
-                inspect("succeeded", Some("succeeded"), Some(artifact))
-            }),
-            ("jpeg stage on tiff target", {
-                let mut artifact = artifact.clone();
-                artifact.stage = "film".to_owned();
-                inspect("succeeded", Some("succeeded"), Some(artifact))
-            }),
-            ("wrong media type", {
-                let mut artifact = artifact.clone();
-                artifact.content_type = "image/jpeg".to_owned();
-                inspect("succeeded", Some("succeeded"), Some(artifact))
-            }),
-            ("short digest", {
-                let mut artifact = artifact;
-                artifact.sha256 = "a".repeat(63);
-                inspect("succeeded", Some("succeeded"), Some(artifact))
-            }),
-        ] {
-            let failure = transport(label.1);
-            assert_eq!(failure.payload.code, "transport_failed", "for {}", label.0);
-        }
-    }
-
-    #[test]
-    fn export_list_entries_carry_only_closed_states_and_targets() {
-        let entry = |target: &str| ExportSummaryWire {
-            export_id: "e1".to_owned(),
-            state: "succeeded".to_owned(),
-            target: target.to_owned(),
-        };
-        assert_eq!(
-            export_list_value(
-                ExportListWire {
-                    exports: vec![entry("film-jpeg")]
-                },
-                Operation::PhotosExportList
-            )
-            .unwrap()["exports"][0]["target"],
-            "film-jpeg"
-        );
-        assert_eq!(
-            export_list_value(
-                ExportListWire {
-                    exports: vec![entry("development-tiff")]
-                },
-                Operation::PhotosExportList
-            )
-            .unwrap()["exports"][0]["target"],
-            "development-tiff"
-        );
-        assert_eq!(
-            export_list_value(
-                ExportListWire {
-                    exports: Vec::new()
-                },
-                Operation::PhotosExportList
-            )
-            .unwrap()["exports"]
-                .as_array()
-                .unwrap()
-                .len(),
-            0
-        );
-        for target in ["gallery-print", ""] {
-            let failure = export_list_value(
-                ExportListWire {
-                    exports: vec![entry(target)],
-                },
-                Operation::PhotosExportList,
-            )
-            .unwrap_err();
-            assert_eq!(failure.payload.code, "transport_failed", "for {target}");
-        }
+        assert!(valid_retry("retry-2").is_ok());
+        assert!(valid_retry("has space").is_err());
+        assert!(valid_retry(&too_long).is_err());
     }
 
     #[test]

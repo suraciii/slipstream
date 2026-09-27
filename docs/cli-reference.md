@@ -452,10 +452,12 @@ slipstream processing capability
 slipstream photos recipe get PHOTO_ID
 slipstream photos recipe save PHOTO_ID --input FILE
 slipstream photos recipe rebind PHOTO_ID --input FILE
-slipstream photos edit-preview PHOTO_ID --stage develop --file PATH [--settings current|baseline]
+slipstream photos edit-preview PHOTO_ID --stage develop|film --file PATH [--settings current|baseline]
 slipstream photos export submit PHOTO_ID --target development-tiff|film-jpeg --request-id REQUEST_ID
 slipstream photos export list PHOTO_ID
 slipstream photos export status EXPORT_ID
+slipstream photos export cancel EXPORT_ID
+slipstream photos export retry EXPORT_ID --request-id REQUEST_ID
 slipstream photos export download EXPORT_ID --file PATH
 ```
 
@@ -543,6 +545,26 @@ when reporting captured settings; status does not return those settings.
 Queued and running are successful inspections; the caller inspects again later.
 Submitting the same ID only replays when the captured request still matches;
 after a later Photo edit, inspect the original Export instead of resubmitting.
+
+`export cancel` and `export retry` read the original Export first, so an
+uncertain outcome can name its Photo; that read never refreshes guards, and a
+confirmed `unknown_export` stops the command before its write is sent.
+`export cancel` sends no request fields. Its success reports `exportId`,
+`state`, and `terminalOutcome` of the actual settlement: cancellation settles
+exactly once against the real completion, so a completion that raced the
+request is reported as `succeeded`, not as a refusal. An unconfirmed
+settlement is `outcome_unknown`, exit 7, effect `unknown`; reconcile through
+`export status`. `export retry` takes exactly the caller's new
+`--request-id`. It retries only a failed or cancelled Export against its
+retained snapshot — the captured recipe, source, and bundle — and never reads
+the current recipe. Success reports `exportId` and `state` with exit 0 for
+both a new attempt and a replay: a repeated identity replays its accepted
+receipt and starts no second attempt, and a replay whose attempt has settled
+again reports that current state. A different payload under a reused identity
+is `request_conflict`; a succeeded or still active Export is
+`export_conflict`; a swapped source or bundle is `output_unavailable`; expiry,
+resource, and retained-output refusals follow the shared exit table. Neither
+command retries its write automatically after an unknown outcome.
 
 `export download` requires a retained completed artifact. Its data contains
 `exportId`, `path`, `target`, `stage`, `contentType`, `width`, `height`,
@@ -764,11 +786,13 @@ For `authentication_required`, `access_denied`, `server_busy`, `storage_failed`,
 `albums-create`, `albums-rename`, `albums-delete`, `albums-add`, `albums-remove`,
 `albums-reorder`, `processing-capability`, `photos-recipe-get`,
 `photos-recipe-save`, `photos-recipe-rebind`, `photos-edit-preview`,
-`photos-export-submit`, `photos-export-list`, `photos-export-status`, or
-`photos-export-download`. `photoIds` in `outcome_unknown` contains all submitted
+`photos-export-submit`, `photos-export-list`, `photos-export-status`,
+`photos-export-cancel`, `photos-export-retry`, or `photos-export-download`.
+`photoIds` in `outcome_unknown` contains all submitted
 Photo IDs in request order. The Album fields identify the submitted target when
-one exists and are null otherwise. Recipe writes and Export submission can
-have unknown mutation outcomes; capability, recipe reads and download transfers
+one exists and are null otherwise. Recipe writes and Export writes —
+submission, cancellation, and retry — can have unknown mutation outcomes;
+capability, recipe reads and download transfers
 use read/transfer errors and do not claim a saved mutation.
 
 Command failures select codes as follows:
