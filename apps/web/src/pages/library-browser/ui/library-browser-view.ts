@@ -15,6 +15,7 @@ import {
 import { createViewOptions, type ViewOptionsElements } from "./view-options.js";
 import { createRatingControls } from "./rating-controls.js";
 import { createPhotoToolsController } from "./photo-tools.js";
+import { createPhotoZoomController } from "./photo-zoom.js";
 import { createPhotoEditorSurfaceController } from "./photo-editor-surface.js";
 import { createSourceSurfaceController } from "./source-surface.js";
 import { createAlbumForm } from "./album-form.js";
@@ -1590,31 +1591,6 @@ export function createLibraryBrowserView(
   // presenting.
   let batchAlbums: ReadonlyArray<Readonly<{ id: string; name: string }>> = [];
   let renderedBatchAlbumSignature = "";
-  const MIN_ZOOM_PERCENT = 10;
-  const MAX_ZOOM_PERCENT = 800;
-  const ZOOM_STEP = 1.25;
-  const DETAIL_ZOOM_PERCENT = 200;
-  // Reported while no Preview image has measurable pixels, so the live
-  // percentage never claims a value the stage cannot show.
-  const ZOOM_LEVEL_UNMEASURED = "—";
-  // Preview zoom is presentation state: `zoomManual` distinguishes Fit
-  // from a manual percentage anchored to the Preview's own pixels, so
-  // `zoomPercent` maps 1 image pixel to `zoomPercent / 100` CSS pixels.
-  let zoomManual = false;
-  let zoomPercent = 100;
-  let panX = 0;
-  let panY = 0;
-  let imageNaturalWidth = 0;
-  let imageNaturalHeight = 0;
-  const activePointers = new Map<number, { x: number; y: number }>();
-  type PinchGesture = Readonly<{
-    startPercent: number;
-    startScale: number;
-    startDistance: number;
-    offsetX: number;
-    offsetY: number;
-  }>;
-  let pinch: PinchGesture | undefined;
   let photoSurface: object = {};
   let currentPhotoId: string | undefined;
   let currentSelection: ViewSelectionState = "undecided";
@@ -1764,11 +1740,7 @@ export function createLibraryBrowserView(
   const resetGestures = () => {
     cancelRatingHold();
     ratingControls.closeWheel();
-    for (const id of Array.from(activePointers.keys()))
-      if (preview.hasPointerCapture(id)) preview.releasePointerCapture(id);
-    activePointers.clear();
-    pinch = undefined;
-    preview.style.removeProperty("touch-action");
+    zoomController?.resetPointers();
     clearPointer();
   };
   const photoToolsController = createPhotoToolsController({
@@ -1892,203 +1864,18 @@ export function createLibraryBrowserView(
         sourceList.querySelectorAll<HTMLElement>("[data-focus-key]"),
       ).find((candidate) => candidate.dataset.focusKey === focusKey),
   });
-  const stageCenter = () => {
-    const box = stage.getBoundingClientRect();
-    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
-  };
-  const fitScale = () => {
-    if (!imageNaturalWidth || !imageNaturalHeight) return 0;
-    const width = stage.clientWidth;
-    const height = stage.clientHeight;
-    if (!width || !height) return 0;
-    return Math.min(width / imageNaturalWidth, height / imageNaturalHeight);
-  };
-  const currentScale = () => (zoomManual ? zoomPercent / 100 : fitScale());
-  const currentPercent = () => {
-    const scale = currentScale();
-    return scale > 0 ? scale * 100 : zoomPercent;
-  };
-  const panLimitX = () =>
-    Math.max(0, (imageNaturalWidth * currentScale() - stage.clientWidth) / 2);
-  const panLimitY = () =>
-    Math.max(0, (imageNaturalHeight * currentScale() - stage.clientHeight) / 2);
-  const clampPan = () => {
-    panX = clamp(panX, -panLimitX(), panLimitX());
-    panY = clamp(panY, -panLimitY(), panLimitY());
-  };
-  // Zoom acts on the Preview's own pixels. A retained Preview can be shown
-  // again without a new load event, so the size is measured from the image
-  // element whenever the cached measurement is missing, and a Preview whose
-  // bytes never arrived has no pixels to measure at all.
-  const loadedPreviewImage = () => {
-    const image = stage.querySelector<HTMLImageElement>("img");
-    if (!image || !image.complete || image.naturalWidth === 0) return undefined;
-    if (!imageNaturalWidth || !imageNaturalHeight) {
-      imageNaturalWidth = image.naturalWidth;
-      imageNaturalHeight = image.naturalHeight;
-    }
-    return image;
-  };
-  const measurableImage = () => Boolean(loadedPreviewImage());
-  const syncZoomControls = () => {
-    const enabled = alive && measurableImage();
-    for (const button of [zoomFit, zoomOut, zoomIn, zoom100])
-      button.disabled = !enabled;
-    zoomSlider.disabled = !enabled;
-  };
-  const applyZoom = () => {
-    if (!alive) return;
-    preview.dataset.zoomState = zoomManual ? "manual" : "fit";
-    zoomFit.setAttribute("aria-pressed", String(!zoomManual));
-    const image = loadedPreviewImage();
-    const scale = currentScale();
-    if (!image || !imageNaturalWidth || !imageNaturalHeight || scale <= 0) {
-      // Without measurable pixels there is no percentage to report: the
-      // presentation returns to Fit instead of keeping a stale manual value.
-      zoomLevel.textContent = ZOOM_LEVEL_UNMEASURED;
-      zoomSlider.value = String(MIN_ZOOM_PERCENT);
-      zoomSlider.setAttribute("aria-valuetext", "Fit");
-      syncZoomControls();
-      return;
-    }
-    image.style.width = `${imageNaturalWidth * scale}px`;
-    image.style.height = `${imageNaturalHeight * scale}px`;
-    // The Preview is centered on the stage center, so the stage center is
-    // the origin that pan and pointer-anchored zoom are measured from.
-    image.style.transform = `translate(${panX}px, ${panY}px)`;
-    const percent = Math.round(scale * 100);
-    // A Fit can land below the manual floor on a large derivative: the label
-    // reports it truthfully while the slider keeps the value it can hold.
-    const sliderPercent = clamp(percent, MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT);
-    zoomLevel.textContent = `${percent}%`;
-    zoomSlider.value = String(sliderPercent);
-    zoomSlider.setAttribute("aria-valuetext", `${sliderPercent}%`);
-    syncZoomControls();
-  };
-  const applyFit = () => {
-    if (!alive) return;
-    zoomManual = false;
-    panX = 0;
-    panY = 0;
-    applyZoom();
-  };
-  const applyManualZoom = (percent: number) => {
-    if (!alive) return;
-    zoomManual = true;
-    zoomPercent = clamp(percent, MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT);
-    clampPan();
-    applyZoom();
-  };
-  const zoomBy = (factor: number) => {
-    const current = currentPercent();
-    const base = zoomManual ? zoomPercent : Math.max(MIN_ZOOM_PERCENT, current);
-    const target = clamp(base * factor, MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT);
-    // Stepping stays monotonic: the manual floor cannot magnify a Fit that
-    // sits below it by zooming out, and it cannot shrink a 800% manual zoom
-    // by zooming in.
-    if (factor < 1 ? target >= current : target <= current) return;
-    applyManualZoom(target);
-  };
-  /// Changes zoom while keeping the image point under `anchor` (client
-  /// coordinates) stationary, then re-clamps the bounded pan.
-  const zoomAt = (percent: number, anchor: { x: number; y: number }) => {
-    const nextPercent = clamp(percent, MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT);
-    const previousScale = currentScale();
-    const center = stageCenter();
-    const offsetX = anchor.x - (center.x + panX);
-    const offsetY = anchor.y - (center.y + panY);
-    if (previousScale > 0 && imageNaturalWidth > 0) {
-      const ratio = nextPercent / 100 / previousScale;
-      panX = anchor.x - center.x - offsetX * ratio;
-      panY = anchor.y - center.y - offsetY * ratio;
-    }
-    zoomManual = true;
-    zoomPercent = nextPercent;
-    clampPan();
-    applyZoom();
-  };
-  const resetZoomForImage = () => {
-    zoomManual = false;
-    zoomPercent = 100;
-    panX = 0;
-    panY = 0;
-    imageNaturalWidth = 0;
-    imageNaturalHeight = 0;
-    applyZoom();
-  };
-  const toggleDetail = () => {
-    if (!alive || !measurableImage()) return;
-    if (zoomManual && Math.abs(zoomPercent - DETAIL_ZOOM_PERCENT) < 0.5)
-      applyFit();
-    else applyManualZoom(DETAIL_ZOOM_PERCENT);
-  };
-  const beginPinch = () => {
-    const [first, second] = Array.from(activePointers.values());
-    clearPointer();
-    const scale = currentScale();
-    if (!first || !second || scale <= 0 || !imageNaturalWidth) {
-      pinch = undefined;
-      return;
-    }
-    const midpoint = {
-      x: (first.x + second.x) / 2,
-      y: (first.y + second.y) / 2,
-    };
-    const center = stageCenter();
-    pinch = {
-      startPercent: currentPercent(),
-      startScale: scale,
-      startDistance: Math.max(
-        1,
-        Math.hypot(first.x - second.x, first.y - second.y),
-      ),
-      offsetX: midpoint.x - (center.x + panX),
-      offsetY: midpoint.y - (center.y + panY),
-    };
-    for (const id of Array.from(activePointers.keys())) {
-      try {
-        preview.setPointerCapture(id);
-      } catch {
-        // Synthetic PointerEvents have no native active pointer to capture.
-      }
-    }
-    preview.style.touchAction = "none";
-  };
-  const updatePinch = () => {
-    const active = pinch;
-    const [first, second] = Array.from(activePointers.values());
-    if (!active || !first || !second) return;
-    const midpoint = {
-      x: (first.x + second.x) / 2,
-      y: (first.y + second.y) / 2,
-    };
-    const distance = Math.max(
-      1,
-      Math.hypot(first.x - second.x, first.y - second.y),
-    );
-    const nextPercent = clamp(
-      active.startPercent * (distance / active.startDistance),
-      MIN_ZOOM_PERCENT,
-      MAX_ZOOM_PERCENT,
-    );
-    const ratio = nextPercent / 100 / active.startScale;
-    const center = stageCenter();
-    zoomManual = true;
-    zoomPercent = nextPercent;
-    panX = midpoint.x - center.x - active.offsetX * ratio;
-    panY = midpoint.y - center.y - active.offsetY * ratio;
-    clampPan();
-    applyZoom();
-  };
-  const wheelZoom = (event: WheelEvent) => {
-    if (!alive || !stage.querySelector("img") || !imageNaturalWidth) return;
-    event.preventDefault();
-    const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
-    const base = zoomManual
-      ? zoomPercent
-      : Math.max(MIN_ZOOM_PERCENT, currentPercent());
-    zoomAt(base * factor, { x: event.clientX, y: event.clientY });
-  };
+  const zoomController = createPhotoZoomController({
+    preview,
+    stage,
+    controls: zoomControls,
+    fit: zoomFit,
+    out: zoomOut,
+    inButton: zoomIn,
+    hundred: zoom100,
+    slider: zoomSlider,
+    level: zoomLevel,
+    isAlive: () => alive,
+  });
   const onPreviewContextMenu = (event: MouseEvent) => {
     if (pointer?.ratingPending || ratingControls.isWheelOpen())
       event.preventDefault();
@@ -3192,14 +2979,12 @@ export function createLibraryBrowserView(
     image.fetchPriority = "high";
     image.decoding = "async";
     stage.replaceChildren(image);
-    resetZoomForImage();
+    zoomController?.resetForImage();
     // Fit depends on the Preview's natural pixels, so the geometry is
     // applied when the bytes arrive.
     image.addEventListener("load", () => {
       if (!alive || !image.isConnected) return;
-      imageNaturalWidth = image.naturalWidth;
-      imageNaturalHeight = image.naturalHeight;
-      applyZoom();
+      zoomController?.applyZoom();
     });
     const target: ReviewImageTarget = {
       get connected() {
@@ -3259,7 +3044,7 @@ export function createLibraryBrowserView(
       stage.replaceChildren(
         paragraph(model.photoId ? "Loading Preview…" : "Photo unavailable"),
       );
-      resetZoomForImage();
+      zoomController?.resetForImage();
     }
     setPhotoStatus(
       model.photoId && model.available === false
@@ -3277,25 +3062,30 @@ export function createLibraryBrowserView(
 
   const pointerDown = (event: PointerEvent) => {
     if (!alive || !currentPhotoId) return;
-    activePointers.set(event.pointerId, {
-      x: event.clientX,
-      y: event.clientY,
-    });
-    if (activePointers.size === 2) {
+    const zoom = zoomController;
+    if (!zoom) return;
+    const pointerCount = zoom.trackPointer(
+      event.pointerId,
+      event.clientX,
+      event.clientY,
+    );
+    if (pointerCount === 2) {
       event.preventDefault();
       cancelRatingHold();
       ratingControls.closeWheel();
-      beginPinch();
+      clearPointer();
+      zoom.beginPinch();
       return;
     }
-    if (activePointers.size > 2 || pinch || pointer || !event.isPrimary) return;
+    if (pointerCount > 2 || zoom.isPinching() || pointer || !event.isPrimary)
+      return;
     // Fit owns decision swipes; a manual zoom owns bounded panning. Neither
     // state ever records a decision from a drag.
-    if (!zoomManual && !decisionInteractionEnabled) return;
+    if (!zoom.isManual() && !decisionInteractionEnabled) return;
     const ratingPending =
       event.pointerType === "touch" &&
-      !zoomManual &&
-      measurableImage() &&
+      !zoom.isManual() &&
+      zoom.hasMeasurableImage() &&
       decisionInteractionEnabled;
     pointer = {
       id: event.pointerId,
@@ -3307,7 +3097,7 @@ export function createLibraryBrowserView(
       vertical: false,
       ratingPending,
       ratingWheel: false,
-      pan: zoomManual,
+      pan: zoom.isManual(),
       surface: photoSurface,
       photoId: currentPhotoId,
     };
@@ -3332,7 +3122,7 @@ export function createLibraryBrowserView(
           active.photoId !== photoId ||
           active.vertical ||
           active.pan ||
-          zoomManual ||
+          zoom.isManual() ||
           !decisionInteractionEnabled ||
           !currentPhotoId
         )
@@ -3349,13 +3139,11 @@ export function createLibraryBrowserView(
   };
   const pointerMove = (event: PointerEvent) => {
     if (!alive) return;
-    const tracked = activePointers.get(event.pointerId);
-    if (tracked) {
-      tracked.x = event.clientX;
-      tracked.y = event.clientY;
-    }
-    if (pinch) {
-      updatePinch();
+    const zoom = zoomController;
+    if (!zoom) return;
+    zoom.updatePointer(event.pointerId, event.clientX, event.clientY);
+    if (zoom.isPinching()) {
+      zoom.updatePinch();
       return;
     }
     if (!pointer || pointer.id !== event.pointerId) return;
@@ -3369,10 +3157,8 @@ export function createLibraryBrowserView(
       ratingControls.updateWheel(event.clientX, event.clientY);
       return;
     }
-    if (pointer.pan || zoomManual) {
-      panX = clamp(panX + stepX, -panLimitX(), panLimitX());
-      panY = clamp(panY + stepY, -panLimitY(), panLimitY());
-      applyZoom();
+    if (pointer.pan || zoom.isManual()) {
+      zoom.panBy(stepX, stepY);
       return;
     }
     if (
@@ -3394,13 +3180,14 @@ export function createLibraryBrowserView(
   };
   const finishPointer = (event: PointerEvent, cancelled = false) => {
     if (!alive) return;
-    activePointers.delete(event.pointerId);
-    if (pinch) {
+    const zoom = zoomController;
+    if (!zoom) return;
+    const remainingPointers = zoom.removePointer(event.pointerId);
+    if (zoom.isPinching()) {
       // A pinch keeps ownership until fewer than two pointers remain; the
       // finger that is still down never becomes a decision swipe.
-      if (activePointers.size >= 2) return;
-      pinch = undefined;
-      preview.style.removeProperty("touch-action");
+      if (remainingPointers >= 2) return;
+      zoom.endPinch();
       return;
     }
     if (!pointer || pointer.id !== event.pointerId) return;
@@ -3429,7 +3216,7 @@ export function createLibraryBrowserView(
     }
     if (
       active.pan ||
-      zoomManual ||
+      zoom.isManual() ||
       cancelled ||
       active.vertical ||
       !decisionInteractionEnabled ||
@@ -3490,16 +3277,18 @@ export function createLibraryBrowserView(
       return;
     }
     if (modifier) return;
+    const zoom = zoomController;
+    if (!zoom) return;
     if (event.key === "+" || event.key === "=") {
-      if (!measurableImage()) return;
+      if (!zoom.hasMeasurableImage()) return;
       event.preventDefault();
-      zoomBy(ZOOM_STEP);
+      zoom.zoomIn();
       return;
     }
     if (event.key === "-" || event.key === "_") {
-      if (!measurableImage()) return;
+      if (!zoom.hasMeasurableImage()) return;
       event.preventDefault();
-      zoomBy(1 / ZOOM_STEP);
+      zoom.zoomOut();
       return;
     }
     // A focused zoom slider keeps its own key handling; every other Photo
@@ -3511,10 +3300,10 @@ export function createLibraryBrowserView(
     else if (event.key === "ArrowRight") send({ kind: "next" });
     else if (event.key.toLowerCase() === "f") {
       event.preventDefault();
-      applyFit();
+      zoom.applyFit();
     } else if (event.key.toLowerCase() === "d") {
       event.preventDefault();
-      toggleDetail();
+      zoom.toggleDetail();
     } else if (event.key.toLowerCase() === "p")
       send({
         kind: "photo-mutation",
@@ -3613,8 +3402,8 @@ export function createLibraryBrowserView(
     if (!alive) return;
     // Fit is recomputed and a manual percentage keeps its value, while a
     // shrinking stage re-clamps how far the Preview may be panned.
-    clampPan();
-    applyZoom();
+    zoomController?.clampPan();
+    zoomController?.applyZoom();
   });
   stageObserver.observe(stage);
   back.addEventListener("click", () => send({ kind: "show-grid" }));
@@ -3648,29 +3437,7 @@ export function createLibraryBrowserView(
       advance: false,
     }),
   );
-  photoToolsUndo.addEventListener("click", () => send({ kind: "undo" }));
-  // A pointer drag reports every intermediate position, and only the settled
-  // gesture is one edit action, so the label follows `input` while the save
-  // follows `change`.
-  stage.addEventListener("dblclick", toggleDetail);
-  zoomFit.addEventListener("click", applyFit);
-  zoomOut.addEventListener("click", () => zoomBy(1 / ZOOM_STEP));
-  zoomIn.addEventListener("click", () => zoomBy(ZOOM_STEP));
-  zoom100.addEventListener("click", () => applyManualZoom(100));
-  zoomSlider.addEventListener("input", () =>
-    applyManualZoom(Number(zoomSlider.value)),
-  );
-  preview.addEventListener("wheel", wheelZoom, { passive: false });
   preview.addEventListener("contextmenu", onPreviewContextMenu);
-  zoomControls.addEventListener("pointerdown", (event) =>
-    event.stopPropagation(),
-  );
-  zoomControls.addEventListener("pointermove", (event) =>
-    event.stopPropagation(),
-  );
-  zoomControls.addEventListener("pointerup", (event) =>
-    event.stopPropagation(),
-  );
   dockSelect.addEventListener("click", () =>
     send({
       kind: "photo-mutation",
@@ -3901,7 +3668,7 @@ export function createLibraryBrowserView(
       } else if (!wasStripInteractive && model.filmstripEnabled) {
         restoreHeldStripFocus();
       }
-      syncZoomControls();
+      zoomController?.applyZoom();
     },
     renderMembership(model) {
       if (!alive) return;
@@ -3915,7 +3682,7 @@ export function createLibraryBrowserView(
       photoToolsController.close(false);
       closeRatingChoices(false);
       stage.replaceChildren();
-      resetZoomForImage();
+      zoomController?.resetForImage();
       gridView.hidden = false;
       photoView.hidden = true;
       clearGridCells();
@@ -4036,7 +3803,7 @@ export function createLibraryBrowserView(
       resetGestures();
       photoToolsController.close(false);
       closeRatingChoices(false);
-      resetZoomForImage();
+      zoomController?.resetForImage();
       photoView.hidden = true;
       gridView.hidden = false;
       // Photo View detached the owner's Grid images, so the visible Grid
@@ -4067,7 +3834,7 @@ export function createLibraryBrowserView(
       syncFilmstripHost();
       presentConnection();
       photoView.focus();
-      resetZoomForImage();
+      zoomController?.resetForImage();
       photoSurface = {};
     },
     renderFilmstrip,
@@ -4089,7 +3856,7 @@ export function createLibraryBrowserView(
     showPreviewUnavailable(text) {
       if (alive && !stage.querySelector("img")) {
         stage.replaceChildren(paragraph(text));
-        resetZoomForImage();
+        zoomController?.resetForImage();
       }
     },
     setPreviewFacts(value, isLimited) {
@@ -4182,7 +3949,7 @@ export function createLibraryBrowserView(
       viewOptionsController.dispose();
       stageObserver.disconnect();
       clearFilmstripCells();
-      preview.removeEventListener("wheel", wheelZoom);
+      zoomController?.dispose();
       preview.removeEventListener("contextmenu", onPreviewContextMenu);
       sourceController.dispose();
       cancelGridRender();
