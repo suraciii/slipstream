@@ -14,7 +14,7 @@ pub(super) fn preflight_schema(
     preflight_schema_for_max_version(connection, canonical_root, 10)
 }
 
-fn preflight_schema_for_max_version(
+pub(super) fn preflight_schema_for_max_version(
     connection: &Connection,
     canonical_root: &str,
     maximum_version: u32,
