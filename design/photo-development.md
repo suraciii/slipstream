@@ -411,6 +411,9 @@ retained Development Result is the published Development TIFF of a succeeded
 Development TIFF Export whose captured snapshot is that identity and whose
 artifact retention has not expired; an artifact of any other identity is not
 retained for the derivation, and the derivation never publishes an Export.
+A retained Development TIFF can satisfy only the `develop` stage. A `film`
+request resolves its own Film Result or admits Film rendering even when a
+Development TIFF with matching source and recipe facts is retained.
 When that result is not retained, the service admits one render through the
 same closed production workload as an Export, marked as preview-class work. A
 preview-class attempt runs the same workload, policy, and bundle as an Export

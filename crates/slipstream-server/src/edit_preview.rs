@@ -278,6 +278,11 @@ impl DevelopmentResultRetention for RetainedExportDevelopmentResults {
         facts: &'a PreviewFacts,
     ) -> Pin<Box<dyn Future<Output = Option<RetainedDevelopmentResult>> + Send + 'a>> {
         Box::pin(async move {
+            // A retained Development TIFF can only satisfy Develop. Film
+            // must resolve its own stage result or admit a Film render.
+            if facts.stage != "develop" {
+                return None;
+            }
             let identity = RetainedDevelopmentIdentity {
                 settings: facts.settings,
                 recipe_revision: facts.recipe_revision.as_deref(),

@@ -2367,6 +2367,49 @@ async fn edit_preview_derives_from_the_retained_development_tiff_of_an_export() 
     let _ = fs::remove_dir_all(base);
 }
 
+#[tokio::test]
+async fn film_preview_admits_film_work_when_a_development_export_is_retained() {
+    let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+    let launcher = FakeLauncher::start(config.processing.as_ref().unwrap(), LauncherScript::new());
+    let mut config = config;
+    config.processing = Some(launcher.processing_config());
+    let (application, router) = export_application(&base, &config).await;
+    let photo_id = photo_id_for(&config, "pair.ARW");
+    let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+    let source = current_source_revision(&application, &photo_id).await;
+    let created =
+        submit_export_request(&router, &photo_id, "request-1", &recipe.revision, &source).await;
+    let export_id = response_json(created).await["exportId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    launcher.with_script(|script| {
+        script.output = Some(valid_development_tiff());
+        script.settle_attempt(1, "completed");
+    });
+    wait_for_state(&router, &export_id, "succeeded").await;
+    let develop = edit_preview_request(&router, &photo_id).await;
+    assert_eq!(develop.status(), StatusCode::OK);
+    let film = send(
+        &router,
+        authenticated_request()
+            .uri(format!(
+                "http://camera.local/api/photos/{photo_id}/edit-preview/film"
+            ))
+            .header("slipstream-cli-contract", "1")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(film.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        response_json(film).await,
+        serde_json::json!({"state": "queued", "stage": "film"})
+    );
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
 /// The baseline comparison selector serves the as-shot/baseline
 /// development from the retained result captured at exactly those
 /// settings, independently of the saved recipe revision, and it keeps
