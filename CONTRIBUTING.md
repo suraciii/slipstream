@@ -107,6 +107,7 @@ Use the repository commands rather than invoking individual tools in CI or revie
 bun run test:rust
 bun run test:cli
 bun run test:cli-package
+bun run test:file-size
 bun run test:container-input
 bun run test:fast
 bun run verify
@@ -115,6 +116,8 @@ bun run verify
 `test:cli` runs the focused command parser, output, and real CLI-to-service tests. It covers `status`, Library checks, Folder, Album, and Photo commands, including Preview downloads, without running the complete repository gate.
 
 `test:cli-package` verifies the source-bound Linux amd64 candidate archive, its checksum and fixed metadata, and no-replace behavior using synthetic inputs. It runs in `test:fast` and `verify`. To build an actual candidate from a clean committed tree, run `python3 scripts/package-cli.py`; see [CLI Candidate Installation](docs/cli-install.md). Packaging does not publish a tag or upload a release.
+
+`test:file-size` runs the changed-file line ratchet. It grades only the files that differ from the base commit: a new file must stay at or below 3,000 lines, and a file already above that may hold or shrink but never grow. The base is `merge-base origin/main HEAD` locally, `CHECK_FILE_SIZES_BASE` when set, and `HEAD^1` under GitHub Actions, which is why `verify.yml` checks out with `fetch-depth: 2`. Rules and their excluded prefixes live in `scripts/check-file-sizes.mjs`; `bun test scripts/check-file-sizes-core.test.mjs` covers the policy.
 
 Install the Playwright Chromium browser once before running the gates:
 

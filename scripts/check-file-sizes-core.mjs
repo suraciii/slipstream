@@ -110,7 +110,16 @@ export async function collectFileSizeViolations({
   rules,
   baseRef = resolveBaseRef(repoRoot),
 }) {
-  git(["cat-file", "-e", `${baseRef}^{commit}`], repoRoot);
+  try {
+    git(["cat-file", "-e", `${baseRef}^{commit}`], repoRoot, {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  } catch (error) {
+    throw new Error(
+      `The file-size base ${baseRef} is not in this checkout. In GitHub Actions the base is HEAD^1, so a shallow checkout must fetch at least two commits (actions/checkout fetch-depth: 2); otherwise set CHECK_FILE_SIZES_BASE to a commit that exists locally.`,
+      { cause: error },
+    );
+  }
   const violations = [];
 
   for (const change of changedFiles({ repoRoot, baseRef })) {

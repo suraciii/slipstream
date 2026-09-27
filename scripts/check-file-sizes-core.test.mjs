@@ -132,3 +132,58 @@ test("checks tracked growth and untracked file ceilings", async () => {
     },
   );
 });
+
+function makeMergedRepository() {
+  const repo = makeRepository();
+  writeFileSync(path.join(repo, "crates", "merged.rs"), "one\ntwo");
+  git(repo, "add", ".");
+  git(repo, "commit", "-m", "branch change");
+  git(repo, "switch", "main");
+  git(repo, "merge", "--no-ff", "feature", "-m", "Merge pull request #1");
+  return repo;
+}
+
+test("grades GitHub Actions runs against the merge base commit HEAD^1", async () => {
+  const repo = makeMergedRepository();
+  assert.equal(resolveBaseRef(repo, { GITHUB_ACTIONS: "true" }), "HEAD^1");
+
+  const previous = process.env.GITHUB_ACTIONS;
+  process.env.GITHUB_ACTIONS = "true";
+  try {
+    const report = await collectFileSizeViolations({
+      repoRoot: repo,
+      rules: [{ root: "crates", extensions: new Set([".rs"]), maxLines: 1 }],
+    });
+    assert.equal(report.baseRef, "HEAD^1");
+    assert.deepEqual(report.violations, [
+      {
+        relativePath: "crates/merged.rs",
+        baseLines: null,
+        candidateLines: 2,
+        limit: 1,
+      },
+    ]);
+  } finally {
+    if (previous === undefined) delete process.env.GITHUB_ACTIONS;
+    else process.env.GITHUB_ACTIONS = previous;
+  }
+});
+
+test("names the checkout depth when the base commit is missing", async () => {
+  const repo = mkdtempSync(path.join(tmpdir(), "slipstream-file-size-"));
+  git(repo, "init", "-b", "main");
+  git(repo, "config", "user.name", "Test");
+  git(repo, "config", "user.email", "test@example.com");
+  writeFileSync(path.join(repo, "README.md"), "root");
+  git(repo, "add", ".");
+  git(repo, "commit", "-m", "root");
+
+  await assert.rejects(
+    collectFileSizeViolations({
+      repoRoot: repo,
+      baseRef: "HEAD^1",
+      rules: [{ root: "crates", extensions: new Set([".rs"]), maxLines: 3 }],
+    }),
+    /fetch-depth: 2.*CHECK_FILE_SIZES_BASE/,
+  );
+});
