@@ -12,29 +12,38 @@ const [stdout, stderr, exitCode] = await Promise.all([
 if (exitCode !== 0 && exitCode !== 1)
   throw new Error(stderr.trim() || `git grep exited ${exitCode}`);
 
-const ownerPath = "crates/slipstream-core/src/persistence/owner.rs";
-const ownerLines = (await Bun.file(ownerPath).text()).split("\n");
-const legacyOwnerLines = new Set<number>();
-let legacyBlock: string | undefined;
-for (const [index, line] of ownerLines.entries()) {
-  const start = line.match(/album-language-legacy:start ([a-z0-9-]+)$/);
-  const end = line.match(/album-language-legacy:end ([a-z0-9-]+)$/);
-  if (start) {
-    if (legacyBlock) throw new Error(`nested legacy marker at ${index + 1}`);
-    legacyBlock = start[1];
-  } else if (end) {
-    if (!legacyBlock || end[1] !== legacyBlock)
-      throw new Error(`unmatched legacy marker at ${index + 1}`);
-    legacyBlock = undefined;
-  } else if (legacyBlock) legacyOwnerLines.add(index + 1);
+const legacyPaths = [
+  "crates/slipstream-core/src/persistence/owner.rs",
+  "crates/slipstream-core/src/persistence/migrations.rs",
+] as const;
+const legacyLinesByPath: Record<string, Set<number>> = {};
+for (const path of legacyPaths) {
+  const lines = (await Bun.file(path).text()).split("\n");
+  const legacyLines = new Set<number>();
+  let legacyBlock: string | undefined;
+  for (const [index, line] of lines.entries()) {
+    const start = line.match(/album-language-legacy:start ([a-z0-9-]+)$/);
+    const end = line.match(/album-language-legacy:end ([a-z0-9-]+)$/);
+    if (start) {
+      if (legacyBlock) throw new Error(`nested legacy marker in ${path}:${index + 1}`);
+      legacyBlock = start[1];
+    } else if (end) {
+      if (!legacyBlock || end[1] !== legacyBlock)
+        throw new Error(`unmatched legacy marker in ${path}:${index + 1}`);
+      legacyBlock = undefined;
+    } else if (legacyBlock) {
+      legacyLines.add(index + 1);
+    }
+  }
+  if (legacyBlock) throw new Error(`unclosed legacy marker in ${path}: ${legacyBlock}`);
+  legacyLinesByPath[path] = legacyLines;
 }
-if (legacyBlock) throw new Error(`unclosed legacy marker: ${legacyBlock}`);
 
 const allowed = (path: string, line: number, text: string): boolean => {
   if (path === "scripts/check-album-language.ts") return true;
   if (/^compatibility\/sqlite\/schema-v[234]\.(json|sql)$/.test(path))
     return true;
-  if (path === ownerPath) return legacyOwnerLines.has(line);
+  if (legacyLinesByPath[path]?.has(line)) return true;
   if (path === "CONTEXT.md")
     return (
       text.startsWith("_Avoid_: Photo Set,") ||
