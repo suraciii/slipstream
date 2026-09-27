@@ -544,7 +544,8 @@ function mountPrivateLibraryBrowser(
         start: number;
         total: number;
         operation:
-          Readonly<{ operationId: string; removed: number }> | undefined;
+          | Readonly<{ operationId: string; removed: number }>
+          | undefined;
         items: ReadonlyArray<RemovedPhotoItem>;
       }>
     | undefined;
@@ -1350,7 +1351,11 @@ function mountPrivateLibraryBrowser(
   const stepEditorHistory = (
     photoId: string,
     operation:
-      "undo" | "redo" | "reset" | "resetExposure" | "resetWhiteBalance",
+      | "undo"
+      | "redo"
+      | "reset"
+      | "resetExposure"
+      | "resetWhiteBalance",
   ): void => {
     const session = editorSessions.get(photoId);
     if (!session) return;
@@ -2407,7 +2412,8 @@ function mountPrivateLibraryBrowser(
   >();
   const fileLocationOutcomeSettlements = new WeakMap<object, Promise<void>>();
   let publicationLocationPresentation:
-    FileLocationPresentationRecord | undefined;
+    | FileLocationPresentationRecord
+    | undefined;
 
   const releaseFileLocationPresentation = (
     presentation: FileLocationPresentationRecord,
