@@ -47,6 +47,7 @@ import { releaseBrowse, type SourceViewOrder } from "./api/source-grid.js";
 import { type RemovalResult, type RestorationResult } from "./api/removal.js";
 import { createRemovalOwner } from "./model/removal-owner.js";
 import { createRemovedListingOwner } from "./model/removed-listing-owner.js";
+import { createGridMultiSelectionOwner } from "./model/grid-multi-selection-owner.js";
 import {
   createAlbumActionOwner,
   type AlbumActionAdmission,
@@ -506,6 +507,38 @@ function mountPrivateLibraryBrowser(
       restorationMessage: (counts) => restorationOutcomeMessage(counts),
     },
   });
+  const gridMulti = createGridMultiSelectionOwner({
+    present: {
+      renderGrid: (position) => renderGrid(position),
+      renderBatchAlbums: (model) => view.renderBatchAlbums(model),
+      resetGridMultiSelection: () => view.resetGridMultiSelection(),
+      setDecisionStatus: (text) => setDecisionStatus(text),
+      focusGridIndex: (index) => view.focusGridIndex(index),
+      updateControls: () => updateControls(),
+    },
+    coordinate: {
+      alive: () => applicationAlive,
+      connected: () => connected,
+      pageBusy: () => pageBusy,
+      setPageBusy: (value) => {
+        pageBusy = value;
+      },
+      gridVisible: () => view.gridVisible(),
+      canOpenGridPhoto: () => canOpenGridPhoto(),
+      sourceGrid,
+      photoOwner,
+      albumActions,
+      albums: () => application.albums,
+      mutateAlbum: (start) => mutateAlbum(start, "summary"),
+      membershipAlbumName: (albumId) => membershipAlbumName(albumId),
+      loadWindow: (index, operation, quiet, priority) =>
+        loadWindow(index, operation, quiet, priority),
+      reopenExpired: (anchorIndex, generation) =>
+        reopenExpired(anchorIndex, generation),
+      failPhotoRecovery: (authority, kind) =>
+        failPhotoRecovery(authority, kind),
+    },
+  });
   let removalReviewed = 0;
   let removalReviewOpen = false;
   let removalResult:
@@ -543,41 +576,6 @@ function mountPrivateLibraryBrowser(
   let connectionEstablished = false;
   let pageBusy = false;
   let photoRetryPending = false;
-  // The Grid's multi-selection is session state of the open source: the
-  // stable Photo identities the Photographer marked, the anchor a range
-  // extends from, and whether Select mode makes every cell activation toggle
-  // its Photo instead of opening it. Opening or reopening a source clears it.
-  // One batch addresses at most MULTI_SELECTION_LIMIT Photos: the Grid refuses
-  // to grow the selection past the bound the server enforces, so an invalid
-  // batch can never be built.
-  const MULTI_SELECTION_LIMIT = 100;
-  type GridBatchResult = Readonly<{
-    tone: "success" | "warning" | "failure";
-    message: string;
-    review?: Readonly<{ label: string }>;
-    compensation?: Readonly<{ label: string }>;
-  }>;
-  type BatchAlbumCompensation = Readonly<{
-    albumId: string;
-    albumName: string;
-    photoIds: ReadonlyArray<string>;
-    sourceAuthority: SourceAuthority;
-    hadSavedPosition: boolean;
-  }>;
-  let multiSelection = new Set<string>();
-  // A settled batch can report that a retained Photo is no longer in the
-  // current Library. It stays visible in the tray, but must not be sent in a
-  // later batch request until the Photographer clears the selection.
-  let multiMissingIds = new Set<string>();
-  let multiChangedIds = new Set<string>();
-  let multiExpectedSelection = new Map<string, SelectionState>();
-  let multiAnchorId: string | undefined;
-  let selectMode = false;
-  let gridBatchResult: GridBatchResult | undefined;
-  let batchAlbumCompensation: BatchAlbumCompensation | undefined;
-  // One batch Add to Album in flight. Membership stays outside the Undo
-  // contract, so it never touches the pending Undo description.
-  let batchAlbumPending = false;
   const canOpenGridPhoto = () =>
     sourceGrid.isReady(sourceGrid.authority) &&
     !pageBusy &&
@@ -1363,7 +1361,7 @@ function mountPrivateLibraryBrowser(
         ...(operation?.status ? { status: operation.status } : {}),
       });
     }
-    renderBatchAlbums();
+    gridMulti.renderBatchAlbums();
   };
 
   const openAlbumForm = (form: AlbumFormReference): void => {
@@ -1404,10 +1402,8 @@ function mountPrivateLibraryBrowser(
       );
       if (albumActions.isFormCurrent(record.authority))
         dismissAlbumForm(record);
-      if (deleted && batchAlbumCompensation?.albumId === albumId) {
-        expireBatchAlbumCompensation();
+      if (deleted && gridMulti.expireCompensationForAlbum(albumId))
         renderGrid();
-      }
       renderSources();
       if (
         deleted &&
@@ -1485,7 +1481,7 @@ function mountPrivateLibraryBrowser(
   };
 
   const addFolderToAlbum = (albumId: string): void => {
-    expireBatchAlbumCompensation();
+    gridMulti.expireCompensation();
     const folder = sourceGrid.kind === "folder" ? sourceGrid.folder : undefined;
     const publication =
       sourceGrid.kind === "folder" ? fileLocations.publication : undefined;
@@ -1639,7 +1635,7 @@ function mountPrivateLibraryBrowser(
     // The multi-selection names Photos of the source that was open: a new
     // source starts empty, and its tray presents nothing until the
     // Photographer marks Photos again.
-    clearMultiSelection();
+    gridMulti.clear();
     renderSortControl();
     try {
       const opened = await pendingOpen;
@@ -1811,7 +1807,7 @@ function mountPrivateLibraryBrowser(
     // A reopen builds a new Snapshot of the same source, so the
     // multi-selection starts empty here too; the render after the reopen
     // clears the markers on the retained cells.
-    clearMultiSelection();
+    gridMulti.clear();
     updateControls();
     const resumePhoto = photoOwner.active;
     const resumeIndex = photoOwner.currentIndex;
@@ -2145,153 +2141,12 @@ function mountPrivateLibraryBrowser(
     view.renderGrid(
       {
         total: sourceGrid.total,
-        multi: {
-          mode: selectMode,
-          count: multiSelection.size,
-          limit: MULTI_SELECTION_LIMIT,
-          // A batch action is presented only while it would be admitted: the
-          // same source readiness, connection, and idle owner a Grid decision
-          // needs, so an activation is never refused silently.
-          enabled: connected && canOpenGridPhoto(),
-          result: gridBatchResult,
-          selected: (index) => {
-            const photo = sourceGrid.photoAt(index);
-            return photo !== undefined && multiSelection.has(photo.id);
-          },
-        },
+        multi: gridMulti.model(),
         photoAt: (index) => sourceGrid.photoAt(index),
       },
       position,
     );
     updateControls();
-  };
-
-  /// Presents the batch tray's Album choices from the bounded Album summary.
-  const renderBatchAlbums = () => {
-    if (!applicationAlive) return;
-    view.renderBatchAlbums({
-      albums: application.albums.map(({ id, name }) => ({ id, name })),
-      pending: batchAlbumPending,
-    });
-  };
-
-  /// One Photo count with its noun, so every batch message reads correctly
-  /// for a single Photo and for many.
-  const photoCountText = (count: number): string =>
-    `${count.toLocaleString()} ${count === 1 ? "Photo" : "Photos"}`;
-
-  const expireBatchAlbumCompensation = () => {
-    batchAlbumCompensation = undefined;
-    if (!gridBatchResult?.compensation) return;
-    gridBatchResult = {
-      tone: gridBatchResult.tone,
-      message: gridBatchResult.message,
-      ...(gridBatchResult.review ? { review: gridBatchResult.review } : {}),
-    };
-  };
-
-  /// Empties the Grid's multi-selection and leaves Select mode. The caller
-  /// owns the render, so a source open that clears it presents the cleared
-  /// Grid in its own render; the view is told here as well, because an open
-  /// that fails leaves the Grid its retained cells and must never keep a tray
-  /// or a marker for Photos that open no longer presents.
-  const clearMultiSelection = () => {
-    multiSelection = new Set();
-    multiMissingIds = new Set();
-    multiChangedIds = new Set();
-    multiExpectedSelection = new Map();
-    multiAnchorId = undefined;
-    selectMode = false;
-    gridBatchResult = undefined;
-    batchAlbumCompensation = undefined;
-    view.resetGridMultiSelection();
-  };
-
-  /// The shared refusal for a multi-selection that would pass the batch
-  /// bound: the bound is named, and the selection is left exactly as it was.
-  const refuseBeyondBatchBound = () => {
-    setDecisionStatus(
-      "Selection limit reached. Remove a Photo to extend the range.",
-    );
-  };
-
-  /// Toggles one Photo's membership of the multi-selection and moves the
-  /// anchor there, so a following shift-click extends from the last mark.
-  const toggleMultiSelection = (photoId: string) => {
-    if (multiSelection.delete(photoId)) {
-      multiExpectedSelection.delete(photoId);
-      multiMissingIds.delete(photoId);
-      multiChangedIds.delete(photoId);
-    } else {
-      if (multiSelection.size >= MULTI_SELECTION_LIMIT) {
-        refuseBeyondBatchBound();
-        return;
-      }
-      const photoIndex = sourceGrid.findPhotoIndex(photoId);
-      const photo =
-        photoIndex === undefined ? undefined : sourceGrid.photoAt(photoIndex);
-      if (!photo) return;
-      multiSelection.add(photoId);
-      multiMissingIds.delete(photoId);
-      multiExpectedSelection.set(photoId, photo.selectionState);
-    }
-    gridBatchResult = undefined;
-    multiAnchorId = photoId;
-    renderGrid();
-  };
-
-  /// Extends the multi-selection over the loaded Photos between the anchor and
-  /// the clicked Photo. A position the Grid has not loaded cannot join, and an
-  /// anchor the Grid no longer holds makes the clicked Photo the new anchor.
-  /// An extension that would pass the batch bound is refused whole, so the
-  /// Grid never presents a selection its own batch would be refused for.
-  const extendMultiSelection = (index: number, photoId: string) => {
-    const anchorIndex =
-      multiAnchorId === undefined
-        ? undefined
-        : sourceGrid.findPhotoIndex(multiAnchorId);
-    if (anchorIndex === undefined) {
-      if (multiSelection.size >= MULTI_SELECTION_LIMIT) {
-        refuseBeyondBatchBound();
-        return;
-      }
-      const photo = sourceGrid.photoAt(index);
-      if (!photo) return;
-      multiSelection.add(photoId);
-      multiMissingIds.delete(photoId);
-      multiChangedIds.delete(photoId);
-      multiExpectedSelection.set(photoId, photo.selectionState);
-      gridBatchResult = undefined;
-      multiAnchorId = photoId;
-      renderGrid();
-      return;
-    }
-    const joined: string[] = [];
-    for (
-      let position = Math.min(anchorIndex, index);
-      position <= Math.max(anchorIndex, index);
-      position += 1
-    ) {
-      const photo = sourceGrid.photoAt(position);
-      if (photo && !multiSelection.has(photo.id)) joined.push(photo.id);
-    }
-    if (multiSelection.size + joined.length > MULTI_SELECTION_LIMIT) {
-      refuseBeyondBatchBound();
-      return;
-    }
-    for (const photoIdToAdd of joined) {
-      const indexToAdd = sourceGrid.findPhotoIndex(photoIdToAdd);
-      const photo =
-        indexToAdd === undefined ? undefined : sourceGrid.photoAt(indexToAdd);
-      if (!photo) continue;
-      multiSelection.add(photoIdToAdd);
-      multiMissingIds.delete(photoIdToAdd);
-      multiChangedIds.delete(photoIdToAdd);
-      multiExpectedSelection.set(photoIdToAdd, photo.selectionState);
-    }
-    gridBatchResult = undefined;
-    multiAnchorId = photoId;
-    renderGrid();
   };
 
   const openPhoto = async (
@@ -2536,7 +2391,7 @@ function mountPrivateLibraryBrowser(
   /// checkbox shows the intended state while the mutation is in flight, and
   /// a failed mutation keeps the panel truthful and names the action.
   const toggleMembership = (albumId: string, member: boolean): void => {
-    expireBatchAlbumCompensation();
+    gridMulti.expireCompensation();
     const photo = currentPhoto();
     if (!photo || !albumId) return;
     const photoId = photo.id;
@@ -2838,12 +2693,8 @@ function mountPrivateLibraryBrowser(
       return;
     }
     if (!outcome.applied) return;
-    if (
-      field === "selectionState" &&
-      outcome.photoId &&
-      multiSelection.has(outcome.photoId)
-    )
-      multiExpectedSelection.set(outcome.photoId, value as SelectionState);
+    if (field === "selectionState" && outcome.photoId)
+      gridMulti.noteExpectedSelection(outcome.photoId, value as SelectionState);
     view.setPhotoStatus(
       `${field === "rating" ? "Rating" : "Selection"} saved.`,
     );
@@ -2873,8 +2724,8 @@ function mountPrivateLibraryBrowser(
     if (outcome.kind === "detached") return;
     if (outcome.kind === "persisted" && field === "selectionState") {
       const photoId = sourceGrid.photoAt(index)?.id;
-      if (photoId && multiSelection.has(photoId))
-        multiExpectedSelection.set(photoId, value as SelectionState);
+      if (photoId)
+        gridMulti.noteExpectedSelection(photoId, value as SelectionState);
     }
     if (outcome.kind === "failed") {
       if (outcome.failure === "answered") {
@@ -2891,516 +2742,12 @@ function mountPrivateLibraryBrowser(
       updateControls();
     }
   };
-  /// Applies one Selection State to every multi-selected Photo as one bounded
-  /// change. The write shares the Photo View and Grid admission, the
-  /// one-level Undo, and every failure rule; the multi-selection stays, so the
-  /// Photographer can decide again or add the same Photos to an Album.
-  const mutateGridBatch = async (value: SelectionState) => {
-    if (!connected || pageBusy || !view.gridVisible() || !canOpenGridPhoto())
-      return;
-    const photoIds = [...multiSelection].filter(
-      (photoId) => !multiMissingIds.has(photoId),
-    );
-    if (photoIds.length === 0) {
-      const message =
-        "No selected Photos remain in this Library. Clear the selection to continue.";
-      gridBatchResult = { tone: "warning", message };
-      setDecisionStatus(message);
-      renderGrid();
-      return;
-    }
-    const photos = photoIds.flatMap((photoId) => {
-      const expectedCurrent = multiExpectedSelection.get(photoId);
-      return expectedCurrent === undefined
-        ? []
-        : [{ photoId, expectedCurrent }];
-    });
-    if (photos.length !== photoIds.length) {
-      const message =
-        "The selected Photos need a refresh before this batch can be retried.";
-      gridBatchResult = { tone: "failure", message };
-      setDecisionStatus(message);
-      renderGrid();
-      return;
-    }
-    const admission = photoOwner.mutateBatch(photos, value);
-    if (!admission) return;
-    gridBatchResult = undefined;
-    renderGrid();
-    setDecisionStatus(`Saving ${photoCountText(photoIds.length)}…`);
-    const outcome = await admission.settlement;
-    // The write settled, so the Grid is interactive again whatever the
-    // outcome; the merged render re-enables the tray and rebuilds the decided
-    // cells in place. A detached write stays silent.
-    renderGrid();
-    if (outcome.kind === "detached") return;
-    if (outcome.kind === "failed") {
-      if (outcome.failure === "answered") {
-        setDecisionStatus(
-          // Only an over-limit batch answers 400; the client caps the
-          // selection, so the bound clause stays off every other answered
-          // failure it cannot have caused.
-          outcome.status === 400
-            ? `The change could not be saved. A batch holds up to ${MULTI_SELECTION_LIMIT} Photos.`
-            : "The change could not be saved.",
-        );
-      } else {
-        setDecisionStatus(
-          "Connection lost before the change was confirmed. Retry to refresh.",
-        );
-      }
-      if (outcome.connectivity === "lost")
-        failPhotoRecovery(photoOwner.authority, "photo-write");
-      gridBatchResult = {
-        tone: "failure",
-        message:
-          outcome.failure === "transport"
-            ? "Connection lost before the batch was confirmed. Retry to refresh."
-            : "The batch could not be saved. Retry to refresh the selected Photos.",
-      };
-      renderGrid();
-      updateControls();
-      return;
-    }
-    const applied = outcome.applied.length;
-    const changed = outcome.changedElsewhere.length;
-    const missing = outcome.missing.length;
-    multiChangedIds = new Set(
-      outcome.changedElsewhere.map((entry) => entry.photoId),
-    );
-    for (const entry of outcome.missing) {
-      multiMissingIds.add(entry.photoId);
-      multiExpectedSelection.delete(entry.photoId);
-    }
-    const decision = value === "selected" ? "selected" : "rejected";
-    const resumeMessage =
-      sourceGrid.kind === "album" ? " Album resume point unchanged." : "";
-    for (const entry of outcome.applied)
-      multiExpectedSelection.set(entry.photoId, value);
-    const parts = [`${photoCountText(applied)} ${decision}.`];
-    if (changed > 0)
-      parts.push(
-        `${photoCountText(changed)} changed elsewhere. Review them before retrying.`,
-      );
-    if (missing > 0)
-      parts.push(`${photoCountText(missing)} no longer in this Library.`);
-    const message = `${parts.join(" ")}${resumeMessage}`;
-    gridBatchResult = {
-      tone: changed > 0 || missing > 0 ? "warning" : "success",
-      message,
-      ...(changed > 0
-        ? { review: { label: `Review ${photoCountText(changed)}` } }
-        : {}),
-    };
-    setDecisionStatus(message);
-    renderGrid();
-    updateControls();
-  };
-  /// Refreshes the bounded facts for Photos that the server reported as
-  /// changed elsewhere. The open Browse Snapshot and the page-owned selection
-  /// stay in place; only the windows containing the reviewed identities are
-  /// reloaded. Missing identities become non-retryable retained selections.
-  const reviewChangedPhotos = async () => {
-    if (
-      !applicationAlive ||
-      !connected ||
-      pageBusy ||
-      !view.gridVisible() ||
-      multiChangedIds.size === 0
-    )
-      return;
-    const reviewIds = [...multiChangedIds].filter(
-      (photoId) => multiSelection.has(photoId) && !multiMissingIds.has(photoId),
-    );
-    if (reviewIds.length === 0) return;
-    const sourceAuthority = sourceGrid.authority;
-    const loadedWindows = new Set<number>();
-    const reviewed = new Set<string>();
-    const becameMissing = new Set<string>();
-    let firstReviewedIndex: number | undefined;
-    let failed = false;
-    pageBusy = true;
-    renderGrid();
-    setDecisionStatus(
-      `Reviewing ${photoCountText(reviewIds.length)} changed elsewhere…`,
-    );
-    try {
-      for (const photoId of reviewIds) {
-        if (!sourceGrid.isCurrent(sourceAuthority)) return;
-        let index = sourceGrid.findPhotoIndex(photoId);
-        if (index === undefined) {
-          const position = await sourceGrid.resolvePhotoPosition(
-            sourceAuthority,
-            photoId,
-          );
-          if (!sourceGrid.isCurrent(sourceAuthority)) return;
-          if (position.kind === "missing") {
-            becameMissing.add(photoId);
-            continue;
-          }
-          if (position.kind === "expired") {
-            await reopenExpired(
-              sourceGrid.readGridPosition(sourceAuthority) ?? 0,
-              sourceGrid.generation,
-            );
-            return;
-          }
-          if (position.kind !== "resolved") {
-            failed = true;
-            break;
-          }
-          index = position.position;
-        }
-        const believedState = multiExpectedSelection.get(photoId);
-        const { start } = sourceGrid.describeWindow(index);
-        const refreshWindow = async () => {
-          sourceGrid.invalidateWindow(index);
-          const loaded = await loadWindow(
-            index,
-            { kind: "grid", authority: sourceAuthority },
-            true,
-            "high",
-          );
-          if (!loaded || !sourceGrid.isCurrent(sourceAuthority)) return false;
-          loadedWindows.add(start);
-          return true;
-        };
-        if (!loadedWindows.has(start) && !(await refreshWindow())) {
-          failed = true;
-          break;
-        }
-        let refreshedIndex = sourceGrid.findPhotoIndex(photoId);
-        if (refreshedIndex === undefined && !(await refreshWindow())) {
-          failed = true;
-          break;
-        }
-        refreshedIndex = sourceGrid.findPhotoIndex(photoId);
-        let photo =
-          refreshedIndex === undefined
-            ? undefined
-            : sourceGrid.photoAt(refreshedIndex);
-        if (!photo) {
-          // A refreshed window can lose a retained fact to bounded-cache
-          // pressure. Ask the position authority before deciding that the
-          // Photo left the Library; only its `missing` answer is definitive.
-          const currentPosition = await sourceGrid.resolvePhotoPosition(
-            sourceAuthority,
-            photoId,
-          );
-          if (!sourceGrid.isCurrent(sourceAuthority)) return;
-          if (currentPosition.kind === "missing") {
-            becameMissing.add(photoId);
-            continue;
-          }
-          if (currentPosition.kind === "expired") {
-            await reopenExpired(
-              sourceGrid.readGridPosition(sourceAuthority) ?? 0,
-              sourceGrid.generation,
-            );
-            return;
-          }
-          if (currentPosition.kind !== "resolved") {
-            failed = true;
-            break;
-          }
-          if (!(await refreshWindow())) {
-            failed = true;
-            break;
-          }
-          refreshedIndex = sourceGrid.findPhotoIndex(photoId);
-          photo =
-            refreshedIndex === undefined
-              ? undefined
-              : sourceGrid.photoAt(refreshedIndex);
-          // The position route proved that the Photo still exists. If the
-          // second refresh cannot retain it, keep it retryable rather than
-          // presenting a false deletion.
-          if (!photo) {
-            failed = true;
-            break;
-          }
-        }
-        if (
-          believedState !== undefined &&
-          !sourceGrid.reconcilePhotoSelection(
-            sourceAuthority,
-            refreshedIndex!,
-            photoId,
-            believedState,
-            photo.selectionState,
-          )
-        ) {
-          failed = true;
-          break;
-        }
-        multiExpectedSelection.set(photoId, photo.selectionState);
-        reviewed.add(photoId);
-        firstReviewedIndex ??= refreshedIndex;
-      }
-    } finally {
-      if (sourceGrid.isCurrent(sourceAuthority)) {
-        pageBusy = false;
-        updateControls();
-      }
-    }
-    if (!applicationAlive || !sourceGrid.isCurrent(sourceAuthority)) return;
-    for (const photoId of becameMissing) {
-      multiMissingIds.add(photoId);
-      multiExpectedSelection.delete(photoId);
-      multiChangedIds.delete(photoId);
-    }
-    for (const photoId of reviewed) multiChangedIds.delete(photoId);
-    const remaining = [...multiChangedIds].filter(
-      (photoId) => multiSelection.has(photoId) && !multiMissingIds.has(photoId),
-    );
-    if (failed) {
-      const missingMessage =
-        becameMissing.size > 0
-          ? ` ${photoCountText(becameMissing.size)} no longer in this Library.`
-          : "";
-      const message = `Some changed Photos could not be refreshed.${missingMessage} Retry Review to continue.`;
-      gridBatchResult = {
-        tone: "warning",
-        message,
-        ...(remaining.length > 0
-          ? {
-              review: {
-                label: `Review ${photoCountText(remaining.length)}`,
-              },
-            }
-          : {}),
-      };
-      setDecisionStatus(message);
-    } else {
-      const reviewedCount = reviewed.size;
-      const missingMessage =
-        becameMissing.size > 0
-          ? ` ${photoCountText(becameMissing.size)} no longer in this Library.`
-          : "";
-      const message = `${photoCountText(reviewedCount)} reviewed.${missingMessage} Retry the batch when ready.`;
-      gridBatchResult = {
-        tone: becameMissing.size > 0 ? "warning" : "success",
-        message,
-      };
-      setDecisionStatus(message);
-    }
-    renderGrid(firstReviewedIndex);
-    if (firstReviewedIndex !== undefined)
-      view.focusGridIndex(firstReviewedIndex);
-    updateControls();
-  };
-
-  /// Adds every multi-selected Photo to one Album through the bounded
-  /// membership route. Membership stays outside the Undo contract, and the
-  /// multi-selection stays so the same Photos can join another Album.
-  const batchAddToAlbum = async (albumId: string) => {
-    expireBatchAlbumCompensation();
-    if (!applicationAlive || batchAlbumPending || !albumId) return;
-    if (multiSelection.size === 0) return;
-    if (!application.albums.some((album) => album.id === albumId)) return;
-    const photoIds = [...multiSelection].filter(
-      (photoId) => !multiMissingIds.has(photoId),
-    );
-    if (photoIds.length === 0) {
-      const message =
-        "No selected Photos remain in this Library. Clear the selection to continue.";
-      gridBatchResult = { tone: "warning", message };
-      setDecisionStatus(message);
-      renderGrid();
-      return;
-    }
-    const sourceAuthority = sourceGrid.authority;
-    const albumBefore = application.albums.find(
-      (album) => album.id === albumId,
-    );
-    const name = membershipAlbumName(albumId);
-    batchAlbumPending = true;
-    gridBatchResult = undefined;
-    renderGrid();
-    renderBatchAlbums();
-    setDecisionStatus(
-      `Adding ${photoCountText(photoIds.length)} to “${name}”…`,
-    );
-    const result = await mutateAlbum(
-      (context) => albumActions.addMemberships(albumId, photoIds, context),
-      "summary",
-    );
-    batchAlbumPending = false;
-    if (!applicationAlive) return;
-    renderBatchAlbums();
-    // A superseded or already admitted batch reports nothing: the action that
-    // owns the settlement presents its own outcome.
-    if (
-      !result.admitted ||
-      !result.latest ||
-      !sourceGrid.isCurrent(sourceAuthority)
-    )
-      return;
-    let message: string;
-    let compensation: GridBatchResult["compensation"];
-    if (result.ok && result.membershipAdd) {
-      const added = result.membershipAdd.addedPhotoIds.length;
-      const alreadyMember = result.membershipAdd.alreadyMemberPhotoIds.length;
-      const parts = [
-        ...(added > 0 ? [`${photoCountText(added)} added to “${name}”.`] : []),
-        ...(alreadyMember > 0
-          ? [`${photoCountText(alreadyMember)} already in “${name}”.`]
-          : []),
-      ];
-      if (sourceGrid.kind === "album")
-        parts.push("Album resume point unchanged.");
-      message = parts.join(" ");
-      if (added > 0) {
-        batchAlbumCompensation = Object.freeze({
-          albumId,
-          albumName: name,
-          photoIds: Object.freeze([...result.membershipAdd.addedPhotoIds]),
-          sourceAuthority,
-          hadSavedPosition: albumBefore?.hasSavedPosition ?? false,
-        });
-        compensation = { label: "Remove added Photos" };
-      } else batchAlbumCompensation = undefined;
-    } else {
-      batchAlbumCompensation = undefined;
-      message = result.ok
-        ? `${photoCountText(photoIds.length)} added to “${name}”.${
-            sourceGrid.kind === "album" ? " Album resume point unchanged." : ""
-          }`
-        : `Could not add the selected Photos to “${name}”.`;
-    }
-    gridBatchResult = {
-      tone: result.ok ? "success" : "failure",
-      message,
-      ...(compensation ? { compensation } : {}),
-    };
-    setDecisionStatus(message);
-    renderGrid();
-  };
-  /// Removes only the identities returned as newly added by the current batch
-  /// Album operation. This is a scoped compensation, not the global decision
-  /// Undo, and a failed settlement keeps the exact bounded record retryable.
-  const removeAddedPhotosFromAlbum = async () => {
-    const compensation = batchAlbumCompensation;
-    if (
-      !compensation ||
-      batchAlbumPending ||
-      !applicationAlive ||
-      !sourceGrid.isCurrent(compensation.sourceAuthority)
-    )
-      return;
-    const savedPositionBefore =
-      application.albums.find((album) => album.id === compensation.albumId)
-        ?.hasSavedPosition ?? compensation.hadSavedPosition;
-    batchAlbumPending = true;
-    renderGrid();
-    renderBatchAlbums();
-    setDecisionStatus(
-      `Removing ${photoCountText(compensation.photoIds.length)} added Photos from “${compensation.albumName}”…`,
-    );
-    const result = await mutateAlbum(
-      (context) =>
-        albumActions.removeAddedMemberships(
-          compensation.albumId,
-          compensation.photoIds,
-          context,
-        ),
-      "summary",
-    );
-    batchAlbumPending = false;
-    if (!applicationAlive) return;
-    renderBatchAlbums();
-    if (
-      !result.admitted ||
-      !result.latest ||
-      batchAlbumCompensation !== compensation ||
-      !sourceGrid.isCurrent(compensation.sourceAuthority)
-    ) {
-      renderGrid();
-      return;
-    }
-    if (!result.ok || !result.membershipRemove) {
-      const message = `Could not remove the added Photos from “${compensation.albumName}”. Retry to continue.`;
-      gridBatchResult = {
-        tone: "failure",
-        message,
-        compensation: { label: "Remove added Photos" },
-      };
-      setDecisionStatus(message);
-      renderGrid();
-      return;
-    }
-    const removed = result.membershipRemove.removedPhotoIds.length;
-    const absent = result.membershipRemove.alreadyAbsentPhotoIds.length;
-    const currentAlbum = application.albums.find(
-      (album) => album.id === compensation.albumId,
-    );
-    const savedPositionMessage =
-      savedPositionBefore && !currentAlbum?.hasSavedPosition
-        ? " Album resume point cleared."
-        : savedPositionBefore && currentAlbum?.hasSavedPosition
-          ? " Album resume point remains."
-          : "";
-    const message = [
-      `${photoCountText(removed)} removed from “${compensation.albumName}”.`,
-      ...(absent > 0
-        ? [
-            `${photoCountText(absent)} already absent from “${compensation.albumName}”.`,
-          ]
-        : []),
-      savedPositionMessage.trim(),
-    ]
-      .filter(Boolean)
-      .join(" ");
-    batchAlbumCompensation = undefined;
-    gridBatchResult = {
-      tone: absent > 0 ? "warning" : "success",
-      message,
-    };
-    setDecisionStatus(message);
-    renderGrid();
-  };
-
-  /// Restores every Photo one batch Selection State change confirmed. The
-  /// writes are the same compare-and-set writes a single Undo sends, one
-  /// Photo at a time, and the Grid stays where it is: a batch never opened a
-  /// Photo, so nothing navigates.
-  const performBatchUndo = async () => {
-    const preparation = photoOwner.prepareBatchUndo();
-    if (!preparation) return;
-    updateControls();
-    setDecisionStatus(`Restoring ${photoCountText(preparation.count)}…`);
-    const outcome = await photoOwner.performBatchUndo(preparation);
-    renderGrid();
-    updateControls();
-    if (outcome.kind === "detached") return;
-    if (outcome.connectivity === "lost")
-      failPhotoRecovery(photoOwner.authority, "undo");
-    const restored = outcome.restored.length;
-    const conflicts = outcome.conflicts.length;
-    const failed = outcome.failed.length;
-    for (const entry of outcome.restoredValues) {
-      if (multiSelection.has(entry.photoId))
-        multiExpectedSelection.set(entry.photoId, entry.value);
-    }
-    const message =
-      failed > 0
-        ? `${photoCountText(restored)} restored. ${photoCountText(failed)} not restored; Undo again to retry.`
-        : conflicts > 0
-          ? `${photoCountText(restored)} restored. ${photoCountText(conflicts)} could not be restored because ${conflicts === 1 ? "it changed" : "they changed"} elsewhere.`
-          : `${photoCountText(restored)} restored.`;
-    gridBatchResult = {
-      tone: failed > 0 || conflicts > 0 ? "warning" : "success",
-      message,
-    };
-    setDecisionStatus(message);
-    renderGrid();
-  };
   const performUndo = async () => {
     if (!connected || pageBusy) return;
     // One Undo control covers the one-level change: a pending batch restores
     // in place, and a pending single decision keeps its own path.
     if (photoOwner.undoBatch) {
-      await performBatchUndo();
+      await gridMulti.performBatchUndo();
       return;
     }
     const targetPhotoId = photoOwner.undoPhotoId;
@@ -3483,8 +2830,11 @@ function mountPrivateLibraryBrowser(
     if (outcome.kind === "detached") return;
     if (outcome.kind === "persisted" && outcome.photoId) {
       const restored = sourceGrid.photoAt(outcome.index);
-      if (restored && multiSelection.has(outcome.photoId))
-        multiExpectedSelection.set(outcome.photoId, restored.selectionState);
+      if (restored)
+        gridMulti.noteExpectedSelection(
+          outcome.photoId,
+          restored.selectionState,
+        );
     }
     if (outcome.kind === "failed") {
       if (outcome.failure === "transport") {
@@ -4147,37 +3497,37 @@ function mountPrivateLibraryBrowser(
         // A modifier always wins: a shift-click extends a range even in
         // Select mode, where a plain activation toggles its Photo.
         if (intent.range) {
-          extendMultiSelection(intent.index, photo.id);
+          gridMulti.extend(intent.index, photo.id);
           return;
         }
-        if (selectMode || intent.toggle) {
-          toggleMultiSelection(photo.id);
+        if (gridMulti.model().mode || intent.toggle) {
+          gridMulti.toggle(photo.id);
           return;
         }
         void openPhoto(intent.index);
         return;
       }
       case "grid-select-mode":
-        if (selectMode === intent.mode) return;
-        selectMode = intent.mode;
+        gridMulti.setMode(intent.mode);
+        return;
+      case "grid-multi-clear": {
+        const model = gridMulti.model();
+        if (model.count === 0 && !model.mode) return;
+        gridMulti.clear();
         renderGrid();
         return;
-      case "grid-multi-clear":
-        if (multiSelection.size === 0 && !selectMode) return;
-        clearMultiSelection();
-        renderGrid();
-        return;
+      }
       case "grid-batch-mutation":
-        void mutateGridBatch(intent.value);
+        void gridMulti.mutate(intent.value);
         return;
       case "grid-batch-album-add":
-        void batchAddToAlbum(intent.albumId);
+        void gridMulti.addToAlbum(intent.albumId);
         return;
       case "grid-batch-album-remove":
-        void removeAddedPhotosFromAlbum();
+        void gridMulti.removeAddedPhotos();
         return;
       case "grid-batch-review":
-        void reviewChangedPhotos();
+        void gridMulti.reviewChanged();
         return;
       case "removal-review-open":
         openRemovalReview();
@@ -4341,6 +3691,9 @@ function mountPrivateLibraryBrowser(
       photoOwner.currentIndex;
     await reopenExpired(anchor, sourceGrid.generation, undefined, reason);
   };
+
+  const photoCountText = (count: number): string =>
+    `${count.toLocaleString()} ${count === 1 ? "Photo" : "Photos"}`;
 
   const removalOutcomeMessage = (counts: RemovalResult["counts"]): string => {
     const parts = [
@@ -5075,7 +4428,7 @@ function mountPrivateLibraryBrowser(
     unsubscribeWindowSettled();
     navigation.dispose();
     albumRecovery = undefined;
-    batchAlbumCompensation = undefined;
+    gridMulti.dispose();
     albumActions.dispose();
     savedPositions.dispose();
     application.dispose();
