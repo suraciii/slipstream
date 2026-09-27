@@ -50,3 +50,11 @@ the intended service. An incompatible service is rejected before any write;
 keep the previous client candidate until the new one passes that check. An
 uncertain write still requires a fresh object read and human or Agent judgment,
 not an automatic retry.
+
+Use a client and service built from the same candidate source revision. A
+contract-1 response can still be incomplete: `incompatible_server` preserves
+the advertised versions and identifies a missing or invalid capability field.
+Install the matching service candidate before retrying; do not bypass this
+check. For RAW development, also inspect `processing capability` and follow
+the [Agent workflow](agent-cli.md#develop-a-raw-photo). A working client/service
+pair does not qualify the deployment's native processing stages.

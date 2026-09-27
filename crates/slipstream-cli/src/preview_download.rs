@@ -26,6 +26,7 @@ const OPERATION: Operation = Operation::PhotosPreview;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DestinationKind {
     Preview,
+    EditPreview,
     Export,
 }
 
@@ -33,6 +34,7 @@ impl DestinationKind {
     fn noun(self) -> &'static str {
         match self {
             Self::Preview => "Preview",
+            Self::EditPreview => "Edit Preview",
             Self::Export => "Export",
         }
     }
@@ -41,7 +43,7 @@ impl DestinationKind {
     /// The post-publication reporting failure always reports `write-output`.
     fn write_operation(self) -> &'static str {
         match self {
-            Self::Preview => "write-preview",
+            Self::Preview | Self::EditPreview => "write-preview",
             Self::Export => "write-output",
         }
     }
@@ -363,7 +365,7 @@ pub(super) async fn download(
 
 // Header parsing does not consume entropy-coded scans. Walk their marker
 // structure as well; this does not claim to validate individual MCU data.
-fn complete_jpeg(bytes: &[u8], width: u32, height: u32) -> bool {
+pub(super) fn complete_jpeg(bytes: &[u8], width: u32, height: u32) -> bool {
     if !bytes.starts_with(&[0xff, 0xd8]) {
         return false;
     }
