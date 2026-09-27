@@ -1,13 +1,16 @@
 //! SQLite state ownership for the production Library core.
 
 mod admission;
+mod albums;
 mod decisions;
 mod edit_recipe;
 mod expansion;
 mod export;
 mod metadata;
 mod migrations;
+mod mutation;
 mod owner;
+mod queries;
 mod removal;
 mod scan;
 mod schema;
@@ -26,14 +29,13 @@ pub use crate::domain::{
 pub use admission::{
     DatabaseName, StateDatabaseLock, StateDirectory, StateError, StateFileIdentity,
 };
+pub use albums::AlbumWriteError;
 pub(crate) use expansion::expand_library_binding;
 pub use metadata::{
     ActiveAssociation, MetadataContext, MetadataRecord, MetadataStoreError, ObservedSidecar,
     ObservedSidecarState, RetainedOrphan,
 };
-pub use owner::{
-    AlbumWriteError, MutationError, Persistence, PersistenceError, PhotoDecisionWriteError,
-};
+pub use owner::{MutationError, Persistence, PersistenceError, PhotoDecisionWriteError};
 pub use scan::{
     DiscoveredFingerprint, FingerprintCounts, FingerprintTarget, ScanApplication, ScanRecoveryPlan,
 };

@@ -1,7 +1,8 @@
 //! Library-root binding: the preserved-row projection and the plan that rebinds
 //! a Library to its canonical root.
 
-use super::owner::{PersistenceError, validate_database};
+use super::migrations::validate_database;
+use super::owner::PersistenceError;
 use super::{DatabaseName, SchemaVersion, StateDirectory, migrations, validate_canonical_schema};
 use crate::identity::classify_name;
 use crate::{LibraryRoot, OriginalKind, RelativeOriginalPath, ScanLimits};

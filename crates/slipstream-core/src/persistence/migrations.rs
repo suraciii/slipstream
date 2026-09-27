@@ -1,6 +1,5 @@
 use super::{
-    DatabaseName, PersistenceError, SchemaVersion, StateDirectory,
-    owner::{allocate_library_id, names, table_columns, table_exists, validate_database},
+    DatabaseName, PersistenceError, SchemaVersion, StateDirectory, owner::allocate_library_id,
     validate_canonical_schema,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -881,4 +880,58 @@ fn validate_legacy_v0(connection: &Connection) -> Result<(), PersistenceError> {
         return Err(PersistenceError::InvalidLegacyData);
     }
     Ok(())
+}
+
+pub(super) fn validate_database(connection: &Connection) -> Result<(), PersistenceError> {
+    if connection
+        .prepare("PRAGMA foreign_key_check")
+        .and_then(|mut statement| statement.exists([]))
+        .map_err(|_| PersistenceError::Storage)?
+    {
+        return Err(PersistenceError::Storage);
+    }
+    let integrity: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|_| PersistenceError::Storage)?;
+    if integrity != "ok" {
+        return Err(PersistenceError::Storage);
+    }
+    Ok(())
+}
+
+pub(super) fn table_exists(connection: &Connection, name: &str) -> Result<bool, PersistenceError> {
+    connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            [name],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|value| value.is_some())
+        .map_err(|_| PersistenceError::Storage)
+}
+
+pub(super) fn names(connection: &Connection, kind: &str) -> Result<Vec<String>, PersistenceError> {
+    connection
+        .prepare("SELECT name FROM sqlite_master WHERE type=? AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        .and_then(|mut statement| {
+            statement
+                .query_map([kind], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|_| PersistenceError::Storage)
+}
+
+pub(super) fn table_columns(
+    connection: &Connection,
+    table: &str,
+) -> Result<Vec<String>, PersistenceError> {
+    connection
+        .prepare(&format!("PRAGMA table_info(\"{table}\")"))
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get(1))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|_| PersistenceError::Storage)
 }

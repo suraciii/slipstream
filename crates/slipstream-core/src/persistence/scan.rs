@@ -3,7 +3,7 @@
 
 use super::owner::{
     PERMANENT_DELETION_RETIRED_LOCATION_PREFIX, PersistenceError, allocate_library_id,
-    parse_selection_state, permanently_deleted_original_ids, write_transaction,
+    permanently_deleted_original_ids, write_transaction,
 };
 use super::{DatabaseName, StateDirectory};
 use crate::identity::classify_name;
@@ -11,8 +11,8 @@ use crate::{
     AppliedRelocations, CaptureFact, CaptureMetadataState, CaptureTimeField, DiscoveredOriginal,
     OriginalErrorCategory, OriginalFacts, OriginalFingerprint, OriginalKind, OriginalRecord,
     OriginalScanError, PhotoRecord, PreviewSeed, PreviewSeedResult, PreviewState, RecoverySurvey,
-    RelativeOriginalPath, RequestedRelocation, ScanSnapshot, UnavailablePhotoRecord,
-    preview_should_preserve, reconcile, selected_source,
+    RelativeOriginalPath, RequestedRelocation, ScanSnapshot, SelectionState,
+    UnavailablePhotoRecord, preview_should_preserve, reconcile, selected_source,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::{HashMap, HashSet};
@@ -653,6 +653,23 @@ pub(super) fn parse_preview_state(value: &str) -> rusqlite::Result<PreviewState>
         "failed" => Ok(PreviewState::Failed),
         "unavailable" => Ok(PreviewState::Unavailable),
         _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+pub(super) fn parse_selection_state(value: &str) -> rusqlite::Result<SelectionState> {
+    match value {
+        "undecided" => Ok(SelectionState::Undecided),
+        "selected" => Ok(SelectionState::Selected),
+        "rejected" => Ok(SelectionState::Rejected),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+pub(super) fn selection_state_value(value: SelectionState) -> &'static str {
+    match value {
+        SelectionState::Undecided => "undecided",
+        SelectionState::Selected => "selected",
+        SelectionState::Rejected => "rejected",
     }
 }
 pub(super) fn parse_dimension(value: Option<i64>) -> rusqlite::Result<Option<u32>> {
