@@ -1002,3 +1002,530 @@ pub(super) fn release_export_lease(
         Ok(changed == 1)
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::persistence::Persistence;
+    use crate::persistence::export;
+    use crate::persistence::test_support::*;
+    use crate::{
+        EXPORT_DEVELOPMENT_TIFF_WORKLOAD, EXPORT_RETENTION_SECONDS, ExportExposureRange,
+        ExportLeaseOutcome, ExportRecipePayload, ExportRetryOutcome, ExportSettlement, ExportState,
+        ExportSubmission, ExportSubmitOutcome, LibraryRoot,
+    };
+    use rusqlite::Connection;
+    use rusqlite::params;
+    use std::path::Path;
+
+    fn export_test_revision(relative_path: &str, size: i64, mtime_ms: f64) -> String {
+        crate::source_revision(relative_path, u64::try_from(size).unwrap(), mtime_ms).unwrap()
+    }
+
+    fn seed_current_schema(library: &LibraryRoot, path: &Path) {
+        seed(
+            path,
+            include_str!("../../../../compatibility/sqlite/schema-v8.sql"),
+        );
+        let connection = Connection::open(path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+    }
+
+    fn seed_export_photo(connection: &Connection) -> (String, String) {
+        add_recipe_test_photo(
+            connection,
+            RecipeTestPhoto {
+                original_id: "raw-original",
+                photo_id: "raw-photo",
+                relative_path: "shoot/one.ARW",
+                kind: "raw",
+                available: true,
+                size: 17,
+                mtime_ms: 1_000.0,
+            },
+        );
+        connection
+            .execute(
+                "INSERT INTO edit_recipes(photo_id,revision,source_revision,exposure_ev,white_balance_mode)
+                 VALUES('raw-photo','recipe-rev-1',?1,0.5,'as-shot')",
+                params![crate::source_revision("shoot/one.ARW", 17_u64, 1_000.0).unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            connection,
+            RecipeTestPhoto {
+                original_id: "jpeg-original",
+                photo_id: "jpeg-photo",
+                relative_path: "shoot/two.JPG",
+                kind: "jpeg",
+                available: true,
+                size: 19,
+                mtime_ms: 1_000.0,
+            },
+        );
+        (
+            "recipe-rev-1".to_owned(),
+            export_test_revision("shoot/one.ARW", 17, 1_000.0),
+        )
+    }
+
+    fn export_submission(
+        request_id: &str,
+        recipe_revision: &str,
+        source_revision: &str,
+        allowance: u64,
+    ) -> ExportSubmission {
+        ExportSubmission {
+            request_id: request_id.to_owned(),
+            photo_id: "raw-photo".to_owned(),
+            source_profile_id: "sony-ilce-7rm5-arw".to_owned(),
+            policy_id: "a".repeat(64),
+            bundle_id: "b".repeat(64),
+            workload: EXPORT_DEVELOPMENT_TIFF_WORKLOAD.to_owned(),
+            expected_recipe_revision: recipe_revision.to_owned(),
+            expected_source_revision: source_revision.to_owned(),
+            exposure_range: ExportExposureRange {
+                minimum_milli_ev: 0,
+                maximum_milli_ev: 1000,
+            },
+            retained_output_bytes_max: allowance,
+        }
+    }
+
+    // Export lifecycle: submit snapshot capture and guarded rejection, request
+    // identity replay, exactly-once settlement and cancellation, retry against
+    // a retained snapshot, capacity reservation, and retention with leases.
+    #[tokio::test]
+    async fn export_submit_captures_snapshot_and_replays_identity_exactly() {
+        let (_base, library, state, name, path) = fixture();
+        seed_current_schema(&library, &path);
+        let (recipe_revision, source_revision) = {
+            let connection = Connection::open(&path).unwrap();
+            seed_export_photo(&connection)
+        };
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        let created = persistence
+            .submit_export_receiver(export_submission(
+                "request-1",
+                &recipe_revision,
+                &source_revision,
+                8 * 1024 * 1024 * 1024,
+            ))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let ExportSubmitOutcome::Created(record) = created else {
+            panic!("first submission must be created");
+        };
+        assert_eq!(record.state, ExportState::Queued);
+        assert_eq!(record.snapshot.photo_id, "raw-photo");
+        assert_eq!(record.snapshot.recipe_revision, "recipe-rev-1");
+        assert_eq!(record.snapshot.settings.exposure_ev, 0.5);
+        assert_eq!(record.snapshot.source_revision, source_revision);
+        assert_eq!(record.snapshot.source_profile_id, "sony-ilce-7rm5-arw");
+        assert_eq!(record.snapshot.workload, "development-tiff");
+        assert_eq!(record.attempt, None);
+        let payload = ExportRecipePayload::capture(
+            &record.snapshot.settings,
+            ExportExposureRange {
+                minimum_milli_ev: 0,
+                maximum_milli_ev: 1000,
+            },
+        )
+        .unwrap();
+        assert_eq!(record.snapshot.recipe_digest, payload.digest());
+        assert_eq!(payload.exposure_milli_ev, 500);
+        assert!(record.settled_at.is_none() && record.retain_until.is_none());
+        assert_eq!(record.source, None);
+
+        let replayed = persistence
+            .submit_export_receiver(export_submission(
+                "request-1",
+                &recipe_revision,
+                &source_revision,
+                8 * 1024 * 1024 * 1024,
+            ))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let ExportSubmitOutcome::Existing(replayed) = replayed else {
+            panic!("identical replay must resolve to the existing Export");
+        };
+        assert_eq!(replayed.id, record.id);
+
+        let conflicting = persistence
+            .submit_export_receiver(export_submission(
+                "request-1",
+                "other-revision",
+                &source_revision,
+                8 * 1024 * 1024 * 1024,
+            ))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(conflicting, ExportSubmitOutcome::RequestConflict);
+
+        let stale = persistence
+            .submit_export_receiver(export_submission(
+                "request-2",
+                "older-recipe-rev",
+                &source_revision,
+                8 * 1024 * 1024 * 1024,
+            ))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let ExportSubmitOutcome::RecipeConflict(facts) = stale else {
+            panic!("stale recipe revision must conflict");
+        };
+        assert_eq!(facts.recipe.as_ref().unwrap().revision, "recipe-rev-1");
+
+        let changed = persistence
+            .submit_export_receiver(export_submission(
+                "request-3",
+                &recipe_revision,
+                &export_test_revision("shoot/one.ARW", 17, 2_000.0),
+                8 * 1024 * 1024 * 1024,
+            ))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(changed, ExportSubmitOutcome::SourceChanged(_)));
+
+        let unsupported = persistence
+            .submit_export_receiver(ExportSubmission {
+                photo_id: "jpeg-photo".to_owned(),
+                ..export_submission(
+                    "request-4",
+                    &recipe_revision,
+                    &source_revision,
+                    8 * 1024 * 1024 * 1024,
+                )
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unsupported, ExportSubmitOutcome::UnsupportedPhoto);
+
+        let unknown = persistence
+            .submit_export_receiver(ExportSubmission {
+                photo_id: "absent-photo".to_owned(),
+                ..export_submission(
+                    "request-5",
+                    &recipe_revision,
+                    &source_revision,
+                    8 * 1024 * 1024 * 1024,
+                )
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unknown, ExportSubmitOutcome::UnknownPhoto);
+
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn export_settle_cancel_race_settles_exactly_once_and_retry_rearms() {
+        let (_base, library, state, name, path) = fixture();
+        seed_current_schema(&library, &path);
+        let (recipe_revision, source_revision) = {
+            let connection = Connection::open(&path).unwrap();
+            seed_export_photo(&connection)
+        };
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let allowance = 8 * 1024 * 1024 * 1024;
+        macro_rules! submit_export {
+            ($request_id:expr) => {{
+                let outcome = persistence
+                    .submit_export_receiver(export_submission(
+                        $request_id,
+                        &recipe_revision,
+                        &source_revision,
+                        allowance,
+                    ))
+                    .unwrap()
+                    .await
+                    .unwrap()
+                    .unwrap();
+                match outcome {
+                    ExportSubmitOutcome::Created(record) => record,
+                    _ => panic!("submission must be created"),
+                }
+            }};
+        }
+
+        let cancelled = submit_export!("request-cancel");
+        let record = persistence
+            .cancel_export_receiver(&cancelled.id)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, ExportState::Cancelled);
+        assert!(record.settled_at.is_some());
+        assert!(record.retain_until.is_some());
+        let again = persistence
+            .cancel_export_receiver(&cancelled.id)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.state, ExportState::Cancelled);
+        assert_eq!(again.settled_at, record.settled_at);
+        let late_completion = persistence
+            .settle_export_receiver(
+                &cancelled.id,
+                ExportSettlement::Succeeded {
+                    artifact_size: 10,
+                    artifact_sha256: "c".repeat(64),
+                    published_at: export::export_unix_seconds(),
+                    artifact_width: 2,
+                    artifact_height: 1,
+                    artifact_profile_identity: "e".repeat(64),
+                },
+            )
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(late_completion.state, ExportState::Cancelled);
+
+        let failed = submit_export!("request-failed");
+        let record = persistence
+            .settle_export_receiver(
+                &failed.id,
+                ExportSettlement::Failed {
+                    outcome: "processing attempt did not complete: engine-failed".to_owned(),
+                    settled_at: export::export_unix_seconds(),
+                },
+            )
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, ExportState::Failed);
+        let retried = persistence
+            .retry_export_receiver(&failed.id, "retry-1", &"b".repeat(64), allowance)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let ExportRetryOutcome::Retried(record) = retried else {
+            panic!("failed Export must retry");
+        };
+        assert_eq!(record.state, ExportState::Queued);
+        assert_eq!(record.outcome, None);
+        assert_eq!(record.attempt, None);
+        assert_eq!(record.snapshot.recipe_revision, "recipe-rev-1");
+        // The accepted retry identity replays to the current record without
+        // starting work.
+        assert!(matches!(
+            persistence
+                .retry_export_receiver(&failed.id, "retry-1", &"b".repeat(64), allowance)
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap(),
+            ExportRetryOutcome::Replayed(_)
+        ));
+        // The consumed retry identity against a different Export conflicts.
+        let queued = submit_export!("request-queued");
+        assert_eq!(
+            persistence
+                .retry_export_receiver(&queued.id, "retry-1", &"b".repeat(64), allowance)
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap(),
+            ExportRetryOutcome::RequestConflict
+        );
+        // An unfinished Export is never retried.
+        assert_eq!(
+            persistence
+                .retry_export_receiver(&queued.id, "retry-2", &"b".repeat(64), allowance)
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap(),
+            ExportRetryOutcome::NotRetriable
+        );
+
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn export_capacity_leases_and_expiry_refuse_before_acceptance() {
+        let (_base, library, state, name, path) = fixture();
+        seed_current_schema(&library, &path);
+        let (recipe_revision, source_revision) = {
+            let connection = Connection::open(&path).unwrap();
+            seed_export_photo(&connection)
+        };
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let allowance = 8 * 1024 * 1024 * 1024;
+
+        let refused = persistence
+            .submit_export_receiver(export_submission(
+                "request-full",
+                &recipe_revision,
+                &source_revision,
+                1024,
+            ))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(refused, ExportSubmitOutcome::RetainedOutputFull);
+
+        let outcome = persistence
+            .submit_export_receiver(export_submission(
+                "request-published",
+                &recipe_revision,
+                &source_revision,
+                allowance,
+            ))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let ExportSubmitOutcome::Created(record) = outcome else {
+            panic!("submission must be created");
+        };
+        let published_at = export::export_unix_seconds();
+        let settled = persistence
+            .settle_export_receiver(
+                &record.id,
+                ExportSettlement::Succeeded {
+                    artifact_size: 4096,
+                    artifact_sha256: "d".repeat(64),
+                    published_at,
+                    artifact_width: 16,
+                    artifact_height: 9,
+                    artifact_profile_identity: "e".repeat(64),
+                },
+            )
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.state, ExportState::Succeeded);
+        let artifact = settled.artifact.clone().unwrap();
+        assert_eq!(artifact.size, 4096);
+        assert_eq!(artifact.sha256, "d".repeat(64));
+        assert_eq!(artifact.expires_at, published_at + EXPORT_RETENTION_SECONDS);
+        assert_eq!(artifact.width, 16);
+        assert_eq!(artifact.height, 9);
+        assert_eq!(artifact.profile_identity, "e".repeat(64));
+        assert_eq!(
+            settled.retain_until,
+            Some(published_at + EXPORT_RETENTION_SECONDS)
+        );
+
+        let after_retention = published_at + EXPORT_RETENTION_SECONDS + 1;
+        // The lease is fresh relative to the sweep; a week-old lease would be
+        // crash debris and reclaimed by the same sweep.
+        let lease = persistence
+            .acquire_export_lease_receiver(&record.id, after_retention - 3600)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let ExportLeaseOutcome::Acquired {
+            lease_id,
+            artifact: leased,
+        } = lease
+        else {
+            panic!("a live artifact must lease");
+        };
+        assert_eq!(leased, artifact);
+        let after_retention = published_at + EXPORT_RETENTION_SECONDS + 1;
+        let sweep = persistence
+            .sweep_export_expiry_receiver(after_retention)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(sweep.record_expiry_ids.is_empty());
+        assert!(
+            persistence
+                .export_receiver(&record.id)
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+                .is_some()
+        );
+
+        assert!(
+            persistence
+                .release_export_lease_receiver(&lease_id)
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        let sweep = persistence
+            .sweep_export_expiry_receiver(after_retention)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sweep.record_expiry_ids, vec![record.id.clone()]);
+        assert!(
+            persistence
+                .export_receiver(&record.id)
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+        let expired = persistence
+            .submit_export_receiver(export_submission(
+                "request-published",
+                &recipe_revision,
+                &source_revision,
+                allowance,
+            ))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(expired, ExportSubmitOutcome::Expired);
+
+        persistence.shutdown().unwrap();
+    }
+}

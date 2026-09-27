@@ -450,3 +450,499 @@ pub(super) fn rebind_edit_recipe(
         Ok(EditRecipeWriteOutcome::Saved(rebound))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::persistence::Persistence;
+    use crate::persistence::test_support::*;
+    use crate::{
+        EditRecipe, EditRecipeRead, EditRecipeSettings, EditRecipeWriteOutcome, RebindEditRecipe,
+        SaveEditRecipe, WhiteBalanceIntent, source_revision,
+    };
+    use rusqlite::Connection;
+    use sha2::{Digest, Sha256};
+
+    #[tokio::test]
+    async fn edit_recipe_compare_and_set_rebind_and_read_model_are_guarded() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v6.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "raw-original",
+                photo_id: "raw-photo",
+                relative_path: "shoot/one.ARW",
+                kind: "raw",
+                available: true,
+                size: 17,
+                mtime_ms: 1_000.0,
+            },
+        );
+        drop(connection);
+
+        let persistence = Persistence::open(
+            state,
+            name.clone(),
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let initial_source = source_revision("shoot/one.ARW", 17, 1_000.0).unwrap();
+        let initial = persistence
+            .edit_recipe_receiver("raw-photo")
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(initial.recipe.is_none());
+        assert!(initial.source_available);
+        assert_eq!(initial.current_source_revision, initial_source);
+
+        let mutation = SaveEditRecipe {
+            photo_id: "raw-photo".to_owned(),
+            request_id: "first-save".to_owned(),
+            expected_recipe_version: None,
+            expected_source_revision: initial_source.clone(),
+            settings: EditRecipeSettings {
+                exposure_ev: 0.0,
+                white_balance: WhiteBalanceIntent::AsShot,
+            },
+        };
+        let first = persistence
+            .save_edit_recipe_receiver(mutation.clone())
+            .unwrap();
+        let concurrent = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                request_id: "concurrent-save".to_owned(),
+                ..mutation.clone()
+            })
+            .unwrap();
+        let (first, concurrent) = tokio::join!(first, concurrent);
+        let first = first.unwrap().unwrap();
+        let concurrent = concurrent.unwrap().unwrap();
+        let recipe = match first {
+            EditRecipeWriteOutcome::Saved(recipe) => recipe,
+            outcome => panic!("first compare-and-set should save, got {outcome:?}"),
+        };
+        assert!(matches!(
+            concurrent,
+            EditRecipeWriteOutcome::Conflict(EditRecipeRead {
+                recipe: Some(_),
+                ..
+            })
+        ));
+        assert_eq!(recipe.settings.exposure_ev, 0.0);
+
+        let unchanged = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "unchanged-save".to_owned(),
+                expected_recipe_version: Some(recipe.revision.clone()),
+                expected_source_revision: initial_source.clone(),
+                settings: recipe.settings,
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged, EditRecipeWriteOutcome::Unchanged(recipe.clone()));
+
+        let replay = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "first-save".to_owned(),
+                expected_recipe_version: None,
+                expected_source_revision: initial_source.clone(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.0,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay, EditRecipeWriteOutcome::Replayed(recipe.clone()));
+
+        let request_conflict = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "first-save".to_owned(),
+                expected_recipe_version: None,
+                expected_source_revision: initial_source.clone(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 1.0,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(request_conflict, EditRecipeWriteOutcome::RequestConflict);
+
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE original_files SET size=18,mtime_ms=2_000.0 WHERE id='raw-original'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let changed_source = source_revision("shoot/one.ARW", 18, 2_000.0).unwrap();
+        let stale_save = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "stale-save".to_owned(),
+                expected_recipe_version: Some(recipe.revision.clone()),
+                expected_source_revision: initial_source.clone(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 1.0,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stale_save,
+            EditRecipeWriteOutcome::SourceChanged(EditRecipeRead {
+                recipe: Some(_),
+                ..
+            })
+        ));
+        let rebound = persistence
+            .rebind_edit_recipe_receiver(RebindEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "rebind-1".to_owned(),
+                expected_recipe_version: recipe.revision.clone(),
+                new_source_revision: changed_source.clone(),
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let rebound = match rebound {
+            EditRecipeWriteOutcome::Saved(recipe) => recipe,
+            outcome => panic!("explicit rebind should save, got {outcome:?}"),
+        };
+        assert_ne!(rebound.revision, recipe.revision);
+        assert_eq!(rebound.source_revision, changed_source);
+        assert_eq!(rebound.settings, recipe.settings);
+
+        // A replay stays exact even after another write advanced the recipe:
+        // persistence decides the outcome inside the write transaction, so
+        // the receipt's version is reported whatever happened since.
+        persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "advance-save".to_owned(),
+                expected_recipe_version: Some(rebound.revision.clone()),
+                expected_source_revision: rebound.source_revision.clone(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.5,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let stale_replay = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "first-save".to_owned(),
+                expected_recipe_version: None,
+                expected_source_revision: initial_source.clone(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.0,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stale_replay,
+            EditRecipeWriteOutcome::Replayed(recipe.clone()),
+            "the replay must carry the receipt's version, not the current one"
+        );
+
+        // The rebind identity replays exactly like a save identity: the same
+        // payload replays the receipt, a different payload is refused.
+        let rebind_replay = persistence
+            .rebind_edit_recipe_receiver(RebindEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "rebind-1".to_owned(),
+                expected_recipe_version: recipe.revision.clone(),
+                new_source_revision: changed_source.clone(),
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            rebind_replay,
+            EditRecipeWriteOutcome::Replayed(rebound.clone())
+        );
+        let rebind_conflict = persistence
+            .rebind_edit_recipe_receiver(RebindEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "rebind-1".to_owned(),
+                expected_recipe_version: rebound.revision.clone(),
+                new_source_revision: rebound.source_revision.clone(),
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebind_conflict, EditRecipeWriteOutcome::RequestConflict);
+        assert!(matches!(
+            persistence
+                .save_edit_recipe_receiver(SaveEditRecipe {
+                    photo_id: "raw-photo".to_owned(),
+                    request_id: "after-rebind-save".to_owned(),
+                    expected_recipe_version: Some(recipe.revision),
+                    expected_source_revision: changed_source,
+                    settings: EditRecipeSettings {
+                        exposure_ev: 2.0,
+                        white_balance: WhiteBalanceIntent::AsShot,
+                    },
+                })
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap(),
+            EditRecipeWriteOutcome::Conflict(_)
+        ));
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE original_files SET available=0 WHERE id='raw-original'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute("UPDATE photos SET available=0 WHERE id='raw-photo'", [])
+            .unwrap();
+        drop(connection);
+        let photo = persistence
+            .photo_receiver("raw-photo")
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!photo.original_available);
+        assert!(photo.has_saved_edits);
+        let edit_read = persistence
+            .edit_recipe_receiver("raw-photo")
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!edit_read.source_available);
+        assert!(persistence.snapshot().await.unwrap().photos[0].has_saved_edits);
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn pre_upgrade_receipts_replay_with_the_original_digest_formula() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v8.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+
+        // A receipt written by a release before the internal recipe-version
+        // rename: its digest covers the original serialized key set, and its
+        // shape carries no temperature or tint values because the as-shot
+        // intent predates the value-carrying columns.
+        let source_revision = "legacy-source-revision";
+        let legacy_payload = serde_json::json!({
+            "photo_id": "raw-photo",
+            "expected_recipe_revision": serde_json::Value::Null,
+            "expected_source_revision": source_revision,
+            "exposure_ev": 0.25,
+            "white_balance": "as-shot",
+        });
+        let legacy_digest = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&legacy_payload).unwrap())
+        );
+        let legacy_receipt = serde_json::json!({
+            "photo_id": "raw-photo",
+            "payload_digest": legacy_digest,
+            "outcome": "Saved",
+            "revision": "legacy-recipe-version",
+            "source_revision": source_revision,
+            "exposure_ev": 0.25,
+            "white_balance_mode": "as-shot",
+        });
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('edit_recipe_receipt:legacy-save',?)",
+                [serde_json::to_string(&legacy_receipt).unwrap()],
+            )
+            .unwrap();
+        drop(connection);
+
+        // The same logical save retried after the upgrade must replay the
+        // committed receipt, not refuse the identity as conflicted.
+        let persistence = Persistence::open(
+            state,
+            name.clone(),
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let replay = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "legacy-save".to_owned(),
+                expected_recipe_version: None,
+                expected_source_revision: source_revision.to_owned(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.25,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            replay,
+            EditRecipeWriteOutcome::Replayed(EditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                revision: "legacy-recipe-version".to_owned(),
+                source_revision: source_revision.to_owned(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.25,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            }),
+            "a pre-upgrade receipt must keep replaying with the committed version"
+        );
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn edit_recipe_writes_reject_missing_unavailable_and_non_raw_photos() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v6.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "missing-raw-original",
+                photo_id: "missing-raw-photo",
+                relative_path: "shoot/missing.ARW",
+                kind: "raw",
+                available: false,
+                size: 13,
+                mtime_ms: 1_000.0,
+            },
+        );
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "jpeg-original",
+                photo_id: "jpeg-photo",
+                relative_path: "shoot/one.JPG",
+                kind: "jpeg",
+                available: true,
+                size: 11,
+                mtime_ms: 2_000.0,
+            },
+        );
+        drop(connection);
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        let unavailable = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "missing-raw-photo".to_owned(),
+                request_id: "unavailable-save".to_owned(),
+                expected_recipe_version: None,
+                expected_source_revision: source_revision("shoot/missing.ARW", 13, 1_000.0)
+                    .unwrap(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.0,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unavailable, EditRecipeWriteOutcome::Unavailable);
+
+        let unsupported = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "jpeg-photo".to_owned(),
+                request_id: "jpeg-save".to_owned(),
+                expected_recipe_version: None,
+                expected_source_revision: source_revision("shoot/one.JPG", 11, 2_000.0).unwrap(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.0,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unsupported, EditRecipeWriteOutcome::UnsupportedPhoto);
+
+        let missing = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "not-a-photo".to_owned(),
+                request_id: "missing-save".to_owned(),
+                expected_recipe_version: None,
+                expected_source_revision: "source-revision".to_owned(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.0,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(missing, EditRecipeWriteOutcome::MissingPhoto);
+        persistence.shutdown().unwrap();
+    }
+}
