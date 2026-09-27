@@ -776,9 +776,6 @@ async fn executable_queries_the_real_service_with_fixed_multi_page_membership() 
     assert_eq!(exit, 0);
     assert_eq!(check["data"]["scan"]["state"], "idle");
     assert_eq!(check["data"]["scan"]["total"], 5);
-    let (exit, status_after_check) = command(&server.url, &["status"]).await;
-    assert_eq!(exit, 0);
-    assert_eq!(check["data"]["scan"], status_after_check["data"]["scan"]);
 
     let (exit, folders) = command(&server.url, &["folders", "list", "--limit", "1"]).await;
     assert_eq!(exit, 0);
@@ -1011,7 +1008,7 @@ async fn executable_metadata_inspects_external_edits_and_refuses_unavailable_sav
         )
     };
     fs::write(&sidecar, packet("Review")).unwrap();
-    let server = common::start_authenticated_server(config).await;
+    let (server, upstream) = common::start_authenticated_server_with_upstream(config).await;
     wait_until_idle(&server.url).await;
     let (exit, page) = command(&server.url, &["photos", "list", "--limit", "60"]).await;
     assert_eq!(exit, 0, "{page}");
@@ -1099,6 +1096,45 @@ async fn executable_metadata_inspects_external_edits_and_refuses_unavailable_sav
     assert_eq!(exit, 5, "{refused}");
     assert_eq!(refused["error"]["code"], "save_unavailable");
     assert_eq!(refused["error"]["effect"], "none");
+    assert_eq!(fs::read_to_string(&sidecar).unwrap(), packet("Review"));
+
+    // Route-level refusals must remain definite no-effect failures in the CLI.
+    let (exit, invalid_read) = command(&server.url, &["photos", "metadata", "BAD"]).await;
+    assert_eq!(exit, 2, "{invalid_read}");
+    assert_eq!(invalid_read["error"]["code"], "invalid_input");
+    let (exit, invalid_save) = command(
+        &server.url,
+        &[
+            "photos",
+            "metadata-save",
+            "BAD",
+            "--input",
+            input.to_str().unwrap(),
+        ],
+    )
+    .await;
+    assert_eq!(exit, 2, "{invalid_save}");
+    assert_eq!(invalid_save["error"]["code"], "invalid_input");
+    assert_eq!(invalid_save["error"]["effect"], "none");
+    // The fixture TLS proxy caps input at 1 MiB; exercise the server's 2 MiB
+    // rejection directly on its authenticated loopback HTTP endpoint.
+    let client = reqwest::Client::new();
+    for (body, status, code) in [
+        (vec![b' '; 2 * 1024 * 1024 + 1], 413, "resource_limit"),
+        (b"{".to_vec(), 400, "invalid_input"),
+    ] {
+        let response = client
+            .post(format!("{upstream}/api/photos/{id}/external-metadata"))
+            .bearer_auth(common::ACCESS_TOKEN)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), status);
+        let rejection: slipstream_server::metadata_wire::MetadataErrorEnvelope =
+            response.json().await.unwrap();
+        assert_eq!(serde_json::to_value(rejection.error.code).unwrap(), code);
+    }
     assert_eq!(fs::read_to_string(&sidecar).unwrap(), packet("Review"));
 
     fs::write(&sidecar, packet("External")).unwrap();

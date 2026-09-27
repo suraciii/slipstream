@@ -90,6 +90,9 @@ property in XMP; `remove` deletes the Sidecar property and reveals fallback
 content. Lists preserve order where the field is ordered and collapse exact
 duplicates only for Keywords. Language alternatives name each language being
 changed; an omitted language is not changed.
+Language names must be well-formed RFC 5646 tags, including private-use and
+grandfathered tags; `x-default` retains its XMP meaning. Read and Save use the
+same validator. Subtag registry membership is not checked.
 
 The supported field set is exactly the Product Spec's writable set:
 `dc:title`, `dc:description`, `photoshop:Headline`, `dc:subject`,
@@ -111,10 +114,17 @@ regular RAW shares the basename. Multiple eligible Originals, duplicate
 unavailable and cannot be written. The extension comparison is case-insensitive;
 the directory and basename retain their exact spelling. An ineligible JPEG
 still reads its own embedded metadata but never reads or writes the RAW's Sidecar.
+When a newly eligible RAW displaces a recorded JPEG owner, the state owner
+transfers the association atomically and advances the displaced Photo's
+association generation. An unchanged retained orphan still blocks Save.
 
 Metadata work runs under the state owner's serialization with scan, recovery,
-removal, and restore. Read accepts a Removed Photo; Save checks the current
-removal state under that same gate. Library Rating remains a separate fact.
+removal, and restore. One queued Save operation covers inspection, evidence
+comparison, supervisor admission and publication, and association recording;
+the operation continues even if its caller disconnects. Remove either commits
+before Save, causing `photo_removed`, or after the admitted Save settles.
+Read records its observation in the same operation and returns the committed
+association generation. Library Rating remains a separate fact.
 
 Read opens the Original through `LibraryRoot` and reads bounded embedded XMP,
 EXIF capture facts, and IPTC IIM data. Sidecar bytes are opened only through
@@ -141,6 +151,10 @@ duplicate, zero, or over its parse limit blocks fallback to the lower-priority
 source and reports that state. Orientation comes from the primary IFD only. A
 kind without a source reports `unavailable` with the kind, never as absent.
 The reader never fetches a `WebStatement` URL.
+Scalar TIFF capture values require exactly one value of the declared type.
+JPEG frame dimensions accept the standard SOF marker families and require a
+complete component table. Malformed shapes report invalid dimensions under
+the same source precedence rules.
 
 ### XMP document model and preservation
 
@@ -310,6 +324,10 @@ and CLI:
   `metadata_malformed`, `evidence_stale`, `save_unavailable`, `permission`,
   `resource_limit`, `storage_failure`, and `outcome_unknown`. HTTP status
   mapping and CLI exit codes derive from the same code table.
+  Invalid Photo IDs and malformed request JSON return `400/invalid_input`.
+  Requests exceeding the 2 MiB body limit return `413/resource_limit`, including
+  refusals made by the body extractor. These admission refusals use the same
+  metadata envelope and have no Sidecar effect.
 
 The CLI exposes the same operations as `photos metadata PHOTO_ID` and
 `photos metadata-save PHOTO_ID --input FILE`. Web uses the same read result,

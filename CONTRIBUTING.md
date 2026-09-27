@@ -122,6 +122,10 @@ run the command as root in a disposable Linux container for full coverage.
 The component tests substitute service properties and identity isolation.
 Qualify automatic recovery separately with real systemd, SMB, and an interrupted
 admitted Save; a component pass does not establish that deployment behavior.
+The Rust server suite covers Save/Remove ordering; CLI service tests exercise
+invalid Photo IDs through real TLS and malformed/oversized requests against
+the authenticated server. The test TLS proxy has a separate 1 MiB input limit,
+so the server's 2 MiB refusal is checked through its loopback HTTP endpoint.
 
 Install the Playwright Chromium browser once before running the gates:
 

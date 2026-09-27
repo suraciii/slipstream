@@ -136,6 +136,116 @@ fn prepare_fixture() -> (PathBuf, Config) {
     (base.clone(), test_config(&base, web_root, 3000))
 }
 
+#[tokio::test]
+async fn metadata_save_serializes_with_removal_and_rejects_removed_evidence() {
+    use crate::metadata_service::{read_metadata, save_metadata};
+    use crate::metadata_wire::MetadataErrorCode;
+    use slipstream_core::{PhotoRemovalMutation, PhotoStateMutation};
+    use std::os::unix::net::UnixListener;
+
+    let (base, config) = prepare_fixture();
+    let root = config.library_root;
+    let original = root.join("one.JPG");
+    fs::write(&original, [0xff, 0xd8, 0xff, 0xd9]).unwrap();
+    let library = Arc::new(
+        Library::open(LibraryConfig {
+            library_root: root.clone(),
+            state_directory: config.state_directory,
+            ..LibraryConfig::default()
+        })
+        .unwrap(),
+    );
+    let snapshot = library.scan().await.unwrap();
+    let id = snapshot.photos[0].id.clone();
+    let read = read_metadata(&library, &root, "lifecycle", None, &id)
+        .await
+        .unwrap();
+    library
+        .mutate_photo_state(PhotoStateMutation {
+            photo_id: id.clone(),
+            field: PhotoStateField::SelectionState,
+            value: PhotoStateValue::Selection(SelectionState::Rejected),
+            expected_current: None,
+            album_id: None,
+        })
+        .await
+        .unwrap();
+    let request = || {
+        serde_json::from_value(serde_json::json!({
+            "evidence": read.evidence,
+            "changes": {"xmp:Label": {"op":"set", "value":"review"}}
+        }))
+        .unwrap()
+    };
+    let socket = base.join("supervisor.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let supervisor = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut bytes = Vec::new();
+        let mut byte = [0];
+        loop {
+            stream.read_exact(&mut byte).unwrap();
+            bytes.push(byte[0]);
+            if byte[0] == b'\n' {
+                break;
+            }
+        }
+        let message: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(message["operation"], "status");
+        entered_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        stream
+            .write_all(b"{\"available\":false,\"reason\":\"maintenance\"}\n")
+            .unwrap();
+    });
+    let save_library = Arc::clone(&library);
+    let save_root = root.clone();
+    let save_id = id.clone();
+    let save_request = request();
+    let save = tokio::spawn(async move {
+        save_metadata(
+            &save_library,
+            &save_root,
+            "lifecycle",
+            Some(&socket),
+            &save_id,
+            save_request,
+        )
+        .await
+    });
+    entered_rx.await.unwrap();
+    let removal = library.remove_photos(PhotoRemovalMutation {
+        photo_ids: vec![id.clone()],
+        operation_id: "metadata-removal".into(),
+    });
+    tokio::pin!(removal);
+    let early = tokio::time::timeout(Duration::from_millis(100), &mut removal).await;
+    release_tx.send(()).unwrap();
+    let removed_early = early.is_ok();
+    let removed = match early {
+        Ok(result) => result,
+        Err(_) => removal.await,
+    }
+    .unwrap();
+    assert_eq!(
+        save.await.unwrap().unwrap_err().code,
+        MetadataErrorCode::SaveUnavailable
+    );
+    supervisor.join().unwrap();
+    assert!(!removed_early, "Remove must queue behind the admitted Save");
+    assert_eq!(removed.counts.removed, 1);
+    let failure = save_metadata(&library, &root, "lifecycle", None, &id, request())
+        .await
+        .unwrap_err();
+    assert_eq!(failure.code, MetadataErrorCode::PhotoRemoved);
+    assert!(!root.join("one.xmp").exists());
+    assert_eq!(fs::read(&original).unwrap(), [0xff, 0xd8, 0xff, 0xd9]);
+    library.shutdown().unwrap();
+    fs::remove_dir_all(base).unwrap();
+}
+
 /// The protocol success fixtures contain one RAW/JPEG pair and one JPEG-only
 /// Photo. Their capture times make the descending view visibly reorder the
 /// same two identities, while the pair proves RAW filename and Original

@@ -928,7 +928,7 @@ impl MetadataContext<'_> {
     pub fn record_observation(
         &self,
         observation: &ObservedSidecar,
-    ) -> Result<(), MetadataStoreError> {
+    ) -> Result<u64, MetadataStoreError> {
         let transaction = self
             .connection
             .unchecked_transaction()
@@ -948,11 +948,42 @@ impl MetadataContext<'_> {
                     )
                     .optional()
                     .map_err(|_| MetadataStoreError::Storage)?;
-                if owner
-                    .as_ref()
-                    .is_some_and(|owner| owner != &self.record.photo_id)
-                {
-                    return Err(MetadataStoreError::Storage);
+                if let Some(owner) = owner.filter(|owner| owner != &self.record.photo_id) {
+                    // Sidecar ownership follows the eligible Original: a RAW
+                    // claim displaces a standing JPEG owner, and an owner whose
+                    // Original is no longer available cannot write anyway.
+                    // Every other standing owner is still the unambiguous
+                    // writer, so the claim stays a conflict. The displaced
+                    // owner's generation moves so its held evidence fails the
+                    // next check.
+                    let (owner_kind, owner_available): (String, bool) = transaction
+                        .query_row(
+                            "SELECT o.kind,o.available FROM photos p
+                             JOIN original_files o ON o.id=p.original_id WHERE p.id=?",
+                            [&owner],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()
+                        .map_err(|_| MetadataStoreError::Storage)?
+                        .ok_or(MetadataStoreError::Storage)?;
+                    let displaces =
+                        (self.record.kind == "raw" && owner_kind == "jpeg") || !owner_available;
+                    if !displaces {
+                        return Err(MetadataStoreError::Storage);
+                    }
+                    transaction
+                        .execute(
+                            "UPDATE photos SET association_generation=association_generation+1
+                             WHERE id=?",
+                            [&owner],
+                        )
+                        .map_err(|_| MetadataStoreError::Storage)?;
+                    transaction
+                        .execute(
+                            "DELETE FROM sidecar_associations WHERE photo_id=?",
+                            [&owner],
+                        )
+                        .map_err(|_| MetadataStoreError::Storage)?;
                 }
                 let size = i64::try_from(*size).map_err(|_| MetadataStoreError::Storage)?;
                 transaction.execute(
@@ -984,11 +1015,40 @@ impl MetadataContext<'_> {
                         [&self.candidate_path],
                     )
                     .map_err(|_| MetadataStoreError::Storage)?;
+                // The Sidecar at this stem no longer reads as recorded, so no
+                // active association at the stem keeps standing evidence: each
+                // displaced owner's generation moves and its claim is dropped.
+                transaction
+                    .execute(
+                        "UPDATE photos SET association_generation=association_generation+1
+                         WHERE id IN (
+                             SELECT photo_id FROM sidecar_associations WHERE
+                             substr(sidecar_path,1,length(sidecar_path)-4)=substr(?1,1,length(?1)-4)
+                             AND lower(substr(sidecar_path,-4))='.xmp')",
+                        [&self.candidate_path],
+                    )
+                    .map_err(|_| MetadataStoreError::Storage)?;
+                transaction
+                    .execute(
+                        "DELETE FROM sidecar_associations WHERE
+                         substr(sidecar_path,1,length(sidecar_path)-4)=substr(?1,1,length(?1)-4)
+                         AND lower(substr(sidecar_path,-4))='.xmp'",
+                        [&self.candidate_path],
+                    )
+                    .map_err(|_| MetadataStoreError::Storage)?;
             }
         }
+        let generation: i64 = transaction
+            .query_row(
+                "SELECT association_generation FROM photos WHERE id=?",
+                [&self.record.photo_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| MetadataStoreError::Storage)?;
         transaction
             .commit()
-            .map_err(|_| MetadataStoreError::Storage)
+            .map_err(|_| MetadataStoreError::Storage)?;
+        Ok(generation as u64)
     }
 }
 
@@ -10532,6 +10592,218 @@ mod tests {
                 .unwrap()
                 .unwrap()
         );
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn with_metadata_raw_claim_displaces_jpeg_owner_and_invalidates_evidence() {
+        let (_base, persistence, path) = metadata_fixture();
+        seed(
+            &path,
+            "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state)
+             VALUES('raw-original','dir/photo.ARW','raw',1,1,1,'pending'),
+                   ('raw-twin-original','dir/photo.CR2','raw',1,1,1,'pending');
+             INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating)
+             VALUES('raw-photo','raw-original',1,'inspection-pending','dir/photo.ARW','undecided',0),
+                   ('raw-twin','raw-twin-original',1,'inspection-pending','dir/photo.CR2','undecided',0);",
+        );
+        persistence
+            .with_metadata_receiver("photo".into(), |context| {
+                context.record_observation(&metadata_observation(7))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        // RAW priority hands the Sidecar to the RAW Photo; the displaced JPEG
+        // owner loses its claim and its held evidence fails the generation.
+        persistence
+            .with_metadata_receiver("raw-photo".into(), |context| {
+                context.record_observation(&metadata_observation(7))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT photo_id FROM sidecar_associations WHERE sidecar_path='dir/photo.xmp'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "raw-photo"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sidecar_associations WHERE photo_id='photo'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        drop(connection);
+        assert_eq!(association_generation(&path, "photo"), 2);
+        assert_eq!(association_generation(&path, "raw-photo"), 1);
+        // The displaced JPEG cannot reclaim while the RAW owner stands.
+        assert_eq!(
+            persistence
+                .with_metadata_receiver("photo".into(), |context| context
+                    .record_observation(&metadata_observation(8)))
+                .unwrap()
+                .await
+                .unwrap(),
+            Err(MetadataStoreError::Storage)
+        );
+        // A second available RAW of the same basename is a standing conflict.
+        assert_eq!(
+            persistence
+                .with_metadata_receiver("raw-twin".into(), |context| context
+                    .record_observation(&metadata_observation(8)))
+                .unwrap()
+                .await
+                .unwrap(),
+            Err(MetadataStoreError::Storage)
+        );
+        // The owner keeps updating its own claim.
+        persistence
+            .with_metadata_receiver("raw-photo".into(), |context| {
+                context.record_observation(&metadata_observation(8))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn with_metadata_claim_displaces_unavailable_owner_and_raw_claims_back() {
+        let (_base, persistence, path) = metadata_fixture();
+        seed(
+            &path,
+            "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state)
+             VALUES('raw-original','dir/photo.ARW','raw',1,1,1,'pending');
+             INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating)
+             VALUES('raw-photo','raw-original',1,'inspection-pending','dir/photo.ARW','undecided',0);",
+        );
+        persistence
+            .with_metadata_receiver("raw-photo".into(), |context| {
+                context.record_observation(&metadata_observation(7))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        seed(
+            &path,
+            "UPDATE original_files SET available=0 WHERE id='raw-original';",
+        );
+        // Without its Original the owner cannot write: the JPEG claim at the
+        // stem displaces it and invalidates its evidence.
+        persistence
+            .with_metadata_receiver("photo".into(), |context| {
+                context.record_observation(&metadata_observation(8))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT photo_id FROM sidecar_associations WHERE sidecar_path='dir/photo.xmp'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "photo"
+        );
+        drop(connection);
+        assert_eq!(association_generation(&path, "raw-photo"), 2);
+        assert_eq!(association_generation(&path, "photo"), 1);
+        // Once the RAW Original is available again, RAW priority reclaims the
+        // Sidecar and the displaced JPEG's evidence fails.
+        seed(
+            &path,
+            "UPDATE original_files SET available=1 WHERE id='raw-original';",
+        );
+        persistence
+            .with_metadata_receiver("raw-photo".into(), |context| {
+                context.record_observation(&metadata_observation(9))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(association_generation(&path, "photo"), 2);
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn with_metadata_changed_clears_stale_claim_at_the_stem() {
+        let (_base, persistence, path) = metadata_fixture();
+        seed(
+            &path,
+            "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state)
+             VALUES('raw-original','dir/photo.ARW','raw',1,1,1,'pending');
+             INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating)
+             VALUES('raw-photo','raw-original',1,'inspection-pending','dir/photo.ARW','undecided',0);",
+        );
+        persistence
+            .with_metadata_receiver("photo".into(), |context| {
+                context.record_observation(&metadata_observation(7))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        // A Sidecar that no longer reads as recorded drops the stale JPEG
+        // claim at the stem and invalidates its held evidence.
+        persistence
+            .with_metadata_receiver("raw-photo".into(), |context| {
+                context.record_observation(&ObservedSidecar {
+                    state: ObservedSidecarState::Changed,
+                })
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let record = persistence
+            .with_metadata_receiver("photo".into(), |context| Ok(context.record().clone()))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.active, None);
+        assert_eq!(association_generation(&path, "photo"), 2);
+        // The next readable inspection claims the Sidecar without a conflict.
+        persistence
+            .with_metadata_receiver("raw-photo".into(), |context| {
+                context.record_observation(&metadata_observation(7))
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT photo_id FROM sidecar_associations WHERE sidecar_path='dir/photo.xmp'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "raw-photo"
+        );
+        drop(connection);
         persistence.shutdown().unwrap();
     }
 

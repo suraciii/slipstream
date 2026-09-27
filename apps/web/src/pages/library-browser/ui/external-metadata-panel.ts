@@ -233,13 +233,8 @@ export function createMetadataPanel(
             for (const row of languageRows) {
               if (row.action.value === "unchanged") continue;
               const language = row.name.value;
-              if (
-                !/^(x-default|[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*)$/.test(
-                  language,
-                )
-              ) {
-                error.textContent =
-                  "Use a valid named language, such as en, fr, or x-default.";
+              if (!language) {
+                error.textContent = "Name the language to change.";
                 break;
               }
               if (

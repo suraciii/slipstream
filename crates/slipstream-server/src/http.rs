@@ -3108,7 +3108,7 @@ pub(crate) async fn get_external_metadata(
     axum::extract::Path(photo_id): axum::extract::Path<String>,
 ) -> Response<Body> {
     if !valid_id(&photo_id) {
-        return api_error(StatusCode::BAD_REQUEST, "Invalid Photo");
+        return metadata_invalid_input("Invalid Photo");
     }
     match state.application.external_metadata_read(&photo_id).await {
         Ok(result) => json_response(StatusCode::OK, &result),
@@ -3119,22 +3119,25 @@ pub(crate) async fn get_external_metadata(
 pub(crate) async fn post_external_metadata(
     State(state): State<HttpState>,
     axum::extract::Path(photo_id): axum::extract::Path<String>,
-    body: axum::body::Bytes,
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Response<Body> {
     if !valid_id(&photo_id) {
-        return api_error(StatusCode::BAD_REQUEST, "Invalid Photo");
+        return metadata_invalid_input("Invalid Photo");
     }
+    let body = match body {
+        Ok(body) => body,
+        Err(failure) if failure.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            return metadata_body_limit();
+        }
+        Err(_) => return metadata_invalid_input("Save Metadata request could not be read"),
+    };
     if body.len() > 2 * 1024 * 1024 {
-        return api_error(StatusCode::BAD_REQUEST, "Oversized Save Metadata request");
+        return metadata_body_limit();
     }
     let request: crate::metadata_wire::MetadataSaveRequest = match serde_json::from_slice(&body) {
         Ok(request) => request,
         Err(failure) => {
-            return metadata_error_response(crate::metadata_wire::MetadataError {
-                code: crate::metadata_wire::MetadataErrorCode::InvalidInput,
-                message: format!("Invalid Save Metadata request: {failure}"),
-                details: serde_json::Value::Null,
-            });
+            return metadata_invalid_input(format!("Invalid Save Metadata request: {failure}"));
         }
     };
     match state
@@ -3145,6 +3148,22 @@ pub(crate) async fn post_external_metadata(
         Ok(result) => json_response(StatusCode::OK, &result),
         Err(failure) => metadata_error_response(failure),
     }
+}
+
+fn metadata_body_limit() -> Response<Body> {
+    metadata_error_response(crate::metadata_wire::MetadataError {
+        code: crate::metadata_wire::MetadataErrorCode::ResourceLimit,
+        message: "Save Metadata request exceeds the 2 MiB body limit".into(),
+        details: serde_json::Value::Null,
+    })
+}
+
+fn metadata_invalid_input(message: impl Into<String>) -> Response<Body> {
+    metadata_error_response(crate::metadata_wire::MetadataError {
+        code: crate::metadata_wire::MetadataErrorCode::InvalidInput,
+        message: message.into(),
+        details: serde_json::Value::Null,
+    })
 }
 
 fn metadata_error_response(failure: crate::metadata_wire::MetadataError) -> Response<Body> {

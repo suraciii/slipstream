@@ -502,28 +502,48 @@ fn extract_jpeg(reader: &mut Reader<'_>) -> Result<EmbeddedMetadata, EmbeddedExt
                     }
                 }
             }
-            0xc0 | 0xc2 | 0xc3 if length >= 7 => {
-                let dimensions = reader.read(position, 5)?;
-                for (field, identifier, bytes) in [
-                    (
-                        &mut output.capture.image_width,
-                        "SOF:ImageWidth",
-                        [dimensions[3], dimensions[4]],
-                    ),
-                    (
-                        &mut output.capture.image_height,
-                        "SOF:ImageHeight",
-                        [dimensions[1], dimensions[2]],
-                    ),
-                ] {
-                    if select_dimension_source(field, identifier) {
-                        let value = u32::from(u16::from_be_bytes(bytes));
-                        field.value = (value != 0).then_some(value);
-                        field.state = if value == 0 {
-                            FieldState::Invalid
-                        } else {
-                            FieldState::Present
-                        };
+            // Frame header markers per ITU T.81, excluding DHT (0xc4), JPG
+            // (0xc8), and DAC (0xcc). A frame header is P(1), Y(2), X(2),
+            // Nf(1), then Nf three-byte component entries.
+            0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf => {
+                let shape = if length >= 8 {
+                    let shape = reader.read(position, 6)?;
+                    (shape[5] != 0 && length == 8 + 3 * usize::from(shape[5])).then_some(shape)
+                } else {
+                    None
+                };
+                if let Some(shape) = shape {
+                    for (field, identifier, bytes) in [
+                        (
+                            &mut output.capture.image_width,
+                            "SOF:ImageWidth",
+                            [shape[3], shape[4]],
+                        ),
+                        (
+                            &mut output.capture.image_height,
+                            "SOF:ImageHeight",
+                            [shape[1], shape[2]],
+                        ),
+                    ] {
+                        if select_dimension_source(field, identifier) {
+                            let value = u32::from(u16::from_be_bytes(bytes));
+                            field.value = (value != 0).then_some(value);
+                            field.state = if value == 0 {
+                                FieldState::Invalid
+                            } else {
+                                FieldState::Present
+                            };
+                        }
+                    }
+                } else {
+                    for (field, identifier) in [
+                        (&mut output.capture.image_width, "SOF:ImageWidth"),
+                        (&mut output.capture.image_height, "SOF:ImageHeight"),
+                    ] {
+                        if select_dimension_source(field, identifier) {
+                            field.value = None;
+                            field.state = FieldState::Invalid;
+                        }
                     }
                 }
             }
@@ -639,15 +659,18 @@ impl Tiff<'_, '_> {
             })
             .collect())
     }
-    fn value(&mut self, entry: Entry) -> Result<Vec<u8>, FieldState> {
+    fn value_size(entry: Entry) -> Option<u64> {
         let unit: u64 = match entry.ty {
             1 | 2 | 6 | 7 => 1,
             3 | 8 => 2,
             4 | 9 | 11 => 4,
             5 | 10 | 12 => 8,
-            _ => return Err(FieldState::Invalid),
+            _ => return None,
         };
-        let len = u64::from(entry.count) * unit;
+        Some(u64::from(entry.count) * unit)
+    }
+    fn value(&mut self, entry: Entry) -> Result<Vec<u8>, FieldState> {
+        let len = Self::value_size(entry).ok_or(FieldState::Invalid)?;
         if len > MAX_VALUE as u64 {
             return Err(FieldState::ResourceLimit);
         }
@@ -740,6 +763,26 @@ fn assign<T>(
             None => field.state = FieldState::Invalid,
         },
         Err(state) => field.state = state,
+    }
+}
+/// Scalar capture values must declare exactly one value of an allowed type;
+/// a multi-value payload is never reinterpreted by its byte length. A declared
+/// size beyond the extraction limit still reports the limit.
+fn assign_scalar<T>(
+    field: &mut CaptureField<T>,
+    entry: Entry,
+    tiff: &mut Tiff<'_, '_>,
+    types: &[u16],
+    parse: impl FnOnce(&[u8], Order) -> Option<T>,
+) {
+    match Tiff::value_size(entry) {
+        None => assign(field, entry, tiff, types, parse),
+        Some(len) if len > MAX_VALUE as u64 => field.state = FieldState::ResourceLimit,
+        Some(_) if entry.count != 1 => {
+            field.value = None;
+            field.state = FieldState::Invalid;
+        }
+        Some(_) => assign(field, entry, tiff, types, parse),
     }
 }
 fn ascii(bytes: &[u8], _: Order) -> Option<String> {
@@ -862,7 +905,7 @@ fn apply_entry(tiff: &mut Tiff<'_, '_>, entry: Entry, exif: bool, output: &mut E
                 "ImageWidth"
             };
             if select_dimension_source(&mut c.image_width, identifier) {
-                assign(&mut c.image_width, entry, tiff, &[3, 4], dimension);
+                assign_scalar(&mut c.image_width, entry, tiff, &[3, 4], dimension);
             }
         }
         (false, 0x0101) | (true, 0xa003) => {
@@ -872,10 +915,10 @@ fn apply_entry(tiff: &mut Tiff<'_, '_>, entry: Entry, exif: bool, output: &mut E
                 "ImageLength"
             };
             if select_dimension_source(&mut c.image_height, identifier) {
-                assign(&mut c.image_height, entry, tiff, &[3, 4], dimension);
+                assign_scalar(&mut c.image_height, entry, tiff, &[3, 4], dimension);
             }
         }
-        (false, 0x0112) => assign(&mut c.orientation, entry, tiff, &[3], short),
+        (false, 0x0112) => assign_scalar(&mut c.orientation, entry, tiff, &[3], short),
         (false, 0x010f) => assign(&mut c.camera_make, entry, tiff, &[2], ascii),
         (false, 0x0110) => assign(&mut c.camera_model, entry, tiff, &[2], ascii),
         (true, 0x9003) => assign(&mut c.capture_time, entry, tiff, &[2], datetime),
@@ -916,10 +959,10 @@ fn apply_entry(tiff: &mut Tiff<'_, '_>, entry: Entry, exif: bool, output: &mut E
             assign(&mut c.capture_offset, entry, tiff, &[2], offset);
         }
         (true, 0xa434) => assign(&mut c.lens_model, entry, tiff, &[2], ascii),
-        (true, 0x829a) => assign(&mut c.exposure_time, entry, tiff, &[5], rational),
-        (true, 0x829d) => assign(&mut c.aperture, entry, tiff, &[5], rational),
-        (true, 0x8827) => assign(&mut c.iso, entry, tiff, &[3, 4], number),
-        (true, 0x920a) => assign(&mut c.focal_length, entry, tiff, &[5], rational),
+        (true, 0x829a) => assign_scalar(&mut c.exposure_time, entry, tiff, &[5], rational),
+        (true, 0x829d) => assign_scalar(&mut c.aperture, entry, tiff, &[5], rational),
+        (true, 0x8827) => assign_scalar(&mut c.iso, entry, tiff, &[3, 4], number),
+        (true, 0x920a) => assign_scalar(&mut c.focal_length, entry, tiff, &[5], rational),
         (false, 0x02bc) => {
             output.xmp_packet.state =
                 if output.xmp_packet.state != PacketState::Absent || !matches!(entry.ty, 1 | 7) {
@@ -1166,6 +1209,11 @@ mod tests {
         result.extend_from_slice(data);
         result
     }
+    /// Well-formed frame header: P=8, Y=100, X=300, Nf=1, one component with
+    /// 1x1 sampling and quantization table 0.
+    fn sof(marker: u8) -> Vec<u8> {
+        segment(marker, &[8, 0, 100, 1, 44, 1, 1, 0x11, 0])
+    }
     fn jpeg(exif: &[u8], xmp: &[u8], iim: &[u8]) -> Vec<u8> {
         let mut result = vec![0xff, 0xd8];
         if !exif.is_empty() {
@@ -1263,7 +1311,7 @@ mod tests {
         for sof_first in [false, true] {
             let mut bytes = jpeg(&exif, &[], &[]);
             let position = if sof_first { 2 } else { bytes.len() - 2 };
-            bytes.splice(position..position, segment(0xc0, &[8, 0, 100, 1, 44]));
+            bytes.splice(position..position, sof(0xc0));
             let result = inspect(OriginalKind::Jpeg, &bytes, 16 * 1024 * 1024).unwrap();
             assert_eq!(result.capture, raw.capture);
         }
@@ -1290,7 +1338,7 @@ mod tests {
                 &[],
             );
             let position = if sof_first { 2 } else { bytes.len() - 2 };
-            bytes.splice(position..position, segment(0xc0, &[8, 0, 100, 1, 44]));
+            bytes.splice(position..position, sof(0xc0));
             let result = inspect(OriginalKind::Jpeg, &bytes, 16 * 1024 * 1024).unwrap();
             assert_eq!(result.capture.image_width.value, Some(640));
             assert_eq!(result.capture.image_width.exif_identifier, "ImageWidth");
@@ -1333,7 +1381,7 @@ mod tests {
             if expected == FieldState::Invalid {
                 let mut bytes = jpeg(&exif, &[], &[]);
                 let position = bytes.len() - 2;
-                bytes.splice(position..position, segment(0xc0, &[8, 0, 100, 1, 44]));
+                bytes.splice(position..position, sof(0xc0));
                 let result = inspect(OriginalKind::Jpeg, &bytes, 16 * 1024 * 1024).unwrap();
                 assert_eq!(result.capture.image_width.state, FieldState::Invalid);
                 assert_eq!(result.capture.image_width.value, None);
@@ -1343,6 +1391,128 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn multi_value_scalar_entries_are_invalid_without_fallback() {
+        for (ty, payload) in [
+            // A SHORT declaring two values is never reinterpreted as one LONG.
+            (3u16, vec![1u8, 0, 2, 0]),
+            // Neither is a LONG declaring two values.
+            (4, vec![1, 0, 0, 0, 2, 0, 0, 0]),
+        ] {
+            let mut bytes = jpeg(&tiff(&[(0x0100, ty, payload)], &[]), &[], &[]);
+            let result = inspect(OriginalKind::Jpeg, &bytes, 16 * 1024 * 1024).unwrap();
+            assert_eq!(result.capture.image_width.state, FieldState::Invalid);
+            assert_eq!(result.capture.image_width.value, None);
+            assert_eq!(result.capture.image_width.exif_identifier, "ImageWidth");
+            // A later frame header does not revive a refused TIFF source.
+            bytes.splice(bytes.len() - 2..bytes.len() - 2, sof(0xc0));
+            let result = inspect(OriginalKind::Jpeg, &bytes, 16 * 1024 * 1024).unwrap();
+            assert_eq!(result.capture.image_width.state, FieldState::Invalid);
+            assert_eq!(result.capture.image_width.value, None);
+            assert_eq!(result.capture.image_width.exif_identifier, "ImageWidth");
+        }
+        for (ty, payload, expected) in [
+            (3u16, 640u16.to_le_bytes().to_vec(), 640),
+            (4, 7008u32.to_le_bytes().to_vec(), 7008),
+        ] {
+            let result = inspect(
+                OriginalKind::Raw,
+                &tiff(&[(0x0100, ty, payload)], &[]),
+                16 * 1024 * 1024,
+            )
+            .unwrap();
+            assert_eq!(result.capture.image_width.state, FieldState::Present);
+            assert_eq!(result.capture.image_width.value, Some(expected));
+            assert_eq!(result.capture.image_width.exif_identifier, "ImageWidth");
+        }
+    }
+
+    #[test]
+    fn sof_dimensions_validate_frame_shape_and_legal_markers() {
+        let frame = |segments: &[Vec<u8>]| {
+            let mut bytes = vec![0xff, 0xd8];
+            for segment in segments {
+                bytes.extend_from_slice(segment);
+            }
+            bytes.extend_from_slice(&[0xff, 0xd9]);
+            bytes
+        };
+        // Truncated headers and component tables contradicting the declared
+        // count are malformed: dimensions are refused, never fabricated.
+        for payload in [
+            &[8u8, 0, 100][..],
+            &[8, 0, 100, 1, 44][..],
+            &[8, 0, 100, 1, 44, 0][..],
+            &[8, 0, 100, 1, 44, 2, 1, 0x11, 0][..],
+        ] {
+            let result = inspect(
+                OriginalKind::Jpeg,
+                &frame(&[segment(0xc0, payload)]),
+                16 * 1024 * 1024,
+            )
+            .unwrap();
+            assert_eq!(result.capture.image_width.state, FieldState::Invalid);
+            assert_eq!(result.capture.image_width.value, None);
+            assert_eq!(result.capture.image_width.exif_identifier, "SOF:ImageWidth");
+            assert_eq!(result.capture.image_height.state, FieldState::Invalid);
+            assert_eq!(result.capture.image_height.value, None);
+            assert_eq!(
+                result.capture.image_height.exif_identifier,
+                "SOF:ImageHeight"
+            );
+        }
+        // Every legal frame header marker reports dimensions; DHT, JPG, and
+        // DAC are not frame headers and leave dimensions absent.
+        for marker in [
+            0xc0u8, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf,
+        ] {
+            let result =
+                inspect(OriginalKind::Jpeg, &frame(&[sof(marker)]), 16 * 1024 * 1024).unwrap();
+            assert_eq!(result.capture.image_width.value, Some(300));
+            assert_eq!(result.capture.image_height.value, Some(100));
+            assert_eq!(result.capture.image_width.exif_identifier, "SOF:ImageWidth");
+            assert_eq!(
+                result.capture.image_height.exif_identifier,
+                "SOF:ImageHeight"
+            );
+        }
+        for marker in [0xc4u8, 0xc8, 0xcc] {
+            let result =
+                inspect(OriginalKind::Jpeg, &frame(&[sof(marker)]), 16 * 1024 * 1024).unwrap();
+            assert_eq!(result.capture.image_width.state, FieldState::Absent);
+            assert_eq!(result.capture.image_height.state, FieldState::Absent);
+        }
+        // A malformed frame header is per axis: it must not displace a present
+        // higher-priority TIFF dimension while refusing the other axis.
+        let mut bytes = jpeg(
+            &tiff(&[(0x0100, 4, 640u32.to_le_bytes().to_vec())], &[]),
+            &[],
+            &[],
+        );
+        bytes.splice(
+            bytes.len() - 2..bytes.len() - 2,
+            segment(0xc0, &[8, 0, 100, 1, 44]),
+        );
+        let result = inspect(OriginalKind::Jpeg, &bytes, 16 * 1024 * 1024).unwrap();
+        assert_eq!(result.capture.image_width.value, Some(640));
+        assert_eq!(result.capture.image_width.exif_identifier, "ImageWidth");
+        assert_eq!(result.capture.image_height.state, FieldState::Invalid);
+        assert_eq!(
+            result.capture.image_height.exif_identifier,
+            "SOF:ImageHeight"
+        );
+        // Two frame headers contradict each other: the source is refused.
+        let result = inspect(
+            OriginalKind::Jpeg,
+            &frame(&[sof(0xc0), sof(0xc1)]),
+            16 * 1024 * 1024,
+        )
+        .unwrap();
+        assert_eq!(result.capture.image_width.state, FieldState::Invalid);
+        assert_eq!(result.capture.image_width.exif_identifier, "SOF:ImageWidth");
+        assert_eq!(result.capture.image_height.state, FieldState::Invalid);
     }
 
     #[test]
@@ -1448,7 +1618,7 @@ mod tests {
             &iim,
         );
         let end = bytes.len() - 2;
-        bytes.splice(end..end, segment(0xc2, &[8, 0, 100, 1, 44]));
+        bytes.splice(end..end, sof(0xc2));
         let result = inspect(OriginalKind::Jpeg, &bytes, 16 * 1024 * 1024).unwrap();
         assert_eq!(result.capture.image_width.value, Some(300));
         assert_eq!(result.capture.image_height.value, Some(100));

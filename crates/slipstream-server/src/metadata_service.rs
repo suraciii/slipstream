@@ -14,7 +14,9 @@ use slipstream_core::metadata::sidecar::{
     SidecarObservation, SupervisorLeaseToken,
 };
 use slipstream_core::metadata::xmp::XmpDocument;
-use slipstream_core::persistence::{MetadataRecord, MetadataStoreError, RetainedOrphan};
+use slipstream_core::persistence::{
+    MetadataContext, MetadataRecord, MetadataStoreError, RetainedOrphan,
+};
 use slipstream_core::{
     Library, LibraryRoot, OriginalKind, RelativeOriginalPath, metadata::embedded,
 };
@@ -22,7 +24,7 @@ use slipstream_core::{
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 const MAXIMUM_EMBEDDED_BYTES: u64 = 16 * 1024 * 1024;
@@ -85,27 +87,10 @@ struct Inspection {
     orphan: Option<RetainedOrphan>,
 }
 
-async fn load_record(library: &Library, photo_id: &str) -> Result<MetadataRecord, MetadataError> {
-    library
-        .with_metadata(photo_id.to_owned(), |context| {
-            let record = context.record();
-            Ok(MetadataRecord {
-                photo_id: record.photo_id.clone(),
-                original_id: record.original_id.clone(),
-                relative_path: record.relative_path.clone(),
-                kind: record.kind,
-                association_generation: record.association_generation,
-                removed: record.removed,
-                library_rating: record.library_rating,
-                active: record.active.clone(),
-                orphan: record.orphan.clone(),
-            })
-        })
-        .await
-        .map_err(map_store)
-}
-
-fn inspect_files(record: MetadataRecord, library_root: &Path) -> Result<Inspection, MetadataError> {
+fn inspect_files(
+    record: &MetadataRecord,
+    library_root: &Path,
+) -> Result<Inspection, MetadataError> {
     let original = RelativeOriginalPath::parse(record.relative_path.clone()).map_err(|_| {
         error(
             MetadataErrorCode::StorageFailure,
@@ -142,7 +127,7 @@ fn inspect_files(record: MetadataRecord, library_root: &Path) -> Result<Inspecti
         )
     })?;
     Ok(Inspection {
-        original_location: record.relative_path,
+        original_location: record.relative_path.clone(),
         original,
         kind,
         original_facts,
@@ -151,20 +136,8 @@ fn inspect_files(record: MetadataRecord, library_root: &Path) -> Result<Inspecti
         association_generation: record.association_generation,
         library_rating: record.library_rating,
         removed: record.removed,
-        orphan: record.orphan,
+        orphan: record.orphan.clone(),
     })
-}
-
-async fn inspect(
-    library: &Library,
-    library_root: &Path,
-    photo_id: &str,
-) -> Result<Inspection, MetadataError> {
-    let record = load_record(library, photo_id).await?;
-    let root = library_root.to_path_buf();
-    tokio::task::spawn_blocking(move || inspect_files(record, &root))
-        .await
-        .map_err(join_failure)?
 }
 
 fn sidecar_evidence(
@@ -248,11 +221,10 @@ fn retained_orphan_blocks(inspection: &Inspection, evidence: &MetadataSidecarEvi
     orphan.sidecar_path == *location && orphan.observed_digest.as_deref() == Some(sha256.as_str())
 }
 
-async fn record_observation(
-    library: &Library,
-    photo_id: &str,
+fn record_observation(
+    context: &MetadataContext<'_>,
     observation: &SidecarObservation,
-) -> Result<(), MetadataError> {
+) -> Result<u64, MetadataError> {
     use slipstream_core::persistence::{ObservedSidecar, ObservedSidecarState};
     let state = match observation {
         SidecarObservation::Eligible {
@@ -270,14 +242,11 @@ async fn record_observation(
         | SidecarObservation::Unreadable { .. }
         | SidecarObservation::ResourceLimit { .. } => ObservedSidecarState::Changed,
         SidecarObservation::Ineligible { .. } | SidecarObservation::Ambiguous { .. } => {
-            return Ok(());
+            return Ok(context.record().association_generation);
         }
     };
-    library
-        .with_metadata(photo_id.to_owned(), move |context| {
-            context.record_observation(&ObservedSidecar { state })
-        })
-        .await
+    context
+        .record_observation(&ObservedSidecar { state })
         .map_err(map_store)
 }
 
@@ -338,16 +307,6 @@ fn supervisor_exchange(
             "The supervisor response is not valid JSON.",
         )
     })
-}
-
-async fn supervisor_exchange_offload(
-    socket: PathBuf,
-    payload: Value,
-    timeout: Duration,
-) -> Result<Value, MetadataError> {
-    tokio::task::spawn_blocking(move || supervisor_exchange(&socket, &payload, timeout))
-        .await
-        .map_err(join_failure)?
 }
 
 fn save_availability(socket: Option<&Path>) -> (bool, Option<String>) {
@@ -419,33 +378,43 @@ pub(crate) async fn read_metadata(
     supervisor: Option<&Path>,
     photo_id: &str,
 ) -> Result<MetadataReadResult, MetadataError> {
-    let inspection = inspect(library, library_root, photo_id).await?;
+    let root = library_root.to_path_buf();
+    let epoch = instance_epoch.to_owned();
+    let mut result = library
+        .with_metadata(photo_id.to_owned(), move |context| {
+            Ok(read_metadata_in_context(context, &root, &epoch))
+        })
+        .await
+        .map_err(map_store)??;
+    let supervisor = supervisor.map(Path::to_path_buf);
+    let (available, reason) =
+        tokio::task::spawn_blocking(move || save_availability(supervisor.as_deref()))
+            .await
+            .map_err(join_failure)?;
+    result.save_available = available;
+    result.save_unavailable_reason = reason;
+    Ok(result)
+}
+
+fn read_metadata_in_context(
+    context: &MetadataContext<'_>,
+    library_root: &Path,
+    instance_epoch: &str,
+) -> Result<MetadataReadResult, MetadataError> {
+    let photo_id = &context.record().photo_id;
+    let mut inspection = inspect_files(context.record(), library_root)?;
     let (sidecar, mut association) = sidecar_evidence(&inspection.observation);
     if retained_orphan_blocks(&inspection, &sidecar) {
         association.state = MetadataAssociationState::Unresolved;
         association.reason = Some("retained-orphan".into());
     }
-    let root = library_root.to_path_buf();
-    let embedded = {
-        let inspection_original = inspection.original.clone();
-        let inspection_kind = inspection.kind;
-        tokio::task::spawn_blocking(move || {
-            embedded_metadata(&root, &inspection_original, inspection_kind)
-        })
-        .await
-        .map_err(join_failure)??
-    };
+    let embedded = embedded_metadata(library_root, &inspection.original, inspection.kind)?;
     let fields = metadata_fields::read_fields(
         &sidecar_source(&inspection.observation, &inspection.bytes),
         &embedded,
     );
     let capture_facts = metadata_fields::capture_fields(&embedded);
-    record_observation(library, photo_id, &inspection.observation).await?;
-    let supervisor = supervisor.map(Path::to_path_buf);
-    let (save_available, save_unavailable_reason) =
-        tokio::task::spawn_blocking(move || save_availability(supervisor.as_deref()))
-            .await
-            .map_err(join_failure)?;
+    inspection.association_generation = record_observation(context, &inspection.observation)?;
     let original_location = inspection.original_location.clone();
     Ok(MetadataReadResult {
         photo_id: photo_id.to_owned(),
@@ -462,8 +431,8 @@ pub(crate) async fn read_metadata(
             association_generation: inspection.association_generation,
             instance_epoch: instance_epoch.to_owned(),
         },
-        save_available,
-        save_unavailable_reason,
+        save_available: false,
+        save_unavailable_reason: None,
     })
 }
 
@@ -507,13 +476,38 @@ pub(crate) async fn save_metadata(
     photo_id: &str,
     request: MetadataSaveRequest,
 ) -> Result<MetadataSaveResult, MetadataError> {
+    let root = library_root.to_path_buf();
+    let epoch = instance_epoch.to_owned();
+    let supervisor = supervisor.map(Path::to_path_buf);
+    library
+        .with_metadata(photo_id.to_owned(), move |context| {
+            Ok(save_metadata_in_context(
+                context,
+                &root,
+                &epoch,
+                supervisor.as_deref(),
+                request,
+            ))
+        })
+        .await
+        .map_err(map_store)?
+}
+
+fn save_metadata_in_context(
+    context: &MetadataContext<'_>,
+    library_root: &Path,
+    instance_epoch: &str,
+    supervisor: Option<&Path>,
+    request: MetadataSaveRequest,
+) -> Result<MetadataSaveResult, MetadataError> {
+    let photo_id = context.record().photo_id.as_str();
     if request.evidence.photo_id != photo_id {
         return Err(error(
             MetadataErrorCode::InvalidInput,
             "The evidence token names another Photo.",
         ));
     }
-    let inspection = inspect(library, library_root, photo_id).await?;
+    let mut inspection = inspect_files(context.record(), library_root)?;
     if inspection.removed {
         return Err(error(
             MetadataErrorCode::PhotoRemoved,
@@ -569,12 +563,11 @@ pub(crate) async fn save_metadata(
             "No exclusive metadata save supervisor is configured for this deployment. Read Metadata is supported; Save Metadata is unavailable.",
         ));
     };
-    let status = supervisor_exchange_offload(
-        supervisor_socket.to_path_buf(),
-        json!({"operation":"status"}),
+    let status = supervisor_exchange(
+        supervisor_socket,
+        &json!({"operation":"status"}),
         SUPERVISOR_CONNECT_TIMEOUT,
-    )
-    .await?;
+    )?;
     if status.get("available").and_then(Value::as_bool) != Some(true) {
         let reason = status
             .get("reason")
@@ -607,12 +600,7 @@ pub(crate) async fn save_metadata(
             "changes": request.changes,
         }
     });
-    let verdict = supervisor_exchange_offload(
-        supervisor_socket.to_path_buf(),
-        payload,
-        SUPERVISOR_SAVE_TIMEOUT,
-    )
-    .await?;
+    let verdict = supervisor_exchange(supervisor_socket, &payload, SUPERVISOR_SAVE_TIMEOUT)?;
     let outcome = parse_supervisor_verdict(verdict)?;
     let location = outcome
         .get("location")
@@ -643,16 +631,14 @@ pub(crate) async fn save_metadata(
             )
         })?
         .to_owned();
-    record_observation(
-        library,
-        photo_id,
+    inspection.association_generation = record_observation(
+        context,
         &SidecarObservation::Eligible {
             location: location.clone(),
             facts,
             sha256: sha256.clone(),
         },
-    )
-    .await?;
+    )?;
     let mut verified_values = BTreeMap::new();
     if let Some(verified) = outcome.get("verified").and_then(Value::as_object) {
         for (name, entry) in verified {
