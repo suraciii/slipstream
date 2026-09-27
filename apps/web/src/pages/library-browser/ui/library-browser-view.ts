@@ -13,6 +13,7 @@ import {
   type MembershipPanelElements,
 } from "./membership-panel.js";
 import { createViewOptions, type ViewOptionsElements } from "./view-options.js";
+import { createAlbumForm } from "./album-form.js";
 import {
   addressFor,
   type NavigationGridRestoration,
@@ -790,20 +791,6 @@ export interface LibraryBrowserView {
   closeRecoveryPanel(): void;
   dispose(): void;
 }
-
-type AlbumFormState = {
-  kind: "create" | "rename" | "delete";
-  formId: string;
-  albumId?: string;
-  name: string;
-  returnFocusKey: string;
-  pending: boolean;
-  message?: string;
-};
-
-type AlbumFocusRequest =
-  | Readonly<{ kind: "form"; formId: string }>
-  | Readonly<{ kind: "return"; focusKey: string }>;
 
 export function createLibraryBrowserView(
   root: HTMLElement,
@@ -1628,10 +1615,6 @@ export function createLibraryBrowserView(
     modal: () => true,
     onOpen: syncSecondarySurface,
   });
-  surfaces.register("album-form", {
-    dialog: albumFormDialog,
-    modal: () => true,
-  });
   const recoveryPanelController = createRecoveryPanel({
     elements: {
       recoveryNotice: required<HTMLElement>(root, "[data-recovery-notice]"),
@@ -1771,9 +1754,6 @@ export function createLibraryBrowserView(
 
   let photoStatusSurface: object = {};
   let sourceModel: SourceListViewModel | undefined;
-  let albumFormCounter = 0;
-  let albumForm: AlbumFormState | undefined;
-  let albumFocusRequest: AlbumFocusRequest | undefined;
   let gridKeyboardIndex: number | undefined;
   let gridTotal = 0;
   let thumbnailSize: GridThumbnailSize = DEFAULT_GRID_THUMBNAIL_SIZE;
@@ -2554,6 +2534,16 @@ export function createLibraryBrowserView(
       sourceModel?.albums.find((candidate) => candidate.active)?.id,
     onSizeChange: setGridThumbnailSize,
   });
+  const albumFormController = createAlbumForm({
+    elements: { albumFormDialog, albumFormBody },
+    surfaces,
+    send,
+    resetGestures,
+    findFocusTarget: (focusKey) =>
+      Array.from(
+        sourceList.querySelectorAll<HTMLElement>("[data-focus-key]"),
+      ).find((candidate) => candidate.dataset.focusKey === focusKey),
+  });
   const stageCenter = () => {
     const box = stage.getBoundingClientRect();
     return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
@@ -2911,257 +2901,6 @@ export function createLibraryBrowserView(
       fragment.append(createFolderPager(folder.location, folder.pager));
   };
 
-  const nextAlbumFormId = () => `album-form-${++albumFormCounter}`;
-  const albumActionFocusKey = (kind: AlbumFormState["kind"], albumId = "") =>
-    kind === "create" ? "album:create" : `album:${kind}:${albumId}`;
-  /// The action that opened the Album form. Closing the form returns focus
-  /// here, reopening the surface that holds it when that surface presents as
-  /// a modal and had to close for the form.
-  let albumFormInvoker: HTMLElement | undefined;
-  const albumFormTitle = (form: AlbumFormState): string =>
-    form.kind === "create"
-      ? "Create Album"
-      : form.kind === "rename"
-        ? "Rename Album"
-        : "Delete Album";
-  const albumFormMessage = () => {
-    const message = document.createElement("p");
-    message.className = "album-form-message";
-    message.setAttribute("role", "alert");
-    return message;
-  };
-  const albumNameInput = (form: AlbumFormState) => {
-    const input = document.createElement("input");
-    input.type = "text";
-    input.name = "name";
-    input.dataset.albumFormId = form.formId;
-    input.dataset.focusKey = `album:form:${form.formId}:name`;
-    input.setAttribute("aria-label", "Album name");
-    input.value = form.name;
-    return input;
-  };
-  /// The control the Album form owns: the name field, the delete confirmation,
-  /// or Cancel while the write settles and the committing control is disabled.
-  const albumFormControl = (
-    form: AlbumFormState,
-  ): HTMLInputElement | HTMLButtonElement | undefined => {
-    const selector =
-      form.kind === "delete"
-        ? `[data-album-form-id="${form.formId}"][data-focus-key$=":confirm"]`
-        : `input[data-album-form-id="${form.formId}"]`;
-    const target = albumFormBody.querySelector<HTMLElement>(selector);
-    if (target && !target.matches(":disabled")) {
-      return target as HTMLInputElement | HTMLButtonElement;
-    }
-    return albumFormBody.querySelector<HTMLElement>(
-      `[data-album-form-id="${form.formId}"][data-focus-key$=":cancel"]`,
-    ) as HTMLButtonElement | undefined;
-  };
-  /// Rebuilds the Album form surface from its own state. Only a change to the
-  /// form reaches it, so a background source-list re-render never touches the
-  /// draft, and the caret and validation message survive their own rebuilds.
-  const renderAlbumForm = () => {
-    const form = albumForm;
-    if (!form) {
-      albumFormBody.replaceChildren();
-      return;
-    }
-    const active = document.activeElement;
-    const heldForm =
-      active instanceof HTMLElement &&
-      active.dataset.albumFormId === form.formId;
-    const heldSelection =
-      active instanceof HTMLInputElement
-        ? [active.selectionStart, active.selectionEnd]
-        : undefined;
-    const header = document.createElement("header");
-    header.className = "album-dialog-header";
-    const title = document.createElement("h2");
-    title.id = "album-form-title";
-    title.textContent = albumFormTitle(form);
-    header.append(title);
-    albumFormBody.replaceChildren(header);
-    if (form.kind === "delete") {
-      const confirmBox = document.createElement("div");
-      confirmBox.className = "album-confirm";
-      confirmBox.setAttribute("role", "alert");
-      confirmBox.append(
-        paragraph("Photos and Original Files remain unchanged."),
-      );
-      const confirm = document.createElement("button");
-      confirm.type = "button";
-      confirm.dataset.albumFormId = form.formId;
-      confirm.dataset.focusKey = `album:form:${form.formId}:confirm`;
-      confirm.textContent = "Delete Album";
-      confirm.disabled = form.pending;
-      confirm.addEventListener("click", () => {
-        if (albumForm === form && !form.pending)
-          send({ kind: "album-form-submit", formId: form.formId });
-      });
-      const cancel = document.createElement("button");
-      cancel.type = "button";
-      cancel.dataset.albumFormId = form.formId;
-      cancel.dataset.focusKey = `album:form:${form.formId}:cancel`;
-      cancel.textContent = "Cancel";
-      cancel.addEventListener("click", () => closeAlbumForm(form));
-      confirmBox.append(confirm, cancel);
-      albumFormBody.append(confirmBox);
-    } else {
-      const element = document.createElement("form");
-      element.className = "album-form";
-      element.setAttribute("aria-label", albumFormTitle(form));
-      const input = albumNameInput(form);
-      const message = albumFormMessage();
-      message.textContent = form.message ?? "";
-      const save = document.createElement("button");
-      save.type = "submit";
-      save.dataset.albumFormId = form.formId;
-      save.dataset.focusKey = `album:form:${form.formId}:submit`;
-      save.textContent = form.kind === "create" ? "Create Album" : "Save Name";
-      save.disabled = form.pending;
-      const cancel = document.createElement("button");
-      cancel.type = "button";
-      cancel.dataset.albumFormId = form.formId;
-      cancel.dataset.focusKey = `album:form:${form.formId}:cancel`;
-      cancel.textContent = "Cancel";
-      cancel.addEventListener("click", () => closeAlbumForm(form));
-      input.addEventListener("input", () => {
-        if (alive && albumForm === form) {
-          form.name = input.value;
-          delete form.message;
-          // Editing clears the validation message where it is presented, so a
-          // background refresh never restores a stale one.
-          message.textContent = "";
-        }
-      });
-      element.append(input, save, cancel, message);
-      element.addEventListener("submit", (event) => {
-        event.preventDefault();
-        if (albumForm !== form || form.pending) return;
-        send({
-          kind: "album-form-submit",
-          formId: form.formId,
-          name: input.value,
-        });
-      });
-      albumFormBody.append(element);
-    }
-    // A rebuild keeps the control the Photographer was using, including the
-    // caret, so a validation message or a pending write never moves focus.
-    const request = albumFocusRequest;
-    const control = albumFormControl(form);
-    if (!control) return;
-    if (request?.kind === "form" && request.formId === form.formId) {
-      albumFocusRequest = undefined;
-      control.focus();
-      if (control instanceof HTMLInputElement) control.select();
-      return;
-    }
-    if (heldForm) {
-      control.focus();
-      if (control instanceof HTMLInputElement && heldSelection) {
-        const end = control.value.length;
-        control.setSelectionRange(
-          Math.min(heldSelection[0] ?? end, end),
-          Math.min(heldSelection[1] ?? end, end),
-        );
-      }
-      return;
-    }
-    // Opening a modal moves focus into the surface.
-    control.focus();
-    if (control instanceof HTMLInputElement && form.name === "")
-      control.select();
-  };
-  const openAlbumForm = (
-    kind: AlbumFormState["kind"],
-    albumId = "",
-    name = "",
-  ) => {
-    if (!alive) return;
-    albumFormInvoker =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : undefined;
-    albumForm = {
-      kind,
-      formId: nextAlbumFormId(),
-      ...(albumId ? { albumId } : {}),
-      name,
-      returnFocusKey: albumActionFocusKey(kind, albumId),
-      pending: false,
-    };
-    albumFocusRequest = { kind: "form", formId: albumForm.formId };
-    send({ kind: "album-form-open", form: { ...albumForm } });
-    resetGestures();
-    surfaces.open("album-form", albumFormInvoker);
-    renderAlbumForm();
-  };
-  /// Closes the Album form and returns focus to the action that opened it, or
-  /// to the nearest valid Album action when that row is gone.
-  const dismissAlbumFormSurface = (form: AlbumFormState) => {
-    const invoker = albumFormInvoker;
-    albumFormInvoker = undefined;
-    surfaces.close("album-form", false);
-    if (invoker?.isConnected && !("disabled" in invoker && invoker.disabled)) {
-      surfaces.focus(invoker);
-      return;
-    }
-    const target =
-      albumFocusTarget(form.returnFocusKey) ?? albumFocusTarget("album:create");
-    if (target) surfaces.focus(target);
-  };
-  const closeAlbumForm = (form: AlbumFormState) => {
-    if (!alive || albumForm !== form) return;
-    albumFocusRequest = {
-      kind: "return",
-      focusKey: form.returnFocusKey,
-    };
-    albumForm = undefined;
-    send({ kind: "album-form-close", formId: form.formId });
-    dismissAlbumFormSurface(form);
-  };
-  const createAlbumTools = (album: SourceListViewModel["albums"][number]) => {
-    const tools = document.createElement("div");
-    tools.className = "album-tools";
-    const rename = document.createElement("button");
-    rename.type = "button";
-    rename.className = "album-tool";
-    rename.textContent = "Rename";
-    rename.dataset.focusKey = albumActionFocusKey("rename", album.id);
-    rename.setAttribute("aria-label", `Rename ${album.name}`);
-    rename.addEventListener("click", () =>
-      openAlbumForm("rename", album.id, album.name),
-    );
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "album-tool";
-    remove.textContent = "Delete";
-    remove.dataset.focusKey = albumActionFocusKey("delete", album.id);
-    remove.setAttribute("aria-label", `Delete ${album.name}`);
-    remove.addEventListener("click", () =>
-      openAlbumForm("delete", album.id, album.name),
-    );
-    tools.append(rename, remove);
-    // Resume resolves the saved position under the existing saved-position
-    // rules and opens Photo View, so its destination is not an address: it
-    // stays an explicit button beside the Album's Grid destination, reachable
-    // from any source. View options carries the same action for the open
-    // Album; both emit the one album-resume intent.
-    if (album.hasSavedPosition) {
-      const resume = document.createElement("button");
-      resume.type = "button";
-      resume.className = "album-tool album-resume";
-      resume.textContent = "Resume";
-      resume.setAttribute("aria-label", `Resume ${album.name}`);
-      resume.addEventListener("click", () =>
-        send({ kind: "album-resume", albumId: album.id }),
-      );
-      tools.append(resume);
-    }
-    return tools;
-  };
-
   const renderSources = (model: SourceListViewModel) => {
     if (!alive) return;
     sourceModel = model;
@@ -3241,8 +2980,10 @@ export function createLibraryBrowserView(
     newAlbum.type = "button";
     newAlbum.className = "album-new";
     newAlbum.textContent = "New Album";
-    newAlbum.dataset.focusKey = albumActionFocusKey("create");
-    newAlbum.addEventListener("click", () => openAlbumForm("create"));
+    newAlbum.dataset.focusKey = albumFormController.actionFocusKey("create");
+    newAlbum.addEventListener("click", () =>
+      albumFormController.open("create"),
+    );
     albumHeadingRow.append(albumHeading, newAlbum);
     sourceList.append(albumHeadingRow);
     // An Album with a saved position exposes Resume separately from opening
@@ -3265,38 +3006,20 @@ export function createLibraryBrowserView(
       );
       const row = document.createElement("div");
       row.className = "album-row";
-      row.append(button, createAlbumTools(album));
+      row.append(button, albumFormController.createAlbumTools(album));
       sourceList.append(row);
     }
     const focusTarget = (focusKey: string) =>
       Array.from(
         sourceList.querySelectorAll<HTMLElement>("[data-focus-key]"),
       ).find((candidate) => candidate.dataset.focusKey === focusKey);
-    const request = albumFocusRequest;
-    if (request?.kind === "form" && albumForm?.formId === request.formId) {
-      albumFocusRequest = undefined;
-      return;
-    }
-    if (request?.kind === "return") {
-      albumFocusRequest = undefined;
-      const target =
-        focusTarget(request.focusKey) ??
-        focusTarget(albumActionFocusKey("create"));
-      target?.focus();
-      return;
-    }
+    if (albumFormController.restoreSourceFocus(focusTarget)) return;
     const restored = focusedKey ? focusTarget(focusedKey) : undefined;
     if (restored && !restored.matches(":disabled")) {
       restored.focus();
       return;
     }
   };
-  /// The Album action a focus return names, searched in the current source
-  /// list. Used when the action that opened a form no longer exists.
-  const albumFocusTarget = (focusKey: string): HTMLElement | undefined =>
-    Array.from(
-      sourceList.querySelectorAll<HTMLElement>("[data-focus-key]"),
-    ).find((candidate) => candidate.dataset.focusKey === focusKey);
 
   const scheduleGridRender = () => {
     if (!alive || gridRenderFrame !== undefined) return;
@@ -5124,16 +4847,11 @@ export function createLibraryBrowserView(
       // A destination change supersedes every supporting surface: the Album
       // form's draft is discarded and the surfaces close without returning
       // focus, because the destination render owns focus next.
-      if (albumForm) {
-        albumForm = undefined;
-        albumFormInvoker = undefined;
-        albumFormBody.replaceChildren();
-        if (albumFormDialog.contains(document.activeElement)) {
-          surfaces.closeAll();
-          if (!gridView.hidden) gridViewport.focus();
-          else photoView.focus();
-          return;
-        }
+      if (albumFormController.discard()) {
+        surfaces.closeAll();
+        if (!gridView.hidden) gridViewport.focus();
+        else photoView.focus();
+        return;
       }
       surfaces.closeAll();
     },
@@ -5214,28 +4932,16 @@ export function createLibraryBrowserView(
       applyPreviewFact(value, isLimited);
     },
     setAlbumFormMessage(formId, message) {
-      if (!alive || !albumForm || albumForm.formId !== formId) return;
-      albumForm.message = message;
-      albumForm.pending = false;
-      renderAlbumForm();
+      if (!alive) return;
+      albumFormController.setMessage(formId, message);
     },
     setAlbumFormPending(formId, pending, name) {
-      if (!alive || !albumForm || albumForm.formId !== formId) return;
-      albumForm.pending = pending;
-      if (name !== undefined) albumForm.name = name;
-      delete albumForm.message;
-      renderAlbumForm();
+      if (!alive) return;
+      albumFormController.setPending(formId, pending, name);
     },
     dismissAlbumForm(formId) {
-      if (!alive || !albumForm || albumForm.formId !== formId) return;
-      const form = albumForm;
-      albumFocusRequest = {
-        kind: "return",
-        focusKey: form.returnFocusKey,
-      };
-      albumForm = undefined;
-      send({ kind: "album-form-close", formId: form.formId });
-      dismissAlbumFormSurface(form);
+      if (!alive) return;
+      albumFormController.dismiss(formId);
     },
     openRemovalReview(model) {
       if (!alive) return;
@@ -5304,6 +5010,7 @@ export function createLibraryBrowserView(
       removedPanels.dispose();
       recoveryPanelController.dispose();
       membershipPanelController.dispose();
+      albumFormController.dispose();
       viewOptionsController.dispose();
       stageObserver.disconnect();
       clearFilmstripCells();
