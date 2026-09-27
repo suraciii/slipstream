@@ -24,10 +24,7 @@ use std::{
     env,
     ffi::{CString, OsString},
     fmt, fs, io,
-    os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
-        unix::fs::OpenOptionsExt,
-    },
+    os::fd::{AsRawFd, OwnedFd},
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
@@ -86,8 +83,8 @@ pub use wire::{
 };
 pub(crate) use wire::{
     FingerprintProgressWire, RecoveryApplyResponseWire, RecoveryProposalWire,
-    RecoveryRejectionResponseWire, RecoveryRejectionWire, RecoverySurveyWire, ScanRecoveryWire,
-    album_summary, photo_summary_indexed_with_url, selection_state,
+    RecoveryRejectionWire, RecoverySurveyWire, ScanRecoveryWire, album_summary,
+    photo_summary_indexed_with_url, selection_state,
 };
 
 #[cfg(test)]
