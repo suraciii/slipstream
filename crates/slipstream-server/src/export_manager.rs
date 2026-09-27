@@ -6,13 +6,12 @@
 //! starts a replacement attempt against a possibly live one and never
 //! publishes an unvalidated artifact.
 
-use super::*;
 use crate::{config::ProcessingConfig, edit_preview::PreviewFacts};
 use slipstream_core::{
     DEVELOPMENT_PREVIEW_LONG_EDGE, DISPLAY_TRANSFORM_VERSION, ExportAttempt, ExportError,
     ExportExposureRange, ExportRecipePayload, ExportRecord, ExportSettlement, ExportSnapshot,
-    ExportSourceEvidence, ExportState, ExportWorkspace, LibraryRoot, OriginalCapability,
-    OriginalKind, RelativeOriginalPath, StagedOriginal,
+    ExportSourceEvidence, ExportState, ExportTarget, ExportWorkspace, Library, LibraryRoot,
+    OriginalCapability, OriginalKind, RelativeOriginalPath, StagedOriginal,
 };
 use slipstream_processing::{
     photo::{self, PhotoReceipt, Recipe, Request, ResultBody, Source},
@@ -20,12 +19,15 @@ use slipstream_processing::{
     protocol::{Availability, PHOTO_MODE, PHOTO_PROTOCOL_VERSION, PHOTO_WORKLOAD},
 };
 use std::{
-    io::{Read, Seek, SeekFrom},
+    fs,
+    io::{self, Read, Seek, SeekFrom},
+    os::unix::{fs::OpenOptionsExt, io::AsRawFd},
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 /// Resolves the published Library Location of one Photo. The closure keeps
@@ -65,9 +67,9 @@ impl PreviewCancellation {
     }
 }
 
-/// The validated result of one preview-class render. The TIFF remains in the
-/// preview-private workspace until the gate's ephemeral retention expires or
-/// a newer intent deletes it.
+/// The validated result of one preview-class render. The target output remains
+/// in the preview-private workspace until ephemeral retention expires or a
+/// newer intent deletes it.
 pub(crate) struct PreviewRenderResult {
     pub(crate) attempt_key: String,
     pub(crate) path: PathBuf,
@@ -163,18 +165,31 @@ impl ExportManager {
     /// The retained artifact file of one Export identity. The path stays
     /// private to the service; responses carry identity facts only.
     pub(crate) fn artifact_path(&self, export_id: &str) -> Option<PathBuf> {
+        self.artifact_path_for_workload(export_id, "development-tiff")
+    }
+
+    pub(crate) fn artifact_path_for_workload(
+        &self,
+        export_id: &str,
+        workload: &str,
+    ) -> Option<PathBuf> {
+        let target = match workload {
+            "development-tiff" => ExportTarget::DevelopmentTiff,
+            "film-jpeg" => ExportTarget::FilmJpeg,
+            _ => return None,
+        };
         valid_artifact_stem(export_id).map(|stem| {
             self.workspace
                 .root()
                 .join("artifacts")
-                .join(format!("{stem}.tiff"))
+                .join(format!("{stem}.{}", target.extension()))
         })
     }
 
     /// Deletes one ephemeral preview output after failure, cancellation,
     /// supersession, or retention expiry.
     pub(crate) fn delete_preview_output(&self, attempt_key: &str) {
-        let _ = self.workspace.delete_preview_tiff(attempt_key);
+        let _ = self.workspace.delete_preview_artifact(attempt_key);
     }
     /// The retained Development TIFF of one Photo whose captured snapshot
     /// matches the current Edit identity and whose retention has not expired,
@@ -239,6 +254,12 @@ impl ExportManager {
         // independently of the saved recipe. A Photo without a saved recipe
         // is that same baseline.
         let baseline = settings == "baseline";
+        let target = if stage == "film" {
+            ExportTarget::FilmJpeg
+        } else {
+            ExportTarget::DevelopmentTiff
+        };
+        let workload = target.workload();
         let recipe = match read.recipe.as_ref() {
             Some(recipe) if !baseline => ExportRecipePayload::capture(
                 &recipe.settings,
@@ -291,8 +312,8 @@ impl ExportManager {
             &source_profile_id,
             &source,
             &recipe,
-            PHOTO_WORKLOAD,
-            PHOTO_WORKLOAD,
+            workload,
+            workload,
         );
 
         // Keep the staged descriptor open until Start returns, exactly like
@@ -308,6 +329,7 @@ impl ExportManager {
         let start_source = source.clone();
         let start_recipe = recipe;
         let start_manifest = manifest_sha256;
+        let start_workload = workload.to_owned();
         let start_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
             let file = open_read_only(&staged_path)
                 .map_err(|_| "staged source could not be opened".to_owned())?;
@@ -320,7 +342,7 @@ impl ExportManager {
                 sequence,
                 policy: start_policy,
                 bundle: start_bundle,
-                workload: PHOTO_WORKLOAD.to_owned(),
+                workload: start_workload,
                 source: Source {
                     kind: "raw".to_owned(),
                     profile_id: source_profile_id,
@@ -379,7 +401,7 @@ impl ExportManager {
             return Err("preview render cancelled".to_owned());
         }
 
-        let writer = match self.workspace.begin_preview_tiff(&attempt_key) {
+        let writer = match self.workspace.begin_preview_artifact(&attempt_key, target) {
             Ok(writer) => writer,
             Err(error) => {
                 self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
@@ -409,7 +431,7 @@ impl ExportManager {
                     export_id: output_attempt_key,
                     incarnation: output_incarnation,
                     sequence,
-                    target: PHOTO_WORKLOAD.to_owned(),
+                    target: workload.to_owned(),
                 };
                 let response =
                     photo::request_with_descriptor(&socket, &request, output_file.as_raw_fd())
@@ -446,7 +468,7 @@ impl ExportManager {
         let validation_path = output_path.clone();
         let validation_receipt = output_receipt.clone();
         let validation_result = tokio::task::spawn_blocking(move || {
-            verify_received_output(&validation_path, &validation_receipt)
+            verify_received_output(&validation_path, &validation_receipt, target)
         })
         .await;
         let output_facts = match validation_result {
@@ -472,7 +494,7 @@ impl ExportManager {
                 return Err(format!("preview validation task failed: {error}"));
             }
         };
-        let published = match writer.publish(|path| validate_development_tiff(path).map(|_| ())) {
+        let published = match writer.publish(|path| validate_output(path, target).map(|_| ())) {
             Ok(published) => published,
             Err(error) => {
                 self.discard_preview_attempt(
@@ -713,8 +735,15 @@ impl ExportManager {
             .iter()
             .chain(sweep.record_expiry_ids.iter())
         {
-            if let Some(path) = self.artifact_path(export_id) {
-                let _ = fs::remove_file(path);
+            for extension in ["tiff", "jpg"] {
+                if let Some(stem) = valid_artifact_stem(export_id) {
+                    let _ = fs::remove_file(
+                        self.workspace
+                            .root()
+                            .join("artifacts")
+                            .join(format!("{stem}.{extension}")),
+                    );
+                }
             }
         }
         self.remove_orphan_artifacts().await;
@@ -1207,7 +1236,7 @@ impl ExportManager {
                 sequence,
                 policy: start_snapshot.policy_id.clone(),
                 bundle: start_snapshot.bundle_id.clone(),
-                workload: PHOTO_WORKLOAD.to_owned(),
+                workload: start_snapshot.workload.clone(),
                 source: Source {
                     kind: "raw".to_owned(),
                     profile_id: start_snapshot.source_profile_id.clone(),
@@ -1263,23 +1292,25 @@ impl ExportManager {
             .export_publication_claim(&export_id)
             .await
             .unwrap_or(None);
+        let target = export_target(&record.snapshot.workload)?;
+        let workload = record.snapshot.workload.clone();
         let claim_is_current = record.attempt.as_ref().is_some_and(|attempt| {
             claim.as_ref() == Some(&(attempt.incarnation.clone(), attempt.sequence))
         });
         if claim_is_current {
             let published_path = self
-                .artifact_path(&export_id)
+                .artifact_path_for_workload(&export_id, &workload)
                 .ok_or_else(|| "the publication claim named no artifact directory".to_owned())?;
             if tokio::fs::metadata(&published_path).await.is_ok() {
                 return self
-                    .settle_from_published_file(&export_id, &published_path)
+                    .settle_from_published_file(&export_id, &published_path, target)
                     .await;
             }
             // The launcher transfer claim is spent; a second Output can
             // never arrive. The attempt fails, and a retry starts fresh.
             return Err("the claimed publication never produced its artifact".to_owned());
         }
-        if let Some(published_path) = self.artifact_path(&export_id)
+        if let Some(published_path) = self.artifact_path_for_workload(&export_id, &workload)
             && tokio::fs::metadata(&published_path).await.is_ok()
         {
             // A file without a matching claim belongs to a superseded
@@ -1290,7 +1321,7 @@ impl ExportManager {
         // workspace, then validate before any acknowledgement.
         let writer = self
             .workspace
-            .begin_development_tiff(&export_id)
+            .begin_artifact(&export_id, target)
             .map_err(|error| format!("output staging failed: {error}"))?;
         let output_path = writer.temporary_path().to_path_buf();
         let output_file = open_writable(&output_path)
@@ -1299,6 +1330,7 @@ impl ExportManager {
         let instance = self.processing.instance.clone();
         let export_id_for_output = export_id.clone();
         let incarnation_for_output = incarnation.to_owned();
+        let output_target = workload.clone();
         let output_receipt = tokio::task::spawn_blocking(
             move || -> Result<slipstream_processing::photo::OutputReceipt, String> {
                 let request = Request::Output {
@@ -1308,7 +1340,7 @@ impl ExportManager {
                     export_id: export_id_for_output,
                     incarnation: incarnation_for_output,
                     sequence,
-                    target: PHOTO_WORKLOAD.to_owned(),
+                    target: output_target,
                 };
                 let response =
                     photo::request_with_descriptor(&socket, &request, output_file.as_raw_fd())
@@ -1335,8 +1367,9 @@ impl ExportManager {
         // closed Development TIFF contract before any acknowledgement.
         let validation_path = output_path.clone();
         let validation_receipt = output_receipt.clone();
+        let validation_target = target;
         let validation = tokio::task::spawn_blocking(move || {
-            verify_received_output(&validation_path, &validation_receipt)
+            verify_received_output(&validation_path, &validation_receipt, validation_target)
         })
         .await
         .map_err(|error| format!("validation task failed: {error}"))?;
@@ -1386,7 +1419,7 @@ impl ExportManager {
         let facts_ref = &facts_slot;
         let published = writer
             .publish(move |path| {
-                let facts = validate_development_tiff(path)?;
+                let facts = validate_output(path, target)?;
                 *facts_ref.borrow_mut() = Some(facts);
                 Ok(())
             })
@@ -1432,15 +1465,15 @@ impl ExportManager {
             .await;
         Ok(())
     }
-
-    /// Resolves an Export from an artifact that a previous process already
-    /// renamed into place before crashing: the file is validated through the
-    /// same closed Development TIFF contract, hashed, and settled with its
-    /// own publication time. No launcher transfer is requested.
-    async fn settle_from_published_file(&self, export_id: &str, path: &Path) -> Result<(), String> {
+    async fn settle_from_published_file(
+        &self,
+        export_id: &str,
+        path: &Path,
+        target: ExportTarget,
+    ) -> Result<(), String> {
         let hash_path = path.to_path_buf();
         let facts_and_hash = tokio::task::spawn_blocking(move || -> Result<_, String> {
-            let facts = validate_development_tiff(&hash_path)
+            let facts = validate_output(&hash_path, target)
                 .map_err(|_| OUTPUT_VALIDATION_FAILED.to_owned())?;
             let file = open_read_only(&hash_path)
                 .map_err(|_| "published artifact could not be reopened".to_owned())?;
@@ -1707,7 +1740,7 @@ pub(crate) fn retained_development_tiff(
     now_unix_seconds: u64,
     artifact_path: impl Fn(&str) -> Option<PathBuf>,
 ) -> Option<RetainedDevelopmentTiff> {
-    if record.state != ExportState::Succeeded {
+    if record.state != ExportState::Succeeded || record.snapshot.workload != "development-tiff" {
         return None;
     }
     // The captured snapshot's own execution payload is the identity the
@@ -1838,17 +1871,31 @@ fn manifest_digest_parts(
     format!("{:x}", Sha256::digest(manifest.as_bytes()))
 }
 
+fn export_target(workload: &str) -> Result<ExportTarget, String> {
+    match workload {
+        "development-tiff" => Ok(ExportTarget::DevelopmentTiff),
+        "film-jpeg" => Ok(ExportTarget::FilmJpeg),
+        _ => Err("export snapshot has an unsupported workload".to_owned()),
+    }
+}
+
 /// The one actionable reason every output refusal carries. The launcher
 /// retains its result for reconciliation either way.
-const OUTPUT_VALIDATION_FAILED: &str = "received output failed Development TIFF validation";
+const OUTPUT_VALIDATION_FAILED: &str = "received output failed closed artifact validation";
 
-/// Verifies the received output against the launcher receipt: byte length,
-/// SHA-256 identity, and the closed Development TIFF contract (float32 RGB
-/// scene-linear pixels with a matching embedded ICC profile). Returns the
-/// validated facts on success.
+fn validate_output(path: &Path, target: ExportTarget) -> Result<DevelopmentTiffFacts, ExportError> {
+    match target {
+        ExportTarget::DevelopmentTiff => validate_development_tiff(path),
+        ExportTarget::FilmJpeg => validate_finished_jpeg(path),
+    }
+}
+
+/// Verifies the received output against the launcher receipt and target
+/// contract before any acknowledgement or publication.
 fn verify_received_output(
     path: &Path,
     receipt: &slipstream_processing::photo::OutputReceipt,
+    target: ExportTarget,
 ) -> Result<DevelopmentTiffFacts, ExportError> {
     use sha2::{Digest, Sha256};
     let file = open_read_only(path).map_err(|_| ExportError::InvalidArtifact)?;
@@ -1862,7 +1909,7 @@ fn verify_received_output(
     if format!("{:x}", hasher.finalize()) != receipt.sha256 {
         return Err(ExportError::InvalidArtifact);
     }
-    validate_development_tiff(path)
+    validate_output(path, target)
 }
 
 /// Validated Development TIFF facts the wire contract discloses with the
@@ -2106,6 +2153,92 @@ pub(crate) fn validate_development_tiff(path: &Path) -> Result<DevelopmentTiffFa
         width,
         height,
         profile_identity: format!("{:x}", hasher.finalize()),
+    })
+}
+/// Validates the bounded JPEG envelope emitted by the fixed Film adapter.
+/// The worker performs the complete decode/profile check; this second check
+/// binds the transferred artifact to an image shape and one embedded sRGB ICC
+/// profile without loading all pixel bytes into the server.
+fn validate_finished_jpeg(path: &Path) -> Result<DevelopmentTiffFacts, ExportError> {
+    use sha2::{Digest, Sha256};
+    const OUTPUT_ICC_SHA256: &str =
+        "b44e86e44d44993a3a9a880626f9832e9c37e2234caba501548f9114bada6d21";
+    let invalid = || ExportError::Validation("Output is not a valid Finished JPEG");
+    let file = open_read_only(path).map_err(|_| invalid())?;
+    if file.metadata().map_err(ExportError::Io)?.len() > slipstream_core::MAXIMUM_EXPORT_BYTES {
+        return Err(invalid());
+    }
+    let mut reader = std::io::BufReader::new(file);
+    let mut signature = [0_u8; 2];
+    reader.read_exact(&mut signature).map_err(|_| invalid())?;
+    if signature != [0xff, 0xd8] {
+        return Err(invalid());
+    }
+    let mut width = 0_u32;
+    let mut height = 0_u32;
+    let mut channels = 0_u8;
+    let mut profile = None;
+    let mut saw_scan = false;
+    loop {
+        let mut byte = [0_u8; 1];
+        reader.read_exact(&mut byte).map_err(|_| invalid())?;
+        if byte[0] != 0xff {
+            continue;
+        }
+        loop {
+            reader.read_exact(&mut byte).map_err(|_| invalid())?;
+            if byte[0] != 0xff {
+                break;
+            }
+        }
+        let marker = byte[0];
+        if marker == 0xd9 {
+            break;
+        }
+        if marker == 0xda {
+            saw_scan = true;
+        }
+        if matches!(marker, 0xd8 | 0xd9 | 0x01 | 0xd0..=0xd7) {
+            continue;
+        }
+        let mut length = [0_u8; 2];
+        reader.read_exact(&mut length).map_err(|_| invalid())?;
+        let length = u16::from_be_bytes(length);
+        if length < 2 || usize::from(length) > 1024 * 1024 {
+            return Err(invalid());
+        }
+        let mut segment = vec![0_u8; usize::from(length) - 2];
+        reader.read_exact(&mut segment).map_err(|_| invalid())?;
+        if (0xc0..=0xcf).contains(&marker) && !matches!(marker, 0xc4 | 0xc8 | 0xcc) {
+            if segment.len() < 6 {
+                return Err(invalid());
+            }
+            height = u32::from(u16::from_be_bytes([segment[1], segment[2]]));
+            width = u32::from(u16::from_be_bytes([segment[3], segment[4]]));
+            channels = segment[5];
+        }
+        if marker == 0xe2 && segment.starts_with(b"ICC_PROFILE\0") {
+            if segment.len() < 14 || segment[12] != 1 || segment[13] != 1 {
+                return Err(invalid());
+            }
+            profile = Some(segment[14..].to_vec());
+        }
+        if saw_scan {
+            break;
+        }
+    }
+    let profile = profile.ok_or_else(invalid)?;
+    if width == 0 || height == 0 || channels != 3 {
+        return Err(invalid());
+    }
+    let identity = format!("{:x}", Sha256::digest(&profile));
+    if identity != OUTPUT_ICC_SHA256 {
+        return Err(invalid());
+    }
+    Ok(DevelopmentTiffFacts {
+        width,
+        height,
+        profile_identity: identity,
     })
 }
 

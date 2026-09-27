@@ -36,7 +36,8 @@ CREATE TABLE photos(
   selection_state TEXT NOT NULL DEFAULT 'undecided' CHECK(selection_state IN ('undecided','selected','rejected')),
   rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
   removed_at_ms INTEGER CHECK(removed_at_ms IS NULL OR removed_at_ms >= 0),
-  removed_operation TEXT CHECK((removed_at_ms IS NULL) = (removed_operation IS NULL))
+  removed_operation TEXT CHECK((removed_at_ms IS NULL) = (removed_operation IS NULL)),
+  association_generation INTEGER NOT NULL DEFAULT 1 CHECK(association_generation > 0)
 );
 CREATE INDEX photos_original ON photos(original_id);
 CREATE TABLE original_fingerprints(
@@ -109,4 +110,24 @@ CREATE TABLE export_download_leases(
   export_id TEXT NOT NULL REFERENCES exports(id) ON DELETE CASCADE,
   created_at INTEGER NOT NULL CHECK(created_at >= 0)
 );
-PRAGMA user_version = 10;
+-- Active paths and retained paths are unique only within each table; cross-table uniqueness is service-layer responsibility.
+CREATE TABLE sidecar_associations(
+  photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE RESTRICT,
+  sidecar_path TEXT NOT NULL UNIQUE,
+  observed_size INTEGER CHECK(observed_size IS NULL OR observed_size >= 0),
+  observed_mtime_ms REAL CHECK(observed_mtime_ms IS NULL OR observed_mtime_ms >= 0),
+  observed_digest TEXT CHECK(observed_digest IS NULL OR length(observed_digest) = 64),
+  CHECK((observed_size IS NULL) = (observed_mtime_ms IS NULL))
+);
+CREATE TABLE retained_sidecar_orphans(
+  sidecar_path TEXT PRIMARY KEY,
+  retired_photo_id TEXT NOT NULL,
+  retired_original_path TEXT NOT NULL,
+  original_kind TEXT NOT NULL CHECK(original_kind IN ('raw','jpeg')),
+  retired_generation INTEGER NOT NULL CHECK(retired_generation > 0),
+  observed_size INTEGER CHECK(observed_size IS NULL OR observed_size >= 0),
+  observed_mtime_ms REAL CHECK(observed_mtime_ms IS NULL OR observed_mtime_ms >= 0),
+  observed_digest TEXT CHECK(observed_digest IS NULL OR length(observed_digest) = 64),
+  CHECK((observed_size IS NULL) = (observed_mtime_ms IS NULL))
+);
+PRAGMA user_version = 11;

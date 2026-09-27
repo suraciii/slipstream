@@ -306,7 +306,7 @@ fn creation_args(name: &str, limits: &Limits) -> Result<Vec<String>> {
         "ssa(sv)a(sa(sv))".into(),
         name.into(),
         "fail".into(),
-        "6".into(),
+        "7".into(),
         "MemoryMax".into(),
         "t".into(),
         limits.memory_bytes.to_string(),
@@ -322,6 +322,9 @@ fn creation_args(name: &str, limits: &Limits) -> Result<Vec<String>> {
         "CPUQuotaPeriodUSec".into(),
         "t".into(),
         limits.cpu_period_us.to_string(),
+        "IOAccounting".into(),
+        "b".into(),
+        "true".into(),
         "StopWhenUnneeded".into(),
         "b".into(),
         "false".into(),
@@ -601,14 +604,16 @@ mod tests {
         let args = creation_args("attempt.slice", &limits).unwrap();
         assert_eq!(
             &args[..4],
-            &["ssa(sv)a(sa(sv))", "attempt.slice", "fail", "6"]
+            &["ssa(sv)a(sa(sv))", "attempt.slice", "fail", "7"]
         );
         let values: Vec<_> = args[4..args.len() - 1].chunks_exact(3).collect();
         assert_eq!(values[0], &["MemoryMax", "t", "134217728"]);
         assert_eq!(values[1], &["MemorySwapMax", "t", "0"]);
+        assert_eq!(values[2], &["TasksMax", "t", "32"]);
         assert_eq!(values[3], &["CPUQuotaPerSecUSec", "t", "4000000"]);
         assert_eq!(values[4], &["CPUQuotaPeriodUSec", "t", "100000"]);
-        assert_eq!(values[5], &["StopWhenUnneeded", "b", "false"]);
+        assert_eq!(values[5], &["IOAccounting", "b", "true"]);
+        assert_eq!(values[6], &["StopWhenUnneeded", "b", "false"]);
         assert_eq!(args.last().unwrap(), "0");
         limits.cpu_period_us = 0;
         assert!(creation_args("attempt.slice", &limits).is_err());

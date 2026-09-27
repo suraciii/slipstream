@@ -40,6 +40,15 @@ fn error(code: MetadataErrorCode, message: impl Into<String>) -> MetadataError {
     }
 }
 
+fn admit_metadata(library: &Library) -> Result<slipstream_core::NativeWorkPermit, MetadataError> {
+    library.try_admit_native_work().ok_or_else(|| {
+        error(
+            MetadataErrorCode::ResourceLimit,
+            "The Library is busy with native work. Retry the metadata operation.",
+        )
+    })
+}
+
 fn map_store(failure: MetadataStoreError) -> MetadataError {
     match failure {
         MetadataStoreError::PhotoMissing => {
@@ -378,19 +387,23 @@ pub(crate) async fn read_metadata(
     supervisor: Option<&Path>,
     photo_id: &str,
 ) -> Result<MetadataReadResult, MetadataError> {
+    let permit = admit_metadata(library)?;
     let root = library_root.to_path_buf();
     let epoch = instance_epoch.to_owned();
-    let mut result = library
+    let (result, permit) = library
         .with_metadata(photo_id.to_owned(), move |context| {
-            Ok(read_metadata_in_context(context, &root, &epoch))
+            Ok((read_metadata_in_context(context, &root, &epoch), permit))
         })
         .await
-        .map_err(map_store)??;
+        .map_err(map_store)?;
+    let mut result = result?;
     let supervisor = supervisor.map(Path::to_path_buf);
-    let (available, reason) =
-        tokio::task::spawn_blocking(move || save_availability(supervisor.as_deref()))
-            .await
-            .map_err(join_failure)?;
+    let (available, reason) = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        save_availability(supervisor.as_deref())
+    })
+    .await
+    .map_err(join_failure)?;
     result.save_available = available;
     result.save_unavailable_reason = reason;
     Ok(result)
@@ -476,11 +489,13 @@ pub(crate) async fn save_metadata(
     photo_id: &str,
     request: MetadataSaveRequest,
 ) -> Result<MetadataSaveResult, MetadataError> {
+    let permit = admit_metadata(library)?;
     let root = library_root.to_path_buf();
     let epoch = instance_epoch.to_owned();
     let supervisor = supervisor.map(Path::to_path_buf);
     library
         .with_metadata(photo_id.to_owned(), move |context| {
+            let _permit = permit;
             Ok(save_metadata_in_context(
                 context,
                 &root,

@@ -46,9 +46,8 @@ use crate::{
     queries::{format_time, hex_encode},
 };
 
-/// The closed stage set of the first version; `stage` is the closed value
-/// `develop` until the Film capability is enabled.
-const CLOSED_STAGES: [&str; 1] = ["develop"];
+/// The closed stage set of the Edit Preview route.
+const CLOSED_STAGES: [&str; 2] = ["develop", "film"];
 
 /// The closed `settings` selector of the route. `current` is the saved Edit
 /// Recipe's settings and the default. `baseline` is the as-shot/baseline
@@ -213,6 +212,8 @@ pub(crate) struct RetainedDevelopmentResult {
     pub(crate) source_revision: String,
     pub(crate) bundle_sha256: String,
     pub(crate) path: PathBuf,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 impl RetainedDevelopmentResult {
@@ -295,8 +296,10 @@ impl DevelopmentResultRetention for RetainedExportDevelopmentResults {
                 exposure_milli_ev: retained.exposure_milli_ev,
                 white_balance: WHITE_BALANCE_AS_SHOT,
                 source_revision: retained.source_revision,
-                bundle_sha256: retained.bundle_id,
                 path: retained.path,
+                width: 0,
+                height: 0,
+                bundle_sha256: retained.bundle_id,
             })
         })
     }
@@ -413,7 +416,6 @@ enum PreviewRenderState {
         attempt_key: String,
         size: u64,
         sha256: String,
-        #[allow(dead_code)]
         facts: Box<crate::export_manager::DevelopmentTiffFacts>,
         deadline: SystemTime,
     },
@@ -754,12 +756,14 @@ impl DevelopmentResultRetention for PreviewClassRenders {
                 .unwrap_or_else(|error| error.into_inner());
             Self::purge_expired_locked(&self.inner, &mut entries, now);
             let entry = entries.get_mut(&key)?;
-            let (identity, output_path, size, sha256, deadline) = match &entry.state {
+            let (identity, output_path, size, sha256, width, height, deadline) = match &entry.state
+            {
                 PreviewRenderState::Ready {
                     identity,
                     output_path,
                     size,
                     sha256,
+                    facts,
                     deadline,
                     ..
                 } => (
@@ -767,6 +771,8 @@ impl DevelopmentResultRetention for PreviewClassRenders {
                     output_path.clone(),
                     *size,
                     sha256.clone(),
+                    facts.width,
+                    facts.height,
                     *deadline,
                 ),
                 _ => return None,
@@ -790,6 +796,8 @@ impl DevelopmentResultRetention for PreviewClassRenders {
                 source_revision: identity.source_revision.clone(),
                 bundle_sha256: identity.bundle_sha256.clone(),
                 path: output_path,
+                width,
+                height,
             })
         })
     }
@@ -1382,7 +1390,7 @@ fn support_refusal(
 ) -> Option<Response<Body>> {
     let support = classify_support(photo, metadata, read);
     match support.state {
-        "unsupported" => Some(unsupported_photo(&photo.id)),
+        "unsupported" => Some(unsupported_photo(&photo.id, stage)),
         "unavailable" => Some(resource_unavailable(
             stage,
             support.reason.unwrap_or("original-missing"),
@@ -1550,8 +1558,9 @@ async fn serve_preview(
         permit = acquisition => permit,
     };
     owner.note_derivation_started();
-    let derived = derive_development_display(
+    let derived = derive_preview_display(
         record,
+        stage,
         slipstream_core::DerivativeTarget::DevelopmentPreview1224,
         signal.token(),
     )
@@ -1603,12 +1612,11 @@ async fn serve_preview(
     }
 }
 
-/// One native display conversion of a retained result, cancellable: a token
-/// set before the conversion skips the native call entirely, and a token set
-/// during it discards the finished result. The conversion itself is one
-/// opaque FFI call and cannot be interrupted once started.
-async fn derive_development_display(
+/// Reads a retained Film JPEG directly, or converts a retained Development
+/// TIFF through the pinned display transform.
+async fn derive_preview_display(
     record: RetainedDevelopmentResult,
+    stage: &'static str,
     target: slipstream_core::DerivativeTarget,
     cancelled: Arc<AtomicBool>,
 ) -> Result<Option<slipstream_core::Derivative>, slipstream_core::DerivativeError> {
@@ -1616,9 +1624,29 @@ async fn derive_development_display(
         return Ok(None);
     }
     let path = record.path;
+    let width = record.width;
+    let height = record.height;
     let derived = tokio::task::spawn_blocking(move || {
         if cancelled.load(Ordering::Relaxed) {
             return Ok(None);
+        }
+        if stage == "film" {
+            if width == 0 || height == 0 {
+                return Err(slipstream_core::DerivativeError::Internal);
+            }
+            let metadata =
+                std::fs::metadata(&path).map_err(|_| slipstream_core::DerivativeError::Internal)?;
+            if metadata.len() > 128 * 1024 * 1024 {
+                return Err(slipstream_core::DerivativeError::OutputLimit);
+            }
+            let jpeg =
+                std::fs::read(&path).map_err(|_| slipstream_core::DerivativeError::Internal)?;
+            return Ok(Some(slipstream_core::Derivative {
+                width,
+                height,
+                profile: slipstream_core::DerivativeProfile::Srgb,
+                jpeg,
+            }));
         }
         std::fs::File::open(&path)
             .map_err(|_| slipstream_core::DerivativeError::Internal)
@@ -1825,12 +1853,12 @@ fn settings_outside_closed_set() -> Response<Body> {
     )
 }
 
-fn unsupported_photo(photo_id: &str) -> Response<Body> {
+fn unsupported_photo(photo_id: &str, stage: &'static str) -> Response<Body> {
     cli_error(
         StatusCode::UNPROCESSABLE_ENTITY,
         "unsupported_photo",
         "This Photo's source class has no approved profile.",
-        serde_json::json!({"photoId": photo_id, "stage": CLOSED_STAGES[0]}),
+        serde_json::json!({"photoId": photo_id, "stage": stage}),
     )
 }
 
@@ -1912,6 +1940,8 @@ mod tests {
             source_revision: "source".to_owned(),
             bundle_sha256: "c".repeat(64),
             path: PathBuf::from("/tmp/unused.tiff"),
+            width: 1,
+            height: 1,
         }
     }
 
@@ -2327,8 +2357,9 @@ mod tests {
             ..record(250)
         };
         assert!(matches!(
-            derive_development_display(
+            derive_preview_display(
                 cancelled_record,
+                "develop",
                 slipstream_core::DerivativeTarget::DevelopmentPreview1224,
                 signal.token(),
             )

@@ -1014,7 +1014,7 @@ export function createLibraryBrowserView(
                     <p class="photo-editor-note" data-photo-editor-capability hidden></p>
                     <p class="photo-editor-draft" data-photo-editor-draft hidden role="status"></p>
                     <div class="photo-editor-conflict" data-photo-editor-conflict hidden><p data-photo-editor-conflict-message role="alert"></p><div class="photo-editor-actions"><button type="button" data-photo-editor-use-saved>Use saved recipe</button><button type="button" class="quiet" data-photo-editor-reapply>Reapply my settings</button><button type="button" class="quiet" data-photo-editor-discard-draft>Discard draft</button></div></div>
-                    <div class="photo-editor-export" aria-label="Export"><p class="photo-editor-export-heading">Export <span>Development TIFF</span></p><p class="photo-editor-export-state" data-photo-editor-export-state role="status"></p><div class="photo-editor-actions"><button type="button" data-photo-editor-export-submit>Export TIFF</button><button type="button" class="quiet" data-photo-editor-export-cancel hidden>Cancel</button><button type="button" class="quiet" data-photo-editor-export-retry hidden>Retry</button><button type="button" class="quiet" data-photo-editor-export-download hidden>Download</button></div></div>
+                    <div class="photo-editor-export" aria-label="Export"><p class="photo-editor-export-heading">Export <span data-photo-editor-export-target>Development TIFF</span></p><p class="photo-editor-export-state" data-photo-editor-export-state role="status"></p><div class="photo-editor-actions"><button type="button" data-photo-editor-export-submit>Export selected stage</button><button type="button" class="quiet" data-photo-editor-export-cancel hidden>Cancel</button><button type="button" class="quiet" data-photo-editor-export-retry hidden>Retry</button><button type="button" class="quiet" data-photo-editor-export-download hidden>Download</button></div></div>
                     <p class="photo-editor-status" data-photo-editor-status role="status" aria-live="polite"></p>
                   </div>
                 </div>
@@ -1817,6 +1817,10 @@ export function createLibraryBrowserView(
     root,
     "[data-photo-editor-export-download]",
   );
+  const editorExportTarget = required<HTMLElement>(
+    root,
+    "[data-photo-editor-export-target]",
+  );
   const editorStatus = required<HTMLElement>(
     root,
     "[data-photo-editor-status]",
@@ -2358,7 +2362,11 @@ export function createLibraryBrowserView(
     editorReapply.disabled = model.saving;
     editorDiscardDraft.disabled = model.saving;
     const exported = model.export;
+    const exportLabel =
+      model.stage === "film" ? "Finished JPEG" : "Development TIFF";
+    editorExportTarget.textContent = exportLabel;
     editorExportState.textContent = exported.note;
+    editorExportSubmit.textContent = `Export ${exportLabel}`;
     editorExportSubmit.disabled =
       model.loading || !model.canEdit || !exported.canSubmit;
     editorExportCancel.hidden = !exported.canCancel;

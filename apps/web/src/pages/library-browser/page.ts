@@ -1475,9 +1475,13 @@ function mountPrivateLibraryBrowser(
   let editorComparisonAttempts = 0;
   let editorComparisonTimer: number | undefined;
   let editorExportId: string | undefined;
+  let editorExportTarget: "development-tiff" | "film-jpeg" = "development-tiff";
   let editorExportState: EditorExportViewModel["state"] = "idle";
   let editorExportNote = "";
   let editorExportArtifact: ExportArtifact | null = null;
+  const editorExportLabel = (
+    target: "development-tiff" | "film-jpeg",
+  ): string => (target === "film-jpeg" ? "Finished JPEG" : "Development TIFF");
   let editorExportAbort: AbortController | undefined;
   let editorExportTimer: number | undefined;
   let editorWriteAbort: AbortController | undefined;
@@ -1817,8 +1821,6 @@ function mountPrivateLibraryBrowser(
   };
   const openEditor = (photoId: string): void => {
     if (!photoId) return;
-    clearEditorPreview();
-    editorComparing = false;
     editorExportId = undefined;
     editorExportState = "idle";
     editorExportNote = "";
@@ -1827,6 +1829,8 @@ function mountPrivateLibraryBrowser(
     // Develop is the default otherwise.
     editorStage =
       processingCapability?.stages.film === "ready" ? "film" : "develop";
+    editorExportTarget =
+      editorStage === "film" ? "film-jpeg" : "development-tiff";
     editorSession(photoId);
     renderEditor();
     void loadEditorFacts(photoId, "open");
@@ -1935,7 +1939,7 @@ function mountPrivateLibraryBrowser(
     // other settings selector, is not this stage's comparison.
     clearEditorComparison();
     renderEditor();
-    if (stage === "develop") void requestEditorPreview(photoId);
+    if (stage !== "camera") void requestEditorPreview(photoId);
   };
   /// The as-shot/baseline development comparison of the chosen stage. Pressing
   /// the control presents the baseline development of the same stage beside the
@@ -2361,6 +2365,7 @@ function mountPrivateLibraryBrowser(
     );
     if (!inspection || inspection.exportId !== exportId) return;
     editorExportId = exportId;
+    editorExportTarget = inspection.target;
     editorExportState = inspection.state;
     editorExportArtifact = inspection.artifact;
     editorExportNote = describeExportState(inspection, formatByteCount);
@@ -2417,10 +2422,12 @@ function mountPrivateLibraryBrowser(
     }
     const presented = session.presentation();
     const source = session.facts()?.sourceRevision ?? null;
+    const target: "development-tiff" | "film-jpeg" =
+      editorStage === "film" ? "film-jpeg" : "development-tiff";
+    editorExportTarget = target;
     if (!presented.canEdit || !presented.processingAvailable || !source) {
       editorExportState = "idle";
-      editorExportNote =
-        "This Photo cannot export a Development TIFF right now.";
+      editorExportNote = `This Photo cannot export a ${editorExportLabel(target)} right now.`;
       renderEditor();
       return;
     }
@@ -2428,7 +2435,7 @@ function mountPrivateLibraryBrowser(
       requestId: `web-export-${crypto.randomUUID().replaceAll("-", "").slice(0, 24)}`,
       expectedRecipeVersion: presented.recipeVersion,
       expectedSourceRevision: source,
-      target: "development-tiff",
+      target,
     };
     // Later edits wait behind this submission, so they can never retarget the
     // snapshot the service accepted.
@@ -2470,13 +2477,20 @@ function mountPrivateLibraryBrowser(
       return;
     }
     editorExportId = accepted["exportId"];
+    if (
+      accepted["target"] === "development-tiff" ||
+      accepted["target"] === "film-jpeg"
+    ) {
+      editorExportTarget = accepted["target"];
+    }
     editorExportState = "queued";
     editorExportArtifact = null;
     const receiptExpiresAt = accepted["receiptExpiresAt"];
+    const label = editorExportLabel(editorExportTarget);
     editorExportNote =
       typeof receiptExpiresAt === "string"
-        ? `Development TIFF queued; processing has not started. The receipt and its captured snapshot are retained until ${receiptExpiresAt}.`
-        : "Development TIFF queued; processing has not started.";
+        ? `${label} queued; processing has not started. The receipt and its captured snapshot are retained until ${receiptExpiresAt}.`
+        : `${label} queued; processing has not started.`;
     renderEditor();
     scheduleEditorExportPoll(photoId);
   };
@@ -2519,7 +2533,7 @@ function mountPrivateLibraryBrowser(
         return;
       }
       editorExportState = "queued";
-      editorExportNote = "Development TIFF queued; processing has not started.";
+      editorExportNote = `${editorExportLabel(editorExportTarget)} queued; processing has not started.`;
       renderEditor();
       scheduleEditorExportPoll(photoId);
     } catch {
@@ -2562,13 +2576,15 @@ function mountPrivateLibraryBrowser(
       return;
     }
     const url = URL.createObjectURL(image);
+    const extension = editorExportTarget === "film-jpeg" ? "jpg" : "tif";
+    const label = editorExportLabel(editorExportTarget);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `slipstream-development-${exportId}.tif`;
+    anchor.download = `slipstream-${editorExportTarget === "film-jpeg" ? "film" : "development"}-${exportId}.${extension}`;
     anchor.click();
     URL.revokeObjectURL(url);
     if (!editorOwnsPhoto(photoId)) return;
-    editorExportNote = `Downloaded ${formatByteCount(image.size)} of the Development TIFF.`;
+    editorExportNote = `Downloaded ${formatByteCount(image.size)} of the ${label}.`;
     renderEditor();
   };
   /// Rebinds the stored recipe to the currently observed source. It is the one

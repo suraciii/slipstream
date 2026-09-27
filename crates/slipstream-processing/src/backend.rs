@@ -1412,6 +1412,9 @@ fn raw_terminal_source(path: &Path, total: &mut usize) -> Result<String> {
     count_terminal_source(&raw, total)?;
     Ok(raw)
 }
+fn terminal_source_path(directory: &File, name: &str) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{}/{}", directory.as_raw_fd(), name))
+}
 
 fn count_terminal_source(raw: &str, total: &mut usize) -> Result<()> {
     if raw.len() > crate::protocol::TERMINAL_SNAPSHOT_BYTES
@@ -1527,16 +1530,22 @@ fn terminal_snapshot(
     mut snapshot: TerminalSnapshot,
     expected_memory_limit: u64,
 ) -> Result<(TerminalSnapshot, u64, Events)> {
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| ErrorCode::Uncertain)?;
+    let source = |name: &str| terminal_source_path(&directory, name);
     let mut total = 0;
-    snapshot.memory_peak_raw = raw_terminal_source(&path.join("memory.peak"), &mut total)?;
-    snapshot.memory_max_raw = raw_terminal_source(&path.join("memory.max"), &mut total)?;
+    snapshot.memory_peak_raw = raw_terminal_source(&source("memory.peak"), &mut total)?;
+    snapshot.memory_max_raw = raw_terminal_source(&source("memory.max"), &mut total)?;
     snapshot.memory_swap_current_raw =
-        raw_terminal_source(&path.join("memory.swap.current"), &mut total)?;
-    snapshot.memory_swap_max_raw = raw_terminal_source(&path.join("memory.swap.max"), &mut total)?;
-    snapshot.memory_events_raw = raw_terminal_source(&path.join("memory.events"), &mut total)?;
+        raw_terminal_source(&source("memory.swap.current"), &mut total)?;
+    snapshot.memory_swap_max_raw = raw_terminal_source(&source("memory.swap.max"), &mut total)?;
+    snapshot.memory_events_raw = raw_terminal_source(&source("memory.events"), &mut total)?;
     snapshot.memory_events_local_raw =
-        raw_terminal_source(&path.join("memory.events.local"), &mut total)?;
-    snapshot.io_stat_raw = match optional_terminal_io_source(&path.join("io.stat"), &mut total) {
+        raw_terminal_source(&source("memory.events.local"), &mut total)?;
+    snapshot.io_stat_raw = match optional_terminal_io_source(&source("io.stat"), &mut total) {
         TerminalIoCapture::Captured(raw) => Some(raw),
         TerminalIoCapture::Omitted(reason) => {
             eprintln!(
@@ -1835,6 +1844,24 @@ mod tests {
             suffix += 1;
         }
         contents
+    }
+
+    #[test]
+    fn terminal_source_path_survives_cgroup_directory_cleanup() {
+        let (root, _) = snapshot_fixture();
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&root)
+            .unwrap();
+        let detached = root.with_extension("detached");
+        fs::rename(&root, &detached).unwrap();
+        assert_eq!(
+            fs::read_to_string(terminal_source_path(&directory, "io.stat")).unwrap(),
+            "8:0 rbytes=1 wbytes=2 rios=3 wios=4 cost.usage=9\n"
+        );
+        drop(directory);
+        fs::remove_dir_all(detached).unwrap();
     }
 
     #[test]

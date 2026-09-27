@@ -1,11 +1,13 @@
-//! Fixed production Photo PID 1. It runs the pinned `development-tiff`
-//! adapter inside the isolated attempt boundary and reports one bounded
-//! terminal outcome. It must never run as a host process.
+//! Fixed production Photo PID 1. It runs the pinned engine adapters for the
+//! closed Photo workloads — `development-tiff` (the darktable handoff TIFF)
+//! and `film-jpeg` (the fixed Film render over that TIFF) — inside the
+//! isolated attempt boundary and reports one bounded terminal outcome. It
+//! must never run as a host process.
 
 use sha2::{Digest, Sha256};
 use slipstream_processing::{
     photo::ICC_ASSET_SHA256,
-    protocol::{Outcome, now},
+    protocol::{Outcome, PHOTO_WORKLOAD, PHOTO_WORKLOAD_FILM, is_photo_workload, now},
 };
 use std::{
     fs::{self, File, OpenOptions},
@@ -20,6 +22,11 @@ use std::{
 /// bytes separately (`design/development-color.md`).
 const ICC_ASSET: &str = "/opt/slipstream-photo/icc/LargeRGB-elle-V2-g10.icc";
 const ADAPTER: &str = "/opt/slipstream-photo/adapter.py";
+/// The fixed Film stage over the darktable handoff TIFF. The interpreter and
+/// source layout come verbatim from the pinned qualification image, so the
+/// numerical bundle the Film identity pins is the one that renders.
+const FILM_PYTHON: &str = "/opt/runtime/bin/python3";
+const FILM_ADAPTER: &str = "/opt/slipstream-photo/film_adapter.py";
 const RESULT_BYTES: usize = 4096;
 
 fn bad(message: &str) -> io::Error {
@@ -111,7 +118,7 @@ fn gate(token: &str) -> io::Result<()> {
 
 /// The launcher-written engine grant. It is the only carrier of the guarded
 /// recipe payload; the service request never reaches the worker directly.
-fn grant(launch: &str) -> io::Result<i64> {
+fn grant(launch: &str, workload: &str) -> io::Result<i64> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct DevelopmentGrant {
@@ -145,7 +152,8 @@ fn grant(launch: &str) -> io::Result<i64> {
     if value.version != 1
         || value.kind != "photo-development-grant"
         || value.launch_id != launch
-        || value.workload != "development-tiff"
+        || value.workload != workload
+        || !is_photo_workload(&value.workload)
         || value.white_balance_mode != "as-shot"
         || !(0..=1000).contains(&value.exposure_milli_ev)
         || value.profile_id.is_empty()
@@ -155,6 +163,22 @@ fn grant(launch: &str) -> io::Result<i64> {
         return Err(bad("engine grant does not match the pinned bundle"));
     }
     Ok(value.exposure_milli_ev)
+}
+
+/// The attempt artifact paths of one closed workload: the darktable handoff
+/// TIFF and the published result. `development-tiff` publishes the handoff
+/// TIFF itself; `film-jpeg` develops into the private work directory and
+/// publishes only the fixed Film JPEG rendered from it. Any other workload
+/// has no admitted engine command and fails closed.
+fn attempt_outputs(workload: &str) -> Option<(&'static str, &'static str)> {
+    match workload {
+        PHOTO_WORKLOAD => Some((
+            "/work/output/development.tif",
+            "/work/output/development.tif",
+        )),
+        PHOTO_WORKLOAD_FILM => Some(("/work/developed.tif", "/work/output/finished.jpg")),
+        _ => None,
+    }
 }
 
 fn prepare_work() -> io::Result<()> {
@@ -167,6 +191,9 @@ fn prepare_work() -> io::Result<()> {
         "output",
         "baseline",
         "xdg",
+        // The private Numba cache of the fixed Film stage. It must be a
+        // fresh per-attempt directory so compiled kernels are never shared.
+        "numba",
     ] {
         let path = PathBuf::from("/work").join(name);
         fs::create_dir_all(&path)?;
@@ -220,14 +247,17 @@ fn finish(mut file: &File, launch_id: &str, outcome: Outcome) -> io::Result<()> 
     file.sync_all()
 }
 
-fn run(launch: &str, deadline: u64) -> io::Result<()> {
+fn run(launch: &str, deadline: u64, workload: &str) -> io::Result<()> {
     gate(launch)?;
-    let exposure_milli_ev = grant(launch)?;
+    let exposure_milli_ev = grant(launch, workload)?;
     prepare_work()?;
     let input = input_name()?;
+    let Some((developed, published)) = attempt_outputs(workload) else {
+        return Err(bad("unsupported workload"));
+    };
     ensure_before_deadline(deadline)?;
-    // One fixed adapter invocation. No shell, no caller-controlled argv,
-    // no engine choice: the pinned bundle owns the exact engine command.
+    // One fixed adapter invocation per stage. No shell, no caller-controlled
+    // argv, no engine choice: the pinned bundle owns the exact engine command.
     let status = Command::new("python3")
         .arg(ADAPTER)
         .arg("--input")
@@ -237,7 +267,7 @@ fn run(launch: &str, deadline: u64) -> io::Result<()> {
         .arg("--work")
         .arg("/work")
         .arg("--output")
-        .arg("/work/output/development.tif")
+        .arg(developed)
         .arg("--icc-asset")
         .arg(ICC_ASSET)
         .env_clear()
@@ -254,7 +284,42 @@ fn run(launch: &str, deadline: u64) -> io::Result<()> {
     if !status.success() {
         return Err(bad("pinned engine adapter failed"));
     }
-    let output = fs::metadata("/work/output/development.tif")?;
+    let developed_metadata = fs::metadata(developed)?;
+    if !developed_metadata.is_file() || developed_metadata.len() == 0 {
+        return Err(bad("adapter produced no output"));
+    }
+    if workload == PHOTO_WORKLOAD_FILM {
+        // The fixed Film stage: one deterministic render over the handoff
+        // TIFF with the pinned one-thread Numba runtime and private caches.
+        let status = Command::new(FILM_PYTHON)
+            .arg(FILM_ADAPTER)
+            .arg("--input")
+            .arg(developed)
+            .arg("--output")
+            .arg(published)
+            .env_clear()
+            .env(
+                "PATH",
+                "/opt/runtime/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            )
+            .env("PYTHONPATH", "/opt/spektrafilm/src:/opt/probe")
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .env("NUMBA_CACHE_DIR", "/work/numba")
+            .env("NUMBA_NUM_THREADS", "1")
+            .env("OMP_NUM_THREADS", "4")
+            .env("OPENBLAS_NUM_THREADS", "4")
+            .env("NUMEXPR_NUM_THREADS", "4")
+            .env("TMPDIR", "/work/tmp")
+            .env("XDG_CONFIG_HOME", "/work/xdg")
+            .env("XDG_CACHE_HOME", "/work/cache")
+            .env("HOME", "/work/xdg")
+            .stdin(Stdio::null())
+            .status()?;
+        if !status.success() {
+            return Err(bad("pinned film adapter failed"));
+        }
+    }
+    let output = fs::metadata(published)?;
     if !output.is_file() || output.len() == 0 {
         return Err(bad("adapter produced no output"));
     }
@@ -269,7 +334,7 @@ fn main() {
         std::process::exit(70);
     }
     if args.len() != 3
-        || args[0] != "development-tiff"
+        || !is_photo_workload(&args[0])
         || args[1].len() != 32
         || !args[1]
             .bytes()
@@ -288,12 +353,13 @@ fn main() {
         std::process::exit(70);
     }
     let launch = args[1].clone();
+    let workload = args[0].clone();
     let result = (|| {
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open("/work/result")?;
-        match run(&launch, deadline) {
+        match run(&launch, deadline, &workload) {
             Ok(()) => finish(&file, &launch, Outcome::Completed),
             Err(_) => finish(&file, &launch, Outcome::EngineFailed),
         }
@@ -307,6 +373,39 @@ fn main() {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// Each closed workload publishes exactly one pinned artifact path, and
+    /// the `film-jpeg` handoff TIFF stays inside the private work directory
+    /// while only the fixed Film JPEG is published. Unknown workloads have no
+    /// engine command at all.
+    #[test]
+    fn attempt_outputs_are_pinned_per_workload_and_fail_closed() {
+        assert_eq!(
+            attempt_outputs(PHOTO_WORKLOAD),
+            Some((
+                "/work/output/development.tif",
+                "/work/output/development.tif"
+            ))
+        );
+        assert_eq!(
+            attempt_outputs(PHOTO_WORKLOAD_FILM),
+            Some(("/work/developed.tif", "/work/output/finished.jpg"))
+        );
+        for unknown in [
+            "",
+            "film",
+            "film-tiff",
+            "development-jpeg",
+            "development-tiff,jpeg",
+            "probe-success",
+        ] {
+            assert_eq!(
+                attempt_outputs(unknown),
+                None,
+                "{unknown:?} must be refused"
+            );
+        }
+    }
 
     /// The armed deadline is absolute: a near-future CLOCK_REALTIME instant
     /// must terminate the worker at that wall-clock time, within a small

@@ -893,13 +893,6 @@ impl SharedLibrary {
     }
 }
 
-fn metadata_busy() -> crate::metadata_wire::MetadataError {
-    crate::metadata_wire::MetadataError {
-        code: crate::metadata_wire::MetadataErrorCode::ResourceLimit,
-        message: "The Library is busy with native work. Retry the metadata operation.".into(),
-        details: serde_json::Value::Null,
-    }
-}
 pub struct Application {
     pub(crate) access: crate::access::Access,
     pub(crate) library: Arc<Library>,
@@ -1164,19 +1157,14 @@ impl Application {
         &self,
         photo_id: &str,
     ) -> Result<crate::metadata_wire::MetadataReadResult, crate::metadata_wire::MetadataError> {
-        let Some(permit) = self.library.try_admit_native_work() else {
-            return Err(metadata_busy());
-        };
-        let result = crate::metadata_service::read_metadata(
+        crate::metadata_service::read_metadata(
             &self.library,
             &self.library_root,
             &self.instance_epoch,
             self.metadata_supervisor.as_deref(),
             photo_id,
         )
-        .await;
-        drop(permit);
-        result
+        .await
     }
 
     /// Performs one checked Sidecar save through the exclusive save
@@ -1187,10 +1175,7 @@ impl Application {
         photo_id: &str,
         request: crate::metadata_wire::MetadataSaveRequest,
     ) -> Result<crate::metadata_wire::MetadataSaveResult, crate::metadata_wire::MetadataError> {
-        let Some(permit) = self.library.try_admit_native_work() else {
-            return Err(metadata_busy());
-        };
-        let result = crate::metadata_service::save_metadata(
+        crate::metadata_service::save_metadata(
             &self.library,
             &self.library_root,
             &self.instance_epoch,
@@ -1198,9 +1183,7 @@ impl Application {
             photo_id,
             request,
         )
-        .await;
-        drop(permit);
-        result
+        .await
     }
 
     async fn inspect_metadata_source(

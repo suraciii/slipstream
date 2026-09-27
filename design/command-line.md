@@ -103,15 +103,23 @@ shutdown admission rules:
 - `GET /api/exports/{id}/artifact`: the validated artifact of one Export,
   leased for the response stream.
 
-`stage` is the closed value `develop` until the Film capability is enabled. The
-Photo facts returned by `GET /api/photos/{id}` and the bounded Photo summaries
-in Browse windows and Photo queries carry the saved-edit fact. Artifact
-downloads and Edit Preview renditions reuse the existing private derivative
-transfer rules. Structured error codes are authoritative for these routes; no
-client parses messages. States, outcomes, snapshot identity, receipt expiry,
-disclosure rules, and the closed wire contract with every request field,
-response field, HTTP status mapping, and outcome/error code are owned by
+`stage` is the closed value `develop` or `film`, subject to the deployment's
+capability report and the Photo's approved source profile. The Photo facts
+returned by `GET /api/photos/{id}` and the bounded Photo summaries in Browse
+windows and Photo queries carry the saved-edit fact. Artifact downloads and Edit
+Preview renditions reuse the existing private derivative transfer rules.
+Structured error codes are authoritative for these routes; no client parses
+messages. States, outcomes, snapshot identity, receipt expiry, disclosure
+rules, and the closed wire contract with every request field, response field,
+HTTP status mapping, and outcome/error code are owned by
 [Photo Development Architecture](photo-development.md#service-surface).
+The CLI exposes the same operations as:
+
+- `photos export submit PHOTO_ID --target development-tiff|film-jpeg
+--request-id REQUEST_ID`;
+- `photos export list PHOTO_ID`;
+- `photos export status EXPORT_ID`; and
+- `photos export download EXPORT_ID --file PATH`.
 
 Every CLI request identifies contract version 1 through
 `Slipstream-CLI-Contract: 1`. A server that advertises version 1 must validate

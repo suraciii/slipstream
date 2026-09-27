@@ -125,6 +125,14 @@ the operation continues even if its caller disconnects. Remove either commits
 before Save, causing `photo_removed`, or after the admitted Save settles.
 Read records its observation in the same operation and returns the committed
 association generation. Library Rating remains a separate fact.
+The native-work permit belongs to the queued inspection or Save, then to any
+remaining supervisor status check. Disconnecting a caller does not release
+capacity while that work is still running.
+
+Metadata associations migrate from the published Film schema v10 to v11.
+The migration preserves existing Photos, Library decisions, Albums, Trash,
+Edit Recipes, and Export records; it initializes each association generation
+to one without importing Sidecar values.
 
 Read opens the Original through `LibraryRoot` and reads bounded embedded XMP,
 EXIF capture facts, and IPTC IIM data. Sidecar bytes are opened only through

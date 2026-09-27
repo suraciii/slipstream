@@ -22,8 +22,8 @@ use std::{
 };
 
 use crate::protocol::{
-    Availability, ErrorCode, PHOTO_MODE, PHOTO_PROTOCOL_VERSION, PHOTO_WORKLOAD, REQUEST_BYTES,
-    RESPONSE_BYTES,
+    Availability, ErrorCode, PHOTO_MODE, PHOTO_PROTOCOL_VERSION, REQUEST_BYTES, RESPONSE_BYTES,
+    is_photo_workload,
 };
 
 /// The bundle-pinned ICC asset bytes shipped inside the worker image. The
@@ -308,7 +308,7 @@ impl Request {
                     || *sequence == 0
                     || !hex(policy, 64)
                     || !hex(bundle, 64)
-                    || workload != PHOTO_WORKLOAD
+                    || !is_photo_workload(workload)
                     || source.kind != "raw"
                     || !identifier(&source.profile_id, 64)
                     || source.size == 0
@@ -331,7 +331,7 @@ impl Request {
                 if !identifier(export_id, 128)
                     || !hex(incarnation, 32)
                     || *sequence == 0
-                    || target != PHOTO_WORKLOAD
+                    || !is_photo_workload(target)
                 {
                     return Err(ErrorCode::InvalidRequest);
                 }
@@ -348,7 +348,7 @@ impl Request {
                 if !identifier(export_id, 128)
                     || !hex(incarnation, 32)
                     || *sequence == 0
-                    || target != PHOTO_WORKLOAD
+                    || !is_photo_workload(target)
                     || *size == 0
                     || *size > MAX_OUTPUT_BYTES
                     || !hex(sha256, 64)
@@ -1031,6 +1031,7 @@ fn invalid(message: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::PHOTO_WORKLOAD;
     use std::{
         env,
         fs::{self, OpenOptions},
@@ -1226,6 +1227,138 @@ mod tests {
         assert_eq!(output.expected_rights(), 1);
         assert!(Request::parse(&serde_json::to_vec(&start).unwrap()).is_ok());
         assert!(Request::parse(&serde_json::to_vec(&output).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn film_jpeg_is_a_closed_workload_and_target_at_the_protocol_boundary() {
+        let start = Request::Start {
+            mode: PHOTO_MODE.into(),
+            version: PHOTO_PROTOCOL_VERSION,
+            instance: "0".repeat(32),
+            export_id: "export-1".into(),
+            incarnation: "1".repeat(32),
+            sequence: 1,
+            policy: "2".repeat(64),
+            bundle: "3".repeat(64),
+            workload: crate::protocol::PHOTO_WORKLOAD_FILM.into(),
+            source: Source {
+                kind: "raw".into(),
+                profile_id: "canon-r5".into(),
+                size: 4,
+                sha256: "4".repeat(64),
+            },
+            recipe: Recipe {
+                exposure_milli_ev: 1000,
+                white_balance_mode: "as-shot".into(),
+            },
+            recipe_digest: "5".repeat(64),
+            manifest_sha256: "6".repeat(64),
+        };
+        let output = Request::Output {
+            mode: PHOTO_MODE.into(),
+            version: PHOTO_PROTOCOL_VERSION,
+            instance: "0".repeat(32),
+            export_id: "export-1".into(),
+            incarnation: "1".repeat(32),
+            sequence: 1,
+            target: crate::protocol::PHOTO_WORKLOAD_FILM.into(),
+        };
+        let validate_output = Request::ValidateOutput {
+            mode: PHOTO_MODE.into(),
+            version: PHOTO_PROTOCOL_VERSION,
+            instance: "0".repeat(32),
+            export_id: "export-1".into(),
+            incarnation: "1".repeat(32),
+            sequence: 1,
+            target: crate::protocol::PHOTO_WORKLOAD_FILM.into(),
+            size: 10,
+            sha256: "7".repeat(64),
+            accepted: true,
+        };
+        assert!(Request::parse(&serde_json::to_vec(&start).unwrap()).is_ok());
+        assert!(Request::parse(&serde_json::to_vec(&output).unwrap()).is_ok());
+        assert!(Request::parse(&serde_json::to_vec(&validate_output).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn unknown_photo_workloads_and_targets_fail_closed() {
+        let mut start = Request::Start {
+            mode: PHOTO_MODE.into(),
+            version: PHOTO_PROTOCOL_VERSION,
+            instance: "0".repeat(32),
+            export_id: "export-1".into(),
+            incarnation: "1".repeat(32),
+            sequence: 1,
+            policy: "2".repeat(64),
+            bundle: "3".repeat(64),
+            workload: crate::protocol::PHOTO_WORKLOAD_FILM.into(),
+            source: Source {
+                kind: "raw".into(),
+                profile_id: "canon-r5".into(),
+                size: 4,
+                sha256: "4".repeat(64),
+            },
+            recipe: Recipe {
+                exposure_milli_ev: 1000,
+                white_balance_mode: "as-shot".into(),
+            },
+            recipe_digest: "5".repeat(64),
+            manifest_sha256: "6".repeat(64),
+        };
+        for workload in ["", "film", "film-tiff", "development-jpeg", "probe-success"] {
+            if let Request::Start {
+                workload: field, ..
+            } = &mut start
+            {
+                *field = workload.into();
+            }
+            assert_eq!(
+                start.validate(),
+                Err(ErrorCode::InvalidRequest),
+                "workload {workload:?} must be refused"
+            );
+        }
+        let mut output = Request::Output {
+            mode: PHOTO_MODE.into(),
+            version: PHOTO_PROTOCOL_VERSION,
+            instance: "0".repeat(32),
+            export_id: "export-1".into(),
+            incarnation: "1".repeat(32),
+            sequence: 1,
+            target: PHOTO_WORKLOAD.into(),
+        };
+        for target in ["", "film", "film-tiff", "development-jpeg", "probe-success"] {
+            if let Request::Output { target: field, .. } = &mut output {
+                *field = target.into();
+            }
+            assert_eq!(
+                output.validate(),
+                Err(ErrorCode::InvalidRequest),
+                "target {target:?} must be refused"
+            );
+        }
+        let mut validate_output = Request::ValidateOutput {
+            mode: PHOTO_MODE.into(),
+            version: PHOTO_PROTOCOL_VERSION,
+            instance: "0".repeat(32),
+            export_id: "export-1".into(),
+            incarnation: "1".repeat(32),
+            sequence: 1,
+            target: PHOTO_WORKLOAD.into(),
+            size: 10,
+            sha256: "7".repeat(64),
+            accepted: true,
+        };
+        for target in ["", "film", "film-tiff", "development-jpeg"] {
+            if let Request::ValidateOutput { target: field, .. } = &mut validate_output {
+                *field = target.into();
+            }
+            assert_eq!(
+                validate_output.validate(),
+                Err(ErrorCode::InvalidRequest),
+                "target {target:?} must be refused"
+            );
+        }
     }
 
     #[test]

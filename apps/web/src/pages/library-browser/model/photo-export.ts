@@ -23,6 +23,7 @@ export type ExportArtifact = Readonly<{
 
 export type ExportInspection = Readonly<{
   exportId: string;
+  target: "development-tiff" | "film-jpeg";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
   failureReason: string;
   artifact: ExportArtifact | null;
@@ -101,8 +102,12 @@ export const parseExportInspection = (
       expiresAt,
     });
   }
+  const target =
+    readString(value, "target") ?? artifact?.target ?? "development-tiff";
+  if (target !== "development-tiff" && target !== "film-jpeg") return undefined;
   return Object.freeze({
     exportId,
+    target,
     state: state as ExportInspection["state"],
     failureReason: readString(value, "failureReason") ?? "",
     artifact,
@@ -136,17 +141,17 @@ export const describeExportState = (
   inspection: ExportInspection,
   byteCount: (bytes: number) => string,
 ): string => {
+  const label =
+    inspection.target === "film-jpeg" ? "Finished JPEG" : "Development TIFF";
   if (inspection.state === "queued")
-    return "Development TIFF queued; processing has not started.";
-  if (inspection.state === "running")
-    return "The Development TIFF is being processed.";
+    return `${label} queued; processing has not started.`;
+  if (inspection.state === "running") return `The ${label} is being processed.`;
   if (inspection.state === "succeeded")
     return inspection.artifact
-      ? `Development TIFF ready: ${byteCount(inspection.artifact.byteLength)}, ${inspection.artifact.width}×${inspection.artifact.height}, downloadable until ${inspection.artifact.expiresAt}.`
-      : "The Development TIFF succeeded without a retained artifact.";
-  if (inspection.state === "cancelled")
-    return "The Development TIFF was cancelled.";
+      ? `${label} ready: ${byteCount(inspection.artifact.byteLength)}, ${inspection.artifact.width}×${inspection.artifact.height}, downloadable until ${inspection.artifact.expiresAt}.`
+      : `The ${label} succeeded without a retained artifact.`;
+  if (inspection.state === "cancelled") return `The ${label} was cancelled.`;
   return inspection.failureReason
-    ? `The Development TIFF failed: ${inspection.failureReason}`
-    : "The Development TIFF failed.";
+    ? `The ${label} failed: ${inspection.failureReason}`
+    : `The ${label} failed.`;
 };

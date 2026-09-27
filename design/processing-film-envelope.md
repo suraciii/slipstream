@@ -140,6 +140,12 @@ value used for fitting. The receipt peak and its six hierarchical
 and local OOM fields (`oom`, `oom_kill`, `oom_group_kill`) must equal the parsed
 snapshot values, and all six OOM fields must be zero.
 
+The transient attempt slice enables systemd `IOAccounting` so its `io.stat`
+source is available while the slice exists. The launcher retains an open
+directory descriptor through the terminal read; unit teardown cannot redirect
+the read to a different cgroup. Neither measure makes missing I/O counters
+acceptable as a complete campaign I/O diagnostic.
+
 The same snapshot may retain the exact raw `io.stat` text from that exact
 verified attempt cgroup, inside the existing post-exit, unpopulated and
 identity-checked read. It shares the per-file cap and uses only the aggregate
@@ -211,12 +217,25 @@ campaign row:
   diagnostic unavailable. Parent I/O counters cannot stand in for attempt
   counters unless contemporaneous evidence proves exclusive membership of the
   attempt in that parent for the entire observation interval.
+
+The independent observer parser requires each `io.stat` line to contain a
+decimal `major:minor` device and at least one unique decimal `key=value`
+counter. Device-only or otherwise malformed lines are unavailable diagnostics.
+
 - `observer_window_eligible` requires the predeclared observer window to have
   complete, attributable Web/Album and host/ancestor observations, with no
   unresolved identity or ordering contradiction that affects memory or
   headroom evidence. Missing any required observation makes the window
   ineligible. It does not require terminal I/O counters when those counters are
   unavailable independently of the complete memory observations.
+
+Provisional exit-time `ENOENT` reads from the same attempt may be retained as
+resolved gaps when the exact terminal snapshot supplies valid `io_stat_raw` and
+the terminal identity and cleanup proof match. Such gaps remain visible with
+`terminal_cleanup_proof=true`; they do not make the I/O diagnostic ineligible.
+Without a valid terminal I/O snapshot, the same resolved gap remains
+`unavailable-after-exit` and keeps the I/O and composite row flags false.
+
 - `campaign_row_eligible` is true only when memory-fit, I/O-diagnostic and
   observer-window eligibility all pass. It represents a complete campaign row,
   not the input gate for the memory fitter.

@@ -246,6 +246,114 @@ async fn metadata_save_serializes_with_removal_and_rejects_removed_evidence() {
     fs::remove_dir_all(base).unwrap();
 }
 
+#[tokio::test]
+async fn cancelled_external_metadata_retains_admission_until_supervisor_finishes() {
+    use crate::metadata_wire::MetadataErrorCode;
+    use std::os::unix::net::UnixListener;
+
+    for saving in [false, true] {
+        let (base, mut config) = prepare_fixture();
+        jpeg_fixture(&config.library_root.join("one.JPG"), 8, 4, [1, 2, 3]);
+        let socket = base.join("supervisor.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        config.metadata_supervisor = Some(socket);
+        let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
+        let id = browse_photo_ids(&application, BrowseSourceRequest::Library).await[0].clone();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while application.library.fingerprint_counts().enrolled != 1 {
+            assert!(Instant::now() < deadline, "enrollment did not settle");
+            tokio::task::yield_now().await;
+        }
+        let read = crate::metadata_service::read_metadata(
+            &application.library,
+            &config.library_root,
+            "cancel-test",
+            None,
+            &id,
+        )
+        .await
+        .unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "evidence": read.evidence,
+            "changes": {"xmp:Label": {"op":"set", "value":"cancelled"}}
+        }))
+        .unwrap();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let supervisor = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut bytes = Vec::new();
+            let mut byte = [0];
+            loop {
+                stream.read_exact(&mut byte).unwrap();
+                bytes.push(byte[0]);
+                if byte[0] == b'\n' {
+                    break;
+                }
+            }
+            let message: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(message["operation"], "status");
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            stream
+                .write_all(b"{\"available\":false,\"reason\":\"maintenance\"}\n")
+                .unwrap();
+        });
+        let occupied = application.library.try_admit_native_work().unwrap();
+        let worker = Arc::clone(&application);
+        let worker_id = id.clone();
+        let pending = tokio::spawn(async move {
+            if saving {
+                crate::metadata_service::save_metadata(
+                    &worker.library,
+                    &config.library_root,
+                    "cancel-test",
+                    config.metadata_supervisor.as_deref(),
+                    &worker_id,
+                    request,
+                )
+                .await
+                .map(|_| ())
+            } else {
+                worker.external_metadata_read(&worker_id).await.map(|_| ())
+            }
+        });
+        entered_rx.await.unwrap();
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        let refusal = tokio::time::timeout(
+            Duration::from_millis(100),
+            application.external_metadata_read(&id),
+        )
+        .await;
+        release_tx.send(()).unwrap();
+        supervisor.join().unwrap();
+        assert_eq!(
+            refusal
+                .expect("cancelled work must retain capacity")
+                .unwrap_err()
+                .code,
+            MetadataErrorCode::ResourceLimit
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(released) = application.library.try_admit_native_work() {
+                drop(released);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "completed work retained admission"
+            );
+            tokio::task::yield_now().await;
+        }
+        drop(occupied);
+        application.shutdown().await.unwrap();
+        fs::remove_dir_all(base).unwrap();
+    }
+}
+
 /// The protocol success fixtures contain one RAW/JPEG pair and one JPEG-only
 /// Photo. Their capture times make the descending view visibly reorder the
 /// same two identities, while the pair proves RAW filename and Original
@@ -14448,6 +14556,8 @@ fn retained_result(
         source_revision,
         bundle_sha256: "c".repeat(64),
         path,
+        width: 1,
+        height: 1,
     }
 }
 
@@ -14617,6 +14727,30 @@ async fn edit_preview_streams_the_current_rendition_with_the_closed_metadata() {
     let _ = fs::remove_dir_all(base);
 }
 
+#[tokio::test]
+async fn edit_preview_admits_the_film_stage() {
+    let (base, config, application, photo_id, _, _) =
+        approved_photo_with_recipe_and_result("film-preview", 0.25).await;
+    let gate = scripted_gate(std::collections::VecDeque::from([
+        crate::edit_preview::RenderAdmission::Queued,
+    ]));
+    let gate_dyn: Arc<dyn crate::edit_preview::PreviewRenderGate> = gate;
+    let (router, _preview_owner) = preview_router(
+        &application,
+        config.web_root(),
+        scripted_retention(None),
+        gate_dyn,
+    );
+    let response = get_preview_response(&router, &preview_uri(&photo_id, "film")).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        response_json(response).await,
+        serde_json::json!({"state": "queued", "stage": "film"})
+    );
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
 /// Every closed refusal of the route carries its exact status and code, and
 /// admitted work reports the 202 queued and running states.
 #[tokio::test]
@@ -14648,7 +14782,7 @@ async fn edit_preview_reports_refusals_and_admissions_with_exact_statuses() {
     }
 
     // 422 invalid_settings: a stage outside the closed set.
-    for stage in ["film", "grain"] {
+    for stage in ["grain"] {
         let response = get_preview_response(&router, &preview_uri(&photo_id, stage)).await;
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = response_json(response).await;
