@@ -901,6 +901,7 @@ fn real_service_fixture() -> (PathBuf, Config) {
         web_root: Some(web),
         processing: None,
         export_retained_output_bytes: None,
+        metadata_supervisor: None,
     };
     (base, config)
 }
