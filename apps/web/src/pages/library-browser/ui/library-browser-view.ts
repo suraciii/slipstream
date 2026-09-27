@@ -13,6 +13,7 @@ import {
   type MembershipPanelElements,
 } from "./membership-panel.js";
 import { createViewOptions, type ViewOptionsElements } from "./view-options.js";
+import { createRatingControls } from "./rating-controls.js";
 import { createAlbumForm } from "./album-form.js";
 import {
   addressFor,
@@ -82,8 +83,6 @@ const SWIPE_COMMIT_PIXELS = 72;
 const SWIPE_COMMIT_VELOCITY = 0.5;
 const RATING_WHEEL_HOLD_MS = 450;
 const RATING_WHEEL_MOVE_PIXELS = 12;
-const RATING_WHEEL_RADIUS = 78;
-const RATING_WHEEL_OPTION_COUNT = 6;
 
 type SourceReference =
   | Readonly<{ kind: "library" }>
@@ -1605,11 +1604,6 @@ export function createLibraryBrowserView(
     dialog: sourceDialog,
     modal: sourcesAreModal,
   });
-  surfaces.register("rating", {
-    dialog: ratingDialog,
-    modal: () => true,
-    onOpen: syncSecondarySurface,
-  });
   surfaces.register("photo-tools", {
     dialog: photoToolsDialog,
     modal: () => true,
@@ -1718,40 +1712,6 @@ export function createLibraryBrowserView(
     gridThumbnailTarget,
   });
 
-  for (let value = 0; value <= 5; value += 1) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.dataset.ratingValue = String(value);
-    button.setAttribute(
-      "aria-label",
-      value === 0
-        ? "Clear Rating, 0 stars"
-        : `Rate ${value} ${value === 1 ? "star" : "stars"}`,
-    );
-    button.setAttribute("aria-pressed", String(value === 0));
-    button.textContent = value === 0 ? "0" : `${value}★`;
-    ratings.append(button);
-
-    const wheelButton = document.createElement("button");
-    wheelButton.type = "button";
-    wheelButton.className = "rating-wheel-option";
-    wheelButton.dataset.ratingWheelValue = String(value);
-    wheelButton.style.setProperty(
-      "--wheel-angle",
-      `${value * (360 / RATING_WHEEL_OPTION_COUNT)}deg`,
-    );
-    wheelButton.tabIndex = -1;
-    wheelButton.setAttribute(
-      "aria-label",
-      value === 0
-        ? "Clear Rating, 0 stars"
-        : `${value} ${value === 1 ? "star" : "stars"}`,
-    );
-    wheelButton.setAttribute("aria-pressed", "false");
-    wheelButton.textContent = value === 0 ? "0" : `${value}★`;
-    ratingWheelOptions.append(wheelButton);
-  }
-
   let photoStatusSurface: object = {};
   let sourceModel: SourceListViewModel | undefined;
   let gridKeyboardIndex: number | undefined;
@@ -1849,12 +1809,7 @@ export function createLibraryBrowserView(
   let currentSelection: ViewSelectionState = "undecided";
   let gridInteractionEnabled = false;
   let decisionInteractionEnabled = false;
-  let currentRating = 0;
   let ratingWheelHoldTimer: number | undefined;
-  let ratingWheelOpen = false;
-  let ratingWheelCandidate: number | undefined;
-  let ratingWheelCenter: Readonly<{ x: number; y: number }> | undefined;
-  let ratingWheelRadius = RATING_WHEEL_RADIUS;
   let pointer:
     | {
         id: number;
@@ -2262,22 +2217,11 @@ export function createLibraryBrowserView(
   const openRatingChoices = () => {
     if (!alive || photoView.hidden) return;
     resetGestures();
-    surfaces.open(
-      "rating",
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : undefined,
-    );
-    syncSecondarySurface();
-    const current = ratings.querySelector<HTMLButtonElement>(
-      `[data-rating-value="${currentRating}"]`,
-    );
-    (current ?? ratings.querySelector<HTMLButtonElement>("button"))?.focus();
+    ratingControls.openChoices();
   };
   const closeRatingChoices = (restoreFocus = true) => {
     if (!alive) return;
-    surfaces.close("rating", restoreFocus);
-    syncSecondarySurface();
+    ratingControls.closeChoices(restoreFocus);
   };
   /// The disclosure's expanded state always mirrors the surface itself, so a
   /// native close request and an explicit Close leave it in the same state.
@@ -2367,102 +2311,6 @@ export function createLibraryBrowserView(
   const effectiveViewportHeight = () =>
     Math.max(360, Math.min(gridViewport.clientHeight, window.innerHeight));
 
-  const ratingLabel = (value: number) =>
-    value === 0 ? "Clear Rating" : `${value} ${value === 1 ? "star" : "stars"}`;
-  const syncRatingWheelOptions = () => {
-    for (const button of Array.from(
-      ratingWheelOptions.querySelectorAll<HTMLButtonElement>(
-        "[data-rating-wheel-value]",
-      ),
-    )) {
-      const value = Number(button.dataset.ratingWheelValue);
-      button.dataset.current = String(value === currentRating);
-      button.setAttribute(
-        "aria-current",
-        value === currentRating ? "true" : "false",
-      );
-      button.setAttribute(
-        "aria-pressed",
-        String(value === ratingWheelCandidate),
-      );
-    }
-  };
-  const setRatingWheelCandidate = (value: number | undefined) => {
-    ratingWheelCandidate = value;
-    if (value === undefined) {
-      ratingWheelStatus.textContent = `Current Rating: ${ratingLabel(currentRating)}. Move across a Rating and release to save.`;
-      ratingWheel.dataset.ratingWheelCandidate = "";
-    } else {
-      ratingWheelStatus.textContent = `${ratingLabel(value)}. Release to save.`;
-      ratingWheel.dataset.ratingWheelCandidate = String(value);
-    }
-    syncRatingWheelOptions();
-  };
-  const closeRatingWheel = () => {
-    ratingWheelOpen = false;
-    ratingWheelCandidate = undefined;
-    ratingWheelCenter = undefined;
-    ratingWheel.hidden = true;
-    delete ratingWheel.dataset.ratingWheelCandidate;
-    preview.classList.remove("rating-wheel-open");
-    preview.style.removeProperty("touch-action");
-    ratingWheelStatus.textContent = "";
-    syncRatingWheelOptions();
-  };
-  const openRatingWheel = (clientX: number, clientY: number) => {
-    const bounds = preview.getBoundingClientRect();
-    const radius = Math.max(
-      46,
-      Math.min(
-        RATING_WHEEL_RADIUS,
-        (bounds.width - 96) / 2,
-        (bounds.height - 96) / 2,
-      ),
-    );
-    const extent = radius + 28;
-    const centerX = clamp(
-      clientX - bounds.left,
-      Math.min(extent, bounds.width / 2),
-      Math.max(bounds.width / 2, bounds.width - extent),
-    );
-    const centerY = clamp(
-      clientY - bounds.top,
-      Math.min(extent, bounds.height / 2),
-      Math.max(bounds.height / 2, bounds.height - extent),
-    );
-    ratingWheelRadius = radius;
-    ratingWheelCenter = { x: centerX, y: centerY };
-    ratingWheel.style.left = `${centerX}px`;
-    ratingWheel.style.top = `${centerY}px`;
-    ratingWheel.style.setProperty("--rating-wheel-radius", `${radius}px`);
-    ratingWheelOpen = true;
-    ratingWheel.hidden = false;
-    ratingWheelInstructions.textContent =
-      "Rating Wheel open. Move across a Rating and release to save.";
-    preview.classList.add("rating-wheel-open");
-    preview.style.touchAction = "none";
-    setRatingWheelCandidate(undefined);
-  };
-  const updateRatingWheel = (clientX: number, clientY: number) => {
-    if (!ratingWheelOpen || !ratingWheelCenter) return;
-    const dx =
-      clientX - (preview.getBoundingClientRect().left + ratingWheelCenter.x);
-    const dy =
-      clientY - (preview.getBoundingClientRect().top + ratingWheelCenter.y);
-    const distance = Math.hypot(dx, dy);
-    const outer = ratingWheelRadius + 56;
-    if (distance < 30 || distance > outer) {
-      setRatingWheelCandidate(undefined);
-      return;
-    }
-    const degrees = (Math.atan2(dy, dx) * (180 / Math.PI) + 90 + 360) % 360;
-    const value =
-      Math.floor(
-        (degrees + 180 / RATING_WHEEL_OPTION_COUNT) /
-          (360 / RATING_WHEEL_OPTION_COUNT),
-      ) % RATING_WHEEL_OPTION_COUNT;
-    setRatingWheelCandidate(value);
-  };
   const cancelRatingHold = () => {
     if (ratingWheelHoldTimer !== undefined) {
       window.clearTimeout(ratingWheelHoldTimer);
@@ -2481,7 +2329,7 @@ export function createLibraryBrowserView(
   };
   const resetGestures = () => {
     cancelRatingHold();
-    closeRatingWheel();
+    ratingControls.closeWheel();
     for (const id of Array.from(activePointers.keys()))
       if (preview.hasPointerCapture(id)) preview.releasePointerCapture(id);
     activePointers.clear();
@@ -2489,6 +2337,23 @@ export function createLibraryBrowserView(
     preview.style.removeProperty("touch-action");
     clearPointer();
   };
+  const ratingControls = createRatingControls({
+    elements: {
+      ratingDialog,
+      ratingChoicesClose,
+      ratings,
+      ratingWheel,
+      ratingWheelInstructions,
+      ratingWheelStatus,
+      ratingWheelOptions,
+      preview,
+      rating,
+      dockRating,
+    },
+    surfaces,
+    send,
+    onSurfaceChange: syncSecondarySurface,
+  });
   const viewOptionsController = createViewOptions({
     elements: {
       viewOptionsDialog: required<HTMLDialogElement>(
@@ -2742,7 +2607,8 @@ export function createLibraryBrowserView(
     zoomAt(base * factor, { x: event.clientX, y: event.clientY });
   };
   const onPreviewContextMenu = (event: MouseEvent) => {
-    if (pointer?.ratingPending || ratingWheelOpen) event.preventDefault();
+    if (pointer?.ratingPending || ratingControls.isWheelOpen())
+      event.preventDefault();
   };
 
   /// The address one source destination resolves to. A source selection
@@ -3817,25 +3683,7 @@ export function createLibraryBrowserView(
     photoFilename.title = model.originalFilename ?? "";
     currentSelection = model.selectionState ?? "undecided";
     selection.textContent = selectionLabel(currentSelection);
-    const value = model.rating ?? 0;
-    currentRating = value;
-    rating.textContent =
-      value === 0 ? "No rating" : `${value} ${value === 1 ? "star" : "stars"}`;
-    dockRating.textContent = value === 0 ? "Rating" : `Rating ${value}★`;
-    dockRating.setAttribute(
-      "aria-label",
-      value === 0
-        ? "Rating, no Rating; open Rating controls"
-        : `Rating ${value} stars; open Rating controls`,
-    );
-    syncRatingWheelOptions();
-    for (const button of Array.from(
-      ratings.querySelectorAll<HTMLButtonElement>("[data-rating-value]"),
-    ))
-      button.setAttribute(
-        "aria-pressed",
-        String(Number(button.dataset.ratingValue) === value),
-      );
+    ratingControls.render(model.rating ?? 0);
   };
   const renderPhotoMetadata = (model: PhotoMetadataViewModel = {}) => {
     if (!alive) return;
@@ -3953,7 +3801,7 @@ export function createLibraryBrowserView(
     if (activePointers.size === 2) {
       event.preventDefault();
       cancelRatingHold();
-      closeRatingWheel();
+      ratingControls.closeWheel();
       beginPinch();
       return;
     }
@@ -4011,8 +3859,8 @@ export function createLibraryBrowserView(
         stage.style.transform = "";
         selectFeedback.classList.remove("pending");
         rejectFeedback.classList.remove("pending");
-        openRatingWheel(active.lastX, active.lastY);
-        updateRatingWheel(active.lastX, active.lastY);
+        ratingControls.openWheel(active.lastX, active.lastY);
+        ratingControls.updateWheel(active.lastX, active.lastY);
       }, RATING_WHEEL_HOLD_MS);
     }
   };
@@ -4035,7 +3883,7 @@ export function createLibraryBrowserView(
     pointer.lastX = event.clientX;
     pointer.lastY = event.clientY;
     if (pointer.ratingWheel) {
-      updateRatingWheel(event.clientX, event.clientY);
+      ratingControls.updateWheel(event.clientX, event.clientY);
       return;
     }
     if (pointer.pan || zoomManual) {
@@ -4075,9 +3923,9 @@ export function createLibraryBrowserView(
     if (!pointer || pointer.id !== event.pointerId) return;
     const active = pointer;
     const wheelCandidate = active.ratingWheel
-      ? ratingWheelCandidate
+      ? ratingControls.candidate()
       : undefined;
-    if (active.ratingWheel) closeRatingWheel();
+    if (active.ratingWheel) ratingControls.closeWheel();
     clearPointer();
     if (active.ratingWheel) {
       if (
@@ -4287,7 +4135,6 @@ export function createLibraryBrowserView(
     syncFilmstripHost();
     syncSecondarySurface();
   });
-  ratingDialog.addEventListener("close", syncSecondarySurface);
   shortViewport.addEventListener("change", onShortViewportChange);
   sourceToggle.addEventListener("click", () => openSources());
   photoSourceToggle.addEventListener("click", () => openSources());
@@ -4322,7 +4169,6 @@ export function createLibraryBrowserView(
   dockNext.addEventListener("click", () => send({ kind: "next" }));
   dockRating.addEventListener("click", () => openRatingChoices());
   dockMore.addEventListener("click", () => openPhotoTools("tools"));
-  ratingChoicesClose.addEventListener("click", () => closeRatingChoices());
   photoToolsClose.addEventListener("click", () => closePhotoTools());
   photoToolsClear.addEventListener("click", () =>
     send({
@@ -4506,18 +4352,6 @@ export function createLibraryBrowserView(
       advance: true,
     }),
   );
-  ratings.addEventListener("click", (event) => {
-    const button = (event.target as HTMLElement).closest<HTMLButtonElement>(
-      "[data-rating-value]",
-    );
-    if (button)
-      send({
-        kind: "photo-mutation",
-        field: "rating",
-        value: Number(button.dataset.ratingValue),
-        advance: false,
-      });
-  });
   folderAlbumSelect.addEventListener("change", () => {
     if (!alive) return;
     folderAlbumSelection = folderAlbumSelect.value;
@@ -4697,17 +4531,15 @@ export function createLibraryBrowserView(
       decisionInteractionEnabled = model.decisionEnabled;
       if (
         !model.decisionEnabled &&
-        (ratingWheelOpen || pointer?.ratingPending || pointer?.ratingWheel)
+        (ratingControls.isWheelOpen() ||
+          pointer?.ratingPending ||
+          pointer?.ratingWheel)
       )
         resetGestures();
-      for (const button of [
-        dockSelect,
-        dockReject,
-        ...Array.from(ratings.querySelectorAll<HTMLButtonElement>("button")),
-      ])
-        button.disabled = !model.decisionEnabled;
+      ratingControls.setDecisionEnabled(model.decisionEnabled);
+      dockSelect.disabled = !model.decisionEnabled;
+      dockReject.disabled = !model.decisionEnabled;
       photoToolsClear.disabled = !model.clearEnabled;
-      dockRating.disabled = !model.decisionEnabled;
       back.disabled = !model.backEnabled;
       refresh.disabled = !model.refreshEnabled;
       retry.disabled = !model.recoveryEnabled;
@@ -5011,6 +4843,7 @@ export function createLibraryBrowserView(
       recoveryPanelController.dispose();
       membershipPanelController.dispose();
       albumFormController.dispose();
+      ratingControls.dispose();
       viewOptionsController.dispose();
       stageObserver.disconnect();
       clearFilmstripCells();
