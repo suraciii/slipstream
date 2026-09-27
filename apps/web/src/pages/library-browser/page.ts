@@ -19,6 +19,7 @@ import {
   withProcessingCapability,
   type ProcessingCapability,
 } from "./api/editor.js";
+import { createMetadataPanel } from "./ui/external-metadata-panel.js";
 
 import {
   applyRelocations,
@@ -312,6 +313,17 @@ function mountPrivateLibraryBrowser(
       void sourceGrid.loadThumbnail(binding.photoId, binding.target);
     },
     (binding) => sourceGrid.releaseThumbnail(binding.photoId, binding.target),
+  );
+  const metadataHost = root.querySelector<HTMLElement>(
+    "[data-external-metadata]",
+  );
+  if (!metadataHost) throw new Error("External Metadata surface is missing.");
+  const metadataPanel = createMetadataPanel(
+    metadataHost,
+    fetcher,
+    (message) => {
+      view.presentSummary(message);
+    },
   );
   const photoOwner = createPhotoOwner(
     fetcher,
@@ -2906,6 +2918,7 @@ function mountPrivateLibraryBrowser(
     cancelScheduledGridRender();
     photoMetadataAbort?.abort();
     photoMetadataAbort = undefined;
+    metadataPanel.show(undefined);
     retryableTraversal = undefined;
     pendingDestination = {
       source: requested.kind,
@@ -3950,6 +3963,7 @@ function mountPrivateLibraryBrowser(
       limitedDetail: photo?.preview.limitedDetail,
       previewUrl: photo?.preview.url,
     });
+    metadataPanel.show(photo?.id);
     void loadPhotoMetadata(authority, photo?.id);
     void loadPhotoAlbums(authority, photo?.id);
     if (image)
@@ -4032,6 +4046,7 @@ function mountPrivateLibraryBrowser(
   const leavePhotoView = () => {
     photoMetadataAbort?.abort();
     photoMetadataAbort = undefined;
+    metadataPanel.show(undefined);
     leaveEditor();
     const authority = photoOwner.leave();
     const photoTransition = recoveryGate.beginTransition(
@@ -6987,6 +7002,7 @@ function mountPrivateLibraryBrowser(
     if (!applicationAlive) return;
     applicationAlive = false;
     photoMetadataAbort?.abort();
+    metadataPanel.dispose();
     membershipAbort?.abort();
     removedAbort?.abort();
     removal.dispose();

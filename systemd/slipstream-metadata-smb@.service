@@ -1,0 +1,19 @@
+[Unit]
+Description=Slipstream isolated metadata Samba instance (%i)
+After=network.target
+ConditionPathExists=/etc/slipstream-metadata/%i/smb.conf
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/sbin/smbd --foreground --no-process-group --configfile=/etc/slipstream-metadata/%i/smb.conf
+KillMode=control-group
+TimeoutStopSec=10s
+SendSIGKILL=yes
+Restart=on-failure
+RestartSec=1s
+UMask=0007
+
+[Install]
+WantedBy=multi-user.target

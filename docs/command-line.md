@@ -43,6 +43,7 @@ The CLI must let its caller:
 - obtain current facts and Album membership for an identified Photo;
 - download one Photo's thumbnail or review Preview;
 - change Selection State or Rating for identified Photos;
+- [read and save standard metadata](library-management-metadata.md) with explicit provenance and checked Sidecar changes;
 - create, rename, and delete Albums and add, remove, or order their members;
 - remove explicitly identified eligible Photos into Trash and Restore observed removals;
 - inspect Trash, review and separately confirm permanent deletion, and recover operation outcomes;

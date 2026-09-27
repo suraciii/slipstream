@@ -11,7 +11,7 @@ pub(super) fn preflight_schema(
     connection: &Connection,
     canonical_root: &str,
 ) -> Result<(), PersistenceError> {
-    preflight_schema_for_max_version(connection, canonical_root, 10)
+    preflight_schema_for_max_version(connection, canonical_root, 11)
 }
 
 pub(super) fn preflight_schema_for_max_version(
@@ -49,6 +49,8 @@ pub(super) fn preflight_schema_for_max_version(
             .map_err(|_| PersistenceError::UnsupportedSchema),
         10 => validate_canonical_schema(connection, SchemaVersion::V10)
             .map_err(|_| PersistenceError::UnsupportedSchema),
+        11 => validate_canonical_schema(connection, SchemaVersion::V11)
+            .map_err(|_| PersistenceError::UnsupportedSchema),
         _ => unreachable!(),
     }
 }
@@ -85,7 +87,7 @@ pub(super) fn startup_schema(
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| PersistenceError::Storage)?;
-    if version > 10 {
+    if version > 11 {
         return Err(PersistenceError::NewerSchema);
     }
     validate_root_binding(connection, canonical_root)?;
@@ -138,6 +140,8 @@ pub(super) fn startup_schema(
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
         10 => validate_canonical_schema(&transaction, SchemaVersion::V10)
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
+        11 => validate_canonical_schema(&transaction, SchemaVersion::V11)
+            .map_err(|_| PersistenceError::UnsupportedSchema)?,
         _ => unreachable!(),
     }
     if version < 6 {
@@ -154,6 +158,9 @@ pub(super) fn startup_schema(
     }
     if version < 10 {
         migrate_v9(&transaction)?;
+    }
+    if version < 11 {
+        migrate_v10(&transaction)?;
     }
     let stored: Option<String> = transaction
         .query_row(
@@ -172,7 +179,7 @@ pub(super) fn startup_schema(
             .map_err(|_| PersistenceError::Storage)?;
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V10)
+    validate_canonical_schema(&transaction, SchemaVersion::V11)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -713,6 +720,43 @@ fn migrate_v9(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
         )
         .map_err(|_| PersistenceError::Storage)?;
     validate_canonical_schema(transaction, SchemaVersion::V10)
+        .map_err(|_| PersistenceError::UnsupportedSchema)
+}
+
+/// Issue #276: metadata sidecar observations follow the Photo's association
+/// generation, and a retired association keeps its observed facts until the
+/// sidecar returns. Add the generation counter and the retained sidecar
+/// records without changing any earlier table shape.
+fn migrate_v10(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
+    validate_canonical_schema(transaction, SchemaVersion::V10)
+        .map_err(|_| PersistenceError::UnsupportedSchema)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE photos ADD COLUMN association_generation INTEGER NOT NULL DEFAULT 1
+               CHECK(association_generation > 0);
+             CREATE TABLE sidecar_associations(
+               photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE RESTRICT,
+               sidecar_path TEXT NOT NULL UNIQUE,
+               observed_size INTEGER CHECK(observed_size IS NULL OR observed_size >= 0),
+               observed_mtime_ms REAL CHECK(observed_mtime_ms IS NULL OR observed_mtime_ms >= 0),
+               observed_digest TEXT CHECK(observed_digest IS NULL OR length(observed_digest) = 64),
+               CHECK((observed_size IS NULL) = (observed_mtime_ms IS NULL))
+             );
+             CREATE TABLE retained_sidecar_orphans(
+               sidecar_path TEXT PRIMARY KEY,
+               retired_photo_id TEXT NOT NULL,
+               retired_original_path TEXT NOT NULL,
+               original_kind TEXT NOT NULL CHECK(original_kind IN ('raw','jpeg')),
+               retired_generation INTEGER NOT NULL CHECK(retired_generation > 0),
+               observed_size INTEGER CHECK(observed_size IS NULL OR observed_size >= 0),
+               observed_mtime_ms REAL CHECK(observed_mtime_ms IS NULL OR observed_mtime_ms >= 0),
+               observed_digest TEXT CHECK(observed_digest IS NULL OR length(observed_digest) = 64),
+               CHECK((observed_size IS NULL) = (observed_mtime_ms IS NULL))
+             );
+             PRAGMA user_version = 11;",
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    validate_canonical_schema(transaction, SchemaVersion::V11)
         .map_err(|_| PersistenceError::UnsupportedSchema)
 }
 

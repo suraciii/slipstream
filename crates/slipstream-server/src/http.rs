@@ -232,6 +232,10 @@ pub(crate) fn create_router_with_preview(
         .route("/api/photos/{id}/preview", get(get_preview))
         .route("/api/photos/{id}/thumbnail", get(get_thumbnail))
         .route("/api/photos/{id}/metadata", get(get_photo_metadata))
+        .route(
+            "/api/photos/{id}/external-metadata",
+            get(get_external_metadata).post(post_external_metadata),
+        )
         .route("/api/photos/{id}/albums", get(get_photo_albums))
         .route(
             "/api/photos/{id}/exports",
@@ -3097,6 +3101,78 @@ pub(crate) async fn get_photo_metadata(
         Ok(metadata) => json_response(StatusCode::OK, &PhotoMetadataWire::from(metadata)),
         Err(error) => ApiError::from(error).into_response(),
     }
+}
+
+pub(crate) async fn get_external_metadata(
+    State(state): State<HttpState>,
+    axum::extract::Path(photo_id): axum::extract::Path<String>,
+) -> Response<Body> {
+    if !valid_id(&photo_id) {
+        return metadata_invalid_input("Invalid Photo");
+    }
+    match state.application.external_metadata_read(&photo_id).await {
+        Ok(result) => json_response(StatusCode::OK, &result),
+        Err(failure) => metadata_error_response(failure),
+    }
+}
+
+pub(crate) async fn post_external_metadata(
+    State(state): State<HttpState>,
+    axum::extract::Path(photo_id): axum::extract::Path<String>,
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+) -> Response<Body> {
+    if !valid_id(&photo_id) {
+        return metadata_invalid_input("Invalid Photo");
+    }
+    let body = match body {
+        Ok(body) => body,
+        Err(failure) if failure.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            return metadata_body_limit();
+        }
+        Err(_) => return metadata_invalid_input("Save Metadata request could not be read"),
+    };
+    if body.len() > 2 * 1024 * 1024 {
+        return metadata_body_limit();
+    }
+    let request: crate::metadata_wire::MetadataSaveRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(failure) => {
+            return metadata_invalid_input(format!("Invalid Save Metadata request: {failure}"));
+        }
+    };
+    match state
+        .application
+        .external_metadata_save(&photo_id, request)
+        .await
+    {
+        Ok(result) => json_response(StatusCode::OK, &result),
+        Err(failure) => metadata_error_response(failure),
+    }
+}
+
+fn metadata_body_limit() -> Response<Body> {
+    metadata_error_response(crate::metadata_wire::MetadataError {
+        code: crate::metadata_wire::MetadataErrorCode::ResourceLimit,
+        message: "Save Metadata request exceeds the 2 MiB body limit".into(),
+        details: serde_json::Value::Null,
+    })
+}
+
+fn metadata_invalid_input(message: impl Into<String>) -> Response<Body> {
+    metadata_error_response(crate::metadata_wire::MetadataError {
+        code: crate::metadata_wire::MetadataErrorCode::InvalidInput,
+        message: message.into(),
+        details: serde_json::Value::Null,
+    })
+}
+
+fn metadata_error_response(failure: crate::metadata_wire::MetadataError) -> Response<Body> {
+    let status = StatusCode::from_u16(crate::metadata_wire::http_status(failure.code))
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    json_response(
+        status,
+        &crate::metadata_wire::MetadataErrorEnvelope { error: failure },
+    )
 }
 
 pub(crate) async fn get_photo_albums(

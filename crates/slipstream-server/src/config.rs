@@ -26,6 +26,9 @@ pub struct Config {
     /// service refuses a new Export before acceptance when the complete
     /// artifact cannot be reserved inside it.
     pub export_retained_output_bytes: Option<u64>,
+    /// Unix socket of the exclusive metadata save supervisor. When absent,
+    /// the deployment supports Read Metadata and refuses Save as unavailable.
+    pub metadata_supervisor: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -158,6 +161,16 @@ impl Config {
                 Some(bytes)
             }
         };
+        let metadata_supervisor = match get("SLIPSTREAM_METADATA_SUPERVISOR") {
+            None => None,
+            Some(value) => {
+                let path = PathBuf::from(&value);
+                if !path.is_absolute() {
+                    return Err(ConfigError::Invalid("SLIPSTREAM_METADATA_SUPERVISOR"));
+                }
+                Some(path)
+            }
+        };
         Ok(Self {
             public_origin,
             library_root,
@@ -169,6 +182,7 @@ impl Config {
             web_root,
             processing,
             export_retained_output_bytes,
+            metadata_supervisor,
         })
     }
 

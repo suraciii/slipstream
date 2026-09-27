@@ -295,11 +295,31 @@ pub enum PhotoCommand {
         #[arg(long, value_enum, default_value_t = PreviewSize::Review)]
         size: PreviewSize,
     },
+    /// Read one Photo's standard metadata with provenance, capture facts,
+    /// association status, and the evidence a checked Save requires.
+    Metadata {
+        #[arg(value_parser = nonempty)]
+        photo_id: String,
+    },
+    /// Save explicit field changes to the Photo's associated XMP Sidecar
+    /// against the evidence observed by a prior Read. The input document
+    /// cannot name a filesystem path.
+    MetadataSave(PhotoMetadataSaveArgs),
     /// Submit, inspect, and download a developed Photo Export.
     Export {
         #[command(subcommand)]
         command: PhotoExportCommand,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct PhotoMetadataSaveArgs {
+    #[arg(value_name = "PHOTO_ID", value_parser = nonempty)]
+    pub photo_id: String,
+    /// UTF-8 JSON file holding one complete save document
+    /// {"evidence":{...},"changes":{...}}; `-` reads it from stdin.
+    #[arg(long, value_name = "FILE", value_parser = nonempty)]
+    pub input: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -598,6 +618,8 @@ enum Operation {
     PhotosRemovalInspect,
     PhotosRestore,
     PhotosRestoreInspect,
+    PhotosMetadata,
+    PhotosMetadataSave,
     PhotosExportSubmit,
     PhotosExportList,
     PhotosExportStatus,
@@ -630,6 +652,8 @@ impl Operation {
             Self::PhotosRemovalInspect => "photos-removal-operation",
             Self::PhotosRestore => "photos-restore",
             Self::PhotosRestoreInspect => "photos-restore-operation",
+            Self::PhotosMetadata => "photos-metadata",
+            Self::PhotosMetadataSave => "photos-metadata-save",
             Self::PhotosExportSubmit => "photos-export-submit",
             Self::PhotosExportList => "photos-export-list",
             Self::PhotosExportStatus => "photos-export-status",
@@ -672,6 +696,8 @@ fn command_operation(command: &Command) -> Operation {
             PhotoCommand::RemovalOperation { .. } => Operation::PhotosRemovalInspect,
             PhotoCommand::Restore(_) => Operation::PhotosRestore,
             PhotoCommand::RestoreOperation { .. } => Operation::PhotosRestoreInspect,
+            PhotoCommand::Metadata { .. } => Operation::PhotosMetadata,
+            PhotoCommand::MetadataSave(_) => Operation::PhotosMetadataSave,
             PhotoCommand::Export { command } => match command {
                 PhotoExportCommand::Submit(_) => Operation::PhotosExportSubmit,
                 PhotoExportCommand::List { .. } => Operation::PhotosExportList,
@@ -1101,6 +1127,203 @@ impl CommandFailure {
 #[derive(Debug, Deserialize)]
 struct ErrorResponse {
     error: ErrorPayload,
+}
+
+// The Read and Save Metadata wire contract mirrors the server's shared
+// `metadata_wire` shapes, which the JSON vectors under
+// `compatibility/metadata/` pin. The CLI validates envelopes locally and
+// never re-derives field semantics.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MetadataReadWire {
+    photo_id: String,
+    original_location: String,
+    association: MetadataAssociationWire,
+    fields: std::collections::BTreeMap<String, MetadataFieldWire>,
+    capture_facts: std::collections::BTreeMap<String, MetadataCaptureFactWire>,
+    library_rating: u8,
+    evidence: MetadataEvidenceWire,
+    save_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    save_unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MetadataAssociationWire {
+    state: MetadataAssociationStateWire,
+    candidates: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum MetadataAssociationStateWire {
+    Eligible,
+    Ambiguous,
+    Unresolved,
+    Ineligible,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum MetadataFieldStateWire {
+    Present,
+    Absent,
+    Invalid,
+    Unavailable,
+    ResourceLimit,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+enum MetadataProvenanceWire {
+    Sidecar,
+    EmbeddedXmp,
+    IptcIim,
+    Original,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(untagged)]
+enum MetadataValueWire {
+    Text(String),
+    Number(serde_json::Number),
+    Boolean(bool),
+    List(Vec<String>),
+    Languages(std::collections::BTreeMap<String, String>),
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MetadataSourceValueWire {
+    state: MetadataFieldStateWire,
+    provenance: MetadataProvenanceWire,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<MetadataValueWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    problem: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language_alternatives_available: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MetadataFieldWire {
+    state: MetadataFieldStateWire,
+    writable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provenance: Option<MetadataProvenanceWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<MetadataValueWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    problem: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inferred_value: Option<MetadataValueWire>,
+    sources: Vec<MetadataSourceValueWire>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MetadataCaptureFactWire {
+    state: MetadataFieldStateWire,
+    identifier: String,
+    unit: String,
+    provenance: MetadataProvenanceWire,
+    writable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<MetadataValueWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    problem: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MetadataSaveResultWire {
+    photo_id: String,
+    sidecar_location: String,
+    affected_fields: Vec<String>,
+    verified_values: std::collections::BTreeMap<String, MetadataFieldWire>,
+    evidence: MetadataEvidenceWire,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MetadataEvidenceWire {
+    photo_id: String,
+    original_location: String,
+    original: MetadataFileFactsWire,
+    sidecar: MetadataSidecarEvidenceWire,
+    association_generation: u64,
+    instance_epoch: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MetadataFileFactsWire {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum MetadataSidecarEvidenceWire {
+    Absent,
+    Unavailable {
+        reason: String,
+    },
+    Present {
+        location: String,
+        facts: MetadataFileFactsWire,
+        sha256: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetadataErrorEnvelopeWire {
+    error: MetadataErrorWire,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetadataErrorWire {
+    code: String,
+    message: String,
+    details: Value,
+}
+
+/// Maps a metadata error code to the shared exit-code table. The server owns
+/// the table; this mirror must stay identical to
+/// `slipstream-server::metadata_wire::cli_exit`.
+fn metadata_failure(error: MetadataErrorWire) -> CommandFailure {
+    let exit_code = match error.code.as_str() {
+        "invalid_input" | "unsupported_field" => 2,
+        "photo_missing" | "original_unavailable" | "association_unresolved" | "photo_removed" => 3,
+        "evidence_stale" | "metadata_malformed" => 4,
+        "save_unavailable" | "permission" => 5,
+        "resource_limit" => 6,
+        "storage_failure" | "outcome_unknown" => 7,
+        _ => 6,
+    };
+    let effect = if error.code == "outcome_unknown" {
+        "unknown"
+    } else {
+        "none"
+    };
+    CommandFailure::from_payload(
+        exit_code,
+        ErrorPayload {
+            code: error.code,
+            message: error.message,
+            effect: effect.to_owned(),
+            details: error.details,
+        },
+    )
 }
 
 fn retry_after_seconds(response: &reqwest::Response) -> Option<u64> {
@@ -2071,6 +2294,93 @@ impl ServiceClient {
         }
         serde_json::from_slice(&bytes).map_err(|_| CommandFailure::unknown(identity))
     }
+
+    /// Performs one Read Metadata request. Metadata endpoints answer with
+    /// their own error envelope and exit-code table; a response that fits
+    /// neither contract is a transport failure, never a silent fallback.
+    async fn metadata_json<T: DeserializeOwned>(
+        &self,
+        operation: Operation,
+        url: Url,
+    ) -> Result<T, CommandFailure> {
+        let request = self
+            .client
+            .request(Method::GET, url)
+            .header(CONTRACT_HEADER, CLI_CONTRACT_VERSION)
+            .bearer_auth(&self.token);
+        let response = request
+            .send()
+            .await
+            .map_err(|_| CommandFailure::transport(operation))?;
+        let status = response.status();
+        if status.is_redirection() {
+            return Err(CommandFailure::transport(operation));
+        }
+        let retry_after = retry_after_seconds(&response);
+        if let Some(failure) = access_boundary_failure(status, retry_after, &[], operation) {
+            return Err(failure);
+        }
+        let bytes = response_bytes(response, operation).await?;
+        if let Some(failure) = access_boundary_failure(status, retry_after, &bytes, operation) {
+            return Err(failure);
+        }
+        if status != StatusCode::OK {
+            let error = serde_json::from_slice::<MetadataErrorEnvelopeWire>(&bytes)
+                .map_err(|_| CommandFailure::transport(operation))?
+                .error;
+            return Err(metadata_failure(error));
+        }
+        serde_json::from_slice(&bytes).map_err(|_| CommandFailure::transport(operation))
+    }
+
+    /// Performs one checked Save Metadata request. Everything after the
+    /// request is handed to the transport can only be an unknown outcome:
+    /// a dropped response is not evidence that the Sidecar write was
+    /// refused, and the caller must re-read rather than retry blindly.
+    async fn metadata_mutation<T: DeserializeOwned>(
+        &self,
+        identity: &MutationIdentity,
+        admission: &AdmissionState,
+        url: Url,
+        body: Value,
+    ) -> Result<T, CommandFailure> {
+        let operation = identity.operation;
+        let request = self
+            .client
+            .request(Method::POST, url)
+            .header(CONTRACT_HEADER, CLI_CONTRACT_VERSION)
+            .bearer_auth(&self.token)
+            .json(&body);
+        admission.admit(identity.clone());
+        let response = request.send().await.map_err(|error| {
+            if error.is_connect() {
+                CommandFailure::transport(operation)
+            } else {
+                CommandFailure::unknown(identity)
+            }
+        })?;
+        let status = response.status();
+        if status.is_redirection() {
+            return Err(CommandFailure::unknown(identity));
+        }
+        let retry_after = retry_after_seconds(&response);
+        if let Some(failure) = access_boundary_failure(status, retry_after, &[], operation) {
+            return Err(failure);
+        }
+        let bytes = response_bytes(response, operation)
+            .await
+            .map_err(|_| CommandFailure::unknown(identity))?;
+        if let Some(failure) = access_boundary_failure(status, retry_after, &bytes, operation) {
+            return Err(failure);
+        }
+        if status != StatusCode::OK {
+            let error = serde_json::from_slice::<MetadataErrorEnvelopeWire>(&bytes)
+                .map_err(|_| CommandFailure::unknown(identity))?
+                .error;
+            return Err(metadata_failure(error));
+        }
+        serde_json::from_slice(&bytes).map_err(|_| CommandFailure::unknown(identity))
+    }
 }
 
 async fn response_bytes(
@@ -2415,6 +2725,100 @@ async fn read_membership_ids(
 ) -> Result<Vec<String>, CommandFailure> {
     parse_membership_ids(read_input_bytes(input).await?, limit_name)
 }
+
+/// Reads and structurally validates one complete metadata save document
+/// before any network access. Field semantics stay server-owned; this
+/// catches shape errors locally and enforces that the evidence names the
+/// same Photo as the command.
+async fn prepare_metadata_save(photo_id: &str, input: &str) -> Result<Value, CommandFailure> {
+    let bytes = read_input_bytes(input).await?;
+    let document: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| CommandFailure::invalid("input", "The save document is not valid JSON."))?;
+    let invalid = |reason: &str| CommandFailure::invalid("input", reason);
+    let object = document
+        .as_object()
+        .ok_or_else(|| invalid("The save document must be a JSON object."))?;
+    if object.len() != 2 || !object.contains_key("evidence") || !object.contains_key("changes") {
+        return Err(invalid(
+            "The save document must contain exactly \"evidence\" and \"changes\".",
+        ));
+    }
+    let evidence_photo_id = object["evidence"]
+        .as_object()
+        .and_then(|evidence| evidence.get("photoId"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            invalid("The evidence must name a non-empty photoId for the observed Read.")
+        })?;
+    if evidence_photo_id != photo_id {
+        return Err(invalid(
+            "The evidence photoId must match the Photo named by the command.",
+        ));
+    }
+    let changes = object["changes"]
+        .as_object()
+        .filter(|changes| !changes.is_empty())
+        .ok_or_else(|| invalid("The changes must be a non-empty JSON object."))?;
+    for (field, change) in changes {
+        if field.is_empty() {
+            return Err(invalid("Every change must name a non-empty field."));
+        }
+        let change = change
+            .as_object()
+            .ok_or_else(|| invalid("Every change must be a JSON object."))?;
+        let operation = change
+            .get("op")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("Every change must name an \"op\"."))?;
+        match operation {
+            "set" => {
+                if change.len() != 2 || !change.contains_key("value") {
+                    return Err(invalid(
+                        "A \"set\" change must contain exactly \"op\" and \"value\".",
+                    ));
+                }
+            }
+            "clear" | "remove" => {
+                if change.len() != 1 {
+                    return Err(invalid(
+                        "A \"clear\" or \"remove\" change must contain only \"op\".",
+                    ));
+                }
+            }
+            "setLanguages" => {
+                let languages = change
+                    .get("languages")
+                    .and_then(Value::as_object)
+                    .filter(|languages| !languages.is_empty())
+                    .ok_or_else(|| {
+                        invalid(
+                            "A \"setLanguages\" change must name a non-empty \"languages\" map.",
+                        )
+                    })?;
+                if change.len() != 2 {
+                    return Err(invalid(
+                        "A \"setLanguages\" change must contain exactly \"op\" and \"languages\".",
+                    ));
+                }
+                for (language, value) in languages {
+                    if language.is_empty() || !value.is_null() && !value.is_string() {
+                        return Err(invalid(
+                            "Every language must map to text or null for removal.",
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(invalid(
+                    "Every \"op\" must be set, clear, remove, or setLanguages.",
+                ));
+            }
+        }
+    }
+    Ok(document)
+}
+
 async fn read_trash_ids(input: &str) -> Result<Vec<String>, CommandFailure> {
     let bytes = read_input_bytes(input).await?;
     let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
@@ -3431,6 +3835,14 @@ async fn execute(
         },
         _ => None,
     };
+    // The complete save document validates before any network access, so a
+    // local input failure can never depend on service reachability.
+    let pending_metadata_save = match &cli.command {
+        Command::Photos {
+            command: PhotoCommand::MetadataSave(args),
+        } => Some(prepare_metadata_save(&args.photo_id, &args.input).await?),
+        _ => None,
+    };
     let pending_trash_review = match &cli.command {
         Command::Trash {
             command: TrashCommand::Review(args),
@@ -3839,6 +4251,49 @@ async fn execute(
                     publication,
                 )
                 .await
+            }
+            Command::Photos {
+                command: PhotoCommand::Metadata { photo_id },
+            } => {
+                let read: MetadataReadWire = client
+                    .metadata_json(
+                        operation,
+                        client.endpoint(&["api", "photos", photo_id, "external-metadata"]),
+                    )
+                    .await?;
+                if read.photo_id != *photo_id
+                    || read.original_location.is_empty()
+                    || read.evidence.photo_id != *photo_id
+                    || read.evidence.instance_epoch.is_empty()
+                {
+                    return Err(CommandFailure::transport(operation));
+                }
+                serde_json::to_value(read).map_err(|_| CommandFailure::transport(operation))
+            }
+            Command::Photos {
+                command: PhotoCommand::MetadataSave(args),
+            } => {
+                let document = pending_metadata_save
+                    .as_ref()
+                    .expect("metadata save input was prepared");
+                let identity = MutationIdentity {
+                    operation,
+                    photo_ids: vec![args.photo_id.clone()],
+                    album_id: None,
+                    album_name: None,
+                };
+                let result: MetadataSaveResultWire = client
+                    .metadata_mutation(
+                        &identity,
+                        admission,
+                        client.endpoint(&["api", "photos", &args.photo_id, "external-metadata"]),
+                        document.clone(),
+                    )
+                    .await?;
+                if result.photo_id != args.photo_id || result.sidecar_location.is_empty() {
+                    return Err(CommandFailure::unknown(&identity));
+                }
+                serde_json::to_value(result).map_err(|_| CommandFailure::unknown(&identity))
             }
             Command::Photos {
                 command: PhotoCommand::Set(args),
@@ -4485,6 +4940,183 @@ fn render_text(envelope: &Envelope) -> String {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn metadata_read_retains_unavailable_evidence_and_reason() {
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../../../compatibility/metadata/external-metadata-read.json"
+        ))
+        .unwrap();
+        let mut result = vectors[0]["result"].clone();
+        result["evidence"]["sidecar"] = json!({
+            "state": "unavailable",
+            "reason": "Sidecar cannot be read without following a link"
+        });
+        result["saveAvailable"] = json!(false);
+        result["saveUnavailableReason"] = json!("Sidecar evidence is unavailable");
+        let read: MetadataReadWire = serde_json::from_value(result.clone()).unwrap();
+        assert!(
+            matches!(&read.evidence.sidecar, MetadataSidecarEvidenceWire::Unavailable { reason }
+            if reason == "Sidecar cannot be read without following a link")
+        );
+        assert_eq!(serde_json::to_value(read).unwrap(), result);
+    }
+
+    #[test]
+    fn parser_accepts_metadata_commands_and_rejects_empty_ids() {
+        assert!(Cli::try_parse_from(["slipstream", "photos", "metadata", "photo-1"]).is_ok());
+        assert!(Cli::try_parse_from(["slipstream", "photos", "metadata", ""]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "slipstream",
+                "photos",
+                "metadata-save",
+                "photo-1",
+                "--input",
+                "save.json"
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["slipstream", "photos", "metadata-save", "photo-1"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn metadata_save_document_validation_accepts_the_pinned_shapes() {
+        let document = serde_json::json!({
+            "evidence": {
+                "photoId": "photo-1",
+                "originalLocation": "photos/IMG_0001.CR3",
+                "original": {
+                    "device": 2049, "inode": 42, "size": 24000000,
+                    "modifiedSeconds": 1790409600, "modifiedNanoseconds": 123456789
+                },
+                "sidecar": { "state": "absent" },
+                "associationGeneration": 7,
+                "instanceEpoch": "8e8c8e92-61b1-48d0-a97f-43891664c110"
+            },
+            "changes": {
+                "photoshop:Headline": { "op": "set", "value": "New headline" },
+                "xmp:Label": { "op": "clear" },
+                "photoshop:Source": { "op": "remove" },
+                "dc:title": {
+                    "op": "setLanguages",
+                    "languages": { "x-default": "New title", "fr": null }
+                }
+            }
+        });
+        let write = |name: &str| {
+            let path = std::env::temp_dir().join(format!("slipstream-metadata-save-{name}"));
+            std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+            path
+        };
+        let path = write("valid.json");
+        let prepared = prepare_metadata_save("photo-1", path.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(prepared, document);
+
+        let path = write("wrong-photo.json");
+        let failure = prepare_metadata_save("photo-2", path.to_str().unwrap())
+            .await
+            .unwrap_err();
+        assert_eq!(failure.exit_code, 2);
+        assert_eq!(failure.payload.code, "invalid_input");
+
+        for (name, reason, broken) in [
+            (
+                "extra-key",
+                "The save document must contain exactly \"evidence\" and \"changes\".",
+                serde_json::json!({
+                    "evidence": document["evidence"].clone(),
+                    "changes": { "xmp:Label": { "op": "clear" } },
+                    "force": true
+                }),
+            ),
+            (
+                "bad-op",
+                "Every \"op\" must be set, clear, remove, or setLanguages.",
+                serde_json::json!({
+                    "evidence": document["evidence"].clone(),
+                    "changes": { "xmp:Label": { "op": "force" } }
+                }),
+            ),
+            (
+                "set-without-value",
+                "A \"set\" change must contain exactly \"op\" and \"value\".",
+                serde_json::json!({
+                    "evidence": document["evidence"].clone(),
+                    "changes": { "xmp:Label": { "op": "set" } }
+                }),
+            ),
+            (
+                "set-languages-value",
+                "Every language must map to text or null for removal.",
+                serde_json::json!({
+                    "evidence": document["evidence"].clone(),
+                    "changes": {
+                        "dc:title": {
+                            "op": "setLanguages",
+                            "languages": { "fr": 3 }
+                        }
+                    }
+                }),
+            ),
+            (
+                "clear-extra",
+                "A \"clear\" or \"remove\" change must contain only \"op\".",
+                serde_json::json!({
+                    "evidence": document["evidence"].clone(),
+                    "changes": { "xmp:Label": { "op": "clear", "value": "" } }
+                }),
+            ),
+        ] {
+            let path = std::env::temp_dir().join(format!("slipstream-metadata-save-{name}.json"));
+            std::fs::write(&path, serde_json::to_vec(&broken).unwrap()).unwrap();
+            let failure = prepare_metadata_save("photo-1", path.to_str().unwrap())
+                .await
+                .unwrap_err();
+            assert_eq!(failure.exit_code, 2, "{name}");
+            assert_eq!(
+                failure.payload.details["reason"].as_str(),
+                Some(reason),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_failure_exit_codes_mirror_the_shared_table() {
+        let expected = [
+            ("invalid_input", 2, "none"),
+            ("unsupported_field", 2, "none"),
+            ("photo_missing", 3, "none"),
+            ("original_unavailable", 3, "none"),
+            ("association_unresolved", 3, "none"),
+            ("photo_removed", 3, "none"),
+            ("evidence_stale", 4, "none"),
+            ("metadata_malformed", 4, "none"),
+            ("save_unavailable", 5, "none"),
+            ("permission", 5, "none"),
+            ("resource_limit", 6, "none"),
+            ("storage_failure", 7, "none"),
+            ("outcome_unknown", 7, "unknown"),
+        ];
+        for (code, exit_code, effect) in expected {
+            let failure = metadata_failure(MetadataErrorWire {
+                code: code.to_owned(),
+                message: "message".to_owned(),
+                details: serde_json::json!({}),
+            });
+            assert_eq!(failure.exit_code, exit_code, "{code}");
+            assert_eq!(failure.payload.effect, effect, "{code}");
+        }
+        let failure = metadata_failure(MetadataErrorWire {
+            code: "future_code".to_owned(),
+            message: "message".to_owned(),
+            details: serde_json::json!({}),
+        });
+        assert_eq!(failure.exit_code, 6);
+    }
 
     #[test]
     fn parser_rejects_duplicates_abbreviations_and_cursor_combinations() {

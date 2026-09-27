@@ -74,23 +74,25 @@ The separately confirmed deletion of a reviewed Original File belonging to a Pho
 ## Metadata
 
 **XMP Sidecar**:
-A Photographer-owned external XMP file associated with a Photo and stored separately from its Original Files. It carries supported metadata for exchange with other photo applications and does not define Photo identity or modify an Original File.
+A Photographer-owned external XMP file associated with a Photo and stored separately from its Original File. It carries supported metadata for exchange with other photo applications and does not define Photo identity or modify an Original File.
 _Avoid_: sidecar when the kind is unclear, XMP Original, XMP Photo
 
 **Sidecar Association**:
-The rule that links one same-directory, same-basename XMP Sidecar to one Photo through its Original Location. A sole RAW Original owns the association; a sole JPEG Original owns it only when no RAW shares the basename. Multiple eligible owners remain ambiguous and have no writable association. A Location or ownership change invalidates an existing synchronization baseline. The sidecar does not create a Photo or change its Original identity.
+The rule that links one same-directory, same-basename XMP Sidecar to one Photo through its Original Location. A sole RAW Original owns the association; a sole JPEG Original owns it only when no RAW shares the basename. Multiple eligible owners remain ambiguous and have no writable association. A Location or ownership change invalidates prior metadata read evidence. The sidecar does not create a Photo or change its Original identity.
 _Avoid_: sidecar identity, filename identity
 
 **Sidecar Metadata**:
-The supported Photo metadata carried by an XMP Sidecar. In the current product boundary, Rating may have a Sidecar Metadata representation; Selection State, Album membership, and Photo identity do not.
+The standard descriptive, organizational, and rights metadata carried by an XMP Sidecar. External rating is separate from Library Rating; Selection State, Album membership, and Photo identity are not Sidecar Metadata.
 _Avoid_: all metadata, EXIF state
 
-**Metadata Synchronization**:
-Reconciliation between a Photo's supported facts in Slipstream and its Sidecar Metadata through explicit read or save actions.
-_Avoid_: automatic import, automatic merge
+**Read Metadata**:
+Inspection of a Photo's embedded metadata and associated XMP Sidecar with their provenance, without changing Library decisions.
+
+**Save Metadata**:
+An explicit, checked creation or update of supported fields in a Photo's associated XMP Sidecar. It does not rewrite the Original or implicitly update Library decisions.
 
 **Metadata Conflict**:
-A condition in which Slipstream and external software have changed the same Sidecar Metadata independently. Both values remain available until the Photographer chooses which value to keep.
+A refusal to save using obsolete metadata read evidence because the external content or its Photo association changed. A difference between external metadata and a Library value alone is not a Metadata Conflict.
 _Avoid_: sync error, overwrite conflict
 
 ## Browsing and Selection
