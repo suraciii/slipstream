@@ -133,6 +133,64 @@ class ContractTests(unittest.TestCase):
         with self.assertRaises(contract.ContractError):
             contract.validate("EngineGrant", value)
 
+    def test_terminal_receipt_io_syntax_is_shared_by_both_profiles(self):
+        for version, fixture in ((2, grant()), (3, qualified_grant())):
+            snapshot = dict(
+                cgroup_path="/sys/fs/cgroup/example.slice", cgroup_inode=1,
+                unit_invocation="1" * 32, launch_id=fixture["launch_id"],
+                container_id="2" * 64, attempt_unit="example.slice",
+                incarnation="3" * 32, sequence=1,
+                memory_peak_raw="100\n", memory_max_raw="8589934592\n",
+                memory_swap_current_raw="0\n", memory_swap_max_raw="0\n",
+                memory_events_raw="oom 0\noom_kill 0\noom_group_kill 0\n",
+                memory_events_local_raw="oom 0\noom_kill 0\noom_group_kill 0\n")
+            receipt = dict(
+                incarnation=snapshot["incarnation"], sequence=1,
+                workload=dict(kind="film-fixture", fixture_id=fixture["fixture"]["id"]),
+                policy="4" * 64, bundle=fixture["bundle"], catalogue="5" * 64,
+                manifest=fixture["manifest"], state="settled", phase="execution-finished",
+                cancellation_requested=False, accepted_at_unix_ms=1, deadline_unix_ms=2,
+                outcome="interrupted", detail=None, runtime=None,
+                limits=dict(memory_bytes=8589934592, swap_bytes=0, cpu_quota_us=400000,
+                            cpu_period_us=100000, tasks=256, storage_bytes=4294967296,
+                            storage_inodes=4096),
+                evidence=dict(peak_bytes=100, exit_code=None, docker_oom_killed=None,
+                              attempt_before=None, attempt_after=None, parent_before=None,
+                              parent_after=None, populated=False, terminal_snapshot=snapshot),
+                plan=fixture["plan"], result=None, cleanup="complete")
+            if version == 2:
+                receipt["resource_model"] = "6" * 64
+            else:
+                receipt.update(envelope=fixture["plan"]["envelope_sha256"],
+                               qualification_failure=None)
+            with self.subTest(version=version, io="legacy omitted"):
+                contract.validate("Receipt", receipt, version=version)
+            # The per-field lexical bound is schema syntax; the shared byte sum
+            # remains native semantic validation, including at this boundary.
+            for raw in (None, "", "8:0 rbytes=1 cost.usage=9\n", "x" * 4096):
+                snapshot["io_stat_raw"] = raw
+                with self.subTest(version=version, io=repr(raw)[:60]):
+                    wire = contract.parse_json(contract.canonical_bytes(receipt))
+                    contract.validate("Receipt", wire, version=version)
+                    contract.validate("Response", {"version": version,
+                                                   "result": {"kind": "receipt", "receipt": wire}}, version=version)
+            for raw in (0, False, {}, "x" * 4097, "\u00e9", "\t", "\r\n", "\x00", "\x7f"):
+                snapshot["io_stat_raw"] = raw
+                with self.subTest(version=version, invalid_io=repr(raw)[:60]):
+                    with self.assertRaises(contract.ContractError):
+                        contract.validate("Receipt", receipt, version=version)
+            snapshot["io_stat_raw"] = None
+            snapshot["io_stat"] = "8:0 rbytes=1\n"
+            with self.assertRaises(contract.ContractError):
+                contract.validate("Receipt", receipt, version=version)
+            del snapshot["io_stat"]
+            for required in ("memory_peak_raw", "unit_invocation"):
+                invalid = copy.deepcopy(receipt)
+                del invalid["evidence"]["terminal_snapshot"][required]
+                with self.subTest(version=version, missing=required):
+                    with self.assertRaises(contract.ContractError):
+                        contract.validate("Receipt", invalid, version=version)
+
     def test_producer_pipe_is_one_exact_frame_and_eof(self):
         value = {"version": 2, "kind": "film-producer-result", "outcome": "engine-failed",
                  "detail": "plan-rejected", "launch_id": "1" * 32,

@@ -623,6 +623,7 @@
     },
     "TerminalSnapshot": {
       "type": "object",
+      "description": "Terminal evidence follows processing-executor-protocol.md. Native validation enforces the shared 4096-byte aggregate bound across the six memory fields and optional io_stat_raw.",
       "additionalProperties": false,
       "required": [
         "cgroup_path",
@@ -686,6 +687,17 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 4096
+        },
+        "io_stat_raw": {
+          "description": "Optional for older persisted snapshots; absent means null. Retained text is exact printable ASCII plus LF from the attempt cgroup's io.stat.",
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "string",
+              "maxLength": 4096,
+              "pattern": "^[\\u0020-\\u007e\\n]*$"
+            }
+          ]
         }
       }
     },
