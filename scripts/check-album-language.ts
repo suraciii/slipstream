@@ -25,7 +25,8 @@ for (const path of legacyPaths) {
     const start = line.match(/album-language-legacy:start ([a-z0-9-]+)$/);
     const end = line.match(/album-language-legacy:end ([a-z0-9-]+)$/);
     if (start) {
-      if (legacyBlock) throw new Error(`nested legacy marker in ${path}:${index + 1}`);
+      if (legacyBlock)
+        throw new Error(`nested legacy marker in ${path}:${index + 1}`);
       legacyBlock = start[1];
     } else if (end) {
       if (!legacyBlock || end[1] !== legacyBlock)
@@ -35,7 +36,8 @@ for (const path of legacyPaths) {
       legacyLines.add(index + 1);
     }
   }
-  if (legacyBlock) throw new Error(`unclosed legacy marker in ${path}: ${legacyBlock}`);
+  if (legacyBlock)
+    throw new Error(`unclosed legacy marker in ${path}: ${legacyBlock}`);
   legacyLinesByPath[path] = legacyLines;
 }
 

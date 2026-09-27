@@ -54,7 +54,7 @@ export function parseChangedFiles(output) {
   const fields = output.split("\0");
   const changes = [];
 
-  for (let index = 0; index < fields.length - 1;) {
+  for (let index = 0; index < fields.length - 1; ) {
     const status = fields[index++];
     if (status.startsWith("R") || status.startsWith("C")) {
       changes.push({
