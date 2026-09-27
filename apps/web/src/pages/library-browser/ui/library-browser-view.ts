@@ -14,6 +14,7 @@ import {
 } from "./membership-panel.js";
 import { createViewOptions, type ViewOptionsElements } from "./view-options.js";
 import { createRatingControls } from "./rating-controls.js";
+import { createPhotoToolsController } from "./photo-tools.js";
 import { createAlbumForm } from "./album-form.js";
 import {
   addressFor,
@@ -1604,11 +1605,6 @@ export function createLibraryBrowserView(
     dialog: sourceDialog,
     modal: sourcesAreModal,
   });
-  surfaces.register("photo-tools", {
-    dialog: photoToolsDialog,
-    modal: () => true,
-    onOpen: syncSecondarySurface,
-  });
   const recoveryPanelController = createRecoveryPanel({
     elements: {
       recoveryNotice: required<HTMLElement>(root, "[data-recovery-notice]"),
@@ -1880,17 +1876,6 @@ export function createLibraryBrowserView(
     photoSourceToggle.hidden = !modal;
     if (!modal) closeSources(false);
   };
-  /// Which Photo tools content the modal presents. Every subview replaces the
-  /// tools list and carries its own local return, so moving between them adds
-  /// no browser history entry and never opens a second modal.
-  type PhotoToolsView =
-    | "tools"
-    | "edit"
-    | "albums"
-    | "details"
-    | "zoom"
-    | "nearby";
-  let photoToolsView: PhotoToolsView = "tools";
   /// The last neighbor facts the page model reported. A disclosure rebuilds
   /// the strip from them, so a closed strip holds no image demand at all.
   let filmstripModel: FilmstripViewModel | undefined;
@@ -1903,26 +1888,6 @@ export function createLibraryBrowserView(
   /// settings it actually restored.
   let editorDraft: number | undefined;
   let editorDraftBase: number | undefined;
-  const applyPhotoToolsView = () => {
-    for (const view of photoToolsViews)
-      view.hidden = view.dataset.photoToolsView !== photoToolsView;
-    // A wide layout docks the Edit surface beside the image instead of
-    // centring it over the Preview, so the controls and the image they change
-    // are both visible.
-    photoToolsDialog.dataset.photoToolsSurface = photoToolsView;
-    photoToolsTitle.textContent =
-      photoToolsView === "tools"
-        ? "Photo tools"
-        : photoToolsView === "nearby"
-          ? "Nearby Photos"
-          : photoToolsView === "zoom"
-            ? "Preview Zoom"
-            : photoToolsView === "albums"
-              ? "Albums"
-              : photoToolsView === "details"
-                ? "Details"
-                : "Edit";
-  };
   const openEditor = (photoId: string) => {
     if (!photoId || photoView.hidden) return;
     editorPhotoId = photoId;
@@ -1969,13 +1934,13 @@ export function createLibraryBrowserView(
       status: "Loading edit recipe…",
     });
     send({ kind: "editor-open", photoId });
-    openPhotoTools("edit");
+    photoToolsController.open("edit");
   };
   const editorVisible = () =>
     alive &&
     !photoView.hidden &&
     surfaces.isActive("photo-tools") &&
-    photoToolsView === "edit";
+    photoToolsController.view() === "edit";
   const renderEditor = (model: EditorViewModel) => {
     if (
       !alive ||
@@ -2140,8 +2105,7 @@ export function createLibraryBrowserView(
   /// True while the Nearby Photos subview is the presented content of Photo
   /// tools. The one strip node then lives inside that disclosure; otherwise it
   /// lives beside the Preview, which only a wide layout shows.
-  const stripInTools = () =>
-    photoToolsView === "nearby" && surfaces.isActive("photo-tools");
+  const stripInTools = () => photoToolsController.isNearbyOpen();
   /// Places the one strip node where it is presented, and releases it
   /// everywhere else: a strip that is not presented binds no thumbnail and
   /// admits no window of its own.
@@ -2171,45 +2135,6 @@ export function createLibraryBrowserView(
       return;
     }
     send({ kind: "filmstrip-resize" });
-  };
-  /// Opens Photo tools on its list, or moves it to one subview. A pending
-  /// gesture never competes with the surface that takes over the pointer and
-  /// the keyboard.
-  const openPhotoTools = (view: PhotoToolsView = "tools") => {
-    if (!alive || photoView.hidden) return;
-    resetGestures();
-    photoToolsView = view;
-    applyPhotoToolsView();
-    // A move between subviews keeps the invoker that opened the surface, so
-    // closing it still returns focus to the More entry rather than to a
-    // control the modal itself holds.
-    if (!surfaces.isActive("photo-tools"))
-      surfaces.open(
-        "photo-tools",
-        document.activeElement instanceof HTMLElement
-          ? document.activeElement
-          : undefined,
-      );
-    syncFilmstripHost();
-    syncSecondarySurface();
-    photoToolsClose.focus();
-  };
-  /// Leaves a Photo tools subview for its list, which is a local return and
-  /// not a browser history entry.
-  const returnToPhotoTools = () => {
-    if (!alive || !surfaces.isActive("photo-tools")) return;
-    photoToolsView = "tools";
-    applyPhotoToolsView();
-    syncFilmstripHost();
-    photoToolsClose.focus();
-  };
-  const closePhotoTools = (restoreFocus = true) => {
-    if (!alive) return;
-    photoToolsView = "tools";
-    applyPhotoToolsView();
-    surfaces.close("photo-tools", restoreFocus);
-    syncFilmstripHost();
-    syncSecondarySurface();
   };
   /// Opens the explicit Rating choices. Only this surface or the Rating entry
   /// owns explicit Rating interaction at one time; the Rating Wheel stays the
@@ -2245,7 +2170,7 @@ export function createLibraryBrowserView(
     // A pending gesture must never compete with the surface that takes over
     // the pointer and the keyboard.
     resetGestures();
-    closePhotoTools(false);
+    photoToolsController.close(false);
     closeRatingChoices(false);
     surfaces.open("sources", invoker);
     syncSourceLayout();
@@ -2337,6 +2262,23 @@ export function createLibraryBrowserView(
     preview.style.removeProperty("touch-action");
     clearPointer();
   };
+  const photoToolsController = createPhotoToolsController({
+    elements: {
+      photoToolsDialog,
+      photoToolsClose,
+      photoToolsTitle,
+      photoToolsViews,
+      photoToolsEntries,
+    },
+    surfaces,
+    isPhotoVisible: () => !photoView.hidden,
+    currentPhotoId: () => currentPhotoId,
+    resetGestures,
+    syncFilmstripHost,
+    syncSecondarySurface,
+    openSources,
+    openEditor,
+  });
   const ratingControls = createRatingControls({
     elements: {
       ratingDialog,
@@ -2393,7 +2335,7 @@ export function createLibraryBrowserView(
     surfaces,
     send,
     resetGestures,
-    closePhotoTools,
+    closePhotoTools: (restoreFocus) => photoToolsController.close(restoreFocus),
     closeRatingChoices,
     activeAlbumId: () =>
       sourceModel?.albums.find((candidate) => candidate.active)?.id,
@@ -4126,15 +4068,6 @@ export function createLibraryBrowserView(
   // cleanup, so the disclosure state is synced from both events.
   sourceDialog.addEventListener("cancel", syncSourcesExpanded);
   sourceDialog.addEventListener("close", syncSourcesExpanded);
-  // A Photo tools dismissal — explicit Close, Escape, a scrim activation, or a
-  // platform close request — returns the modal to its list and releases the
-  // neighbor strip, and both entries report their closed state again.
-  photoToolsDialog.addEventListener("close", () => {
-    photoToolsView = "tools";
-    applyPhotoToolsView();
-    syncFilmstripHost();
-    syncSecondarySurface();
-  });
   shortViewport.addEventListener("change", onShortViewportChange);
   sourceToggle.addEventListener("click", () => openSources());
   photoSourceToggle.addEventListener("click", () => openSources());
@@ -4168,8 +4101,11 @@ export function createLibraryBrowserView(
   dockPrevious.addEventListener("click", () => send({ kind: "previous" }));
   dockNext.addEventListener("click", () => send({ kind: "next" }));
   dockRating.addEventListener("click", () => openRatingChoices());
-  dockMore.addEventListener("click", () => openPhotoTools("tools"));
-  photoToolsClose.addEventListener("click", () => closePhotoTools());
+  dockMore.addEventListener("click", () => photoToolsController.open());
+  for (const button of photoToolsReturnButtons)
+    button.addEventListener("click", () =>
+      photoToolsController.returnToTools(),
+    );
   photoToolsClear.addEventListener("click", () =>
     send({
       kind: "photo-mutation",
@@ -4179,23 +4115,6 @@ export function createLibraryBrowserView(
     }),
   );
   photoToolsUndo.addEventListener("click", () => send({ kind: "undo" }));
-  photoToolsEntries.addEventListener("click", (event) => {
-    const button = (event.target as HTMLElement).closest<HTMLButtonElement>(
-      "[data-photo-tools-entry]",
-    );
-    if (!button) return;
-    const photoId = currentPhotoId;
-    if (!photoId) return;
-    if (button.dataset.photoToolsEntry === "sources") {
-      openSources();
-      return;
-    }
-    if (button.dataset.photoToolsEntry === "edit") {
-      openEditor(photoId);
-      return;
-    }
-    openPhotoTools(button.dataset.photoToolsEntry as PhotoToolsView);
-  });
   // A pointer drag reports every intermediate position, and only the settled
   // gesture is one edit action, so the label follows `input` while the save
   // follows `change`.
@@ -4315,8 +4234,6 @@ export function createLibraryBrowserView(
     if (!editorPhotoId || editorRebind.disabled) return;
     send({ kind: "editor-rebind", photoId: editorPhotoId });
   });
-  for (const button of photoToolsReturnButtons)
-    button.addEventListener("click", () => returnToPhotoTools());
   stage.addEventListener("dblclick", toggleDetail);
   zoomFit.addEventListener("click", applyFit);
   zoomOut.addEventListener("click", () => zoomBy(1 / ZOOM_STEP));
@@ -4404,7 +4321,6 @@ export function createLibraryBrowserView(
   );
   syncSourceLayout();
   syncSourcesExpanded();
-  applyPhotoToolsView();
   syncSecondarySurface();
   // The strip's home is only placed once a Photo can present it: the markup
   // already holds it beside the Preview, which is where a wide layout shows
@@ -4579,7 +4495,7 @@ export function createLibraryBrowserView(
       const returnFocus = surfaces.isActive("sources");
       cancelGridRender();
       resetGestures();
-      closePhotoTools(false);
+      photoToolsController.close(false);
       closeRatingChoices(false);
       stage.replaceChildren();
       resetZoomForImage();
@@ -4674,7 +4590,7 @@ export function createLibraryBrowserView(
     closeTransientSurfaces() {
       if (!alive) return;
       resetGestures();
-      closePhotoTools(false);
+      photoToolsController.close(false);
       closeRatingChoices(false);
       // A destination change supersedes every supporting surface: the Album
       // form's draft is discarded and the surfaces close without returning
@@ -4701,7 +4617,7 @@ export function createLibraryBrowserView(
     showGrid(index) {
       if (!alive) return;
       resetGestures();
-      closePhotoTools(false);
+      photoToolsController.close(false);
       closeRatingChoices(false);
       resetZoomForImage();
       photoView.hidden = true;
@@ -4843,6 +4759,7 @@ export function createLibraryBrowserView(
       recoveryPanelController.dispose();
       membershipPanelController.dispose();
       albumFormController.dispose();
+      photoToolsController.dispose();
       ratingControls.dispose();
       viewOptionsController.dispose();
       stageObserver.disconnect();
