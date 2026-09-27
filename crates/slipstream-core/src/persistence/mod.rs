@@ -10,6 +10,7 @@ mod metadata;
 mod migrations;
 mod mutation;
 mod owner;
+mod owner_recovery;
 mod queries;
 mod removal;
 mod scan;

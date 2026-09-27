@@ -226,6 +226,7 @@ impl CommandFailure {
                 code: "outcome_unknown".to_owned(),
                 message: "Inspect the current state with a read command before continuing."
                     .to_owned(),
+                effect: "unknown".to_owned(),
                 details: identity.unknown_details(),
             },
         )

@@ -514,6 +514,22 @@ impl Library {
             .map_err(Into::into)
     }
 
+    /// Current facts of the retained review memberships, in the requested
+    /// order. `None` means the record no longer exists.
+    pub async fn recovery_records(
+        &self,
+        original_ids: Vec<String>,
+    ) -> Result<Vec<Option<crate::recovery::RecoveryRecord>>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.recovery_records_receiver(original_ids)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
     /// Revalidates and commits one confirmed manual relocation batch
     /// atomically. Filesystem evidence was gathered through confined
     /// descriptors before submission; the transaction rechecks every
@@ -524,7 +540,8 @@ impl Library {
     ) -> Result<AppliedRelocations, LibraryError> {
         let receive = {
             let _admission = self.admit()?;
-            self.persistence.apply_relocations_receiver(relocations)
+            self.persistence
+                .apply_relocations_receiver(self.root.clone(), relocations)
         }?;
         receive
             .await

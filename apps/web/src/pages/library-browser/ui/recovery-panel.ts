@@ -74,6 +74,7 @@ export interface RecoveryPanel {
     mappings: ReadonlyArray<RecoveryMappingViewModel>,
     paging: RecoveryPagingViewModel,
   ): void;
+  clearRecoveryProposals(): void;
   resetRecoveryProposalChoices(): void;
   setRecoveryPending(pending: boolean): void;
   setRecoveryMessage(text?: string): void;
@@ -405,6 +406,17 @@ export function createRecoveryPanel({
       recoveryProposalList.replaceChildren(...rows);
       recoveryProposalList.hidden = mappings.length === 0;
       recoveryMappingsMore.hidden = !paging.more;
+      updateRecoveryApply();
+    },
+    clearRecoveryProposals() {
+      if (!alive) return;
+      recoveryCurrentMappings = [];
+      recoveryMappingChoices.clear();
+      recoveryProposalList.replaceChildren();
+      recoveryProposalList.hidden = true;
+      recoveryProposalSummary.hidden = true;
+      recoveryMappingsMore.hidden = true;
+      recoveryNote.hidden = true;
       updateRecoveryApply();
     },
     setRecoveryPending(pending) {

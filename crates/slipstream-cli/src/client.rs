@@ -308,13 +308,12 @@ pub(crate) fn validated_route_failure(
         }
         "cursor_expired" => {
             required_keys(&["cursorKind", "reason"])
-                && string("cursorKind")
-                    .is_some_and(|value| {
-                        matches!(
-                            value,
-                            "folder" | "album" | "photo" | "unavailable" | "mappings"
-                        )
-                    })
+                && string("cursorKind").is_some_and(|value| {
+                    matches!(
+                        value,
+                        "folder" | "album" | "photo" | "unavailable" | "mappings"
+                    )
+                })
                 && string("reason").is_some_and(|value| {
                     matches!(
                         value,

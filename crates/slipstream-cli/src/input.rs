@@ -533,7 +533,9 @@ pub(crate) async fn read_restore_input(input: &str) -> Result<PreparedRestore, C
 /// before any network access. Every shape rule the service enforces on the
 /// closed batch is checked locally, so an invalid batch can never depend on
 /// service reachability.
-pub(crate) async fn read_recovery_apply(input: &str) -> Result<PreparedRecoveryApply, CommandFailure> {
+pub(crate) async fn read_recovery_apply(
+    input: &str,
+) -> Result<PreparedRecoveryApply, CommandFailure> {
     let bytes = read_input_bytes(input).await?;
     let invalid = |reason: &'static str| CommandFailure::invalid("input", reason);
     let document: Value = serde_json::from_slice(&bytes)

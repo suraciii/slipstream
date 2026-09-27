@@ -1185,6 +1185,27 @@ fn manual_recovery_fixture_with_candidate(
     (base, config)
 }
 
+fn requested_relocation(
+    proposal: &crate::ManualProposal,
+    survey: &crate::RecoverySurvey,
+    facts: crate::OriginalFacts,
+    retire_photo_id: Option<&str>,
+) -> crate::RequestedRelocation {
+    crate::RequestedRelocation {
+        original_id: proposal.original_id.clone(),
+        from_location: proposal.from_location.clone(),
+        to_location: proposal.to_location.clone(),
+        mapping_id: proposal.mapping_id.clone(),
+        fingerprint: survey
+            .unavailable
+            .iter()
+            .find(|record| record.original_id == proposal.original_id)
+            .and_then(|record| record.fingerprint.clone()),
+        facts,
+        retire_photo_id: retire_photo_id.map(str::to_owned),
+    }
+}
+
 #[tokio::test]
 async fn manual_recovery_restores_unavailable_photo_without_fingerprint() {
     let (base, config) = manual_recovery_fixture(None, Some(false));
@@ -1216,12 +1237,12 @@ async fn manual_recovery_restores_unavailable_photo_without_fingerprint() {
         .unwrap();
     let facts = capability.facts().unwrap();
     let applied = library
-        .apply_relocations(vec![crate::RequestedRelocation {
-            original_id: record.original_id.clone(),
-            to_location: "moved/a.JPG".to_owned(),
+        .apply_relocations(vec![requested_relocation(
+            &proposals[0],
+            &survey,
             facts,
-            retire_destination: false,
-        }])
+            None,
+        )])
         .await
         .unwrap();
     assert_eq!(applied.relocated_photos, 1);
@@ -1321,24 +1342,16 @@ async fn manual_recovery_retires_only_unreferenced_default_destination() {
         .original(crate::RelativeOriginalPath::parse("moved/a.JPG").unwrap())
         .unwrap();
     let facts = capability.facts().unwrap();
-    let relocation = crate::RequestedRelocation {
-        original_id: survey.unavailable[0].original_id.clone(),
-        to_location: "moved/a.JPG".to_owned(),
-        facts,
-        retire_destination: false,
-    };
-    assert!(
-        library
-            .apply_relocations(vec![relocation.clone()])
-            .await
-            .is_err()
-    );
+    let relocation = requested_relocation(&proposals[0], &survey, facts, None);
+    assert!(library.apply_relocations(vec![relocation]).await.is_err());
 
     let applied = library
-        .apply_relocations(vec![crate::RequestedRelocation {
-            retire_destination: true,
-            ..relocation
-        }])
+        .apply_relocations(vec![requested_relocation(
+            &proposals[0],
+            &survey,
+            facts,
+            Some("occupant-photo"),
+        )])
         .await
         .unwrap();
     assert_eq!(applied.relocated_photos, 1);
@@ -1388,12 +1401,12 @@ async fn manual_recovery_refuses_retire_with_user_state() {
     let facts = capability.facts().unwrap();
     assert!(
         library
-            .apply_relocations(vec![crate::RequestedRelocation {
-                original_id: survey.unavailable[0].original_id.clone(),
-                to_location: "moved/a.JPG".to_owned(),
+            .apply_relocations(vec![requested_relocation(
+                &proposals[0],
+                &survey,
                 facts,
-                retire_destination: true,
-            }])
+                Some("occupant-photo"),
+            )])
             .await
             .is_err()
     );
@@ -1426,21 +1439,28 @@ async fn manual_recovery_rejects_stale_and_colliding_batches() {
         .unwrap();
     let facts = capability.facts().unwrap();
     let original_id = survey.unavailable[0].original_id.clone();
+    let proposal = crate::plan_single_relocation(
+        &root,
+        &NativeWorkBudget::new(),
+        &survey,
+        &library.snapshot().await.unwrap(),
+        &original_id,
+        "moved/a.JPG",
+    )
+    .unwrap();
     // Colliding destinations reject the whole batch.
     assert!(
         library
             .apply_relocations(vec![
-                crate::RequestedRelocation {
-                    original_id: original_id.clone(),
-                    to_location: "moved/a.JPG".to_owned(),
-                    facts,
-                    retire_destination: false,
-                },
+                requested_relocation(&proposal, &survey, facts, None),
                 crate::RequestedRelocation {
                     original_id: "unknown-original".to_owned(),
+                    from_location: "shoot/a.JPG".to_owned(),
                     to_location: "moved/a.JPG".to_owned(),
+                    mapping_id: "unknown-mapping".to_owned(),
+                    fingerprint: None,
                     facts,
-                    retire_destination: false,
+                    retire_photo_id: None,
                 },
             ])
             .await
@@ -1466,22 +1486,31 @@ async fn manual_recovery_rejects_duplicate_source_mappings() {
         .original(crate::RelativeOriginalPath::parse("moved/b.JPG").unwrap())
         .unwrap();
     let original_id = survey.unavailable[0].original_id.clone();
+    let snapshot = library.snapshot().await.unwrap();
+    let first_proposal = crate::plan_single_relocation(
+        &root,
+        &NativeWorkBudget::new(),
+        &survey,
+        &snapshot,
+        &original_id,
+        "moved/a.JPG",
+    )
+    .unwrap();
+    let second_proposal = crate::plan_single_relocation(
+        &root,
+        &NativeWorkBudget::new(),
+        &survey,
+        &snapshot,
+        &original_id,
+        "moved/b.JPG",
+    )
+    .unwrap();
     // Two mappings for one Original File are a colliding batch: only one
     // Location could win, so the whole batch is refused with a reason.
     let error = match library
         .apply_relocations(vec![
-            crate::RequestedRelocation {
-                original_id: original_id.clone(),
-                to_location: "moved/a.JPG".to_owned(),
-                facts: first.facts().unwrap(),
-                retire_destination: false,
-            },
-            crate::RequestedRelocation {
-                original_id,
-                to_location: "moved/b.JPG".to_owned(),
-                facts: second.facts().unwrap(),
-                retire_destination: false,
-            },
+            requested_relocation(&first_proposal, &survey, first.facts().unwrap(), None),
+            requested_relocation(&second_proposal, &survey, second.facts().unwrap(), None),
         ])
         .await
     {
