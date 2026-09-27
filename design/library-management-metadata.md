@@ -216,6 +216,16 @@ session. A session has five steps, all under the deployment's control:
    The publisher derives ownership again through one retained parent directory
    descriptor and requires the current facts and digest to match the evidence.
    An update retains the observed Sidecar filename, including extension case.
+   Before invoking the helper, the supervisor commits a root-owned runtime
+   publication record containing a fresh lease token, the exact temporary name,
+   and the parent device and inode. The helper derives that same temporary name
+   from the inherited lease and opens it exclusively. Recovery may remove a
+   staged publication only when that record is present, the recovery fence is
+   still proven, the parent identity still matches, and the exact artifact is a
+   regular single-link file owned by the configured writer. A missing or invalid
+   record is fail-closed: recovery never scans for or deletes temporary-looking
+   names. The record is removed before the file service is released; a pending
+   record is discarded only from the supervisor private runtime directory.
 4. **Verify.** Re-open the published Sidecar without following links and
    confirm its content is the staged document and that the requested values
    are present. Derive the reported result from that committed snapshot.
@@ -385,7 +395,12 @@ Permanent tests must prove observable behavior rather than parser wiring:
   crash;
 - Original bytes, Library Rating, Selection State, Albums, Capture Time
   ordering, and Preview state remain unchanged throughout; and
-- ExifTool and Lightroom Classic fixtures are inspected with recorded tool
-  versions when those tools are available. Unsupported or embedded-only JPEG
-  workflows are recorded per field rather than generalized into a universal
-  compatibility claim.
+- external-tool evidence meets the
+  [Product Spec acceptance](../docs/library-management-metadata.md#acceptance):
+  ExifTool checks every declared writable field in both directions and verifies
+  preservation; a named photo application, such as darktable, is evaluated through
+  actual metadata input and output in a headless workflow. Record versions, fields,
+  directions, naming and association behavior, and limitations. Rendering alone
+  does not establish metadata exchange. Distinguish embedded-only JPEG workflows
+  from Sidecar support. Lightroom Classic validation is not required, and untested
+  applications have no compatibility claim.

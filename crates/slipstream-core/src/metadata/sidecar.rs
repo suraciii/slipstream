@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::{
     ffi::CString,
     fs::File,
-    io::{self, Read, Write},
+    io::{self, Write},
     os::fd::AsRawFd,
 };
 
@@ -85,6 +85,15 @@ pub struct ExclusiveSaveLease {
 impl ExclusiveSaveLease {
     pub fn from_supervisor_token(token: SupervisorLeaseToken) -> Self {
         Self { _token: token }
+    }
+
+    fn staging_name(&self) -> Result<CString, PublishError> {
+        // The supervisor's token is the publication identity. Hashing it keeps
+        // the runtime record's exact filename bounded and safe even if a
+        // future supervisor changes the token representation.
+        let digest = Sha256::digest(self._token.0.as_bytes());
+        CString::new(format!(".slipstream-sidecar-{digest:x}.tmp"))
+            .map_err(|_| PublishError::StorageUnavailable)
     }
 }
 
@@ -326,16 +335,17 @@ pub fn publish(
     root: &LibraryRoot,
     original: &RelativeOriginalPath,
     evidence: &SidecarEvidence,
-    _lease: &ExclusiveSaveLease,
+    lease: &ExclusiveSaveLease,
     document: &[u8],
 ) -> Result<PublishedSidecar, PublishError> {
-    publish_inner(root, original, evidence, document, || {})
+    publish_inner(root, original, evidence, lease, document, || {})
 }
 
 fn publish_inner(
     root: &LibraryRoot,
     original: &RelativeOriginalPath,
     evidence: &SidecarEvidence,
+    lease: &ExclusiveSaveLease,
     document: &[u8],
     after_rename: impl FnOnce(),
 ) -> Result<PublishedSidecar, PublishError> {
@@ -374,15 +384,7 @@ fn publish_inner(
     };
     let target =
         CString::new(target_name.as_str()).map_err(|_| PublishError::StorageUnavailable)?;
-    let mut random = [0; 32];
-    File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut random))
-        .map_err(|_| PublishError::StorageUnavailable)?;
-    let temporary = CString::new(format!(
-        ".slipstream-sidecar-{:x}.tmp",
-        Sha256::digest(random)
-    ))
-    .unwrap();
+    let temporary = lease.staging_name()?;
     let descriptor = confinement::sidecar_create(directory.as_raw_fd(), &temporary)
         .map_err(|_| PublishError::StorageUnavailable)?;
     let mut staged = File::from(descriptor);
@@ -612,6 +614,27 @@ mod tests {
         );
     }
     #[test]
+    fn sidecar_staging_name_is_lease_bound_and_exclusive() {
+        let tree = TempTree::new();
+        let lease = lease();
+        let absent = evidence(tree.observe());
+        let temporary = lease.staging_name().unwrap();
+        let descriptor = confinement::sidecar_create(
+            tree.root().sidecar_directory("").unwrap().as_raw_fd(),
+            &temporary,
+        )
+        .unwrap();
+        drop(descriptor);
+        let path = tree.0.join(temporary.to_str().unwrap());
+        fs::write(&path, b"unrelated content").unwrap();
+        assert_eq!(
+            publish(&tree.root(), &original(), &absent, &lease, b"new"),
+            Err(PublishError::StorageUnavailable)
+        );
+        assert_eq!(fs::read(path).unwrap(), b"unrelated content");
+    }
+
+    #[test]
     fn sidecar_publish_update_leaves_original_unchanged() {
         let tree = TempTree::new();
         tree.write("foo.xmp", b"old");
@@ -690,11 +713,13 @@ mod tests {
     #[test]
     fn sidecar_post_rename_failure_keeps_target() {
         let tree = TempTree::new();
+        let lease = lease();
         tree.write("foo.xmp", b"old");
         let result = publish_inner(
             &tree.root(),
             &original(),
             &evidence(tree.observe()),
+            &lease,
             b"published",
             || tree.write("foo.xmp", b"tampered"),
         );

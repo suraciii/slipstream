@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import hashlib
 import fcntl
 import grp
 import json
@@ -17,6 +18,7 @@ import stat
 import secrets
 import struct
 import subprocess
+import sys
 import time
 
 REQUEST_LIMIT = 2 * 1024 * 1024
@@ -111,6 +113,8 @@ class Supervisor:
         self.runtime = Path(f"/run/slipstream-metadata/{instance}")
         secure_path(self.runtime, directory=True)
         self.marker = self.runtime / "fenced"
+        self.publication_record = self.runtime / "publication.json"
+        self.publication_pending = self.runtime / "publication.json.new"
 
     def identity_isolation(self, allowed: str) -> None:
         writer = self.config["writerUid"]
@@ -129,6 +133,9 @@ class Supervisor:
                 continue
             try:
                 process_status = Path(f"/proc/{entry.name}/status").read_text().splitlines()
+                state = next((line.split()[1] for line in process_status if line.startswith("State:")), "")
+                if state in ("Z", "X"):
+                    continue
                 gids = set()
                 for line in process_status:
                     if line.startswith(("Gid:", "Groups:")):
@@ -288,13 +295,219 @@ class Supervisor:
                 raise Refusal("helper descendants did not exit; retaining managed-service mask")
             time.sleep(0.05)
 
+    @staticmethod
+    def _temporary_name(token: str) -> str:
+        try:
+            encoded = token.encode("ascii")
+        except UnicodeEncodeError as error:
+            raise Refusal("publication token is not ASCII") from error
+        return f".slipstream-sidecar-{hashlib.sha256(encoded).hexdigest()}.tmp"
+
+    def _open_confined_parent(self, parent: Path) -> tuple[int, os.stat_result]:
+        """Walk from / with O_NOFOLLOW on every component; never reopen by path."""
+        if (not parent.is_absolute() or str(parent) != os.path.normpath(str(parent))
+                or not parent.is_relative_to(self.root)):
+            raise Refusal("publication parent is outside the backing root")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        descriptor = os.open("/", flags)
+        current = Path("/")
+        device = None
+        try:
+            for component in parent.parts[1:]:
+                child = os.open(component, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+                current /= component
+                facts = os.fstat(descriptor)
+                if facts.st_uid != 0:
+                    raise Refusal("publication ancestors must remain root-owned")
+                if current == self.root:
+                    device = facts.st_dev
+                if device is not None:
+                    if (facts.st_dev != device or facts.st_gid != self.config["writerGid"]
+                            or stat.S_IMODE(facts.st_mode) != 0o3770):
+                        raise Refusal("publication parent is not an admitted library directory")
+                elif facts.st_mode & 0o022:
+                    raise Refusal("publication ancestor is writable by non-root")
+            return descriptor, os.fstat(descriptor)
+        except OSError as error:
+            os.close(descriptor)
+            raise Refusal(f"publication parent cannot be safely reopened: {error}") from error
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def require_fence(self) -> None:
+        # A marker records intent, not exclusivity. Recheck the actual service
+        # and its cgroup before authorizing any Library deletion.
+        secure_path(self.marker)
+        service = properties(self.unit)
+        if (service.get("LoadState") != "masked"
+                or service.get("ActiveState") not in ("inactive", "failed")):
+            raise Refusal("publication recovery requires SMB still masked and stopped")
+        group = service.get("ControlGroup", "")
+        if group:
+            if not group.startswith("/") or group == "/":
+                raise Refusal("managed service cgroup is invalid")
+            for procs in (Path("/sys/fs/cgroup") / group.lstrip("/")).rglob("cgroup.procs"):
+                if procs.read_text().strip():
+                    raise Refusal("managed service still has descendants")
+        self.identity_isolation("/no-managed-writer-may-remain")
+
+    @staticmethod
+    def _sync_directory(path: Path) -> None:
+        descriptor = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _publication_parent(self, original_path: object) -> Path:
+        if type(original_path) is not str or not original_path:
+            raise Refusal("save request must name an Original Location")
+        parts = original_path.split("/")
+        if (original_path.startswith("/") or "\x00" in original_path
+                or any(part in ("", ".", "..") for part in parts)):
+            raise Refusal("Original Location is not a confined relative path")
+        return self.root.joinpath(*parts[:-1])
+
+    def _write_publication_record(self, original_path: object, token: str) -> None:
+        parent = self._publication_parent(original_path)
+        self.require_fence()
+        temporary = self._temporary_name(token)
+        descriptor, facts = self._open_confined_parent(parent)
+        try:
+            try:
+                os.stat(temporary, dir_fd=descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise Refusal("the exact session staging path already exists")
+        finally:
+            os.close(descriptor)
+        if self.publication_record.exists() or self.publication_pending.exists():
+            raise Refusal("a prior publication record is still present")
+        record = {
+            "version": 1,
+            "token": token,
+            "temporary": temporary,
+            "parent": str(parent),
+            "parentDevice": facts.st_dev,
+            "parentInode": facts.st_ino,
+            "writerUid": self.config["writerUid"],
+            "writerGid": self.config["writerGid"],
+        }
+        descriptor = os.open(
+            str(self.publication_pending),
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                descriptor = -1
+                json.dump(record, stream, separators=(",", ":"), sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+        except Exception:
+            if descriptor >= 0:
+                os.close(descriptor)
+            raise
+        os.replace(self.publication_pending, self.publication_record)
+        self._sync_directory(self.runtime)
+
+    def _read_publication_record(self) -> dict | None:
+        try:
+            descriptor = os.open(
+                str(self.publication_record),
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            )
+        except FileNotFoundError:
+            return None
+        try:
+            facts = os.fstat(descriptor)
+            if (not stat.S_ISREG(facts.st_mode) or facts.st_nlink != 1
+                    or facts.st_uid != 0 or stat.S_IMODE(facts.st_mode) != 0o600):
+                raise Refusal("publication record is not a root-owned private file")
+            with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+                descriptor = -1
+                record = json.load(stream)
+        except (OSError, ValueError) as error:
+            raise Refusal(f"publication record is invalid: {error}") from error
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        expected = {"version", "token", "temporary", "parent", "parentDevice", "parentInode", "writerUid", "writerGid"}
+        if not isinstance(record, dict) or set(record) != expected:
+            raise Refusal("publication record fields do not match the contract")
+        if (record["version"] != 1 or type(record["token"]) is not str
+                or type(record["temporary"]) is not str or type(record["parent"]) is not str
+                or type(record["parentDevice"]) is not int or type(record["parentInode"]) is not int
+                or type(record["writerUid"]) is not int or type(record["writerGid"]) is not int):
+            raise Refusal("publication record values do not match the contract")
+        if record["writerUid"] != self.config["writerUid"] or record["writerGid"] != self.config["writerGid"]:
+            raise Refusal("publication record writer identity changed")
+        if (not re.fullmatch(r"[0-9a-f]{64}", record["token"])
+                or record["temporary"] != self._temporary_name(record["token"])):
+            raise Refusal("publication record staging name does not match its token")
+        return record
+
+    def discard_pending_record(self) -> None:
+        try:
+            facts = self.publication_pending.lstat()
+        except FileNotFoundError:
+            return
+        if (not stat.S_ISREG(facts.st_mode) or facts.st_nlink != 1
+                or facts.st_uid != 0 or stat.S_IMODE(facts.st_mode) != 0o600):
+            raise Refusal("pending publication record is not a root-owned private file")
+        self.publication_pending.unlink()
+        self._sync_directory(self.runtime)
+
+    def discard_staged_publication(self) -> None:
+        """Remove only a session's exact intended artifact under its intact fence."""
+        record = self._read_publication_record()
+        if record is None:
+            return
+        self.require_fence()
+        parent = Path(record["parent"])
+        descriptor, facts = self._open_confined_parent(parent)
+        try:
+            if (facts.st_dev != record["parentDevice"] or facts.st_ino != record["parentInode"]):
+                raise Refusal("publication parent identity no longer matches the record; artifact retained")
+            try:
+                artifact = os.stat(record["temporary"], dir_fd=descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                artifact = None
+            if artifact is not None:
+                if (not stat.S_ISREG(artifact.st_mode) or artifact.st_nlink != 1
+                        or artifact.st_uid != record["writerUid"]
+                        or artifact.st_gid != record["writerGid"]):
+                    raise Refusal("recorded staging artifact identity is invalid; artifact retained")
+                os.unlink(record["temporary"], dir_fd=descriptor)
+                os.fsync(descriptor)
+                print(f"discarded attested staged publication under SMB fence: {parent / record['temporary']}", file=sys.stderr)
+        finally:
+            os.close(descriptor)
+        self.publication_record.unlink()
+        self._sync_directory(self.runtime)
+
     def recover(self) -> None:
-        self.kill_descendants()
+        # No record means no Library cleanup, including marker-less startup.
+        # Kill every helper descendant before inspecting any recorded artifact.
+        if self.marker.exists():
+            self.kill_descendants()
+        elif self.publication_record.exists():
+            raise Refusal("publication record exists without an active fence; artifact retained")
+        self.discard_pending_record()
+        self.discard_staged_publication()
         self.release()
 
     def release(self) -> None:
+        if self.publication_record.exists() or self.publication_pending.exists():
+            raise Refusal("publication ledger must be cleaned before external access resumes")
         if self.marker.exists():
             self.kill_descendants()
+            print("publication recovery complete; helper cgroup empty; resuming SMB", file=sys.stderr)
             command("/usr/bin/systemctl", "unmask", "--runtime", self.unit)
             command("/usr/bin/systemctl", "start", self.unit)
             if properties(self.unit).get("ActiveState") != "active":
@@ -363,7 +576,7 @@ class Supervisor:
             parent.close()
 
     def save(self, request: object) -> object:
-        helper_started = False
+        session_started = False
         result = None
         try:
             service = self.validate()
@@ -396,18 +609,21 @@ class Supervisor:
                 # Reinspect file ownership after all external writers have exited.
                 self.identity_isolation("/no-managed-writer-may-remain")
                 self.validate_tree()
-                helper_started = True
-                # The random session token is the attestation the helper needs
-                # to construct its exclusive-save publication authority.
-                request = {"leaseToken": secrets.token_hex(32), "save": request}
+                token = secrets.token_hex(32)
+                # Check the exact token-derived path only after quiescence and
+                # identity validation, then commit its root-owned ledger before
+                # any helper process can create it.
+                self._write_publication_record(request.get("originalPath") if isinstance(request, dict) else None, token)
+                session_started = True
+                request = {"leaseToken": token, "save": request}
                 result = self.run_helper(request)
         except (Refusal, OSError, ValueError, subprocess.SubprocessError) as error:
-            result = failure("outcome_unknown" if helper_started else "save_unavailable", str(error))
+            result = failure("outcome_unknown" if session_started else "save_unavailable", str(error))
         finally:
             try:
-                self.release()
-            except (Refusal, OSError) as error:
-                result = failure("outcome_unknown" if helper_started else "save_unavailable", f"external access recovery failed: {error}")
+                self.recover()
+            except (Refusal, OSError, ValueError, subprocess.SubprocessError) as error:
+                result = failure("outcome_unknown" if session_started else "save_unavailable", f"external access recovery failed: {error}")
         return result
 
 
@@ -485,7 +701,7 @@ def main() -> None:
     if args.recover:
         supervisor.recover()
     else:
-        supervisor.release()
+        supervisor.recover()
         serve(supervisor)
 
 

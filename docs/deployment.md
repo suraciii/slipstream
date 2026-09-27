@@ -121,10 +121,18 @@ exit. Helper input/output is bounded and the helper has a 30-second deadline.
 The helper's entire descendant cgroup is killed and observed empty before
 unmasking and restarting SMB. Systemctl operations each have a ten-second
 deadline. A supervisor SIGKILL invokes systemd `ExecStopPost`, which proves
-helper descendants exited before releasing the mask; ordinary restarts use
-the same recovery. If descendants cannot be stopped, recovery retains the
-mask and refuses, rather than admitting concurrent writers. The persistent
-runtime marker also drives recovery after supervisor restart.
+helper descendants exited before releasing the mask; ordinary restarts use the
+same recovery. Before the helper starts, the supervisor writes an atomic,
+root-owned publication record in its private runtime directory. The record
+pins the lease-derived temporary name and the parent device and inode. Recovery
+may remove only that exact regular, single-link artifact after reproving the
+fence and the parent identity; it must not glob temporary-looking names. A
+missing or invalid record is retained and reported as an actionable refusal.
+The record is removed before the service is released, while an interrupted
+record is discarded only from the private runtime directory. If descendants
+cannot be stopped, recovery retains the mask and refuses, rather than
+admitting concurrent writers. The persistent runtime marker also drives
+recovery after supervisor restart.
 
 Before treating a deployment as writable, independently exercise real helper
 publication and refusal, concurrent SMB writes and restart attempts during the

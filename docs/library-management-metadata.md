@@ -270,13 +270,19 @@ restore must establish current external content before any save.
   prior content, or explicit uncertainty; never a false success.
 - Read in the CLI, save chosen fields, and inspect them in the Web; do the reverse.
   External metadata must remain separate from Library decisions in both paths.
-- Verify interoperability using Adobe Lightroom Classic and ExifTool with recorded
-  versions and non-private fixtures. Exercise data written externally and values
-  saved by Slipstream. For JPEGs, distinguish an external tool's embedded-only
-  workflow from Sidecar support; do not claim automatic JPEG Sidecar consumption.
-  Properties an application does not expose must retain valid standard values
-  and pass independent inspection. Record per-field compatibility rather than
-  claiming universal application support.
+- Verify every declared writable field with ExifTool using recorded versions and
+  non-private fixtures. Exercise externally written values and independently
+  inspect values saved by Slipstream, including preserved unknown structures.
+- Evaluate metadata exchange with a named photo application that can be exercised
+  in a headless environment, such as darktable. Exercise metadata input and output
+  where supported; image rendering alone does not prove metadata exchange.
+  Record supported fields, directions, versions, and workflow limits. For JPEGs,
+  distinguish embedded-only workflows from Sidecar support; do not claim automatic
+  JPEG Sidecar consumption. Properties an application does not expose must retain
+  valid standard values and pass independent inspection. Adobe Lightroom Classic
+  validation is not required. Compatibility claims must name the tested application
+  and workflow; standard XMP alone does not establish compatibility with untested
+  applications.
 
 ## Standards
 

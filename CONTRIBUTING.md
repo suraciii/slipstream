@@ -116,6 +116,13 @@ bun run verify
 
 `test:cli-package` verifies the source-bound Linux amd64 candidate archive, its checksum and fixed metadata, and no-replace behavior using synthetic inputs. It runs in `test:fast` and `verify`. To build an actual candidate from a clean committed tree, run `python3 scripts/package-cli.py`; see [CLI Candidate Installation](docs/cli-install.md). Packaging does not publish a tag or upload a release.
 
+`test:metadata` runs the metadata supervisor recovery tests in `test:fast` and
+`verify`. Most cases require root to exercise production directory ownership;
+run the command as root in a disposable Linux container for full coverage.
+The component tests substitute service properties and identity isolation.
+Qualify automatic recovery separately with real systemd, SMB, and an interrupted
+admitted Save; a component pass does not establish that deployment behavior.
+
 Install the Playwright Chromium browser once before running the gates:
 
 ```sh
