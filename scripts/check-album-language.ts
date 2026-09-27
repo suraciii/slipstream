@@ -76,7 +76,7 @@ const allowed = (path: string, line: number, text: string): boolean => {
   if (path === "docs/library-management-removal-and-restore.md") return true;
   if (path === "docs/rejected-photo-cleanup.md")
     return text.includes("explicitly identified Photo sets");
-  if (path === "crates/slipstream-core/src/library.rs")
+  if (path === "crates/slipstream-core/src/library/mod.rs")
     return text.includes("explicit, caller-reviewed Photo set");
   if (path === "crates/slipstream-server/src/http.rs")
     return text.includes("explicit, caller-reviewed Photo set");
