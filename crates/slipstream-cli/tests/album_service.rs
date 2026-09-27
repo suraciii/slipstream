@@ -160,6 +160,7 @@ fn fixture_with(photo_names: &[&str]) -> (PathBuf, Config) {
         web_root: Some(web),
         processing: None,
         export_retained_output_bytes: None,
+        metadata_supervisor: None,
     };
     (base, config)
 }

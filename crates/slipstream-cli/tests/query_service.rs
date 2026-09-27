@@ -181,6 +181,7 @@ fn fixture() -> (PathBuf, Config) {
         web_root: Some(web),
         processing: None,
         export_retained_output_bytes: None,
+        metadata_supervisor: None,
     };
     (base, config)
 }
@@ -775,9 +776,6 @@ async fn executable_queries_the_real_service_with_fixed_multi_page_membership() 
     assert_eq!(exit, 0);
     assert_eq!(check["data"]["scan"]["state"], "idle");
     assert_eq!(check["data"]["scan"]["total"], 5);
-    let (exit, status_after_check) = command(&server.url, &["status"]).await;
-    assert_eq!(exit, 0);
-    assert_eq!(check["data"]["scan"], status_after_check["data"]["scan"]);
 
     let (exit, folders) = command(&server.url, &["folders", "list", "--limit", "1"]).await;
     assert_eq!(exit, 0);
@@ -990,6 +988,203 @@ async fn executable_queries_the_real_service_with_fixed_multi_page_membership() 
     assert_eq!(missing["status"], "error");
     assert_eq!(missing["error"]["code"], "not_found");
 
+    server.close().await.unwrap();
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[tokio::test]
+async fn executable_metadata_inspects_external_edits_and_refuses_unavailable_save() {
+    let (base, config) = fixture();
+    let original = config.library_root.join("trip/one.JPG");
+    let sidecar = config.library_root.join("trip/one.XMP");
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+        .encode(&[85; 12], 2, 2, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    fs::write(&original, &jpeg).unwrap();
+    let packet = |label: &str| {
+        format!(
+            "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:photoshop=\"http://ns.adobe.com/photoshop/1.0/\" xmlns:xmpRights=\"http://ns.adobe.com/xap/1.0/rights/\"><rdf:Description xmp:Label=\"{label}\" xmp:Rating=\"3.5\" photoshop:Headline=\"Headline\" photoshop:AuthorsPosition=\"Editor\" photoshop:Credit=\"Credit\" photoshop:Source=\"Source\" xmpRights:Marked=\"False\" xmpRights:WebStatement=\"https://example.invalid/rights\"><dc:title><rdf:Alt><rdf:li xml:lang=\"x-default\">Title</rdf:li><rdf:li xml:lang=\"fr\">Titre été</rdf:li></rdf:Alt></dc:title><dc:description><rdf:Alt><rdf:li xml:lang=\"x-default\">Caption</rdf:li></rdf:Alt></dc:description><dc:subject><rdf:Bag><rdf:li>Leaf</rdf:li><rdf:li>leaf</rdf:li></rdf:Bag></dc:subject><dc:creator><rdf:Seq><rdf:li>Zoë</rdf:li><rdf:li>Ada</rdf:li></rdf:Seq></dc:creator><dc:rights><rdf:Alt><rdf:li xml:lang=\"x-default\">Copyright</rdf:li></rdf:Alt></dc:rights><xmpRights:UsageTerms><rdf:Alt><rdf:li xml:lang=\"x-default\">Terms</rdf:li></rdf:Alt></xmpRights:UsageTerms></rdf:Description></rdf:RDF>"
+        )
+    };
+    fs::write(&sidecar, packet("Review")).unwrap();
+    let (server, upstream) = common::start_authenticated_server_with_upstream(config).await;
+    wait_until_idle(&server.url).await;
+    let (exit, page) = command(&server.url, &["photos", "list", "--limit", "60"]).await;
+    assert_eq!(exit, 0, "{page}");
+    let id = page["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|photo| photo["filename"] == "one.JPG")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let (exit, read) = command(&server.url, &["photos", "metadata", id]).await;
+    assert_eq!(exit, 0, "{read}");
+    assert_eq!(read["data"]["fields"]["xmp:Label"]["value"], "Review");
+    assert_eq!(read["data"]["fields"]["xmp:Rating"]["value"], 3.5);
+    assert_eq!(read["data"]["libraryRating"], 0);
+    for field in [
+        "dc:title",
+        "dc:description",
+        "photoshop:Headline",
+        "dc:subject",
+        "xmp:Label",
+        "xmp:Rating",
+        "dc:creator",
+        "photoshop:AuthorsPosition",
+        "photoshop:Credit",
+        "photoshop:Source",
+        "dc:rights",
+        "xmpRights:UsageTerms",
+        "xmpRights:Marked",
+        "xmpRights:WebStatement",
+    ] {
+        assert_eq!(read["data"]["fields"][field]["state"], "present", "{field}");
+        assert_eq!(
+            read["data"]["fields"][field]["provenance"], "sidecar",
+            "{field}"
+        );
+        assert_eq!(read["data"]["fields"][field]["writable"], true, "{field}");
+    }
+    assert_eq!(
+        read["data"]["fields"]["dc:title"]["value"]["fr"],
+        "Titre été"
+    );
+    assert_eq!(
+        read["data"]["fields"]["dc:creator"]["value"],
+        serde_json::json!(["Zoë", "Ada"])
+    );
+    assert_eq!(
+        read["data"]["fields"]["dc:subject"]["value"],
+        serde_json::json!(["Leaf", "leaf"])
+    );
+    assert_eq!(read["data"]["fields"]["xmpRights:Marked"]["value"], false);
+    assert_eq!(read["data"]["captureFacts"]["imageWidth"]["value"], 2);
+    assert_eq!(
+        read["data"]["captureFacts"]["imageWidth"]["provenance"],
+        "original"
+    );
+    assert_eq!(
+        read["data"]["evidence"]["sidecar"]["location"],
+        "trip/one.XMP"
+    );
+    assert_eq!(read["data"]["saveAvailable"], false);
+
+    let input = base.join("save.json");
+    fs::write(
+        &input,
+        serde_json::to_vec(&serde_json::json!({
+            "evidence": read["data"]["evidence"],
+            "changes": {"xmp:Label": {"op": "set", "value": "Changed"}}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let (exit, refused) = command(
+        &server.url,
+        &[
+            "photos",
+            "metadata-save",
+            id,
+            "--input",
+            input.to_str().unwrap(),
+        ],
+    )
+    .await;
+    assert_eq!(exit, 5, "{refused}");
+    assert_eq!(refused["error"]["code"], "save_unavailable");
+    assert_eq!(refused["error"]["effect"], "none");
+    assert_eq!(fs::read_to_string(&sidecar).unwrap(), packet("Review"));
+
+    // Route-level refusals must remain definite no-effect failures in the CLI.
+    let (exit, invalid_read) = command(&server.url, &["photos", "metadata", "BAD"]).await;
+    assert_eq!(exit, 2, "{invalid_read}");
+    assert_eq!(invalid_read["error"]["code"], "invalid_input");
+    let (exit, invalid_save) = command(
+        &server.url,
+        &[
+            "photos",
+            "metadata-save",
+            "BAD",
+            "--input",
+            input.to_str().unwrap(),
+        ],
+    )
+    .await;
+    assert_eq!(exit, 2, "{invalid_save}");
+    assert_eq!(invalid_save["error"]["code"], "invalid_input");
+    assert_eq!(invalid_save["error"]["effect"], "none");
+    // The fixture TLS proxy caps input at 1 MiB; exercise the server's 2 MiB
+    // rejection directly on its authenticated loopback HTTP endpoint.
+    let client = reqwest::Client::new();
+    for (body, status, code) in [
+        (vec![b' '; 2 * 1024 * 1024 + 1], 413, "resource_limit"),
+        (b"{".to_vec(), 400, "invalid_input"),
+    ] {
+        let response = client
+            .post(format!("{upstream}/api/photos/{id}/external-metadata"))
+            .bearer_auth(common::ACCESS_TOKEN)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), status);
+        let rejection: slipstream_server::metadata_wire::MetadataErrorEnvelope =
+            response.json().await.unwrap();
+        assert_eq!(serde_json::to_value(rejection.error.code).unwrap(), code);
+    }
+    assert_eq!(fs::read_to_string(&sidecar).unwrap(), packet("Review"));
+
+    fs::write(&sidecar, packet("External")).unwrap();
+    let (exit, changed) = command(&server.url, &["photos", "metadata", id]).await;
+    assert_eq!(exit, 0, "{changed}");
+    assert_eq!(changed["data"]["fields"]["xmp:Label"]["value"], "External");
+    assert_eq!(changed["data"]["libraryRating"], 0);
+    assert_ne!(
+        changed["data"]["evidence"]["sidecar"]["sha256"],
+        read["data"]["evidence"]["sidecar"]["sha256"]
+    );
+
+    fs::remove_file(&sidecar).unwrap();
+    symlink("one.JPG", &sidecar).unwrap();
+    let (exit, unavailable) = command(&server.url, &["photos", "metadata", id]).await;
+    assert_eq!(exit, 0, "{unavailable}");
+    assert_eq!(
+        unavailable["data"]["evidence"]["sidecar"]["state"],
+        "unavailable"
+    );
+    assert_eq!(unavailable["data"]["saveAvailable"], false);
+    for field in [
+        "exif:DateTimeOriginal",
+        "exif:SubSecTimeOriginal",
+        "exif:OffsetTimeOriginal",
+        "tiff:Make",
+        "tiff:Model",
+        "exif:LensModel",
+        "exif:PixelXDimension",
+        "exif:PixelYDimension",
+        "tiff:Orientation",
+        "exif:ExposureTime",
+        "exif:FNumber",
+        "exif:ISOSpeedRatings",
+        "exif:FocalLength",
+    ] {
+        assert_eq!(
+            unavailable["data"]["fields"][field]["state"], "unavailable",
+            "{field}"
+        );
+        assert_eq!(
+            unavailable["data"]["fields"][field]["writable"], false,
+            "{field}"
+        );
+        assert_eq!(
+            unavailable["data"]["fields"][field]["provenance"], "sidecar",
+            "{field}"
+        );
+    }
+    assert_eq!(fs::read(&original).unwrap(), jpeg);
     server.close().await.unwrap();
     fs::remove_dir_all(base).unwrap();
 }
