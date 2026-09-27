@@ -13,7 +13,6 @@ if (exitCode !== 0 && exitCode !== 1)
   throw new Error(stderr.trim() || `git grep exited ${exitCode}`);
 
 const legacyPaths = [
-  "crates/slipstream-core/src/persistence/owner.rs",
   "crates/slipstream-core/src/persistence/migrations.rs",
 ] as const;
 const legacyLinesByPath: Record<string, Set<number>> = {};
