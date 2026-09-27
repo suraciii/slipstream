@@ -69,6 +69,37 @@ describe("Export inspection", () => {
     expect(inspection?.artifact?.width).toBe(6000);
   });
 
+  test("parses a Finished JPEG export as its own target and label", () => {
+    const inspection = parseExportInspection({
+      exportId: "film-1",
+      photoId: "photo-1",
+      state: "succeeded",
+      target: "film-jpeg",
+      recipeVersion: "recipe-2",
+      sourceRevision: "rev-1",
+      bundleId: "bundle",
+      terminalOutcome: "succeeded",
+      failureReason: null,
+      receiptExpiresAt: "2026-10-02T00:00:00Z",
+      artifact: {
+        exportId: "film-1",
+        target: "film-jpeg",
+        stage: "film",
+        contentType: "image/jpeg",
+        width: 6000,
+        height: 4000,
+        profileIdentity: "sRGB",
+        byteLength: 1024,
+        sha256: "def",
+        expiresAt: "2026-10-02T00:00:00Z",
+      },
+    });
+    expect(inspection?.target).toBe("film-jpeg");
+    expect(describeExportState(inspection!, (bytes) => `${bytes} B`)).toContain(
+      "Finished JPEG",
+    );
+  });
+
   test("a state outside the closed set is not an Export", () => {
     expect(
       parseExportInspection({ exportId: "export-1", state: "paused" }),

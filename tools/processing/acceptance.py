@@ -10,9 +10,10 @@ downloaded artifacts inside the explicit output directory, and it proves the
 fixture Original and any external XMP sidecar unchanged by hashing them before
 and after the run without opening them for writing.
 
-The Film (`finished-jpeg`) stage is owned by Issue #332 and is not implemented
-yet; the runner reports that stage as not covered instead of pretending to
-exercise it.
+The Film (`finished-jpeg`) service stage is implemented.  Native Film
+qualification remains an explicit deployment gate, so this runner records that
+gate as not covered instead of claiming production acceptance from a generic
+workflow run.
 
 The tool must never run against an operator's live library.  It refuses to run
 without `--i-acknowledge-this-is-an-acceptance-instance`, and the documented
@@ -1893,16 +1894,16 @@ class Runner:
 
     def _step_film_stage(self) -> dict:
         self._skip(
-            "film-stage-not-implemented",
+            "film-stage-native-qualification-required",
             {
-                "owner": "issue-332",
                 "observedCapabilityStage": self.capability.get("stages", {}).get("film"),
                 "note": (
-                    "The finished-jpeg Film stage is not implemented yet; the runner "
-                    "will cover it once Issue #332 lands."
+                    "The finished-jpeg Film service stage is implemented, but "
+                    "this generic runner does not claim native Film qualification."
                 ),
             },
         )
+
 
     def _step_invariance_after(self) -> dict:
         snapshots, unreadable = self._current_snapshots()
@@ -2036,7 +2037,7 @@ class Runner:
             "writtenFiles": list(self.written_files),
             "filmStage": {
                 "covered": False,
-                "ownerIssue": 332,
+                "nativeQualificationRequired": True,
                 "observedCapabilityStage": film_observed,
             },
         }
@@ -2051,7 +2052,7 @@ def render_summary(report: dict) -> str:
     lines.append(f"Status: {report['status']}")
     if report["filmStage"]["covered"] is False:
         lines.append(
-            "Film (finished-jpeg) stage not covered: owned by Issue #332, not implemented yet."
+            "Film (finished-jpeg) stage not covered: native Film qualification remains a separate gate."
         )
     for entry in report["notRun"]:
         if entry["step"] != "film-stage":

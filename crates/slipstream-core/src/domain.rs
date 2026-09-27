@@ -1159,8 +1159,9 @@ impl std::error::Error for PathError {}
 /// seven-day period; this constant is its only implementation definition.
 pub const EXPORT_RETENTION_SECONDS: u64 = 7 * 24 * 60 * 60;
 
-/// The one closed processing workload of the first Export capability.
+/// The closed production workloads supported by the Export capability.
 pub const EXPORT_DEVELOPMENT_TIFF_WORKLOAD: &str = "development-tiff";
+pub const EXPORT_FILM_JPEG_WORKLOAD: &str = "film-jpeg";
 
 /// The white-balance payload of the closed first execution recipe.
 pub const EXPORT_AS_SHOT_WHITE_BALANCE: &str = "as-shot";
@@ -1250,8 +1251,8 @@ pub struct ExportSnapshot {
     pub source_kind: OriginalKind,
     pub source_profile_id: String,
     pub policy_id: String,
+    /// The closed workload selected by this immutable Export snapshot.
     pub bundle_id: String,
-    /// The closed workload value; only `development-tiff` exists.
     pub workload: String,
     /// Digest of the captured execution payload.
     pub recipe_digest: String,
@@ -1378,6 +1379,7 @@ pub struct ExportRecord {
 /// The guarded submission accepted by the serialized persistence owner. The
 /// semantic settings are captured from the saved recipe inside the same
 /// transaction that validates both expected revisions.
+/// The guarded submission accepted by the serialized persistence owner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExportSubmission {
     /// Stable caller-owned identity resolving a retry after a lost response.
@@ -1389,6 +1391,8 @@ pub struct ExportSubmission {
     pub policy_id: String,
     /// Exact approved bundle identity observed from the processing capability.
     pub bundle_id: String,
+    /// The requested closed processing workload.
+    pub workload: String,
     pub expected_recipe_revision: String,
     pub expected_source_revision: String,
     /// The bundle's qualified exposure range, validated inside the
@@ -1405,6 +1409,7 @@ impl ExportSubmission {
     /// submissions under one identity conflict unless these digests match.
     pub fn payload_digest(&self) -> String {
         export_submission_payload_digest(
+            &self.workload,
             &self.expected_recipe_revision,
             &self.expected_source_revision,
         )
@@ -1417,10 +1422,12 @@ impl ExportSubmission {
 /// caller payload must still replay under its request identity. The Photo
 /// scopes the identity at the receipt key, not here.
 pub fn export_submission_payload_digest(
+    workload: &str,
     expected_recipe_revision: &str,
     expected_source_revision: &str,
 ) -> String {
     let payload = serde_json::json!({
+        "workload": workload,
         "expected_recipe_revision": expected_recipe_revision,
         "expected_source_revision": expected_source_revision,
     });

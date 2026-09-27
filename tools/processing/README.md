@@ -110,9 +110,11 @@ failed, and `2` when the run was blocked because steps could not run, or the
 invocation was refused.
 
 The runner reports honestly what it could not run. The Film (`finished-jpeg`)
-stage is skipped as not implemented until Issue #332 lands, and a route of the
-merged wire contract that the deployment does not serve yet (a 404 without the
-contract's structured error code) makes dependent steps skipped with
+service stage is implemented, but this generic runner keeps native Film
+qualification as a separate deployment gate and records that stage as not
+covered instead of claiming production acceptance. A route of the merged wire
+contract that the deployment does not serve yet (a 404 without the contract's
+structured error code) makes dependent steps skipped with
 `route-not-deployed` instead of failing the workflow. Contract-conformant
 refusals (`processing_unavailable`, `unsupported_photo`, conflicts, and so on)
 are failures with the status and code recorded.
@@ -128,11 +130,11 @@ python3 -m unittest discover -s tools/processing -p 'test_*.py' -v
 
 Today the runner covers the capability read, Photo resolution, Edit Recipe
 read and guarded writes, the `develop` Edit Preview, and the
-`development-tiff` Export lifecycle through validated download. Once
-#408/#409/#331 land, the same invocation exercises the real service routes
-without tool changes; once #332 lands, the Film stage will need new runner
-coverage before the complete RAW -> TIFF -> Film -> JPEG scenario of Issue
-#334 can be claimed.
+`development-tiff` Export lifecycle through validated download. The Film
+stage is implemented by the service and worker contract, but native Film
+qualification remains outside this generic runner; the complete RAW -> TIFF ->
+Film -> JPEG deployment acceptance of Issue #334 must not be claimed from this
+workflow alone.
 
 ## Build
 

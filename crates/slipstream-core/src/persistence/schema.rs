@@ -11,6 +11,7 @@ const SCHEMA_V6_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/
 const SCHEMA_V7_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v7.json");
 const SCHEMA_V8_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v8.json");
 const SCHEMA_V9_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v9.json");
+const SCHEMA_V10_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v10.json");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchemaVersion {
@@ -23,6 +24,7 @@ pub enum SchemaVersion {
     V7,
     V8,
     V9,
+    V10,
 }
 
 impl SchemaVersion {
@@ -37,6 +39,7 @@ impl SchemaVersion {
             Self::V7 => SCHEMA_V7_MANIFEST,
             Self::V8 => SCHEMA_V8_MANIFEST,
             Self::V9 => SCHEMA_V9_MANIFEST,
+            Self::V10 => SCHEMA_V10_MANIFEST,
         }
     }
 }
@@ -141,6 +144,7 @@ mod tests {
     const SCHEMA_V7_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v7.sql");
     const SCHEMA_V8_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v8.sql");
     const SCHEMA_V9_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v9.sql");
+    const SCHEMA_V10_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v10.sql");
 
     fn execute_fixture(sql: &str) -> Connection {
         let connection = Connection::open_in_memory().unwrap();
@@ -149,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_v1_through_v9_manifests_match_shared_contracts() {
+    fn exact_v1_through_v10_manifests_match_shared_contracts() {
         let v1 = execute_fixture(SCHEMA_V1_SQL);
         validate_canonical_schema(&v1, SchemaVersion::V1).unwrap();
         let v2 = execute_fixture(SCHEMA_V2_SQL);
@@ -192,6 +196,12 @@ mod tests {
             expected_manifest(SchemaVersion::V9).unwrap()
         );
         validate_canonical_schema(&v9, SchemaVersion::V9).unwrap();
+        let v10 = execute_fixture(SCHEMA_V10_SQL);
+        assert_eq!(
+            schema_manifest(&v10).unwrap(),
+            expected_manifest(SchemaVersion::V10).unwrap()
+        );
+        validate_canonical_schema(&v10, SchemaVersion::V10).unwrap();
     }
 
     #[test]

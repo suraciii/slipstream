@@ -8,13 +8,22 @@ pub const TERMINAL_SNAPSHOT_BYTES: usize = 4 * 1024;
 pub const STORAGE_BYTES: u64 = 16 * 1024 * 1024;
 pub const PROFILE: &str = "slipstream-native-qualification-v1";
 
-// Production Photo admission is intentionally only named here for now. The
-// fixture transport and executor do not accept this mode until its descriptor
-// transport and worker contract are implemented.
+// The production Photo admission uses the two closed workloads below. The
+// fixture transport remains separate from this descriptor-based boundary.
 pub const PHOTO_PROTOCOL_VERSION: u8 = 1;
 pub const PHOTO_MODE: &str = "photo-processing";
 pub const PHOTO_CAPABILITY: &str = "photo-processing";
 pub const PHOTO_WORKLOAD: &str = "development-tiff";
+/// The fixed Film workload: the same RAW source descriptor and recipe develop
+/// into the pinned linear ProPhoto TIFF, then render into a finished sRGB
+/// JPEG with the shared Film identity from `tools/development/film_identity.py`.
+pub const PHOTO_WORKLOAD_FILM: &str = "film-jpeg";
+
+/// The closed production Photo workload set. Request workloads and output
+/// targets outside it fail closed; there is no default or fallback target.
+pub fn is_photo_workload(value: &str) -> bool {
+    value == PHOTO_WORKLOAD || value == PHOTO_WORKLOAD_FILM
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -626,5 +635,22 @@ mod tests {
             .unwrap()
             .replace("\"version\":1", "\"version\":1,\"version\":1");
         assert!(Config::parse(text.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn photo_workload_set_admits_exactly_the_two_pinned_targets() {
+        assert!(is_photo_workload(PHOTO_WORKLOAD));
+        assert!(is_photo_workload(PHOTO_WORKLOAD_FILM));
+        for unknown in [
+            "",
+            "film",
+            "film-tiff",
+            "development-jpeg",
+            "development-TIFF",
+            "film-jpeg ",
+            "probe-success",
+        ] {
+            assert!(!is_photo_workload(unknown));
+        }
     }
 }

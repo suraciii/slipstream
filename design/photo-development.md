@@ -451,15 +451,17 @@ retained as Exports.
 An Export is immutable once accepted. Its durable snapshot captures the Photo
 identity, recipe revision and settings, source revision, source profile, target,
 policy and bundle identity. States are closed values: `queued`, `running`,
-`succeeded`, `failed`, `cancelled`. A successful Development TIFF publication
-records the artifact identity, byte length, content digest and expiry.
+`succeeded`, `failed`, `cancelled`. A successful Development TIFF or Finished
+JPEG publication records the artifact identity, byte length, content digest and
+expiry.
 
-The first-version Export target set is closed to `development-tiff` at this
-service boundary; the wire target value is `development-tiff`. A submission
-naming any other target, including the Finished JPEG target of the later Film
-stage owned by Issue #332, is refused with status 422 and code
-`invalid_settings` before acceptance and must not create an Export or a
-receipt: accepting a target without its qualified chain is forbidden.
+The closed Export target set is `development-tiff` and `film-jpeg`. The
+Development TIFF target is the full scene-linear ProPhoto handoff after
+darktable development; the Finished JPEG target runs the fixed Film Recipe
+after that handoff and publishes full developed dimensions as sRGB quality 85.
+Each target names its own stage, output extension, media type, and validator.
+Unknown targets are refused with status 422 and code `invalid_settings` before
+acceptance and must not create an Export or a receipt.
 
 - Submission validates the expected recipe revision and source binding
   atomically, then captures the snapshot. A concurrent save conflict is

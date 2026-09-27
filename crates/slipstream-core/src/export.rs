@@ -137,12 +137,28 @@ pub struct StagedOriginalFacts {
     pub source_facts: OriginalFacts,
 }
 
-/// The only output target enabled by this filesystem seam.
+/// Output targets supported by the Export filesystem seam.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExportTarget {
     DevelopmentTiff,
+    FilmJpeg,
 }
 
+impl ExportTarget {
+    pub fn workload(self) -> &'static str {
+        match self {
+            Self::DevelopmentTiff => "development-tiff",
+            Self::FilmJpeg => "film-jpeg",
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::DevelopmentTiff => "tiff",
+            Self::FilmJpeg => "jpg",
+        }
+    }
+}
 /// An unpublished output. The path is private to the workspace until commit.
 pub struct ArtifactWriter {
     temporary_path: PathBuf,
@@ -238,15 +254,26 @@ impl ExportWorkspace {
         })
     }
 
-    /// Starts a private output. The caller writes through the returned path,
-    /// validates the engine output, then calls `publish`.
-    pub fn begin_development_tiff(&self, export_id: &str) -> Result<ArtifactWriter, ExportError> {
+    /// Starts a private output for the selected closed workload. The caller
+    /// writes through the returned path, validates the engine output, then
+    /// calls `publish`.
+    pub fn begin_artifact(
+        &self,
+        export_id: &str,
+        target: ExportTarget,
+    ) -> Result<ArtifactWriter, ExportError> {
         if !valid_export_id(export_id) {
             return Err(ExportError::InvalidExportId);
         }
         let token = unique_token();
-        let temporary_path = self.inner.work.join(format!("{token}.tiff"));
-        let final_path = self.inner.artifacts.join(format!("{export_id}.tiff"));
+        let temporary_path = self
+            .inner
+            .work
+            .join(format!("{token}.{}", target.extension()));
+        let final_path = self
+            .inner
+            .artifacts
+            .join(format!("{export_id}.{}", target.extension()));
         let file = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -257,22 +284,37 @@ impl ExportWorkspace {
         Ok(ArtifactWriter {
             temporary_path,
             final_path,
-            target: ExportTarget::DevelopmentTiff,
+            target,
             committed: false,
         })
     }
 
-    /// Starts a private ephemeral preview output. The caller writes through
-    /// the returned path, validates the engine output, then calls `publish`.
+    pub fn begin_development_tiff(&self, export_id: &str) -> Result<ArtifactWriter, ExportError> {
+        self.begin_artifact(export_id, ExportTarget::DevelopmentTiff)
+    }
+
+    pub fn begin_film_jpeg(&self, export_id: &str) -> Result<ArtifactWriter, ExportError> {
+        self.begin_artifact(export_id, ExportTarget::FilmJpeg)
+    }
+
+    /// Starts a private ephemeral preview output for one closed target.
     /// Preview outputs are kept below their own directory and never enter the
     /// retained Export artifact namespace.
-    pub fn begin_preview_tiff(&self, attempt_key: &str) -> Result<ArtifactWriter, ExportError> {
+    pub fn begin_preview_artifact(
+        &self,
+        attempt_key: &str,
+        target: ExportTarget,
+    ) -> Result<ArtifactWriter, ExportError> {
         if !valid_export_id(attempt_key) {
             return Err(ExportError::InvalidExportId);
         }
         let token = unique_token();
-        let temporary_path = self.inner.work.join(format!("{token}.tiff"));
-        let final_path = self.inner.previews.join(format!("{attempt_key}.tiff"));
+        let extension = target.extension();
+        let temporary_path = self.inner.work.join(format!("{token}.{extension}"));
+        let final_path = self
+            .inner
+            .previews
+            .join(format!("{attempt_key}.{extension}"));
         let file = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -283,23 +325,41 @@ impl ExportWorkspace {
         Ok(ArtifactWriter {
             temporary_path,
             final_path,
-            target: ExportTarget::DevelopmentTiff,
+            target,
             committed: false,
         })
     }
 
+    pub fn begin_preview_tiff(&self, attempt_key: &str) -> Result<ArtifactWriter, ExportError> {
+        self.begin_preview_artifact(attempt_key, ExportTarget::DevelopmentTiff)
+    }
+
+    pub fn begin_preview_jpeg(&self, attempt_key: &str) -> Result<ArtifactWriter, ExportError> {
+        self.begin_preview_artifact(attempt_key, ExportTarget::FilmJpeg)
+    }
+
     /// Deletes one ephemeral preview output. Expiry and supersession are
-    /// idempotent: an already-removed output is no longer retained.
-    pub fn delete_preview_tiff(&self, attempt_key: &str) -> Result<(), ExportError> {
+    /// idempotent for either supported target.
+    pub fn delete_preview_artifact(&self, attempt_key: &str) -> Result<(), ExportError> {
         if !valid_export_id(attempt_key) {
             return Err(ExportError::InvalidExportId);
         }
-        let path = self.inner.previews.join(format!("{attempt_key}.tiff"));
-        match fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.into()),
+        for extension in ["tiff", "jpg"] {
+            let path = self
+                .inner
+                .previews
+                .join(format!("{attempt_key}.{extension}"));
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
         }
+        Ok(())
+    }
+
+    pub fn delete_preview_tiff(&self, attempt_key: &str) -> Result<(), ExportError> {
+        self.delete_preview_artifact(attempt_key)
     }
 }
 

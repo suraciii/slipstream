@@ -21,24 +21,52 @@ use zune_jpeg::JpegDecoder;
 const MAXIMUM_PREVIEW_BYTES: usize = 64 * 1024 * 1024;
 const OPERATION: Operation = Operation::PhotosPreview;
 
+/// Which kind of download a staged destination serves, so local failures
+/// name the right file kind and contract operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DestinationKind {
+    Preview,
+    Export,
+}
+
+impl DestinationKind {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Preview => "Preview",
+            Self::Export => "Export",
+        }
+    }
+
+    /// The closed `local_io_failed` operation of an in-flight staged write.
+    /// The post-publication reporting failure always reports `write-output`.
+    fn write_operation(self) -> &'static str {
+        match self {
+            Self::Preview => "write-preview",
+            Self::Export => "write-output",
+        }
+    }
+}
+
 pub(super) struct Destination {
+    kind: DestinationKind,
     directory: File,
     name: CString,
     path: String,
 }
 
 impl Destination {
-    pub(super) fn preflight(path: &Path) -> Result<Self, CommandFailure> {
+    pub(super) fn preflight(kind: DestinationKind, path: &Path) -> Result<Self, CommandFailure> {
+        let noun = kind.noun();
         let path_text = path.to_str().ok_or_else(|| {
-            CommandFailure::invalid("file", "The Preview path must be valid UTF-8.")
+            CommandFailure::invalid("file", format!("The {noun} path must be valid UTF-8."))
         })?;
         let name = path
             .file_name()
-            .ok_or_else(|| CommandFailure::invalid("file", "Name one new Preview file."))?;
+            .ok_or_else(|| CommandFailure::invalid("file", format!("Name one new {noun} file.")))?;
         let name = CString::new(name.to_str().ok_or_else(|| {
-            CommandFailure::invalid("file", "The Preview path must be valid UTF-8.")
+            CommandFailure::invalid("file", format!("The {noun} path must be valid UTF-8."))
         })?)
-        .map_err(|_| CommandFailure::invalid("file", "The Preview path is invalid."))?;
+        .map_err(|_| CommandFailure::invalid("file", format!("The {noun} path is invalid.")))?;
         let parent = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -47,7 +75,7 @@ impl Destination {
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(parent)
-            .map_err(|_| local_io(path_text))?;
+            .map_err(|_| local_io(kind, path_text))?;
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         let exists = unsafe {
             libc::fstatat(
@@ -60,20 +88,21 @@ impl Destination {
         if exists == 0 {
             return Err(CommandFailure::invalid(
                 "file",
-                "The Preview path already exists.",
+                format!("The {noun} path already exists."),
             ));
         }
         if std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
-            return Err(local_io(path_text));
+            return Err(local_io(kind, path_text));
         }
         Ok(Self {
+            kind,
             directory,
             name,
             path: path_text.to_owned(),
         })
     }
 
-    fn anonymous_file(&self) -> Result<tokio::fs::File, CommandFailure> {
+    pub(super) fn anonymous_file(&self) -> Result<tokio::fs::File, CommandFailure> {
         let dot = c".";
         let fd = unsafe {
             libc::openat(
@@ -84,7 +113,7 @@ impl Destination {
             )
         };
         if fd < 0 {
-            return Err(local_io(&self.path));
+            return Err(self.local_io());
         }
         // The unnamed inode has no directory entry to race or clean up on
         // cancellation. Closing this fd before publication discards it.
@@ -92,7 +121,7 @@ impl Destination {
         Ok(tokio::fs::File::from_std(file))
     }
 
-    fn publish(&self, file: &tokio::fs::File) -> Result<(), CommandFailure> {
+    pub(super) fn publish(&self, file: &tokio::fs::File) -> Result<(), CommandFailure> {
         let empty = c"";
         let result = unsafe {
             libc::linkat(
@@ -109,21 +138,40 @@ impl Destination {
         if std::io::Error::last_os_error().raw_os_error() == Some(libc::EEXIST) {
             return Err(CommandFailure::invalid(
                 "file",
-                "The Preview path already exists.",
+                format!("The {} path already exists.", self.kind.noun()),
             ));
         }
-        Err(local_io(&self.path))
+        Err(self.local_io())
+    }
+
+    /// The bounded local-write failure of this destination's in-flight work.
+    pub(super) fn local_io(&self) -> CommandFailure {
+        local_io(self.kind, &self.path)
+    }
+
+    /// The local path this destination publishes, for the result document.
+    pub(super) fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Flushes the destination directory entry after publication.
+    pub(super) fn fsync_directory(&self) -> bool {
+        unsafe { libc::fsync(self.directory.as_raw_fd()) == 0 }
     }
 }
 
-fn local_io(path: &str) -> CommandFailure {
+fn local_io(kind: DestinationKind, path: &str) -> CommandFailure {
     CommandFailure::from_payload(
         6,
         super::ErrorPayload {
             code: "local_io_failed".to_owned(),
-            message: "Check the local Preview destination and try again.".to_owned(),
+            message: format!("Check the local {} destination and try again.", kind.noun()),
             effect: "none".to_owned(),
-            details: json!({"operation": "write-preview", "path": path, "fileCommitted": false}),
+            details: json!({
+                "operation": kind.write_operation(),
+                "path": path,
+                "fileCommitted": false,
+            }),
         },
     )
 }
@@ -281,7 +329,7 @@ pub(super) async fn download(
         }
         file.write_all(&chunk)
             .await
-            .map_err(|_| local_io(&destination.path))?;
+            .map_err(|_| destination.local_io())?;
         bytes.extend_from_slice(&chunk);
     }
     let width = metadata.width;
@@ -292,9 +340,7 @@ pub(super) async fn download(
     if !complete {
         return Err(CommandFailure::transport(OPERATION));
     }
-    file.sync_all()
-        .await
-        .map_err(|_| local_io(&destination.path))?;
+    file.sync_all().await.map_err(|_| destination.local_io())?;
     let mut data = json!({
         "photoId": photo_id,
         "path": destination.path,
@@ -308,9 +354,9 @@ pub(super) async fn download(
     });
     super::redact_value(&mut data, &client.token);
     destination.publish(&file)?;
-    publication.record(data.clone());
-    if unsafe { libc::fsync(destination.directory.as_raw_fd()) } != 0 {
-        return Err(CommandFailure::published_preview(data, false));
+    publication.record("Preview", data.clone());
+    if !destination.fsync_directory() {
+        return Err(CommandFailure::published_file(data, false, "Preview"));
     }
     Ok(data)
 }
@@ -407,7 +453,11 @@ mod tests {
             b"/tmp/invalid-\xff.jpg".to_vec(),
         ));
         assert_eq!(
-            Destination::preflight(&path).err().unwrap().payload.code,
+            Destination::preflight(DestinationKind::Preview, &path)
+                .err()
+                .unwrap()
+                .payload
+                .code,
             "invalid_input"
         );
 
@@ -419,8 +469,9 @@ mod tests {
         });
         super::super::redact_value(&mut data, token);
         let publication = PublicationState::default();
-        publication.record(data);
-        let failure = CommandFailure::published_preview(publication.committed().unwrap(), true);
+        publication.record("Preview", data);
+        let failure =
+            CommandFailure::published_file(publication.committed().unwrap(), true, "Preview");
         assert_eq!(failure.payload.effect, "partial");
         assert_eq!(failure.payload.details["fileCommitted"], true);
         assert!(
@@ -439,7 +490,7 @@ mod tests {
         let path = base.join("preview.jpg");
         let sentinel = base.join("sentinel");
         std::fs::write(&sentinel, b"original").unwrap();
-        let destination = Destination::preflight(&path).unwrap();
+        let destination = Destination::preflight(DestinationKind::Preview, &path).unwrap();
         let mut staged = destination.anonymous_file().unwrap();
         staged.write_all(b"downloaded").await.unwrap();
         staged.sync_all().await.unwrap();
