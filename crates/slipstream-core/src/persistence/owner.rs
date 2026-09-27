@@ -10,14 +10,12 @@ use crate::{
     CaptureFact, CaptureMetadataState, CaptureTimeField, CheckedAlbumMutation,
     CheckedAlbumMutationResult, CheckedPhotoDecisionCounts, CheckedPhotoDecisionItemResult,
     CheckedPhotoDecisionMutation, CheckedPhotoDecisionOutcome, CheckedPhotoDecisionResult,
-    DiscoveredOriginal, EXPORT_DEVELOPMENT_TIFF_WORKLOAD, EXPORT_RETENTION_SECONDS, EditRecipe,
-    EditRecipeRead, EditRecipeSettings, EditRecipeWriteOutcome, ExplicitPhotoRemovalMutation,
+    DiscoveredOriginal, EditRecipeRead, EditRecipeWriteOutcome, ExplicitPhotoRemovalMutation,
     ExplicitPhotoRestoreCounts, ExplicitPhotoRestoreMutation, ExplicitPhotoRestoreResult,
-    ExportAttempt, ExportExposureRange, ExportLeaseOutcome, ExportRecipePayload, ExportRecord,
-    ExportRetryOutcome, ExportSettlement, ExportState, ExportSubmission,
-    ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult, LibraryRoot,
-    MAXIMUM_FOLDER_ALBUM_PHOTOS, MAXIMUM_PHOTO_RATING, OriginalErrorCategory, OriginalFacts,
-    OriginalFingerprint, OriginalKind, OriginalRecord, OriginalScanError,
+    ExportAttempt, ExportLeaseOutcome, ExportRecord, ExportRetryOutcome, ExportSettlement,
+    ExportSubmission, ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult,
+    LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS, MAXIMUM_PHOTO_RATING, OriginalErrorCategory,
+    OriginalFacts, OriginalFingerprint, OriginalKind, OriginalRecord, OriginalScanError,
     PermanentDeletionItemResult, PermanentDeletionItemState, PermanentDeletionRejection,
     PermanentDeletionResult, PermanentDeletionReview, PermanentDeletionReviewItem,
     PermanentDeletionSelection, PermanentDeletionTarget, PermanentDeletionWorkItem,
@@ -39,7 +37,6 @@ use rusqlite::{
     params_from_iter, types::Value,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fmt,
@@ -7743,10 +7740,13 @@ mod tests {
     use super::*;
     use crate::identity::source_revision;
     use crate::{
-        CaptureTimeBound, CheckedPhotoDecisionItem, LibraryRoot, PhotoRemovalMarker,
-        PhotoRemovalTarget, PhotoStateBatchItem, identity::original_id,
+        CaptureTimeBound, CheckedPhotoDecisionItem, EXPORT_DEVELOPMENT_TIFF_WORKLOAD,
+        EXPORT_RETENTION_SECONDS, EditRecipe, EditRecipeSettings, ExportExposureRange,
+        ExportRecipePayload, ExportState, LibraryRoot, PhotoRemovalMarker, PhotoRemovalTarget,
+        PhotoStateBatchItem, identity::original_id,
     };
     use serde::Deserialize;
+    use sha2::{Digest, Sha256};
     use std::{
         fs,
         os::unix::fs::PermissionsExt,
