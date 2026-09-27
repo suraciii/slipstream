@@ -343,6 +343,7 @@ async fn recipe_write(
         photo_ids: vec![args.photo_id.clone()],
         album_id: None,
         album_name: None,
+        mappings: Vec::new(),
     };
     let result: RecipeWriteWire = client
         .mutation(&identity, admission, client.endpoint(path), body)
@@ -683,6 +684,7 @@ mod tests {
             photo_ids: vec!["p1".to_owned()],
             album_id: None,
             album_name: None,
+            mappings: Vec::new(),
         }
     }
 

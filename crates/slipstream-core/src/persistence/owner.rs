@@ -12,14 +12,14 @@ use crate::{
     EditRecipeWriteOutcome, ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreMutation,
     ExplicitPhotoRestoreResult, ExportAttempt, ExportLeaseOutcome, ExportRecord,
     ExportRetryOutcome, ExportSettlement, ExportSubmission, ExportSubmissionResolution,
-    ExportSubmitOutcome, ExportSweepResult, MAXIMUM_PHOTO_RATING, OriginalFingerprint,
+    ExportSubmitOutcome, ExportSweepResult, LibraryRoot, MAXIMUM_PHOTO_RATING, OriginalFingerprint,
     OriginalScanError, PermanentDeletionItemState, PermanentDeletionSelection,
     PermanentDeletionTarget, PhotoAlbumMembership, PhotoOperationRemainder, PhotoQuery,
     PhotoQueryError, PhotoQueryProjection, PhotoRead, PhotoRemovalMutation, PhotoRemovalResult,
     PhotoRestoration, PhotoRestorationResult, PhotoStateBatchMutation, PhotoStateBatchResult,
     PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateValue, PreviewSeed,
-    PreviewSeedResult, RebindEditRecipe, RecoverySurvey, RemovedPhotoRecord, RequestedRelocation,
-    SaveEditRecipe, ScanSnapshot, SelectionState, WhiteBalanceIntent,
+    PreviewSeedResult, RebindEditRecipe, RecoveryRecord, RecoverySurvey, RemovedPhotoRecord,
+    RequestedRelocation, SaveEditRecipe, ScanSnapshot, SelectionState, WhiteBalanceIntent,
 };
 
 use rusqlite::{
@@ -319,6 +319,10 @@ type RemovedPhotoPageReceiver = oneshot::Receiver<RemovedPhotoPageResult>;
 
 type MetadataWork = Box<dyn FnOnce(&Connection) + Send>;
 
+/// One review-identity read keeps its requested order, so every id gets a
+/// slot and `None` means the record no longer exists.
+type RecoveryRecords = Vec<Option<RecoveryRecord>>;
+
 pub(super) enum Command {
     Probe(Reply<u64>),
     Metadata(MetadataWork),
@@ -338,7 +342,12 @@ pub(super) enum Command {
     StoreFingerprint(OriginalFingerprint, Reply<()>),
     FingerprintCounts(Reply<FingerprintCounts>),
     RecoverySurvey(Reply<RecoverySurvey>),
+    RecoveryRecords {
+        original_ids: Vec<String>,
+        reply: Reply<RecoveryRecords>,
+    },
     ApplyRelocations {
+        root: LibraryRoot,
         relocations: Vec<RequestedRelocation>,
         reply: Reply<AppliedRelocations>,
     },
@@ -838,13 +847,29 @@ impl Persistence {
         Ok(receive)
     }
 
+    /// Resolves current facts for one retained review membership, preserving
+    /// the requested order.
+    pub(crate) fn recovery_records_receiver(
+        &self,
+        original_ids: Vec<String>,
+    ) -> Result<oneshot::Receiver<Result<RecoveryRecords, PersistenceError>>, PersistenceError>
+    {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::RecoveryRecords {
+            original_ids,
+            reply: send,
+        })?;
+        Ok(receive)
+    }
     pub(crate) fn apply_relocations_receiver(
         &self,
+        root: LibraryRoot,
         relocations: Vec<RequestedRelocation>,
     ) -> Result<oneshot::Receiver<Result<AppliedRelocations, PersistenceError>>, PersistenceError>
     {
         let (send, receive) = oneshot::channel();
         self.submit(Command::ApplyRelocations {
+            root,
             relocations,
             reply: send,
         })?;
@@ -1814,11 +1839,23 @@ fn owner_main(
                 let result = scan::recovery_survey(&connection);
                 let _ = reply.send(result);
             }
-            Command::ApplyRelocations { relocations, reply } => {
+            Command::RecoveryRecords {
+                original_ids,
+                reply,
+            } => {
+                let result = scan::recovery_records(&connection, &original_ids);
+                let _ = reply.send(result);
+            }
+            Command::ApplyRelocations {
+                root,
+                relocations,
+                reply,
+            } => {
                 let result = scan::apply_manual_relocations(
                     &state,
                     &database_name,
                     &mut connection,
+                    &root,
                     &relocations,
                 );
                 let _ = reply.send(result);

@@ -9,7 +9,12 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 
 impl ServiceClient {
-    pub(super) async fn capabilities(&self, operation: Operation) -> Result<(), CommandFailure> {
+    /// Negotiates the contract and returns the advertised request bounds the
+    /// operational commands enforce locally.
+    pub(super) async fn capabilities(
+        &self,
+        operation: Operation,
+    ) -> Result<AdvertisedLimits, CommandFailure> {
         let url = self.endpoint(&["api", "capabilities"]);
         let response = self
             .client
@@ -45,7 +50,14 @@ impl ServiceClient {
         validate_capabilities(&bytes)
     }
 }
-fn validate_capabilities(bytes: &[u8]) -> Result<(), CommandFailure> {
+
+/// The advertised request bounds one command run enforces locally.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct AdvertisedLimits {
+    pub(super) recovery_page_maximum: usize,
+    pub(super) recovery_apply_maximum: usize,
+}
+fn validate_capabilities(bytes: &[u8]) -> Result<AdvertisedLimits, CommandFailure> {
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|_| capability_shape_failure(Vec::new(), "invalid-json", None))?;
     let versions = value
@@ -89,6 +101,13 @@ fn validate_capabilities(bytes: &[u8]) -> Result<(), CommandFailure> {
             "retainedQueryIdleSeconds",
             "limits.retainedQueryIdleSeconds",
         ),
+        ("recoveryPageMaximum", "limits.recoveryPageMaximum"),
+        ("recoveryMappingsMaximum", "limits.recoveryMappingsMaximum"),
+        ("recoveryApplyMaximum", "limits.recoveryApplyMaximum"),
+        (
+            "recoveryReviewIdleSeconds",
+            "limits.recoveryReviewIdleSeconds",
+        ),
     ] {
         let limit = limits.get(name).and_then(Value::as_u64);
         if limit.is_none_or(|limit| limit == 0)
@@ -97,7 +116,18 @@ fn validate_capabilities(bytes: &[u8]) -> Result<(), CommandFailure> {
             return Err(failure(field));
         }
     }
-    Ok(())
+    let advertised = |name: &str| -> Option<usize> {
+        limits
+            .get(name)
+            .and_then(Value::as_u64)
+            .and_then(|limit| usize::try_from(limit).ok())
+    };
+    Ok(AdvertisedLimits {
+        recovery_page_maximum: advertised("recoveryPageMaximum")
+            .ok_or_else(|| failure("limits.recoveryPageMaximum"))?,
+        recovery_apply_maximum: advertised("recoveryApplyMaximum")
+            .ok_or_else(|| failure("limits.recoveryApplyMaximum"))?,
+    })
 }
 
 fn capability_shape_failure(

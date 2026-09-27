@@ -708,10 +708,14 @@ pub struct DerivativeDelivery {
     pub(crate) cli_facts: Option<CliDerivativeFacts>,
 }
 
-/// One unavailable Photo listed by the bounded recovery review entry.
-#[derive(Debug, Serialize)]
+/// One reviewed unavailable Photo. `state` reports the current state of the
+/// reviewed identity, so a Photo that was recovered, trashed, or that no
+/// longer exists keeps its reviewed position instead of shifting the items
+/// around it.
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct UnavailableOriginalWire {
+pub struct RecoveryItemWire {
+    pub state: &'static str,
     pub original_id: String,
     pub photo_id: String,
     pub location: String,
@@ -720,44 +724,60 @@ pub struct UnavailableOriginalWire {
     pub selection_state: &'static str,
     pub fingerprint_enrolled: bool,
     pub album_count: u64,
+    pub web_url: String,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RecoverySurveyWire {
-    pub unavailable: Vec<UnavailableOriginalWire>,
-}
-
-impl From<slipstream_core::RecoverySurvey> for RecoverySurveyWire {
-    fn from(survey: slipstream_core::RecoverySurvey) -> Self {
+impl RecoveryItemWire {
+    /// The item one Current Original read reports, in the given state.
+    pub(crate) fn from_record(
+        record: &slipstream_core::RecoveryRecord,
+        state: &'static str,
+    ) -> Self {
         Self {
-            unavailable: survey
-                .unavailable
-                .into_iter()
-                .map(|record| UnavailableOriginalWire {
-                    original_id: record.original_id,
-                    photo_id: record.photo_id,
-                    location: record.relative_path,
-                    kind: match record.kind {
-                        slipstream_core::OriginalKind::Raw => "raw",
-                        slipstream_core::OriginalKind::Jpeg => "jpeg",
-                    },
-                    rating: record.rating,
-                    selection_state: match record.selection_state {
-                        slipstream_core::SelectionState::Undecided => "undecided",
-                        slipstream_core::SelectionState::Selected => "selected",
-                        slipstream_core::SelectionState::Rejected => "rejected",
-                    },
-                    fingerprint_enrolled: record.fingerprint.is_some(),
-                    album_count: record.album_count,
-                })
-                .collect(),
+            state,
+            original_id: record.original_id.clone(),
+            photo_id: record.photo_id.clone(),
+            location: record.relative_path.clone(),
+            kind: original_kind(&record.kind),
+            rating: record.rating,
+            selection_state: selection_state(record.selection_state),
+            fingerprint_enrolled: record.fingerprint.is_some(),
+            album_count: record.album_count,
+            web_url: photo_web_path(&record.photo_id),
+        }
+    }
+
+    /// The same reviewed identity after its record vanished: the last
+    /// evaluated facts are the only facts left to report.
+    pub(crate) fn missing(retained: &Self) -> Self {
+        Self {
+            state: "missing",
+            ..retained.clone()
         }
     }
 }
 
+/// The current state of one reviewed identity. The review reports exactly
+/// one of these per retained item.
+pub(crate) fn recovery_item_state(record: &slipstream_core::RecoveryRecord) -> &'static str {
+    if record.removed {
+        "removed"
+    } else if record.available {
+        "available"
+    } else {
+        "unavailable"
+    }
+}
+
+pub(crate) fn original_kind(kind: &slipstream_core::OriginalKind) -> &'static str {
+    match kind {
+        slipstream_core::OriginalKind::Raw => "raw",
+        slipstream_core::OriginalKind::Jpeg => "jpeg",
+    }
+}
+
 /// The occupying record an explicit retire-and-bind may replace.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetireCandidateWire {
     pub photo_id: String,
@@ -765,10 +785,14 @@ pub struct RetireCandidateWire {
     pub location: String,
 }
 
-/// One inspectable proposed mapping for an unavailable Original.
-#[derive(Debug, Serialize)]
+/// One reviewed proposed mapping for an unavailable Original. `mappingId`
+/// identifies exactly the evaluated mapping; applying repeats it so a
+/// proposal that changed between review and apply is refused instead of
+/// silently committed.
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RecoveryProposalWire {
+pub struct RecoveryMappingWire {
+    pub mapping_id: String,
     pub original_id: String,
     pub photo_id: String,
     pub from_location: String,
@@ -779,53 +803,73 @@ pub struct RecoveryProposalWire {
     /// means historical content could not be verified and the confirmation
     /// must say so.
     pub verified: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<&'static str>,
     pub retire: Option<RetireCandidateWire>,
 }
 
-impl From<slipstream_core::ManualProposal> for RecoveryProposalWire {
-    fn from(proposal: slipstream_core::ManualProposal) -> Self {
-        let outcome = match &proposal.outcome {
-            slipstream_core::ManualOutcome::Matched => "matched",
-            slipstream_core::ManualOutcome::ContentMismatch => "content-mismatch",
-            slipstream_core::ManualOutcome::Missing => "missing",
-            slipstream_core::ManualOutcome::KindMismatch => "kind-mismatch",
-            slipstream_core::ManualOutcome::Unreadable => "unreadable",
-            slipstream_core::ManualOutcome::Occupied { .. } => "occupied",
-            slipstream_core::ManualOutcome::Colliding => "colliding",
-        };
-        let retire = match proposal.outcome {
+impl RecoveryMappingWire {
+    /// One reviewed mapping. `mapping_id` and `blocked_reason` come from the
+    /// evaluation itself, so a later confirmation binds to exactly the facts
+    /// the Photographer reviewed.
+    pub(crate) fn from_proposal(proposal: &slipstream_core::ManualProposal) -> Self {
+        let outcome = proposal.outcome.code();
+        let retire = match &proposal.outcome {
             slipstream_core::ManualOutcome::Occupied {
                 retire: Some(retire),
             } => Some(RetireCandidateWire {
-                photo_id: retire.photo_id,
-                original_id: retire.original_id,
-                location: retire.location,
+                photo_id: retire.photo_id.clone(),
+                original_id: retire.original_id.clone(),
+                location: retire.location.clone(),
             }),
             _ => None,
         };
         Self {
-            original_id: proposal.original_id,
-            photo_id: proposal.photo_id,
-            from_location: proposal.from_location,
-            to_location: proposal.to_location,
-            kind: match proposal.kind {
-                slipstream_core::OriginalKind::Raw => "raw",
-                slipstream_core::OriginalKind::Jpeg => "jpeg",
-            },
+            mapping_id: proposal.mapping_id.clone(),
+            original_id: proposal.original_id.clone(),
+            photo_id: proposal.photo_id.clone(),
+            from_location: proposal.from_location.clone(),
+            to_location: proposal.to_location.clone(),
+            kind: original_kind(&proposal.kind),
             outcome,
             verified: proposal.verified,
+            blocked_reason: proposal.blocked.map(slipstream_core::MappingBlock::code),
             retire,
         }
     }
 }
 
-/// Committed result of one manual relocation batch.
+/// One bounded page of a retained review.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryListResponse<T: Serialize> {
+    pub items: Vec<T>,
+    pub total: usize,
+    pub next_cursor: Option<String>,
+    pub evaluated_at: String,
+    pub expires_at: Option<String>,
+}
+
+/// One committed mapping: where its Original now lives and which occupying
+/// Photo it replaced when the Photographer chose that explicit retire.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryAppliedWire {
+    pub original_id: String,
+    pub photo_id: String,
+    pub from_location: String,
+    pub to_location: String,
+    pub web_url: String,
+    pub retired: Option<RetireCandidateWire>,
+}
+
+/// Committed result of one reviewed relocation batch.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryApplyResponseWire {
-    pub relocated_photos: u64,
+    pub applied_mappings: u64,
+    pub refused_mappings: u64,
     pub unavailable_photos: u64,
+    pub mappings: Vec<RecoveryAppliedWire>,
 }
 
 /// One per-mapping rejection for a refused batch.
@@ -844,4 +888,16 @@ pub struct RecoveryRejectionWire {
 pub struct RecoveryRejectionResponseWire {
     pub message: &'static str,
     pub rejections: Vec<RecoveryRejectionWire>,
+    pub applied_mappings: u64,
+    pub refused_mappings: u64,
+}
+
+/// One submitted mapping identity an unknown-outcome report names, so the
+/// caller can reconcile exactly the correspondences that may have committed.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoverySubmittedMappingWire {
+    pub original_id: String,
+    pub new_location: String,
+    pub mapping_id: String,
 }

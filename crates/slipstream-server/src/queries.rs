@@ -16,6 +16,10 @@ pub(crate) enum RetainedKind {
     Browse,
     Album,
     Photo,
+    /// One unavailable-Photo inspection review.
+    RecoveryUnavailable,
+    /// One Folder-prefix relocation proposal review.
+    RecoveryMappings,
 }
 
 impl RetainedKind {
@@ -24,13 +28,17 @@ impl RetainedKind {
             Self::Browse => 'b',
             Self::Album => 'a',
             Self::Photo => 'p',
+            Self::RecoveryUnavailable => 'u',
+            Self::RecoveryMappings => 'm',
         }
     }
 
-    fn idle(self) -> Duration {
+    pub(crate) fn idle(self) -> Duration {
         match self {
             Self::Browse => crate::config::BROWSE_SNAPSHOT_IDLE,
-            Self::Album | Self::Photo => QUERY_IDLE,
+            Self::Album | Self::Photo | Self::RecoveryUnavailable | Self::RecoveryMappings => {
+                QUERY_IDLE
+            }
         }
     }
 }
@@ -343,6 +351,8 @@ pub(crate) enum CursorError {
     Invalid,
     ProcessRestarted,
     PublicationReplaced,
+    /// The retained state behind the cursor expired or was evicted.
+    Idle,
 }
 
 #[derive(Debug, Eq, PartialEq)]

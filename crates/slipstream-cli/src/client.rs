@@ -286,7 +286,7 @@ pub(crate) fn validated_route_failure(
         "not_found" => {
             required_keys(&["resource", "reference"])
                 && string("resource")
-                    .is_some_and(|value| matches!(value, "photo" | "album" | "folder"))
+                    .is_some_and(|value| matches!(value, "photo" | "album" | "folder" | "original"))
                 && string("reference").is_some()
         }
         "conflict" => {
@@ -309,7 +309,12 @@ pub(crate) fn validated_route_failure(
         "cursor_expired" => {
             required_keys(&["cursorKind", "reason"])
                 && string("cursorKind")
-                    .is_some_and(|value| matches!(value, "folder" | "album" | "photo"))
+                    .is_some_and(|value| {
+                        matches!(
+                            value,
+                            "folder" | "album" | "photo" | "unavailable" | "mappings"
+                        )
+                    })
                 && string("reason").is_some_and(|value| {
                     matches!(
                         value,
@@ -349,6 +354,40 @@ pub(crate) fn validated_route_failure(
         }
         "storage_failed" => {
             required_keys(&["operation"]) && string("operation") == Some(operation.wire())
+        }
+        // One refused recovery batch: a confirmed refusal that changed
+        // nothing, with one reason per submitted mapping.
+        "recovery_conflict" => {
+            required_keys(&["appliedMappings", "refusedMappings", "rejections"])
+                && details.get("appliedMappings").and_then(Value::as_u64) == Some(0)
+                && details
+                    .get("refusedMappings")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|refused| refused > 0)
+                && details
+                    .get("rejections")
+                    .and_then(Value::as_array)
+                    .is_some_and(|rejections| {
+                        !rejections.is_empty()
+                            && rejections.iter().all(|rejection| {
+                                rejection.as_object().is_some_and(|rejection| {
+                                    let original_id =
+                                        rejection.get("originalId").and_then(Value::as_str);
+                                    let reason = rejection.get("reason").and_then(Value::as_str);
+                                    original_id.is_some_and(|value| !value.is_empty())
+                                        && reason.is_some_and(|value| !value.is_empty())
+                                })
+                            })
+                    })
+        }
+        // A Folder-prefix scope that exceeds the advertised mapping bound is
+        // refused before any continuation is issued.
+        "recovery_scope_exceeded" => {
+            required_keys(&["evaluated", "limit"])
+                && details.get("evaluated").and_then(Value::as_u64).is_some()
+                && details.get("limit").and_then(Value::as_u64).is_some()
+                && details.get("evaluated").and_then(Value::as_u64)
+                    > details.get("limit").and_then(Value::as_u64)
         }
         // Development routes carry structured recovery facts. A missing or
         // malformed conflict guard is not evidence of a confirmed refusal.
@@ -390,10 +429,14 @@ pub(crate) fn validated_route_failure(
     }
     redact_error(&mut error, secret);
     let exit_code = match error.code.as_str() {
-        "invalid_input" | "limit_exceeded" | "invalid_settings" | "unsupported_photo" => 2,
+        "invalid_input"
+        | "limit_exceeded"
+        | "invalid_settings"
+        | "unsupported_photo"
+        | "recovery_scope_exceeded" => 2,
         "not_found" | "unknown_photo" | "unknown_export" | "missing_recipe" => 3,
         "conflict" | "name_conflict" | "recipe_conflict" | "source_changed" | "requires_rebind"
-        | "request_conflict" | "export_conflict" | "output_unavailable" => 4,
+        | "request_conflict" | "export_conflict" | "output_unavailable" | "recovery_conflict" => 4,
         _ => 6,
     };
     Some(CommandFailure::from_payload(exit_code, error))

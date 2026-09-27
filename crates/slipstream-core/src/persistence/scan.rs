@@ -9,10 +9,10 @@ use super::{DatabaseName, StateDirectory};
 use crate::identity::classify_name;
 use crate::{
     AppliedRelocations, CaptureFact, CaptureMetadataState, CaptureTimeField, DiscoveredOriginal,
-    OriginalErrorCategory, OriginalFacts, OriginalFingerprint, OriginalKind, OriginalRecord,
-    OriginalScanError, PhotoRecord, PreviewSeed, PreviewSeedResult, PreviewState, RecoverySurvey,
-    RelativeOriginalPath, RequestedRelocation, ScanSnapshot, SelectionState,
-    UnavailablePhotoRecord, preview_should_preserve, reconcile, selected_source,
+    LibraryRoot, OriginalErrorCategory, OriginalFacts, OriginalFingerprint, OriginalKind,
+    OriginalRecord, OriginalScanError, PhotoRecord, PreviewSeed, PreviewSeedResult, PreviewState,
+    RecoveryRecord, RecoverySurvey, RelativeOriginalPath, RequestedRelocation, ScanSnapshot,
+    SelectionState, preview_should_preserve, reconcile, selected_source,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::{HashMap, HashSet};
@@ -118,8 +118,8 @@ pub(super) fn store_fingerprint(
     })
 }
 
-/// One consistent read of every unavailable Photo plus the Album
-/// memberships, for the bounded manual recovery review entry.
+/// One consistent read of every unavailable Photo plus the Photos that keep
+/// independent user state, for the bounded manual recovery review entry.
 pub(super) fn recovery_survey(connection: &Connection) -> Result<RecoverySurvey, PersistenceError> {
     let mut unavailable = Vec::new();
     {
@@ -136,7 +136,7 @@ pub(super) fn recovery_survey(connection: &Connection) -> Result<RecoverySurvey,
             .map_err(|_| PersistenceError::Storage)?;
         let rows = statement
             .query_map([], |row| {
-                Ok(UnavailablePhotoRecord {
+                Ok(RecoveryRecord {
                     original_id: row.get(0)?,
                     relative_path: row.get(1)?,
                     kind: parse_kind(&row.get::<_, String>(2)?)?,
@@ -151,6 +151,8 @@ pub(super) fn recovery_survey(connection: &Connection) -> Result<RecoverySurvey,
                         .get::<_, i64>(7)?
                         .try_into()
                         .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    available: false,
+                    removed: false,
                 })
             })
             .map_err(|_| PersistenceError::Storage)?;
@@ -166,6 +168,8 @@ pub(super) fn recovery_survey(connection: &Connection) -> Result<RecoverySurvey,
                    SELECT photo_id FROM album_members
                    UNION ALL
                    SELECT photo_id FROM edit_recipes
+                   UNION ALL
+                   SELECT photo_id FROM exports
                  )",
             )
             .map_err(|_| PersistenceError::Storage)?;
@@ -182,6 +186,54 @@ pub(super) fn recovery_survey(connection: &Connection) -> Result<RecoverySurvey,
     })
 }
 
+/// Resolves current facts for one retained review membership. Every
+/// requested Original ID gets its slot: `None` means the record no longer
+/// exists. The order of `original_ids` is preserved so a reviewed result set
+/// never shifts when the Library changes.
+pub(super) fn recovery_records(
+    connection: &Connection,
+    original_ids: &[String],
+) -> Result<Vec<Option<RecoveryRecord>>, PersistenceError> {
+    let mut records = Vec::with_capacity(original_ids.len());
+    let mut statement = connection
+        .prepare(
+            "SELECT o.relative_path,o.kind,p.id,p.rating,p.selection_state,f.digest,
+                    (SELECT COUNT(*) FROM album_members m WHERE m.photo_id=p.id),
+                    p.available,p.removed_at_ms
+             FROM original_files o JOIN photos p ON p.original_id=o.id
+             LEFT JOIN original_fingerprints f ON f.original_id=o.id
+             WHERE o.id=?",
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    for original_id in original_ids {
+        let record = statement
+            .query_row(params![original_id], |row| {
+                Ok(RecoveryRecord {
+                    original_id: original_id.clone(),
+                    relative_path: row.get(0)?,
+                    kind: parse_kind(&row.get::<_, String>(1)?)?,
+                    photo_id: row.get(2)?,
+                    rating: row
+                        .get::<_, i64>(3)?
+                        .try_into()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    selection_state: parse_selection_state(&row.get::<_, String>(4)?)?,
+                    fingerprint: row.get(5)?,
+                    album_count: row
+                        .get::<_, i64>(6)?
+                        .try_into()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    available: row.get::<_, i64>(7)? != 0,
+                    removed: row.get::<_, Option<i64>>(8)?.is_some(),
+                })
+            })
+            .optional()
+            .map_err(|_| PersistenceError::Storage)?;
+        records.push(record);
+    }
+    Ok(records)
+}
+
 /// Revalidates one confirmed manual relocation batch and commits it
 /// atomically. Every mapping is rechecked against the persisted state
 /// observed inside the transaction: stale confirmations, colliding
@@ -192,6 +244,7 @@ pub(super) fn apply_manual_relocations(
     state: &StateDirectory,
     database_name: &DatabaseName,
     connection: &mut Connection,
+    root: &LibraryRoot,
     relocations: &[RequestedRelocation],
 ) -> Result<AppliedRelocations, PersistenceError> {
     write_transaction(state, database_name, connection, |transaction| {
@@ -223,24 +276,111 @@ pub(super) fn apply_manual_relocations(
                     reason: "colliding",
                 });
             }
+            // Filesystem evidence is checked again while the database
+            // transaction is open. This closes the gap between proposal
+            // evaluation and association: a replacement with identical
+            // size/mtime cannot inherit a reviewed fingerprint.
+            let capability = root.original(to.clone()).map_err(|_| {
+                PersistenceError::InvalidRecoveryMapping {
+                    original_id: relocation.original_id.clone(),
+                    reason: "unreadable",
+                }
+            })?;
+            match relocation.fingerprint.as_deref() {
+                Some(expected) => match capability.digest_file_if_present() {
+                    Ok(Some(observed)) if observed.facts != relocation.facts => {
+                        return Err(PersistenceError::InvalidRecoveryMapping {
+                            original_id: relocation.original_id.clone(),
+                            reason: "reviewed-stale",
+                        });
+                    }
+                    Ok(Some(observed)) if observed.digest == expected => {}
+                    Ok(Some(_)) => {
+                        return Err(PersistenceError::InvalidRecoveryMapping {
+                            original_id: relocation.original_id.clone(),
+                            reason: "content-mismatch",
+                        });
+                    }
+                    Ok(None) => {
+                        return Err(PersistenceError::InvalidRecoveryMapping {
+                            original_id: relocation.original_id.clone(),
+                            reason: "missing",
+                        });
+                    }
+                    Err(_) => {
+                        return Err(PersistenceError::InvalidRecoveryMapping {
+                            original_id: relocation.original_id.clone(),
+                            reason: "unreadable",
+                        });
+                    }
+                },
+                None => match capability.facts_if_present() {
+                    Ok(Some(observed)) if observed == relocation.facts => {}
+                    Ok(Some(_)) => {
+                        return Err(PersistenceError::InvalidRecoveryMapping {
+                            original_id: relocation.original_id.clone(),
+                            reason: "reviewed-stale",
+                        });
+                    }
+                    Ok(None) => {
+                        return Err(PersistenceError::InvalidRecoveryMapping {
+                            original_id: relocation.original_id.clone(),
+                            reason: "missing",
+                        });
+                    }
+                    Err(_) => {
+                        return Err(PersistenceError::InvalidRecoveryMapping {
+                            original_id: relocation.original_id.clone(),
+                            reason: "unreadable",
+                        });
+                    }
+                },
+            }
+            // The transaction revalidates the reviewed correspondence: the
+            // Original must still be an active unavailable Photo at the
+            // remembered Location, and its destination must still be free or
+            // occupied by exactly the Photo the confirmation named.
             let persisted = transaction
                 .query_row(
-                    "SELECT available,kind FROM original_files WHERE id=?",
+                    "SELECT o.kind,o.relative_path,p.available,p.removed_at_ms
+                     FROM original_files o JOIN photos p ON p.original_id=o.id
+                     WHERE o.id=?",
                     params![relocation.original_id],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                        ))
+                    },
                 )
                 .optional()
                 .map_err(|_| PersistenceError::Storage)?;
-            let Some((available, kind)) = persisted else {
+            let Some((kind, remembered_path, available, removed_at_ms)) = persisted else {
                 return Err(PersistenceError::InvalidRecoveryMapping {
                     original_id: relocation.original_id.clone(),
                     reason: "stale",
                 });
             };
-            if available != 0 {
+            if relocation.mapping_id.is_empty() {
+                return Err(PersistenceError::InvalidRecoveryMapping {
+                    original_id: relocation.original_id.clone(),
+                    reason: "reviewed-stale",
+                });
+            }
+            // A removed Photo keeps its own Trash Restore contract; Location
+            // Recovery never revives it.
+            if available != 0 || removed_at_ms.is_some() {
                 return Err(PersistenceError::InvalidRecoveryMapping {
                     original_id: relocation.original_id.clone(),
                     reason: "stale",
+                });
+            }
+            if remembered_path != relocation.from_location {
+                return Err(PersistenceError::InvalidRecoveryMapping {
+                    original_id: relocation.original_id.clone(),
+                    reason: "reviewed-stale",
                 });
             }
             let filename = to.as_str().rsplit('/').next().unwrap_or_default();
@@ -253,7 +393,7 @@ pub(super) fn apply_manual_relocations(
             }
             // A destination owned by another Original requires either a
             // simultaneous relocation of that owner or an explicit retire of
-            // an otherwise unreferenced default-state occupier.
+            // exactly the Photo the confirmation reviewed.
             let owner = transaction
                 .query_row(
                     "SELECT id FROM original_files WHERE relative_path=?",
@@ -262,76 +402,111 @@ pub(super) fn apply_manual_relocations(
                 )
                 .optional()
                 .map_err(|_| PersistenceError::Storage)?;
-            if let Some(owner_id) = owner
-                && owner_id != relocation.original_id
-                && !relocating_ids.contains(&owner_id)
-            {
-                if !relocation.retire_destination {
+            let other_owner = owner.filter(|owner_id| owner_id != &relocation.original_id);
+            let vacated = other_owner
+                .as_ref()
+                .is_some_and(|owner_id| relocating_ids.contains(owner_id));
+            let Some(owner_id) = other_owner.filter(|_| !vacated) else {
+                // A free or vacated destination has no retireable occupant,
+                // so a confirmation that names one reviewed a different
+                // correspondence.
+                if relocation.retire_photo_id.is_some() {
                     return Err(PersistenceError::InvalidRecoveryMapping {
                         original_id: relocation.original_id.clone(),
-                        reason: "occupied",
+                        reason: "reviewed-stale",
                     });
                 }
-                let occupant = transaction
-                    .query_row(
-                        "SELECT id,rating,selection_state,
-                            EXISTS(SELECT 1 FROM edit_recipes e WHERE e.photo_id=photos.id)
-                     FROM photos WHERE original_id=?",
-                        params![owner_id],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, i64>(1)?,
-                                row.get::<_, String>(2)?,
-                                row.get::<_, i64>(3)? != 0,
-                            ))
-                        },
-                    )
-                    .optional()
-                    .map_err(|_| PersistenceError::Storage)?;
-                if let Some((photo_id, rating, selection_state, has_saved_edits)) = occupant {
-                    if rating != 0 || selection_state != "undecided" || has_saved_edits {
-                        return Err(PersistenceError::InvalidRecoveryMapping {
-                            original_id: relocation.original_id.clone(),
-                            reason: "occupied",
-                        });
-                    }
-                    let members = transaction
-                        .query_row(
-                            "SELECT COUNT(*) FROM album_members WHERE photo_id=?",
-                            params![photo_id],
-                            |row| row.get::<_, i64>(0),
-                        )
-                        .map_err(|_| PersistenceError::Storage)?;
-                    if members != 0 {
-                        return Err(PersistenceError::InvalidRecoveryMapping {
-                            original_id: relocation.original_id.clone(),
-                            reason: "occupied",
-                        });
-                    }
-                    transaction
-                        .execute(
-                            "UPDATE photos SET association_generation=association_generation+1 WHERE id=?",
-                            params![photo_id],
-                        )
-                        .map_err(|_| PersistenceError::Storage)?;
-                    retire_sidecar_association(
-                        transaction,
-                        &photo_id,
-                        &to.to_string(),
-                        match kind {
-                            crate::OriginalKind::Raw => "raw",
-                            crate::OriginalKind::Jpeg => "jpeg",
-                        },
-                    )?;
-                    transaction
-                        .execute("DELETE FROM photos WHERE id=?", params![photo_id])
-                        .map_err(|_| PersistenceError::Storage)?;
-                }
-                transaction
-                    .execute("DELETE FROM original_files WHERE id=?", params![owner_id])
-                    .map_err(|_| PersistenceError::Storage)?;
+                continue;
+            };
+            let Some(reviewed_photo_id) = relocation.retire_photo_id.as_deref() else {
+                return Err(PersistenceError::InvalidRecoveryMapping {
+                    original_id: relocation.original_id.clone(),
+                    reason: "occupied",
+                });
+            };
+            let occupant = transaction
+                .query_row(
+                    "SELECT p.id,p.rating,p.selection_state,p.removed_at_ms,
+                        EXISTS(SELECT 1 FROM edit_recipes e WHERE e.photo_id=p.id),
+                        (SELECT COUNT(*) FROM album_members m WHERE m.photo_id=p.id),
+                        (SELECT COUNT(*) FROM exports x WHERE x.photo_id=p.id)
+                     FROM photos p WHERE p.original_id=?",
+                    params![owner_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, i64>(4)? != 0,
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, i64>(6)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|_| PersistenceError::Storage)?;
+            let Some((
+                photo_id,
+                rating,
+                selection_state,
+                removed_at_ms,
+                has_saved_edits,
+                members,
+                exports,
+            )) = occupant
+            else {
+                return Err(PersistenceError::InvalidRecoveryMapping {
+                    original_id: relocation.original_id.clone(),
+                    reason: "stale",
+                });
+            };
+            // A confirmation names one destination Photo. A different Photo
+            // that later occupies the same Location does not inherit it.
+            if photo_id != reviewed_photo_id {
+                return Err(PersistenceError::InvalidRecoveryMapping {
+                    original_id: relocation.original_id.clone(),
+                    reason: "reviewed-stale",
+                });
             }
+            if removed_at_ms.is_some() {
+                return Err(PersistenceError::InvalidRecoveryMapping {
+                    original_id: relocation.original_id.clone(),
+                    reason: "destination-removed",
+                });
+            }
+            if rating != 0
+                || selection_state != "undecided"
+                || has_saved_edits
+                || members != 0
+                || exports != 0
+            {
+                return Err(PersistenceError::InvalidRecoveryMapping {
+                    original_id: relocation.original_id.clone(),
+                    reason: "destination-in-use",
+                });
+            }
+            transaction
+                .execute(
+                    "UPDATE photos SET association_generation=association_generation+1 WHERE id=?",
+                    params![photo_id],
+                )
+                .map_err(|_| PersistenceError::Storage)?;
+            retire_sidecar_association(
+                transaction,
+                &photo_id,
+                &to.to_string(),
+                match kind {
+                    crate::OriginalKind::Raw => "raw",
+                    crate::OriginalKind::Jpeg => "jpeg",
+                },
+            )?;
+            transaction
+                .execute("DELETE FROM photos WHERE id=?", params![photo_id])
+                .map_err(|_| PersistenceError::Storage)?;
+            transaction
+                .execute("DELETE FROM original_files WHERE id=?", params![owner_id])
+                .map_err(|_| PersistenceError::Storage)?;
         }
         // Two-phase Location updates keep direct swaps from violating the
         // UNIQUE(relative_path) constraint.

@@ -18,6 +18,7 @@ import type {
   EditorWhiteBalance,
   EditorWhiteBalancePresentation,
 } from "../model/photo-editor.js";
+import type { RecoveryApplyMapping } from "../model/recovery-review.js";
 
 export type {
   RemovedPanelViewModel,
@@ -372,6 +373,7 @@ export type LibraryBrowserIntent =
   | Readonly<{ kind: "membership-toggle"; albumId: string; member: boolean }>
   | Readonly<{ kind: "membership-retry" }>
   | Readonly<{ kind: "recovery-entry" | "recovery-close" }>
+  | Readonly<{ kind: "recovery-more" | "recovery-mappings-more" }>
   | Readonly<{
       kind: "recovery-propose";
       oldPrefix: string;
@@ -384,13 +386,7 @@ export type LibraryBrowserIntent =
     }>
   | Readonly<{
       kind: "recovery-apply";
-      items: ReadonlyArray<
-        Readonly<{
-          originalId: string;
-          newLocation: string;
-          retireDestination: boolean;
-        }>
-      >;
+      items: ReadonlyArray<RecoveryApplyMapping>;
     }>;
 
 /// One Thumbnail delivery request: the Photo the page's one image-delivery
@@ -491,8 +487,10 @@ type GridPhotoViewModel = Readonly<{
   preview: GridPhotoPreview;
 }>;
 
-/// One unavailable Original the bounded recovery review entry lists.
+/// One item the bounded recovery review lists: the remembered facts of an
+/// Original the review opened on, with the state the Library holds now.
 export type RecoveryEntryViewModel = Readonly<{
+  state: "unavailable" | "available" | "removed" | "missing";
   originalId: string;
   location: string;
   kind: "raw" | "jpeg";
@@ -502,8 +500,11 @@ export type RecoveryEntryViewModel = Readonly<{
   fingerprintEnrolled: boolean;
 }>;
 
-/// One inspectable proposed mapping for an unavailable Original.
-export type RecoveryProposalViewModel = Readonly<{
+/// One inspectable reviewed mapping for an unavailable Original. A mapping
+/// with a blockedReason is presented as blocked and never applied; the
+/// retire candidate names the Photo an explicit choice may replace.
+export type RecoveryMappingViewModel = Readonly<{
+  mappingId: string;
   originalId: string;
   fromLocation: string;
   toLocation: string;
@@ -517,7 +518,28 @@ export type RecoveryProposalViewModel = Readonly<{
     | "occupied"
     | "colliding";
   verified: boolean;
-  retire: Readonly<{ photoId: string; location: string }> | null;
+  blockedReason:
+    | "colliding"
+    | "content-mismatch"
+    | "destination-in-use"
+    | "destination-removed"
+    | "kind-mismatch"
+    | "missing"
+    | "unreadable"
+    | null;
+  retire: Readonly<{
+    photoId: string;
+    originalId: string;
+    location: string;
+  }> | null;
+}>;
+
+/// The explicit paging of one recovery list: how many of the total are
+/// loaded, and whether a continuation page remains.
+export type RecoveryPagingViewModel = Readonly<{
+  shown: number;
+  total: number;
+  more: boolean;
 }>;
 
 type GridBatchResultViewModel = Readonly<{
@@ -803,14 +825,27 @@ export interface LibraryBrowserView {
       unavailablePhotos: number;
     }>,
   ): void;
-  /// Opens the recovery review with the remembered facts of every
-  /// unavailable Original.
-  openRecoveryPanel(entries: ReadonlyArray<RecoveryEntryViewModel>): void;
-  /// Presents inspectable proposed mappings; each occupied destination that
-  /// an explicit retire-and-bind may replace carries its checkbox.
-  renderRecoveryProposals(
-    proposals: ReadonlyArray<RecoveryProposalViewModel>,
+  /// Opens the recovery review with the first page of its bounded listing:
+  /// every loaded entry, how many of the total are shown, and whether more
+  /// pages remain in the same review.
+  openRecoveryPanel(
+    entries: ReadonlyArray<RecoveryEntryViewModel>,
+    paging: RecoveryPagingViewModel,
   ): void;
+  /// Replaces the unavailable entries the open review presents, including
+  /// the pages a Load more appended.
+  renderRecoveryEntries(
+    entries: ReadonlyArray<RecoveryEntryViewModel>,
+    paging: RecoveryPagingViewModel,
+  ): void;
+  /// Presents inspectable reviewed mappings with their explicit paging; a
+  /// blocked mapping carries its reason, and each mapping that needs an
+  /// explicit choice carries its own unchecked control.
+  renderRecoveryProposals(
+    mappings: ReadonlyArray<RecoveryMappingViewModel>,
+    paging: RecoveryPagingViewModel,
+  ): void;
+  resetRecoveryProposalChoices(): void;
   setRecoveryPending(pending: boolean): void;
   setRecoveryMessage(text?: string): void;
   closeRecoveryPanel(): void;
@@ -972,6 +1007,7 @@ export function createLibraryBrowserView(
             <header class="recovery-header"><h3 id="recovery-title">Review unavailable originals</h3><button type="button" class="quiet" data-recovery-close>Close</button></header>
           <p class="recovery-summary" data-recovery-summary role="status"></p>
           <ul class="recovery-list" data-recovery-list></ul>
+          <div class="recovery-more"><button type="button" class="quiet" data-recovery-more hidden>Load more</button></div>
           <div class="recovery-forms">
             <div class="recovery-batch">
               <label>Old folder prefix<input data-recovery-old-prefix type="text" autocomplete="off" spellcheck="false" placeholder="2023/travel" /></label>
@@ -985,7 +1021,9 @@ export function createLibraryBrowserView(
             </div>
           </div>
           <p class="recovery-note" data-recovery-note hidden>Old content cannot be verified for Originals without a fingerprint. Review every mapping and confirm explicitly.</p>
+          <p class="recovery-summary" data-recovery-proposal-summary role="status" hidden></p>
           <ul class="recovery-proposals" data-recovery-proposals hidden></ul>
+          <div class="recovery-more"><button type="button" class="quiet" data-recovery-mappings-more hidden>Load more</button></div>
           <div class="recovery-actions"><button type="button" data-recovery-apply hidden>Apply mappings</button></div>
           <p class="recovery-message" data-recovery-message role="alert" hidden></p>
           </div>
@@ -1706,6 +1744,7 @@ export function createLibraryBrowserView(
       recoveryPanel: required<HTMLDialogElement>(root, "[data-recovery-panel]"),
       recoverySummary: required<HTMLElement>(root, "[data-recovery-summary]"),
       recoveryList: required<HTMLElement>(root, "[data-recovery-list]"),
+      recoveryMore: required<HTMLButtonElement>(root, "[data-recovery-more]"),
       recoveryOldPrefix: required<HTMLInputElement>(
         root,
         "[data-recovery-old-prefix]",
@@ -1731,9 +1770,17 @@ export function createLibraryBrowserView(
         "[data-recovery-propose-single]",
       ),
       recoveryNote: required<HTMLElement>(root, "[data-recovery-note]"),
+      recoveryProposalSummary: required<HTMLElement>(
+        root,
+        "[data-recovery-proposal-summary]",
+      ),
       recoveryProposalList: required<HTMLElement>(
         root,
         "[data-recovery-proposals]",
+      ),
+      recoveryMappingsMore: required<HTMLButtonElement>(
+        root,
+        "[data-recovery-mappings-more]",
       ),
       recoveryApply: required<HTMLButtonElement>(root, "[data-recovery-apply]"),
       recoveryMessage: required<HTMLElement>(root, "[data-recovery-message]"),
@@ -5594,13 +5641,21 @@ export function createLibraryBrowserView(
       if (!alive) return;
       recoveryPanelController.setRecoveryNotice(model);
     },
-    openRecoveryPanel(entries) {
+    openRecoveryPanel(entries, paging) {
       if (!alive) return;
-      recoveryPanelController.openRecoveryPanel(entries);
+      recoveryPanelController.openRecoveryPanel(entries, paging);
     },
-    renderRecoveryProposals(proposals) {
+    renderRecoveryEntries(entries, paging) {
       if (!alive) return;
-      recoveryPanelController.renderRecoveryProposals(proposals);
+      recoveryPanelController.renderRecoveryEntries(entries, paging);
+    },
+    renderRecoveryProposals(mappings, paging) {
+      if (!alive) return;
+      recoveryPanelController.renderRecoveryProposals(mappings, paging);
+    },
+    resetRecoveryProposalChoices() {
+      if (!alive) return;
+      recoveryPanelController.resetRecoveryProposalChoices();
     },
     setRecoveryPending(pending) {
       if (!alive) return;

@@ -52,6 +52,7 @@ pub mod metadata_service;
 pub mod metadata_wire;
 mod processing_capability;
 mod queries;
+mod recovery_review;
 mod wire;
 
 pub use app::Application;
@@ -82,9 +83,11 @@ pub use wire::{
     RemovedPhotoWire, RemovedPhotosResponse, ScanStatusWire, SelectionCountsWire,
 };
 pub(crate) use wire::{
-    FingerprintProgressWire, RecoveryApplyResponseWire, RecoveryProposalWire,
-    RecoveryRejectionWire, RecoverySurveyWire, ScanRecoveryWire, album_summary,
-    photo_summary_indexed_with_url, selection_state,
+    FingerprintProgressWire, RecoveryAppliedWire, RecoveryApplyResponseWire, RecoveryItemWire,
+    RecoveryListResponse, RecoveryMappingWire, RecoveryRejectionResponseWire,
+    RecoveryRejectionWire, RecoverySubmittedMappingWire, RetireCandidateWire, ScanRecoveryWire,
+    album_summary, photo_summary_indexed_with_url, photo_web_path, recovery_item_state,
+    selection_state,
 };
 
 #[cfg(test)]

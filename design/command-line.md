@@ -68,7 +68,12 @@ the missing representations and checked operations. The target additions are:
 - `GET /api/photos/{id}`: one Photo's current facts and decision version;
 - `POST /api/photo-decisions`: checked bounded Selection State or Rating changes;
 - `POST /api/albums/{id}/changes`: one typed, version-checked rename, delete,
-  member addition/removal, or complete reorder.
+  member addition/removal, or complete reorder;
+- `POST /api/recovery/unavailable` and `GET /api/recovery/unavailable/{cursor}`:
+  open and page one bounded review of active unavailable Photos with current facts;
+- `POST /api/recovery/propose` and `GET /api/recovery/proposals/{cursor}`:
+  evaluate one read-only mapping or one Folder-prefix review, with continuation;
+- `POST /api/recovery/apply`: commit one explicit batch of reviewed mappings.
 
 These routes must map to shared owners, not a parallel CLI business layer.
 Album creation, Folder windows, scan status/check, capture metadata, Preview
@@ -148,7 +153,40 @@ The request/response fixtures for these routes must be derived from the wire
 contract in [Photo Development Architecture](photo-development.md#service-surface),
 added with their implementation, and executed before any CLI release. No route addition may
 bypass the existing method, header-size, body-size, or shutdown admission rules.
-No existing route or wire value is retired by this design.
+No existing route or wire value is retired by this design, except the earlier
+unbounded Web-only recovery shapes that the reviewed protocol replaces.
+
+### Reviewed Recovery Surface
+
+Location Recovery keeps one Web and CLI protocol. The shared contract —
+retained inspection, read-only proposals, confirmation bound to the reviewed
+mapping identity, explicit retire choice, atomic batch application, and truthful
+outcome rules — is owned by
+[Physical File Locations and Virtual Albums](photo-organization.md#reviewed-location-recovery-access).
+The [CLI Reference](../docs/cli-reference.md#reviewed-location-recovery) alone
+owns the command grammar, input documents, limits, result schemas, and exit
+codes. The earlier Web-only unbounded recovery shapes are retired by this
+design; the Web client moves to the reviewed protocol in the same change.
+
+Reviews are bounded process state with the same lifecycle rules as query
+collections: idle expiry, least-recently-used eviction under pressure, and an
+explicit refusal instead of a partial or truncated result. An unavailable review
+retains ordered Original and Photo identities and resolves current facts on each
+page. A Folder-prefix review retains its evaluated mappings, because collision
+detection needs the complete evaluated scope, and a later file must not join a
+reviewed set. Cursors validate kind, process epoch, offset, and page size, and a
+failed or expired review is reported as such rather than silently re-evaluated.
+
+Apply revalidates every submitted mapping against current state inside the
+existing persistence transaction. Refused batches report one reason per mapping
+and change nothing. Applied results identify each recovered Photo and Original,
+its previous and current Location, and any retired destination record, with the
+Library-wide unavailable count reported separately.
+
+A lost apply response is an unknown outcome. The client presents the submitted
+mapping identities and directs the caller to inspect those Photo identities; it
+does not replay the request, retry automatically, or report a current-state match
+as proof that this attempt committed.
 
 ## Query Semantics and Resources
 

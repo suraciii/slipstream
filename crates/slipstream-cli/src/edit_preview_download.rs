@@ -318,6 +318,7 @@ pub(super) async fn download(
                 photo_ids: vec![photo_id.to_owned()],
                 album_id: None,
                 album_name: None,
+                mappings: Vec::new(),
             }));
         }
         return Err(validated_route_failure(error, OPERATION, &client.token)

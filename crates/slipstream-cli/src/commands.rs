@@ -93,6 +93,11 @@ pub enum Command {
         #[command(subcommand)]
         command: TrashCommand,
     },
+    /// Restore the association between unavailable Photos and moved Originals.
+    Recovery {
+        #[command(subcommand)]
+        command: RecoveryCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -142,6 +147,63 @@ pub struct TrashReviewArgs {
     /// UTF-8 JSON file holding {"photoIds":[...]} or a bare ID array to exclude.
     #[arg(long, value_name = "FILE", value_parser = nonempty, requires = "all")]
     pub exclude_input: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RecoveryCommand {
+    /// Open one bounded review of the active unavailable Photos.
+    Unavailable(RecoveryUnavailableArgs),
+    /// Evaluate reviewed relocation mappings without writing.
+    Propose(RecoveryProposeArgs),
+    /// Commit one reviewed relocation batch atomically.
+    Apply(RecoveryApplyArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RecoveryUnavailableArgs {
+    /// Maximum items in this page (1 through the advertised review bound).
+    #[arg(long, value_name = "N", value_parser = page_limit, conflicts_with = "cursor")]
+    pub limit: Option<u8>,
+    /// Opaque continuation from the preceding unavailable review page.
+    #[arg(long, value_name = "CURSOR", value_parser = nonempty, conflicts_with = "limit")]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct RecoveryProposeArgs {
+    /// Library-relative Folder prefix to replace; empty addresses the Library
+    /// Folder.
+    #[arg(long, value_name = "PREFIX", conflicts_with_all = ["cursor", "original_id", "new_location"])]
+    pub old_prefix: Option<String>,
+    /// Library-relative Folder prefix that replaces --old-prefix; empty
+    /// addresses the Library Folder.
+    #[arg(long, value_name = "PREFIX", conflicts_with_all = ["cursor", "original_id", "new_location"])]
+    pub new_prefix: Option<String>,
+    /// Maximum mappings in this page (1 through the advertised review bound).
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = page_limit,
+        conflicts_with_all = ["cursor", "original_id", "new_location"]
+    )]
+    pub limit: Option<u8>,
+    /// Opaque continuation from the preceding proposal page.
+    #[arg(long, value_name = "CURSOR", value_parser = nonempty, conflicts_with_all = ["old_prefix", "new_prefix", "limit", "original_id", "new_location"])]
+    pub cursor: Option<String>,
+    /// One unavailable Original identity for a single mapping.
+    #[arg(long, value_name = "ORIGINAL_ID", value_parser = nonempty, conflicts_with_all = ["old_prefix", "new_prefix", "limit", "cursor"])]
+    pub original_id: Option<String>,
+    /// Library-relative Original Location including the filename.
+    #[arg(long, value_name = "LOCATION", value_parser = nonempty, conflicts_with_all = ["old_prefix", "new_prefix", "limit", "cursor"])]
+    pub new_location: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct RecoveryApplyArgs {
+    /// UTF-8 JSON file holding exactly the server apply body
+    /// `{"mappings":[...]}`; `-` reads the document from stdin.
+    #[arg(long, value_name = "FILE", value_parser = nonempty)]
+    pub input: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -387,6 +449,38 @@ pub(crate) fn valid_request_identity(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// One Library identity in the closed server form: lowercase hex and
+/// dashes, 36 through 64 bytes.
+pub(crate) fn valid_library_id(value: &str) -> bool {
+    (36..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) || byte == b'-')
+}
+
+/// One Library-relative Original Location including the filename, in the
+/// same closed form the service parses.
+pub(crate) fn valid_original_location(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('/')
+        && !value.contains('\0')
+        && !value
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+}
+
+/// One Library-relative Folder Location with no leading or trailing
+/// separator; the empty value addresses the Library Folder.
+pub(crate) fn valid_location_prefix(value: &str) -> bool {
+    value.is_empty()
+        || (!value.starts_with('/')
+            && !value.ends_with('/')
+            && !value.contains('\0')
+            && !value
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == ".."))
 }
 
 #[derive(Debug, Args)]
