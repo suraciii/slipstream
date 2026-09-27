@@ -1392,17 +1392,26 @@ fn receipt_expires_at(record: &slipstream_core::ExportRecord) -> Option<String> 
     record.retain_until.map(export_time)
 }
 
+fn export_format(workload: &str) -> (&'static str, &'static str, &'static str) {
+    match workload {
+        "development-tiff" => ("development-tiff", "develop", "image/tiff"),
+        "film-jpeg" => ("film-jpeg", "film", "image/jpeg"),
+        _ => unreachable!("validated Export workload"),
+    }
+}
+
 /// The closed artifact object, or `null` when no validated artifact is
 /// retained.
 pub(crate) fn export_artifact_object(
     record: &slipstream_core::ExportRecord,
 ) -> Option<ExportArtifactWire> {
     let artifact = record.artifact.as_ref()?;
+    let (target, stage, content_type) = export_format(&record.snapshot.workload);
     Some(ExportArtifactWire {
         export_id: record.id.clone(),
-        target: "development-tiff",
-        stage: "develop",
-        content_type: "image/tiff",
+        target,
+        stage,
+        content_type,
         width: artifact.width,
         height: artifact.height,
         profile_identity: artifact.profile_identity.clone(),
@@ -1413,10 +1422,11 @@ pub(crate) fn export_artifact_object(
 }
 
 pub(crate) fn export_submit(record: &slipstream_core::ExportRecord) -> ExportSubmitWire {
+    let (target, _, _) = export_format(&record.snapshot.workload);
     ExportSubmitWire {
         export_id: record.id.clone(),
         state: record.state.name(),
-        target: "development-tiff",
+        target,
         recipe_version: record.snapshot.recipe_revision.clone(),
         source_revision: record.snapshot.source_revision.clone(),
         receipt_expires_at: receipt_expires_at(record),
@@ -1428,19 +1438,21 @@ pub(crate) fn export_submit(record: &slipstream_core::ExportRecord) -> ExportSub
 }
 
 pub(crate) fn export_summary(record: &slipstream_core::ExportRecord) -> ExportSummaryWire {
+    let (target, _, _) = export_format(&record.snapshot.workload);
     ExportSummaryWire {
         export_id: record.id.clone(),
         state: record.state.name(),
-        target: "development-tiff",
+        target,
     }
 }
 
 pub(crate) fn export_inspect(record: &slipstream_core::ExportRecord) -> ExportInspectWire {
+    let (target, _, _) = export_format(&record.snapshot.workload);
     ExportInspectWire {
         export_id: record.id.clone(),
         photo_id: record.snapshot.photo_id.clone(),
         state: record.state.name(),
-        target: "development-tiff",
+        target,
         recipe_version: record.snapshot.recipe_revision.clone(),
         source_revision: record.snapshot.source_revision.clone(),
         bundle_id: record.snapshot.bundle_id.clone(),

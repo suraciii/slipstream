@@ -6,6 +6,7 @@ mod faults;
 mod journal;
 pub mod photo;
 mod photo_exec;
+mod photo_jpeg;
 pub mod photo_profile;
 mod photo_tiff;
 pub mod protocol;

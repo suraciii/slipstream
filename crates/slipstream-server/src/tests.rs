@@ -14337,6 +14337,8 @@ fn retained_result(
         source_revision,
         bundle_sha256: "c".repeat(64),
         path,
+        width: 1,
+        height: 1,
     }
 }
 
@@ -14506,6 +14508,30 @@ async fn edit_preview_streams_the_current_rendition_with_the_closed_metadata() {
     let _ = fs::remove_dir_all(base);
 }
 
+#[tokio::test]
+async fn edit_preview_admits_the_film_stage() {
+    let (base, config, application, photo_id, _, _) =
+        approved_photo_with_recipe_and_result("film-preview", 0.25).await;
+    let gate = scripted_gate(std::collections::VecDeque::from([
+        crate::edit_preview::RenderAdmission::Queued,
+    ]));
+    let gate_dyn: Arc<dyn crate::edit_preview::PreviewRenderGate> = gate;
+    let (router, _preview_owner) = preview_router(
+        &application,
+        config.web_root(),
+        scripted_retention(None),
+        gate_dyn,
+    );
+    let response = get_preview_response(&router, &preview_uri(&photo_id, "film")).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        response_json(response).await,
+        serde_json::json!({"state": "queued", "stage": "film"})
+    );
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
 /// Every closed refusal of the route carries its exact status and code, and
 /// admitted work reports the 202 queued and running states.
 #[tokio::test]
@@ -14537,7 +14563,7 @@ async fn edit_preview_reports_refusals_and_admissions_with_exact_statuses() {
     }
 
     // 422 invalid_settings: a stage outside the closed set.
-    for stage in ["film", "grain"] {
+    for stage in ["grain"] {
         let response = get_preview_response(&router, &preview_uri(&photo_id, stage)).await;
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = response_json(response).await;

@@ -24,9 +24,10 @@ qualify a RAW camera, or enable Film work.
   arbitrary stage list to a privileged launcher.
 - The launcher must verify exact source bytes before releasing a worker and
   must retain ownership until output and resource evidence settle.
-- The first production workload is one bounded `development-tiff` stage. Film
-  remains a separate capability until its own supported-source and resource
-  decisions pass.
+- The production Photo workload set is the bounded `development-tiff` and
+  `film-jpeg` stages. `film-jpeg` consumes the sealed Development TIFF handoff
+  inside the same worker attempt and publishes the fixed Finished JPEG; it does
+  not expose arbitrary Film controls or a second source admission path.
 
 ## Transport
 

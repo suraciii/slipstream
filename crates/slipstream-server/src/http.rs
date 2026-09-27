@@ -3882,8 +3882,9 @@ fn valid_export_request_id(request_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
-/// The closed first-version Export target.
+/// The closed first-version Export targets.
 const EXPORT_DEVELOPMENT_TIFF_TARGET: &str = "development-tiff";
+const EXPORT_FILM_JPEG_TARGET: &str = "film-jpeg";
 
 /// Reads one Export request body. Every body failure is a shape violation:
 /// the wire contract refuses unknown fields, wrong types, and oversized or
@@ -3963,7 +3964,10 @@ pub(crate) async fn submit_export(
     if !valid_export_request_id(&body.request_id)
         || body.expected_recipe_version.is_empty()
         || body.expected_source_revision.is_empty()
-        || body.target != EXPORT_DEVELOPMENT_TIFF_TARGET
+        || !matches!(
+            body.target.as_str(),
+            EXPORT_DEVELOPMENT_TIFF_TARGET | EXPORT_FILM_JPEG_TARGET
+        )
     {
         return export_error(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -3991,6 +3995,7 @@ pub(crate) async fn submit_export(
     // admission. The digest covers only the caller's payload, so a
     // deployment bundle or policy change cannot break a replay.
     let payload_digest = slipstream_core::export_submission_payload_digest(
+        &body.target,
         &body.expected_recipe_version,
         &body.expected_source_revision,
     );
@@ -4033,7 +4038,7 @@ pub(crate) async fn submit_export(
         return export_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "unsupported_photo",
-            "Only RAW Photos support the development-tiff workload",
+            "Only RAW Photos support the development-tiff and film-jpeg workloads",
         );
     }
     let metadata = match state.application.photo_metadata(&photo_id).await {
@@ -4074,6 +4079,7 @@ pub(crate) async fn submit_export(
         request_id: body.request_id,
         photo_id,
         source_profile_id: profile.profile_id.to_owned(),
+        workload: body.target,
         policy_id: state
             .processing
             .as_ref()
@@ -4096,7 +4102,7 @@ pub(crate) async fn submit_export(
         return export_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "processing_unavailable",
-            "The processing launcher is not admitting development work",
+            "The processing launcher is not admitting export work",
         );
     }
     match state.application.library.submit_export(submission).await {
@@ -4411,7 +4417,8 @@ pub(crate) async fn get_export_artifact(
             let _ = library.release_export_lease(&lease_id).await;
         }
     };
-    let Some(path) = manager.artifact_path(&export_id) else {
+    let Some(path) = manager.artifact_path_for_workload(&export_id, &record.snapshot.workload)
+    else {
         release_lease.await;
         return export_error(
             StatusCode::NOT_FOUND,
@@ -4492,6 +4499,11 @@ pub(crate) async fn get_export_artifact(
     // The typed metadata framing for this route is response headers; they are
     // the artifact object field for field, so a client validates the download
     // by comparing every header with `GET /api/exports/{id}`.
+    let extension = if record.snapshot.workload == "film-jpeg" {
+        "jpg"
+    } else {
+        "tiff"
+    };
     let builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, artifact.content_type)
@@ -4516,7 +4528,7 @@ pub(crate) async fn get_export_artifact(
         .header("slipstream-artifact-expires-at", &artifact.expires_at)
         .header(
             header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{export_id}.tiff\""),
+            format!("attachment; filename=\"{export_id}.{extension}\""),
         );
     builder
         .body(Body::from_stream(ExportFileStream(

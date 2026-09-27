@@ -10,29 +10,29 @@ use crate::{
     CaptureFact, CaptureMetadataState, CaptureTimeField, CheckedAlbumMutation,
     CheckedAlbumMutationResult, CheckedPhotoDecisionCounts, CheckedPhotoDecisionItemResult,
     CheckedPhotoDecisionMutation, CheckedPhotoDecisionOutcome, CheckedPhotoDecisionResult,
-    DiscoveredOriginal, EXPORT_DEVELOPMENT_TIFF_WORKLOAD, EXPORT_RETENTION_SECONDS, EditRecipe,
-    EditRecipeRead, EditRecipeSettings, EditRecipeWriteOutcome, ExplicitPhotoRemovalMutation,
-    ExplicitPhotoRestoreCounts, ExplicitPhotoRestoreMutation, ExplicitPhotoRestoreResult,
-    ExportArtifactFacts, ExportAttempt, ExportExposureRange, ExportLeaseOutcome,
-    ExportRecipePayload, ExportRecord, ExportRetryOutcome, ExportSettlement, ExportSnapshot,
-    ExportSourceEvidence, ExportState, ExportSubmission, ExportSubmissionResolution,
-    ExportSubmitOutcome, ExportSweepResult, LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS,
-    MAXIMUM_PHOTO_RATING, OriginalErrorCategory, OriginalFacts, OriginalFingerprint, OriginalKind,
-    OriginalRecord, OriginalScanError, PermanentDeletionItemResult, PermanentDeletionItemState,
-    PermanentDeletionRejection, PermanentDeletionResult, PermanentDeletionReview,
-    PermanentDeletionReviewItem, PermanentDeletionSelection, PermanentDeletionTarget,
-    PermanentDeletionWorkItem, PhotoAlbumMembership, PhotoDecisionFacts, PhotoDecisionSnapshot,
-    PhotoOperationRemainder, PhotoQuery, PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder,
-    PhotoQueryProjection, PhotoQuerySource, PhotoRead, PhotoRecord, PhotoRemovalCounts,
-    PhotoRemovalMarker, PhotoRemovalMutation, PhotoRemovalResult, PhotoRestoration,
-    PhotoRestorationCounts, PhotoRestorationResult, PhotoStateBatchApplied,
-    PhotoStateBatchChangedElsewhere, PhotoStateBatchMissing, PhotoStateBatchMutation,
-    PhotoStateBatchResult, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult,
-    PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult, PreviewState,
-    RebindEditRecipe, RecoverySurvey, RelativeOriginalPath, RemovedPhotoRecord,
-    RequestedRelocation, SaveEditRecipe, ScanLimits, ScanSnapshot, SelectionState,
-    TrashPhotoCandidate, UnavailablePhotoRecord, WhiteBalanceIntent, preview_should_preserve,
-    reconcile, selected_source,
+    DiscoveredOriginal, EXPORT_DEVELOPMENT_TIFF_WORKLOAD, EXPORT_FILM_JPEG_WORKLOAD,
+    EXPORT_RETENTION_SECONDS, EditRecipe, EditRecipeRead, EditRecipeSettings,
+    EditRecipeWriteOutcome, ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreCounts,
+    ExplicitPhotoRestoreMutation, ExplicitPhotoRestoreResult, ExportArtifactFacts, ExportAttempt,
+    ExportExposureRange, ExportLeaseOutcome, ExportRecipePayload, ExportRecord, ExportRetryOutcome,
+    ExportSettlement, ExportSnapshot, ExportSourceEvidence, ExportState, ExportSubmission,
+    ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult, LibraryRoot,
+    MAXIMUM_FOLDER_ALBUM_PHOTOS, MAXIMUM_PHOTO_RATING, OriginalErrorCategory, OriginalFacts,
+    OriginalFingerprint, OriginalKind, OriginalRecord, OriginalScanError,
+    PermanentDeletionItemResult, PermanentDeletionItemState, PermanentDeletionRejection,
+    PermanentDeletionResult, PermanentDeletionReview, PermanentDeletionReviewItem,
+    PermanentDeletionSelection, PermanentDeletionTarget, PermanentDeletionWorkItem,
+    PhotoAlbumMembership, PhotoDecisionFacts, PhotoDecisionSnapshot, PhotoOperationRemainder,
+    PhotoQuery, PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder, PhotoQueryProjection,
+    PhotoQuerySource, PhotoRead, PhotoRecord, PhotoRemovalCounts, PhotoRemovalMarker,
+    PhotoRemovalMutation, PhotoRemovalResult, PhotoRestoration, PhotoRestorationCounts,
+    PhotoRestorationResult, PhotoStateBatchApplied, PhotoStateBatchChangedElsewhere,
+    PhotoStateBatchMissing, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField,
+    PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed,
+    PreviewSeedResult, PreviewState, RebindEditRecipe, RecoverySurvey, RelativeOriginalPath,
+    RemovedPhotoRecord, RequestedRelocation, SaveEditRecipe, ScanLimits, ScanSnapshot,
+    SelectionState, TrashPhotoCandidate, UnavailablePhotoRecord, WhiteBalanceIntent,
+    preview_should_preserve, reconcile, selected_source,
 };
 
 use rusqlite::{
@@ -2830,7 +2830,7 @@ fn open_connection(
 }
 
 fn preflight_schema(connection: &Connection, canonical_root: &str) -> Result<(), PersistenceError> {
-    preflight_schema_for_max_version(connection, canonical_root, 9)
+    preflight_schema_for_max_version(connection, canonical_root, 10)
 }
 
 fn preflight_schema_for_max_version(
@@ -2865,6 +2865,8 @@ fn preflight_schema_for_max_version(
         8 => validate_canonical_schema(connection, SchemaVersion::V8)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         9 => validate_canonical_schema(connection, SchemaVersion::V9)
+            .map_err(|_| PersistenceError::UnsupportedSchema),
+        10 => validate_canonical_schema(connection, SchemaVersion::V10)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         _ => unreachable!(),
     }
@@ -2902,7 +2904,7 @@ fn startup_schema(
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| PersistenceError::Storage)?;
-    if version > 9 {
+    if version > 10 {
         return Err(PersistenceError::NewerSchema);
     }
     validate_root_binding(connection, canonical_root)?;
@@ -2953,6 +2955,8 @@ fn startup_schema(
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
         9 => validate_canonical_schema(&transaction, SchemaVersion::V9)
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
+        10 => validate_canonical_schema(&transaction, SchemaVersion::V10)
+            .map_err(|_| PersistenceError::UnsupportedSchema)?,
         _ => unreachable!(),
     }
     if version < 6 {
@@ -2966,6 +2970,9 @@ fn startup_schema(
     }
     if version < 9 {
         migrate_v8(&transaction)?;
+    }
+    if version < 10 {
+        migrate_v9(&transaction)?;
     }
     let stored: Option<String> = transaction
         .query_row(
@@ -2984,7 +2991,7 @@ fn startup_schema(
             .map_err(|_| PersistenceError::Storage)?;
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V9)
+    validate_canonical_schema(&transaction, SchemaVersion::V10)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -3450,6 +3457,81 @@ fn migrate_v8(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
         )
         .map_err(|_| PersistenceError::Storage)?;
     validate_canonical_schema(transaction, SchemaVersion::V9)
+        .map_err(|_| PersistenceError::UnsupportedSchema)
+}
+
+/// Issue #327: allow the first production Film workload without changing the
+/// durable Export row shape. Rebuild only the two tables whose closed checks
+/// widen from the V9 development workload to V10's two workloads.
+fn migrate_v9(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
+    validate_canonical_schema(transaction, SchemaVersion::V9)
+        .map_err(|_| PersistenceError::UnsupportedSchema)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE export_download_leases RENAME TO export_download_leases_v9;
+             DROP INDEX exports_photo;
+             ALTER TABLE exports RENAME TO exports_v9;
+             CREATE TABLE exports(
+               id TEXT PRIMARY KEY,
+               photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE RESTRICT,
+               target TEXT NOT NULL CHECK(target IN ('development-tiff','film-jpeg')),
+               state TEXT NOT NULL CHECK(state IN ('queued','running','succeeded','failed','cancelled')),
+               outcome TEXT CHECK(outcome IS NULL OR length(outcome) BETWEEN 1 AND 200),
+               recipe_revision TEXT NOT NULL CHECK(length(recipe_revision) > 0),
+               exposure_ev REAL NOT NULL,
+               white_balance_mode TEXT NOT NULL CHECK(white_balance_mode = 'as-shot'),
+               source_revision TEXT NOT NULL CHECK(length(source_revision) > 0),
+               source_profile_id TEXT NOT NULL CHECK(length(source_profile_id) BETWEEN 1 AND 64),
+               source_kind TEXT NOT NULL CHECK(source_kind = 'raw'),
+               source_size INTEGER CHECK(source_size IS NULL OR source_size > 0),
+               source_sha256 TEXT CHECK(source_sha256 IS NULL OR length(source_sha256) = 64),
+               recipe_digest TEXT NOT NULL CHECK(length(recipe_digest) = 64),
+               policy_id TEXT NOT NULL CHECK(length(policy_id) = 64),
+               bundle_id TEXT NOT NULL CHECK(length(bundle_id) = 64),
+               workload TEXT NOT NULL CHECK(workload IN ('development-tiff','film-jpeg')),
+               attempt_incarnation TEXT CHECK(attempt_incarnation IS NULL OR length(attempt_incarnation) = 32),
+               attempt_sequence INTEGER CHECK(attempt_sequence IS NULL OR attempt_sequence > 0),
+               artifact_size INTEGER CHECK(artifact_size IS NULL OR artifact_size > 0),
+               artifact_sha256 TEXT CHECK(artifact_sha256 IS NULL OR length(artifact_sha256) = 64),
+               artifact_expires_at INTEGER CHECK(artifact_expires_at IS NULL OR artifact_expires_at >= 0),
+               artifact_width INTEGER CHECK(artifact_width IS NULL OR artifact_width > 0),
+               artifact_height INTEGER CHECK(artifact_height IS NULL OR artifact_height > 0),
+               artifact_profile_identity TEXT CHECK(artifact_profile_identity IS NULL OR length(artifact_profile_identity) = 64),
+               created_at INTEGER NOT NULL CHECK(created_at >= 0),
+               settled_at INTEGER CHECK(settled_at IS NULL OR settled_at >= 0),
+               retain_until INTEGER CHECK(retain_until IS NULL OR retain_until >= 0)
+             );
+             INSERT INTO exports(
+               id,photo_id,target,state,outcome,recipe_revision,exposure_ev,
+               white_balance_mode,source_revision,source_profile_id,source_kind,
+               source_size,source_sha256,recipe_digest,policy_id,bundle_id,
+               workload,attempt_incarnation,attempt_sequence,artifact_size,
+               artifact_sha256,artifact_expires_at,artifact_width,artifact_height,
+               artifact_profile_identity,created_at,settled_at,retain_until
+             )
+             SELECT
+               id,photo_id,target,state,outcome,recipe_revision,exposure_ev,
+               white_balance_mode,source_revision,source_profile_id,source_kind,
+               source_size,source_sha256,recipe_digest,policy_id,bundle_id,
+               workload,attempt_incarnation,attempt_sequence,artifact_size,
+               artifact_sha256,artifact_expires_at,artifact_width,artifact_height,
+               artifact_profile_identity,created_at,settled_at,retain_until
+             FROM exports_v9;
+             CREATE INDEX exports_photo ON exports(photo_id);
+             CREATE TABLE export_download_leases_new(
+               id TEXT PRIMARY KEY,
+               export_id TEXT NOT NULL REFERENCES exports(id) ON DELETE CASCADE,
+               created_at INTEGER NOT NULL CHECK(created_at >= 0)
+             );
+             INSERT INTO export_download_leases_new(id,export_id,created_at)
+               SELECT id,export_id,created_at FROM export_download_leases_v9;
+             DROP TABLE export_download_leases_v9;
+             DROP TABLE exports_v9;
+             ALTER TABLE export_download_leases_new RENAME TO export_download_leases;
+             PRAGMA user_version = 10;",
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    validate_canonical_schema(transaction, SchemaVersion::V10)
         .map_err(|_| PersistenceError::UnsupportedSchema)
 }
 
@@ -4037,9 +4119,10 @@ pub(crate) fn expand_library_binding(
     )
     .map_err(|_| PersistenceError::Storage)?;
     // The read-only preflight accepts every schema the writable pass can
-    // migrate or use. In particular, an already current V9 database must
+    // migrate or use. In particular, an already current V10 database must
     // reach startup_schema instead of being rejected here.
-    if validate_canonical_schema(&readonly, SchemaVersion::V9).is_err()
+    if validate_canonical_schema(&readonly, SchemaVersion::V10).is_err()
+        && validate_canonical_schema(&readonly, SchemaVersion::V9).is_err()
         && validate_canonical_schema(&readonly, SchemaVersion::V8).is_err()
         && validate_canonical_schema(&readonly, SchemaVersion::V7).is_err()
     {
@@ -4109,7 +4192,7 @@ pub(crate) fn expand_library_binding(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V9)
+    validate_canonical_schema(&transaction, SchemaVersion::V10)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     if required_root_binding(&transaction)? != stored_root
         || expansion_projection(&transaction)? != preserved
@@ -4159,7 +4242,7 @@ pub(crate) fn expand_library_binding(
         return Err(PersistenceError::InvalidExpansion);
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V9)
+    validate_canonical_schema(&transaction, SchemaVersion::V10)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -5482,10 +5565,6 @@ fn export_publication_claim_key(export_id: &str) -> String {
     format!("export_publication:{export_id}")
 }
 
-fn export_payload_digest(submission: &ExportSubmission) -> Result<String, PersistenceError> {
-    Ok(submission.payload_digest())
-}
-
 /// Export request identities are unique per Photo; the receipt key carries
 /// the Photo identity next to the caller's request identity.
 fn export_receipt_key(photo_id: &str, request_id: &str) -> String {
@@ -5562,6 +5641,7 @@ struct ExportRow {
     recipe_digest: String,
     policy_id: String,
     bundle_id: String,
+    workload: String,
     attempt_incarnation: Option<String>,
     attempt_sequence: Option<u64>,
     artifact_size: Option<u64>,
@@ -5579,7 +5659,7 @@ const EXPORT_ROW_COLUMNS: &str = "id,photo_id,state,outcome,recipe_revision,expo
     source_revision,source_profile_id,source_size,source_sha256,recipe_digest,policy_id,
     bundle_id,attempt_incarnation,attempt_sequence,artifact_size,artifact_sha256,
     artifact_expires_at,artifact_width,artifact_height,artifact_profile_identity,
-    created_at,settled_at,retain_until";
+    created_at,settled_at,retain_until,workload";
 
 fn export_row(_connection: &Connection, row: &rusqlite::Row<'_>) -> rusqlite::Result<ExportRow> {
     let state_name: String = row.get(2)?;
@@ -5632,6 +5712,7 @@ fn export_row(_connection: &Connection, row: &rusqlite::Row<'_>) -> rusqlite::Re
         recipe_digest: row.get(10)?,
         policy_id: row.get(11)?,
         bundle_id: row.get(12)?,
+        workload: row.get(24)?,
         attempt_incarnation: row.get(13)?,
         attempt_sequence,
         artifact_size,
@@ -5702,7 +5783,12 @@ fn export_record_from_row(row: ExportRow) -> Result<ExportRecord, PersistenceErr
         },
     )
     .map_err(|_| PersistenceError::Storage)?;
-    if payload.digest() != row.recipe_digest {
+    if payload.digest() != row.recipe_digest
+        || !matches!(
+            row.workload.as_str(),
+            EXPORT_DEVELOPMENT_TIFF_WORKLOAD | EXPORT_FILM_JPEG_WORKLOAD
+        )
+    {
         return Err(PersistenceError::Storage);
     }
     Ok(ExportRecord {
@@ -5716,7 +5802,7 @@ fn export_record_from_row(row: ExportRow) -> Result<ExportRecord, PersistenceErr
             source_profile_id: row.source_profile_id,
             policy_id: row.policy_id,
             bundle_id: row.bundle_id,
-            workload: EXPORT_DEVELOPMENT_TIFF_WORKLOAD.to_owned(),
+            workload: row.workload,
             recipe_digest: row.recipe_digest,
         },
         source,
@@ -5791,10 +5877,14 @@ fn submit_export(
 ) -> Result<ExportSubmitOutcome, PersistenceError> {
     if !validate_export_request_id(&submission.request_id)
         || submission.source_profile_id.is_empty()
+        || !matches!(
+            submission.workload.as_str(),
+            EXPORT_DEVELOPMENT_TIFF_WORKLOAD | EXPORT_FILM_JPEG_WORKLOAD
+        )
     {
         return Ok(ExportSubmitOutcome::InvalidSettings);
     }
-    let payload_digest = export_payload_digest(&submission)?;
+    let payload_digest = submission.payload_digest();
     write_transaction(state, database_name, connection, |transaction| {
         if let Some(receipt) =
             read_export_receipt(transaction, &submission.photo_id, &submission.request_id)?
@@ -5857,11 +5947,12 @@ fn submit_export(
                    exposure_ev,white_balance_mode,source_revision,source_profile_id,
                    source_kind,source_size,source_sha256,recipe_digest,policy_id,bundle_id,
                    workload,created_at)
-                 VALUES(?1,?2,'development-tiff','queued',NULL,?3,?4,'as-shot',?5,?6,'raw',
-                   NULL,NULL,?7,?8,?9,'development-tiff',?10)",
+                 VALUES(?1,?2,?3,'queued',NULL,?4,?5,'as-shot',?6,?7,'raw',
+                   NULL,NULL,?8,?9,?10,?3,?11)",
                 params![
                     export_id,
                     submission.photo_id,
+                    submission.workload,
                     recipe.revision,
                     recipe.settings.exposure_ev,
                     submission.expected_source_revision,
@@ -10053,7 +10144,7 @@ mod tests {
         );
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V9).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V10).unwrap();
     }
 
     #[tokio::test]
@@ -10132,14 +10223,13 @@ mod tests {
             "raw-photo"
         );
         persistence.shutdown().unwrap();
-
-        let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V9).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V10).unwrap();
         assert_eq!(
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            9
+            10
         );
         assert_eq!(
             connection
@@ -10842,9 +10932,9 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            9
+            10
         );
-        validate_canonical_schema(&connection, SchemaVersion::V9).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V10).unwrap();
         // The legacy photo-set tables are gone rather than left as aliases.
         for legacy in ["photo_sets", "photo_set_members", "review_progress"] {
             assert!(!table_exists(&connection, legacy).unwrap(), "{legacy}");
@@ -10853,7 +10943,7 @@ mod tests {
     // album-language-legacy:end v4-migration-test
 
     #[test]
-    fn newer_v10_database_is_rejected_without_changes() {
+    fn newer_v11_database_is_rejected_without_changes() {
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
@@ -10861,7 +10951,7 @@ mod tests {
         );
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 10)
+            .pragma_update(None, "user_version", 11)
             .unwrap();
         let before = fs::read(&path).unwrap();
         assert!(matches!(
@@ -10938,8 +11028,8 @@ mod tests {
             )
             .unwrap();
             persistence.shutdown().unwrap();
-            let connection = Connection::open(path).unwrap();
-            validate_canonical_schema(&connection, SchemaVersion::V9).unwrap();
+            let connection = Connection::open(&path).unwrap();
+            validate_canonical_schema(&connection, SchemaVersion::V10).unwrap();
         }
         let (_base, library, state, name, path) = fixture();
         seed(
@@ -11109,8 +11199,8 @@ mod tests {
         assert_eq!(album.members[0].rating, 5);
         assert_eq!(album.last_reviewed_photo_id.as_deref(), Some(photo_id));
         persistence.shutdown().unwrap();
-        let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V9).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V10).unwrap();
     }
     // album-language-legacy:end v3-migration-test
 
@@ -14689,7 +14779,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            9
+            10
         );
         assert_eq!(
             connection
@@ -15678,6 +15768,7 @@ mod tests {
             source_profile_id: "sony-ilce-7rm5-arw".to_owned(),
             policy_id: "a".repeat(64),
             bundle_id: "b".repeat(64),
+            workload: EXPORT_DEVELOPMENT_TIFF_WORKLOAD.to_owned(),
             expected_recipe_revision: recipe_revision.to_owned(),
             expected_source_revision: source_revision.to_owned(),
             exposure_range: ExportExposureRange {

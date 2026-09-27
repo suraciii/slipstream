@@ -18,4 +18,10 @@ tools/processing/**
 tools/processing/photo/**
 !tools/processing/photo/Dockerfile
 !tools/processing/photo/adapter.py
+!tools/processing/photo/film_adapter.py
 !tools/processing/photo/test_adapter.py
+!tools/development/
+tools/development/**
+!tools/development/film_identity.py
+!tools/development/finished_jpeg.py
+!tools/processing/photo/test_film_adapter.py

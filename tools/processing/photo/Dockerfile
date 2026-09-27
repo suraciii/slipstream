@@ -1,7 +1,9 @@
-# Production development-tiff worker image: PID-1 launcher worker plus the
-# pinned darktable engine and its adapter. The adapter reproduces the
+# Production Photo worker image: PID-1 launcher worker plus the pinned
+# darktable engine and its adapter, and the fixed Film stage over the
+# darktable handoff TIFF. The development adapter reproduces the
 # qualification history pipeline from tools/development (baseline database,
-# generated XMP history, final full-size run, imported-history validation).
+# generated XMP history, final full-size run, imported-history validation);
+# the film-jpeg workload renders the same handoff with the fixed Film recipe.
 FROM rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -19,13 +21,33 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/slipstream-processing-photo-worker /usr/local/bin/slipstream-processing-photo-worker
 COPY tools/processing/photo/adapter.py /opt/slipstream-photo/adapter.py
+COPY tools/processing/photo/film_adapter.py /opt/slipstream-photo/film_adapter.py
 # The linear ProPhoto RGB handoff profile comes verbatim from the qualified
 # image; the worker copies it into the container configdir before exec, and
 # darktable only resolves --icc-file against that registered copy.
 COPY --from=slipstream:development-qualification \
      /opt/spektrafilm/src/spektrafilm/data/icc/ellelstone/LargeRGB-elle-V2-g10.icc \
      /opt/slipstream-photo/icc/LargeRGB-elle-V2-g10.icc
-RUN sha256sum /opt/slipstream-photo/icc/LargeRGB-elle-V2-g10.icc /opt/slipstream-photo/adapter.py /opt/os-packages.txt \
+# The fixed Film stage renders the handoff TIFF with the pinned numerical
+# runtime. The locked interpreter (the venv and the uv-managed CPython it
+# links), the patched spektrafilm source, and the shared development modules
+# come verbatim from the same qualified image, so the recipe identity pinned
+# by film_identity.py is the identity that renders here.
+COPY --from=slipstream:development-qualification /opt/python /opt/python
+COPY --from=slipstream:development-qualification /opt/runtime /opt/runtime
+COPY --from=slipstream:development-qualification /opt/spektrafilm /opt/spektrafilm
+COPY --from=slipstream:development-qualification \
+     /opt/probe/film.py \
+     /opt/probe/bundle.py \
+     /opt/probe/
+COPY tools/development/finished_jpeg.py \
+     tools/development/film_identity.py \
+     /opt/probe/
+COPY --from=slipstream:development-qualification \
+     /opt/processing-bundle.json /opt/processing-bundle.json
+RUN sha256sum /opt/slipstream-photo/icc/LargeRGB-elle-V2-g10.icc \
+        /opt/slipstream-photo/adapter.py /opt/slipstream-photo/film_adapter.py \
+        /opt/os-packages.txt \
         | sed 's#  /#  #g' | sha256sum | cut -d' ' -f1 > /opt/slipstream-photo/bundle \
     && cat /opt/slipstream-photo/bundle
 # The deploy pipeline pins the numerical bundle recorded by the build:

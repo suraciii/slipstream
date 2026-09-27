@@ -1217,9 +1217,14 @@ class DryRunTests(AcceptanceTestCase):
         )
         self.assertEqual(report["filmStage"], {
             "covered": False,
-            "ownerIssue": 332,
+            "nativeQualificationRequired": True,
             "observedCapabilityStage": "unavailable",
         })
+
+        self.assertEqual(report["notRun"][0]["step"], "film-stage")
+        self.assertEqual(report["notRun"][0]["reason"], "film-stage-native-qualification-required")
+        self.assertIn("Film (finished-jpeg) stage not covered", summary)
+        self.assertIn("film-stage-native-qualification-required", summary)
         identities = report["identities"]
         self.assertEqual(identities["capabilityState"], "ready")
         self.assertEqual(identities["bundleId"], BUNDLE_ID)
@@ -1235,9 +1240,9 @@ class DryRunTests(AcceptanceTestCase):
         self.assertEqual(artifact["height"], 3)
         self.assertEqual(artifact["profileIdentity"], hashlib.sha256(PROFILE_ASSET.read_bytes()).hexdigest())
         self.assertEqual(report["notRun"][0]["step"], "film-stage")
-        self.assertEqual(report["notRun"][0]["reason"], "film-stage-not-implemented")
+        self.assertEqual(report["notRun"][0]["reason"], "film-stage-native-qualification-required")
         self.assertIn("Film (finished-jpeg) stage not covered", summary)
-        self.assertIn("film-stage-not-implemented", summary)
+        self.assertIn("film-stage-native-qualification-required", summary)
         downloaded = Path(report["writtenFiles"][0])
         self.assertTrue(downloaded.is_file())
         self.assertEqual(downloaded.read_bytes(), stub.artifact_bytes)

@@ -2,9 +2,10 @@
 //!
 //! This module owns the launcher side of the frozen production Photo protocol
 //! (`design/processing-photo-protocol.md`): descriptor staging into a private
-//! immutable snapshot, the isolated pinned `development-tiff` engine attempt,
-//! output transfer, validation acknowledgement, and durable reconciliation.
-//! It never resolves Photos, reads the Library, or publishes Exports.
+//! immutable snapshot, the isolated pinned engine attempts of the closed
+//! `development-tiff` and `film-jpeg` workloads, output transfer, validation
+//! acknowledgement, and durable reconciliation. It never resolves Photos,
+//! reads the Library, or publishes Exports.
 
 use crate::{
     backend,
@@ -62,11 +63,22 @@ const OUTCOMES: [&str; 11] = [
     "refused-output-validation",
 ];
 const RESULT_NAME: &str = "result";
-const OUTPUT_NAME: &str = "output/development.tif";
 
-/// The one admitted stage plan for the closed `development-tiff` workload.
-/// The plan is derived from the validated source facts, the configured bundle
-/// and the finite policy; it is never a request field.
+/// The launcher-owned result path of one closed workload. The
+/// `development-tiff` artifact is the darktable handoff TIFF itself; the
+/// `film-jpeg` artifact is the fixed Film JPEG rendered from it. An unknown
+/// workload has no published artifact.
+fn output_name(workload: &str) -> Option<&'static str> {
+    match workload {
+        protocol::PHOTO_WORKLOAD => Some("output/development.tif"),
+        protocol::PHOTO_WORKLOAD_FILM => Some("output/finished.jpg"),
+        _ => None,
+    }
+}
+
+/// The one admitted stage plan for a closed Photo workload. The plan is
+/// derived from the validated source facts, the configured bundle and the
+/// finite policy; it is never a request field.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Plan {
@@ -76,11 +88,22 @@ pub(crate) struct Plan {
 }
 
 impl Plan {
-    fn development_tiff() -> Self {
-        Self {
-            workload: protocol::PHOTO_WORKLOAD.into(),
-            steps: vec!["develop".into()],
-            output: protocol::PHOTO_WORKLOAD.into(),
+    /// The plan is a pure function of the closed workload: `film-jpeg`
+    /// renders the fixed Film stage over the developed handoff TIFF. An
+    /// unknown workload admits no plan.
+    fn for_workload(workload: &str) -> Option<Self> {
+        match workload {
+            protocol::PHOTO_WORKLOAD => Some(Self {
+                workload: workload.into(),
+                steps: vec!["develop".into()],
+                output: protocol::PHOTO_WORKLOAD.into(),
+            }),
+            protocol::PHOTO_WORKLOAD_FILM => Some(Self {
+                workload: workload.into(),
+                steps: vec!["develop".into(), "film".into()],
+                output: protocol::PHOTO_WORKLOAD_FILM.into(),
+            }),
+            _ => None,
         }
     }
 }
@@ -118,6 +141,9 @@ pub(crate) struct PhotoRecord {
     pub export_id: String,
     pub policy: String,
     pub bundle: String,
+    /// The closed workload this attempt admits. The receipt, plan, engine
+    /// grant, container command and published artifact all derive from it.
+    pub workload: String,
     pub state: State,
     pub outcome: Option<String>,
     pub manifest_sha256: String,
@@ -153,7 +179,7 @@ impl PhotoRecord {
             export_id: self.export_id.clone(),
             incarnation: incarnation.to_owned(),
             sequence: self.sequence,
-            workload: protocol::PHOTO_WORKLOAD.into(),
+            workload: self.workload.clone(),
             policy: self.policy.clone(),
             bundle: self.bundle.clone(),
             state: state_name(self.state).into(),
@@ -220,8 +246,9 @@ pub fn manifest_digest(request: &Request) -> Result<String, ErrorCode> {
             bundle,
             source,
             recipe,
+            workload,
             ..
-        } => manifest_digest_of(source, recipe, policy, bundle),
+        } => manifest_digest_of(source, recipe, policy, bundle, workload),
         _ => Err(ErrorCode::InvalidRequest),
     }
 }
@@ -231,6 +258,7 @@ fn manifest_digest_parts(
     recipe: &Recipe,
     policy: &str,
     bundle: &str,
+    workload: &str,
 ) -> Result<String, ErrorCode> {
     let bytes = serde_json::to_vec(&serde_json::json!({
         "bundle": bundle,
@@ -242,8 +270,8 @@ fn manifest_digest_parts(
             "sha256": source.sha256,
             "size": source.size,
         },
-        "target": protocol::PHOTO_WORKLOAD,
-        "workload": protocol::PHOTO_WORKLOAD,
+        "target": workload,
+        "workload": workload,
     }))
     .map_err(|_| ErrorCode::InvalidRequest)?;
     Ok(digest(&bytes))
@@ -258,8 +286,9 @@ fn manifest_digest_of(
     recipe: &Recipe,
     policy: &str,
     bundle: &str,
+    workload: &str,
 ) -> Result<String, ErrorCode> {
-    manifest_digest_parts(source, recipe, policy, bundle)
+    manifest_digest_parts(source, recipe, policy, bundle, workload)
 }
 
 fn attempt_unit(instance: &str, launch_id: &str) -> String {
@@ -626,7 +655,7 @@ impl PhotoExecutor {
         descriptor: Option<File>,
     ) -> Result<ResultBody, ErrorCode> {
         let mut descriptor = descriptor;
-        let (identity, result_path, mut descriptor) = {
+        let (identity, result_path, mut descriptor, workload) = {
             let mut data = self.lock()?;
             expire(
                 &mut data.registry,
@@ -661,10 +690,12 @@ impl PhotoExecutor {
             )
             .map_err(|_| ErrorCode::InvalidRequest)?;
             let identity = record.output.clone().ok_or(ErrorCode::Uncertain)?;
+            let name = output_name(&record.workload).ok_or(ErrorCode::Uncertain)?;
             let path = record
                 .workspace(Path::new(&self.config.root))
                 .join("work")
-                .join(OUTPUT_NAME);
+                .join(name);
+            let workload = record.workload.clone();
             // Persist the transfer claim under the journal lock before the
             // copy: concurrent requests observe the claim and are refused,
             // and one attempt can never publish a second service artifact.
@@ -672,7 +703,7 @@ impl PhotoExecutor {
             // a second transfer instead of publishing partial bytes twice.
             record_ref_mut(&mut data.registry, incarnation, sequence)?.output_transferred = true;
             persist(Path::new(&self.config.root), &data.registry)?;
-            (identity, path, descriptor)
+            (identity, path, descriptor, workload)
         };
         let receipt = transfer_output(
             &self.config,
@@ -682,6 +713,7 @@ impl PhotoExecutor {
             export_id,
             incarnation,
             sequence,
+            &workload,
         )?;
         Ok(ResultBody::Output { receipt })
     }
@@ -900,16 +932,36 @@ impl PhotoExecutor {
         };
         let outcome = journal::classify(&evidence, worker, requested);
         if outcome == Outcome::Completed {
+            let Some(name) = output_name(&record.workload) else {
+                return Err(ErrorCode::Uncertain);
+            };
             let output_path = record.workspace(Path::new(&self.config.root));
-            let output_path = output_path.join("work").join(OUTPUT_NAME);
-            match crate::photo_tiff::validate(&output_path, self.config.output_bytes_max) {
+            let output_path = output_path.join("work").join(name);
+            let identity = match record.workload.as_str() {
+                protocol::PHOTO_WORKLOAD => {
+                    crate::photo_tiff::validate(&output_path, self.config.output_bytes_max).map(
+                        |identity| OutputIdentity {
+                            size: identity.size,
+                            sha256: identity.sha256,
+                            width: identity.width,
+                            height: identity.height,
+                        },
+                    )
+                }
+                protocol::PHOTO_WORKLOAD_FILM => {
+                    crate::photo_jpeg::validate(&output_path, self.config.output_bytes_max).map(
+                        |identity| OutputIdentity {
+                            size: identity.size,
+                            sha256: identity.sha256,
+                            width: identity.width,
+                            height: identity.height,
+                        },
+                    )
+                }
+                _ => Err(ErrorCode::Uncertain),
+            };
+            match identity {
                 Ok(identity) => {
-                    let identity = OutputIdentity {
-                        size: identity.size,
-                        sha256: identity.sha256,
-                        width: identity.width,
-                        height: identity.height,
-                    };
                     let mut data = self.lock()?;
                     let record = data
                         .registry
@@ -1152,11 +1204,37 @@ impl PhotoExecutor {
     }
 
     fn output_present(&self, record: &PhotoRecord, identity: &OutputIdentity) -> bool {
+        let Some(name) = output_name(&record.workload) else {
+            return false;
+        };
         let path = record
             .workspace(Path::new(&self.config.root))
             .join("work")
-            .join(OUTPUT_NAME);
-        crate::photo_tiff::validate(&path, self.config.output_bytes_max).is_ok_and(|found| {
+            .join(name);
+        let found = match record.workload.as_str() {
+            protocol::PHOTO_WORKLOAD => {
+                crate::photo_tiff::validate(&path, self.config.output_bytes_max).map(|identity| {
+                    OutputIdentity {
+                        size: identity.size,
+                        sha256: identity.sha256,
+                        width: identity.width,
+                        height: identity.height,
+                    }
+                })
+            }
+            protocol::PHOTO_WORKLOAD_FILM => {
+                crate::photo_jpeg::validate(&path, self.config.output_bytes_max).map(|identity| {
+                    OutputIdentity {
+                        size: identity.size,
+                        sha256: identity.sha256,
+                        width: identity.width,
+                        height: identity.height,
+                    }
+                })
+            }
+            _ => return false,
+        };
+        found.is_ok_and(|found| {
             found.size == identity.size
                 && found.sha256 == identity.sha256
                 && found.width == identity.width
@@ -1559,7 +1637,7 @@ impl PhotoExecutor {
             || value["Config"]["Entrypoint"] != serde_json::json!([WORKER])
             || value["Config"]["Cmd"]
                 != serde_json::json!([
-                    protocol::PHOTO_WORKLOAD,
+                    record.workload,
                     record.launch_id,
                     record.deadline_unix_ms.to_string()
                 ])
@@ -1719,7 +1797,7 @@ impl PhotoExecutor {
         }
         args.extend(backend::strings(&[
             &self.image_id,
-            protocol::PHOTO_WORKLOAD,
+            &record.workload,
             &record.launch_id,
             &record.deadline_unix_ms.to_string(),
         ]));
@@ -2042,7 +2120,7 @@ fn write_grant(record: &PhotoRecord, control: &Path) -> Result<(), ErrorCode> {
         "version": 1,
         "kind": "photo-development-grant",
         "launch_id": record.launch_id,
-        "workload": protocol::PHOTO_WORKLOAD,
+        "workload": record.workload,
         "exposure_milli_ev": record.recipe.exposure_milli_ev,
         "white_balance_mode": record.recipe.white_balance_mode,
         "profile_id": record.source.profile_id,
@@ -2194,6 +2272,7 @@ fn begin_start(
         bundle,
         source,
         recipe,
+        workload,
         recipe_digest: request_recipe_digest,
         manifest_sha256,
         ..
@@ -2244,7 +2323,11 @@ fn begin_start(
         return Err(ErrorCode::IncompatibleBundle);
     }
     // The closed workload and approved profile set. A source kind, profile,
-    // bundle or policy outside the fixed authority has no admitted plan.
+    // workload, bundle or policy outside the fixed authority has no admitted
+    // plan.
+    if !crate::protocol::is_photo_workload(workload) {
+        return Err(ErrorCode::InvalidRequest);
+    }
     if !photo_profile::APPROVED_PROFILES
         .iter()
         .any(|profile| profile.profile_id == source.profile_id)
@@ -2304,6 +2387,7 @@ fn begin_start(
         export_id: export_id.clone(),
         policy: policy.clone(),
         bundle: bundle.clone(),
+        workload: workload.clone(),
         state: State::Accepted,
         outcome: None,
         manifest_sha256: manifest_sha256.clone(),
@@ -2500,7 +2584,7 @@ fn finalize_start(
             .records
             .get_mut(sequence)
             .ok_or(ErrorCode::Uncertain)?;
-        record.plan = Some(Plan::development_tiff());
+        record.plan = Some(Plan::for_workload(&record.workload).ok_or(ErrorCode::InvalidRequest)?);
         record.phase = Phase::Planned;
         record.clone()
     };
@@ -2521,6 +2605,7 @@ fn transfer_output(
     export_id: &str,
     incarnation: &str,
     sequence: u64,
+    target: &str,
 ) -> Result<OutputReceipt, ErrorCode> {
     let mut result = OpenOptions::new()
         .read(true)
@@ -2562,7 +2647,7 @@ fn transfer_output(
         export_id: export_id.to_owned(),
         incarnation: incarnation.to_owned(),
         sequence,
-        target: protocol::PHOTO_WORKLOAD.into(),
+        target: target.to_owned(),
         size: identity.size,
         sha256,
     })
@@ -2729,11 +2814,13 @@ fn validate_registry(registry: &Registry, config: &Config) -> Result<(), ErrorCo
                 &record.recipe,
                 &record.policy,
                 &record.bundle,
+                &record.workload,
             ) != Ok(record.manifest_sha256.clone())
             || recipe_digest(&record.recipe) != Ok(record.recipe_digest.clone())
             || record.accepted_at_unix_ms == 0
             || record.deadline_unix_ms < record.accepted_at_unix_ms
             || !hex(&record.launch_id, 32)
+            || !protocol::is_photo_workload(&record.workload)
             || record
                 .image_id
                 .as_ref()
@@ -2756,7 +2843,9 @@ fn validate_registry(registry: &Registry, config: &Config) -> Result<(), ErrorCo
                 }
             }
             Phase::Planned | Phase::Provisioned | Phase::Released | Phase::OutputReady => {
-                if record.plan.as_ref() != Some(&Plan::development_tiff()) {
+                if Plan::for_workload(&record.workload)
+                    .is_none_or(|expected| record.plan.as_ref() != Some(&expected))
+                {
                     return Err(ErrorCode::Uncertain);
                 }
             }
@@ -2902,6 +2991,86 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    /// The plan and published artifact are pure functions of the closed
+    /// workload; an unknown workload admits neither.
+    #[test]
+    fn plan_and_output_name_are_derived_from_the_closed_workload() {
+        let development = Plan::for_workload(crate::protocol::PHOTO_WORKLOAD).unwrap();
+        assert_eq!(development.steps, vec!["develop".to_string()]);
+        assert_eq!(development.output, crate::protocol::PHOTO_WORKLOAD);
+        assert_eq!(
+            output_name(crate::protocol::PHOTO_WORKLOAD),
+            Some("output/development.tif")
+        );
+        let film = Plan::for_workload(crate::protocol::PHOTO_WORKLOAD_FILM).unwrap();
+        assert_eq!(film.steps, vec!["develop".to_string(), "film".to_string()]);
+        assert_eq!(film.output, crate::protocol::PHOTO_WORKLOAD_FILM);
+        assert_eq!(
+            output_name(crate::protocol::PHOTO_WORKLOAD_FILM),
+            Some("output/finished.jpg")
+        );
+        for unknown in ["", "film", "film-tiff", "development-jpeg", "probe-success"] {
+            assert!(Plan::for_workload(unknown).is_none(), "{unknown:?}");
+            assert_eq!(output_name(unknown), None, "{unknown:?}");
+        }
+    }
+
+    /// The canonical manifest digest binds the declared workload: two Start
+    /// requests that differ only in target never share an attempt identity,
+    /// and the replay comparison cannot alias one workload onto the other.
+    #[test]
+    fn manifest_digest_binds_the_declared_workload() {
+        let source = Source {
+            kind: "raw".into(),
+            profile_id: "sony-ilce-7rm5-arw".into(),
+            size: 100,
+            sha256: "4".repeat(64),
+        };
+        let recipe = Recipe {
+            exposure_milli_ev: 250,
+            white_balance_mode: "as-shot".into(),
+        };
+        let development =
+            manifest_digest_of(&source, &recipe, "p", "b", crate::protocol::PHOTO_WORKLOAD)
+                .unwrap();
+        let film = manifest_digest_of(
+            &source,
+            &recipe,
+            "p",
+            "b",
+            crate::protocol::PHOTO_WORKLOAD_FILM,
+        )
+        .unwrap();
+        assert_ne!(development, film);
+        assert_eq!(
+            film,
+            manifest_digest_of(
+                &source,
+                &recipe,
+                "p",
+                "b",
+                crate::protocol::PHOTO_WORKLOAD_FILM
+            )
+            .unwrap()
+        );
+    }
+
+    /// The receipt a service observes identifies the attempt's admitted
+    /// workload, not a global constant.
+    #[test]
+    fn wire_receipt_carries_the_record_workload() {
+        let mut record = record_for(1, Phase::Planned);
+        assert_eq!(
+            record.wire_receipt(&record.incarnation).workload,
+            "development-tiff"
+        );
+        record.workload = crate::protocol::PHOTO_WORKLOAD_FILM.into();
+        assert_eq!(
+            record.wire_receipt(&record.incarnation).workload,
+            "film-jpeg"
+        );
+    }
+
     fn temp_dir(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "slipstream-photo-exec-{name}-{}-{}",
@@ -3029,6 +3198,7 @@ mod tests {
                 recipe: ref recipe_field,
                 policy: ref policy_field,
                 bundle: ref bundle_field,
+                workload: ref workload_field,
                 ref mut recipe_digest,
                 ref mut manifest_sha256,
                 ..
@@ -3037,8 +3207,14 @@ mod tests {
                 unreachable!()
             };
             *recipe_digest = recipe_digest_of(recipe_field).unwrap();
-            *manifest_sha256 =
-                manifest_digest_of(source_field, recipe_field, policy_field, bundle_field).unwrap();
+            *manifest_sha256 = manifest_digest_of(
+                source_field,
+                recipe_field,
+                policy_field,
+                bundle_field,
+                workload_field,
+            )
+            .unwrap();
         }
         overrides(&mut request);
         // Recompute nothing: overridden digests intentionally mismatch.
@@ -3051,13 +3227,15 @@ mod tests {
             ref recipe,
             ref policy,
             ref bundle,
+            ref workload,
             ref mut recipe_digest,
             ref mut manifest_sha256,
             ..
         } = request
         {
             *recipe_digest = recipe_digest_of(recipe).unwrap();
-            *manifest_sha256 = manifest_digest_of(source, recipe, policy, bundle).unwrap();
+            *manifest_sha256 =
+                manifest_digest_of(source, recipe, policy, bundle, workload).unwrap();
         }
         request
     }
@@ -3079,6 +3257,7 @@ mod tests {
             export_id: "export-1".into(),
             policy: "3".repeat(64),
             bundle: "2".repeat(64),
+            workload: crate::protocol::PHOTO_WORKLOAD.into(),
             state: if phase == Phase::OutputReady {
                 State::Settling
             } else {
@@ -3090,16 +3269,14 @@ mod tests {
                 &recipe,
                 "3".repeat(64).as_str(),
                 "2".repeat(64).as_str(),
+                crate::protocol::PHOTO_WORKLOAD,
             )
             .unwrap(),
             recipe_digest: recipe_digest_of(&recipe).unwrap(),
             source,
             recipe,
-            plan: (phase != Phase::Intent).then(|| Plan {
-                workload: crate::protocol::PHOTO_WORKLOAD.into(),
-                steps: vec!["develop".into()],
-                output: crate::protocol::PHOTO_WORKLOAD.into(),
-            }),
+            plan: (phase != Phase::Intent)
+                .then(|| Plan::for_workload(crate::protocol::PHOTO_WORKLOAD).unwrap()),
             phase,
             launch_id: "b".repeat(32),
             image_id: Some(format!("sha256:{}", "1".repeat(64))),
@@ -3319,13 +3496,15 @@ mod tests {
                 ref recipe,
                 ref policy,
                 ref bundle,
+                ref workload,
                 ref mut recipe_digest,
                 ref mut manifest_sha256,
                 ..
             } = request
             {
                 *recipe_digest = recipe_digest_of(recipe).unwrap();
-                *manifest_sha256 = manifest_digest_of(source, recipe, policy, bundle).unwrap();
+                *manifest_sha256 =
+                    manifest_digest_of(source, recipe, policy, bundle, workload).unwrap();
             }
             request
         };
@@ -3614,6 +3793,61 @@ mod tests {
             fs::read(root.join("service-output-2")).unwrap(),
             Vec::<u8>::new()
         );
+        assert_eq!(fs::read(&output_path).unwrap(), payload);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A `film-jpeg` attempt publishes the fixed Film artifact from the
+    /// film path under the film target: the transfer reads `finished.jpg`,
+    /// never the `development-tiff` handoff path, and the receipt names the
+    /// attempt's own workload.
+    #[test]
+    fn film_jpeg_output_transfers_the_film_artifact_path() {
+        let root = temp_dir("film-output");
+        let mut registry = empty_registry("0".repeat(32).as_str());
+        let mut record = record_for(1, Phase::OutputReady);
+        record.state = State::Settling;
+        record.workload = crate::protocol::PHOTO_WORKLOAD_FILM.into();
+        record.plan = Some(Plan::for_workload(&record.workload).unwrap());
+        let payload = b"jpeg-bytes";
+        record.output = Some(OutputIdentity {
+            size: payload.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(payload)),
+            width: 64,
+            height: 48,
+        });
+        registry.records.insert(1, record);
+        registry.active = Some(1);
+        registry.watermark = 1;
+        let executor = executor_with(&root, registry);
+        let incarnation = "a".repeat(32);
+
+        let result_path = root
+            .join("attempts")
+            .join("b".repeat(32))
+            .join("work")
+            .join("output");
+        fs::create_dir_all(&result_path).unwrap();
+        fs::write(result_path.join("finished.jpg"), payload).unwrap();
+
+        let output_path = root.join("service-output");
+        let descriptor = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC)
+            .open(&output_path)
+            .unwrap();
+        let body = executor
+            .output(&incarnation, "export-1", 1, Some(descriptor))
+            .unwrap();
+        let ResultBody::Output { receipt } = body else {
+            panic!("expected an output receipt");
+        };
+        assert_eq!(receipt.target, crate::protocol::PHOTO_WORKLOAD_FILM);
+        assert_eq!(receipt.size, payload.len() as u64);
+        assert_eq!(receipt.sha256, format!("{:x}", Sha256::digest(payload)));
         assert_eq!(fs::read(&output_path).unwrap(), payload);
         fs::remove_dir_all(&root).unwrap();
     }
