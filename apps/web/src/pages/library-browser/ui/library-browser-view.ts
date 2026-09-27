@@ -9,6 +9,10 @@ import {
 } from "./removed-panels.js";
 import { createRecoveryPanel } from "./recovery-panel.js";
 import {
+  createMembershipPanel,
+  type MembershipPanelElements,
+} from "./membership-panel.js";
+import {
   addressFor,
   type NavigationGridRestoration,
 } from "../model/browser-navigation.js";
@@ -619,7 +623,7 @@ type PhotoShellViewModel = PhotoFactsViewModel &
 
 type MembershipAlbumViewModel = Readonly<{ id: string; name: string }>;
 
-type MembershipViewModel = Readonly<{
+export type MembershipViewModel = Readonly<{
   photoPresent: boolean;
   loading: boolean;
   failed: boolean;
@@ -1422,31 +1426,6 @@ export function createLibraryBrowserView(
   const status = required<HTMLElement>(root, "[data-status]");
   const retryPhoto = required<HTMLButtonElement>(root, "[data-retry-photo]");
   const back = required<HTMLButtonElement>(root, "[data-back]");
-  const membershipStatus = required<HTMLElement>(
-    root,
-    "[data-membership-status]",
-  );
-  const membershipList = required<HTMLElement>(root, "[data-membership-list]");
-  const membershipMessage = required<HTMLElement>(
-    root,
-    "[data-membership-message]",
-  );
-  const membershipManage = required<HTMLButtonElement>(
-    root,
-    "[data-membership-manage]",
-  );
-  const membershipRetry = required<HTMLButtonElement>(
-    root,
-    "[data-membership-retry]",
-  );
-  const membershipPanel = required<HTMLElement>(
-    root,
-    "[data-membership-panel]",
-  );
-  const membershipOptions = required<HTMLElement>(
-    root,
-    "[data-membership-options]",
-  );
   const dockPrevious = required<HTMLButtonElement>(
     root,
     "[data-dock-previous]",
@@ -1656,6 +1635,30 @@ export function createLibraryBrowserView(
   const send = (intent: LibraryBrowserIntent): void => {
     if (alive) emit(intent);
   };
+  const membershipPanelController = createMembershipPanel({
+    elements: {
+      membershipStatus: required<HTMLElement>(root, "[data-membership-status]"),
+      membershipList: required<HTMLElement>(root, "[data-membership-list]"),
+      membershipMessage: required<HTMLElement>(
+        root,
+        "[data-membership-message]",
+      ),
+      membershipManage: required<HTMLButtonElement>(
+        root,
+        "[data-membership-manage]",
+      ),
+      membershipRetry: required<HTMLButtonElement>(
+        root,
+        "[data-membership-retry]",
+      ),
+      membershipPanel: required<HTMLElement>(root, "[data-membership-panel]"),
+      membershipOptions: required<HTMLElement>(
+        root,
+        "[data-membership-options]",
+      ),
+    } satisfies MembershipPanelElements,
+    send,
+  });
 
   /// The one page-UI controller for the shared native-modal lifecycle. Every
   /// supporting surface registers its dialog here, so at most one is active
@@ -1839,7 +1842,6 @@ export function createLibraryBrowserView(
 
   let photoStatusSurface: object = {};
   let sourceModel: SourceListViewModel | undefined;
-  let membershipModel: MembershipViewModel | undefined;
   let albumFormCounter = 0;
   let albumForm: AlbumFormState | undefined;
   let albumFocusRequest: AlbumFocusRequest | undefined;
@@ -1866,8 +1868,6 @@ export function createLibraryBrowserView(
   // The range the Grid last reported for admission. A render reports a
   // changed range, or the same range again while part of it has no Photo.
   let reportedGridRange: Readonly<{ start: number; end: number }> | undefined;
-  let membershipManageOpen = false;
-  let membershipFocusAlbumId: string | undefined;
   let folderAlbumSelection = "";
   /// True while the empty-state action belongs to an explained destination
   /// state rather than to an empty source's Library check.
@@ -4625,118 +4625,6 @@ export function createLibraryBrowserView(
     scheduleGridRender();
   };
 
-  const renderMembership = (model: MembershipViewModel) => {
-    if (!alive) return;
-    membershipModel = model;
-    const pending = new Set(model.pendingAlbumIds);
-    const renderFacts = () => {
-      membershipList.replaceChildren();
-      membershipMessage.hidden = true;
-      membershipMessage.textContent = "";
-      membershipRetry.hidden = true;
-      if (!model.photoPresent) {
-        membershipStatus.hidden = false;
-        membershipStatus.textContent = "No current Photo.";
-        membershipList.hidden = true;
-        return;
-      }
-      if (model.loading) {
-        membershipStatus.hidden = false;
-        membershipStatus.textContent = "Loading Albums…";
-        membershipList.hidden = true;
-      } else if (model.failed) {
-        membershipStatus.hidden = false;
-        membershipStatus.textContent = "Albums could not be loaded.";
-        membershipList.hidden = true;
-        membershipRetry.hidden = false;
-      } else if (model.containing.length === 0) {
-        membershipStatus.hidden = false;
-        membershipStatus.textContent = "Not in any Album yet";
-        membershipList.hidden = true;
-      } else {
-        membershipStatus.hidden = true;
-        membershipStatus.textContent = "";
-        membershipList.hidden = false;
-        for (const album of model.containing) {
-          const item = document.createElement("li");
-          item.className = "membership-item";
-          item.textContent = album.name;
-          membershipList.append(item);
-        }
-      }
-      if (model.message) {
-        membershipMessage.hidden = false;
-        membershipMessage.textContent = model.message;
-      }
-    };
-    const renderOptions = () => {
-      // Rebuilding the options must not drop keyboard focus from a checkbox
-      // the visitor is operating, even while that checkbox is disabled for
-      // its in-flight toggle.
-      const focused = document.activeElement;
-      const focusedAlbumId =
-        focused instanceof HTMLInputElement &&
-        membershipOptions.contains(focused)
-          ? focused.dataset.membershipAlbumId
-          : undefined;
-      if (focusedAlbumId !== undefined && pending.has(focusedAlbumId))
-        membershipFocusAlbumId = focusedAlbumId;
-      membershipOptions.replaceChildren();
-      if (!model.options.length) {
-        const empty = paragraph(
-          model.photoPresent ? "No Albums yet." : "No current Photo.",
-        );
-        empty.className = "membership-empty";
-        membershipOptions.append(empty);
-        return;
-      }
-      for (const album of model.options) {
-        const option = document.createElement("label");
-        option.className = "membership-option";
-        const input = document.createElement("input");
-        input.type = "checkbox";
-        input.dataset.membershipAlbumId = album.id;
-        input.checked = album.member;
-        input.disabled = !model.photoPresent || pending.has(album.id);
-        input.addEventListener("change", () => {
-          if (!alive) return;
-          send({
-            kind: "membership-toggle",
-            albumId: album.id,
-            member: input.checked,
-          });
-        });
-        const name = document.createElement("span");
-        name.textContent = album.name;
-        option.append(input, name);
-        membershipOptions.append(option);
-      }
-      const targetId = focusedAlbumId ?? membershipFocusAlbumId;
-      if (targetId !== undefined) {
-        const restored = Array.from(
-          membershipOptions.querySelectorAll("input"),
-        ).find((input) => input.dataset.membershipAlbumId === targetId);
-        if (!restored) membershipFocusAlbumId = undefined;
-        else if (!restored.disabled) {
-          if (document.activeElement === document.body) restored.focus();
-          membershipFocusAlbumId = undefined;
-        }
-      }
-    };
-    renderFacts();
-    membershipManage.disabled = !model.photoPresent;
-    membershipManage.setAttribute(
-      "aria-expanded",
-      String(membershipManageOpen),
-    );
-    membershipPanel.hidden = !membershipManageOpen;
-    if (membershipManageOpen) renderOptions();
-    else {
-      membershipFocusAlbumId = undefined;
-      membershipOptions.replaceChildren();
-    }
-  };
-
   const renderFolderAlbum = (model: FolderAlbumViewModel) => {
     if (!alive) return;
     folderAlbumControls.hidden = !model.visible;
@@ -5019,14 +4907,6 @@ export function createLibraryBrowserView(
         advance: false,
       });
   });
-  membershipManage.addEventListener("click", () => {
-    if (!alive) return;
-    membershipManageOpen = !membershipManageOpen;
-    if (membershipModel) renderMembership(membershipModel);
-  });
-  membershipRetry.addEventListener("click", () =>
-    send({ kind: "membership-retry" }),
-  );
   folderAlbumSelect.addEventListener("change", () => {
     if (!alive) return;
     folderAlbumSelection = folderAlbumSelect.value;
@@ -5335,7 +5215,10 @@ export function createLibraryBrowserView(
       }
       syncZoomControls();
     },
-    renderMembership,
+    renderMembership(model) {
+      if (!alive) return;
+      membershipPanelController.render(model);
+    },
     prepareSourceOpen(name) {
       if (!alive) return;
       const returnFocus = surfaces.isActive("sources");
@@ -5620,6 +5503,7 @@ export function createLibraryBrowserView(
       resetGestures();
       removedPanels.dispose();
       recoveryPanelController.dispose();
+      membershipPanelController.dispose();
       stageObserver.disconnect();
       clearFilmstripCells();
       preview.removeEventListener("wheel", wheelZoom);
