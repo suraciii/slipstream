@@ -1,6 +1,9 @@
 //! SQLite state ownership for the production Library core.
 
 mod admission;
+mod edit_recipe;
+mod export;
+mod migrations;
 mod owner;
 mod schema;
 
