@@ -488,27 +488,27 @@ mod tests {
             ),
             (
                 "protocol/browse-vectors.json",
-                "crates/slipstream-server/src/tests.rs",
+                "crates/slipstream-server/src/tests/protocol.rs",
             ),
             (
                 "protocol/cache-vectors.json",
-                "crates/slipstream-server/src/tests.rs",
+                "crates/slipstream-server/src/tests/protocol.rs",
             ),
             (
                 "protocol/capture-order-omission.json",
-                "crates/slipstream-server/src/tests.rs",
+                "crates/slipstream-server/src/tests/protocol.rs",
             ),
             (
                 "protocol/responses.json",
-                "crates/slipstream-server/src/tests.rs",
+                "crates/slipstream-server/src/tests/protocol.rs",
             ),
             (
                 "protocol/vectors.json",
-                "crates/slipstream-server/src/tests.rs",
+                "crates/slipstream-server/src/tests/protocol.rs",
             ),
             (
                 "startup/vectors.json",
-                "crates/slipstream-server/src/tests.rs",
+                "crates/slipstream-server/src/tests/startup.rs",
             ),
             (
                 "sqlite/malformed-v2.sql",
