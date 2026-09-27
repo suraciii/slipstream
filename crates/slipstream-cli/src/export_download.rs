@@ -4,11 +4,12 @@
 //! closed targets stream the same way; the target only fixes the validated
 //! stage and media type.
 
+use super::export_lifecycle::{ExportInspectWire, validated_export_inspect};
 use super::preview_download::Destination;
 use super::{
-    CLI_CONTRACT_VERSION, CONTRACT_HEADER, CommandFailure, ErrorResponse, ExportInspectWire,
-    Operation, PublicationState, ServiceClient, access_boundary_failure, response_bytes,
-    validated_export_inspect, validated_route_failure,
+    CLI_CONTRACT_VERSION, CONTRACT_HEADER, CommandFailure, ErrorResponse, Operation,
+    PublicationState, ServiceClient, access_boundary_failure, response_bytes,
+    validated_route_failure,
 };
 use reqwest::{StatusCode, header};
 use serde_json::{Value, json};

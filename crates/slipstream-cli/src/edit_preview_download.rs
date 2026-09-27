@@ -46,11 +46,16 @@ const DISPLAY_TRANSFORM_HEADER: &str = "slipstream-edit-preview-display-transfor
 const EXPIRES_AT_HEADER: &str = "slipstream-edit-preview-expires-at";
 
 /// The stage of `slipstream photos edit-preview`. The closed stage set of
-/// contract version 1 carries the develop stage only.
+/// contract version 1: `develop` renders the retained Development Result
+/// through the pinned display transform, and `film` reads the retained Film
+/// Result in its own display encoding. Both stages answer in the same
+/// response framing, so the transfer validation is shared.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum EditPreviewStage {
     /// The current development rendered through the pinned display transform.
     Develop,
+    /// The finished Film rendition, served in its own display encoding.
+    Film,
 }
 
 impl EditPreviewStage {
@@ -58,6 +63,7 @@ impl EditPreviewStage {
     fn route(self) -> &'static str {
         match self {
             Self::Develop => "develop",
+            Self::Film => "film",
         }
     }
 }

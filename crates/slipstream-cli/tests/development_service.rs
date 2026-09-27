@@ -121,16 +121,62 @@ enum Step {
     LoseAfterRead,
     /// Answer the save with the service's `recipe_conflict` facts.
     RecipeConflict,
-    /// Answer the Edit Preview read with the pending admission.
-    AdmitPreview,
-    IndeterminatePreview,
+    /// Answer the Edit Preview read with the pending admission of `stage`.
+    AdmitPreview {
+        stage: &'static str,
+        state: &'static str,
+    },
+    /// Answer with the service's indeterminate admission refusal of `stage`.
+    IndeterminatePreview { stage: &'static str },
+    /// Answer with the service's unavailable-stage refusal of `stage`.
+    RefuseStage {
+        stage: &'static str,
+        reason: &'static str,
+    },
     /// Serve a complete, correctly described ready rendition.
-    ServeRendition,
+    ServeRendition(RenditionHeaders),
     /// Serve the rendition with a digest that names other bytes.
-    ServeWrongDigest,
+    ServeWrongDigest(RenditionHeaders),
     /// Announce more body bytes than the transfer sends, then close.
-    ServeShortTransfer,
+    ServeShortTransfer(RenditionHeaders),
 }
+
+/// The framed identity of one scripted ready rendition, in the server's own
+/// header naming: the stage and settings selectors the reply names, the
+/// recipe version it reports, and its display-transform identity.
+#[derive(Clone, Copy)]
+struct RenditionHeaders {
+    stage: &'static str,
+    settings: &'static str,
+    recipe_version: &'static str,
+    display_transform: &'static str,
+}
+
+/// The develop rendition framing the develop scenarios already exercise.
+const DEVELOP_CURRENT: RenditionHeaders = RenditionHeaders {
+    stage: "develop",
+    settings: "current",
+    recipe_version: "recipe-7",
+    display_transform: "sRGB",
+};
+
+/// The film rendition framing under the saved recipe's settings, with the
+/// pinned display-transform identity the service reports for both stages.
+const FILM_CURRENT: RenditionHeaders = RenditionHeaders {
+    stage: "film",
+    settings: "current",
+    recipe_version: "recipe-7",
+    display_transform: "display-transform-v1",
+};
+
+/// The film baseline framing: the as-shot settings and the empty recipe
+/// version, because no saved recipe produced the rendition.
+const FILM_BASELINE: RenditionHeaders = RenditionHeaders {
+    stage: "film",
+    settings: "baseline",
+    recipe_version: "",
+    display_transform: "display-transform-v1",
+};
 
 #[derive(Clone, Debug)]
 struct RecordedRequest {
@@ -285,29 +331,41 @@ fn answer(stream: &mut impl Write, step: &Step, rendition: &[u8]) {
         // The request was read; dropping the stream loses the response.
         Step::LoseAfterRead => {}
         Step::RecipeConflict => write_json_response(stream, 409, "Conflict", &conflict_body()),
-        Step::AdmitPreview => write_json_response(
+        Step::AdmitPreview { stage, state } => write_json_response(
             stream,
             202,
             "Accepted",
-            &json!({"state": "queued", "stage": "develop"}),
+            &json!({"state": state, "stage": stage}),
         ),
-        Step::IndeterminatePreview => write_json_response(
+        Step::IndeterminatePreview { stage } => write_json_response(
             stream,
             500,
             "Internal Server Error",
-            &json!({"error":{"code":"outcome_unknown", "message":"The render admission outcome is unknown; request the preview again.", "effect":"none", "details":{"stage":"develop"}}}),
+            &json!({"error":{"code":"outcome_unknown", "message":"The render admission outcome is unknown; request the preview again.", "effect":"none", "details":{"stage":stage}}}),
         ),
-        Step::ServeRendition => {
-            write_rendition(stream, &sha256_hex(rendition), rendition.len(), rendition)
-        }
-        Step::ServeWrongDigest => write_rendition(
+        Step::RefuseStage { stage, reason } => write_json_response(
             stream,
+            503,
+            "Service Unavailable",
+            &json!({"error":{"code":"processing_unavailable", "message":"The develop stage cannot execute for this Photo right now.", "effect":"none", "details":{"stage":stage, "reason":reason}}}),
+        ),
+        Step::ServeRendition(framing) => write_rendition(
+            stream,
+            framing,
+            &sha256_hex(rendition),
+            rendition.len(),
+            rendition,
+        ),
+        Step::ServeWrongDigest(framing) => write_rendition(
+            stream,
+            framing,
             &sha256_hex(b"other bytes"),
             rendition.len(),
             rendition,
         ),
-        Step::ServeShortTransfer => write_rendition(
+        Step::ServeShortTransfer(framing) => write_rendition(
             stream,
+            framing,
             &sha256_hex(rendition),
             rendition.len() + 24,
             &rendition[..rendition.len() / 2],
@@ -326,12 +384,22 @@ fn write_json_response(stream: &mut impl Write, status: u16, reason: &str, body:
 }
 
 /// The ready-rendition response in the server's own header naming, with the
-/// declared digest, length, and body chosen by the caller.
-fn write_rendition(stream: &mut impl Write, digest: &str, declared: usize, sent: &[u8]) {
+/// framed selectors, declared digest, length, and body chosen by the caller.
+fn write_rendition(
+    stream: &mut impl Write,
+    framing: &RenditionHeaders,
+    digest: &str,
+    declared: usize,
+    sent: &[u8],
+) {
     let _ = write!(
         stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {declared}\r\nx-content-type-options: nosniff\r\nslipstream-edit-preview-photo-id: {PHOTO_ID}\r\nslipstream-edit-preview-stage: develop\r\nslipstream-edit-preview-settings: current\r\nslipstream-edit-preview-width: 8\r\nslipstream-edit-preview-height: 4\r\nslipstream-edit-preview-sha256: {digest}\r\nslipstream-edit-preview-source-revision: {}\r\nslipstream-edit-preview-recipe-version: recipe-7\r\nslipstream-edit-preview-display-transform: sRGB\r\nslipstream-edit-preview-expires-at: {EXPIRES_AT}\r\nConnection: close\r\n\r\n",
-        hex_encode(SOURCE_REVISION)
+        "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {declared}\r\nx-content-type-options: nosniff\r\nslipstream-edit-preview-photo-id: {PHOTO_ID}\r\nslipstream-edit-preview-stage: {}\r\nslipstream-edit-preview-settings: {}\r\nslipstream-edit-preview-width: 8\r\nslipstream-edit-preview-height: 4\r\nslipstream-edit-preview-sha256: {digest}\r\nslipstream-edit-preview-source-revision: {}\r\nslipstream-edit-preview-recipe-version: {}\r\nslipstream-edit-preview-display-transform: {}\r\nslipstream-edit-preview-expires-at: {EXPIRES_AT}\r\nConnection: close\r\n\r\n",
+        framing.stage,
+        framing.settings,
+        hex_encode(SOURCE_REVISION),
+        framing.recipe_version,
+        framing.display_transform,
     );
     let _ = stream.write_all(sent);
 }
@@ -683,7 +751,13 @@ async fn a_lost_recipe_save_response_is_an_unknown_outcome_without_retry() {
 async fn an_accepted_edit_preview_intent_leaves_the_destination_untouched() {
     let base = temp_base("accepted-preview");
     let destination = base.join("edit-preview.jpg");
-    let service = fake_service(vec![Step::Capabilities, Step::AdmitPreview]);
+    let service = fake_service(vec![
+        Step::Capabilities,
+        Step::AdmitPreview {
+            stage: "develop",
+            state: "queued",
+        },
+    ]);
     let (exit, envelope) = command(
         &service.url,
         &[
@@ -723,7 +797,10 @@ async fn an_accepted_edit_preview_intent_leaves_the_destination_untouched() {
 async fn indeterminate_preview_admission_preserves_uncertainty_without_retry() {
     let base = temp_base("indeterminate-preview");
     let destination = base.join("edit-preview.jpg");
-    let service = fake_service(vec![Step::Capabilities, Step::IndeterminatePreview]);
+    let service = fake_service(vec![
+        Step::Capabilities,
+        Step::IndeterminatePreview { stage: "develop" },
+    ]);
     let (exit, envelope) = command(
         &service.url,
         &[
@@ -760,7 +837,7 @@ async fn a_ready_edit_preview_is_verified_and_published_once() {
     let base = temp_base("ready-preview");
     let destination = base.join("develop.jpg");
     let service = fake_service_with(
-        vec![Step::Capabilities, Step::ServeRendition],
+        vec![Step::Capabilities, Step::ServeRendition(DEVELOP_CURRENT)],
         Arc::clone(&rendition),
     );
     let (exit, envelope) = command(
@@ -807,7 +884,13 @@ async fn an_existing_edit_preview_destination_is_refused_before_any_network() {
     let base = temp_base("existing-destination");
     let destination = base.join("develop.jpg");
     fs::write(&destination, b"sentinel").unwrap();
-    let service = fake_service(vec![Step::Capabilities, Step::AdmitPreview]);
+    let service = fake_service(vec![
+        Step::Capabilities,
+        Step::AdmitPreview {
+            stage: "develop",
+            state: "queued",
+        },
+    ]);
     let (exit, envelope) = command(
         &service.url,
         &[
@@ -839,8 +922,8 @@ async fn an_existing_edit_preview_destination_is_refused_before_any_network() {
 async fn unverifiable_edit_preview_transfers_publish_nothing() {
     let rendition = Arc::new(jpeg_bytes());
     for (name, step) in [
-        ("wrong-digest", Step::ServeWrongDigest),
-        ("short-transfer", Step::ServeShortTransfer),
+        ("wrong-digest", Step::ServeWrongDigest(DEVELOP_CURRENT)),
+        ("short-transfer", Step::ServeShortTransfer(DEVELOP_CURRENT)),
     ] {
         let base = temp_base(name);
         let destination = base.join("develop.jpg");
@@ -872,6 +955,346 @@ async fn unverifiable_edit_preview_transfers_publish_nothing() {
         assert_eq!(requests.len(), 2, "for {name}");
         fs::remove_dir_all(base).unwrap();
     }
+}
+
+// ---------------------------------------------------------------- film stage
+
+/// A ready Film rendition answers in the same framing as the develop stage:
+/// the read of the film route is verified header for header, by digest, and
+/// by JPEG structure, then published once with the exact Film facts.
+#[tokio::test]
+async fn a_ready_film_edit_preview_is_verified_and_published_once() {
+    let rendition = Arc::new(jpeg_bytes());
+    let base = temp_base("ready-film-preview");
+    let destination = base.join("film.jpg");
+    let service = fake_service_with(
+        vec![Step::Capabilities, Step::ServeRendition(FILM_CURRENT)],
+        Arc::clone(&rendition),
+    );
+    let (exit, envelope) = command(
+        &service.url,
+        &[
+            "photos",
+            "edit-preview",
+            PHOTO_ID,
+            "--file",
+            destination.to_str().unwrap(),
+            "--stage",
+            "film",
+        ],
+    )
+    .await;
+    assert_eq!(exit, 0);
+    let data = &envelope["data"];
+    assert_eq!(data["photoId"], PHOTO_ID);
+    assert_eq!(data["stage"], "film");
+    assert_eq!(data["settings"], "current");
+    assert_eq!(data["state"], "ready");
+    assert_eq!(data["sourceRevision"], SOURCE_REVISION);
+    assert_eq!(data["recipeVersion"], "recipe-7");
+    assert_eq!(data["displayTransform"], "display-transform-v1");
+    assert_eq!(data["contentType"], "image/jpeg");
+    assert_eq!(data["width"], 8);
+    assert_eq!(data["height"], 4);
+    assert_eq!(data["byteLength"].as_u64(), Some(rendition.len() as u64));
+    assert_eq!(data["sha256"], sha256_hex(&rendition));
+    assert_eq!(data["expiresAt"], EXPIRES_AT);
+    assert_eq!(data["detailLimited"], true);
+    assert_eq!(data["path"], destination.to_str().unwrap());
+    assert_eq!(data["fileCommitted"], true);
+    assert_eq!(fs::read(&destination).unwrap(), *rendition);
+    assert_eq!(
+        fs::read_dir(&base).unwrap().count(),
+        1,
+        "no staging leftover beside the publication"
+    );
+    let (connections, requests) = service.finish();
+    assert_eq!(connections, 2);
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1].request_line,
+        format!("GET /api/photos/{PHOTO_ID}/edit-preview/film?settings=current HTTP/1.1")
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+/// The film baseline selector asks the route for the as-shot baseline and
+/// reports the empty recipe version: no saved recipe produced the rendition.
+#[tokio::test]
+async fn a_film_baseline_preview_selects_the_baseline_settings() {
+    let rendition = Arc::new(jpeg_bytes());
+    let base = temp_base("film-baseline");
+    let destination = base.join("film-baseline.jpg");
+    let service = fake_service_with(
+        vec![Step::Capabilities, Step::ServeRendition(FILM_BASELINE)],
+        rendition,
+    );
+    let (exit, envelope) = command(
+        &service.url,
+        &[
+            "photos",
+            "edit-preview",
+            PHOTO_ID,
+            "--file",
+            destination.to_str().unwrap(),
+            "--stage",
+            "film",
+            "--settings",
+            "baseline",
+        ],
+    )
+    .await;
+    assert_eq!(exit, 0);
+    let data = &envelope["data"];
+    assert_eq!(data["settings"], "baseline");
+    assert_eq!(data["recipeVersion"], "");
+    assert_eq!(data["state"], "ready");
+    assert_eq!(data["fileCommitted"], true);
+    assert!(destination.is_file());
+    let (connections, requests) = service.finish();
+    assert_eq!(connections, 2);
+    assert_eq!(
+        requests[1].request_line,
+        format!("GET /api/photos/{PHOTO_ID}/edit-preview/film?settings=baseline HTTP/1.1")
+    );
+    fs::remove_dir_all(base).unwrap();
+}
+
+/// A film reply that names another stage, another settings selector, no
+/// display transform, or another digest does not identify the rendition the
+/// caller asked for: the transfer is refused and nothing is published.
+#[tokio::test]
+async fn unverifiable_film_replies_publish_nothing() {
+    let rendition = Arc::new(jpeg_bytes());
+    let another_stage = RenditionHeaders {
+        stage: "develop",
+        ..FILM_CURRENT
+    };
+    let another_settings = RenditionHeaders {
+        settings: "baseline",
+        ..FILM_CURRENT
+    };
+    let untransformed = RenditionHeaders {
+        display_transform: "",
+        ..FILM_CURRENT
+    };
+    for (name, step) in [
+        ("develop-stage-header", Step::ServeRendition(another_stage)),
+        (
+            "baseline-settings-header",
+            Step::ServeRendition(another_settings),
+        ),
+        (
+            "empty-display-transform",
+            Step::ServeRendition(untransformed),
+        ),
+        ("wrong-digest", Step::ServeWrongDigest(FILM_CURRENT)),
+    ] {
+        let base = temp_base(name);
+        let destination = base.join("film.jpg");
+        let service = fake_service_with(vec![Step::Capabilities, step], Arc::clone(&rendition));
+        let (exit, envelope) = command(
+            &service.url,
+            &[
+                "photos",
+                "edit-preview",
+                PHOTO_ID,
+                "--file",
+                destination.to_str().unwrap(),
+                "--stage",
+                "film",
+            ],
+        )
+        .await;
+        assert_eq!(exit, 6, "for {name}");
+        assert_eq!(envelope["error"]["code"], "transport_failed", "for {name}");
+        assert_eq!(envelope["error"]["effect"], "none", "for {name}");
+        assert_eq!(
+            envelope["error"]["details"]["operation"], "photos-edit-preview",
+            "for {name}"
+        );
+        assert!(!destination.exists(), "for {name}");
+        assert_eq!(fs::read_dir(&base).unwrap().count(), 0, "for {name}");
+        let (connections, requests) = service.finish();
+        assert_eq!(connections, 2, "for {name}");
+        assert_eq!(requests.len(), 2, "for {name}");
+        fs::remove_dir_all(base).unwrap();
+    }
+}
+
+/// A film admission is a pending success of the film stage, and a pending
+/// body that names the develop stage is never reported as this route's
+/// admission.
+#[tokio::test]
+async fn film_pending_admissions_are_bound_to_the_film_stage() {
+    let base = temp_base("film-pending");
+    let destination = base.join("film.jpg");
+    let service = fake_service(vec![
+        Step::Capabilities,
+        Step::AdmitPreview {
+            stage: "film",
+            state: "running",
+        },
+    ]);
+    let (exit, envelope) = command(
+        &service.url,
+        &[
+            "photos",
+            "edit-preview",
+            PHOTO_ID,
+            "--file",
+            destination.to_str().unwrap(),
+            "--stage",
+            "film",
+        ],
+    )
+    .await;
+    assert_eq!(exit, 0);
+    let data = &envelope["data"];
+    assert_eq!(data["stage"], "film");
+    assert_eq!(data["settings"], "current");
+    assert_eq!(data["state"], "running");
+    assert_eq!(data["fileCommitted"], false);
+    assert!(!destination.exists());
+    assert_eq!(fs::read_dir(&base).unwrap().count(), 0);
+    let (connections, requests) = service.finish();
+    assert_eq!(connections, 2);
+    assert_eq!(
+        requests[1].request_line,
+        format!("GET /api/photos/{PHOTO_ID}/edit-preview/film?settings=current HTTP/1.1")
+    );
+    fs::remove_dir_all(base).unwrap();
+
+    let base = temp_base("develop-pending-body");
+    let destination = base.join("film.jpg");
+    let service = fake_service(vec![
+        Step::Capabilities,
+        Step::AdmitPreview {
+            stage: "develop",
+            state: "queued",
+        },
+    ]);
+    let (exit, envelope) = command(
+        &service.url,
+        &[
+            "photos",
+            "edit-preview",
+            PHOTO_ID,
+            "--file",
+            destination.to_str().unwrap(),
+            "--stage",
+            "film",
+        ],
+    )
+    .await;
+    assert_eq!(exit, 6);
+    assert_eq!(envelope["error"]["code"], "transport_failed");
+    assert_eq!(envelope["error"]["effect"], "none");
+    assert!(!destination.exists());
+    assert_eq!(fs::read_dir(&base).unwrap().count(), 0);
+    let (connections, _) = service.finish();
+    assert_eq!(connections, 2);
+    fs::remove_dir_all(base).unwrap();
+}
+
+/// The film stage's unavailable refusal passes the service's facts through,
+/// and an indeterminate film admission preserves its uncertainty; a refusal
+/// or indeterminate body naming another stage is not this stage's answer.
+#[tokio::test]
+async fn film_refusals_and_indeterminate_admissions_preserve_the_stage_facts() {
+    let base = temp_base("film-unavailable");
+    let destination = base.join("film.jpg");
+    let service = fake_service(vec![
+        Step::Capabilities,
+        Step::RefuseStage {
+            stage: "film",
+            reason: "operator-disabled",
+        },
+    ]);
+    let (exit, envelope) = command(
+        &service.url,
+        &[
+            "photos",
+            "edit-preview",
+            PHOTO_ID,
+            "--file",
+            destination.to_str().unwrap(),
+            "--stage",
+            "film",
+        ],
+    )
+    .await;
+    assert_eq!(exit, 6);
+    assert_eq!(envelope["error"]["code"], "processing_unavailable");
+    assert_eq!(envelope["error"]["effect"], "none");
+    assert_eq!(envelope["error"]["details"]["stage"], "film");
+    assert_eq!(envelope["error"]["details"]["reason"], "operator-disabled");
+    assert!(!destination.exists());
+    assert_eq!(fs::read_dir(&base).unwrap().count(), 0);
+    let (connections, _) = service.finish();
+    assert_eq!(connections, 2);
+    fs::remove_dir_all(base).unwrap();
+
+    let base = temp_base("film-indeterminate");
+    let destination = base.join("film.jpg");
+    let service = fake_service(vec![
+        Step::Capabilities,
+        Step::IndeterminatePreview { stage: "film" },
+    ]);
+    let (exit, envelope) = command(
+        &service.url,
+        &[
+            "photos",
+            "edit-preview",
+            PHOTO_ID,
+            "--file",
+            destination.to_str().unwrap(),
+            "--stage",
+            "film",
+        ],
+    )
+    .await;
+    assert_eq!(exit, 7);
+    assert_eq!(envelope["error"]["code"], "outcome_unknown");
+    assert_eq!(envelope["error"]["effect"], "unknown");
+    assert_eq!(
+        envelope["error"]["details"]["operation"],
+        "photos-edit-preview"
+    );
+    assert_eq!(envelope["error"]["details"]["photoIds"], json!([PHOTO_ID]));
+    assert!(!destination.exists());
+    assert_eq!(fs::read_dir(&base).unwrap().count(), 0);
+    let (connections, _) = service.finish();
+    assert_eq!(connections, 2);
+    fs::remove_dir_all(base).unwrap();
+
+    let base = temp_base("develop-indeterminate-body");
+    let destination = base.join("film.jpg");
+    let service = fake_service(vec![
+        Step::Capabilities,
+        Step::IndeterminatePreview { stage: "develop" },
+    ]);
+    let (exit, envelope) = command(
+        &service.url,
+        &[
+            "photos",
+            "edit-preview",
+            PHOTO_ID,
+            "--file",
+            destination.to_str().unwrap(),
+            "--stage",
+            "film",
+        ],
+    )
+    .await;
+    assert_eq!(exit, 6);
+    assert_eq!(envelope["error"]["code"], "transport_failed");
+    assert_eq!(envelope["error"]["effect"], "none");
+    assert!(!destination.exists());
+    assert_eq!(fs::read_dir(&base).unwrap().count(), 0);
+    let (connections, _) = service.finish();
+    assert_eq!(connections, 2);
+    fs::remove_dir_all(base).unwrap();
 }
 
 // ---------------------------------------------------------------- real service
@@ -965,8 +1388,9 @@ async fn the_real_service_capability_report_is_disabled_without_processing() {
 }
 
 /// A JPEG source class has no approved development profile: the real
-/// service refuses the Edit Preview read and the CLI maps the confirmed
-/// refusal onto exit 2 without creating the destination.
+/// service refuses the Edit Preview read of either stage, naming the
+/// requested stage in its facts, and the CLI maps the confirmed refusal
+/// onto exit 2 without creating the destination.
 #[tokio::test]
 async fn the_real_service_refuses_an_edit_preview_of_a_jpeg_source() {
     let (base, config) = real_service_fixture();
@@ -993,6 +1417,26 @@ async fn the_real_service_refuses_an_edit_preview_of_a_jpeg_source() {
     assert_eq!(refusal["error"]["code"], "unsupported_photo");
     assert_eq!(refusal["error"]["effect"], "none");
     assert_eq!(refusal["error"]["details"]["photoId"], photo_id);
+    assert_eq!(refusal["error"]["details"]["stage"], "develop");
+    assert!(!destination.exists());
+    let (exit, film_refusal) = command(
+        &server.url,
+        &[
+            "photos",
+            "edit-preview",
+            &photo_id,
+            "--file",
+            destination.to_str().unwrap(),
+            "--stage",
+            "film",
+        ],
+    )
+    .await;
+    assert_eq!(exit, 2);
+    assert_eq!(film_refusal["error"]["code"], "unsupported_photo");
+    assert_eq!(film_refusal["error"]["effect"], "none");
+    assert_eq!(film_refusal["error"]["details"]["photoId"], photo_id);
+    assert_eq!(film_refusal["error"]["details"]["stage"], "film");
     assert!(!destination.exists());
     server.close().await.unwrap();
     fs::remove_dir_all(base).unwrap();
