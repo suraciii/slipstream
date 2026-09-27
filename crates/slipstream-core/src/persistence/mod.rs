@@ -14,6 +14,8 @@ mod queries;
 mod removal;
 mod scan;
 mod schema;
+#[cfg(test)]
+mod test_support;
 
 pub use crate::domain::{
     AlbumBrowseMember, AlbumBrowseTarget, AlbumCreationResult, AlbumMember,

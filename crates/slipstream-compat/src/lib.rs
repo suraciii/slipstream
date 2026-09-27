@@ -524,19 +524,19 @@ mod tests {
             ),
             (
                 "sqlite/malformed-v2.sql",
-                "crates/slipstream-core/src/persistence/owner.rs",
+                "crates/slipstream-core/src/persistence/migrations.rs",
             ),
             (
                 "sqlite/rejections.json",
-                "crates/slipstream-core/src/persistence/owner.rs",
+                "crates/slipstream-core/src/persistence/migrations.rs",
             ),
             (
                 "sqlite/v0.sql",
-                "crates/slipstream-core/src/persistence/owner.rs",
+                "crates/slipstream-core/src/persistence/migrations.rs",
             ),
             (
                 "sqlite/v1.sql",
-                "crates/slipstream-core/src/persistence/owner.rs",
+                "crates/slipstream-core/src/persistence/migrations.rs",
             ),
         ] {
             assert!(

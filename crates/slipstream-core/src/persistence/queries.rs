@@ -323,3 +323,536 @@ pub(super) fn create_photo_query(
     }
     Ok(ids)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::persistence::Persistence;
+    use crate::persistence::test_support::*;
+    use crate::{
+        AlbumMutation, CaptureFact, CaptureMetadataState, CaptureTimeBound, CaptureTimeField,
+        OriginalKind, PhotoQuery, PhotoQueryError, PhotoQueryOrder, PhotoQuerySource,
+        PhotoStateField, PhotoStateMutation, PhotoStateValue, SelectionState,
+    };
+    use rusqlite::Connection;
+    use rusqlite::params;
+    use serde::Deserialize;
+    use std::{collections::HashMap, sync::Arc};
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CaptureOrderVector {
+        name: String,
+        raw_path: Option<String>,
+        raw_order_key: Option<String>,
+        jpeg_path: Option<String>,
+        jpeg_order_key: Option<String>,
+        order_key: Option<String>,
+        #[serde(default)]
+        expected_paths: Vec<String>,
+        expected_photo_ids: Option<Vec<String>>,
+    }
+
+    fn capture_order_vectors() -> Vec<CaptureOrderVector> {
+        serde_json::from_str(include_str!(
+            "../../../../compatibility/metadata/capture-order.json"
+        ))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_library_folder_root_resolves_while_no_photo_is_projected() {
+        let (_base, library, state, name, _path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .apply_scan(Vec::new(), Vec::new())
+            .await
+            .unwrap();
+        let projection = query_projection(&snapshot);
+        // The Library Folder root is the Library itself, so it stays a valid
+        // source while no Photo is present to prove it; a named Folder still
+        // needs a member.
+        let ids = persistence
+            .create_photo_query_receiver(
+                PhotoQuery {
+                    source: PhotoQuerySource::Folder(String::new()),
+                    selection_state: None,
+                    rating_minimum: None,
+                    rating_maximum: None,
+                    original_kind: None,
+                    original_available: None,
+                    captured_from: None,
+                    captured_before: None,
+                    order: PhotoQueryOrder::CaptureTimeAscending,
+                },
+                Arc::clone(&projection),
+                10,
+            )
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ids.is_empty());
+        assert!(matches!(
+            persistence
+                .create_photo_query_receiver(
+                    PhotoQuery {
+                        source: PhotoQuerySource::Folder("shoot".to_owned()),
+                        selection_state: None,
+                        rating_minimum: None,
+                        rating_maximum: None,
+                        original_kind: None,
+                        original_available: None,
+                        captured_from: None,
+                        captured_before: None,
+                        order: PhotoQueryOrder::CaptureTimeAscending,
+                    },
+                    Arc::clone(&projection),
+                    10,
+                )
+                .unwrap()
+                .await
+                .unwrap(),
+            Err(PhotoQueryError::SourceNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn bounded_photo_queries_fix_ordered_membership_and_read_current_facts() {
+        let (_base, library, state, name, _path) = fixture();
+        let mut early = discovered("shoot/early.JPG", OriginalKind::Jpeg, 1, 1.0);
+        early.capture = CaptureFact {
+            state: CaptureMetadataState::Known,
+            order_key: Some("2026-01-01T09:00:00.000000000".to_owned()),
+            field: Some(CaptureTimeField::DateTimeOriginal),
+            offset_minutes: Some(90),
+            source_revision: Some("early-revision".to_owned()),
+        };
+        let mut late = discovered("shoot/nested/late.RAF", OriginalKind::Raw, 2, 2.0);
+        late.capture = CaptureFact {
+            state: CaptureMetadataState::Known,
+            order_key: Some("2026-01-01T10:00:00.000000000".to_owned()),
+            field: Some(CaptureTimeField::DateTimeOriginal),
+            offset_minutes: None,
+            source_revision: Some("late-revision".to_owned()),
+        };
+        let missing_time = discovered("other/missing.JPG", OriginalKind::Jpeg, 3, 3.0);
+        let upper = discovered("Shoot/upper.JPG", OriginalKind::Jpeg, 4, 4.0);
+        let short = discovered("a/one.JPG", OriginalKind::Jpeg, 5, 5.0);
+        let sibling = discovered("ab/two.JPG", OriginalKind::Jpeg, 6, 6.0);
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .apply_scan(
+                vec![late, missing_time, early, upper, short, sibling],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let projection = query_projection(&snapshot);
+        let by_path = snapshot
+            .photos
+            .iter()
+            .map(|photo| (photo.sort_path.as_str(), photo.id.clone()))
+            .collect::<HashMap<_, _>>();
+        let early_id = by_path["shoot/early.JPG"].clone();
+        let late_id = by_path["shoot/nested/late.RAF"].clone();
+        let album_id = persistence
+            .mutate_album(AlbumMutation::Create {
+                name: "Order".to_owned(),
+            })
+            .await
+            .unwrap()
+            .album_id;
+        persistence
+            .mutate_album(AlbumMutation::AddMembers {
+                album_id: album_id.clone(),
+                photo_ids: vec![late_id.clone(), early_id.clone()],
+            })
+            .await
+            .unwrap();
+        let album_order = persistence
+            .create_photo_query_receiver(
+                PhotoQuery {
+                    source: PhotoQuerySource::Album(album_id),
+                    selection_state: None,
+                    rating_minimum: None,
+                    rating_maximum: None,
+                    original_kind: None,
+                    original_available: None,
+                    captured_from: None,
+                    captured_before: None,
+                    order: PhotoQueryOrder::AlbumOrder,
+                },
+                Arc::clone(&projection),
+                10,
+            )
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(album_order, vec![late_id.clone(), early_id.clone()]);
+
+        persistence
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: early_id.clone(),
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Selected),
+                expected_current: None,
+                album_id: None,
+            })
+            .await
+            .unwrap();
+        persistence
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: early_id.clone(),
+                field: PhotoStateField::Rating,
+                value: PhotoStateValue::Rating(4),
+                expected_current: None,
+                album_id: None,
+            })
+            .await
+            .unwrap();
+
+        let query = PhotoQuery {
+            source: PhotoQuerySource::Folder("shoot".to_owned()),
+            selection_state: Some(SelectionState::Selected),
+            rating_minimum: Some(4),
+            rating_maximum: Some(5),
+            original_kind: Some(OriginalKind::Jpeg),
+            original_available: Some(true),
+            captured_from: Some(CaptureTimeBound::parse("2026-01-01T08:00:00").unwrap()),
+            captured_before: Some(CaptureTimeBound::parse("2026-01-01T10:00:00").unwrap()),
+            order: PhotoQueryOrder::CaptureTimeAscending,
+        };
+        let ids = persistence
+            .create_photo_query_receiver(query, Arc::clone(&projection), 10)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ids, vec![early_id.clone()]);
+        let narrow = persistence
+            .create_photo_query_receiver(
+                PhotoQuery {
+                    source: PhotoQuerySource::AllPhotos,
+                    selection_state: Some(SelectionState::Selected),
+                    rating_minimum: Some(4),
+                    rating_maximum: None,
+                    original_kind: None,
+                    original_available: None,
+                    captured_from: None,
+                    captured_before: None,
+                    order: PhotoQueryOrder::CaptureTimeAscending,
+                },
+                Arc::clone(&projection),
+                1,
+            )
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(narrow, vec![early_id.clone()]);
+        for (folder, expected_path) in [("Shoot", "Shoot/upper.JPG"), ("a", "a/one.JPG")] {
+            let ids = persistence
+                .create_photo_query_receiver(
+                    PhotoQuery {
+                        source: PhotoQuerySource::Folder(folder.to_owned()),
+                        selection_state: None,
+                        rating_minimum: None,
+                        rating_maximum: None,
+                        original_kind: None,
+                        original_available: None,
+                        captured_from: None,
+                        captured_before: None,
+                        order: PhotoQueryOrder::CaptureTimeAscending,
+                    },
+                    Arc::clone(&projection),
+                    10,
+                )
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(ids, vec![by_path[expected_path].clone()]);
+        }
+        assert!(matches!(
+            persistence
+                .create_photo_query_receiver(
+                    PhotoQuery {
+                        source: PhotoQuerySource::Folder("SHOOT".to_owned()),
+                        selection_state: None,
+                        rating_minimum: None,
+                        rating_maximum: None,
+                        original_kind: None,
+                        original_available: None,
+                        captured_from: None,
+                        captured_before: None,
+                        order: PhotoQueryOrder::CaptureTimeAscending,
+                    },
+                    Arc::clone(&projection),
+                    10,
+                )
+                .unwrap()
+                .await
+                .unwrap(),
+            Err(PhotoQueryError::SourceNotFound)
+        ));
+        // Query membership is fixed, while a later owner read returns current
+        // facts even when the Photo no longer matches the creation filter.
+        persistence
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: early_id.clone(),
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Rejected),
+                expected_current: None,
+                album_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            persistence
+                .create_photo_query_receiver(
+                    PhotoQuery {
+                        source: PhotoQuerySource::Folder("missing".to_owned()),
+                        selection_state: None,
+                        rating_minimum: None,
+                        rating_maximum: None,
+                        original_kind: None,
+                        original_available: None,
+                        captured_from: None,
+                        captured_before: None,
+                        order: PhotoQueryOrder::CaptureTimeAscending,
+                    },
+                    Arc::clone(&projection),
+                    10,
+                )
+                .unwrap()
+                .await
+                .unwrap(),
+            Err(PhotoQueryError::SourceNotFound)
+        ));
+        assert!(matches!(
+            persistence
+                .create_photo_query_receiver(
+                    PhotoQuery {
+                        source: PhotoQuerySource::AllPhotos,
+                        selection_state: None,
+                        rating_minimum: None,
+                        rating_maximum: None,
+                        original_kind: None,
+                        original_available: None,
+                        captured_from: None,
+                        captured_before: None,
+                        order: PhotoQueryOrder::CaptureTimeDescending,
+                    },
+                    Arc::clone(&projection),
+                    2,
+                )
+                .unwrap()
+                .await
+                .unwrap(),
+            Err(PhotoQueryError::ResultLimitExceeded { limit: 2 })
+        ));
+
+        let current = persistence
+            .photos_by_id_receiver(
+                vec![late_id, early_id.clone(), "removed".to_owned()],
+                Arc::clone(&projection),
+            )
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.len(), 3);
+        assert_eq!(current[1].as_ref().unwrap().filename, "early.JPG");
+        assert_eq!(current[1].as_ref().unwrap().rating, 4);
+        assert_eq!(
+            current[1].as_ref().unwrap().selection_state,
+            SelectionState::Rejected
+        );
+        assert_eq!(
+            current[1].as_ref().unwrap().capture.offset_minutes,
+            Some(90)
+        );
+        assert!(current[2].is_none());
+    }
+
+    #[test]
+    fn capture_time_bounds_reject_offsets_and_invalid_calendar_values() {
+        assert!(CaptureTimeBound::parse("2026-02-28T23:59:59").is_ok());
+        assert!(CaptureTimeBound::parse("2024-02-29T00:00:00").is_ok());
+        for invalid in [
+            "0000-01-01T00:00:00",
+            "2026-02-29T00:00:00",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00+01:00",
+            "2026-13-01T00:00:00",
+        ] {
+            assert!(CaptureTimeBound::parse(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_order_orders_each_photo_by_its_own_original_and_retains_unavailable_facts() {
+        let (_base, library, state, name, _path) = fixture();
+        let vectors = capture_order_vectors();
+        let disagreement = vectors
+            .iter()
+            .find(|vector| vector.name == "independent-photos-order-by-their-own-capture-time")
+            .unwrap();
+        let missing_partition = vectors
+            .iter()
+            .find(|vector| vector.name == "missing-capture-time-is-a-final-path-partition")
+            .unwrap();
+        let known = |key: &str, revision: &str| CaptureFact {
+            state: CaptureMetadataState::Known,
+            order_key: Some(key.to_owned()),
+            field: Some(CaptureTimeField::DateTimeOriginal),
+            offset_minutes: None,
+            source_revision: Some(revision.to_owned()),
+        };
+        let mut raw = discovered(
+            disagreement.raw_path.as_deref().unwrap(),
+            OriginalKind::Raw,
+            1,
+            1.0,
+        );
+        raw.capture = known(disagreement.raw_order_key.as_deref().unwrap(), "raw");
+        let mut paired_jpeg = discovered(
+            disagreement.jpeg_path.as_deref().unwrap(),
+            OriginalKind::Jpeg,
+            1,
+            1.0,
+        );
+        paired_jpeg.capture = known(disagreement.jpeg_order_key.as_deref().unwrap(), "jpeg");
+        let mut middle = discovered("middle.JPG", OriginalKind::Jpeg, 1, 1.0);
+        middle.capture = known("2026-01-01T10:30:00.000000000", "middle");
+        let mut z = discovered("z.JPG", OriginalKind::Jpeg, 1, 1.0);
+        z.capture = known("2026-01-01T12:00:00.000000000", "z");
+        let mut a = discovered("a.JPG", OriginalKind::Jpeg, 1, 1.0);
+        a.capture = known("2026-01-01T12:00:00.000000000", "a");
+        let missing = discovered("missing.JPG", OriginalKind::Jpeg, 1, 1.0);
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let first = persistence
+            .apply_scan(
+                vec![raw.clone(), paired_jpeg, middle, z, a, missing],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first
+                .photos
+                .iter()
+                .map(|photo| photo.sort_path.as_str())
+                .collect::<Vec<_>>(),
+            disagreement
+                .expected_paths
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(missing_partition.expected_paths, ["missing.JPG"]);
+        let unavailable = persistence
+            .apply_scan(Vec::new(), Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            unavailable
+                .originals
+                .iter()
+                .find(|original| original.relative_path.as_str() == "pair.ARW")
+                .unwrap()
+                .capture,
+            raw.capture
+        );
+        raw.facts.size = 2;
+        raw.capture = CaptureFact {
+            state: CaptureMetadataState::Missing,
+            order_key: None,
+            field: None,
+            offset_minutes: None,
+            source_revision: Some("raw-replaced".to_owned()),
+        };
+        let replacement_fact = raw.capture.clone();
+        let replaced = persistence.apply_scan(vec![raw], Vec::new()).await.unwrap();
+        assert_eq!(
+            replaced
+                .originals
+                .iter()
+                .find(|original| original.relative_path.as_str() == "pair.ARW")
+                .unwrap()
+                .capture,
+            replacement_fact
+        );
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn equal_capture_and_path_ties_use_photo_id_bytes() {
+        let (_base, library, state, name, path) = fixture();
+        let vectors = capture_order_vectors();
+        let tie = vectors
+            .iter()
+            .find(|vector| vector.name == "equal-time-ties-use-path-then-photo-id-bytes")
+            .unwrap();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v3.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        for (original_id, path) in [
+            ("original-a", "source-a.JPG"),
+            ("original-z", "source-z.JPG"),
+        ] {
+            connection.execute(
+                "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,error_category,error_message,capture_metadata_state,capture_order_key,capture_time_field,capture_offset_minutes,capture_source_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![original_id, path, "jpeg", 1_i64, 1.0_f64, 1_i64, Option::<String>::None, Option::<String>::None, "known", tie.order_key.as_deref().unwrap(), "date-time-original", Option::<i64>::None, "revision"],
+            ).unwrap();
+        }
+        for (photo_id, original_id) in [("z-photo", "original-z"), ("a-photo", "original-a")] {
+            connection.execute(
+                "INSERT INTO photos(id,jpeg_original_id,ambiguous,available,preview_state,sort_path,selection_state,rating) VALUES(?,?,?,?,?,?,?,?)",
+                params![photo_id, original_id, 0_i64, 1_i64, "inspection-pending", "same.JPG", "undecided", 0_i64],
+            ).unwrap();
+        }
+        drop(connection);
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        assert_eq!(
+            persistence
+                .snapshot()
+                .await
+                .unwrap()
+                .photos
+                .iter()
+                .map(|photo| photo.id.as_str())
+                .collect::<Vec<_>>(),
+            tie.expected_photo_ids
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        persistence.shutdown().unwrap();
+    }
+}

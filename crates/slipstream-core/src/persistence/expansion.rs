@@ -340,3 +340,192 @@ fn expansion_projection(connection: &Connection) -> Result<ExpansionProjection, 
         ),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::persistence::PersistenceError;
+    use crate::persistence::scan;
+    use crate::persistence::test_support::*;
+    use crate::{RequestedRelocation, source_revision};
+    use rusqlite::Connection;
+    use rusqlite::params;
+    use std::fs;
+
+    #[tokio::test]
+    async fn retire_and_bind_retires_before_delete() {
+        let (_base, root, state, name, path) = fixture();
+        fs::write(root.canonical_path().join("one.JPG"), b"one").unwrap();
+        fs::write(root.canonical_path().join("two.JPG"), b"different").unwrap();
+        let library = crate::Library::open(sidecar_config(&root, &state, &name)).unwrap();
+        let snapshot = library.scan().await.unwrap();
+        let destination = &snapshot.photos[0];
+        let retiring = &snapshot.photos[1];
+        let old_path = snapshot
+            .originals
+            .iter()
+            .find(|o| o.id == destination.original_id)
+            .unwrap()
+            .relative_path
+            .as_str();
+        let new_path = snapshot
+            .originals
+            .iter()
+            .find(|o| o.id == retiring.original_id)
+            .unwrap()
+            .relative_path
+            .clone();
+        seed_sidecar(&path, &destination.id, "dir/source.xmp");
+        seed_sidecar(&path, &retiring.id, "dir/destination.xmp");
+        let destination_before = association_generation(&path, &destination.id);
+        let retiring_before = association_generation(&path, &retiring.id);
+        fs::remove_file(root.canonical_path().join(old_path)).unwrap();
+        library.scan().await.unwrap();
+        let facts = root
+            .original(new_path.clone())
+            .unwrap()
+            .facts_if_present()
+            .unwrap()
+            .unwrap();
+        library
+            .apply_relocations(vec![RequestedRelocation {
+                original_id: destination.original_id.clone(),
+                to_location: new_path.to_string(),
+                facts,
+                retire_destination: true,
+            }])
+            .await
+            .unwrap();
+        let after = association_generation(&path, &destination.id);
+        assert!(after > destination_before);
+        assert_retired(
+            &path,
+            &retiring.id,
+            new_path.as_str(),
+            "dir/destination.xmp",
+            retiring_before + 1,
+        );
+        assert_retired(
+            &path,
+            &destination.id,
+            new_path.as_str(),
+            "dir/source.xmp",
+            after,
+        );
+        let connection = Connection::open(&path).unwrap();
+        assert!(
+            !connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM photos WHERE id=?)",
+                    [&retiring.id],
+                    |r| r.get::<_, bool>(0)
+                )
+                .unwrap()
+        );
+        assert!(
+            !connection
+                .prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        );
+        library.shutdown().unwrap();
+    }
+
+    #[test]
+    fn retire_and_bind_refuses_a_photo_with_saved_recipe() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v7.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "missing-original",
+                photo_id: "missing-photo",
+                relative_path: "shoot/missing.ARW",
+                kind: "raw",
+                available: false,
+                size: 11,
+                mtime_ms: 1_000.0,
+            },
+        );
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "occupant-original",
+                photo_id: "occupant-photo",
+                relative_path: "moved/occupied.ARW",
+                kind: "raw",
+                available: true,
+                size: 19,
+                mtime_ms: 2_000.0,
+            },
+        );
+        connection
+            .execute(
+                "INSERT INTO edit_recipes(photo_id,revision,source_revision,exposure_ev,white_balance_mode)
+                 VALUES(?,?,?,?, 'as-shot')",
+                params![
+                    "occupant-photo",
+                    "recipe-revision",
+                    source_revision("moved/occupied.ARW", 19, 2_000.0).unwrap(),
+                    0.0_f64
+                ],
+            )
+            .unwrap();
+
+        let result = scan::apply_manual_relocations(
+            &state,
+            &name,
+            &mut Connection::open(&path).unwrap(),
+            &[RequestedRelocation {
+                original_id: "missing-original".to_owned(),
+                to_location: "moved/occupied.ARW".to_owned(),
+                facts: crate::OriginalFacts {
+                    size: 19,
+                    mtime_ms: 2_000.0,
+                    device: 0,
+                    inode: 0,
+                },
+                retire_destination: true,
+            }],
+        );
+        assert!(matches!(
+            result,
+            Err(PersistenceError::InvalidRecoveryMapping {
+                reason: "occupied",
+                ..
+            })
+        ));
+
+        let connection = Connection::open(path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM photos WHERE id IN ('missing-photo','occupant-photo')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM edit_recipes WHERE photo_id='occupant-photo'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+}

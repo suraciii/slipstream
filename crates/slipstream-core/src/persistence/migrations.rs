@@ -935,3 +935,1065 @@ pub(super) fn table_columns(
         })
         .map_err(|_| PersistenceError::Storage)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::persistence::migrations;
+    use crate::persistence::owner::Command;
+    use crate::persistence::owner::reserve_library_id;
+    use crate::persistence::schema::{SchemaVersion, validate_canonical_schema};
+    use crate::persistence::test_support::*;
+    use crate::persistence::{MutationError, Persistence, PersistenceError};
+    use crate::{
+        AlbumMutation, CaptureFact, CaptureMetadataState, CaptureTimeField, OriginalKind,
+        PreviewState, SelectionState, original_id, source_revision,
+    };
+    use rusqlite::Connection;
+    use rusqlite::params;
+    use serde::Deserialize;
+    use std::{fs, os::unix::fs::PermissionsExt};
+    use tokio::sync::oneshot;
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RejectionFixture {
+        name: String,
+        version: u32,
+        sql: String,
+        expected_error: String,
+    }
+
+    #[tokio::test]
+    async fn initializes_current_schema_and_runs_fifo_writes() {
+        let (_base, library, state, name, path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        assert_eq!(persistence.probe().await.unwrap(), 1);
+        persistence.write_probe().await.unwrap();
+        assert_eq!(persistence.probe().await.unwrap(), 3);
+        let (configuration_send, configuration_receive) = oneshot::channel();
+        persistence
+            .submit(Command::Configuration(configuration_send))
+            .unwrap();
+        assert_eq!(
+            configuration_receive.await.unwrap().unwrap(),
+            ("delete".to_owned(), 1)
+        );
+        persistence.shutdown().unwrap();
+        let connection = Connection::open(path).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
+    }
+
+    #[tokio::test]
+    async fn v6_to_v7_migration_preserves_existing_library_rows() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v6.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "raw-original",
+                photo_id: "raw-photo",
+                relative_path: "shoot/one.ARW",
+                kind: "raw",
+                available: true,
+                size: 17,
+                mtime_ms: 1_000.0,
+            },
+        );
+        connection
+            .execute(
+                "INSERT INTO original_fingerprints(original_id,digest,size,mtime_ms) VALUES(?,?,?,?)",
+                params!["raw-original", "a".repeat(64), 17_i64, 1_000.0_f64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO albums(id,name,created_at) VALUES('album-one','Preserved',9)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO album_members(album_id,photo_id,position) VALUES('album-one','raw-photo',0)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE photos SET selection_state='selected',rating=4 WHERE id='raw-photo'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence.snapshot().await.unwrap();
+        assert_eq!(snapshot.originals.len(), 1);
+        assert_eq!(snapshot.originals[0].id, "raw-original");
+        assert_eq!(
+            snapshot.originals[0].relative_path.as_str(),
+            "shoot/one.ARW"
+        );
+        assert_eq!(snapshot.originals[0].facts.size, 17);
+        assert_eq!(snapshot.photos.len(), 1);
+        assert_eq!(snapshot.photos[0].id, "raw-photo");
+        assert_eq!(snapshot.photos[0].selection_state, SelectionState::Selected);
+        assert_eq!(snapshot.photos[0].rating, 4);
+        assert!(!snapshot.photos[0].has_saved_edits);
+        assert_eq!(
+            persistence.list_albums().await.unwrap()[0].members[0].photo_id,
+            "raw-photo"
+        );
+        persistence.shutdown().unwrap();
+        let connection = Connection::open(&path).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            11
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT digest,size,mtime_ms FROM original_fingerprints WHERE original_id='raw-original'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, f64>(2)?)),
+                )
+                .unwrap(),
+            ("a".repeat(64), 17, 1_000.0)
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM edit_recipes", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    // album-language-legacy:start v4-migration-test
+    #[tokio::test]
+    async fn v4_migration_preserves_album_state_through_current_schema() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v4.sql"),
+        );
+        let first = "00000000-0000-4000-8000-000000000031";
+        let second = "00000000-0000-4000-8000-000000000032";
+        let photo_one = "photo-one";
+        let photo_two = "photo-two";
+        let connection = Connection::open(&path).unwrap();
+        for (id, path_text, sort_path) in [
+            ("original-one", "one.JPG", "one.JPG"),
+            ("original-two", "two.JPG", "two.JPG"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state) VALUES(?,?, 'jpeg',9,1.0,1,'pending')",
+                    params![id, path_text],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO photos(id,jpeg_original_id,ambiguous,available,preview_state,sort_path,selection_state,rating) VALUES(?,?,0,1,'inspection-pending',?,'undecided',0)",
+                    params![sort_path.replace(".JPG", ""), id, sort_path],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "UPDATE photos SET id=? WHERE jpeg_original_id='original-one'",
+                [photo_one],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE photos SET id=? WHERE jpeg_original_id='original-two'",
+                [photo_two],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photo_sets(id,name,created_at) VALUES(?,?,?)",
+                params![first, "Shoot", 7_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photo_sets(id,name,created_at) VALUES(?,?,?)",
+                params![second, "Client", 9_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photo_set_members(photo_set_id,photo_id,position) VALUES(?,?,1)",
+                params![first, photo_two],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photo_set_members(photo_set_id,photo_id,position) VALUES(?,?,0)",
+                params![first, photo_one],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO review_progress(photo_set_id,photo_id) VALUES(?,?)",
+                params![first, photo_two],
+            )
+            .unwrap();
+        drop(connection);
+        let persistence = Persistence::open(
+            state,
+            name.clone(),
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let albums = persistence.list_albums().await.unwrap();
+        assert_eq!(albums.len(), 2);
+        assert_eq!(albums[0].id, first);
+        assert_eq!(albums[0].name, "Shoot");
+        assert_eq!(albums[1].id, second);
+        assert_eq!(albums[1].name, "Client");
+        assert_eq!(albums[1].members.len(), 0);
+        assert_eq!(albums[1].last_reviewed_photo_id, None);
+        let members = &albums[0].members;
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].photo_id, photo_one);
+        assert_eq!(members[0].position, 0);
+        assert_eq!(members[1].photo_id, photo_two);
+        assert_eq!(members[1].position, 1);
+        assert_eq!(albums[0].last_reviewed_photo_id.as_deref(), Some(photo_two));
+        persistence.shutdown().unwrap();
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            11
+        );
+        validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
+        // The legacy photo-set tables are gone rather than left as aliases.
+        for legacy in ["photo_sets", "photo_set_members", "review_progress"] {
+            assert!(!table_exists(&connection, legacy).unwrap(), "{legacy}");
+        }
+    }
+    // album-language-legacy:end v4-migration-test
+
+    #[test]
+    fn newer_v12_database_is_rejected_without_changes() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v5.sql"),
+        );
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", 12)
+            .unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(matches!(
+            Persistence::open(
+                state,
+                name,
+                library.canonical_path().to_str().unwrap().to_owned(),
+            ),
+            Err(PersistenceError::NewerSchema)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn legacy_binary_fence_rejects_canonical_schema_above_the_max_version_without_changes() {
+        // Every legacy database whose canonical version exceeds the supported
+        // maximum is rejected without touching a byte, for both fence gaps.
+        for (sql, version, max_version) in [
+            (
+                include_str!("../../../../compatibility/sqlite/schema-v5.sql"),
+                SchemaVersion::V5,
+                4,
+            ),
+            (
+                include_str!("../../../../compatibility/sqlite/schema-v4.sql"),
+                SchemaVersion::V4,
+                3,
+            ),
+        ] {
+            let (_base, library, _state, _name, path) = fixture();
+            seed(&path, sql);
+            let connection = Connection::open(&path).unwrap();
+            validate_canonical_schema(&connection, version).unwrap();
+
+            let sidecars = ["-journal", "-wal", "-shm"]
+                .map(|suffix| path.with_file_name(format!("library.sqlite{suffix}")));
+            let persisted_paths = std::iter::once(path.clone())
+                .chain(sidecars.iter().cloned())
+                .collect::<Vec<_>>();
+            let before = persisted_paths
+                .iter()
+                .map(|path| fs::read(path).ok())
+                .collect::<Vec<_>>();
+
+            assert!(matches!(
+                migrations::preflight_schema_for_max_version(
+                    &connection,
+                    library.canonical_path().to_str().unwrap(),
+                    max_version,
+                ),
+                Err(PersistenceError::NewerSchema)
+            ));
+
+            let after = persisted_paths
+                .iter()
+                .map(|path| fs::read(path).ok())
+                .collect::<Vec<_>>();
+            assert_eq!(after, before);
+        }
+    }
+
+    #[tokio::test]
+    async fn migrates_shared_v0_and_v1_to_current_schema_and_rejects_malformed_v2() {
+        for sql in [
+            include_str!("../../../../compatibility/sqlite/v0.sql"),
+            include_str!("../../../../compatibility/sqlite/v1.sql"),
+        ] {
+            let (_base, library, state, name, path) = fixture();
+            seed(&path, sql);
+            let persistence = Persistence::open(
+                state,
+                name,
+                library.canonical_path().to_string_lossy().into_owned(),
+            )
+            .unwrap();
+            persistence.shutdown().unwrap();
+            let connection = Connection::open(&path).unwrap();
+            validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
+        }
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/malformed-v2.sql"),
+        );
+        assert!(matches!(
+            Persistence::open(
+                state,
+                name,
+                library.canonical_path().to_string_lossy().into_owned()
+            ),
+            Err(PersistenceError::UnsupportedSchema)
+        ));
+        assert_eq!(
+            Connection::open(path)
+                .unwrap()
+                .pragma_query_value::<u8, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn shared_rejection_fixtures_are_rejected_without_database_changes() {
+        let fixtures: Vec<RejectionFixture> = serde_json::from_str(include_str!(
+            "../../../../compatibility/sqlite/rejections.json"
+        ))
+        .unwrap();
+        for rejection in fixtures {
+            let (_base, library, state, name, path) = fixture();
+            seed(&path, &rejection.sql);
+            let before = fs::read(&path).unwrap();
+            let result = Persistence::open(
+                state,
+                name,
+                library.canonical_path().to_str().unwrap().to_owned(),
+            );
+            assert!(
+                matches!(
+                    result,
+                    Err(PersistenceError::UnsupportedSchema | PersistenceError::InvalidLegacyData)
+                ),
+                "{} expected {}",
+                rejection.name,
+                rejection.expected_error
+            );
+            assert_eq!(fs::read(&path).unwrap(), before, "{}", rejection.name);
+            assert_eq!(
+                Connection::open(&path)
+                    .unwrap()
+                    .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+                    .unwrap(),
+                rejection.version,
+                "{}",
+                rejection.name
+            );
+        }
+    }
+
+    // album-language-legacy:start v3-migration-test
+    #[tokio::test]
+    async fn v3_migration_preserves_every_row_identity_and_user_owned_state() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v3.sql"),
+        );
+        let original_id = original_id("shoot/A.JPG");
+        let photo_id = "photo-preserved";
+        let legacy_album_id = "00000000-0000-4000-8000-000000000027";
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO original_files VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![
+                    original_id,
+                    "shoot/A.JPG",
+                    "jpeg",
+                    12_i64,
+                    1_000.0_f64,
+                    1_i64,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    "known",
+                    "2026-01-01T10:00:00.000000000",
+                    "date-time-original",
+                    60_i64,
+                    "capture-revision"
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photos(id,jpeg_original_id,ambiguous,available,preview_state,preview_candidate,preview_source,preview_source_revision,preview_width,preview_height,cache_revision,sort_path,selection_state,rating) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![photo_id, original_id, 0_i64, 1_i64, "ready", "matching-jpeg", "matching-jpeg", source_revision("shoot/A.JPG", 12, 1000.0).unwrap(), 8_i64, 4_i64, "cache-revision", "shoot/A.JPG", "selected", 5_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photo_sets(id,name,created_at) VALUES(?,?,?)",
+                params![legacy_album_id, "Preserved", 1_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photo_set_members(photo_set_id,photo_id,position) VALUES(?,?,?)",
+                params![legacy_album_id, photo_id, 0_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO review_progress(photo_set_id,photo_id) VALUES(?,?)",
+                params![legacy_album_id, photo_id],
+            )
+            .unwrap();
+        drop(connection);
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence.snapshot().await.unwrap();
+        let photo = &snapshot.photos[0];
+        assert_eq!(photo.id, photo_id);
+        assert_eq!(photo.original_id, original_id);
+        assert!(photo.available);
+        assert_eq!(photo.preview_state, PreviewState::Ready);
+        assert_eq!(
+            photo.preview_source_revision.as_deref(),
+            Some(source_revision("shoot/A.JPG", 12, 1000.0).unwrap().as_str())
+        );
+        assert_eq!(photo.preview_width, Some(8));
+        assert_eq!(photo.preview_height, Some(4));
+        assert_eq!(photo.cache_revision.as_deref(), Some("cache-revision"));
+        assert_eq!(photo.sort_path, "shoot/A.JPG");
+        assert_eq!(photo.selection_state, SelectionState::Selected);
+        assert_eq!(photo.rating, 5);
+        let original = &snapshot.originals[0];
+        assert_eq!(original.id, original_id);
+        assert_eq!(original.relative_path.as_str(), "shoot/A.JPG");
+        assert_eq!(original.kind, OriginalKind::Jpeg);
+        assert_eq!(original.facts.size, 12);
+        assert_eq!(original.facts.mtime_ms, 1_000.0);
+        assert!(original.available);
+        assert_eq!(original.error_category, None);
+        assert_eq!(original.error_message, None);
+        assert_eq!(
+            original.capture,
+            CaptureFact {
+                state: CaptureMetadataState::Known,
+                order_key: Some("2026-01-01T10:00:00.000000000".to_owned()),
+                field: Some(CaptureTimeField::DateTimeOriginal),
+                offset_minutes: Some(60),
+                source_revision: Some("capture-revision".to_owned()),
+            }
+        );
+        let album = persistence.list_albums().await.unwrap().remove(0);
+        assert_eq!(album.id, legacy_album_id);
+        assert_eq!(album.name, "Preserved");
+        assert_eq!(album.members.len(), 1);
+        assert_eq!(album.members[0].photo_id, photo_id);
+        assert_eq!(album.members[0].position, 0);
+        assert!(album.members[0].available);
+        assert_eq!(album.members[0].selection_state, SelectionState::Selected);
+        assert_eq!(album.members[0].rating, 5);
+        assert_eq!(album.last_reviewed_photo_id.as_deref(), Some(photo_id));
+        persistence.shutdown().unwrap();
+        let connection = Connection::open(&path).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
+    }
+    // album-language-legacy:end v3-migration-test
+
+    #[tokio::test]
+    async fn every_present_sidecar_rejects_startup_before_creating_database() {
+        for suffix in ["-journal", "-wal", "-shm"] {
+            let (_base, library, state, name, path) = fixture();
+            let sidecar = path.with_file_name(format!("library.sqlite{suffix}"));
+            fs::write(&sidecar, b"operator recovery data").unwrap();
+            fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600)).unwrap();
+            let result = Persistence::open(
+                state,
+                name,
+                library.canonical_path().to_str().unwrap().to_owned(),
+            );
+            assert!(matches!(result, Err(PersistenceError::RecoveryRequired)));
+            assert!(
+                !path.exists(),
+                "{suffix} must be checked before database creation"
+            );
+            assert_eq!(fs::read(sidecar).unwrap(), b"operator recovery data");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_present_sidecar_blocks_writes_without_changing_database() {
+        for suffix in ["-journal", "-wal", "-shm"] {
+            let (_base, library, state, name, path) = fixture();
+            let persistence = Persistence::open(
+                state,
+                name,
+                library.canonical_path().to_str().unwrap().to_owned(),
+            )
+            .unwrap();
+            let sidecar = path.with_file_name(format!("library.sqlite{suffix}"));
+            fs::write(&sidecar, b"operator recovery data").unwrap();
+            fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600)).unwrap();
+            let before = fs::read(&path).unwrap();
+            assert_eq!(
+                persistence
+                    .mutate_album(AlbumMutation::Create {
+                        name: format!("Blocked {suffix}"),
+                    })
+                    .await,
+                Err(MutationError::Persistence)
+            );
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                before,
+                "{suffix} changed database"
+            );
+            assert_eq!(fs::read(&sidecar).unwrap(), b"operator recovery data");
+            persistence.shutdown().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_v2_wal_rejection_preserves_database_and_sidecars() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/malformed-v2.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        connection
+            .pragma_update(None, "wal_autocheckpoint", 0)
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata VALUES('wal_probe','unchanged')",
+                [],
+            )
+            .unwrap();
+        let paths = [
+            path.clone(),
+            path.with_file_name("library.sqlite-wal"),
+            path.with_file_name("library.sqlite-shm"),
+        ];
+        let before = paths
+            .iter()
+            .map(|path| fs::read(path).ok())
+            .collect::<Vec<_>>();
+        let result = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_str().unwrap().to_owned(),
+        );
+        assert!(matches!(result, Err(PersistenceError::RecoveryRequired)));
+        let after = paths
+            .iter()
+            .map(|path| fs::read(path).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+        drop(connection);
+    }
+
+    #[tokio::test]
+    async fn root_mismatch_rejects_before_migration_without_changes() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v1.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata VALUES('canonical_root','/different')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let before = fs::read(&path).unwrap();
+        assert!(matches!(
+            Persistence::open(
+                state,
+                name,
+                library.canonical_path().to_string_lossy().into_owned()
+            ),
+            Err(PersistenceError::RootMismatch)
+        ));
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn wal_only_root_binding_is_rejected_without_changing_database_or_sidecars() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v2.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        connection
+            .pragma_update(None, "wal_autocheckpoint", 0)
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata VALUES('canonical_root','/different')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata VALUES('wal_probe','unchanged')",
+                [],
+            )
+            .unwrap();
+        let paths = [
+            path.clone(),
+            path.with_file_name("library.sqlite-wal"),
+            path.with_file_name("library.sqlite-shm"),
+        ];
+        let before = paths
+            .iter()
+            .map(|path| fs::read(path).ok())
+            .collect::<Vec<_>>();
+        let open_result = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        );
+        assert!(matches!(
+            open_result,
+            Err(PersistenceError::RecoveryRequired)
+        ));
+        let after = paths
+            .iter()
+            .map(|path| fs::read(path).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM library_metadata WHERE key='wal_probe'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "unchanged"
+        );
+        drop(connection);
+    }
+
+    // album-language-legacy:start v2-reconciliation-test
+    #[tokio::test]
+    async fn preserves_decisions_and_memberships_while_reconciling_rows() {
+        let (_base, library, state, name, path) = fixture();
+        let raw = discovered("one.ARW", OriginalKind::Raw, 3, 1000.0);
+        let jpeg = discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0);
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v2.sql"),
+        );
+        let raw_id = original_id(raw.path.as_str());
+        let jpeg_id = original_id(jpeg.path.as_str());
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO original_files VALUES(?,?,?,?,?,?,?,?)",
+                params![
+                    raw_id,
+                    "one.ARW",
+                    "raw",
+                    3_i64,
+                    1000.0_f64,
+                    1_i64,
+                    Option::<String>::None,
+                    Option::<String>::None
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO original_files VALUES(?,?,?,?,?,?,?,?)",
+                params![
+                    jpeg_id,
+                    "one.JPG",
+                    "jpeg",
+                    4_i64,
+                    1000.0_f64,
+                    1_i64,
+                    Option::<String>::None,
+                    Option::<String>::None
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photos(id,raw_original_id,jpeg_original_id,ambiguous,available,preview_state,preview_candidate,selection_state,rating,sort_path) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                params!["stable-photo", raw_id, jpeg_id, 0_i64, 1_i64, "inspection-pending", "matching-jpeg", "selected", 5_i64, "one.ARW"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photo_sets(id,name,created_at) VALUES(?,?,?)",
+                params!["00000000-0000-4000-8000-000000000021", "Keep", 1_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photo_set_members(photo_set_id,photo_id,position) VALUES(?,?,?)",
+                params![
+                    "00000000-0000-4000-8000-000000000021",
+                    "stable-photo",
+                    0_i64
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO review_progress(photo_set_id,photo_id) VALUES(?,?)",
+                params!["00000000-0000-4000-8000-000000000021", "stable-photo"],
+            )
+            .unwrap();
+        drop(connection);
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .apply_scan(vec![raw, jpeg], Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(snapshot.photos[0].id, "stable-photo");
+        assert_eq!(snapshot.photos[0].selection_state, SelectionState::Selected);
+        assert_eq!(snapshot.photos[0].rating, 5);
+        persistence.shutdown().unwrap();
+        let connection = Connection::open(path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT photo_id FROM album_progress WHERE album_id=?",
+                    ["00000000-0000-4000-8000-000000000021"],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "stable-photo"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM album_members WHERE album_id=?",
+                    ["00000000-0000-4000-8000-000000000021"],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+    // album-language-legacy:end v2-reconciliation-test
+
+    /// The v8 fixture carries the Photos, decisions, and Album membership the
+    /// migration must preserve, and the new removal marker starts empty.
+    #[tokio::test]
+    async fn v8_to_v9_migration_preserves_photos_and_starts_unremoved() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v8.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "raw-original",
+                photo_id: "raw-photo",
+                relative_path: "shoot/one.ARW",
+                kind: "raw",
+                available: true,
+                size: 17,
+                mtime_ms: 1_000.0,
+            },
+        );
+        connection
+            .execute(
+                "UPDATE photos SET selection_state='rejected',rating=4 WHERE id='raw-photo'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let persistence = Persistence::open(
+            state,
+            name.clone(),
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .snapshot_receiver()
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.photos.len(), 1);
+        assert_eq!(snapshot.photos[0].selection_state, SelectionState::Rejected);
+        assert_eq!(snapshot.photos[0].rating, 4);
+        assert!(!snapshot.photos[0].removed);
+
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            11
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT removed_at_ms,removed_operation FROM photos WHERE id='raw-photo'",
+                    [],
+                    |row| Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    )),
+                )
+                .unwrap(),
+            (None, None)
+        );
+        drop(connection);
+        persistence.shutdown().unwrap();
+    }
+
+    // Issue #276 metadata records join the Film v10 schema as v11. The
+    // migration must add the sidecar records without disturbing the Film
+    // export rows, their download leases, or any Photo's identity and
+    // user-owned state, and every Photo starts at the first generation.
+    #[tokio::test]
+    async fn v10_to_v11_migration_preserves_film_export_state_and_starts_generation() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v10.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "raw-original",
+                photo_id: "raw-photo",
+                relative_path: "shoot/one.ARW",
+                kind: "raw",
+                available: true,
+                size: 17,
+                mtime_ms: 1_000.0,
+            },
+        );
+        connection
+            .execute(
+                "UPDATE photos SET selection_state='selected',rating=4 WHERE id='raw-photo'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO exports(id,photo_id,target,state,recipe_revision,exposure_ev,white_balance_mode,source_revision,source_profile_id,source_kind,recipe_digest,policy_id,bundle_id,workload,created_at)
+                 VALUES('export-one','raw-photo','film-jpeg','succeeded','recipe-1',0.25,'as-shot','source-1','profile-1','raw',?,?,?,'film-jpeg',1)",
+                params!["d".repeat(64), "e".repeat(64), "f".repeat(64)],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO export_download_leases(id,export_id,created_at) VALUES('lease-one','export-one',2)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        persistence.shutdown().unwrap();
+
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            11
+        );
+        validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT target,state,workload,recipe_digest,policy_id,bundle_id,exposure_ev,white_balance_mode
+                     FROM exports WHERE id='export-one'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, f64>(6)?,
+                            row.get::<_, String>(7)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                "film-jpeg".to_owned(),
+                "succeeded".to_owned(),
+                "film-jpeg".to_owned(),
+                "d".repeat(64),
+                "e".repeat(64),
+                "f".repeat(64),
+                0.25,
+                "as-shot".to_owned(),
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT export_id,created_at FROM export_download_leases WHERE id='lease-one'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .unwrap(),
+            ("export-one".to_owned(), 2)
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT id,sort_path,selection_state,rating,association_generation
+                     FROM photos WHERE id='raw-photo'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                "raw-photo".to_owned(),
+                "shoot/one.ARW".to_owned(),
+                "selected".to_owned(),
+                4,
+                1,
+            )
+        );
+    }
+
+    #[test]
+    fn new_library_id_collision_is_rejected_before_insertion() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!(
+                "../../../../compatibility/sqlite/schema-v4.sql"
+            ))
+            .unwrap();
+        connection.execute(
+            "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state) VALUES('collision','a.JPG','jpeg',1,1,1,'pending')",
+            [],
+        ).unwrap();
+        let transaction = connection.unchecked_transaction().unwrap();
+        assert!(matches!(
+            reserve_library_id(&transaction, &mut HashSet::new(), "collision".to_owned()),
+            Err(PersistenceError::IdCollision)
+        ));
+        assert_eq!(
+            transaction
+                .query_row("SELECT count(*) FROM original_files", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+}

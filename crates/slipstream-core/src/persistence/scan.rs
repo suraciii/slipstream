@@ -1225,3 +1225,322 @@ pub(super) fn seed_preview(
         })
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::persistence::removal::{PermanentDeletionStoredItem, reviewed_facts};
+    use crate::persistence::test_support::*;
+    use crate::persistence::{Persistence, PersistenceError};
+    use crate::{
+        OriginalFacts, OriginalKind, PreviewSeed, PreviewSeedResult, PreviewState, source_revision,
+    };
+    use std::fs;
+
+    /// The retained review is read back from its own JSON row, so the facts it
+    /// compares against the filesystem must survive that round trip exactly.
+    /// A milliseconds mtime needs 17 significant digits for some files, and a
+    /// decimal parse of those returns a neighboring f64, so the row keeps the
+    /// bits.
+    #[test]
+    fn reviewed_facts_survive_the_retained_review_round_trip() {
+        let reviewed = OriginalFacts {
+            size: 629,
+            mtime_ms: 1_790_379_911_790.761_5,
+            device: 64_513,
+            inode: 21_758_498,
+        };
+        let stored = PermanentDeletionStoredItem {
+            photo_id: "photo".to_owned(),
+            removed_at_ms: 1_790_379_911_955,
+            original_id: "original".to_owned(),
+            relative_path: "b.jpg".to_owned(),
+            kind: "jpeg".to_owned(),
+            size: reviewed.size,
+            mtime_bits: reviewed.mtime_ms.to_bits(),
+            device: reviewed.device,
+            inode: reviewed.inode,
+            albums: Vec::new(),
+        };
+        let row = serde_json::to_string(&stored).unwrap();
+        let read: PermanentDeletionStoredItem = serde_json::from_str(&row).unwrap();
+        assert_eq!(
+            reviewed_facts(read.size, read.mtime_bits, read.device, read.inode),
+            reviewed
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_relocation_retires_sidecar_association() {
+        let (_base, root, state, name, path) = fixture();
+        fs::write(root.canonical_path().join("one.JPG"), b"one").unwrap();
+        let library = crate::Library::open(sidecar_config(&root, &state, &name)).unwrap();
+        let snapshot = library.scan().await.unwrap();
+        let photo = &snapshot.photos[0].id;
+        seed_sidecar(&path, photo, "dir/photo.xmp");
+        let before = association_generation(&path, photo);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while library.fingerprint_counts().enrolled != 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fingerprint enrollment timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        library.shutdown().unwrap();
+        fs::rename(
+            root.canonical_path().join("one.JPG"),
+            root.canonical_path().join("moved.JPG"),
+        )
+        .unwrap();
+        let library = crate::Library::open(sidecar_config(&root, &state, &name)).unwrap();
+        let relocated = library.scan().await.unwrap();
+        assert_eq!(relocated.photos[0].id, *photo);
+        assert_eq!(relocated.originals[0].relative_path.as_str(), "moved.JPG");
+        let after = association_generation(&path, photo);
+        assert!(after > before);
+        assert_retired(&path, photo, "one.JPG", "dir/photo.xmp", after);
+        library.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn applies_scans_transactionally_and_preserves_unavailable_pair_identity() {
+        let (_base, library, state, name, _path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let raw = discovered("one.ARW", OriginalKind::Raw, 3, 1000.0);
+        let jpeg = discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0);
+        let first = persistence
+            .apply_scan(vec![raw.clone(), jpeg.clone()], Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(first.originals.len(), 2);
+        assert_eq!(first.photos.len(), 2);
+        let raw_photo = first
+            .photos
+            .iter()
+            .find(|photo| {
+                first.originals.iter().any(|original| {
+                    original.id == photo.original_id && original.kind == OriginalKind::Raw
+                })
+            })
+            .unwrap();
+        let jpeg_photo = first
+            .photos
+            .iter()
+            .find(|photo| photo.id != raw_photo.id)
+            .unwrap();
+        assert!(raw_photo.available);
+        assert!(jpeg_photo.available);
+        assert_eq!(raw_photo.preview_state, PreviewState::InspectionPending);
+
+        let unavailable = persistence
+            .apply_scan(Vec::new(), Vec::new())
+            .await
+            .unwrap();
+        let missing = unavailable
+            .photos
+            .iter()
+            .find(|photo| photo.id == raw_photo.id)
+            .unwrap();
+        assert_eq!(missing.id, raw_photo.id);
+        assert_eq!(missing.original_id, raw_photo.original_id);
+        assert!(!missing.available);
+        assert_eq!(missing.preview_state, PreviewState::Unavailable);
+
+        let restored = persistence.apply_scan(vec![raw], Vec::new()).await.unwrap();
+        let restored_photo = restored
+            .photos
+            .iter()
+            .find(|photo| photo.id == raw_photo.id)
+            .unwrap();
+        assert_eq!(restored_photo.id, raw_photo.id);
+        assert!(restored_photo.available);
+        assert_eq!(restored_photo.original_id, raw_photo.original_id);
+        assert_eq!(
+            restored_photo.preview_state,
+            PreviewState::InspectionPending
+        );
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn relocation_resets_preview_and_moves_identity_in_one_transaction() {
+        let (_base, library, state, name, _path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let first = persistence
+            .apply_scan(
+                vec![discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0)],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let photo = &first.photos[0];
+        let original_id = photo.original_id.clone();
+        let photo_id = photo.id.clone();
+        let revision = source_revision("one.JPG", 4, 1000.0).unwrap();
+        assert_eq!(
+            persistence
+                .seed_preview(PreviewSeed {
+                    photo_id: photo_id.clone(),
+                    state: PreviewState::Ready,
+                    source: crate::PreviewSource::JpegOriginal,
+                    expected_source_revision: revision,
+                    width: Some(100),
+                    height: Some(50),
+                    cache_revision: Some("cache-v1".to_owned()),
+                })
+                .await
+                .unwrap(),
+            PreviewSeedResult::Applied
+        );
+
+        // The same content re-discovered at a new Location with a proven
+        // relocation keeps the Photo identity, resets Preview inspection, and
+        // records the fresh fingerprint bound to the new Location.
+        let digest = crate::recovery::digest_bytes(b"payload");
+        let _ = digest;
+        let recovery = ScanRecoveryPlan {
+            relocations: [("moved/two.JPG".to_owned(), original_id.clone())].into(),
+            fingerprints: vec![DiscoveredFingerprint {
+                path: "moved/two.JPG".to_owned(),
+                digest: crate::recovery::digest_bytes(&[]),
+            }],
+        };
+        let relocated = persistence
+            .apply_scan_recovered(
+                vec![discovered("moved/two.JPG", OriginalKind::Jpeg, 4, 1000.0)],
+                Vec::new(),
+                recovery,
+            )
+            .await
+            .unwrap();
+        assert_eq!(relocated.snapshot.photos.len(), 1);
+        assert_eq!(relocated.snapshot.photos[0].id, photo_id);
+        assert_eq!(relocated.relocated_originals, 1);
+        assert_eq!(
+            relocated.snapshot.originals[0].relative_path.as_str(),
+            "moved/two.JPG"
+        );
+        assert_eq!(
+            relocated.snapshot.photos[0].preview_state,
+            PreviewState::InspectionPending
+        );
+        assert!(relocated.snapshot.photos[0].cache_revision.is_none());
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn rolls_back_scan_and_keeps_the_prior_snapshot_without_partial_rows() {
+        let (_base, library, state, name, _path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let initial = persistence
+            .apply_scan(
+                vec![discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0)],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let failed = persistence
+            .apply_scan_failure(
+                vec![
+                    discovered("new.JPG", OriginalKind::Jpeg, 5, 1001.0),
+                    discovered("second.JPG", OriginalKind::Jpeg, 6, 1002.0),
+                ],
+                Vec::new(),
+            )
+            .await;
+        assert!(matches!(failed, Err(PersistenceError::Storage)));
+        let after = persistence.snapshot().await.unwrap();
+        assert_eq!(after, initial);
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_fallback_preview_completion_is_ignored_after_candidate_change() {
+        let (_base, library, state, name, _path) = fixture();
+        let raw = discovered("one.ARW", OriginalKind::Raw, 3, 1000.0);
+        let first = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let initial = first
+            .apply_scan(vec![raw.clone()], Vec::new())
+            .await
+            .unwrap();
+        let photo_id = initial.photos[0].id.clone();
+        let raw_revision = source_revision("one.ARW", 3, 1000.0).unwrap();
+        assert_eq!(
+            first
+                .seed_preview(PreviewSeed {
+                    photo_id: photo_id.clone(),
+                    state: PreviewState::Ready,
+                    source: crate::PreviewSource::RawEmbeddedJpeg,
+                    expected_source_revision: raw_revision.clone(),
+                    width: Some(512),
+                    height: Some(341),
+                    cache_revision: Some("raw-cache".to_owned()),
+                })
+                .await
+                .unwrap(),
+            PreviewSeedResult::Applied
+        );
+        // An unchanged rescan keeps the seeded preview facts bound to the
+        // unchanged original.
+        let unchanged = first
+            .apply_scan(
+                vec![discovered("one.ARW", OriginalKind::Raw, 3, 1000.0)],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unchanged.photos[0].preview_state, PreviewState::Ready);
+        assert_eq!(
+            unchanged.photos[0].cache_revision.as_deref(),
+            Some("raw-cache")
+        );
+        // A second scan with changed RAW facts makes the old revision stale.
+        let changed = discovered("one.ARW", OriginalKind::Raw, 7, 1002.0);
+        let updated = first.apply_scan(vec![changed], Vec::new()).await.unwrap();
+        let updated_photo = updated
+            .photos
+            .iter()
+            .find(|photo| photo.id == photo_id)
+            .unwrap();
+        assert_eq!(updated_photo.preview_state, PreviewState::InspectionPending);
+        // Seeding with the superseded revision must lose the compare-and-swap
+        // on the RAW revision itself, not merely a source-kind guard.
+        assert_eq!(
+            first
+                .seed_preview(PreviewSeed {
+                    photo_id,
+                    state: PreviewState::Ready,
+                    source: crate::PreviewSource::RawEmbeddedJpeg,
+                    expected_source_revision: raw_revision,
+                    width: Some(512),
+                    height: Some(341),
+                    cache_revision: Some("stale".to_owned()),
+                })
+                .await
+                .unwrap(),
+            PreviewSeedResult::StaleIgnored
+        );
+        first.shutdown().unwrap();
+    }
+}
