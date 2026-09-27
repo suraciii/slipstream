@@ -15,6 +15,7 @@ import {
 import { createViewOptions, type ViewOptionsElements } from "./view-options.js";
 import { createRatingControls } from "./rating-controls.js";
 import { createPhotoToolsController } from "./photo-tools.js";
+import { createPhotoEditorSurfaceController } from "./photo-editor-surface.js";
 import { createSourceSurfaceController } from "./source-surface.js";
 import { createAlbumForm } from "./album-form.js";
 import {
@@ -23,10 +24,7 @@ import {
 } from "../model/browser-navigation.js";
 import { formatCaptureTime } from "./capture-time.js";
 import { formatPhotoCount } from "./photo-count.js";
-import type {
-  EditorWhiteBalance,
-  EditorWhiteBalancePresentation,
-} from "../model/photo-editor.js";
+import type { EditorWhiteBalancePresentation } from "../model/photo-editor.js";
 
 export type {
   RemovedPanelViewModel,
@@ -34,26 +32,6 @@ export type {
   TrashOutcomeViewModel,
   TrashReviewViewModel,
 } from "./removed-panels.js";
-
-/// One white-balance intent in the workspace's words. A stored mode the
-/// deployment does not admit still reads as retained intent, never as as-shot.
-const describeWhiteBalance = (intent: EditorWhiteBalance): string =>
-  intent.mode === "as-shot"
-    ? "As shot"
-    : `Temperature ${intent.temperatureKelvin} K, tint ${intent.tintMilli}`;
-
-/// The white-balance presentation before any facts arrive: as-shot intent, no
-/// admitted adjustable mode, and controls that take no input.
-const loadingWhiteBalance = (): EditorWhiteBalancePresentation =>
-  Object.freeze({
-    intent: Object.freeze({ mode: "as-shot" }),
-    modes: Object.freeze(["as-shot"]),
-    adjustable: false,
-    note: "",
-    temperatureKelvin: null,
-    tintMilli: null,
-    resettable: false,
-  });
 
 type ViewSelectionState = "undecided" | "selected" | "rejected";
 type ViewPreviewSource = "jpeg-original" | "raw-embedded-jpeg";
@@ -1386,153 +1364,6 @@ export function createLibraryBrowserView(
   const photoToolsReturnButtons = Array.from(
     root.querySelectorAll<HTMLButtonElement>("[data-photo-tools-return]"),
   );
-  const editorExposure = required<HTMLInputElement>(
-    root,
-    "[data-photo-editor-exposure]",
-  );
-  const editorExposureValue = required<HTMLOutputElement>(
-    root,
-    "[data-photo-editor-exposure-value]",
-  );
-  const editorWhiteBalance = required<HTMLElement>(
-    root,
-    "[data-photo-editor-white-balance]",
-  );
-  const editorWhiteBalanceMode = required<HTMLSelectElement>(
-    root,
-    "[data-photo-editor-white-balance-mode]",
-  );
-  const editorWhiteBalanceNote = required<HTMLElement>(
-    root,
-    "[data-photo-editor-white-balance-note]",
-  );
-  const editorTemperature = required<HTMLInputElement>(
-    root,
-    "[data-photo-editor-temperature]",
-  );
-  const editorTemperatureValue = required<HTMLOutputElement>(
-    root,
-    "[data-photo-editor-temperature-value]",
-  );
-  const editorTint = required<HTMLInputElement>(
-    root,
-    "[data-photo-editor-tint]",
-  );
-  const editorTintValue = required<HTMLOutputElement>(
-    root,
-    "[data-photo-editor-tint-value]",
-  );
-  const editorResetExposure = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-reset-exposure]",
-  );
-  const editorResetWhiteBalance = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-reset-white-balance]",
-  );
-  const editorStageNote = required<HTMLElement>(
-    root,
-    "[data-photo-editor-stage-note]",
-  );
-  const editorSupport = required<HTMLElement>(
-    root,
-    "[data-photo-editor-support]",
-  );
-  const editorProcessing = required<HTMLElement>(
-    root,
-    "[data-photo-editor-processing]",
-  );
-  const editorCapabilityNote = required<HTMLElement>(
-    root,
-    "[data-photo-editor-capability]",
-  );
-  const editorStages = Array.from(
-    root.querySelectorAll<HTMLButtonElement>("[data-photo-editor-stage]"),
-  );
-  const editorProvenance = required<HTMLElement>(
-    root,
-    "[data-photo-editor-provenance]",
-  );
-  const editorPreview = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-preview]",
-  );
-  const editorReset = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-reset]",
-  );
-  const editorUndo = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-undo]",
-  );
-  const editorRedo = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-redo]",
-  );
-  const editorCompare = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-compare]",
-  );
-  const editorPreviewImage = required<HTMLImageElement>(
-    root,
-    "[data-photo-editor-preview-image]",
-  );
-  const editorPreviewNote = required<HTMLElement>(
-    root,
-    "[data-photo-editor-preview-note]",
-  );
-  const editorDraftNote = required<HTMLElement>(
-    root,
-    "[data-photo-editor-draft]",
-  );
-  const editorConflict = required<HTMLElement>(
-    root,
-    "[data-photo-editor-conflict]",
-  );
-  const editorConflictMessage = required<HTMLElement>(
-    root,
-    "[data-photo-editor-conflict-message]",
-  );
-  const editorUseSaved = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-use-saved]",
-  );
-  const editorReapply = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-reapply]",
-  );
-  const editorDiscardDraft = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-discard-draft]",
-  );
-  const editorExportState = required<HTMLElement>(
-    root,
-    "[data-photo-editor-export-state]",
-  );
-  const editorExportSubmit = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-export-submit]",
-  );
-  const editorExportCancel = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-export-cancel]",
-  );
-  const editorExportRetry = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-export-retry]",
-  );
-  const editorExportDownload = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-export-download]",
-  );
-  const editorExportTarget = required<HTMLElement>(
-    root,
-    "[data-photo-editor-export-target]",
-  );
-  const editorStatus = required<HTMLElement>(
-    root,
-    "[data-photo-editor-status]",
-  );
   const ratingDialog = required<HTMLDialogElement>(
     root,
     "[data-rating-choices]",
@@ -1540,14 +1371,6 @@ export function createLibraryBrowserView(
   const ratingChoicesClose = required<HTMLButtonElement>(
     root,
     "[data-rating-choices-close]",
-  );
-  const editorRebind = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-rebind]",
-  );
-  const editorRefresh = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-refresh]",
   );
   const ratings = required<HTMLElement>(root, "[data-ratings]");
   const selectFeedback = required<HTMLElement>(root, "[data-select-feedback]");
@@ -1832,229 +1655,6 @@ export function createLibraryBrowserView(
   /// The last neighbor facts the page model reported. A disclosure rebuilds
   /// the strip from them, so a closed strip holds no image demand at all.
   let filmstripModel: FilmstripViewModel | undefined;
-  let editorPhotoId: string | undefined;
-  let editorModel: EditorViewModel | undefined;
-  /// The exposure a live gesture is showing, and the model value it is drawn
-  /// over. The draft covers the window between a pointer drag and the write
-  /// that follows it, and it is dropped as soon as the model reaches it or
-  /// moves anywhere else: an undo, reset, or conflict adoption renders the
-  /// settings it actually restored.
-  let editorDraft: number | undefined;
-  let editorDraftBase: number | undefined;
-  const openEditor = (photoId: string) => {
-    if (!photoId || photoView.hidden) return;
-    editorPhotoId = photoId;
-    editorDraft = undefined;
-    editorDraftBase = undefined;
-    editorModel = undefined;
-    renderEditor({
-      photoId,
-      loading: true,
-      stage: "develop",
-      stageNote: "Develop: loading this Photo's edit facts.",
-      filmReason: "",
-      sourceSupport: "unknown",
-      processingAvailable: false,
-      capabilityNote: "",
-      exposureEv: 0,
-      savedExposureEv: 0,
-      baselineExposureEv: 0,
-      exposureMinimumEv: 0,
-      exposureMaximumEv: 1,
-      exposureStepEv: 0.001,
-      whiteBalance: loadingWhiteBalance(),
-      canEdit: false,
-      canPreview: false,
-      previewing: false,
-      previewNote: "",
-      previewStale: false,
-      saving: false,
-      dirty: false,
-      canUndo: false,
-      canRedo: false,
-      comparing: false,
-      conflict: null,
-      draftNote: "",
-      export: {
-        state: "idle",
-        note: "",
-        artifact: null,
-        canSubmit: false,
-        canCancel: false,
-        canRetry: false,
-        canDownload: false,
-      },
-      status: "Loading edit recipe…",
-    });
-    send({ kind: "editor-open", photoId });
-    photoToolsController.open("edit");
-  };
-  const editorVisible = () =>
-    alive &&
-    !photoView.hidden &&
-    surfaces.isActive("photo-tools") &&
-    photoToolsController.view() === "edit";
-  const renderEditor = (model: EditorViewModel) => {
-    if (
-      !alive ||
-      (editorPhotoId !== undefined && editorPhotoId !== model.photoId)
-    )
-      return;
-    editorPhotoId = model.photoId;
-    editorModel = model;
-    const minimum = Number.isFinite(model.exposureMinimumEv)
-      ? model.exposureMinimumEv
-      : 0;
-    const maximum = Number.isFinite(model.exposureMaximumEv)
-      ? model.exposureMaximumEv
-      : 1;
-    const step =
-      Number.isFinite(model.exposureStepEv) && model.exposureStepEv > 0
-        ? model.exposureStepEv
-        : 0.001;
-    if (
-      editorDraft !== undefined &&
-      (model.exposureEv === editorDraft || model.exposureEv !== editorDraftBase)
-    ) {
-      editorDraft = undefined;
-      editorDraftBase = undefined;
-    }
-    const exposure = editorDraft ?? model.exposureEv;
-    editorExposure.min = String(minimum);
-    editorExposure.max = String(maximum);
-    editorExposure.step = String(step);
-    editorExposure.value = String(exposure);
-    const label = `${exposure.toFixed(3)} EV`;
-    editorExposureValue.value = label;
-    editorExposureValue.textContent = label;
-    editorExposure.disabled = model.loading || !model.canEdit;
-    editorWhiteBalance.textContent = describeWhiteBalance(
-      model.whiteBalance.intent,
-    );
-    const whiteBalance = model.whiteBalance;
-    const adjustableOption =
-      editorWhiteBalanceMode.querySelector<HTMLOptionElement>(
-        'option[value="temperature-tint"]',
-      );
-    if (adjustableOption) adjustableOption.disabled = !whiteBalance.adjustable;
-    editorWhiteBalanceMode.value = whiteBalance.intent.mode;
-    editorWhiteBalanceMode.disabled =
-      model.loading || !model.canEdit || !whiteBalance.adjustable;
-    editorWhiteBalanceNote.textContent = whiteBalance.note;
-    editorWhiteBalanceNote.hidden = !whiteBalance.note;
-    const temperature = whiteBalance.temperatureKelvin;
-    if (temperature) {
-      editorTemperature.min = String(temperature.minimum);
-      editorTemperature.max = String(temperature.maximum);
-      editorTemperature.value = String(temperature.value);
-      editorTemperature.disabled = model.loading || !temperature.enabled;
-      const label = `${temperature.value} K`;
-      editorTemperatureValue.value = label;
-      editorTemperatureValue.textContent = label;
-    } else {
-      editorTemperature.disabled = true;
-      editorTemperatureValue.value = "—";
-      editorTemperatureValue.textContent = "—";
-    }
-    const tint = whiteBalance.tintMilli;
-    if (tint) {
-      editorTint.min = String(tint.minimum);
-      editorTint.max = String(tint.maximum);
-      editorTint.value = String(tint.value);
-      editorTint.disabled = model.loading || !tint.enabled;
-      const label = `${tint.value}`;
-      editorTintValue.value = label;
-      editorTintValue.textContent = label;
-    } else {
-      editorTint.disabled = true;
-      editorTintValue.value = "—";
-      editorTintValue.textContent = "—";
-    }
-    editorResetExposure.disabled =
-      model.loading ||
-      !model.canEdit ||
-      Math.abs(exposure - model.baselineExposureEv) < step / 2;
-    editorResetWhiteBalance.disabled =
-      model.loading || !model.canEdit || !whiteBalance.resettable;
-    editorSupport.textContent = model.sourceSupport;
-    editorProcessing.textContent = model.loading
-      ? "Checking…"
-      : model.processingAvailable
-        ? "Available"
-        : "Unavailable";
-    editorCapabilityNote.textContent = model.capabilityNote;
-    editorCapabilityNote.hidden = !model.capabilityNote;
-    for (const button of editorStages) {
-      const stage = button.dataset.photoEditorStage as EditorStage | undefined;
-      button.setAttribute("aria-pressed", String(stage === model.stage));
-      button.disabled = stage === "film" && Boolean(model.filmReason);
-      if (stage === "film") {
-        button.title = model.filmReason;
-        if (model.filmReason)
-          button.setAttribute("aria-describedby", editorStageNote.id);
-        else button.removeAttribute("aria-describedby");
-      }
-    }
-    editorStageNote.textContent = model.filmReason;
-    editorStageNote.hidden = !model.filmReason;
-    editorProvenance.textContent = model.stageNote;
-    // Reset all restores the processing baseline of both controls, so it is
-    // enabled exactly while the settings are away from that baseline. Local
-    // changes are discarded by Undo, never by a disabled Reset all.
-    const atBaseline =
-      Math.abs(exposure - model.baselineExposureEv) < step / 2 &&
-      !model.whiteBalance.resettable;
-    editorUndo.disabled = model.loading || !model.canUndo;
-    editorRedo.disabled = model.loading || !model.canRedo;
-    editorReset.disabled = model.loading || model.saving || atBaseline;
-    // The comparison compares a stage's baseline development with the current
-    // settings; the Camera stage presents the camera Preview itself, so it
-    // offers no comparison of its own.
-    editorCompare.disabled =
-      model.loading || !model.canPreview || model.stage === "camera";
-    editorCompare.setAttribute("aria-pressed", String(model.comparing));
-    editorPreview.disabled =
-      model.loading || model.previewing || !model.canPreview;
-    editorRebind.hidden = !model.conflict;
-    editorRebind.disabled = model.loading || model.saving || !model.conflict;
-    editorRefresh.disabled = model.loading || model.saving;
-    editorDraftNote.textContent = model.draftNote;
-    editorDraftNote.hidden = !model.draftNote;
-    editorConflict.hidden = !model.conflict;
-    editorConflictMessage.textContent = model.conflict?.message ?? "";
-    editorUseSaved.disabled = model.saving;
-    editorReapply.disabled = model.saving;
-    editorDiscardDraft.disabled = model.saving;
-    const exported = model.export;
-    const exportLabel =
-      model.stage === "film" ? "Finished JPEG" : "Development TIFF";
-    editorExportTarget.textContent = exportLabel;
-    editorExportState.textContent = exported.note;
-    editorExportSubmit.textContent = `Export ${exportLabel}`;
-    editorExportSubmit.disabled =
-      model.loading || !model.canEdit || !exported.canSubmit;
-    editorExportCancel.hidden = !exported.canCancel;
-    editorExportRetry.hidden = !exported.canRetry;
-    editorExportDownload.hidden = !exported.canDownload;
-    // The Edit Preview note describes the Develop or Film rendition. The
-    // Camera stage presents the camera Preview, which is not an Edit Preview.
-    const editPreviewStage = model.stage !== "camera";
-    editorPreviewNote.textContent = editPreviewStage ? model.previewNote : "";
-    editorPreviewNote.hidden = !editPreviewStage || !model.previewNote;
-    editorPreviewNote.dataset.tone = model.previewStale ? "stale" : "";
-    editorStatus.textContent = model.status;
-    editorStatus.dataset.tone = model.status ? "notice" : "";
-  };
-  const presentEditorPreview = (url: string): void => {
-    if (!alive || !editorVisible() || !editorPhotoId) return;
-    editorPreviewImage.src = new URL(url, window.location.href).href;
-    editorPreviewImage.hidden = false;
-  };
-  const clearEditorPreview = (): void => {
-    if (!alive) return;
-    editorPreviewImage.hidden = true;
-    editorPreviewImage.removeAttribute("src");
-  };
   /// True while the Nearby Photos subview is the presented content of Photo
   /// tools. The one strip node then lives inside that disclosure; otherwise it
   /// lives beside the Preview, which only a wide layout shows.
@@ -2186,7 +1786,16 @@ export function createLibraryBrowserView(
     syncFilmstripHost,
     syncSecondarySurface,
     openSources: () => sourceController.open(),
-    openEditor,
+    openEditor: (photoId) => editorController.open(photoId),
+  });
+  const editorController = createPhotoEditorSurfaceController({
+    root,
+    send,
+    isPhotoVisible: () => !photoView.hidden,
+    isEditorSurfaceVisible: () =>
+      surfaces.isActive("photo-tools") &&
+      photoToolsController.view() === "edit",
+    openEditorSurface: () => photoToolsController.open("edit"),
   });
   const ratingControls = createRatingControls({
     elements: {
@@ -4043,122 +3652,6 @@ export function createLibraryBrowserView(
   // A pointer drag reports every intermediate position, and only the settled
   // gesture is one edit action, so the label follows `input` while the save
   // follows `change`.
-  editorExposure.addEventListener("input", () => {
-    if (!editorPhotoId || !editorModel || editorExposure.disabled) return;
-    editorDraftBase ??= editorModel.exposureEv;
-    editorDraft = Number(editorExposure.value);
-    renderEditor(editorModel);
-  });
-  editorExposure.addEventListener("change", () => {
-    if (!editorPhotoId || !editorModel || editorExposure.disabled) return;
-    const value = Number(editorExposure.value);
-    editorDraftBase ??= editorModel.exposureEv;
-    editorDraft = value;
-    renderEditor(editorModel);
-    send({
-      kind: "editor-exposure",
-      photoId: editorPhotoId,
-      exposureEv: value,
-    });
-  });
-  // The white-balance mode is one committed choice, so it saves on `change`.
-  editorWhiteBalanceMode.addEventListener("change", () => {
-    if (!editorPhotoId || !editorModel || editorWhiteBalanceMode.disabled)
-      return;
-    send({
-      kind: "editor-white-balance-mode",
-      photoId: editorPhotoId,
-      mode: editorWhiteBalanceMode.value,
-    });
-  });
-  editorTemperature.addEventListener("change", () => {
-    if (!editorPhotoId || !editorModel || editorTemperature.disabled) return;
-    send({
-      kind: "editor-temperature",
-      photoId: editorPhotoId,
-      temperatureKelvin: Number(editorTemperature.value),
-    });
-  });
-  editorTint.addEventListener("change", () => {
-    if (!editorPhotoId || !editorModel || editorTint.disabled) return;
-    send({
-      kind: "editor-tint",
-      photoId: editorPhotoId,
-      tintMilli: Number(editorTint.value),
-    });
-  });
-  editorResetExposure.addEventListener("click", () => {
-    if (!editorPhotoId || !editorModel) return;
-    send({ kind: "editor-reset-exposure", photoId: editorPhotoId });
-  });
-  editorResetWhiteBalance.addEventListener("click", () => {
-    if (!editorPhotoId || !editorModel) return;
-    send({ kind: "editor-reset-white-balance", photoId: editorPhotoId });
-  });
-  editorPreview.addEventListener("click", () => {
-    if (editorPhotoId) send({ kind: "editor-preview", photoId: editorPhotoId });
-  });
-  editorUndo.addEventListener("click", () => {
-    if (editorPhotoId) send({ kind: "editor-undo", photoId: editorPhotoId });
-  });
-  editorRedo.addEventListener("click", () => {
-    if (editorPhotoId) send({ kind: "editor-redo", photoId: editorPhotoId });
-  });
-  editorCompare.addEventListener("click", () => {
-    if (!editorPhotoId || !editorModel) return;
-    send({
-      kind: "editor-compare",
-      photoId: editorPhotoId,
-      pressed: !editorModel.comparing,
-    });
-  });
-  editorReset.addEventListener("click", () => {
-    if (!editorPhotoId || !editorModel) return;
-    send({ kind: "editor-reset", photoId: editorPhotoId });
-  });
-  editorRefresh.addEventListener("click", () => {
-    if (editorPhotoId) send({ kind: "editor-refresh", photoId: editorPhotoId });
-  });
-  editorUseSaved.addEventListener("click", () => {
-    if (editorPhotoId)
-      send({ kind: "editor-use-saved", photoId: editorPhotoId });
-  });
-  editorReapply.addEventListener("click", () => {
-    if (editorPhotoId) send({ kind: "editor-reapply", photoId: editorPhotoId });
-  });
-  editorDiscardDraft.addEventListener("click", () => {
-    if (editorPhotoId)
-      send({ kind: "editor-discard-draft", photoId: editorPhotoId });
-  });
-  editorExportSubmit.addEventListener("click", () => {
-    if (editorPhotoId)
-      send({ kind: "editor-export-submit", photoId: editorPhotoId });
-  });
-  editorExportCancel.addEventListener("click", () => {
-    if (editorPhotoId)
-      send({ kind: "editor-export-cancel", photoId: editorPhotoId });
-  });
-  editorExportRetry.addEventListener("click", () => {
-    if (editorPhotoId)
-      send({ kind: "editor-export-retry", photoId: editorPhotoId });
-  });
-  editorExportDownload.addEventListener("click", () => {
-    if (editorPhotoId)
-      send({ kind: "editor-export-download", photoId: editorPhotoId });
-  });
-  for (const button of editorStages)
-    button.addEventListener("click", () => {
-      if (!editorPhotoId || button.disabled) return;
-      send({
-        kind: "editor-stage",
-        photoId: editorPhotoId,
-        stage: button.dataset.photoEditorStage as EditorStage,
-      });
-    });
-  editorRebind.addEventListener("click", () => {
-    if (!editorPhotoId || editorRebind.disabled) return;
-    send({ kind: "editor-rebind", photoId: editorPhotoId });
-  });
   stage.addEventListener("dblclick", toggleDetail);
   zoomFit.addEventListener("click", applyFit);
   zoomOut.addEventListener("click", () => zoomBy(1 / ZOOM_STEP));
@@ -4581,10 +4074,10 @@ export function createLibraryBrowserView(
     renderPhotoFacts,
     renderPhotoMetadata,
     renderPhotoShell,
-    editorVisible,
-    renderEditor,
-    presentEditorPreview,
-    clearEditorPreview,
+    editorVisible: () => editorController.visible(),
+    renderEditor: (model) => editorController.render(model),
+    presentEditorPreview: (url) => editorController.presentPreview(url),
+    clearEditorPreview: () => editorController.clearPreview(),
     presentReviewImage,
     reviewImageMatches(url) {
       if (!alive) return false;
@@ -4684,6 +4177,7 @@ export function createLibraryBrowserView(
       membershipPanelController.dispose();
       albumFormController.dispose();
       photoToolsController.dispose();
+      editorController.dispose();
       ratingControls.dispose();
       viewOptionsController.dispose();
       stageObserver.disconnect();
