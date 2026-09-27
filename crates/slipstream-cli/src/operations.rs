@@ -1,0 +1,855 @@
+use super::*;
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Operation {
+    Status,
+    ProcessingCapability,
+    PhotosRecipeGet,
+    PhotosRecipeSave,
+    PhotosRecipeRebind,
+    PhotosEditPreview,
+    LibraryCheck,
+    FoldersList,
+    AlbumsList,
+    AlbumsGet,
+    PhotosList,
+    PhotosGet,
+    PhotosPreview,
+    PhotosSet,
+    PhotosRemove,
+    PhotosRemovalInspect,
+    PhotosRestore,
+    PhotosRestoreInspect,
+    PhotosMetadata,
+    PhotosMetadataSave,
+    PhotosExportSubmit,
+    PhotosExportList,
+    PhotosExportStatus,
+    PhotosExportDownload,
+    AlbumsCreate,
+    AlbumsRename,
+    AlbumsDelete,
+    AlbumsAdd,
+    AlbumsRemove,
+    AlbumsReorder,
+    TrashList,
+    TrashReview,
+    TrashDelete,
+    TrashRead,
+}
+
+impl Operation {
+    pub(crate) fn wire(self) -> &'static str {
+        match self {
+            Self::Status => "status",
+            Self::ProcessingCapability => "processing-capability",
+            Self::PhotosRecipeGet => "photos-recipe-get",
+            Self::PhotosRecipeSave => "photos-recipe-save",
+            Self::PhotosRecipeRebind => "photos-recipe-rebind",
+            Self::PhotosEditPreview => "photos-edit-preview",
+            Self::LibraryCheck => "library-check",
+            Self::FoldersList => "folders-list",
+            Self::AlbumsList => "albums-list",
+            Self::AlbumsGet => "albums-get",
+            Self::PhotosList => "photos-list",
+            Self::PhotosGet => "photos-get",
+            Self::PhotosPreview => "photos-preview",
+            Self::PhotosSet => "photos-set",
+            Self::PhotosRemove => "photos-remove",
+            Self::PhotosRemovalInspect => "photos-removal-operation",
+            Self::PhotosRestore => "photos-restore",
+            Self::PhotosRestoreInspect => "photos-restore-operation",
+            Self::PhotosMetadata => "photos-metadata",
+            Self::PhotosMetadataSave => "photos-metadata-save",
+            Self::PhotosExportSubmit => "photos-export-submit",
+            Self::PhotosExportList => "photos-export-list",
+            Self::PhotosExportStatus => "photos-export-status",
+            Self::PhotosExportDownload => "photos-export-download",
+            Self::AlbumsCreate => "albums-create",
+            Self::AlbumsRename => "albums-rename",
+            Self::AlbumsDelete => "albums-delete",
+            Self::AlbumsAdd => "albums-add",
+            Self::AlbumsRemove => "albums-remove",
+            Self::AlbumsReorder => "albums-reorder",
+            Self::TrashList => "trash-list",
+            Self::TrashReview => "trash-review",
+            Self::TrashDelete => "trash-delete",
+            Self::TrashRead => "trash-operation",
+        }
+    }
+}
+
+pub(crate) fn command_operation(command: &Command) -> Operation {
+    match command {
+        Command::Status => Operation::Status,
+        Command::Processing { .. } => Operation::ProcessingCapability,
+        Command::Library { .. } => Operation::LibraryCheck,
+        Command::Folders { .. } => Operation::FoldersList,
+        Command::Albums { command } => match command {
+            AlbumCommand::List(_) => Operation::AlbumsList,
+            AlbumCommand::Get { .. } => Operation::AlbumsGet,
+            AlbumCommand::Create { .. } => Operation::AlbumsCreate,
+            AlbumCommand::Rename { .. } => Operation::AlbumsRename,
+            AlbumCommand::Delete { .. } => Operation::AlbumsDelete,
+            AlbumCommand::Add(_) => Operation::AlbumsAdd,
+            AlbumCommand::Remove(_) => Operation::AlbumsRemove,
+            AlbumCommand::Reorder(_) => Operation::AlbumsReorder,
+        },
+        Command::Photos { command } => match command {
+            PhotoCommand::List(_) => Operation::PhotosList,
+            PhotoCommand::Get { .. } => Operation::PhotosGet,
+            PhotoCommand::Preview { .. } => Operation::PhotosPreview,
+            PhotoCommand::EditPreview(_) => Operation::PhotosEditPreview,
+            PhotoCommand::Recipe { command } => match command {
+                development::RecipeCommand::Get { .. } => Operation::PhotosRecipeGet,
+                development::RecipeCommand::Save(_) => Operation::PhotosRecipeSave,
+                development::RecipeCommand::Rebind(_) => Operation::PhotosRecipeRebind,
+            },
+            PhotoCommand::Set(_) => Operation::PhotosSet,
+            PhotoCommand::Remove(_) => Operation::PhotosRemove,
+            PhotoCommand::RemovalOperation { .. } => Operation::PhotosRemovalInspect,
+            PhotoCommand::Restore(_) => Operation::PhotosRestore,
+            PhotoCommand::RestoreOperation { .. } => Operation::PhotosRestoreInspect,
+            PhotoCommand::Metadata { .. } => Operation::PhotosMetadata,
+            PhotoCommand::MetadataSave(_) => Operation::PhotosMetadataSave,
+            PhotoCommand::Export { command } => match command {
+                PhotoExportCommand::Submit(_) => Operation::PhotosExportSubmit,
+                PhotoExportCommand::List { .. } => Operation::PhotosExportList,
+                PhotoExportCommand::Status { .. } => Operation::PhotosExportStatus,
+                PhotoExportCommand::Download(_) => Operation::PhotosExportDownload,
+            },
+        },
+        Command::Trash { command } => match command {
+            TrashCommand::List(_) => Operation::TrashList,
+            TrashCommand::Review(_) => Operation::TrashReview,
+            TrashCommand::Delete { .. } => Operation::TrashDelete,
+            TrashCommand::Operation { .. } => Operation::TrashRead,
+        },
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MembershipKind {
+    Add,
+    Remove,
+    Reorder,
+}
+
+impl MembershipKind {
+    pub(crate) fn operation(self) -> Operation {
+        match self {
+            Self::Add => Operation::AlbumsAdd,
+            Self::Remove => Operation::AlbumsRemove,
+            Self::Reorder => Operation::AlbumsReorder,
+        }
+    }
+
+    pub(crate) fn wire(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Remove => "remove",
+            Self::Reorder => "reorder",
+        }
+    }
+
+    pub(crate) fn limit_name(self) -> &'static str {
+        match self {
+            Self::Reorder => "albumReorderMembersMaximum",
+            Self::Add | Self::Remove => "mutationPhotoIdsMaximum",
+        }
+    }
+}
+
+/// Checks that two returned ID arrays are an order-preserving partition of the
+/// submitted IDs: no omission, no duplication, and request order preserved.
+pub(crate) fn request_order_partition(
+    submitted: &[String],
+    first: &[String],
+    second: &[String],
+) -> bool {
+    let mut assignment = std::collections::HashMap::<&str, usize>::new();
+    for (index, ids) in [first, second].into_iter().enumerate() {
+        for id in ids {
+            if assignment.insert(id.as_str(), index).is_some() {
+                return false;
+            }
+        }
+    }
+    if assignment.len() != submitted.len() {
+        return false;
+    }
+    let mut consumed = [0_usize, 0_usize];
+    for id in submitted {
+        let Some(&assigned) = assignment.get(id.as_str()) else {
+            return false;
+        };
+        if [first, second][assigned]
+            .get(consumed[assigned])
+            .is_none_or(|expected| expected != id)
+        {
+            return false;
+        }
+        consumed[assigned] += 1;
+    }
+    consumed == [first.len(), second.len()]
+}
+
+pub(crate) fn confirmed<T>(
+    result: Result<T, ()>,
+    identity: &MutationIdentity,
+) -> Result<T, CommandFailure> {
+    result.map_err(|()| CommandFailure::unknown(identity))
+}
+
+pub(crate) async fn membership_mutation(
+    kind: MembershipKind,
+    args: &AlbumMembershipArgs,
+    photo_ids: Vec<String>,
+    client: &ServiceClient,
+    admission: &AdmissionState,
+) -> Result<Value, CommandFailure> {
+    let identity = MutationIdentity {
+        operation: kind.operation(),
+        photo_ids: photo_ids.clone(),
+        album_id: Some(args.album_id.clone()),
+        album_name: None,
+    };
+    let result: Value = client
+        .mutation(
+            &identity,
+            admission,
+            client.endpoint(&["api", "albums", &args.album_id, "changes"]),
+            json!({
+                "operation": kind.wire(),
+                "photoIds": photo_ids,
+                "ifVersion": args.if_version,
+            }),
+        )
+        .await?;
+    confirmed_membership_result(kind, &identity, result, &client.origin)
+}
+
+/// Validates one confirmed membership result against the submitted request
+/// and renders the CLI reference data shape.
+pub(crate) fn confirmed_membership_result(
+    kind: MembershipKind,
+    identity: &MutationIdentity,
+    result: Value,
+    origin: &Url,
+) -> Result<Value, CommandFailure> {
+    let unknown = || CommandFailure::unknown(identity);
+    match kind {
+        MembershipKind::Add => {
+            let result: AlbumAddWire = serde_json::from_value(result).map_err(|_| unknown())?;
+            if !request_order_partition(
+                &identity.photo_ids,
+                &result.added_photo_ids,
+                &result.already_member_photo_ids,
+            ) {
+                return Err(unknown());
+            }
+            let album = confirmed(album_value(result.album, origin), identity)?;
+            Ok(json!({
+                "album": album,
+                "addedPhotoIds": result.added_photo_ids,
+                "alreadyMemberPhotoIds": result.already_member_photo_ids,
+            }))
+        }
+        MembershipKind::Remove => {
+            let result: AlbumRemoveWire = serde_json::from_value(result).map_err(|_| unknown())?;
+            if result.saved_photo_id.as_deref().is_some_and(str::is_empty)
+                || !request_order_partition(
+                    &identity.photo_ids,
+                    &result.removed_photo_ids,
+                    &result.already_absent_photo_ids,
+                )
+            {
+                return Err(unknown());
+            }
+            let album = confirmed(album_value(result.album, origin), identity)?;
+            Ok(json!({
+                "album": album,
+                "removedPhotoIds": result.removed_photo_ids,
+                "alreadyAbsentPhotoIds": result.already_absent_photo_ids,
+                "savedPhotoId": result.saved_photo_id,
+            }))
+        }
+        MembershipKind::Reorder => {
+            let result: AlbumReorderWire = serde_json::from_value(result).map_err(|_| unknown())?;
+            if result.ordered_photo_ids != identity.photo_ids {
+                return Err(unknown());
+            }
+            let album = confirmed(album_value(result.album, origin), identity)?;
+            Ok(json!({
+                "album": album,
+                "orderedPhotoIds": result.ordered_photo_ids,
+                "reordered": result.reordered,
+            }))
+        }
+    }
+}
+
+/// Validates one confirmed decision batch against the submitted request and
+/// derives the CLI reference data shape, partition, and exit code. Every
+/// result must match its requested Photo and outcome-specific key set, the
+/// reported counts must count those outcomes, and every changed or
+/// unchanged result must repeat the requested decision value in its
+/// current snapshot; anything else is an unknown outcome rather than a
+/// claimed partition.
+pub(crate) fn confirmed_decision_result(
+    identity: &MutationIdentity,
+    prepared: &PreparedDecision,
+    result: PhotoDecisionWire,
+) -> Result<Value, CommandFailure> {
+    let unknown = || CommandFailure::unknown(identity);
+    if result.results.len() != prepared.photos.len() {
+        return Err(unknown());
+    }
+    let mut counted = [0_usize; 4];
+    let mut first_conflict: Option<(String, String)> = None;
+    let mut first_missing: Option<String> = None;
+    let mut items = Vec::with_capacity(result.results.len());
+    // A changed or unchanged result reports the requested decision value,
+    // so any other current value is an untrustworthy response.
+    let echoed_request = |current: &PhotoDecisionSnapshotWire| match prepared.field {
+        DecisionField::SelectionState => serde_json::to_value(&current.selection_state)
+            .is_ok_and(|snapshot| snapshot == prepared.value),
+        DecisionField::Rating => prepared.value.as_u64() == Some(u64::from(current.rating)),
+    };
+    for (item, submitted_photo) in result.results.into_iter().zip(&prepared.photos) {
+        if item.photo_id != submitted_photo.photo_id {
+            return Err(unknown());
+        }
+        let mut value = json!({
+            "photoId": item.photo_id,
+            "outcome": item.outcome,
+        });
+        let current_valid = |current: &PhotoDecisionSnapshotWire| {
+            !current.decision_version.is_empty() && current.rating <= 5
+        };
+        match item.outcome.as_str() {
+            "changed" => {
+                let (Some(prior), Some(current)) = (&item.prior, &item.current) else {
+                    return Err(unknown());
+                };
+                if prior.rating > 5 || !current_valid(current) || !echoed_request(current) {
+                    return Err(unknown());
+                }
+                counted[0] += 1;
+                value["prior"] = json!({
+                    "selectionState": prior.selection_state,
+                    "rating": prior.rating,
+                });
+                value["current"] = json!({
+                    "selectionState": current.selection_state,
+                    "rating": current.rating,
+                    "decisionVersion": current.decision_version,
+                });
+            }
+            "unchanged" | "conflict" => {
+                if item.prior.is_some() {
+                    return Err(unknown());
+                }
+                let Some(current) = &item.current else {
+                    return Err(unknown());
+                };
+                if !current_valid(current) {
+                    return Err(unknown());
+                }
+                if item.outcome == "unchanged" {
+                    if !echoed_request(current) {
+                        return Err(unknown());
+                    }
+                    counted[1] += 1;
+                } else {
+                    counted[2] += 1;
+                    if first_conflict.is_none() {
+                        first_conflict =
+                            Some((item.photo_id.clone(), current.decision_version.clone()));
+                    }
+                }
+                value["current"] = json!({
+                    "selectionState": current.selection_state,
+                    "rating": current.rating,
+                    "decisionVersion": current.decision_version,
+                });
+            }
+            "missing" => {
+                if item.prior.is_some() || item.current.is_some() {
+                    return Err(unknown());
+                }
+                counted[3] += 1;
+                if first_missing.is_none() {
+                    first_missing = Some(item.photo_id.clone());
+                }
+            }
+            _ => return Err(unknown()),
+        }
+        items.push(value);
+    }
+    let [changed, unchanged, conflict, missing] = counted;
+    if (changed, unchanged, conflict, missing)
+        != (
+            result.counts.changed,
+            result.counts.unchanged,
+            result.counts.conflict,
+            result.counts.missing,
+        )
+    {
+        return Err(unknown());
+    }
+    let counts = json!({
+        "changed": changed,
+        "unchanged": unchanged,
+        "conflict": conflict,
+        "missing": missing,
+    });
+    let data = json!({ "results": items, "counts": counts });
+    if conflict + missing == 0 {
+        return Ok(data);
+    }
+    if changed + unchanged > 0 {
+        return Err(CommandFailure::photo_batch_partial(&counts).with_data(data));
+    }
+    if conflict > 0 {
+        let (reference, current_version) =
+            first_conflict.expect("a conflicting result was counted");
+        return Err(
+            CommandFailure::photo_batch_conflict(&reference, &current_version).with_data(data),
+        );
+    }
+    let reference = first_missing.expect("a missing result was counted");
+    Err(CommandFailure::photo_batch_missing(&reference).with_data(data))
+}
+
+pub(crate) fn confirmed_removal_result(
+    identity: &MutationIdentity,
+    operation_id: &str,
+    prepared: &PreparedRemoval,
+    result: PhotoRemovalWire,
+) -> Result<Value, CommandFailure> {
+    if result.operation_id != operation_id || result.results.len() != prepared.photos.len() {
+        return Err(CommandFailure::unknown(identity));
+    }
+    let submitted = prepared
+        .photos
+        .iter()
+        .map(|photo| photo.photo_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut counts = PhotoRemovalCountsWire {
+        removed: 0,
+        changed_elsewhere: 0,
+        missing: 0,
+        already_removed: 0,
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut items = Vec::with_capacity(result.results.len());
+    for item in result.results {
+        if !submitted.contains(item.photo_id.as_str()) || !seen.insert(item.photo_id.clone()) {
+            return Err(CommandFailure::unknown(identity));
+        }
+        match item.outcome.as_str() {
+            "removed" => {
+                if item.removed_at_ms.is_none_or(|value| value < 0) {
+                    return Err(CommandFailure::unknown(identity));
+                }
+                counts.removed += 1;
+            }
+            "changed-elsewhere" => {
+                if item.removed_at_ms.is_some() {
+                    return Err(CommandFailure::unknown(identity));
+                }
+                counts.changed_elsewhere += 1;
+            }
+            "unavailable" => {
+                if item.removed_at_ms.is_some() {
+                    return Err(CommandFailure::unknown(identity));
+                }
+                counts.missing += 1;
+            }
+            "already-removed" => {
+                if item.removed_at_ms.is_some() {
+                    return Err(CommandFailure::unknown(identity));
+                }
+                counts.already_removed += 1;
+            }
+            _ => return Err(CommandFailure::unknown(identity)),
+        };
+        items.push(json!({
+            "photoId": item.photo_id,
+            "outcome": item.outcome,
+            "removedAtMs": item.removed_at_ms,
+        }));
+    }
+    if seen.len() != submitted.len()
+        || counts.removed != result.counts.removed
+        || counts.changed_elsewhere != result.counts.changed_elsewhere
+        || counts.missing != result.counts.missing
+        || counts.already_removed != result.counts.already_removed
+    {
+        return Err(CommandFailure::unknown(identity));
+    }
+    let data = json!({
+        "operationId": result.operation_id,
+        "counts": {
+            "removed": counts.removed,
+            "changedElsewhere": counts.changed_elsewhere,
+            "missing": counts.missing,
+            "alreadyRemoved": counts.already_removed,
+        },
+        "results": items,
+    });
+    if counts.changed_elsewhere == 0 && counts.missing == 0 {
+        return Ok(data);
+    }
+    let code = if counts.changed_elsewhere > 0 {
+        "conflict"
+    } else {
+        "not_found"
+    };
+    let message = if code == "conflict" {
+        "Read current Photo evidence before submitting a replacement removal."
+    } else {
+        "Query Photos and use current Photo IDs before submitting a replacement removal."
+    };
+    let effect = if counts.removed + counts.already_removed > 0 {
+        "partial"
+    } else {
+        "none"
+    };
+    Err(CommandFailure::from_payload(
+        if code == "conflict" { 4 } else { 3 },
+        ErrorPayload {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            effect: effect.to_owned(),
+            details: json!({"operationId": operation_id}),
+        },
+    )
+    .with_data(data))
+}
+
+pub(crate) fn confirmed_restore_result(
+    identity: &MutationIdentity,
+    operation_id: &str,
+    prepared: &PreparedRestore,
+    result: PhotoRestoreWire,
+) -> Result<Value, CommandFailure> {
+    if result.operation_id != operation_id || result.results.len() != prepared.markers.len() {
+        return Err(CommandFailure::unknown(identity));
+    }
+    let submitted = prepared
+        .markers
+        .iter()
+        .map(|marker| marker.photo_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut counts = PhotoRestoreCountsWire {
+        restored: 0,
+        already_active: 0,
+        changed_elsewhere: 0,
+        missing: 0,
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut items = Vec::with_capacity(result.results.len());
+    for item in result.results {
+        if !submitted.contains(item.photo_id.as_str()) || !seen.insert(item.photo_id.clone()) {
+            return Err(CommandFailure::unknown(identity));
+        }
+        match item.outcome.as_str() {
+            "restored" => counts.restored += 1,
+            "already-active" => counts.already_active += 1,
+            "changed-elsewhere" => counts.changed_elsewhere += 1,
+            "unavailable" => counts.missing += 1,
+            _ => return Err(CommandFailure::unknown(identity)),
+        }
+        items.push(json!({
+            "photoId": item.photo_id,
+            "outcome": item.outcome,
+        }));
+    }
+    if seen.len() != submitted.len()
+        || counts.restored != result.counts.restored
+        || counts.already_active != result.counts.already_active
+        || counts.changed_elsewhere != result.counts.changed_elsewhere
+        || counts.missing != result.counts.missing
+    {
+        return Err(CommandFailure::unknown(identity));
+    }
+    let data = json!({
+        "operationId": result.operation_id,
+        "counts": {
+            "restored": counts.restored,
+            "alreadyActive": counts.already_active,
+            "changedElsewhere": counts.changed_elsewhere,
+            "missing": counts.missing,
+        },
+        "results": items,
+    });
+    if counts.changed_elsewhere == 0 && counts.missing == 0 {
+        return Ok(data);
+    }
+    let code = if counts.changed_elsewhere > 0 {
+        "conflict"
+    } else {
+        "not_found"
+    };
+    let message = if code == "conflict" {
+        "Read current Trash evidence before submitting a replacement Restore."
+    } else {
+        "Query Trash and use current Photo IDs before submitting a replacement Restore."
+    };
+    let effect = if counts.restored + counts.already_active > 0 {
+        "partial"
+    } else {
+        "none"
+    };
+    Err(CommandFailure::from_payload(
+        if code == "conflict" { 4 } else { 3 },
+        ErrorPayload {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            effect: effect.to_owned(),
+            details: json!({"operationId": operation_id}),
+        },
+    )
+    .with_data(data))
+}
+
+pub(crate) fn restore_wire_value(
+    result: PhotoRestoreWire,
+    operation: Operation,
+) -> Result<Value, CommandFailure> {
+    let total = result
+        .counts
+        .restored
+        .checked_add(result.counts.already_active)
+        .and_then(|value| value.checked_add(result.counts.changed_elsewhere))
+        .and_then(|value| value.checked_add(result.counts.missing));
+    if result.operation_id.is_empty() || total != Some(result.results.len()) {
+        return Err(CommandFailure::transport(operation));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for item in &result.results {
+        if item.photo_id.is_empty() || !ids.insert(item.photo_id.as_str()) {
+            return Err(CommandFailure::transport(operation));
+        }
+        if !matches!(
+            item.outcome.as_str(),
+            "restored" | "already-active" | "changed-elsewhere" | "unavailable"
+        ) {
+            return Err(CommandFailure::transport(operation));
+        }
+    }
+    serde_json::to_value(result).map_err(|_| CommandFailure::transport(operation))
+}
+pub(crate) fn removal_wire_value(
+    result: PhotoRemovalWire,
+    operation: Operation,
+) -> Result<Value, CommandFailure> {
+    if result.operation_id.is_empty()
+        || result.counts.removed
+            + result.counts.changed_elsewhere
+            + result.counts.missing
+            + result.counts.already_removed
+            != result.results.len()
+    {
+        return Err(CommandFailure::transport(operation));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for item in &result.results {
+        if item.photo_id.is_empty() || !ids.insert(item.photo_id.as_str()) {
+            return Err(CommandFailure::transport(operation));
+        }
+        match item.outcome.as_str() {
+            "removed" if item.removed_at_ms.is_some_and(|value| value >= 0) => {}
+            "changed-elsewhere" | "unavailable" | "already-removed"
+                if item.removed_at_ms.is_none() => {}
+            _ => return Err(CommandFailure::transport(operation)),
+        }
+    }
+    serde_json::to_value(result).map_err(|_| CommandFailure::transport(operation))
+}
+
+/// One confirmed development-surface refusal synthesized locally under the
+/// same closed code the service uses for the same outcome.
+pub(crate) fn export_refusal(
+    exit_code: u8,
+    code: &'static str,
+    message: &'static str,
+) -> CommandFailure {
+    CommandFailure::from_payload(
+        exit_code,
+        ErrorPayload {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            effect: "none".to_owned(),
+            details: json!({}),
+        },
+    )
+}
+
+/// Resolves the current Edit Recipe and source revision, then submits the
+/// Export against exactly those observed revisions, so the service captures
+/// what this command saw instead of whatever is current at admission. The
+/// submission is a write: any unusable response stays an unknown outcome.
+pub(crate) async fn export_submission(
+    client: &ServiceClient,
+    admission: &AdmissionState,
+    args: &PhotoExportSubmitArgs,
+    operation: Operation,
+) -> Result<Value, CommandFailure> {
+    let read: ExportRecipeSourceWire = client
+        .json(
+            operation,
+            Method::GET,
+            client.endpoint(&["api", "photos", &args.photo_id, "edit-recipe"]),
+            None,
+        )
+        .await?;
+    if read.photo_id != args.photo_id {
+        return Err(CommandFailure::transport(operation));
+    }
+    let Some(recipe) = read.recipe else {
+        return Err(export_refusal(
+            3,
+            "missing_recipe",
+            "Save an Edit Recipe for this Photo before submitting an Export.",
+        ));
+    };
+    if recipe.recipe_version.is_empty() {
+        return Err(CommandFailure::transport(operation));
+    }
+    let Some(source_revision) = read.source_revision.filter(|revision| !revision.is_empty()) else {
+        return Err(export_refusal(
+            6,
+            "resource_unavailable",
+            "The current source revision cannot be read; retry when the Library reports the source as available.",
+        ));
+    };
+    let identity = MutationIdentity {
+        operation,
+        photo_ids: vec![args.photo_id.clone()],
+        album_id: None,
+        album_name: None,
+    };
+    let result: ExportSubmitWire = client
+        .mutation_admitting(
+            &identity,
+            admission,
+            client.endpoint(&["api", "photos", &args.photo_id, "exports"]),
+            json!({
+                "requestId": args.request_id,
+                "expectedRecipeVersion": recipe.recipe_version,
+                "expectedSourceRevision": source_revision,
+                "target": args.target.wire(),
+            }),
+            &[StatusCode::OK, StatusCode::CREATED],
+        )
+        .await?;
+    confirmed_export_submit(
+        &identity,
+        args.target.wire(),
+        &recipe.recipe_version,
+        &source_revision,
+        result,
+    )
+}
+
+/// Validates one confirmed submit response against the submitted request.
+/// The response must repeat the requested target and the exact revisions
+/// this command submitted; anything else is an unknown outcome rather than
+/// a claimed receipt.
+pub(crate) fn confirmed_export_submit(
+    identity: &MutationIdentity,
+    target: &str,
+    recipe_version: &str,
+    source_revision: &str,
+    result: ExportSubmitWire,
+) -> Result<Value, CommandFailure> {
+    let unknown = || CommandFailure::unknown(identity);
+    if !valid_request_identity(&result.export_id)
+        || !valid_export_state(&result.state)
+        || result.target != target
+        || result.recipe_version != recipe_version
+        || result.source_revision != source_revision
+        || result
+            .receipt_expires_at
+            .as_deref()
+            .is_some_and(|time| !valid_utc_time(time))
+        || result
+            .artifact_expires_at
+            .as_deref()
+            .is_some_and(|time| !valid_utc_time(time))
+    {
+        return Err(unknown());
+    }
+    serde_json::to_value(result).map_err(|_| unknown())
+}
+
+/// Renders one validated retained-Export list. Every entry must carry a
+/// closed state and target; an invalid entry is a transport failure.
+pub(crate) fn export_list_value(
+    data: ExportListWire,
+    operation: Operation,
+) -> Result<Value, CommandFailure> {
+    for export in &data.exports {
+        if !valid_request_identity(&export.export_id)
+            || !valid_export_state(&export.state)
+            || ExportTargetArg::parse(&export.target).is_none()
+        {
+            return Err(CommandFailure::transport(operation));
+        }
+    }
+    serde_json::to_value(data).map_err(|_| CommandFailure::transport(operation))
+}
+
+pub(crate) fn preview_valid(preview: &PreviewFacts) -> bool {
+    match preview.state {
+        PreviewState::Ready => {
+            preview.source.is_some()
+                && preview
+                    .source_revision
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                && preview.width.is_some_and(|value| value > 0)
+                && preview.height.is_some_and(|value| value > 0)
+                && preview.detail_limited.is_some()
+        }
+        _ => {
+            preview.source.is_none()
+                && preview.source_revision.is_none()
+                && preview.width.is_none()
+                && preview.height.is_none()
+                && preview.detail_limited.is_none()
+        }
+    }
+}
+
+pub(crate) fn photo_value(photo: PhotoItem, origin: &Url) -> Result<Value, ()> {
+    validate_nonempty(&photo.id)?;
+    validate_nonempty(&photo.decision_version)?;
+    if photo.rating > 5
+        || photo
+            .capture_time
+            .as_deref()
+            .is_some_and(|value| !valid_camera_time(value))
+        || !preview_valid(&photo.preview)
+    {
+        return Err(());
+    }
+    let mut value = serde_json::to_value(&photo).map_err(|_| ())?;
+    let object = value.as_object_mut().ok_or(())?;
+    object.remove("webPath");
+    object.insert(
+        "webUrl".to_owned(),
+        Value::String(web_url(origin, &photo.web_path)?),
+    );
+    Ok(value)
+}
+
+pub(crate) fn list_expiry_valid<T>(list: &ListData<T>, page_limit: usize) -> bool {
+    list.items.len() <= page_limit
+        && list.total >= list.items.len() as u64
+        && valid_utc_time(&list.evaluated_at)
+        && list.next_cursor.is_some() == list.expires_at.is_some()
+        && list.expires_at.as_deref().is_none_or(valid_utc_time)
+}
