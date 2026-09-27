@@ -1,10 +1,12 @@
 //! SQLite state ownership for the production Library core.
 
 mod admission;
+mod decisions;
 mod edit_recipe;
 mod export;
 mod migrations;
 mod owner;
+mod removal;
 mod schema;
 
 pub use crate::domain::{
