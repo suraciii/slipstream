@@ -47,15 +47,17 @@ describe("recovery review apply outcomes", () => {
   test("clears the reviewed mappings after a confirmed refusal", async () => {
     const view = makeSurface();
     const owner = createRecoveryReviewOwner(
-      async () =>
-        new Response(
-          JSON.stringify({
-            message: "Review is stale.",
-            appliedMappings: 0,
-            refusedMappings: 1,
-            rejections: [{ originalId: mapping.originalId, reason: "stale" }],
-          }),
-          { status: 409 },
+      () =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              message: "Review is stale.",
+              appliedMappings: 0,
+              refusedMappings: 1,
+              rejections: [{ originalId: mapping.originalId, reason: "stale" }],
+            }),
+            { status: 409 },
+          ),
         ),
       view.surface,
       page,
@@ -70,7 +72,7 @@ describe("recovery review apply outcomes", () => {
   test("clears the reviewed mappings after an unknown outcome", async () => {
     const view = makeSurface();
     const owner = createRecoveryReviewOwner(
-      async () => new Response("{}", { status: 500 }),
+      () => Promise.resolve(new Response("{}", { status: 500 })),
       view.surface,
       page,
     );
