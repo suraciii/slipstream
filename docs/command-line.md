@@ -47,15 +47,21 @@ The CLI must let its caller:
 - create, rename, and delete Albums and add, remove, or order their members;
 - remove explicitly identified eligible Photos into Trash and Restore observed removals;
 - inspect Trash, review and separately confirm permanent deletion, and recover operation outcomes;
+- inspect unavailable Photos, review proposed Original Locations, and apply explicitly confirmed Location Recovery mappings;
 - request a Library check; and
 - return a browser Destination for a Photo or Album.
 
 [Composable Removal and Restore](library-management-removal-and-restore.md) defines
 explicit-set mutations and their effect recovery. [Trash](library-management-trash.md)
 is the sole product authority for confirmed permanent Original deletion.
+[Manual Recovery](photo-library.md#manual-recovery) owns Location Recovery
+inspection, reviewed evidence, content confirmation, permitted retirement,
+atomic batch effects, and uncertainty. These operations restore associations;
+they do not restore Photos from Trash or write Original Files. Command help must
+make those differences explicit and advertise inspection and application limits.
 
 These capabilities do not include Original download, arbitrary filesystem mutation, XMP
-synchronization, Library Expansion, or Location Recovery writes. Those operations
+synchronization, or Library Expansion. Those operations
 retain their own product and operator boundaries. The CLI does not expose a
 SQL escape hatch or an arbitrary server-path argument.
 
