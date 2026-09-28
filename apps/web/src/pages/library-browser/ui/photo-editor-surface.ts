@@ -119,6 +119,18 @@ export function createPhotoEditorSurfaceController({
     root,
     "[data-photo-editor-provenance]",
   );
+  const editorProxyState = required<HTMLElement>(
+    root,
+    "[data-photo-editor-proxy-state]",
+  );
+  const editorProxyCreate = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-proxy-create]",
+  );
+  const editorProxyRemove = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-proxy-remove]",
+  );
   const editorPreview = required<HTMLButtonElement>(
     root,
     "[data-photo-editor-preview]",
@@ -364,6 +376,10 @@ export function createPhotoEditorSurfaceController({
     editorSupport.textContent = model.loading
       ? "Checking…"
       : model.sourceFactNote;
+    editorProxyState.textContent = model.proxy?.note ?? "No Development Proxy.";
+    editorProxyCreate.disabled = model.loading || !model.proxy?.canCreate;
+    editorProxyRemove.disabled = model.loading || !model.proxy?.canRemove;
+    editorProxyRemove.hidden = !model.proxy?.canRemove;
     editorProcessing.textContent =
       model.processingReadiness === "checking"
         ? "Checking…"
@@ -608,6 +624,20 @@ export function createPhotoEditorSurfaceController({
     () => {
       if (editorPhotoId)
         send({ kind: "editor-discard-draft", photoId: editorPhotoId });
+    },
+    { signal: listeners.signal },
+  );
+  editorProxyCreate.addEventListener(
+    "click",
+    () => {
+      if (editorPhotoId) send({ kind: "editor-proxy-create", photoId: editorPhotoId });
+    },
+    { signal: listeners.signal },
+  );
+  editorProxyRemove.addEventListener(
+    "click",
+    () => {
+      if (editorPhotoId) send({ kind: "editor-proxy-remove", photoId: editorPhotoId });
     },
     { signal: listeners.signal },
   );

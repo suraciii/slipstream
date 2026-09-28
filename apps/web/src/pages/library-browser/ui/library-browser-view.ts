@@ -131,6 +131,8 @@ export type GridProgressViewModel = Readonly<{
 /// Develop the Edit Preview of the Development Result, and Film the Edit
 /// Preview of the Film Result once that capability is enabled.
 export type EditorStage = "camera" | "develop" | "film";
+type EditorProxyViewModel = Readonly<{ state: "absent" | "building" | "current" | "stale"; note: string; proxy: Readonly<{ width: number; height: number; longEdge: number; qualityLimit: string; byteLength: number; sourceRevision: string; sourceProfileId: string; pipelineVersion: string }> | null; canCreate: boolean; canRemove: boolean }>;
+
 
 export type EditorExportViewModel = Readonly<{
   state:
@@ -186,6 +188,7 @@ export type EditorViewModel = Readonly<{
   /// The white-balance intent in force, the modes a Photographer may select,
   /// and why an adjustable mode is not offered.
   whiteBalance: EditorWhiteBalancePresentation;
+  proxy?: EditorProxyViewModel;
   canEdit: boolean;
   canPreview: boolean;
   previewing: boolean;
@@ -232,10 +235,7 @@ export type LibraryBrowserIntent =
         | "editor-use-saved"
         | "editor-reapply"
         | "editor-discard-draft"
-        | "editor-export-submit"
-        | "editor-export-cancel"
-        | "editor-export-retry"
-        | "editor-export-download";
+        | "editor-proxy-create" | "editor-proxy-remove" | "editor-export-submit" | "editor-export-cancel" | "editor-export-retry" | "editor-export-download";
       photoId: string;
     }>
   | Readonly<{ kind: "summary-action"; presentationId: number }>
@@ -816,10 +816,7 @@ export function createLibraryBrowserView(
                     </div>
                     <div class="photo-editor-actions"><button type="button" class="quiet" data-photo-editor-undo disabled>Undo</button><button type="button" class="quiet" data-photo-editor-redo disabled>Redo</button><button type="button" class="quiet" data-photo-editor-reset disabled>Reset all</button><button type="button" class="quiet" data-photo-editor-compare aria-pressed="false" title="Press to compare the current settings with the as-shot/baseline development of this stage" disabled>Baseline comparison</button><button type="button" data-photo-editor-preview disabled>Refresh preview</button><button type="button" class="quiet" data-photo-editor-rebind hidden disabled>Rebind source</button><button type="button" class="quiet" data-photo-editor-refresh>Reload recipe</button></div>
                     <p class="photo-editor-fact"><span>White balance</span><span data-photo-editor-white-balance>As shot</span></p>
-                    <p class="photo-editor-fact"><span>Edit source</span><span data-photo-editor-support>Checking…</span></p>
-                    <p class="photo-editor-fact"><span>Processing</span><span data-photo-editor-processing>Checking…</span></p>
-                    <p class="photo-editor-fact"><span>Edit Preview</span><span data-photo-editor-preview-state>Checking…</span></p>
-                    <p class="photo-editor-note" data-photo-editor-capability hidden></p>
+                    <p class="photo-editor-fact"><span>Edit source</span><span data-photo-editor-support>Checking…</span></p><p class="photo-editor-fact"><span>Development Proxy</span><span data-photo-editor-proxy-state>Checking…</span></p><div class="photo-editor-actions"><button type="button" class="quiet" data-photo-editor-proxy-create disabled>Create Development Proxy</button><button type="button" class="quiet" data-photo-editor-proxy-remove hidden disabled>Remove Development Proxy</button></div><p class="photo-editor-fact"><span>Processing</span><span data-photo-editor-processing>Checking…</span></p><p class="photo-editor-fact"><span>Edit Preview</span><span data-photo-editor-preview-state>Checking…</span></p>
                     <p class="photo-editor-draft" data-photo-editor-draft hidden role="status"></p>
                     <div class="photo-editor-conflict" data-photo-editor-conflict hidden><p data-photo-editor-conflict-message role="alert"></p><div class="photo-editor-actions"><button type="button" data-photo-editor-use-saved>Use saved recipe</button><button type="button" class="quiet" data-photo-editor-reapply>Reapply my settings</button><button type="button" class="quiet" data-photo-editor-discard-draft>Discard draft</button></div></div>
                     <div class="photo-editor-export" aria-label="Export"><p class="photo-editor-export-heading">Export <span data-photo-editor-export-target>Development TIFF</span></p><p class="photo-editor-export-state" data-photo-editor-export-state role="status"></p><div class="photo-editor-actions"><button type="button" data-photo-editor-export-submit>Export selected stage</button><button type="button" class="quiet" data-photo-editor-export-cancel hidden>Cancel</button><button type="button" class="quiet" data-photo-editor-export-retry hidden>Retry</button><button type="button" class="quiet" data-photo-editor-export-download hidden>Download</button></div></div>

@@ -289,6 +289,8 @@ function mountPrivateLibraryBrowser(
     reapplyLocal: reapplyLocalSettings,
     discardDraft: discardEditorDraft,
     rebind: rebindEditor,
+    createProxy: createEditorProxy,
+    removeProxy: removeEditorProxy,
     submitExport: submitEditorExport,
     cancelExport: cancelEditorExport,
     retryExport: retryEditorExport,
@@ -3208,6 +3210,12 @@ function mountPrivateLibraryBrowser(
         return;
       case "editor-discard-draft":
         discardEditorDraft(intent.photoId);
+        return;
+      case "editor-proxy-create":
+        createEditorProxy(intent.photoId);
+        return;
+      case "editor-proxy-remove":
+        removeEditorProxy(intent.photoId);
         return;
       case "editor-rebind":
         void rebindEditor(intent.photoId);
