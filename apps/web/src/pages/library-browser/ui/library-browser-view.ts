@@ -7,7 +7,10 @@ import {
   type RemovalReviewViewModel,
   type TrashReviewViewModel,
 } from "./removed-panels.js";
-import { createRecoveryPanel } from "./recovery-panel.js";
+import {
+  createRecoveryPanel,
+  type RecoveryReviewView,
+} from "./recovery-panel.js";
 import {
   createMembershipPanel,
   type MembershipPanelElements,
@@ -25,7 +28,11 @@ import {
 } from "../model/browser-navigation.js";
 import { formatCaptureTime } from "./capture-time.js";
 import { formatPhotoCount } from "./photo-count.js";
-import type { EditorWhiteBalancePresentation } from "../model/photo-editor.js";
+import type {
+  EditSourceKind,
+  EditSourceReadiness,
+  EditorWhiteBalancePresentation,
+} from "../model/photo-editor.js";
 import type { RecoveryApplyMapping } from "../model/recovery-review.js";
 
 export type {
@@ -34,8 +41,13 @@ export type {
   TrashOutcomeViewModel,
   TrashReviewViewModel,
 } from "./removed-panels.js";
+export type {
+  RecoveryEntryViewModel,
+  RecoveryMappingViewModel,
+  RecoveryPagingViewModel,
+} from "./recovery-panel.js";
 
-type ViewSelectionState = "undecided" | "selected" | "rejected";
+export type ViewSelectionState = "undecided" | "selected" | "rejected";
 type ViewPreviewSource = "jpeg-original" | "raw-embedded-jpeg";
 
 /**
@@ -150,17 +162,8 @@ export type EditorViewModel = Readonly<{
   stageNote: string;
   /// Why the Film stage cannot be presented, when it cannot.
   filmReason: string;
-  /// The Edit source axis: `checking` while facts load or the service reports
-  /// a retryable wait; the confirmed outcomes otherwise.
-  editSourceReadiness:
-    | "checking"
-    | "ready"
-    | "missing"
-    | "unreadable"
-    | "unsupported";
-  /// The edit source the current facts were resolved against. A proxy
-  /// derivative is named as provenance, never as the Original File.
-  editSourceKind: "original" | "development-proxy";
+  editSourceReadiness: EditSourceReadiness;
+  editSourceKind: EditSourceKind;
   /// The Source support fact line: the readiness word, the Library's scan
   /// phase while the source is being checked, and proxy provenance.
   sourceFactNote: string;
@@ -461,63 +464,6 @@ type GridPhotoViewModel = Readonly<{
   preview: GridPhotoPreview;
 }>;
 
-/// One item the bounded recovery review lists: the remembered facts of an
-/// Original the review opened on, with the state the Library holds now.
-export type RecoveryEntryViewModel = Readonly<{
-  state: "unavailable" | "available" | "removed" | "missing";
-  originalId: string;
-  photoId: string;
-  webUrl: string;
-  location: string;
-  kind: "raw" | "jpeg";
-  rating: number;
-  selectionState: ViewSelectionState;
-  albumCount: number;
-  fingerprintEnrolled: boolean;
-}>;
-
-/// One inspectable reviewed mapping for an unavailable Original. A mapping
-/// with a blockedReason is presented as blocked and never applied; the
-/// retire candidate names the Photo an explicit choice may replace.
-export type RecoveryMappingViewModel = Readonly<{
-  mappingId: string;
-  originalId: string;
-  fromLocation: string;
-  toLocation: string;
-  kind: "raw" | "jpeg";
-  outcome:
-    | "matched"
-    | "content-mismatch"
-    | "missing"
-    | "kind-mismatch"
-    | "unreadable"
-    | "occupied"
-    | "colliding";
-  verified: boolean;
-  blockedReason:
-    | "colliding"
-    | "content-mismatch"
-    | "destination-in-use"
-    | "destination-removed"
-    | "kind-mismatch"
-    | "missing"
-    | "unreadable"
-    | null;
-  retire: Readonly<{
-    photoId: string;
-    originalId: string;
-    location: string;
-  }> | null;
-}>;
-
-/// The explicit paging of one recovery list: how many of the total are
-/// loaded, and whether a continuation page remains.
-export type RecoveryPagingViewModel = Readonly<{
-  shown: number;
-  total: number;
-  more: boolean;
-}>;
-
 type GridBatchResultViewModel = Readonly<{
   tone: "success" | "warning" | "failure";
   message: string;
@@ -652,7 +598,7 @@ export type BatchAlbumsViewModel = Readonly<{
   pending: boolean;
 }>;
 
-export interface LibraryBrowserView {
+export interface LibraryBrowserView extends RecoveryReviewView {
   readonly photoStatusSurface: object;
   readonly photoStatusEmpty: boolean;
   isPhotoStatusSurfaceCurrent(surface: object): boolean;
@@ -793,39 +739,6 @@ export interface LibraryBrowserView {
   /// confirmation reaches the surface the Photographer is looking at.
   renderTrashReview(model: TrashReviewViewModel): void;
   closeTrashReview(): void;
-  /// Presents the committed recovery counts of the last scan and, while
-  /// Originals remain unavailable, the one bounded review entry.
-  setRecoveryNotice(
-    model: Readonly<{
-      relocatedPhotos: number;
-      unavailablePhotos: number;
-    }>,
-  ): void;
-  /// Opens the recovery review with the first page of its bounded listing:
-  /// entries are the remembered facts, paging names how much of the total is
-  /// loaded and whether a continuation page remains.
-  openRecoveryPanel(
-    entries: ReadonlyArray<RecoveryEntryViewModel>,
-    paging: RecoveryPagingViewModel,
-  ): void;
-  /// Re-renders the entries of the open review, including its paging.
-  renderRecoveryEntries(
-    entries: ReadonlyArray<RecoveryEntryViewModel>,
-    paging: RecoveryPagingViewModel,
-  ): void;
-  /// Presents the reviewed mappings and their paging; each occupied
-  /// destination that an explicit retire-and-bind may replace carries its
-  /// checkbox.
-  renderRecoveryProposals(
-    mappings: ReadonlyArray<RecoveryMappingViewModel>,
-    paging: RecoveryPagingViewModel,
-  ): void;
-  clearRecoveryProposals(): void;
-  markRecoveryProposalsUnusable(): void;
-  resetRecoveryProposalChoices(): void;
-  setRecoveryPending(pending: boolean): void;
-  setRecoveryMessage(text?: string): void;
-  closeRecoveryPanel(): void;
   dispose(): void;
 }
 

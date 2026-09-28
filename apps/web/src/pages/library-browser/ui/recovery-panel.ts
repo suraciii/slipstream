@@ -7,9 +7,7 @@ import {
 } from "../model/recovery-review.js";
 import type {
   LibraryBrowserIntent,
-  RecoveryEntryViewModel,
-  RecoveryMappingViewModel,
-  RecoveryPagingViewModel,
+  ViewSelectionState,
 } from "./library-browser-view.js";
 
 type RecoveryPanelIntentKind =
@@ -25,6 +23,63 @@ export type RecoveryPanelIntent = Extract<
   LibraryBrowserIntent,
   { kind: RecoveryPanelIntentKind }
 >;
+
+/// One item the bounded recovery review lists: the remembered facts of an
+/// Original the review opened on, with the state the Library holds now.
+export type RecoveryEntryViewModel = Readonly<{
+  state: "unavailable" | "available" | "removed" | "missing";
+  originalId: string;
+  photoId: string;
+  webUrl: string;
+  location: string;
+  kind: "raw" | "jpeg";
+  rating: number;
+  selectionState: ViewSelectionState;
+  albumCount: number;
+  fingerprintEnrolled: boolean;
+}>;
+
+/// One inspectable reviewed mapping for an unavailable Original. A mapping
+/// with a blockedReason is presented as blocked and never applied; the
+/// retire candidate names the Photo an explicit choice may replace.
+export type RecoveryMappingViewModel = Readonly<{
+  mappingId: string;
+  originalId: string;
+  fromLocation: string;
+  toLocation: string;
+  kind: "raw" | "jpeg";
+  outcome:
+    | "matched"
+    | "content-mismatch"
+    | "missing"
+    | "kind-mismatch"
+    | "unreadable"
+    | "occupied"
+    | "colliding";
+  verified: boolean;
+  blockedReason:
+    | "colliding"
+    | "content-mismatch"
+    | "destination-in-use"
+    | "destination-removed"
+    | "kind-mismatch"
+    | "missing"
+    | "unreadable"
+    | null;
+  retire: Readonly<{
+    photoId: string;
+    originalId: string;
+    location: string;
+  }> | null;
+}>;
+
+/// The explicit paging of one recovery list: how many of the total are
+/// loaded, and whether a continuation page remains.
+export type RecoveryPagingViewModel = Readonly<{
+  shown: number;
+  total: number;
+  more: boolean;
+}>;
 
 export type RecoveryPanelElements = Readonly<{
   recoveryNotice: HTMLElement;
@@ -52,24 +107,28 @@ type RecoveryNoticeModel = Readonly<{
   unavailablePhotos: number;
 }>;
 
-export interface RecoveryPanel {
+/// The recovery review surface the page view presents: the committed-counts
+/// notice, the bounded review listing with its explicit paging, and the
+/// reviewed mappings an explicit apply commits.
+export interface RecoveryReviewView {
+  /// Presents the committed recovery counts of the last scan and, while
+  /// Originals remain unavailable, the one bounded review entry.
   setRecoveryNotice(model: RecoveryNoticeModel): void;
   /// Opens the recovery review with the first page of its bounded listing:
-  /// every loaded entry, how many of the total are shown, and whether more
-  /// pages remain in the same review.
+  /// entries are the remembered facts, paging names how much of the total is
+  /// loaded and whether a continuation page remains.
   openRecoveryPanel(
     entries: ReadonlyArray<RecoveryEntryViewModel>,
     paging: RecoveryPagingViewModel,
   ): void;
-  /// Replaces the unavailable entries the open review presents, including
-  /// the pages a Load more appended.
+  /// Re-renders the entries of the open review, including its paging.
   renderRecoveryEntries(
     entries: ReadonlyArray<RecoveryEntryViewModel>,
     paging: RecoveryPagingViewModel,
   ): void;
-  /// Presents inspectable reviewed mappings with their explicit paging; a
-  /// blocked mapping carries its reason, and each mapping that needs an
-  /// explicit choice carries its own unchecked control.
+  /// Presents the reviewed mappings and their paging; each occupied
+  /// destination that an explicit retire-and-bind may replace carries its
+  /// checkbox.
   renderRecoveryProposals(
     mappings: ReadonlyArray<RecoveryMappingViewModel>,
     paging: RecoveryPagingViewModel,
@@ -80,6 +139,9 @@ export interface RecoveryPanel {
   setRecoveryPending(pending: boolean): void;
   setRecoveryMessage(text?: string): void;
   closeRecoveryPanel(): void;
+}
+
+export interface RecoveryPanel extends RecoveryReviewView {
   dispose(): void;
 }
 
