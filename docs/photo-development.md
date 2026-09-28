@@ -123,6 +123,11 @@ must not discard a saved recipe or a recoverable draft. Late, cancelled, or
 obsolete results must not replace the current view. A successful image for a
 different source, stage, or settings snapshot is not the requested preview.
 
+The workspace must continue checking an admitted Preview long enough for a
+full RAW development. If the bounded wait ends before settlement, it must say
+the result is still unknown and offer a fresh check. It must not keep showing
+"rendering" as though it is still following the request.
+
 Comparison must keep the chosen stage and display conversion constant while
 comparing the current settings with the as-shot/baseline development settings.
 Camera reference must remain a separately labeled view. If either comparison

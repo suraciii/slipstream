@@ -703,11 +703,15 @@ export function createEditorController(
     else view.clearEditorPreview();
     renderEditor();
   };
-  /// The bounded follow-up of an admitted comparison. A baseline render is
-  /// queued or running like any other preview-class render, so the client
-  /// re-asks until the rendition arrives or the bounded attempt count runs out.
+  /// A full RAW development can take over a minute. Continue polling an
+  /// admitted comparison for up to five minutes, then offer a fresh request.
   const scheduleEditorComparisonFollowUp = (photoId: string): void => {
-    if (editorComparisonAttempts >= PREVIEW_POLL_LIMIT) return;
+    if (editorComparisonAttempts >= PREVIEW_POLL_LIMIT) {
+      editorComparisonNote =
+        "The baseline comparison outcome is unknown after five minutes. Compare again to check its result.";
+      renderEditor();
+      return;
+    }
     editorComparisonAttempts += 1;
     if (editorComparisonTimer !== undefined)
       clearTimeout(editorComparisonTimer);
@@ -821,13 +825,17 @@ export function createEditorController(
     if (editorComparing) view.presentEditorPreview(editorComparisonUrl);
     renderEditor();
   };
-  /// The bounded follow-up of an admitted Edit Preview. Preview-class work is
-  /// queued or running, so the client re-asks until the rendition arrives or
-  /// the bounded attempt count runs out; a superseded request never publishes.
+  /// Poll admitted work long enough for a full RAW render. Stop after five
+  /// minutes so a lost or stuck operation does not poll indefinitely.
   const PREVIEW_POLL_MS = 750;
-  const PREVIEW_POLL_LIMIT = 20;
+  const PREVIEW_POLL_LIMIT = 400;
   const scheduleEditorPreviewFollowUp = (photoId: string): void => {
-    if (editorPreviewAttempts >= PREVIEW_POLL_LIMIT) return;
+    if (editorPreviewAttempts >= PREVIEW_POLL_LIMIT) {
+      editorPreviewNote =
+        "The Edit Preview outcome is unknown after five minutes. Request it again to check its result.";
+      renderEditor();
+      return;
+    }
     editorPreviewAttempts += 1;
     if (editorPreviewTimer !== undefined) clearTimeout(editorPreviewTimer);
     editorPreviewTimer = window.setTimeout(() => {

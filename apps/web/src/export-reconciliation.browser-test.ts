@@ -251,3 +251,73 @@ for (const lostResponse of [
     );
   });
 }
+
+test("an admitted Edit Preview remains observable after the old 15-second polling limit", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await page.route("**/api/processing/capability", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        state: "ready",
+        stages: { develop: "ready", film: "unavailable" },
+        profiles: [],
+      }),
+    }),
+  );
+  await page.route("**/api/photos/*/edit-recipe", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sourceSupport: "supported",
+        supportReason: null,
+        sourceRevision: "source-1",
+        recipe: {
+          recipeVersion: "recipe-1",
+          exposureEv: 0,
+          whiteBalance: { mode: "as-shot" },
+        },
+        processingAvailable: true,
+        controls: {
+          exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
+          whiteBalanceModes: ["as-shot"],
+        },
+      }),
+    }),
+  );
+  let requests = 0;
+  await page.route(
+    "**/api/photos/*/edit-preview/develop?settings=current",
+    (route) => {
+      requests += 1;
+      return route.fulfill({
+        status: requests <= 21 ? 202 : 503,
+        contentType: "application/json",
+        body:
+          requests <= 21
+            ? JSON.stringify({ state: "running" })
+            : JSON.stringify({ error: { code: "resource_unavailable" } }),
+      });
+    },
+  );
+
+  await page.goto(running.url);
+  await expect(page.locator("[data-grid-status]")).toContainText(
+    "Ready · 2 Photos",
+  );
+  await page.locator('[data-photo-index="0"]').click();
+  await openEdit(page);
+  await expect(page.locator("[data-photo-editor-preview-note]")).toContainText(
+    "rendering",
+  );
+  for (let count = requests; count <= 21; count += 1) {
+    await page.clock.runFor(751);
+    await expect.poll(() => requests).toBeGreaterThan(count);
+  }
+  await expect(page.locator("[data-photo-editor-preview-note]")).toContainText(
+    "resource allowance",
+  );
+});
