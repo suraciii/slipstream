@@ -1960,3 +1960,93 @@ fn recovery_failure_codes_validate_their_exact_details() {
         .is_some()
     );
 }
+
+#[test]
+fn deadline_expiry_maps_library_check_to_an_unknown_scan_outcome() {
+    // A `library check` deadline is never a connection failure: the scan is
+    // service-owned and may have been admitted and running whether or not
+    // this client handed the request over, so only `status` can report it.
+    let failure = deadline_failure(
+        Operation::LibraryCheck,
+        &PublicationState::default(),
+        &AdmissionState::default(),
+    );
+    assert_eq!(failure.exit_code, 7);
+    assert_eq!(failure.payload.code, "outcome_unknown");
+    assert_eq!(failure.payload.effect, "unknown");
+    assert_eq!(failure.payload.details["operation"], "library-check");
+    assert!(failure.payload.message.contains("status"));
+    assert!(!failure.payload.message.contains("connection"));
+}
+
+#[test]
+fn deadline_expiry_keeps_the_admitted_and_transport_mappings_elsewhere() {
+    // A read that never admitted a mutation stays a transport failure.
+    let transport = deadline_failure(
+        Operation::Status,
+        &PublicationState::default(),
+        &AdmissionState::default(),
+    );
+    assert_eq!(transport.exit_code, 6);
+    assert_eq!(transport.payload.code, "transport_failed");
+    assert_eq!(transport.payload.effect, "none");
+    // An admitted mutation keeps its unknown outcome and identity details.
+    let admission = AdmissionState::default();
+    admission.admit(MutationIdentity::bare(Operation::PhotosRecipeSave));
+    let admitted = deadline_failure(
+        Operation::PhotosRecipeSave,
+        &PublicationState::default(),
+        &admission,
+    );
+    assert_eq!(admitted.exit_code, 7);
+    assert_eq!(admitted.payload.code, "outcome_unknown");
+    assert_eq!(admitted.payload.details["operation"], "photos-recipe-save");
+}
+
+#[tokio::test]
+async fn a_timed_out_library_check_reports_the_unknown_scan_outcome() {
+    // The service accepts connections and never answers — the TLS handshake
+    // to a silent socket cannot complete — so the deadline, not a connection
+    // refusal, ends the command while the service-owned scan may be running.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let token = std::env::temp_dir().join("slipstream-cli-deadline-token");
+    std::fs::write(&token, "A".repeat(43)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&token).unwrap().permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&token, permissions).unwrap();
+    }
+    let cli = Cli::try_parse_from([
+        "slipstream",
+        "--server",
+        &format!("https://127.0.0.1:{port}"),
+        "--token-file",
+        token.to_str().unwrap(),
+        "library",
+        "check",
+    ])
+    .unwrap();
+    let result = invoke_until(
+        cli,
+        None,
+        tokio::time::Instant::now() + std::time::Duration::from_millis(500),
+    )
+    .await;
+    assert_eq!(result.exit_code, 7);
+    assert!(
+        result.stdout.contains("outcome_unknown"),
+        "{}",
+        result.stdout
+    );
+    assert!(result.stdout.contains("status"), "{}", result.stdout);
+    assert!(
+        !result.stdout.contains("transport_failed"),
+        "{}",
+        result.stdout
+    );
+    std::fs::remove_file(&token).ok();
+    drop(listener);
+}

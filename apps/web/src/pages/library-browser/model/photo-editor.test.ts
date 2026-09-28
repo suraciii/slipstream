@@ -451,9 +451,12 @@ describe("sources without editing", () => {
         settings: { exposureEv: 0, whiteBalance: { mode: "as-shot" } },
       }),
     );
-    // The workspace explains the source, and no stale local history can be
-    // replayed against a source the service no longer admits.
-    expect(step.presentation.status).toContain("cannot be read right now");
+    // The workspace explains the confirmed read failure for this revision,
+    // and no stale local history can be replayed against a source the
+    // service no longer admits.
+    expect(step.presentation.status).toContain(
+      "failed for its current source revision",
+    );
     expect(step.presentation.canEdit).toBe(false);
     expect(step.presentation.canUndo).toBe(false);
     expect(step.presentation.canRedo).toBe(false);
@@ -466,6 +469,59 @@ describe("sources without editing", () => {
     const step = editor.open(facts({ sourceSupport: "unsupported" }));
     expect(step.presentation.canEdit).toBe(false);
     expect(step.presentation.status).toContain("approved profile");
+  });
+
+  test("a read-pending source is a retryable wait that recovers on a later read", () => {
+    const editor = createPhotoEditor({ nextRequestId: () => "req-1" });
+    const pending = editor.open(
+      facts({
+        sourceRevision: null,
+        sourceSupport: "unavailable",
+        supportReason: "read-pending",
+      }),
+    );
+    expect(pending.request).toBeNull();
+    expect(pending.presentation.canEdit).toBe(false);
+    // The wait is actionable, not a claimed read failure.
+    expect(pending.presentation.status).toContain("pending");
+    expect(pending.presentation.status).toContain("Reload");
+    expect(pending.presentation.status).not.toContain("failed");
+    // A later read that publishes current source facts re-enables editing
+    // and leaves no stale wait behind. The controls were disabled during
+    // the wait, so no local intent needs reconciliation.
+    const recovered = editor.refresh(facts({ sourceRevision: "rev-2" }));
+    expect(recovered.presentation.canEdit).toBe(true);
+    expect(recovered.presentation.status).toBe("");
+    const write = request(editor.commitExposure(0.4));
+    expect(write.expectedSourceRevision).toBe("rev-2");
+  });
+
+  test("a resource-unavailable read stays a retryable wait, never a failure", () => {
+    const editor = createPhotoEditor({ nextRequestId: () => "req-1" });
+    const saturated = editor.open(
+      facts({
+        sourceRevision: null,
+        sourceSupport: "unavailable",
+        supportReason: "resource-unavailable",
+      }),
+    );
+    expect(saturated.presentation.canEdit).toBe(false);
+    expect(saturated.request).toBeNull();
+    expect(saturated.presentation.status).toContain("capacity");
+    expect(saturated.presentation.status).not.toContain("failed");
+    // The confirmed unreadable outcome stays distinct from the retryable
+    // waits on the same surface.
+    const unreadable = editor.refresh(
+      facts({
+        sourceRevision: null,
+        sourceSupport: "unavailable",
+        supportReason: "original-unreadable",
+      }),
+    );
+    expect(unreadable.presentation.status).toContain(
+      "failed for its current source revision",
+    );
+    expect(unreadable.presentation.canEdit).toBe(false);
   });
 });
 

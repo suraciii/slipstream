@@ -32,9 +32,9 @@ pub use cache::{
     derivative_cache_key, manifest_identity,
 };
 pub use capture::{
-    CaptureFact, CaptureInspectionError, CaptureMetadataState, CaptureReviewMetadata,
-    CaptureTimeField, MAXIMUM_CAPTURE_METADATA_BYTES, capture_source_revision,
-    inspect_review_metadata,
+    CameraIdentity, CaptureFact, CaptureInspectionError, CaptureMetadataState,
+    CaptureReviewMetadata, CaptureTimeField, MAXIMUM_CAPTURE_METADATA_BYTES,
+    capture_source_revision, inspect_review_metadata,
 };
 pub use confinement::{LibraryRoot, OriginalCapability, OriginalDeletionOutcome, ScanLimits};
 pub use derivative::{

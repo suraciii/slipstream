@@ -1331,11 +1331,10 @@ impl EditPreviewOwner {
 /// `unavailable`, `unsupported`) with one closed `supportReason`.
 fn classify_support(
     photo: &slipstream_core::PhotoRead,
-    metadata: &slipstream_core::CaptureReviewMetadata,
     read: &EditRecipeRead,
 ) -> crate::edit_recipe::SupportClassification {
     crate::edit_recipe::derive_support(
-        crate::edit_recipe::source_facts(photo, metadata),
+        crate::edit_recipe::source_facts(photo),
         read.source_available,
         photo.original_available,
     )
@@ -1366,11 +1365,11 @@ pub(crate) async fn get_edit_preview(
     }
     // One serialized recipe read owns every identity fact, so a rescan
     // between reads cannot mix an old recipe with newer source facts.
-    let (photo, metadata, read) = match crate::edit_recipe::load_facts(&state, &photo_id).await {
+    let (photo, read) = match crate::edit_recipe::load_facts(&state, &photo_id).await {
         Ok(facts) => facts,
         Err(response) => return response,
     };
-    if let Some(response) = support_refusal(&photo, &metadata, &read, stage) {
+    if let Some(response) = support_refusal(&photo, &read, stage) {
         return response;
     }
     if let Err(response) = develop_executable(&state, stage, settings, &read) {
@@ -1384,11 +1383,10 @@ pub(crate) async fn get_edit_preview(
 /// checked separately by `develop_executable`.
 fn support_refusal(
     photo: &slipstream_core::PhotoRead,
-    metadata: &slipstream_core::CaptureReviewMetadata,
     read: &EditRecipeRead,
     stage: &'static str,
 ) -> Option<Response<Body>> {
-    let support = classify_support(photo, metadata, read);
+    let support = classify_support(photo, read);
     match support.state {
         "unsupported" => Some(unsupported_photo(&photo.id, stage)),
         "unavailable" => Some(resource_unavailable(
@@ -1682,11 +1680,11 @@ async fn fresh_identity(
     stage: &'static str,
     settings: &'static str,
 ) -> Result<PreviewIdentity, Response<Body>> {
-    let (photo, metadata, read) = match crate::edit_recipe::load_facts(state, photo_id).await {
+    let (photo, read) = match crate::edit_recipe::load_facts(state, photo_id).await {
         Ok(facts) => facts,
         Err(response) => return Err(response),
     };
-    if let Some(response) = support_refusal(&photo, &metadata, &read, stage) {
+    if let Some(response) = support_refusal(&photo, &read, stage) {
         return Err(response);
     }
     develop_executable(state, stage, settings, &read).map_err(|response| *response)?;

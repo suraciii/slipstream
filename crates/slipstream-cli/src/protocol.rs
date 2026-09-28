@@ -244,6 +244,26 @@ impl CommandFailure {
         )
     }
 
+    /// A `library check` that reached its deadline. The scan belongs to the
+    /// service: it may have been admitted and still be running, and this
+    /// client's deadline neither cancels it nor claims a duplicate retry is
+    /// safe, so the outcome stays unknown and `status` carries the scan's
+    /// current phase.
+    pub(crate) fn library_check_deadline() -> Self {
+        Self::from_payload(
+            7,
+            ErrorPayload {
+                code: "outcome_unknown".to_owned(),
+                message: "The Library check timed out before the scan outcome was known. The \
+                          service owns the scan and may still be running it; inspect status for \
+                          the current scan phase."
+                    .to_owned(),
+                effect: "unknown".to_owned(),
+                details: MutationIdentity::bare(Operation::LibraryCheck).unknown_details(),
+            },
+        )
+    }
+
     /// A mixed Photo batch: at least one sibling decision committed while
     /// at least one requested Photo conflicted or was missing.
     pub(crate) fn photo_batch_partial(counts: &Value) -> Self {

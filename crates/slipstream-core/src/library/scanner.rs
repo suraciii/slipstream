@@ -28,7 +28,11 @@ pub(super) fn inspect_capture_facts(
         .map(|original| (original.relative_path.as_str(), original))
         .collect::<std::collections::HashMap<_, _>>();
     for (index, original) in originals.iter_mut().enumerate() {
-        progress.lock().unwrap().inspected = u64::try_from(index + 1).unwrap_or(u64::MAX);
+        {
+            let mut progress = progress.lock().unwrap();
+            progress.inspected = u64::try_from(index + 1).unwrap_or(u64::MAX);
+            touch(&mut progress);
+        }
         let prior = previous.get(original.path.as_str()).copied();
         if original.error_category.is_some() {
             if let Some(prior) = prior {
@@ -103,6 +107,7 @@ pub(super) fn scanner_main(
                         phase: ScanPhase::Discovering,
                         ..ScanProgress::default()
                     };
+                    touch(&mut progress);
                 }
                 #[cfg(test)]
                 scanner_test_hook(&root);
@@ -122,6 +127,7 @@ pub(super) fn scanner_main(
                             progress.inspect_total =
                                 Some(u64::try_from(result.originals.len()).unwrap_or(u64::MAX));
                             progress.phase = ScanPhase::Inspecting;
+                            touch(&mut progress);
                         }
                         inspect_capture_facts(
                             &root,
@@ -144,11 +150,17 @@ pub(super) fn scanner_main(
                         let fingerprints = persistence
                             .recovery_facts_blocking(evidence_ids)
                             .map_err(LibraryError::from)?;
-                        let mut recovery_progress = crate::recovery::RecoveryProgress::default();
                         {
                             let mut progress = progress.lock().unwrap();
                             progress.phase = ScanPhase::Recovering;
+                            touch(&mut progress);
                         }
+                        // The planner reports hashing progress as it happens,
+                        // so a status read during the plan observes the phase
+                        // moving instead of a zeroed counter held until the end.
+                        let mut reporter = ScanProgressReporter {
+                            progress: progress.clone(),
+                        };
                         let recovery = crate::recovery::plan_recovery(
                             &root,
                             &native_work,
@@ -156,14 +168,13 @@ pub(super) fn scanner_main(
                             &previous,
                             &fingerprints,
                             &deleted_originals,
-                            &mut recovery_progress,
+                            &mut reporter,
                         );
                         {
                             let mut progress = progress.lock().unwrap();
-                            progress.hashed = recovery_progress.hashed;
-                            progress.hash_total = Some(recovery_progress.hash_total);
+                            progress.phase = ScanPhase::Applying;
+                            touch(&mut progress);
                         }
-                        progress.lock().unwrap().phase = ScanPhase::Applying;
                         let applied = persistence
                             .apply_scan_recovered_blocking(
                                 result.originals,
@@ -193,7 +204,11 @@ pub(super) fn scanner_main(
                     enrollment_state.scan_running = false;
                 }
                 enrollment.1.notify_all();
-                progress.lock().unwrap().phase = ScanPhase::Idle;
+                {
+                    let mut progress = progress.lock().unwrap();
+                    progress.phase = ScanPhase::Idle;
+                    touch(&mut progress);
+                }
                 let (lock, signal) = &*state;
                 let mut guard = lock.lock().unwrap();
                 if let Some(waiters) = guard.in_flight.take() {
@@ -213,4 +228,29 @@ pub(super) fn scanner_main(
         }
     }
     signal.notify_all();
+}
+
+/// Stamps one progress update with the current wall-clock time, so a bounded
+/// status read can tell an advancing phase from a stalled one.
+fn touch(progress: &mut ScanProgress) {
+    progress.updated_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .map(|milliseconds| u64::try_from(milliseconds).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+}
+
+/// Forwards recovery-phase hashing counters into the shared scan progress as
+/// the planner reports them.
+struct ScanProgressReporter {
+    progress: Arc<Mutex<ScanProgress>>,
+}
+
+impl crate::recovery::RecoveryReporter for ScanProgressReporter {
+    fn recovery_progress(&mut self, recovery: crate::recovery::RecoveryProgress) {
+        let mut progress = self.progress.lock().unwrap();
+        progress.hashed = recovery.hashed;
+        progress.hash_total = Some(recovery.hash_total);
+        touch(&mut progress);
+    }
 }

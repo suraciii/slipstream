@@ -19,11 +19,25 @@ use std::collections::{HashMap, HashSet};
 const SWAP_DETECTION_THRESHOLD: usize = 2;
 
 /// Progress counters the planner reports for the recovering phase.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct RecoveryProgress {
     pub hashed: u64,
     pub hash_total: u64,
     pub failed_hashes: u64,
+}
+
+/// Bounded progress reporting for one recovering-phase plan.
+///
+/// The planner publishes its hash total before hashing starts and reports
+/// completed counters as files finish, so a status read during a long plan
+/// observes real movement instead of a zeroed phase.
+pub trait RecoveryReporter {
+    fn recovery_progress(&mut self, progress: RecoveryProgress);
+}
+
+/// A reporter that discards every update.
+impl RecoveryReporter for () {
+    fn recovery_progress(&mut self, _progress: RecoveryProgress) {}
 }
 
 /// Plans relocations and fresh fingerprints for one scan.
@@ -43,8 +57,9 @@ pub fn plan_recovery(
     previous: &ScanSnapshot,
     persisted_fingerprints: &[crate::OriginalFingerprint],
     excluded_original_ids: &std::collections::HashSet<String>,
-    progress: &mut RecoveryProgress,
+    reporter: &mut dyn RecoveryReporter,
 ) -> ScanRecoveryPlan {
+    let mut progress = RecoveryProgress::default();
     let mut discovered_by_path = HashMap::with_capacity(discovered.len());
     for original in discovered {
         discovered_by_path.insert(original.path.as_str().to_owned(), original);
@@ -55,7 +70,14 @@ pub fn plan_recovery(
         fingerprints.insert(fingerprint.original_id.clone(), fingerprint);
     }
 
-    // Classify every persisted Original against the complete discovery.
+    // Classify every persisted Original against the complete discovery. The
+    // persisted-path index keeps the whole classification linear; a scan of
+    // a large Library must not rescan every persisted Original per file.
+    let previous_paths: HashSet<&str> = previous
+        .originals
+        .iter()
+        .map(|original| original.relative_path.as_str())
+        .collect();
     let mut unchanged_paths = std::collections::HashSet::new();
     let mut changed_originals = Vec::new();
     let mut missing_originals = Vec::new();
@@ -91,11 +113,7 @@ pub fn plan_recovery(
         missing_with_evidence > 0 || changed_originals.len() >= SWAP_DETECTION_THRESHOLD;
     if need_new_paths {
         for original in discovered {
-            if !previous
-                .originals
-                .iter()
-                .any(|persisted| persisted.relative_path.as_str() == original.path.as_str())
-            {
+            if !previous_paths.contains(original.path.as_str()) {
                 hash_targets.push(original);
             }
         }
@@ -116,6 +134,7 @@ pub fn plan_recovery(
     hash_targets.dedup_by(|left, right| left.path.as_str() == right.path.as_str());
 
     progress.hash_total = hash_targets.len() as u64;
+    reporter.recovery_progress(progress);
     let mut hashed: HashMap<String, HashedFile> = HashMap::new();
     let mut failed_kinds: Vec<crate::OriginalKind> = Vec::new();
     for target in hash_targets {
@@ -142,7 +161,9 @@ pub fn plan_recovery(
             }
         }
         progress.hashed += 1;
+        reporter.recovery_progress(progress);
     }
+    reporter.recovery_progress(progress);
 
     // A fact-changed file whose digest still equals its owner's fingerprint
     // is a re-save of the same bytes: the owner keeps it as a revision, and

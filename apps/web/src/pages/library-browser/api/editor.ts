@@ -200,7 +200,9 @@ const parseEditFacts = (
     !isRecord(controls) ||
     (supportReason !== null &&
       supportReason !== "original-missing" &&
-      supportReason !== "original-unreadable")
+      supportReason !== "original-unreadable" &&
+      supportReason !== "read-pending" &&
+      supportReason !== "resource-unavailable")
   )
     return undefined;
   const exposure = controls["exposure"];
@@ -240,6 +242,10 @@ const parseEditFacts = (
     whiteBalance = stored;
   }
   if ((sourceSupport === "unavailable") !== (sourceRevision === null))
+    return undefined;
+  // The reason is reported exactly when the source is unavailable, the same
+  // coupling the service documents and the CLI believes.
+  if ((supportReason !== null) !== (sourceSupport === "unavailable"))
     return undefined;
   return Object.freeze({
     photoId,

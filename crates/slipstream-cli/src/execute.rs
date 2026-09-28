@@ -1316,6 +1316,31 @@ pub async fn invoke(cli: Cli, environment: Option<&str>) -> InvocationResult {
     invoke_until(cli, environment, deadline).await
 }
 
+/// The failure one deadline expiry reports. A published file is reported as
+/// committed whatever else was in flight. `library check` is the one
+/// operation whose expiry is never a connection failure: the scan is owned
+/// by the service, may already be admitted and running whether or not this
+/// client handed the request over, and its timeout neither cancels it nor
+/// proves a retry would not join it, so the outcome stays unknown and
+/// `status` carries the scan phase. Every other operation keeps its
+/// admitted-unknown or transport mapping.
+pub(crate) fn deadline_failure(
+    operation: Operation,
+    publication: &PublicationState,
+    admission: &AdmissionState,
+) -> CommandFailure {
+    if let Some(data) = publication.committed() {
+        return CommandFailure::published_file(data, false, publication.committed_noun());
+    }
+    if matches!(operation, Operation::LibraryCheck) {
+        return CommandFailure::library_check_deadline();
+    }
+    match admission.admitted() {
+        Some(identity) => CommandFailure::unknown(&identity),
+        None => CommandFailure::transport(operation),
+    }
+}
+
 pub async fn invoke_until(
     cli: Cli,
     environment: Option<&str>,
@@ -1344,15 +1369,7 @@ pub async fn invoke_until(
                 (failure.exit_code, envelope)
             }
             Err(_) => {
-                let failure = match publication.committed() {
-                    Some(data) => {
-                        CommandFailure::published_file(data, false, publication.committed_noun())
-                    }
-                    None => match admission.admitted() {
-                        Some(identity) => CommandFailure::unknown(&identity),
-                        None => CommandFailure::transport(operation),
-                    },
-                };
+                let failure = deadline_failure(operation, &publication, &admission);
                 let envelope = match failure.data {
                     Some(data) => Envelope::partial(*data, failure.payload),
                     None => Envelope::error(failure.payload),

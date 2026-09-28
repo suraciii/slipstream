@@ -112,6 +112,11 @@ exact claim. Application teardown detaches presentation from the command but
 cannot treat accepted scan work as rolled back; the application-owned server
 Scan Cycle continues independently of the HTTP waiter.
 
+A client-side timeout or transport loss on the scan command is an unknown
+outcome, not a cancellation or terminal result: the monitor reconciles the
+cycle through `GET /api/status`, and a re-issued command joins the
+still-running server cycle rather than starting a second physical scan.
+
 ### Shared overview refresh
 
 `GET /api/overview` is a shared-state read owned by the application scope,
@@ -421,6 +426,16 @@ keep the last committed revisions in the controls and never claim the draft was
 saved. Session undo, redo, and reset are browser-local over drafted settings;
 none is a save until the next settled write.
 
+An `unavailable` read or refusal carries the closed `supportReason`. A
+retryable reason (`read-pending`, `resource-unavailable`) presents a wait
+state: the Develop surface keeps its last committed revisions read-only with
+a retry or refresh action and re-reads later; it never presents the source as
+unreadable. A confirmed reason (`original-missing`, `original-unreadable`)
+presents the permanent read failure. The Develop surface keeps the engine,
+Library, and Photo axes separate — capability note, scan status, and source
+reason each name their own condition — and native-work saturation never
+downgrades a supported Photo's presentation.
+
 ### Edit Preview requests
 
 An Edit Preview request is owned by the Photo scope with key
@@ -676,6 +691,13 @@ Focused automated coverage must prove:
   prior publication, keeps probing, and owns Retry Library Check; and the
   retry command's terminal result and monitor transition consume one
   completion handle exactly once without changing an open snapshot;
+- a scan-command client timeout presents an unknown, non-terminal outcome,
+  reconciles through the status monitor while the server-owned cycle
+  continues, and a re-issued command joins that cycle without claiming
+  cancellation, terminal success, or a duplicate scan;
+- a retryable source reason presents a retryable wait state distinct from a
+  confirmed unreadable source, and native-work saturation never downgrades a
+  supported Photo's Develop presentation;
 - concurrent startup/explicit scan admissions run one application-owned leader,
   publish once, return one captured terminal status to all live waiters, and
   finish status accounting even when one or every HTTP waiter disconnects;

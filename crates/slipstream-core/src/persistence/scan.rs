@@ -553,7 +553,8 @@ pub(super) fn apply_manual_relocations(
                        error_category=NULL,error_message=NULL,
                        capture_metadata_state='pending',capture_order_key=NULL,
                        capture_time_field=NULL,capture_offset_minutes=NULL,
-                       capture_source_revision=NULL
+                       capture_source_revision=NULL,
+                       camera_identity_state='pending',camera_make=NULL,camera_model=NULL
                      WHERE id=?",
                     params![
                         to.as_str(),
@@ -632,7 +633,8 @@ pub(super) fn snapshot(connection: &Connection) -> Result<ScanSnapshot, Persiste
         .prepare(
             "SELECT id,relative_path,kind,size,mtime_ms,available,error_category,error_message,
                     capture_metadata_state,capture_order_key,capture_time_field,
-                    capture_offset_minutes,capture_source_revision
+                    capture_offset_minutes,capture_source_revision,
+                    camera_identity_state,camera_make,camera_model
              FROM original_files ORDER BY relative_path COLLATE BINARY",
         )
         .map_err(|_| PersistenceError::Storage)?
@@ -660,6 +662,7 @@ pub(super) fn snapshot(connection: &Connection) -> Result<ScanSnapshot, Persiste
                     row.get(10)?,
                     row.get(11)?,
                     row.get(12)?,
+                    parse_camera_identity(row.get(13)?, row.get(14)?, row.get(15)?)?,
                 )?,
             })
         })
@@ -748,12 +751,32 @@ fn capture_state_name(state: CaptureMetadataState) -> &'static str {
     }
 }
 
+fn camera_identity_name(identity: &crate::CameraIdentity) -> &'static str {
+    match identity {
+        crate::CameraIdentity::Pending => "pending",
+        crate::CameraIdentity::Observed { .. } => "observed",
+    }
+}
+
+pub(super) fn parse_camera_identity(
+    state: String,
+    make: Option<String>,
+    model: Option<String>,
+) -> rusqlite::Result<crate::CameraIdentity> {
+    match state.as_str() {
+        "pending" if make.is_none() && model.is_none() => Ok(crate::CameraIdentity::Pending),
+        "observed" => Ok(crate::CameraIdentity::Observed { make, model }),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
 pub(super) fn parse_capture_fact(
     state: String,
     order_key: Option<String>,
     field: Option<String>,
     offset_minutes: Option<i64>,
     source_revision: Option<String>,
+    identity: crate::CameraIdentity,
 ) -> rusqlite::Result<CaptureFact> {
     let state = match state.as_str() {
         "pending" => CaptureMetadataState::Pending,
@@ -778,6 +801,7 @@ pub(super) fn parse_capture_fact(
         field,
         offset_minutes,
         source_revision,
+        identity,
     };
     validate_capture_fact(&fact).map_err(|_| rusqlite::Error::InvalidQuery)?;
     Ok(fact)
@@ -809,6 +833,18 @@ fn validate_capture_fact(fact: &CaptureFact) -> Result<(), ()> {
         && source_revision;
     let no_derived =
         fact.order_key.is_none() && fact.field.is_none() && fact.offset_minutes.is_none();
+    // Only a completed inspection can carry a camera identity. Rows written
+    // before the identity column existed keep `pending` identities with
+    // their completed capture states until the next scan re-inspects and
+    // publishes them.
+    let identity_consistent = match fact.state {
+        CaptureMetadataState::Pending | CaptureMetadataState::Failed => {
+            !fact.identity.is_observed()
+        }
+        CaptureMetadataState::Known
+        | CaptureMetadataState::Missing
+        | CaptureMetadataState::Invalid => true,
+    };
     match fact.state {
         CaptureMetadataState::Pending => no_derived && fact.source_revision.is_none(),
         CaptureMetadataState::Known => known,
@@ -818,7 +854,8 @@ fn validate_capture_fact(fact: &CaptureFact) -> Result<(), ()> {
         CaptureMetadataState::Failed => no_derived,
     }
     .then_some(())
-    .ok_or(())
+    .ok_or(())?;
+    identity_consistent.then_some(()).ok_or(())
 }
 
 pub(super) fn parse_preview_state(value: &str) -> rusqlite::Result<PreviewState> {
@@ -1100,7 +1137,8 @@ pub(super) fn apply_scan(
                     "UPDATE original_files SET relative_path=?,
                        capture_metadata_state='pending',capture_order_key=NULL,
                        capture_time_field=NULL,capture_offset_minutes=NULL,
-                       capture_source_revision=NULL
+                       capture_source_revision=NULL,
+                       camera_identity_state='pending',camera_make=NULL,camera_model=NULL
                      WHERE id=?",
                     params![new_path, original_id],
                 )
@@ -1152,7 +1190,7 @@ pub(super) fn apply_scan(
                             "{PERMANENT_DELETION_RETIRED_LOCATION_PREFIX}{}",
                             original.id
                         ),
-                        original.id
+                        original.id.as_str(),
                     ],
                 )
                 .map_err(|_| PersistenceError::Storage)?;
@@ -1188,8 +1226,9 @@ pub(super) fn apply_scan(
                 "INSERT INTO original_files(
                     id,relative_path,kind,size,mtime_ms,available,error_category,error_message,
                     capture_metadata_state,capture_order_key,capture_time_field,
-                    capture_offset_minutes,capture_source_revision)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    capture_offset_minutes,capture_source_revision,
+                    camera_identity_state,camera_make,camera_model)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(relative_path) DO UPDATE SET
                    kind=excluded.kind,size=excluded.size,mtime_ms=excluded.mtime_ms,
                    available=excluded.available,error_category=excluded.error_category,error_message=excluded.error_message,
@@ -1197,10 +1236,19 @@ pub(super) fn apply_scan(
                    capture_order_key=excluded.capture_order_key,
                    capture_time_field=excluded.capture_time_field,
                    capture_offset_minutes=excluded.capture_offset_minutes,
-                   capture_source_revision=excluded.capture_source_revision",
+                   capture_source_revision=excluded.capture_source_revision,
+                   camera_identity_state=excluded.camera_identity_state,
+                   camera_make=excluded.camera_make,
+                   camera_model=excluded.camera_model",
             )
             .map_err(|_| PersistenceError::Storage)?;
         for (index, original) in discovered.iter().enumerate() {
+            let (identity_make, identity_model) = match &original.capture.identity {
+                crate::CameraIdentity::Observed { make, model } => {
+                    (make.as_deref(), model.as_deref())
+                }
+                crate::CameraIdentity::Pending => (None, None),
+            };
             validate_capture_fact(&original.capture).map_err(|_| PersistenceError::Storage)?;
             let id = original_ids
                 .get(original.path.as_str())
@@ -1229,6 +1277,9 @@ pub(super) fn apply_scan(
                     original.capture.field.map(CaptureTimeField::database_name),
                     original.capture.offset_minutes.map(i64::from),
                     original.capture.source_revision.as_deref(),
+                    camera_identity_name(&original.capture.identity),
+                    identity_make,
+                    identity_model,
                 ])
                 .map_err(|_| PersistenceError::Storage)?;
             if failure_after_first && index == 0 {

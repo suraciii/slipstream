@@ -118,10 +118,13 @@ pub(crate) async fn submit_export(
             "The submission carries a value outside the closed wire shape",
         );
     }
-    let Some(photo) = state
+    // One serialized owner read: the Photo facts, the capture identity, and
+    // the recipe source availability below all come from a single published
+    // state, so a scan publication cannot change them mid-submission.
+    let Some((photo, read)) = state
         .application
         .library
-        .photo(&photo_id)
+        .edit_recipe_surface(&photo_id)
         .await
         .ok()
         .flatten()
@@ -184,17 +187,44 @@ pub(crate) async fn submit_export(
             "Only RAW Photos support the development-tiff and film-jpeg workloads",
         );
     }
-    let metadata = match state.application.photo_metadata(&photo_id).await {
-        Ok(metadata) => metadata,
-        Err(_) => {
+    // The support classification is shared with the Edit surface: it derives
+    // from the published capture evidence in the same owner read, carries
+    // the same closed refusal reasons, and never performs an on-demand
+    // metadata read, so native-work saturation cannot change it.
+    let support = crate::edit_recipe::derive_support(
+        crate::edit_recipe::source_facts(&photo),
+        read.source_available,
+        photo.original_available,
+    );
+    match support.state {
+        "unsupported" => {
             return export_error(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "unsupported_photo",
-                "The source class of the Photo could not be identified",
+                "This Photo's source class has no approved profile.",
             );
         }
+        "unavailable" => {
+            return cli_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "resource_unavailable",
+                "Current source facts cannot be read, so no Export can be admitted.",
+                serde_json::json!({
+                    "photoId": photo_id,
+                    "supportReason": support.reason,
+                }),
+            );
+        }
+        _ => {}
+    }
+    let slipstream_core::CameraIdentity::Observed { make, model } = &photo.capture.identity else {
+        return export_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "resource_unavailable",
+            "Current source facts cannot be read, so no Export can be admitted.",
+        );
     };
-    let (Some(make), Some(model)) = (metadata.make.as_deref(), metadata.model.as_deref()) else {
+    let (Some(make), Some(model)) = (make.as_deref(), model.as_deref()) else {
         return export_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "unsupported_photo",

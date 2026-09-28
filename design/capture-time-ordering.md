@@ -34,7 +34,7 @@ Each Original owns one derived capture fact:
 - optional timezone offset in minutes;
 - the source revision inspected.
 
-`pending` means the current Original revision has not been inspected. `known` has a valid ordering key. `missing` means no supported base field was present. `invalid` means supported base fields were present but malformed. `failed` means confinement, I/O, parser, revision, or resource enforcement prevented a trustworthy result.
+`pending` means the current Original revision has not been inspected. `known` has a valid ordering key. `missing` means no supported base field was present. `invalid` means supported base fields were present but malformed. `failed` means an admitted, confined read attempt could not produce a trustworthy result: confinement, I/O, parser, or revision enforcement failed. Native-work admission is not an inspection outcome — when the shared capacity cannot admit an attempt, the fact stays `pending` for that scan and remains retryable; capacity exhaustion must never be recorded as `failed`.
 
 A failed fact remains eligible for retry. Missing and invalid facts are reused while their source revision remains unchanged.
 
@@ -95,9 +95,24 @@ After a changed-revision failure, Capture inspection makes one fresh observation
 
 There are at most two attempts per Original per scan. The fresh attempt must not reuse a prior capture fact, change Location, infer identity or a Content Fingerprint, or start another scan. If it fails, the scan retains its discovery facts and records `failed` without a source revision or ordering key; a later scan may try again. Other first-attempt errors keep their existing failure behavior. Both attempts use the same Library native-work permit, and each keeps the existing parsing limits.
 
+When the shared budget cannot admit an inspection, that inspection is
+deferred rather than failed: the scan records a retryable wait state for the
+Original, the next admitted scan may retry it without a restart, and the
+Published Library keeps the prior published facts. A saturated queue must
+never publish null, stale, or `failed` facts over known published facts, and
+recovering one deferred Original must not require a full restart.
+
 Metadata input, parser allocation, blocking workers, and queued work are bounded. Each Library owns one capacity-two native-work budget shared by Capture inspection, Preview extraction, and derivative processing; standalone cache schedulers may own an independent budget. It must not unlock LibRaw sensor unpack, demosaic, or any RAW development path.
 
 ## Scan and Browse Lifecycle
+
+A completed scan is the only event that advances the Published Library, and
+its publication is atomic: discovery facts, source facts, source revision,
+capture fact, and derivative eligibility change together. A deferred, failed,
+or interrupted inspection or scan publishes nothing and leaves every prior
+published metadata fact, source revision, recipe binding, Preview fact, and
+processing eligibility intact. An empty or failed read must never overwrite a
+known published fact.
 
 A completed scan atomically publishes one Library snapshot. An unchanged Original reuses its persisted fact when the inspected source revision matches. When compatible persisted state already contains a completed published snapshot, an ordinary startup may serve that snapshot while a background rescan builds its replacement. A new state store must finish its first scan before Browse Snapshots are available.
 
@@ -213,4 +228,4 @@ Size and modification time alone cannot detect a same-size, same-time replacemen
 
 ## Verification
 
-Verification covers every Product Spec example, descriptor-confined inspection, discovery-identity and mid-read revision changes, parser and resource failures, exact v2-to-v3, v4-to-v5, and v5-to-v6 migrated state, stable open Browse Snapshot order, newly opened source order after rescan, unchanged Album positions, bounded protocol omission, and unchanged Original bytes and metadata. Generated JPEG and RAW fixtures must prove the two-attempt bound, successful fresh observation with matching published source facts, rejection of stale-discovery metadata for a same-size/same-time replacement, acceptance of a replacement completed before the fresh observation, and failure without old metadata reuse when the fresh attempt also changes. Persistence checks must preserve Original and Photo IDs, decisions, Album membership order, and Resume. Backup restore rehearsal is owned by Issue #38.
+Verification covers every Product Spec example, descriptor-confined inspection, discovery-identity and mid-read revision changes, parser and resource failures, native-work saturation that defers an inspection without recording `failed` or erasing published facts, the next admitted scan retrying a deferred Original without a restart, exact v2-to-v3, v4-to-v5, and v5-to-v6 migrated state, stable open Browse Snapshot order, newly opened source order after rescan, unchanged Album positions, bounded protocol omission, and unchanged Original bytes and metadata. Generated JPEG and RAW fixtures must prove the two-attempt bound, successful fresh observation with matching published source facts, rejection of stale-discovery metadata for a same-size/same-time replacement, acceptance of a replacement completed before the fresh observation, and failure without old metadata reuse when the fresh attempt also changes. Persistence checks must pre

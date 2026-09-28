@@ -404,7 +404,7 @@ export function createEditorController(
             whiteBalance: Object.freeze({ mode: "as-shot" }),
           },
           sourceSupport: "unavailable",
-          supportReason: "unreadable",
+          supportReason: "",
           processingAvailable: false,
           controls: {
             minimumEv: 0,
