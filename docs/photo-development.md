@@ -240,6 +240,13 @@ validated. An interrupted Export must have an explicit recoverable outcome.
 Cancellation must settle to the actual terminal result if completion races it.
 A dropped response alone must not imply that the request failed to take effect.
 
+In the browser, an Export submission whose response is lost or cannot establish
+acceptance retains its Photo's request identity and captured settings. Reconcile
+repeats that exact request; a new Export or a dependent edit of that Photo waits
+until the service resolves it. Other Photos remain editable. This in-session
+recovery does not survive a browser reload; retained Exports can be inspected
+after reopening, but an unconfirmed request cannot be inferred from a list.
+
 Edit Recipes require backup. Intermediate images and Edit Previews may be
 reconstructed while their source and processing assets remain available.
 Every accepted Export's status receipt and captured snapshot must remain

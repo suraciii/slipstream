@@ -408,6 +408,8 @@ export function createPhotoEditorSurfaceController({
       model.loading || !model.canEdit || !exported.canSubmit;
     editorExportCancel.hidden = !exported.canCancel;
     editorExportRetry.hidden = !exported.canRetry;
+    editorExportRetry.textContent =
+      exported.state === "outcome-unknown" ? "Reconcile" : "Retry";
     editorExportDownload.hidden = !exported.canDownload;
     // The Edit Preview note describes the Develop or Film rendition. The
     // Camera stage presents the camera Preview, which is not an Edit Preview.

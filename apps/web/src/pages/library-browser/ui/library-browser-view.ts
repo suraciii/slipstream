@@ -128,6 +128,7 @@ export type EditorExportViewModel = Readonly<{
   state:
     | "idle"
     | "submitting"
+    | "outcome-unknown"
     | "queued"
     | "running"
     | "succeeded"
