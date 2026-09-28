@@ -75,6 +75,9 @@ pub struct ScanProgress {
     pub hashed: u64,
     /// Total fingerprint hashes required by the recovering phase.
     pub hash_total: Option<u64>,
+    /// Milliseconds since the epoch of the last phase or counter advance.
+    /// Zero means no advance has been observed in this process.
+    pub updated_ms: u64,
 }
 
 /// The committed outcome of the most recent completed scan, for truthful

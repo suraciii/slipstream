@@ -30,6 +30,7 @@ export type LibraryOverviewResponse = Readonly<{
   photoCount: number;
   scan: Readonly<{
     state: string;
+    updatedAt?: number;
     publication?: string;
     completed?: number;
     total?: number;

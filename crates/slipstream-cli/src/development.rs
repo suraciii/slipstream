@@ -580,7 +580,13 @@ fn validated_recipe_read(
         None => read.source_support != "unavailable",
         Some(reason) => {
             read.source_support == "unavailable"
-                && matches!(reason, "original-missing" | "original-unreadable")
+                && matches!(
+                    reason,
+                    "original-missing"
+                        | "original-unreadable"
+                        | "read-pending"
+                        | "resource-unavailable"
+                )
         }
     };
     let revision_valid = match read.source_revision.as_deref() {
@@ -1012,6 +1018,19 @@ mod tests {
         });
         validated_recipe_read(read_wire(document), "p1", &origin())
             .expect("unavailable source with its reason is valid");
+    }
+
+    #[test]
+    fn recipe_read_accepts_retryable_source_evidence() {
+        for reason in ["read-pending", "resource-unavailable"] {
+            let mut document = read_fixture();
+            document["sourceRevision"] = Value::Null;
+            document["sourceSupport"] = json!("unavailable");
+            document["supportReason"] = json!(reason);
+            let value = validated_recipe_read(read_wire(document), "p1", &origin())
+                .expect("retryable source evidence is valid");
+            assert_eq!(value["supportReason"], reason);
+        }
     }
 
     #[test]

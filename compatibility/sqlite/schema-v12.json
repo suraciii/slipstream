@@ -1,0 +1,864 @@
+{
+  "userVersion": 12,
+  "objects": [
+    {
+      "type": "index",
+      "name": "album_members_photo",
+      "sql": "createindexalbum_members_photoonalbum_members(photo_id)"
+    },
+    {
+      "type": "index",
+      "name": "exports_photo",
+      "sql": "createindexexports_photoonexports(photo_id)"
+    },
+    {
+      "type": "index",
+      "name": "original_fingerprints_digest",
+      "sql": "createindexoriginal_fingerprints_digestonoriginal_fingerprints(digest)"
+    },
+    {
+      "type": "index",
+      "name": "photos_original",
+      "sql": "createindexphotos_originalonphotos(original_id)"
+    },
+    {
+      "type": "table",
+      "name": "album_members",
+      "sql": "createtablealbum_members(album_idtextnotnullreferencesalbums(id)ondeletecascade,photo_idtextnotnullreferencesphotos(id)ondeleterestrict,positionintegernotnullcheck(position>=0),primarykey(album_id,photo_id),unique(album_id,position))",
+      "columns": [
+        {
+          "name": "album_id",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 1
+        },
+        {
+          "name": "photo_id",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 2
+        },
+        {
+          "name": "position",
+          "type": "INTEGER",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        }
+      ],
+      "foreignKeys": [
+        {
+          "table": "photos",
+          "from": "photo_id",
+          "to": "id",
+          "onUpdate": "NO ACTION",
+          "onDelete": "RESTRICT"
+        },
+        {
+          "table": "albums",
+          "from": "album_id",
+          "to": "id",
+          "onUpdate": "NO ACTION",
+          "onDelete": "CASCADE"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "name": "album_progress",
+      "sql": "createtablealbum_progress(album_idtextprimarykeyreferencesalbums(id)ondeletecascade,photo_idtextnotnull,foreignkey(album_id,photo_id)referencesalbum_members(album_id,photo_id)ondeletecascade)",
+      "columns": [
+        {
+          "name": "album_id",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 1
+        },
+        {
+          "name": "photo_id",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        }
+      ],
+      "foreignKeys": [
+        {
+          "table": "album_members",
+          "from": "album_id",
+          "to": "album_id",
+          "onUpdate": "NO ACTION",
+          "onDelete": "CASCADE"
+        },
+        {
+          "table": "album_members",
+          "from": "photo_id",
+          "to": "photo_id",
+          "onUpdate": "NO ACTION",
+          "onDelete": "CASCADE"
+        },
+        {
+          "table": "albums",
+          "from": "album_id",
+          "to": "id",
+          "onUpdate": "NO ACTION",
+          "onDelete": "CASCADE"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "name": "albums",
+      "sql": "createtablealbums(idtextprimarykey,nametextnotnulluniquecollatenocasecheck(length(name)between1and120),created_atintegernotnull)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 1
+        },
+        {
+          "name": "name",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "created_at",
+          "type": "INTEGER",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        }
+      ],
+      "foreignKeys": []
+    },
+    {
+      "type": "table",
+      "name": "edit_recipes",
+      "sql": "createtableedit_recipes(photo_idtextprimarykeyreferencesphotos(id)ondeleterestrict,revisiontextnotnullcheck(length(revision)>0),source_revisiontextnotnullcheck(length(source_revision)>0),exposure_evrealnotnullcheck(exposure_evbetween-1.7976931348623157e308and1.7976931348623157e308),white_balance_modetextnotnullcheck(white_balance_modein('as-shot','temperature-tint')),temperature_kelvinintegercheck(temperature_kelvinisnullortemperature_kelvinbetween1000and40000),tint_milliintegercheck(tint_milliisnullortint_millibetween-150000and150000))",
+      "columns": [
+        {
+          "name": "photo_id",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 1
+        },
+        {
+          "name": "revision",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "source_revision",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "exposure_ev",
+          "type": "REAL",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "white_balance_mode",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "temperature_kelvin",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "tint_milli",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        }
+      ],
+      "foreignKeys": [
+        {
+          "table": "photos",
+          "from": "photo_id",
+          "to": "id",
+          "onUpdate": "NO ACTION",
+          "onDelete": "RESTRICT"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "name": "export_download_leases",
+      "sql": "createtableexport_download_leases(idtextprimarykey,export_idtextnotnullreferencesexports(id)ondeletecascade,created_atintegernotnullcheck(created_at>=0))",
+      "columns": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 1
+        },
+        {
+          "name": "export_id",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "created_at",
+          "type": "INTEGER",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        }
+      ],
+      "foreignKeys": [
+        {
+          "table": "exports",
+          "from": "export_id",
+          "to": "id",
+          "onUpdate": "NO ACTION",
+          "onDelete": "CASCADE"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "name": "exports",
+      "sql": "createtableexports(idtextprimarykey,photo_idtextnotnullreferencesphotos(id)ondeleterestrict,targettextnotnullcheck(targetin('development-tiff','film-jpeg')),statetextnotnullcheck(statein('queued','running','succeeded','failed','cancelled')),outcometextcheck(outcomeisnullorlength(outcome)between1and200),recipe_revisiontextnotnullcheck(length(recipe_revision)>0),exposure_evrealnotnull,white_balance_modetextnotnullcheck(white_balance_mode='as-shot'),source_revisiontextnotnullcheck(length(source_revision)>0),source_profile_idtextnotnullcheck(length(source_profile_id)between1and64),source_kindtextnotnullcheck(source_kind='raw'),source_sizeintegercheck(source_sizeisnullorsource_size>0),source_sha256textcheck(source_sha256isnullorlength(source_sha256)=64),recipe_digesttextnotnullcheck(length(recipe_digest)=64),policy_idtextnotnullcheck(length(policy_id)=64),bundle_idtextnotnullcheck(length(bundle_id)=64),workloadtextnotnullcheck(workloadin('development-tiff','film-jpeg')),attempt_incarnationtextcheck(attempt_incarnationisnullorlength(attempt_incarnation)=32),attempt_sequenceintegercheck(attempt_sequenceisnullorattempt_sequence>0),artifact_sizeintegercheck(artifact_sizeisnullorartifact_size>0),artifact_sha256textcheck(artifact_sha256isnullorlength(artifact_sha256)=64),artifact_expires_atintegercheck(artifact_expires_atisnullorartifact_expires_at>=0),artifact_widthintegercheck(artifact_widthisnullorartifact_width>0),artifact_heightintegercheck(artifact_heightisnullorartifact_height>0),artifact_profile_identitytextcheck(artifact_profile_identityisnullorlength(artifact_profile_identity)=64),created_atintegernotnullcheck(created_at>=0),settled_atintegercheck(settled_atisnullorsettled_at>=0),retain_untilintegercheck(retain_untilisnullorretain_until>=0))",
+      "columns": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 1
+        },
+        {
+          "name": "photo_id",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "target",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "state",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "outcome",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "recipe_revision",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "exposure_ev",
+          "type": "REAL",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "white_balance_mode",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "source_revision",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "source_profile_id",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "source_kind",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "source_size",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "source_sha256",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "recipe_digest",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "policy_id",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "bundle_id",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "workload",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "attempt_incarnation",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "attempt_sequence",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "artifact_size",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "artifact_sha256",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "artifact_expires_at",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "artifact_width",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "artifact_height",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "artifact_profile_identity",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "created_at",
+          "type": "INTEGER",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "settled_at",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "retain_until",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        }
+      ],
+      "foreignKeys": [
+        {
+          "table": "photos",
+          "from": "photo_id",
+          "to": "id",
+          "onUpdate": "NO ACTION",
+          "onDelete": "RESTRICT"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "name": "library_metadata",
+      "sql": "createtablelibrary_metadata(keytextprimarykey,valuetextnotnull)",
+      "columns": [
+        {
+          "name": "key",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 1
+        },
+        {
+          "name": "value",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        }
+      ],
+      "foreignKeys": []
+    },
+    {
+      "type": "table",
+      "name": "original_files",
+      "sql": "createtableoriginal_files(idtextprimarykey,relative_pathtextnotnullunique,kindtextnotnullcheck(kindin('raw','jpeg')),sizeintegernotnullcheck(size>=0),mtime_msrealnotnullcheck(mtime_ms>=0),availableintegernotnullcheck(availablein(0,1)),error_categorytextcheck(error_categoryisnullorerror_categoryin('unreadable','changed')),error_messagetextcheck(error_messageisnullorlength(error_message)<=120),capture_metadata_statetextnotnulldefault'pending'check(capture_metadata_statein('pending','known','missing','invalid','failed')),capture_order_keytextcheck(capture_order_keyisnullor(length(capture_order_key)=29andsubstr(capture_order_key,5,1)='-'andsubstr(capture_order_key,8,1)='-'andsubstr(capture_order_key,11,1)='t'andsubstr(capture_order_key,14,1)=':'andsubstr(capture_order_key,17,1)=':'andsubstr(capture_order_key,20,1)='.'andreplace(replace(replace(replace(capture_order_key,'-',''),':',''),'t',''),'.','')notglob'*^0-9*')),capture_time_fieldtextcheck(capture_time_fieldisnullorcapture_time_fieldin('date-time-original','date-time-digitized')),capture_offset_minutesintegercheck(capture_offset_minutesisnullorcapture_offset_minutesbetween-840and840),capture_source_revisiontext,capture_maketextcheck(capture_makeisnullor(length(capture_make)>=1andlength(capture_make)<=64)),capture_modeltextcheck(capture_modelisnullor(length(capture_model)>=1andlength(capture_model)<=64)))",
+      "columns": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 1
+        },
+        {
+          "name": "relative_path",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "kind",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "size",
+          "type": "INTEGER",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "mtime_ms",
+          "type": "REAL",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "available",
+          "type": "INTEGER",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "error_category",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "error_message",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "capture_metadata_state",
+          "type": "TEXT",
+          "notNull": true,
+          "default": "'pending'",
+          "primaryKey": 0
+        },
+        {
+          "name": "capture_order_key",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "capture_time_field",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "capture_offset_minutes",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "capture_source_revision",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "capture_make",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "capture_model",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        }
+      ],
+      "foreignKeys": []
+    },
+    {
+      "type": "table",
+      "name": "original_fingerprints",
+      "sql": "createtableoriginal_fingerprints(original_idtextprimarykeyreferencesoriginal_files(id)ondeletecascade,digesttextnotnullcheck(length(digest)=64),sizeintegernotnullcheck(size>=0),mtime_msrealnotnullcheck(mtime_ms>=0))",
+      "columns": [
+        {
+          "name": "original_id",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 1
+        },
+        {
+          "name": "digest",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "size",
+          "type": "INTEGER",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "mtime_ms",
+          "type": "REAL",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        }
+      ],
+      "foreignKeys": [
+        {
+          "table": "original_files",
+          "from": "original_id",
+          "to": "id",
+          "onUpdate": "NO ACTION",
+          "onDelete": "CASCADE"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "name": "photos",
+      "sql": "createtablephotos(idtextprimarykey,original_idtextnotnulluniquereferencesoriginal_files(id)ondeleterestrict,availableintegernotnullcheck(availablein(0,1)),preview_statetextnotnullcheck(preview_statein('inspection-pending','ready','failed','unavailable')),preview_source_revisiontext,preview_widthintegercheck(preview_widthisnullorpreview_width>0),preview_heightintegercheck(preview_heightisnullorpreview_height>0),cache_revisiontext,sort_pathtextnotnull,selection_statetextnotnulldefault'undecided'check(selection_statein('undecided','selected','rejected')),ratingintegernotnulldefault0check(ratingbetween0and5),removed_at_msintegercheck(removed_at_msisnullorremoved_at_ms>=0),removed_operationtextcheck((removed_at_msisnull)=(removed_operationisnull)),association_generationintegernotnulldefault1check(association_generation>0))",
+      "columns": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 1
+        },
+        {
+          "name": "original_id",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "available",
+          "type": "INTEGER",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "preview_state",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "preview_source_revision",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "preview_width",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "preview_height",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "cache_revision",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "sort_path",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "selection_state",
+          "type": "TEXT",
+          "notNull": true,
+          "default": "'undecided'",
+          "primaryKey": 0
+        },
+        {
+          "name": "rating",
+          "type": "INTEGER",
+          "notNull": true,
+          "default": "0",
+          "primaryKey": 0
+        },
+        {
+          "name": "removed_at_ms",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "removed_operation",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "association_generation",
+          "type": "INTEGER",
+          "notNull": true,
+          "default": "1",
+          "primaryKey": 0
+        }
+      ],
+      "foreignKeys": [
+        {
+          "table": "original_files",
+          "from": "original_id",
+          "to": "id",
+          "onUpdate": "NO ACTION",
+          "onDelete": "RESTRICT"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "name": "retained_sidecar_orphans",
+      "sql": "createtableretained_sidecar_orphans(sidecar_pathtextprimarykey,retired_photo_idtextnotnull,retired_original_pathtextnotnull,original_kindtextnotnullcheck(original_kindin('raw','jpeg')),retired_generationintegernotnullcheck(retired_generation>0),observed_sizeintegercheck(observed_sizeisnullorobserved_size>=0),observed_mtime_msrealcheck(observed_mtime_msisnullorobserved_mtime_ms>=0),observed_digesttextcheck(observed_digestisnullorlength(observed_digest)=64),check((observed_sizeisnull)=(observed_mtime_msisnull)))",
+      "columns": [
+        {
+          "name": "sidecar_path",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 1
+        },
+        {
+          "name": "retired_photo_id",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "retired_original_path",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "original_kind",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "retired_generation",
+          "type": "INTEGER",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "observed_size",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "observed_mtime_ms",
+          "type": "REAL",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "observed_digest",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        }
+      ],
+      "foreignKeys": []
+    },
+    {
+      "type": "table",
+      "name": "sidecar_associations",
+      "sql": "createtablesidecar_associations(photo_idtextprimarykeyreferencesphotos(id)ondeleterestrict,sidecar_pathtextnotnullunique,observed_sizeintegercheck(observed_sizeisnullorobserved_size>=0),observed_mtime_msrealcheck(observed_mtime_msisnullorobserved_mtime_ms>=0),observed_digesttextcheck(observed_digestisnullorlength(observed_digest)=64),check((observed_sizeisnull)=(observed_mtime_msisnull)))",
+      "columns": [
+        {
+          "name": "photo_id",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 1
+        },
+        {
+          "name": "sidecar_path",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "observed_size",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "observed_mtime_ms",
+          "type": "REAL",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "observed_digest",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        }
+      ],
+      "foreignKeys": [
+        {
+          "table": "photos",
+          "from": "photo_id",
+          "to": "id",
+          "onUpdate": "NO ACTION",
+          "onDelete": "RESTRICT"
+        }
+      ]
+    }
+  ]
+}

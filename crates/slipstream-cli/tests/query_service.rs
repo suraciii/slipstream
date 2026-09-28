@@ -329,6 +329,7 @@ async fn interrupted_library_check_reports_unknown_and_directs_a_status_read() {
 async fn failed_library_check_carries_service_scan_state_without_claiming_success() {
     let scan = serde_json::json!({
         "state": "failed",
+        "updatedAt": 1780000000123u64,
         "publication": null,
         "completed": 0,
         "total": 0,
@@ -418,6 +419,7 @@ fn executable_output_deadline_and_interrupt_do_not_wait_for_blocked_pipes() {
         "photoCount": 0,
         "scan": {
             "state": "idle",
+            "updatedAt": null,
             "publication": "p1",
             "completed": 0,
             "total": 0,
@@ -472,6 +474,7 @@ fn status_payload_with_version(length: usize) -> Value {
         "photoCount": 0,
         "scan": {
             "state": "idle",
+            "updatedAt": null,
             "publication": "p1",
             "completed": 0,
             "total": 0,

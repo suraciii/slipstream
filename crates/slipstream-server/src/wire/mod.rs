@@ -52,6 +52,8 @@ pub struct LibraryOverviewResponse {
 pub struct ScanStatusWire {
     pub state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub publication: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed: Option<usize>,

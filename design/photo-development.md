@@ -580,7 +580,8 @@ retained artifacts stay usable in every state. It has no error body.
 `sourceRevision`, `recipe` (`null` or an object with `recipeVersion`,
 `exposureEv`, and `whiteBalance`), `sourceSupport` (`supported`,
 `unavailable`, or `unsupported`), `supportReason` (`null`, `original-missing`,
-or `original-unreadable`, non-null only with `unavailable`),
+`original-unreadable`, `read-pending`, or `resource-unavailable`, non-null only
+with `unavailable`),
 `processingAvailable` (boolean), and `controls` (`exposure` with `minimumEv`,
 `maximumEv`, `stepEv`, and `whiteBalanceModes`). A stored `whiteBalance` whose
 mode is absent from `controls.whiteBalanceModes` is not currently admitted:
@@ -591,9 +592,14 @@ exactly when `sourceSupport` is `unavailable`, so a missing or unreadable
 Original reports one state and never `supported` or `unsupported` with
 processing unavailable. A client that observes `unavailable` must not save,
 rebind, preview, or export against that source and must reconcile from a later
-read; a guarded save or rebind against it returns `unavailable` with 503
-`resource_unavailable` until current source facts are readable again. The only
-error is 404 `unknown_photo`.
+read; a guarded save or rebind against it returns 503 `resource_unavailable`
+until current source facts are readable again. `read-pending` means the
+published inspection is absent or belongs to another source revision.
+`resource-unavailable` means a bounded observation could not complete; neither
+is evidence that the Original is unreadable. A completed Capture fact for the
+current source revision carries observed camera identity, and source support
+is classified from that committed evidence. The only read error is 404
+`unknown_photo`.
 
 `POST /api/photos/{id}/edit-recipe` takes `requestId`,
 `expectedRecipeVersion` (string or `null`), `expectedSourceRevision`, and

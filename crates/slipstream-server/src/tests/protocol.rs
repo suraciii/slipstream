@@ -31,6 +31,25 @@ fn substitute_protocol_captures(
     }
 }
 
+/// Masks the wall-clock `updatedAt` progress timestamp so the exact contract
+/// comparison pins its presence and shape without pinning a clock reading.
+fn mask_updated_at(body: &mut serde_json::Value, name: &str) {
+    fn mask_field(object: &mut serde_json::Value, name: &str) {
+        let Some(updated_at) = object.get("updatedAt").and_then(|value| value.as_u64()) else {
+            return;
+        };
+        assert!(
+            updated_at > 0,
+            "{name} updatedAt must be a real epoch timestamp"
+        );
+        object["updatedAt"] = serde_json::Value::String("$updatedAt".to_owned());
+    }
+    mask_field(body, name);
+    if let Some(scan) = body.get_mut("scan") {
+        mask_field(scan, name);
+    }
+}
+
 #[tokio::test]
 async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
     let (base, config) = prepare_fixture();
@@ -89,7 +108,8 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
             .await
             .unwrap();
         if let Some(expected) = vector["expected"]["body"].as_object() {
-            let actual: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let mut actual: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            mask_updated_at(&mut actual, vector["name"].as_str().unwrap());
             if captured_album_id.is_empty()
                 && let Some(id) = actual["albums"][0]["id"].as_str()
             {
@@ -288,11 +308,14 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
         let body = axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024)
             .await
             .unwrap();
-        let actual: Option<serde_json::Value> = if vector["expected"]["body"].is_object() {
+        let mut actual: Option<serde_json::Value> = if vector["expected"]["body"].is_object() {
             Some(serde_json::from_slice(&body).unwrap())
         } else {
             None
         };
+        if let Some(actual_value) = actual.as_mut() {
+            mask_updated_at(actual_value, &name);
+        }
         if let Some(actual_value) = actual.as_ref() {
             if publication.is_empty()
                 && let Some(captured) = actual_value

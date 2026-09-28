@@ -122,6 +122,10 @@ Loading Status reports real phases and counts. It distinguishes:
 - initializing when no Published Library exists.
 
 A phase may omit a total until that total is known. The protocol must not manufacture a percentage from elapsed time.
+The status includes `updatedAt` in Unix epoch milliseconds when progress last
+advanced, absent before any scan activity. Recovery progress counts cover
+eligible candidates examined during the current scan, not an estimate.
+
 
 ## Semantics
 

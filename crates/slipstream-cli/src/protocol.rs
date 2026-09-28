@@ -563,6 +563,7 @@ pub(crate) fn client_version() -> String {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ScanStatus {
     pub(crate) state: ScanState,
+    pub(crate) updated_at: Option<u64>,
     pub(crate) publication: Option<String>,
     pub(crate) completed: Option<u64>,
     pub(crate) total: Option<u64>,

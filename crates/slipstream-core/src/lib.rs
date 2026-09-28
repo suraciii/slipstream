@@ -33,8 +33,8 @@ pub use cache::{
 };
 pub use capture::{
     CaptureFact, CaptureInspectionError, CaptureMetadataState, CaptureReviewMetadata,
-    CaptureTimeField, MAXIMUM_CAPTURE_METADATA_BYTES, capture_source_revision,
-    inspect_review_metadata,
+    CaptureTimeField, MAXIMUM_CAPTURE_METADATA_BYTES, capture_revision_matches_descriptor,
+    capture_source_revision, inspect_review_metadata,
 };
 pub use confinement::{LibraryRoot, OriginalCapability, OriginalDeletionOutcome, ScanLimits};
 pub use derivative::{

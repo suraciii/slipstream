@@ -1326,19 +1326,12 @@ impl EditPreviewOwner {
 
 // ---------------------------------------------------------------- handler
 
-/// Classifies one Photo's source class through the Edit Recipe surface's
-/// support derivation: the closed contract states (`supported`,
-/// `unavailable`, `unsupported`) with one closed `supportReason`.
-fn classify_support(
-    photo: &slipstream_core::PhotoRead,
-    metadata: &slipstream_core::CaptureReviewMetadata,
+/// Classifies one Photo's source class through the Edit Recipe surface.
+async fn classify_support(
+    state: &HttpState,
     read: &EditRecipeRead,
 ) -> crate::edit_recipe::SupportClassification {
-    crate::edit_recipe::derive_support(
-        crate::edit_recipe::source_facts(photo, metadata),
-        read.source_available,
-        photo.original_available,
-    )
+    crate::edit_recipe::classify(state, read).await
 }
 
 /// `GET /api/photos/{id}/edit-preview/{stage}`
@@ -1364,13 +1357,11 @@ pub(crate) async fn get_edit_preview(
     if !valid_id(&photo_id) {
         return unknown_photo(&photo_id);
     }
-    // One serialized recipe read owns every identity fact, so a rescan
-    // between reads cannot mix an old recipe with newer source facts.
-    let (photo, metadata, read) = match crate::edit_recipe::load_facts(&state, &photo_id).await {
-        Ok(facts) => facts,
+    let read = match crate::edit_recipe::load_facts(&state, &photo_id).await {
+        Ok(read) => read,
         Err(response) => return response,
     };
-    if let Some(response) = support_refusal(&photo, &metadata, &read, stage) {
+    if let Some(response) = support_refusal(&state, &photo_id, &read, stage).await {
         return response;
     }
     if let Err(response) = develop_executable(&state, stage, settings, &read) {
@@ -1382,15 +1373,15 @@ pub(crate) async fn get_edit_preview(
 /// The support refusal of one Photo, if its class or facts refuse the route.
 /// The deployment's processing enablement is the capability boundary and is
 /// checked separately by `develop_executable`.
-fn support_refusal(
-    photo: &slipstream_core::PhotoRead,
-    metadata: &slipstream_core::CaptureReviewMetadata,
+async fn support_refusal(
+    state: &HttpState,
+    photo_id: &str,
     read: &EditRecipeRead,
     stage: &'static str,
 ) -> Option<Response<Body>> {
-    let support = classify_support(photo, metadata, read);
+    let support = classify_support(state, read).await;
     match support.state {
-        "unsupported" => Some(unsupported_photo(&photo.id, stage)),
+        "unsupported" => Some(unsupported_photo(photo_id, stage)),
         "unavailable" => Some(resource_unavailable(
             stage,
             support.reason.unwrap_or("original-missing"),
@@ -1682,11 +1673,11 @@ async fn fresh_identity(
     stage: &'static str,
     settings: &'static str,
 ) -> Result<PreviewIdentity, Response<Body>> {
-    let (photo, metadata, read) = match crate::edit_recipe::load_facts(state, photo_id).await {
-        Ok(facts) => facts,
+    let read = match crate::edit_recipe::load_facts(state, photo_id).await {
+        Ok(read) => read,
         Err(response) => return Err(response),
     };
-    if let Some(response) = support_refusal(&photo, &metadata, &read, stage) {
+    if let Some(response) = support_refusal(state, photo_id, &read, stage).await {
         return Err(response);
     }
     develop_executable(state, stage, settings, &read).map_err(|response| *response)?;

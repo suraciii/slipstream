@@ -44,6 +44,7 @@ pub fn plan_recovery(
     persisted_fingerprints: &[crate::OriginalFingerprint],
     excluded_original_ids: &std::collections::HashSet<String>,
     progress: &mut RecoveryProgress,
+    report: &dyn Fn(u64, u64),
 ) -> ScanRecoveryPlan {
     let mut discovered_by_path = HashMap::with_capacity(discovered.len());
     for original in discovered {
@@ -116,6 +117,7 @@ pub fn plan_recovery(
     hash_targets.dedup_by(|left, right| left.path.as_str() == right.path.as_str());
 
     progress.hash_total = hash_targets.len() as u64;
+    report(progress.hashed, progress.hash_total);
     let mut hashed: HashMap<String, HashedFile> = HashMap::new();
     let mut failed_kinds: Vec<crate::OriginalKind> = Vec::new();
     for target in hash_targets {
@@ -142,6 +144,7 @@ pub fn plan_recovery(
             }
         }
         progress.hashed += 1;
+        report(progress.hashed, progress.hash_total);
     }
 
     // A fact-changed file whose digest still equals its owner's fingerprint

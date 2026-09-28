@@ -553,7 +553,7 @@ pub(super) fn apply_manual_relocations(
                        error_category=NULL,error_message=NULL,
                        capture_metadata_state='pending',capture_order_key=NULL,
                        capture_time_field=NULL,capture_offset_minutes=NULL,
-                       capture_source_revision=NULL
+                       capture_source_revision=NULL,capture_make=NULL,capture_model=NULL
                      WHERE id=?",
                     params![
                         to.as_str(),
@@ -632,7 +632,7 @@ pub(super) fn snapshot(connection: &Connection) -> Result<ScanSnapshot, Persiste
         .prepare(
             "SELECT id,relative_path,kind,size,mtime_ms,available,error_category,error_message,
                     capture_metadata_state,capture_order_key,capture_time_field,
-                    capture_offset_minutes,capture_source_revision
+                    capture_offset_minutes,capture_source_revision,capture_make,capture_model
              FROM original_files ORDER BY relative_path COLLATE BINARY",
         )
         .map_err(|_| PersistenceError::Storage)?
@@ -660,6 +660,8 @@ pub(super) fn snapshot(connection: &Connection) -> Result<ScanSnapshot, Persiste
                     row.get(10)?,
                     row.get(11)?,
                     row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
                 )?,
             })
         })
@@ -728,7 +730,9 @@ pub(super) fn parse_kind(value: &str) -> rusqlite::Result<OriginalKind> {
     }
 }
 
-fn parse_error_category(value: Option<String>) -> rusqlite::Result<Option<OriginalErrorCategory>> {
+pub(super) fn parse_error_category(
+    value: Option<String>,
+) -> rusqlite::Result<Option<OriginalErrorCategory>> {
     value
         .map(|value| match value.as_str() {
             "unreadable" => Ok(OriginalErrorCategory::Unreadable),
@@ -754,6 +758,8 @@ pub(super) fn parse_capture_fact(
     field: Option<String>,
     offset_minutes: Option<i64>,
     source_revision: Option<String>,
+    make: Option<String>,
+    model: Option<String>,
 ) -> rusqlite::Result<CaptureFact> {
     let state = match state.as_str() {
         "pending" => CaptureMetadataState::Pending,
@@ -778,6 +784,8 @@ pub(super) fn parse_capture_fact(
         field,
         offset_minutes,
         source_revision,
+        make,
+        model,
     };
     validate_capture_fact(&fact).map_err(|_| rusqlite::Error::InvalidQuery)?;
     Ok(fact)
@@ -809,13 +817,28 @@ fn validate_capture_fact(fact: &CaptureFact) -> Result<(), ()> {
         && source_revision;
     let no_derived =
         fact.order_key.is_none() && fact.field.is_none() && fact.offset_minutes.is_none();
+    // The camera identity names the source class of the inspected revision:
+    // both halves are recorded together, only for a completed revision, and
+    // within the bounded text length the schema admits.
+    let valid_identity = (fact.make.is_none() == fact.model.is_none())
+        && fact
+            .make
+            .as_deref()
+            .is_none_or(|value| !value.is_empty() && value.len() <= 64)
+        && fact
+            .model
+            .as_deref()
+            .is_none_or(|value| !value.is_empty() && value.len() <= 64)
+        && (fact.make.is_none() || source_revision);
     match fact.state {
-        CaptureMetadataState::Pending => no_derived && fact.source_revision.is_none(),
-        CaptureMetadataState::Known => known,
-        CaptureMetadataState::Missing | CaptureMetadataState::Invalid => {
-            no_derived && source_revision
+        CaptureMetadataState::Pending => {
+            no_derived && fact.source_revision.is_none() && valid_identity
         }
-        CaptureMetadataState::Failed => no_derived,
+        CaptureMetadataState::Known => known && valid_identity,
+        CaptureMetadataState::Missing | CaptureMetadataState::Invalid => {
+            no_derived && source_revision && valid_identity
+        }
+        CaptureMetadataState::Failed => no_derived && fact.make.is_none() && fact.model.is_none(),
     }
     .then_some(())
     .ok_or(())
@@ -1100,7 +1123,7 @@ pub(super) fn apply_scan(
                     "UPDATE original_files SET relative_path=?,
                        capture_metadata_state='pending',capture_order_key=NULL,
                        capture_time_field=NULL,capture_offset_minutes=NULL,
-                       capture_source_revision=NULL
+                       capture_source_revision=NULL,capture_make=NULL,capture_model=NULL
                      WHERE id=?",
                     params![new_path, original_id],
                 )
@@ -1188,8 +1211,8 @@ pub(super) fn apply_scan(
                 "INSERT INTO original_files(
                     id,relative_path,kind,size,mtime_ms,available,error_category,error_message,
                     capture_metadata_state,capture_order_key,capture_time_field,
-                    capture_offset_minutes,capture_source_revision)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    capture_offset_minutes,capture_source_revision,capture_make,capture_model)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(relative_path) DO UPDATE SET
                    kind=excluded.kind,size=excluded.size,mtime_ms=excluded.mtime_ms,
                    available=excluded.available,error_category=excluded.error_category,error_message=excluded.error_message,
@@ -1197,7 +1220,9 @@ pub(super) fn apply_scan(
                    capture_order_key=excluded.capture_order_key,
                    capture_time_field=excluded.capture_time_field,
                    capture_offset_minutes=excluded.capture_offset_minutes,
-                   capture_source_revision=excluded.capture_source_revision",
+                   capture_source_revision=excluded.capture_source_revision,
+                   capture_make=excluded.capture_make,
+                   capture_model=excluded.capture_model",
             )
             .map_err(|_| PersistenceError::Storage)?;
         for (index, original) in discovered.iter().enumerate() {
@@ -1229,6 +1254,8 @@ pub(super) fn apply_scan(
                     original.capture.field.map(CaptureTimeField::database_name),
                     original.capture.offset_minutes.map(i64::from),
                     original.capture.source_revision.as_deref(),
+                    original.capture.make.as_deref(),
+                    original.capture.model.as_deref(),
                 ])
                 .map_err(|_| PersistenceError::Storage)?;
             if failure_after_first && index == 0 {

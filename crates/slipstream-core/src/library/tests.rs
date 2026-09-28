@@ -880,7 +880,7 @@ async fn expansion_preserves_legacy_identity_and_user_state_then_discovers_sibli
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        11
+        12
     );
     assert_eq!(
         connection

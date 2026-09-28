@@ -10,7 +10,7 @@ pub(super) fn preflight_schema(
     connection: &Connection,
     canonical_root: &str,
 ) -> Result<(), PersistenceError> {
-    preflight_schema_for_max_version(connection, canonical_root, 11)
+    preflight_schema_for_max_version(connection, canonical_root, 12)
 }
 
 pub(super) fn preflight_schema_for_max_version(
@@ -50,6 +50,8 @@ pub(super) fn preflight_schema_for_max_version(
             .map_err(|_| PersistenceError::UnsupportedSchema),
         11 => validate_canonical_schema(connection, SchemaVersion::V11)
             .map_err(|_| PersistenceError::UnsupportedSchema),
+        12 => validate_canonical_schema(connection, SchemaVersion::V12)
+            .map_err(|_| PersistenceError::UnsupportedSchema),
         _ => unreachable!(),
     }
 }
@@ -86,7 +88,7 @@ pub(super) fn startup_schema(
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| PersistenceError::Storage)?;
-    if version > 11 {
+    if version > 12 {
         return Err(PersistenceError::NewerSchema);
     }
     validate_root_binding(connection, canonical_root)?;
@@ -141,6 +143,8 @@ pub(super) fn startup_schema(
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
         11 => validate_canonical_schema(&transaction, SchemaVersion::V11)
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
+        12 => validate_canonical_schema(&transaction, SchemaVersion::V12)
+            .map_err(|_| PersistenceError::UnsupportedSchema)?,
         _ => unreachable!(),
     }
     if version < 6 {
@@ -161,6 +165,9 @@ pub(super) fn startup_schema(
     if version < 11 {
         migrate_v10(&transaction)?;
     }
+    if version < 12 {
+        migrate_v11(&transaction)?;
+    }
     let stored: Option<String> = transaction
         .query_row(
             "SELECT value FROM library_metadata WHERE key='canonical_root'",
@@ -178,7 +185,7 @@ pub(super) fn startup_schema(
             .map_err(|_| PersistenceError::Storage)?;
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V11)
+    validate_canonical_schema(&transaction, SchemaVersion::V12)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -759,6 +766,28 @@ fn migrate_v10(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
         .map_err(|_| PersistenceError::UnsupportedSchema)
 }
 
+/// Issue: Preview/Edit Readiness. Capture inspection publishes the camera
+/// identity it observed together with the rest of the Capture fact, so a
+/// saturated bounded read can never be mistaken for an unreadable Original
+/// and the last Published Library stays authoritative for Edit support.
+/// Existing rows keep every fact; the identity columns start empty and are
+/// recorded by the next inspection of each revision.
+fn migrate_v11(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
+    validate_canonical_schema(transaction, SchemaVersion::V11)
+        .map_err(|_| PersistenceError::UnsupportedSchema)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE original_files ADD COLUMN capture_make TEXT
+               CHECK(capture_make IS NULL OR (length(capture_make) >= 1 AND length(capture_make) <= 64));
+             ALTER TABLE original_files ADD COLUMN capture_model TEXT
+               CHECK(capture_model IS NULL OR (length(capture_model) >= 1 AND length(capture_model) <= 64));
+             PRAGMA user_version = 12;",
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    validate_canonical_schema(transaction, SchemaVersion::V12)
+        .map_err(|_| PersistenceError::UnsupportedSchema)
+}
+
 struct LegacyPhotoRow {
     id: String,
     raw_original_id: Option<String>,
@@ -986,7 +1015,7 @@ mod tests {
         );
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V12).unwrap();
     }
 
     #[tokio::test]
@@ -1066,12 +1095,12 @@ mod tests {
         );
         persistence.shutdown().unwrap();
         let connection = Connection::open(&path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V12).unwrap();
         assert_eq!(
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            11
+            12
         );
         assert_eq!(
             connection
@@ -1192,9 +1221,9 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            11
+            12
         );
-        validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V12).unwrap();
         // The legacy photo-set tables are gone rather than left as aliases.
         for legacy in ["photo_sets", "photo_set_members", "review_progress"] {
             assert!(!table_exists(&connection, legacy).unwrap(), "{legacy}");
@@ -1203,7 +1232,7 @@ mod tests {
     // album-language-legacy:end v4-migration-test
 
     #[test]
-    fn newer_v12_database_is_rejected_without_changes() {
+    fn newer_v13_database_is_rejected_without_changes() {
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
@@ -1211,7 +1240,7 @@ mod tests {
         );
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 12)
+            .pragma_update(None, "user_version", 13)
             .unwrap();
         let before = fs::read(&path).unwrap();
         assert!(matches!(
@@ -1223,6 +1252,108 @@ mod tests {
             Err(PersistenceError::NewerSchema)
         ));
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn migrates_v11_to_v12_preserving_every_fact_with_empty_camera_identity() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v11.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "raw-original",
+                photo_id: "raw-photo",
+                relative_path: "shoot/one.ARW",
+                kind: "raw",
+                available: true,
+                size: 17,
+                mtime_ms: 1_000.0,
+            },
+        );
+        connection
+            .execute(
+                "UPDATE original_files SET capture_metadata_state='known',
+                     capture_order_key='2026-01-01T10:00:00.000000000',
+                     capture_time_field='date-time-original',capture_offset_minutes=60,
+                     capture_source_revision='capture-revision'
+                 WHERE id='raw-original'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .snapshot_receiver()
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        // Every earlier fact survives; the identity columns start empty and
+        // wait for the next inspection of the revision.
+        let original = &snapshot.originals[0];
+        assert_eq!(original.capture.state, CaptureMetadataState::Known);
+        assert_eq!(
+            original.capture.order_key.as_deref(),
+            Some("2026-01-01T10:00:00.000000000")
+        );
+        assert_eq!(
+            original.capture.source_revision.as_deref(),
+            Some("capture-revision")
+        );
+        assert_eq!(original.capture.make, None);
+        assert_eq!(original.capture.model, None);
+        persistence.shutdown().unwrap();
+
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            12
+        );
+        validate_canonical_schema(&connection, SchemaVersion::V12).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT capture_metadata_state,capture_order_key,capture_make,capture_model,
+                            capture_source_revision
+                     FROM original_files WHERE id='raw-original'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                "known".to_owned(),
+                "2026-01-01T10:00:00.000000000".to_owned(),
+                None,
+                None,
+                "capture-revision".to_owned()
+            )
+        );
     }
 
     #[test]
@@ -1289,7 +1420,7 @@ mod tests {
             .unwrap();
             persistence.shutdown().unwrap();
             let connection = Connection::open(&path).unwrap();
-            validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
+            validate_canonical_schema(&connection, SchemaVersion::V12).unwrap();
         }
         let (_base, library, state, name, path) = fixture();
         seed(
@@ -1446,6 +1577,8 @@ mod tests {
                 field: Some(CaptureTimeField::DateTimeOriginal),
                 offset_minutes: Some(60),
                 source_revision: Some("capture-revision".to_owned()),
+                make: None,
+                model: None,
             }
         );
         let album = persistence.list_albums().await.unwrap().remove(0);
@@ -1460,7 +1593,7 @@ mod tests {
         assert_eq!(album.last_reviewed_photo_id.as_deref(), Some(photo_id));
         persistence.shutdown().unwrap();
         let connection = Connection::open(&path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V12).unwrap();
     }
     // album-language-legacy:end v3-migration-test
 
@@ -1817,7 +1950,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            11
+            12
         );
         assert_eq!(
             connection
@@ -1900,9 +2033,9 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            11
+            12
         );
-        validate_canonical_schema(&connection, SchemaVersion::V11).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V12).unwrap();
         assert_eq!(
             connection
                 .query_row(

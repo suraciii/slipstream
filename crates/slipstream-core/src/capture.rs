@@ -58,6 +58,73 @@ pub struct CaptureFact {
     pub field: Option<CaptureTimeField>,
     pub offset_minutes: Option<i16>,
     pub source_revision: Option<String>,
+    /// The camera identity observed for `source_revision`. Make and model
+    /// are recorded together or not at all, and only an inspection that
+    /// completed for that revision may record one. They are the published
+    /// evidence a RAW Photo's source class is derived from, so a saturated
+    /// bounded read can never be mistaken for an unreadable Original.
+    pub make: Option<String>,
+    pub model: Option<String>,
+}
+
+impl CaptureFact {
+    pub fn pending() -> Self {
+        Self {
+            state: CaptureMetadataState::Pending,
+            order_key: None,
+            field: None,
+            offset_minutes: None,
+            source_revision: None,
+            make: None,
+            model: None,
+        }
+    }
+
+    pub fn failed(source_revision: Option<String>) -> Self {
+        Self {
+            state: CaptureMetadataState::Failed,
+            order_key: None,
+            field: None,
+            offset_minutes: None,
+            source_revision,
+            make: None,
+            model: None,
+        }
+    }
+
+    fn completed(
+        state: CaptureMetadataState,
+        order_key: Option<String>,
+        field: Option<CaptureTimeField>,
+        offset_minutes: Option<i16>,
+        source_revision: String,
+        review: &CaptureReviewMetadata,
+    ) -> Self {
+        // A partial identity cannot name a source class, so an inspection
+        // records make and model only when both halves were observed.
+        let identity = match (&review.make, &review.model) {
+            (Some(make), Some(model)) => (Some(make.clone()), Some(model.clone())),
+            _ => (None, None),
+        };
+        Self {
+            state,
+            order_key,
+            field,
+            offset_minutes,
+            source_revision: Some(source_revision),
+            make: identity.0,
+            model: identity.1,
+        }
+    }
+
+    pub(crate) fn is_reusable_for(&self, source_revision: &str) -> bool {
+        matches!(
+            self.state,
+            CaptureMetadataState::Known
+                | CaptureMetadataState::Missing
+                | CaptureMetadataState::Invalid
+        ) && self.source_revision.as_deref() == Some(source_revision)
+    }
 }
 
 /// The camera facts needed during Photo review. This is intentionally a
@@ -73,53 +140,6 @@ pub struct CaptureReviewMetadata {
     /// source class of a RAW Original and are not user-editable facts.
     pub make: Option<String>,
     pub model: Option<String>,
-}
-
-impl CaptureFact {
-    pub fn pending() -> Self {
-        Self {
-            state: CaptureMetadataState::Pending,
-            order_key: None,
-            field: None,
-            offset_minutes: None,
-            source_revision: None,
-        }
-    }
-
-    pub fn failed(source_revision: Option<String>) -> Self {
-        Self {
-            state: CaptureMetadataState::Failed,
-            order_key: None,
-            field: None,
-            offset_minutes: None,
-            source_revision,
-        }
-    }
-
-    fn completed(
-        state: CaptureMetadataState,
-        order_key: Option<String>,
-        field: Option<CaptureTimeField>,
-        offset_minutes: Option<i16>,
-        source_revision: String,
-    ) -> Self {
-        Self {
-            state,
-            order_key,
-            field,
-            offset_minutes,
-            source_revision: Some(source_revision),
-        }
-    }
-
-    pub(crate) fn is_reusable_for(&self, source_revision: &str) -> bool {
-        matches!(
-            self.state,
-            CaptureMetadataState::Known
-                | CaptureMetadataState::Missing
-                | CaptureMetadataState::Invalid
-        ) && self.source_revision.as_deref() == Some(source_revision)
-    }
 }
 
 #[derive(Debug)]
@@ -221,6 +241,17 @@ pub fn capture_source_revision(
     ))
 }
 
+/// Whether a published Capture fact revision belongs to the durable
+/// descriptor (path, size, and modification time) named by `current`. A
+/// published revision also carries the discovery device and inode, which are
+/// not persisted, so a metadata-only read decides currency from the durable
+/// leading components alone.
+pub fn capture_revision_matches_descriptor(published: &str, current: &str) -> bool {
+    published
+        .strip_prefix(current)
+        .is_some_and(|remainder| remainder.starts_with('\0'))
+}
+
 pub(crate) struct CaptureObservation {
     pub(crate) facts: OriginalFacts,
     pub(crate) capture: CaptureFact,
@@ -301,27 +332,30 @@ fn complete_capture(
             order_key,
             field,
             offset_minutes,
-            ..
+            review,
         } => CaptureFact::completed(
             CaptureMetadataState::Known,
             Some(order_key),
             Some(field),
             offset_minutes,
             source_revision,
+            &review,
         ),
-        ParseOutcome::Missing { .. } => CaptureFact::completed(
+        ParseOutcome::Missing { review } => CaptureFact::completed(
             CaptureMetadataState::Missing,
             None,
             None,
             None,
             source_revision,
+            &review,
         ),
-        ParseOutcome::Invalid { .. } => CaptureFact::completed(
+        ParseOutcome::Invalid { review } => CaptureFact::completed(
             CaptureMetadataState::Invalid,
             None,
             None,
             None,
             source_revision,
+            &review,
         ),
     };
     Ok(CaptureObservation {

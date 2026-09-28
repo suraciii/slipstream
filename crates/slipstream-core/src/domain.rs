@@ -307,12 +307,25 @@ pub struct EditRecipe {
     pub settings: EditRecipeSettings,
 }
 
-/// Current recipe and source facts from one serialized persistence read.
+/// Current recipe and source facts from one serialized persistence read. The
+/// Photo's availability, Original kind and Location, persisted error class,
+/// and published Capture fact arrive from the same committed state, so a
+/// scan committed between two reads can never mix an old recipe with newer
+/// support facts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EditRecipeRead {
     pub recipe: Option<EditRecipe>,
     pub current_source_revision: String,
     pub source_available: bool,
+    /// The Original's availability as the Photo read model reports it.
+    pub original_available: bool,
+    /// The Original's Library-relative Location.
+    pub original_location: String,
+    pub original_kind: OriginalKind,
+    /// The persisted discovery error class of the Original, if any.
+    pub original_error: Option<OriginalErrorCategory>,
+    /// The published Capture fact of the Original.
+    pub capture: CaptureFact,
 }
 
 #[derive(Clone, Debug, PartialEq)]

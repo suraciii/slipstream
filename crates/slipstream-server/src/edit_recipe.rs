@@ -8,12 +8,12 @@ use axum::{
     body::Body,
     extract::State,
     http::{Request, StatusCode},
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use serde::{Deserialize, Serialize};
 use slipstream_core::{
-    CaptureReviewMetadata, EditRecipe, EditRecipeRead, EditRecipeSettings, EditRecipeWriteOutcome,
-    OriginalKind, PhotoRead, RebindEditRecipe, SaveEditRecipe, WhiteBalanceIntent,
+    EditRecipe, EditRecipeRead, EditRecipeSettings, EditRecipeWriteOutcome, RebindEditRecipe,
+    SaveEditRecipe, WhiteBalanceIntent,
 };
 use slipstream_processing::photo_profile::{
     self, APPROVED_EXPOSURE_MILLI_EV_MAX, APPROVED_EXPOSURE_MILLI_EV_MIN,
@@ -45,10 +45,20 @@ pub(crate) struct SupportClassification {
 /// Location, so no current source fact can be read.
 const ORIGINAL_MISSING: &str = "original-missing";
 
-/// The reason recorded when the Original cannot yield the facts that name
-/// its source class: unreadable bytes, an unreadable camera identity, or an
-/// unrecognized RAW container.
+/// The reason recorded when a read or parser failure is confirmed for the
+/// currently published source revision: unreadable bytes, an unreadable
+/// camera identity, or an unrecognized RAW container.
 const ORIGINAL_UNREADABLE: &str = "original-unreadable";
+
+/// The retryable reason recorded when no current published source fact
+/// exists yet: the Photo is waiting for the next admitted inspection and is
+/// never reported as unreadable.
+const READ_PENDING: &str = "read-pending";
+
+/// The retryable reason recorded when a bounded resource — native-work
+/// capacity or a deferred inspection — prevented observing current source
+/// facts. A retry may succeed without a new scan.
+const RESOURCE_UNAVAILABLE: &str = "resource-unavailable";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,62 +92,142 @@ pub(crate) fn approved_exposure_range() -> ExposureRangeWire {
         step_ev: 0.001,
     }
 }
-
-/// The source facts one support derivation needs beside the availability.
-#[derive(Clone, Copy)]
-pub(crate) struct SourceFacts<'a> {
-    kind: OriginalKind,
-    filename: &'a str,
-    make: Option<&'a str>,
-    model: Option<&'a str>,
-}
-
 /// Classifies one Photo's source class against the approved profiles.
 ///
-/// The state is a fact about the class, independent of the deployment's
-/// processing enablement: the capability report owns that boundary. A
-/// missing or unreadable Original reports `unavailable` and never
-/// `supported` or `unsupported`, because no current source fact can be
-/// read. A JPEG source is a known class without an approved profile, so it
-/// reports `unsupported`. For a RAW source the class identity needs the
-/// filename container and the observed camera make and model; the bounded
-/// metadata read deliberately returns defaults when inspection is saturated,
-/// the source changed mid-read, or it cannot be opened, so an unobservable
-/// identity means the class is unavailable to observe rather than unlisted.
+/// The derivation reads the Published Library's committed facts — the same
+/// evidence a completed scan published atomically — so a recovering Library
+/// or saturated native-work budget can never downgrade a supported Photo:
+///
+/// - an unavailable Original reports `unavailable` with `original-missing`
+///   when it is absent from its remembered Location and `original-unreadable`
+///   when its persisted record confirms an unreadable discovery;
+/// - a completed capture fact for the current source revision carries the
+///   camera identity the scan observed, and that identity classifies the
+///   source (`supported` or `unsupported`) without any live read;
+/// - a completed fact without an identity may be classified from one bounded
+///   live observation of the same revision: capacity exhaustion reports the
+///   retryable `resource-unavailable`, changed bytes report `read-pending`,
+///   and observed bytes without an identity confirm `original-unreadable`;
+/// - a pending fact, a failed fact for another revision, or a revision that
+///   has since changed reports the retryable `read-pending`: the Photo is
+///   waiting for inspection and is never reported as unreadable;
+/// - a failed fact for exactly the current revision confirms
+///   `original-unreadable`.
+///
+/// A JPEG source is a known class without an approved profile, so it reports
+/// `unsupported`.
 pub(crate) fn derive_support(
-    facts: SourceFacts<'_>,
-    source_available: bool,
-    original_available: bool,
+    read: &EditRecipeRead,
+    observation: Option<&crate::app::SourceIdentityObservation>,
 ) -> SupportClassification {
-    if !source_available {
+    if !read.source_available {
         // An Original absent from its remembered Location is missing; one
-        // that is present but whose published source facts cannot be read
-        // is unreadable.
+        // whose persisted record confirms an unreadable discovery, or whose
+        // Photo still marks the Original present, is unreadable.
         return SupportClassification {
             state: "unavailable",
-            reason: Some(if original_available {
-                ORIGINAL_UNREADABLE
-            } else {
-                ORIGINAL_MISSING
-            }),
+            reason: Some(
+                if read.original_error == Some(slipstream_core::OriginalErrorCategory::Unreadable)
+                    || read.original_available
+                {
+                    ORIGINAL_UNREADABLE
+                } else {
+                    ORIGINAL_MISSING
+                },
+            ),
         };
     }
-    if facts.kind != OriginalKind::Raw {
+    if read.original_kind != slipstream_core::OriginalKind::Raw {
         return SupportClassification {
             state: "unsupported",
             reason: None,
         };
     }
-    let Some(container) = photo_profile::container_of_filename(facts.filename) else {
+    let filename = read
+        .original_location
+        .rsplit('/')
+        .next()
+        .unwrap_or(&read.original_location);
+    let Some(container) = photo_profile::container_of_filename(filename) else {
         return SupportClassification {
             state: "unavailable",
             reason: Some(ORIGINAL_UNREADABLE),
         };
     };
-    let (Some(make), Some(model)) = (facts.make, facts.model) else {
+    let current = read
+        .capture
+        .source_revision
+        .as_deref()
+        .is_some_and(|published| {
+            slipstream_core::capture_revision_matches_descriptor(
+                published,
+                &read.current_source_revision,
+            )
+        });
+    if !current {
+        // The published fact names another revision (or none): the Photo is
+        // waiting for the next admitted inspection of its current bytes.
+        return SupportClassification {
+            state: "unavailable",
+            reason: Some(READ_PENDING),
+        };
+    }
+    if read.capture.state == slipstream_core::CaptureMetadataState::Failed {
+        // The scan inspected exactly these bytes and the inspection failed.
         return SupportClassification {
             state: "unavailable",
             reason: Some(ORIGINAL_UNREADABLE),
+        };
+    }
+    if read.capture.state == slipstream_core::CaptureMetadataState::Pending {
+        return SupportClassification {
+            state: "unavailable",
+            reason: Some(READ_PENDING),
+        };
+    }
+    let identity = match (&read.capture.make, &read.capture.model) {
+        (Some(make), Some(model)) => Some((make.as_str(), model.as_str())),
+        // The published fact carries no identity (a pre-identity record or
+        // an inspection that observed none); one bounded live observation
+        // resolves it for this response without publishing.
+        _ => match observation {
+            Some(crate::app::SourceIdentityObservation::Observed(review)) => {
+                match (&review.make, &review.model) {
+                    (Some(make), Some(model)) => Some((make.as_str(), model.as_str())),
+                    // The bytes were read for this revision and carry no
+                    // camera identity: a confirmed unreadable identity.
+                    _ => {
+                        return SupportClassification {
+                            state: "unavailable",
+                            reason: Some(ORIGINAL_UNREADABLE),
+                        };
+                    }
+                }
+            }
+            Some(crate::app::SourceIdentityObservation::Changed) => {
+                return SupportClassification {
+                    state: "unavailable",
+                    reason: Some(READ_PENDING),
+                };
+            }
+            // Saturation or an incomplete read is retryable evidence about
+            // capacity, never about the Original.
+            Some(
+                crate::app::SourceIdentityObservation::Saturated
+                | crate::app::SourceIdentityObservation::Unreadable,
+            )
+            | None => {
+                return SupportClassification {
+                    state: "unavailable",
+                    reason: Some(RESOURCE_UNAVAILABLE),
+                };
+            }
+        },
+    };
+    let Some((make, model)) = identity else {
+        return SupportClassification {
+            state: "unavailable",
+            reason: Some(RESOURCE_UNAVAILABLE),
         };
     };
     match photo_profile::classify(make, model, &container) {
@@ -152,6 +242,50 @@ pub(crate) fn derive_support(
             reason: None,
         },
     }
+}
+
+/// Whether one bounded live identity observation is needed to classify this
+/// Photo: only a completed current capture fact without a recorded identity
+/// requires it.
+pub(crate) fn identity_observation_needed(read: &EditRecipeRead) -> bool {
+    read.source_available
+        && read.original_kind == slipstream_core::OriginalKind::Raw
+        && read
+            .capture
+            .source_revision
+            .as_deref()
+            .is_some_and(|published| {
+                slipstream_core::capture_revision_matches_descriptor(
+                    published,
+                    &read.current_source_revision,
+                )
+            })
+        && read.capture.state != slipstream_core::CaptureMetadataState::Failed
+        && !matches!(
+            (&read.capture.make, &read.capture.model),
+            (Some(_), Some(_))
+        )
+}
+
+/// Resolves the support classification of one facts read, performing the
+/// bounded live identity observation only when the published fact does not
+/// carry an identity.
+pub(crate) async fn classify(state: &HttpState, read: &EditRecipeRead) -> SupportClassification {
+    let observation = if identity_observation_needed(read) {
+        Some(
+            state
+                .application
+                .observe_source_identity(
+                    &read.original_location,
+                    read.original_kind,
+                    read.capture.source_revision.as_deref().unwrap_or_default(),
+                )
+                .await,
+        )
+    } else {
+        None
+    };
+    derive_support(read, observation.as_ref())
 }
 
 /// True when the enabled execution payload can represent the stored value:
@@ -417,40 +551,16 @@ fn conflict_response(
 
 // ---------------------------------------------------------------- shared reads
 
-/// One serialized read of the recipe facts, Photo facts, and the bounded
-/// capture metadata. The recipe read owns the combined source availability
-/// and the unknown-Photo refusal.
+/// One serialized read of the published recipe facts. The recipe read owns
+/// the committed source availability and the unknown-Photo refusal.
 pub(crate) async fn load_facts(
     state: &HttpState,
     photo_id: &str,
-) -> Result<(PhotoRead, CaptureReviewMetadata, EditRecipeRead), Response<Body>> {
-    let read = match state.application.library.edit_recipe(photo_id).await {
-        Ok(Some(read)) => read,
-        Ok(None) => return Err(unknown_photo(photo_id)),
-        Err(_) => return Err(storage_error("edit-recipe-read")),
-    };
-    let photo = match state.application.library.photo(photo_id).await {
-        Ok(Some(photo)) => photo,
-        Ok(None) => return Err(unknown_photo(photo_id)),
-        Err(_) => return Err(storage_error("edit-recipe-read")),
-    };
-    let metadata = state
-        .application
-        .photo_metadata(photo_id)
-        .await
-        .map_err(|error| crate::http::ApiError::from(error).into_response())?;
-    Ok((photo, metadata, read))
-}
-
-pub(crate) fn source_facts<'a>(
-    photo: &'a PhotoRead,
-    metadata: &'a CaptureReviewMetadata,
-) -> SourceFacts<'a> {
-    SourceFacts {
-        kind: photo.original_kind,
-        filename: &photo.filename,
-        make: metadata.make.as_deref(),
-        model: metadata.model.as_deref(),
+) -> Result<EditRecipeRead, Response<Body>> {
+    match state.application.library.edit_recipe(photo_id).await {
+        Ok(Some(read)) => Ok(read),
+        Ok(None) => Err(unknown_photo(photo_id)),
+        Err(_) => Err(storage_error("edit-recipe-read")),
     }
 }
 
@@ -473,29 +583,22 @@ pub(crate) async fn get_edit_recipe(
     if !valid_id(&photo_id) {
         return invalid_cli("photoId", "The Photo ID is invalid.");
     }
-    // One serialized recipe read owns every response fact, so a rescan
-    // between reads cannot mix an old recipe with newer support facts.
-    let (photo, metadata, read) = match load_facts(&state, &photo_id).await {
-        Ok(facts) => facts,
+    let read = match load_facts(&state, &photo_id).await {
+        Ok(read) => read,
         Err(response) => return response,
     };
-    let facts = source_facts(&photo, &metadata);
     let condition = capability_condition(&state).await;
-    let support = apply_capability_condition(
-        derive_support(facts, read.source_available, photo.original_available),
-        condition,
-    );
+    let support = apply_capability_condition(classify(&state, &read).await, condition);
     let processing_available = processing_available(
         support,
         condition,
         read.source_available,
         read.recipe.as_ref(),
     );
-    let recipe = read.recipe.map(RecipeWire::from);
     ok_response(&EditRecipeResponse {
         source_revision: (support.state != "unavailable")
             .then(|| read.current_source_revision.clone()),
-        recipe,
+        recipe: read.recipe.map(RecipeWire::from),
         source_support: support.state,
         support_reason: support.reason,
         processing_available,
@@ -504,8 +607,7 @@ pub(crate) async fn get_edit_recipe(
     })
 }
 
-/// `POST /api/photos/{id}/edit-recipe`: one guarded save carrying a stable
-/// request identity and both expected revisions.
+/// `POST /api/photos/{id}/edit-recipe`: one guarded save.
 pub(crate) async fn post_edit_recipe(
     State(state): State<HttpState>,
     axum::extract::Path(photo_id): axum::extract::Path<String>,
@@ -530,19 +632,16 @@ pub(crate) async fn post_edit_recipe(
         Some(settings) => settings,
         None => return invalid_settings_response(),
     };
-    let (photo, metadata, read) = match load_facts(&state, &photo_id).await {
-        Ok(facts) => facts,
+    let read = match load_facts(&state, &photo_id).await {
+        Ok(read) => read,
         Err(response) => return response,
     };
-    let facts = source_facts(&photo, &metadata);
     let support = apply_capability_condition(
-        derive_support(facts, read.source_available, photo.original_available),
+        classify(&state, &read).await,
         capability_condition(&state).await,
     );
     match support.state {
-        // A known-unapproved class refuses every guarded write.
         "unsupported" => return unsupported_photo(&photo_id),
-        // The source facts that guard the write cannot be read.
         "unavailable" => return unavailable_source(&photo_id, support.reason),
         _ => {}
     }
@@ -560,8 +659,7 @@ pub(crate) async fn post_edit_recipe(
     map_write_outcome(&photo_id, outcome)
 }
 
-/// `POST /api/photos/{id}/edit-recipe/rebind`: explicit rebinding of saved
-/// intent to a newly observed source revision.
+/// `POST /api/photos/{id}/edit-recipe/rebind`.
 pub(crate) async fn post_edit_recipe_rebind(
     State(state): State<HttpState>,
     axum::extract::Path(photo_id): axum::extract::Path<String>,
@@ -585,7 +683,7 @@ pub(crate) async fn post_edit_recipe_rebind(
     if !valid_request_id(&body.request_id) {
         return settings_error(
             "requestId",
-            "The rebind must carry a valid request identity: 1 to 128 characters of ASCII letters, digits, `.`, `_`, or `-`.",
+            "The rebind must carry a valid request identity.",
         );
     }
     if body.expected_recipe_version.is_empty() {
@@ -600,19 +698,16 @@ pub(crate) async fn post_edit_recipe_rebind(
             "The rebind must carry the newly observed source revision.",
         );
     }
-    let (photo, metadata, read) = match load_facts(&state, &photo_id).await {
-        Ok(facts) => facts,
+    let read = match load_facts(&state, &photo_id).await {
+        Ok(read) => read,
         Err(response) => return response,
     };
-    let facts = source_facts(&photo, &metadata);
     let support = apply_capability_condition(
-        derive_support(facts, read.source_available, photo.original_available),
+        classify(&state, &read).await,
         capability_condition(&state).await,
     );
     match support.state {
-        // A known-unapproved class refuses every guarded write.
         "unsupported" => return unsupported_photo(&photo_id),
-        // The source facts that guard the write cannot be read.
         "unavailable" => return unavailable_source(&photo_id, support.reason),
         _ => {}
     }
@@ -629,10 +724,6 @@ pub(crate) async fn post_edit_recipe_rebind(
     map_write_outcome(&photo_id, outcome)
 }
 
-// ---------------------------------------------------------------- validation
-
-/// The shared field shape's request identity: 1..=128 characters of ASCII
-/// letters, digits, `.`, `_`, or `-`.
 fn valid_request_id(request_id: &str) -> bool {
     !request_id.is_empty()
         && request_id.len() <= MAXIMUM_REQUEST_ID_BYTES
@@ -775,7 +866,66 @@ fn ok_response<T: Serialize>(value: &T) -> Response<Body> {
 
 #[cfg(test)]
 mod tests {
+    use slipstream_core::OriginalKind;
+
     use super::*;
+    fn source_read(kind: OriginalKind, capture: slipstream_core::CaptureFact) -> EditRecipeRead {
+        EditRecipeRead {
+            recipe: None,
+            current_source_revision: "rev-2".to_owned(),
+            source_available: true,
+            original_available: true,
+            original_location: match kind {
+                OriginalKind::Raw => "shoot/image.ARW".to_owned(),
+                _ => "shoot/image.JPG".to_owned(),
+            },
+            original_kind: kind,
+            original_error: None,
+            capture,
+        }
+    }
+
+    #[test]
+    fn support_uses_revision_bound_capture_evidence() {
+        let mut capture = slipstream_core::CaptureFact::pending();
+        let read = source_read(OriginalKind::Raw, capture.clone());
+        assert!(!identity_observation_needed(&read));
+
+        capture.source_revision = Some("rev-2\064\0123".to_owned());
+        capture.state = slipstream_core::CaptureMetadataState::Known;
+        capture.make = Some("SONY".to_owned());
+        capture.model = Some("ILCE-7RM5".to_owned());
+        let mut read = source_read(OriginalKind::Raw, capture);
+        assert_eq!(derive_support(&read, None).state, "supported");
+        assert!(!identity_observation_needed(&read));
+        read.current_source_revision = "rev-3".to_owned();
+        assert_eq!(derive_support(&read, None).reason, Some(READ_PENDING));
+        read.current_source_revision = "rev-2".to_owned();
+        read.capture.state = slipstream_core::CaptureMetadataState::Failed;
+        assert_eq!(
+            derive_support(&read, None).reason,
+            Some(ORIGINAL_UNREADABLE)
+        );
+    }
+
+    #[test]
+    fn support_distinguishes_retryable_observation_from_known_unsupported_class() {
+        let mut capture = slipstream_core::CaptureFact::pending();
+        capture.state = slipstream_core::CaptureMetadataState::Missing;
+        capture.source_revision = Some("rev-2\064\0123".to_owned());
+        let mut read = source_read(OriginalKind::Raw, capture);
+        assert!(identity_observation_needed(&read));
+        assert_eq!(
+            derive_support(&read, None).reason,
+            Some(RESOURCE_UNAVAILABLE)
+        );
+        read.capture.make = Some("SONY".to_owned());
+        read.capture.model = Some("ILCE-7M4".to_owned());
+        assert_eq!(derive_support(&read, None).state, "unsupported");
+        read.source_available = false;
+        read.original_available = false;
+        assert_eq!(derive_support(&read, None).reason, Some(ORIGINAL_MISSING));
+    }
 
     #[test]
     fn source_unsupported_condition_downgrades_only_supported_classes() {

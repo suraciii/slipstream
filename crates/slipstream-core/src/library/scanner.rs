@@ -16,6 +16,21 @@ pub(super) struct Scanner {
     pub(super) state: Arc<(Mutex<ScanState>, Condvar)>,
     pub(super) join: Mutex<Option<JoinHandle<()>>>,
 }
+
+/// Milliseconds since the epoch of the current instant, so Loading Status
+/// can report the last observed progress advance without inventing a rate.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| u64::try_from(value.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
+/// Marks one truthful progress advance.
+fn touch(progress: &mut ScanProgress) {
+    progress.updated_ms = now_ms();
+}
+
 pub(super) fn inspect_capture_facts(
     root: &LibraryRoot,
     native_work: &NativeWorkBudget,
@@ -28,7 +43,11 @@ pub(super) fn inspect_capture_facts(
         .map(|original| (original.relative_path.as_str(), original))
         .collect::<std::collections::HashMap<_, _>>();
     for (index, original) in originals.iter_mut().enumerate() {
-        progress.lock().unwrap().inspected = u64::try_from(index + 1).unwrap_or(u64::MAX);
+        {
+            let mut progress = progress.lock().unwrap();
+            progress.inspected = u64::try_from(index + 1).unwrap_or(u64::MAX);
+            touch(&mut progress);
+        }
         let prior = previous.get(original.path.as_str()).copied();
         if original.error_category.is_some() {
             if let Some(prior) = prior {
@@ -103,6 +122,7 @@ pub(super) fn scanner_main(
                         phase: ScanPhase::Discovering,
                         ..ScanProgress::default()
                     };
+                    touch(&mut progress);
                 }
                 #[cfg(test)]
                 scanner_test_hook(&root);
@@ -122,6 +142,7 @@ pub(super) fn scanner_main(
                             progress.inspect_total =
                                 Some(u64::try_from(result.originals.len()).unwrap_or(u64::MAX));
                             progress.phase = ScanPhase::Inspecting;
+                            touch(&mut progress);
                         }
                         inspect_capture_facts(
                             &root,
@@ -148,7 +169,17 @@ pub(super) fn scanner_main(
                         {
                             let mut progress = progress.lock().unwrap();
                             progress.phase = ScanPhase::Recovering;
+                            touch(&mut progress);
                         }
+                        let recovery_report = {
+                            let progress = Arc::clone(&progress);
+                            move |hashed: u64, hash_total: u64| {
+                                let mut progress = progress.lock().unwrap();
+                                progress.hashed = hashed;
+                                progress.hash_total = Some(hash_total);
+                                touch(&mut progress);
+                            }
+                        };
                         let recovery = crate::recovery::plan_recovery(
                             &root,
                             &native_work,
@@ -157,13 +188,18 @@ pub(super) fn scanner_main(
                             &fingerprints,
                             &deleted_originals,
                             &mut recovery_progress,
+                            &recovery_report,
                         );
                         {
                             let mut progress = progress.lock().unwrap();
                             progress.hashed = recovery_progress.hashed;
                             progress.hash_total = Some(recovery_progress.hash_total);
                         }
-                        progress.lock().unwrap().phase = ScanPhase::Applying;
+                        {
+                            let mut progress = progress.lock().unwrap();
+                            progress.phase = ScanPhase::Applying;
+                            touch(&mut progress);
+                        }
                         let applied = persistence
                             .apply_scan_recovered_blocking(
                                 result.originals,
@@ -193,7 +229,11 @@ pub(super) fn scanner_main(
                     enrollment_state.scan_running = false;
                 }
                 enrollment.1.notify_all();
-                progress.lock().unwrap().phase = ScanPhase::Idle;
+                {
+                    let mut progress = progress.lock().unwrap();
+                    progress.phase = ScanPhase::Idle;
+                    touch(&mut progress);
+                }
                 let (lock, signal) = &*state;
                 let mut guard = lock.lock().unwrap();
                 if let Some(waiters) = guard.in_flight.take() {

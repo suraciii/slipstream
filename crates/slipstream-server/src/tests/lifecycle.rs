@@ -27,9 +27,23 @@ async fn metadata_saturation_uses_shared_admission_and_safe_capture_fallback() {
     assert!(raw.capture.source_revision.is_some());
 
     let scheduled = Arc::new(AtomicUsize::new(0));
+    // Enrollment shares native capacity. Wait for its actual completion before
+    // asserting that both slots belong to these controlled metadata workers.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while application.library.fingerprint_counts().enrolled != 2 {
+        assert!(
+            Instant::now() < deadline,
+            "fingerprint enrollment did not settle"
+        );
+        tokio::task::yield_now().await;
+    }
     let scheduled_hook = Arc::clone(&scheduled);
-    let _hook = crate::app::install_metadata_inspection_test_hook(move |_| {
-        scheduled_hook.fetch_add(1, Ordering::AcqRel);
+    let _hook = crate::app::install_metadata_inspection_test_hook(move |path| {
+        // Other concurrently running tests share the global hook; count only
+        // inspections of this fixture's Originals.
+        if matches!(path.as_str(), "native.ARW" | "known.jpg") {
+            scheduled_hook.fetch_add(1, Ordering::AcqRel);
+        }
     });
     let first = application
         .library

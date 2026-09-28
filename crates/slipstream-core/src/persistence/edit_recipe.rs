@@ -4,6 +4,7 @@ use super::{
         parse_white_balance_intent, photo_processing_source, random_uuid_v4,
         white_balance_intent_name, white_balance_intent_values, write_transaction,
     },
+    scan::{parse_capture_fact, parse_error_category, parse_kind},
 };
 use crate::{
     EditRecipe, EditRecipeRead, EditRecipeSettings, EditRecipeWriteOutcome, RebindEditRecipe,
@@ -47,6 +48,9 @@ pub(super) fn read_edit_recipe(
     let row = connection
         .query_row(
             "SELECT o.relative_path,o.size,o.mtime_ms,o.available,p.available,
+                    o.kind,o.error_category,
+                    o.capture_metadata_state,o.capture_order_key,o.capture_time_field,
+                    o.capture_offset_minutes,o.capture_source_revision,o.capture_make,o.capture_model,
                     e.revision,e.source_revision,e.exposure_ev,e.white_balance_mode,
                     e.temperature_kelvin,e.tint_milli
              FROM photos p JOIN original_files o ON o.id=p.original_id
@@ -57,13 +61,25 @@ pub(super) fn read_edit_recipe(
                 let size = u64::try_from(row.get::<_, i64>(1)?)
                     .map_err(|_| rusqlite::Error::InvalidQuery)?;
                 let mtime_ms: f64 = row.get(2)?;
-                let source_available = row.get::<_, i64>(3)? != 0 && row.get::<_, i64>(4)? != 0;
-                let recipe_revision: Option<String> = row.get(5)?;
-                let recipe_source_revision: Option<String> = row.get(6)?;
-                let exposure_ev: Option<f64> = row.get(7)?;
-                let white_balance_mode: Option<String> = row.get(8)?;
-                let temperature_kelvin: Option<i32> = row.get(9)?;
-                let tint_milli: Option<i32> = row.get(10)?;
+                let original_available = row.get::<_, i64>(3)? != 0;
+                let photo_available = row.get::<_, i64>(4)? != 0;
+                let kind = parse_kind(&row.get::<_, String>(5)?)?;
+                let original_error = parse_error_category(row.get(6)?)?;
+                let capture = parse_capture_fact(
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                )?;
+                let recipe_revision: Option<String> = row.get(14)?;
+                let recipe_source_revision: Option<String> = row.get(15)?;
+                let exposure_ev: Option<f64> = row.get(16)?;
+                let white_balance_mode: Option<String> = row.get(17)?;
+                let temperature_kelvin: Option<i32> = row.get(18)?;
+                let tint_milli: Option<i32> = row.get(19)?;
                 let recipe = match (
                     recipe_revision,
                     recipe_source_revision,
@@ -88,21 +104,50 @@ pub(super) fn read_edit_recipe(
                     }
                     _ => return Err(rusqlite::Error::InvalidQuery),
                 };
-                Ok((relative_path, size, mtime_ms, source_available, recipe))
+                Ok(FactsRow {
+                    relative_path,
+                    size,
+                    mtime_ms,
+                    original_available,
+                    photo_available,
+                    kind,
+                    original_error,
+                    capture,
+                    recipe,
+                })
             },
         )
         .optional()
         .map_err(|_| PersistenceError::Storage)?;
-    let Some((relative_path, size, mtime_ms, source_available, recipe)) = row else {
+    let Some(row) = row else {
         return Ok(None);
     };
-    let current_source_revision = crate::source_revision(&relative_path, size, mtime_ms)
-        .map_err(|_| PersistenceError::Storage)?;
+    let current_source_revision =
+        crate::source_revision(&row.relative_path, row.size, row.mtime_ms)
+            .map_err(|_| PersistenceError::Storage)?;
     Ok(Some(EditRecipeRead {
-        recipe,
+        recipe: row.recipe,
         current_source_revision,
-        source_available,
+        source_available: row.original_available && row.photo_available,
+        original_available: row.original_available,
+        original_location: row.relative_path,
+        original_kind: row.kind,
+        original_error: row.original_error,
+        capture: row.capture,
     }))
+}
+
+/// The committed columns one recipe facts read derives its response from.
+struct FactsRow {
+    relative_path: String,
+    size: u64,
+    mtime_ms: f64,
+    original_available: bool,
+    photo_available: bool,
+    kind: crate::OriginalKind,
+    original_error: Option<crate::OriginalErrorCategory>,
+    capture: crate::CaptureFact,
+    recipe: Option<EditRecipe>,
 }
 
 fn validate_edit_recipe_request_id(request_id: &str) -> bool {

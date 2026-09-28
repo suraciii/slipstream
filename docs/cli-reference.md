@@ -700,6 +700,8 @@ or `null`. Arrays preserve the ordering stated below.
 
 - `state`: `initializing`, `discovering`, `inspecting`, `recovering`, `applying`,
   `idle`, or `failed`;
+- `updatedAt`: milliseconds since the Unix epoch when scan progress last advanced,
+  or `null` before any scan activity in this process;
 - `publication`: an opaque string, or `null` before a Library is published;
 - `completed` and `total`: counts, or `null` while the phase cannot report them;
 - `lastRecovery`: `null` or an object with count fields `relocatedPhotos`,
