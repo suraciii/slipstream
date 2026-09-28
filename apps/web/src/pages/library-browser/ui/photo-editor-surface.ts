@@ -8,6 +8,29 @@ import type {
   LibraryBrowserIntent,
 } from "./library-browser-view.js";
 
+export type EditorExportViewModel = Readonly<{
+  state:
+    | "idle"
+    | "submitting"
+    | "outcome-unknown"
+    | "queued"
+    | "running"
+    | "succeeded"
+    | "failed"
+    | "cancelled";
+  note: string;
+  artifact: Readonly<{
+    byteLength: number;
+    width: number;
+    height: number;
+    expiresAt: string;
+  }> | null;
+  canSubmit: boolean;
+  canCancel: boolean;
+  canRetry: boolean;
+  canDownload: boolean;
+}>;
+
 type EditorIntent = Extract<LibraryBrowserIntent, { kind: `editor-${string}` }>;
 
 export interface PhotoEditorSurfaceController {
@@ -408,6 +431,8 @@ export function createPhotoEditorSurfaceController({
       model.loading || !model.canEdit || !exported.canSubmit;
     editorExportCancel.hidden = !exported.canCancel;
     editorExportRetry.hidden = !exported.canRetry;
+    editorExportRetry.textContent =
+      exported.state === "outcome-unknown" ? "Reconcile" : "Retry";
     editorExportDownload.hidden = !exported.canDownload;
     // The Edit Preview note describes the Develop or Film rendition. The
     // Camera stage presents the camera Preview, which is not an Edit Preview.

@@ -198,19 +198,27 @@ export function createEditorController(
   let editorWriteAbort: AbortController | undefined;
   /// Resolves the writers waiting for this Photo's write stream to settle.
   let editorWriteWaiters: Array<() => void> = [];
-  /// The Export ordering barrier: later edits wait behind an accepted
-  /// submission so they can never retarget the captured snapshot.
-  let editorExportBarrier: Promise<void> | undefined;
-  let releaseEditorExportBarrier: (() => void) | undefined;
+  /// Each Photo has its own Export barrier. An uncertain Export keeps only
+  /// that Photo's later writes behind its idempotency reconciliation.
+  const editorExportBarriers = new Map<
+    string,
+    Readonly<{ promise: Promise<void>; resolve: () => void }>
+  >();
   /// The automatic resolution of a save whose outcome is unknown: at most one
   /// identical retry per lost response, so a lost receipt cannot spin.
   let editorUnknownResolution: string | undefined;
   let filmUnavailableReason =
     "The Film capability is not enabled in this deployment.";
-  /// The deployment's processing capability report, once one Edit session has
-  /// read it. It is the only source of the admitted adjustable controls.
-  let processingCapability: ProcessingCapability | undefined;
-
+  /// A submission that may have reached the service remains reusable until its
+  /// outcome is reconciled. Reusing the same body lets the service resolve its
+  /// idempotency receipt instead of starting a second Export.
+  type ExportSubmissionBody = Readonly<{
+    requestId: string;
+    expectedRecipeVersion: string;
+    expectedSourceRevision: string;
+    target: "development-tiff" | "film-jpeg";
+  }>;
+  const pendingExports = new Map<string, ExportSubmissionBody>();
   const settleEditorWriters = (): void => {
     const waiters = editorWriteWaiters;
     editorWriteWaiters = [];
@@ -221,6 +229,18 @@ export function createEditorController(
     view.editorVisible() &&
     isCurrentPhoto(photoId) &&
     currentPhoto()?.id === photoId;
+  let editorScopeGeneration = 0;
+  const ownsEditorScope = (photoId: string, generation: number): boolean =>
+    generation === editorScopeGeneration && editorOwnsPhoto(photoId);
+  const releaseEditorExportBarrier = (photoId: string): void => {
+    const barrier = editorExportBarriers.get(photoId);
+    if (!barrier) return;
+    editorExportBarriers.delete(photoId);
+    barrier.resolve();
+  };
+  /// The deployment's processing capability report, once one Edit session has
+  /// read it. It is the only source of the admitted adjustable controls.
+  let processingCapability: ProcessingCapability | undefined;
   const clearEditorComparison = (): void => {
     editorComparisonAbort?.abort();
     editorComparisonAbort = undefined;
@@ -289,15 +309,19 @@ export function createEditorController(
         state: editorExportState,
         note: editorExportNote,
         artifact: editorExportArtifact,
-        canSubmit: exportable && editorExportState !== "submitting",
+        canSubmit:
+          exportable &&
+          editorExportState !== "submitting" &&
+          editorExportState !== "outcome-unknown",
         canCancel:
           editorExportState === "queued" || editorExportState === "running",
-        // Retry re-submits the retained snapshot, so it needs an accepted
-        // Export: a refused submission has no identity to retry and is
-        // submitted again instead.
+        // An unknown submission reuses its identity; retrying a failed or
+        // cancelled accepted Export instead creates a new processing attempt.
         canRetry:
-          editorExportId !== undefined &&
-          (editorExportState === "failed" || editorExportState === "cancelled"),
+          editorExportState === "outcome-unknown" ||
+          (editorExportId !== undefined &&
+            (editorExportState === "failed" ||
+              editorExportState === "cancelled")),
         canDownload:
           editorExportState === "succeeded" && editorExportArtifact !== null,
       },
@@ -345,7 +369,7 @@ export function createEditorController(
     // The Export ordering barrier: an edit placed while a submission is
     // settling waits behind it, so the accepted Export can never be retargeted
     // by a later write.
-    const barrier = editorExportBarrier;
+    const barrier = editorExportBarriers.get(photoId)?.promise;
     if (barrier) await barrier;
     const request = step.request;
     if (!request) {
@@ -532,16 +556,23 @@ export function createEditorController(
   };
   const openEditor = (photoId: string): void => {
     if (!photoId) return;
+    editorScopeGeneration += 1;
+    const unresolved = pendingExports.get(photoId);
     editorExportId = undefined;
-    editorExportState = "idle";
-    editorExportNote = "";
+    editorExportState = unresolved ? "outcome-unknown" : "idle";
+    editorExportNote = unresolved
+      ? "The previous Export outcome is unknown. Reconcile it before submitting another Export."
+      : "";
     editorExportArtifact = null;
     // Film is the default editing view when the deployment can present it;
     // Develop is the default otherwise.
     editorStage =
       processingCapability?.stages.film === "ready" ? "film" : "develop";
-    editorExportTarget =
-      editorStage === "film" ? "film-jpeg" : "development-tiff";
+    editorExportTarget = unresolved
+      ? unresolved.target
+      : editorStage === "film"
+        ? "film-jpeg"
+        : "development-tiff";
     editorSession(photoId);
     renderEditor();
     void loadEditorFacts(photoId, "open");
@@ -672,11 +703,15 @@ export function createEditorController(
     else view.clearEditorPreview();
     renderEditor();
   };
-  /// The bounded follow-up of an admitted comparison. A baseline render is
-  /// queued or running like any other preview-class render, so the client
-  /// re-asks until the rendition arrives or the bounded attempt count runs out.
+  /// A full RAW development can take over a minute. Continue polling an
+  /// admitted comparison for up to five minutes, then offer a fresh request.
   const scheduleEditorComparisonFollowUp = (photoId: string): void => {
-    if (editorComparisonAttempts >= PREVIEW_POLL_LIMIT) return;
+    if (editorComparisonAttempts >= PREVIEW_POLL_LIMIT) {
+      editorComparisonNote =
+        "The baseline comparison outcome is unknown after five minutes. Compare again to check its result.";
+      renderEditor();
+      return;
+    }
     editorComparisonAttempts += 1;
     if (editorComparisonTimer !== undefined)
       clearTimeout(editorComparisonTimer);
@@ -790,13 +825,17 @@ export function createEditorController(
     if (editorComparing) view.presentEditorPreview(editorComparisonUrl);
     renderEditor();
   };
-  /// The bounded follow-up of an admitted Edit Preview. Preview-class work is
-  /// queued or running, so the client re-asks until the rendition arrives or
-  /// the bounded attempt count runs out; a superseded request never publishes.
+  /// Poll admitted work long enough for a full RAW render. Stop after five
+  /// minutes so a lost or stuck operation does not poll indefinitely.
   const PREVIEW_POLL_MS = 750;
-  const PREVIEW_POLL_LIMIT = 20;
+  const PREVIEW_POLL_LIMIT = 400;
   const scheduleEditorPreviewFollowUp = (photoId: string): void => {
-    if (editorPreviewAttempts >= PREVIEW_POLL_LIMIT) return;
+    if (editorPreviewAttempts >= PREVIEW_POLL_LIMIT) {
+      editorPreviewNote =
+        "The Edit Preview outcome is unknown after five minutes. Request it again to check its result.";
+      renderEditor();
+      return;
+    }
     editorPreviewAttempts += 1;
     if (editorPreviewTimer !== undefined) clearTimeout(editorPreviewTimer);
     editorPreviewTimer = window.setTimeout(() => {
@@ -1042,6 +1081,8 @@ export function createEditorController(
   /// and download. The Export captures the confirmed settings, so submission
   /// settles this Photo's write stream first.
   const loadEditorExports = async (photoId: string): Promise<void> => {
+    const generation = editorScopeGeneration;
+    const exportAtRead = editorExportId;
     try {
       const response = await fetcher(
         `/api/photos/${encodeURIComponent(photoId)}/exports`,
@@ -1050,6 +1091,13 @@ export function createEditorController(
       if (response.status !== 200) return;
       const body: unknown = await response.json();
       if (!isRecord(body) || !Array.isArray(body["exports"])) return;
+      if (
+        !ownsEditorScope(photoId, generation) ||
+        pendingExports.has(photoId) ||
+        editorExportState === "submitting" ||
+        editorExportId !== exportAtRead
+      )
+        return;
       const entries = body["exports"].filter(isRecord);
       // The list is in retention order, newest first, so the Export the
       // Photographer most recently submitted is the head of the list.
@@ -1067,6 +1115,8 @@ export function createEditorController(
     photoId: string,
     exportId: string,
   ): Promise<void> => {
+    const generation = editorScopeGeneration;
+    const exportAtRead = editorExportId;
     const controller = new AbortController();
     editorExportAbort?.abort();
     editorExportAbort = controller;
@@ -1083,7 +1133,15 @@ export function createEditorController(
     const inspection = parseExportInspection(
       await response.json().catch(() => undefined),
     );
-    if (!inspection || inspection.exportId !== exportId) return;
+    if (
+      !inspection ||
+      inspection.exportId !== exportId ||
+      !ownsEditorScope(photoId, generation) ||
+      pendingExports.has(photoId) ||
+      editorExportState === "submitting" ||
+      editorExportId !== exportAtRead
+    )
+      return;
     editorExportId = exportId;
     editorExportTarget = inspection.target;
     editorExportState = inspection.state;
@@ -1118,9 +1176,107 @@ export function createEditorController(
       await new Promise<void>((resolve) => editorWriteWaiters.push(resolve));
     }
   };
+  const submitEditorExportRequest = async (
+    photoId: string,
+    body: ExportSubmissionBody,
+  ): Promise<void> => {
+    let response: Response;
+    try {
+      response = await fetcher(
+        `/api/photos/${encodeURIComponent(photoId)}/exports`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+    } catch {
+      if (pendingExports.get(photoId) === body && editorOwnsPhoto(photoId)) {
+        editorExportState = "outcome-unknown";
+        editorExportNote =
+          "The Export outcome is unknown. Reconcile it before submitting another Export.";
+        renderEditor();
+      }
+      return;
+    }
+    if (pendingExports.get(photoId) !== body) return;
+    if (response.status !== 201 && response.status !== 200) {
+      const responseBody: unknown = await response
+        .clone()
+        .json()
+        .catch(() => undefined);
+      const error =
+        isRecord(responseBody) && isRecord(responseBody["error"])
+          ? responseBody["error"]
+          : undefined;
+      const code =
+        error && typeof error["code"] === "string" ? error["code"] : "";
+      if (response.status >= 500 || code === "outcome_unknown") {
+        if (pendingExports.get(photoId) !== body || !editorOwnsPhoto(photoId))
+          return;
+        editorExportState = "outcome-unknown";
+        editorExportNote =
+          "The Export outcome is unknown. Reconcile it before submitting another Export.";
+        renderEditor();
+        return;
+      }
+      const message = await describeEditRefusal(response, "The Export");
+      if (pendingExports.get(photoId) !== body) return;
+      pendingExports.delete(photoId);
+      if (!editorOwnsPhoto(photoId)) return;
+      editorExportState = response.status === 409 ? "failed" : "idle";
+      editorExportNote = message;
+      renderEditor();
+      return;
+    }
+    const accepted: unknown = await response.json().catch(() => undefined);
+    if (pendingExports.get(photoId) !== body) return;
+    const state = isRecord(accepted) ? accepted["state"] : undefined;
+    if (
+      !isRecord(accepted) ||
+      typeof accepted["exportId"] !== "string" ||
+      !["queued", "running", "succeeded", "failed", "cancelled"].includes(
+        String(state),
+      ) ||
+      accepted["target"] !== body.target ||
+      accepted["recipeVersion"] !== body.expectedRecipeVersion ||
+      accepted["sourceRevision"] !== body.expectedSourceRevision
+    ) {
+      if (!editorOwnsPhoto(photoId)) return;
+      editorExportState = "outcome-unknown";
+      editorExportNote =
+        "The Export response could not be matched to its captured snapshot. Reconcile it before submitting another Export.";
+      renderEditor();
+      return;
+    }
+    pendingExports.delete(photoId);
+    if (!editorOwnsPhoto(photoId)) return;
+    editorExportId = accepted["exportId"];
+    editorExportTarget = body.target;
+    editorExportState = state as EditorExportViewModel["state"];
+    editorExportArtifact = null;
+    const receiptExpiresAt = accepted["receiptExpiresAt"];
+    const label = editorExportLabel(editorExportTarget);
+    editorExportNote =
+      editorExportState === "queued"
+        ? typeof receiptExpiresAt === "string"
+          ? `${label} queued; processing has not started. The receipt and its captured snapshot are retained until ${receiptExpiresAt}.`
+          : `${label} queued; processing has not started.`
+        : `${label} ${editorExportState}.`;
+    renderEditor();
+    void inspectEditorExport(photoId, editorExportId);
+    scheduleEditorExportPoll(photoId);
+  };
   const submitEditorExport = async (photoId: string): Promise<void> => {
     const session = editorSessions.get(photoId);
-    if (!session || editorExportState === "submitting") return;
+    if (
+      !editorOwnsPhoto(photoId) ||
+      !session ||
+      pendingExports.has(photoId) ||
+      editorExportState === "submitting"
+    )
+      return;
+    const generation = editorScopeGeneration;
     editorExportState = "submitting";
     editorExportNote = "Settling the saved settings before the Export…";
     renderEditor();
@@ -1134,85 +1290,46 @@ export function createEditorController(
       void placeEditorWrite(photoId, session, commit);
     }
     if (!(await settleEditorWrites(photoId))) {
+      if (!ownsEditorScope(photoId, generation)) return;
       editorExportState = "idle";
       editorExportNote =
         "The Export waits for the saved settings to be confirmed; resolve the conflict or retry the save first.";
       renderEditor();
       return;
     }
+    if (!ownsEditorScope(photoId, generation)) return;
     const presented = session.presentation();
     const source = session.facts()?.sourceRevision ?? null;
     const target: "development-tiff" | "film-jpeg" =
       editorStage === "film" ? "film-jpeg" : "development-tiff";
     editorExportTarget = target;
-    if (!presented.canEdit || !presented.processingAvailable || !source) {
+    if (
+      !presented.canEdit ||
+      !presented.processingAvailable ||
+      !presented.recipeVersion ||
+      !source
+    ) {
       editorExportState = "idle";
       editorExportNote = `This Photo cannot export a ${editorExportLabel(target)} right now.`;
       renderEditor();
       return;
     }
-    const body = {
+    const body: ExportSubmissionBody = {
       requestId: `web-export-${crypto.randomUUID().replaceAll("-", "").slice(0, 24)}`,
       expectedRecipeVersion: presented.recipeVersion,
       expectedSourceRevision: source,
       target,
     };
+    pendingExports.set(photoId, body);
     // Later edits wait behind this submission, so they can never retarget the
     // snapshot the service accepted.
     const barrier = Promise.withResolvers<void>();
-    editorExportBarrier = barrier.promise;
-    releaseEditorExportBarrier = barrier.resolve;
-    let response: Response;
+    editorExportBarriers.set(photoId, barrier);
     try {
-      response = await fetcher(
-        `/api/photos/${encodeURIComponent(photoId)}/exports`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        },
-      );
-    } catch {
-      editorExportState = "failed";
-      editorExportNote = "The Export request did not reach the service.";
-      renderEditor();
-      return;
+      await submitEditorExportRequest(photoId, body);
     } finally {
-      const release = releaseEditorExportBarrier;
-      editorExportBarrier = undefined;
-      releaseEditorExportBarrier = undefined;
-      release?.();
+      if (!pendingExports.has(photoId)) releaseEditorExportBarrier(photoId);
     }
-    if (response.status !== 201 && response.status !== 200) {
-      editorExportState = response.status === 409 ? "failed" : "idle";
-      editorExportNote = await describeEditRefusal(response, "The Export");
-      renderEditor();
-      return;
-    }
-    const accepted: unknown = await response.json().catch(() => undefined);
-    if (!isRecord(accepted) || typeof accepted["exportId"] !== "string") {
-      editorExportState = "failed";
-      editorExportNote = "The Export acceptance could not be read.";
-      renderEditor();
-      return;
-    }
-    editorExportId = accepted["exportId"];
-    if (
-      accepted["target"] === "development-tiff" ||
-      accepted["target"] === "film-jpeg"
-    ) {
-      editorExportTarget = accepted["target"];
-    }
-    editorExportState = "queued";
-    editorExportArtifact = null;
-    const receiptExpiresAt = accepted["receiptExpiresAt"];
-    const label = editorExportLabel(editorExportTarget);
-    editorExportNote =
-      typeof receiptExpiresAt === "string"
-        ? `${label} queued; processing has not started. The receipt and its captured snapshot are retained until ${receiptExpiresAt}.`
-        : `${label} queued; processing has not started.`;
-    renderEditor();
-    scheduleEditorExportPoll(photoId);
   };
   const cancelEditorExport = async (photoId: string): Promise<void> => {
     if (!editorExportId) return;
@@ -1234,6 +1351,19 @@ export function createEditorController(
     }
   };
   const retryEditorExport = async (photoId: string): Promise<void> => {
+    if (editorExportState === "outcome-unknown") {
+      const pending = pendingExports.get(photoId);
+      if (!pending) return;
+      editorExportState = "submitting";
+      editorExportNote = "Reconciling the previous Export outcome…";
+      renderEditor();
+      try {
+        await submitEditorExportRequest(photoId, pending);
+      } finally {
+        if (!pendingExports.has(photoId)) releaseEditorExportBarrier(photoId);
+      }
+      return;
+    }
     if (!editorExportId) return;
     const exportId = editorExportId;
     try {
@@ -1341,6 +1471,7 @@ export function createEditorController(
   /// session: a pending save still settles under its own identity, and the
   /// local draft remains for a later visit.
   const leaveEditor = (): void => {
+    editorScopeGeneration += 1;
     editorPreviewAbort?.abort();
     editorPreviewAbort = undefined;
     editorPreviewGeneration += 1;

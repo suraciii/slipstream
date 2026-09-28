@@ -30,6 +30,7 @@ import {
 import { formatCaptureTime } from "./capture-time.js";
 import { formatPhotoCount } from "./photo-count.js";
 import type { EditorWhiteBalancePresentation } from "../model/photo-editor.js";
+import type { EditorExportViewModel } from "./photo-editor-surface.js";
 import type { RecoveryApplyMapping } from "../model/recovery-review.js";
 
 export type {
@@ -124,27 +125,7 @@ export type GridProgressViewModel = Readonly<{
 /// Preview of the Film Result once that capability is enabled.
 export type EditorStage = "camera" | "develop" | "film";
 
-export type EditorExportViewModel = Readonly<{
-  state:
-    | "idle"
-    | "submitting"
-    | "queued"
-    | "running"
-    | "succeeded"
-    | "failed"
-    | "cancelled";
-  note: string;
-  artifact: Readonly<{
-    byteLength: number;
-    width: number;
-    height: number;
-    expiresAt: string;
-  }> | null;
-  canSubmit: boolean;
-  canCancel: boolean;
-  canRetry: boolean;
-  canDownload: boolean;
-}>;
+export type { EditorExportViewModel } from "./photo-editor-surface.js";
 
 export type EditorViewModel = Readonly<{
   photoId: string;
