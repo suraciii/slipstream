@@ -3117,6 +3117,9 @@ function mountPrivateLibraryBrowser(
     isAlive: () => applicationAlive,
     setGridStatusText,
     refreshSource,
+    refreshRecoveryOverview: async () => {
+      await application.refreshOverview().catch(() => {});
+    },
   });
 
   function handleViewIntent(intent: LibraryBrowserIntent): void {

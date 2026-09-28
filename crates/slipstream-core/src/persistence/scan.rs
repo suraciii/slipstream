@@ -870,11 +870,18 @@ fn preview_state_name(state: PreviewState) -> &'static str {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ScanRecoveryPlan {
     pub relocations: HashMap<String, String>,
-    /// The Location each Original occupied when the scanner built the plan.
+    /// The source state each Original had when the scanner built the plan.
     /// Applying a stale plan must not overwrite a manual recovery committed
     /// while content inspection was in progress.
-    pub relocation_sources: HashMap<String, String>,
+    pub relocation_sources: HashMap<String, ScanRelocationSource>,
     pub fingerprints: Vec<DiscoveredFingerprint>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScanRelocationSource {
+    pub relative_path: String,
+    pub facts: crate::OriginalFacts,
+    pub available: bool,
 }
 
 /// One complete-content digest computed for the file observed at one
@@ -1013,10 +1020,13 @@ pub(super) fn apply_scan(
             let Some(persisted) = persisted_by_id.get(original_id) else {
                 return Err(PersistenceError::InvalidRecovery);
             };
-            let Some(source_path) = recovery.relocation_sources.get(original_id) else {
+            let Some(source) = recovery.relocation_sources.get(original_id) else {
                 return Err(PersistenceError::InvalidRecovery);
             };
-            if persisted.relative_path.as_str() != source_path {
+            if persisted.relative_path.as_str() != source.relative_path
+                || persisted.facts != source.facts
+                || persisted.available != source.available
+            {
                 return Err(PersistenceError::InvalidRecovery);
             }
             let Some(discovered_original) = discovered_by_path.get(new_path.as_str()) else {
@@ -1595,7 +1605,20 @@ mod tests {
         let _ = digest;
         let recovery = ScanRecoveryPlan {
             relocations: [("moved/two.JPG".to_owned(), original_id.clone())].into(),
-            relocation_sources: [(original_id.clone(), "one.JPG".to_owned())].into(),
+            relocation_sources: [(
+                original_id.clone(),
+                ScanRelocationSource {
+                    relative_path: "one.JPG".to_owned(),
+                    facts: OriginalFacts {
+                        size: 4,
+                        mtime_ms: 1000.0,
+                        device: 0,
+                        inode: 0,
+                    },
+                    available: true,
+                },
+            )]
+            .into(),
             fingerprints: vec![DiscoveredFingerprint {
                 path: "moved/two.JPG".to_owned(),
                 digest: crate::recovery::digest_bytes(&[]),
@@ -1627,7 +1650,20 @@ mod tests {
                     Vec::new(),
                     ScanRecoveryPlan {
                         relocations: [("moved/two.JPG".to_owned(), original_id.clone())].into(),
-                        relocation_sources: [(original_id.clone(), "one.JPG".to_owned())].into(),
+                        relocation_sources: [(
+                            original_id.clone(),
+                            ScanRelocationSource {
+                                relative_path: "one.JPG".to_owned(),
+                                facts: OriginalFacts {
+                                    size: 4,
+                                    mtime_ms: 1000.0,
+                                    device: 0,
+                                    inode: 0,
+                                },
+                                available: true,
+                            },
+                        )]
+                        .into(),
                         fingerprints: vec![DiscoveredFingerprint {
                             path: "moved/two.JPG".to_owned(),
                             digest: crate::recovery::digest_bytes(&[]),

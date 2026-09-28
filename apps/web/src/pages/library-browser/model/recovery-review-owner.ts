@@ -54,11 +54,14 @@ export interface RecoveryReviewSurface {
 
 /// The page ports the review owner reads: the mounted-page check every
 /// settled answer re-reads, the Grid status line a failed open names its
-/// failure on, and the source reload a committed apply triggers.
+/// failure on, the source reload a committed apply triggers, and the
+/// authoritative Overview refresh a superseded commit presents its shared
+/// recovery facts through.
 export type RecoveryReviewPage = Readonly<{
   isAlive(): boolean;
   setGridStatusText(text: string): void;
   refreshSource(): Promise<void>;
+  refreshRecoveryOverview(): Promise<void>;
 }>;
 
 export interface RecoveryReviewOwner {
@@ -353,7 +356,12 @@ export function createRecoveryReviewOwner(
   };
 
   /// Commits the reviewed mappings the panel chose. A refusal names every
-  /// refused mapping and claims nothing as applied.
+  /// refused mapping and claims nothing as applied. The current review's
+  /// success writes its committed counts directly and reloads the affected
+  /// source. An apply that settles after a newer review superseded it still
+  /// reloads the source and re-reads the authoritative Overview — the server
+  /// committed its effect — but claims no panel-local presentation and no
+  /// counts, so an older settlement cannot regress a newer one.
   const applyRecovery = async (
     mappings: ReadonlyArray<RecoveryApplyMapping>,
   ): Promise<void> => {
@@ -371,21 +379,28 @@ export function createRecoveryReviewOwner(
       mappings,
       new AbortController().signal,
     );
-    if (generation !== proposalGeneration) return;
-    view.setRecoveryPending(false);
+    const superseded = generation !== proposalGeneration;
+    if (!superseded) view.setRecoveryPending(false);
     if (!page.isAlive()) return;
     if (result.kind === "applied") {
-      view.closeRecoveryPanel();
-      // The committed counts are the freshest recovery truth until the next
-      // scan reports its own.
-      recoveryNoticeShown = `${result.appliedMappings}:${result.unavailablePhotos}`;
-      view.setRecoveryNotice({
-        relocatedPhotos: result.appliedMappings,
-        unavailablePhotos: result.unavailablePhotos,
-      });
+      if (superseded) {
+        // The Overview owns the shared counts here: its publication fencing
+        // keeps an older settlement from regressing a newer commit's facts.
+        void page.refreshRecoveryOverview();
+      } else {
+        view.closeRecoveryPanel();
+        // The committed counts are the freshest recovery truth until the
+        // next scan reports its own.
+        recoveryNoticeShown = `${result.appliedMappings}:${result.unavailablePhotos}`;
+        view.setRecoveryNotice({
+          relocatedPhotos: result.appliedMappings,
+          unavailablePhotos: result.unavailablePhotos,
+        });
+      }
       void page.refreshSource();
       return;
     }
+    if (superseded) return;
     if (result.kind === "refused") {
       const reasons = result.rejections
         .map((rejection) => rejection.reason)

@@ -9,7 +9,7 @@
 use crate::{
     NativeWorkBudget, OriginalKind, OriginalRecord, ScanSnapshot,
     domain::DiscoveredOriginal,
-    persistence::{DiscoveredFingerprint, ScanRecoveryPlan},
+    persistence::{DiscoveredFingerprint, ScanRecoveryPlan, ScanRelocationSource},
 };
 use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -180,7 +180,7 @@ pub fn plan_recovery(
     // own bytes there.
     let mut relocations: HashMap<String, String> = HashMap::new();
     let mut by_digest: HashMap<String, (Vec<&OriginalRecord>, Vec<String>)> = HashMap::new();
-    let mut relocation_sources: HashMap<String, String> = HashMap::new();
+    let mut relocation_sources: HashMap<String, ScanRelocationSource> = HashMap::new();
     for original in &eligible {
         if let Some(fingerprint) = fingerprints.get(&original.id) {
             by_digest
@@ -218,7 +218,11 @@ pub fn plan_recovery(
             relocations.insert(path.clone(), original.id.clone());
             relocation_sources.insert(
                 original.id.clone(),
-                original.relative_path.as_str().to_owned(),
+                ScanRelocationSource {
+                    relative_path: original.relative_path.as_str().to_owned(),
+                    facts: original.facts,
+                    available: original.available,
+                },
             );
         }
     }
