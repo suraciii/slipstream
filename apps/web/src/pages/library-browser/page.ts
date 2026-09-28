@@ -265,12 +265,16 @@ function mountPrivateLibraryBrowser(
     total: sourceGrid.total,
     index: 0,
   });
+  /// The Library's current scan phase, or "" while no scan is running. The
+  /// Edit surface names it alongside a `Checking source…` wait.
+  let libraryScanPhase = "";
   const editor = createEditorController(fetcher, view, {
     isAlive: () => applicationAlive,
     isCurrentPhoto: (photoId) =>
       photoOwner.isCurrent(photoOwner.authority) &&
       photoOwner.current?.id === photoId,
     currentPhoto: () => photoOwner.current,
+    libraryPhase: () => libraryScanPhase,
   });
   const {
     open: openEditor,
@@ -315,6 +319,13 @@ function mountPrivateLibraryBrowser(
       summaryAction = presentation.summary.action
         ? { presentationId, action: presentation.summary.action }
         : undefined;
+      // The Library's current scan phase in its own words, kept for the Edit
+      // surface's `Checking source…` wait: a wait names what the Library is
+      // doing instead of presenting the Photo as failed.
+      libraryScanPhase =
+        presentation.summary.libraryCheckState === "active"
+          ? presentation.summary.text
+          : "";
       view.presentSummary(
         presentation.summary.text,
         presentation.summary.action
@@ -381,6 +392,17 @@ function mountPrivateLibraryBrowser(
       syncConnection();
       return;
     }
+    if (coordination.kind === "publication-advanced") {
+      // A completed scan published new Library source facts. The open
+      // Photo's Edit surface re-reads its bounded edit facts now, so a
+      // source whose read was pending while the Library recovered becomes
+      // editable without a reload or a reopened Photo. The read joins one
+      // already under way, and an Edit surface that is not presented stays
+      // untouched: opening it later reads the facts fresh anyway.
+      const photoId = photoOwner.current?.id;
+      if (photoId && view.editorVisible()) void refreshEditor(photoId);
+      return;
+    }
     if (coordination.kind === "reset-file-locations") {
       resetFileLocations();
       return;
@@ -389,7 +411,6 @@ function mountPrivateLibraryBrowser(
       await loadFolderWindow("", 0, false);
       return;
     }
-
     if (!fileLocations.publication && coordination.overview.published) {
       if (sourceGrid.lastSource?.kind === "folder" && !sourceGrid.token) {
         await awaitRootBinding();

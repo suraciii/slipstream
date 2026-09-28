@@ -150,7 +150,26 @@ export type EditorViewModel = Readonly<{
   stageNote: string;
   /// Why the Film stage cannot be presented, when it cannot.
   filmReason: string;
-  sourceSupport: "supported" | "unsupported" | "unavailable" | "unknown";
+  /// The Edit source axis: `checking` while facts load or the service reports
+  /// a retryable wait; the confirmed outcomes otherwise.
+  editSourceReadiness:
+    | "checking"
+    | "ready"
+    | "missing"
+    | "unreadable"
+    | "unsupported";
+  /// The edit source the current facts were resolved against. A proxy
+  /// derivative is named as provenance, never as the Original File.
+  editSourceKind: "original" | "development-proxy";
+  /// The Source support fact line: the readiness word, the Library's scan
+  /// phase while the source is being checked, and proxy provenance.
+  sourceFactNote: string;
+  /// The Processing axis: the deployment's engine capability, separately
+  /// from this Photo's source.
+  processingReadiness: "checking" | "ready" | "waiting" | "unavailable";
+  /// The Edit Preview axis for the chosen stage, or `null` when no Edit
+  /// Preview is described on that stage.
+  previewState: "pending" | "ready" | "stale" | "failed" | null;
   processingAvailable: boolean;
   /// Why the deployment cannot execute development work, when it cannot. An
   /// unavailable deployment is explained instead of attempted.
@@ -884,8 +903,9 @@ export function createLibraryBrowserView(
                     </div>
                     <div class="photo-editor-actions"><button type="button" class="quiet" data-photo-editor-undo disabled>Undo</button><button type="button" class="quiet" data-photo-editor-redo disabled>Redo</button><button type="button" class="quiet" data-photo-editor-reset disabled>Reset all</button><button type="button" class="quiet" data-photo-editor-compare aria-pressed="false" title="Press to compare the current settings with the as-shot/baseline development of this stage" disabled>Baseline comparison</button><button type="button" data-photo-editor-preview disabled>Refresh preview</button><button type="button" class="quiet" data-photo-editor-rebind hidden disabled>Rebind source</button><button type="button" class="quiet" data-photo-editor-refresh>Reload recipe</button></div>
                     <p class="photo-editor-fact"><span>White balance</span><span data-photo-editor-white-balance>As shot</span></p>
-                    <p class="photo-editor-fact"><span>Source support</span><span data-photo-editor-support>Checking…</span></p>
+                    <p class="photo-editor-fact"><span>Edit source</span><span data-photo-editor-support>Checking…</span></p>
                     <p class="photo-editor-fact"><span>Processing</span><span data-photo-editor-processing>Checking…</span></p>
+                    <p class="photo-editor-fact"><span>Edit Preview</span><span data-photo-editor-preview-state>Checking…</span></p>
                     <p class="photo-editor-note" data-photo-editor-capability hidden></p>
                     <p class="photo-editor-draft" data-photo-editor-draft hidden role="status"></p>
                     <div class="photo-editor-conflict" data-photo-editor-conflict hidden><p data-photo-editor-conflict-message role="alert"></p><div class="photo-editor-actions"><button type="button" data-photo-editor-use-saved>Use saved recipe</button><button type="button" class="quiet" data-photo-editor-reapply>Reapply my settings</button><button type="button" class="quiet" data-photo-editor-discard-draft>Discard draft</button></div></div>

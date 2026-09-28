@@ -400,7 +400,13 @@ navigates: the change it restores never advanced away from a Photo.
 An Edit Recipe read is owned by the Photo scope with key
 `(requestGeneration, photoId, recipe)`. It starts when a Photo's Develop surface
 opens; the Photo scope aborts it on Photo or source change, and a stale read
-writes neither controls nor committed state.
+writes neither controls nor committed state. Readiness is represented by
+independent source-support, processing-capability, and preview-result axes:
+`read-pending` and `resource-unavailable` are retryable waits, not evidence that
+the Original is unreadable. Reads for the same Photo and source revision join
+one in-flight request; a successful publication advance invalidates that
+request's captured facts and schedules one replacement read rather than
+creating parallel reads.
 
 A save is an admitted write with settlement-family key
 `(photoId, recipe-write)`: the newest save for that Photo owns the Develop
@@ -424,11 +430,19 @@ none is a save until the next settled write.
 ### Edit Preview requests
 
 An Edit Preview request is owned by the Photo scope with key
-`(requestGeneration, photoId, stage, identity)`. Requests with the same full
-identity coalesce. A changed identity supersedes the older request locally
-without claiming to cancel admitted server work, and displays the queued state
-until a result for the current identity exists. A superseded result never
-publishes, and a refusal names the unavailable stage and reason on the Develop
+`(requestGeneration, photoId, stage, identity)`. The identity includes the
+Photo, stage, source revision, recipe version, edit-source kind, and (when the
+source is `development-proxy`) the proxy's content digest. Requests with the
+same full identity coalesce. A changed identity supersedes the older request
+locally without claiming to cancel admitted server work, and displays the last
+image as stale while the replacement is pending. A superseded result never
+publishes, including a result whose source revision is unchanged but whose
+proxy digest is newer or older than the current proxy identity.
+
+The rendered image retains explicit provenance: original-backed and
+development-proxy-backed results are distinct facts, and a proxy-backed
+result is labelled as such rather than presented as full-resolution Original
+evidence. A refusal names the unavailable stage and reason on the Develop
 surface. Preview failure never changes Originals or the committed recipe.
 
 ### Export submission and lifecycle

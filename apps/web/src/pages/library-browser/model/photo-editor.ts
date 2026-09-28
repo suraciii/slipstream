@@ -58,6 +58,17 @@ export type EditorControls = Readonly<{
   /// Empty while the deployment admits no adjustable mode for this class.
   adjustableWhiteBalance: ReadonlyArray<AdmittedWhiteBalance>;
 }>;
+/// The closed reason the service reports with an `unavailable` source, plus
+/// this client's empty "no reason reported". `original-missing` and
+/// `original-unreadable` are confirmed outcomes of the published source
+/// revision; `read-pending` and `resource-unavailable` are retryable waits
+/// the Library itself resolves while it recovers or shares read capacity.
+export type EditorSupportReason =
+  | ""
+  | "original-missing"
+  | "original-unreadable"
+  | "read-pending"
+  | "resource-unavailable";
 
 /// The facts of one `GET /api/photos/{id}/edit-recipe` read.
 export type EditorFacts = Readonly<{
@@ -66,10 +77,32 @@ export type EditorFacts = Readonly<{
   recipeVersion: string | null;
   settings: EditorSettings;
   sourceSupport: "supported" | "unsupported" | "unavailable";
-  supportReason: string;
+  supportReason: EditorSupportReason;
+  editSource: EditSourceKind;
+  /// The proxy identity digest the service bound the edit source to, or
+  /// `null` for the Original File. A rendition of another identity is never
+  /// the requested preview, even under an unchanged source revision.
+  editSourceProxyId: string | null;
   processingAvailable: boolean;
   controls: EditorControls;
 }>;
+
+/// The edit source the service resolved the recipe against. `original` is
+/// the Original File; `development-proxy` is a proxy derivative the service
+/// reports as the current edit source while one exists. An older service
+/// omits the field, and absence reads as `original`.
+export type EditSourceKind = "original" | "development-proxy";
+
+/// The Edit source axis the workspace presents: whether the service holds
+/// current readable source facts for this Photo and, when it does not,
+/// whether that outcome is a wait or a confirmed failure. The wire states
+/// and reasons map onto it without collapsing back into one boolean.
+export type EditSourceReadiness =
+  | "checking"
+  | "ready"
+  | "missing"
+  | "unreadable"
+  | "unsupported";
 
 /// One guarded recipe write. The identity is chosen once and reused by a
 /// retry, so the service resolves a lost response to the committed revision.
@@ -143,7 +176,12 @@ export type EditorPresentation = Readonly<{
   baseline: EditorSettings;
   controls: EditorControls;
   whiteBalance: EditorWhiteBalancePresentation;
-  sourceSupport: "supported" | "unsupported" | "unavailable" | "unknown";
+  /// The Edit source axis: `checking` while the facts are loading or the
+  /// service reports a retryable wait, and the confirmed outcomes otherwise.
+  editSourceReadiness: EditSourceReadiness;
+  /// The edit source the current facts were resolved against. A proxy
+  /// derivative is named as provenance, never as the Original File.
+  editSourceKind: EditSourceKind;
   processingAvailable: boolean;
   /// The revision the service confirmed for the settings the Photographer
   /// sees as saved. A guarded write and an Export both start from it.
@@ -286,15 +324,47 @@ const sameSettings = (left: EditorSettings, right: EditorSettings): boolean =>
 const asShot = (): AsShotIntent => Object.freeze({ mode: "as-shot" });
 
 /// Why this Photo has no editing, in the workspace's words. The service
-/// reports the closed state and reason; the surface explains them.
-const sourceUnavailableStatus = (facts: EditorFacts): string =>
-  facts.sourceSupport === "unsupported"
-    ? "This Photo's source class has no approved profile in this deployment, so its settings are read-only."
-    : facts.supportReason === "original-missing"
-      ? "This Photo's Original File is missing from its remembered Location, so its settings are read-only."
-      : facts.supportReason === "original-unreadable"
-        ? "This Photo's Original File cannot be read right now, so its settings are read-only."
-        : "Current source facts are unavailable, so this Photo's settings are read-only.";
+/// reports the closed state and reason; the surface explains them. A
+/// retryable wait names the one action that resolves it — reloading the
+/// recipe — while a confirmed outcome explains the read failure itself, and
+/// a capacity wait never presents as an unreadable Original.
+const sourceUnavailableStatus = (facts: EditorFacts): string => {
+  if (facts.sourceSupport === "unsupported")
+    return "This Photo's source class has no approved profile in this deployment, so its settings are read-only.";
+  switch (facts.supportReason) {
+    case "original-missing":
+      return "This Photo's Original File is missing from its remembered Location, so its settings are read-only.";
+    case "original-unreadable":
+      return "Reading this Photo's Original File failed for its current source revision, so its settings are read-only.";
+    case "read-pending":
+      return "Checking source… This Photo's source read is still pending while the Library recovers, so its settings are read-only. Reload the recipe to check for current source facts.";
+    case "resource-unavailable":
+      return "The Library could not spare the read capacity for this Photo's Original File yet, so its settings are read-only. Reload the recipe once the current Library work settles.";
+    default:
+      return "Current source facts are unavailable, so this Photo's settings are read-only.";
+  }
+};
+
+/// The Edit source axis one read leaves behind. An unanswered or pending
+/// read is a wait, never a confirmed outcome: the readiness says `checking`
+/// exactly while a later read can still resolve the Photo.
+const editSourceReadinessOf = (
+  facts: EditorFacts | null,
+): EditSourceReadiness => {
+  if (!facts) return "checking";
+  switch (facts.sourceSupport) {
+    case "supported":
+      return facts.sourceRevision ? "ready" : "checking";
+    case "unsupported":
+      return "unsupported";
+    case "unavailable":
+      return facts.supportReason === "original-missing"
+        ? "missing"
+        : facts.supportReason === "original-unreadable"
+          ? "unreadable"
+          : "checking";
+  }
+};
 
 const temperatureTint = (
   temperatureKelvin: number,
@@ -566,7 +636,8 @@ export const createPhotoEditor = (options: {
       baseline: baselineSettings(),
       controls: controls(),
       whiteBalance: whiteBalancePresentation(),
-      sourceSupport: facts?.sourceSupport ?? "unknown",
+      editSourceReadiness: editSourceReadinessOf(facts),
+      editSourceKind: facts?.editSource ?? "original",
       processingAvailable: facts?.processingAvailable ?? false,
       recipeVersion,
       canEdit: editable(),
@@ -777,6 +848,11 @@ export const createPhotoEditor = (options: {
     if (photoId !== next.photoId) return open(next);
     const movedVersion = next.recipeVersion !== recipeVersion;
     const movedSource = next.sourceRevision !== sourceRevision;
+    // Whether this read leaves an unavailable source behind. The notice that
+    // explained the wait must not outlive the condition it explained.
+    const wasUnavailable =
+      facts !== null &&
+      (facts.sourceSupport !== "supported" || !facts.sourceRevision);
     facts = next;
     sourceRevision = next.sourceRevision;
     recipeVersion = next.recipeVersion;
@@ -786,6 +862,7 @@ export const createPhotoEditor = (options: {
       status = sourceUnavailableStatus(next);
       return Object.freeze({ presentation: presentation(), request: null });
     }
+    if (wasUnavailable) status = "";
     if (conflict !== null) {
       // A read is the authoritative current recipe. The conflict stays open
       // with the local intent retained, and its saved side becomes the recipe
