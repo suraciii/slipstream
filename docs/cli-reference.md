@@ -550,16 +550,18 @@ slipstream processing capability
 slipstream photos recipe get PHOTO_ID
 slipstream photos recipe save PHOTO_ID --input FILE
 slipstream photos recipe rebind PHOTO_ID --input FILE
-slipstream photos edit-preview PHOTO_ID --stage develop --file PATH [--settings current|baseline]
+slipstream photos edit-preview PHOTO_ID --stage develop|film --file PATH [--settings current|baseline]
 slipstream photos export submit PHOTO_ID --target development-tiff|film-jpeg --request-id REQUEST_ID
 slipstream photos export list PHOTO_ID
 slipstream photos export status EXPORT_ID
 slipstream photos export download EXPORT_ID --file PATH
 ```
 
-`film-jpeg` is an existing service target. Its presence in help is not evidence
-of native or deployment qualification. Use it only with a separately qualified
-Film deployment; a Develop workflow pass does not qualify Film.
+`film-jpeg` is an existing service target. The `edit-preview --stage film`
+route uses the same source revision, recipe version, bundle-bound rendition
+identity, response metadata, digest, and JPEG validation as `develop`; it is
+admissible only for a separately qualified Film deployment. A Develop workflow
+pass does not qualify Film.
 
 `processing capability` returns the service's processing capability report,
 including state, observed bundle and incarnation, profiles, exposure range and
