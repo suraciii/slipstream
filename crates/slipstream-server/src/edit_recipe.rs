@@ -182,7 +182,7 @@ pub(crate) fn derive_support(
     if read.capture.state == slipstream_core::CaptureMetadataState::Pending {
         return SupportClassification {
             state: "unavailable",
-            reason: Some(READ_PENDING),
+            reason: Some(RESOURCE_UNAVAILABLE),
         };
     }
     let identity = match (&read.capture.make, &read.capture.model) {
@@ -905,6 +905,17 @@ mod tests {
         assert_eq!(
             derive_support(&read, None).reason,
             Some(ORIGINAL_UNREADABLE)
+        );
+    }
+
+    #[test]
+    fn resource_limited_capture_is_retryable_for_the_current_revision() {
+        let mut capture = slipstream_core::CaptureFact::pending();
+        capture.source_revision = Some("rev-2\0dev\0inode".to_owned());
+        let read = source_read(OriginalKind::Raw, capture);
+        assert_eq!(
+            derive_support(&read, None).reason,
+            Some(RESOURCE_UNAVAILABLE)
         );
     }
 

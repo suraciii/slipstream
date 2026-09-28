@@ -270,7 +270,7 @@ fn fresh_capture_mid_read_change_fails_without_third_attempt_or_stale_fact_adopt
 }
 
 #[test]
-fn stable_non_revision_capture_failure_is_not_retried() {
+fn resource_limited_capture_remains_retryable_for_the_same_revision() {
     let (_base, config) = fixture();
     let path = config.library_root.join("resource-limit.ARW");
     let mut excessive = b"II*\0\x08\0\0\0".to_vec();
@@ -303,7 +303,7 @@ fn stable_non_revision_capture_failure_is_not_retried() {
     assert_eq!(originals[0].facts, discovery_facts);
     assert_eq!(
         originals[0].capture.state,
-        crate::CaptureMetadataState::Failed
+        crate::CaptureMetadataState::Pending
     );
     assert_eq!(
         originals[0].capture.source_revision.as_deref(),

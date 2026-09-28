@@ -78,7 +78,15 @@ pub(super) fn inspect_capture_facts(
                             original.facts = observation.facts;
                             observation.capture
                         }
-                        Err(_) => CaptureFact::failed(None),
+                        Err(crate::CaptureInspectionError::ResourceLimit) => CaptureFact {
+                            source_revision: Some(revision),
+                            ..CaptureFact::pending()
+                        },
+                        Err(_) => CaptureFact::failed(Some(revision)),
+                    },
+                    Err(crate::CaptureInspectionError::ResourceLimit) => CaptureFact {
+                        source_revision: Some(revision),
+                        ..CaptureFact::pending()
                     },
                     Err(_) => CaptureFact::failed(Some(revision)),
                 }
