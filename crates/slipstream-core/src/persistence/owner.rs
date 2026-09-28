@@ -12,14 +12,14 @@ use crate::{
     EditRecipeWriteOutcome, ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreMutation,
     ExplicitPhotoRestoreResult, ExportAttempt, ExportLeaseOutcome, ExportRecord,
     ExportRetryOutcome, ExportSettlement, ExportSubmission, ExportSubmissionResolution,
-    ExportSubmitOutcome, ExportSweepResult, MAXIMUM_PHOTO_RATING, OriginalFingerprint,
+    ExportSubmitOutcome, ExportSweepResult, LibraryRoot, MAXIMUM_PHOTO_RATING, OriginalFingerprint,
     OriginalScanError, PermanentDeletionItemState, PermanentDeletionSelection,
     PermanentDeletionTarget, PhotoAlbumMembership, PhotoOperationRemainder, PhotoQuery,
     PhotoQueryError, PhotoQueryProjection, PhotoRead, PhotoRemovalMutation, PhotoRemovalResult,
     PhotoRestoration, PhotoRestorationResult, PhotoStateBatchMutation, PhotoStateBatchResult,
     PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateValue, PreviewSeed,
-    PreviewSeedResult, RebindEditRecipe, RecoverySurvey, RemovedPhotoRecord, RequestedRelocation,
-    SaveEditRecipe, ScanSnapshot, SelectionState, WhiteBalanceIntent,
+    PreviewSeedResult, RebindEditRecipe, RecoveryRecord, RecoverySurvey, RemovedPhotoRecord,
+    RequestedRelocation, SaveEditRecipe, ScanSnapshot, SelectionState, WhiteBalanceIntent,
 };
 
 use rusqlite::{
@@ -297,6 +297,8 @@ pub(super) fn validate_photo_state_batch_mutation(
 }
 
 type Reply<T> = oneshot::Sender<Result<T, PersistenceError>>;
+type EditRecipeSurfaceReceiver =
+    oneshot::Receiver<Result<Option<(PhotoRead, EditRecipeRead)>, PersistenceError>>;
 
 /// Bounded per-Photo Album membership query result.
 type PhotoAlbums = Result<Option<Vec<PhotoAlbumMembership>>, PersistenceError>;
@@ -319,6 +321,10 @@ type RemovedPhotoPageReceiver = oneshot::Receiver<RemovedPhotoPageResult>;
 
 type MetadataWork = Box<dyn FnOnce(&Connection) + Send>;
 
+/// One review-identity read keeps its requested order, so every id gets a
+/// slot and `None` means the record no longer exists.
+pub(super) type RecoveryRecords = Vec<Option<RecoveryRecord>>;
+
 pub(super) enum Command {
     Probe(Reply<u64>),
     Metadata(MetadataWork),
@@ -338,7 +344,12 @@ pub(super) enum Command {
     StoreFingerprint(OriginalFingerprint, Reply<()>),
     FingerprintCounts(Reply<FingerprintCounts>),
     RecoverySurvey(Reply<RecoverySurvey>),
+    RecoveryRecords {
+        original_ids: Vec<String>,
+        reply: Reply<RecoveryRecords>,
+    },
     ApplyRelocations {
+        root: LibraryRoot,
         relocations: Vec<RequestedRelocation>,
         reply: Reply<AppliedRelocations>,
     },
@@ -361,6 +372,10 @@ pub(super) enum Command {
     ReadPhoto {
         photo_id: String,
         reply: Reply<Option<PhotoRead>>,
+    },
+    ReadEditRecipeSurface {
+        photo_id: String,
+        reply: Reply<Option<(PhotoRead, EditRecipeRead)>>,
     },
     ReadEditRecipe {
         photo_id: String,
@@ -694,52 +709,6 @@ impl Persistence {
             .snapshot)
     }
 
-    pub async fn apply_scan_recovered(
-        &self,
-        discovered: Vec<DiscoveredOriginal>,
-        errors: Vec<OriginalScanError>,
-        recovery: ScanRecoveryPlan,
-    ) -> Result<ScanApplication, PersistenceError> {
-        let receive = self.apply_scan_recovered_receiver(discovered, errors, recovery)?;
-        receive.await.unwrap_or(Err(PersistenceError::OwnerStopped))
-    }
-
-    fn apply_scan_recovered_receiver(
-        &self,
-        discovered: Vec<DiscoveredOriginal>,
-        errors: Vec<OriginalScanError>,
-        recovery: ScanRecoveryPlan,
-    ) -> Result<oneshot::Receiver<Result<ScanApplication, PersistenceError>>, PersistenceError>
-    {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ApplyScan {
-            discovered,
-            errors,
-            recovery,
-            failure_after_first: false,
-            reply: send,
-        })?;
-        Ok(receive)
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) async fn apply_scan_failure(
-        &self,
-        discovered: Vec<DiscoveredOriginal>,
-        errors: Vec<OriginalScanError>,
-    ) -> Result<ScanApplication, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ApplyScan {
-            discovered,
-            errors,
-            recovery: ScanRecoveryPlan::default(),
-            failure_after_first: true,
-            reply: send,
-        })?;
-        receive.await.unwrap_or(Err(PersistenceError::OwnerStopped))
-    }
-
     pub async fn seed_preview(
         &self,
         preview: PreviewSeed,
@@ -764,91 +733,6 @@ impl Persistence {
         receive
             .blocking_recv()
             .unwrap_or(Err(PersistenceError::OwnerStopped))
-    }
-
-    pub(crate) fn apply_scan_recovered_blocking(
-        &self,
-        discovered: Vec<DiscoveredOriginal>,
-        errors: Vec<OriginalScanError>,
-        recovery: ScanRecoveryPlan,
-    ) -> Result<ScanApplication, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ApplyScan {
-            discovered,
-            errors,
-            recovery,
-            failure_after_first: false,
-            reply: send,
-        })?;
-        receive
-            .blocking_recv()
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-    }
-
-    pub(crate) fn recovery_facts_blocking(
-        &self,
-        original_ids: Vec<String>,
-    ) -> Result<Vec<OriginalFingerprint>, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::RecoveryFacts {
-            original_ids,
-            reply: send,
-        })?;
-        receive
-            .blocking_recv()
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-    }
-
-    pub(crate) fn next_fingerprint_target_blocking(
-        &self,
-    ) -> Result<Option<FingerprintTarget>, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::NextFingerprintTarget(send))?;
-        receive
-            .blocking_recv()
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-    }
-
-    pub(crate) fn store_fingerprint_blocking(
-        &self,
-        fingerprint: OriginalFingerprint,
-    ) -> Result<(), PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::StoreFingerprint(fingerprint, send))?;
-        receive
-            .blocking_recv()
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-    }
-
-    pub(crate) fn fingerprint_counts_blocking(
-        &self,
-    ) -> Result<FingerprintCounts, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::FingerprintCounts(send))?;
-        receive
-            .blocking_recv()
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-    }
-
-    pub(crate) fn recovery_survey_receiver(
-        &self,
-    ) -> Result<oneshot::Receiver<Result<RecoverySurvey, PersistenceError>>, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::RecoverySurvey(send))?;
-        Ok(receive)
-    }
-
-    pub(crate) fn apply_relocations_receiver(
-        &self,
-        relocations: Vec<RequestedRelocation>,
-    ) -> Result<oneshot::Receiver<Result<AppliedRelocations, PersistenceError>>, PersistenceError>
-    {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ApplyRelocations {
-            relocations,
-            reply: send,
-        })?;
-        Ok(receive)
     }
 
     pub async fn list_albums(&self) -> Result<Vec<AlbumRecord>, PersistenceError> {
@@ -948,6 +832,18 @@ impl Persistence {
     {
         let (send, receive) = oneshot::channel();
         self.submit(Command::SaveEditRecipe(mutation, send))?;
+        Ok(receive)
+    }
+
+    pub(crate) fn edit_recipe_surface_receiver(
+        &self,
+        photo_id: &str,
+    ) -> Result<EditRecipeSurfaceReceiver, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::ReadEditRecipeSurface {
+            photo_id: photo_id.to_owned(),
+            reply: send,
+        })?;
         Ok(receive)
     }
 
@@ -1814,11 +1710,23 @@ fn owner_main(
                 let result = scan::recovery_survey(&connection);
                 let _ = reply.send(result);
             }
-            Command::ApplyRelocations { relocations, reply } => {
+            Command::RecoveryRecords {
+                original_ids,
+                reply,
+            } => {
+                let result = scan::recovery_records(&connection, &original_ids);
+                let _ = reply.send(result);
+            }
+            Command::ApplyRelocations {
+                root,
+                relocations,
+                reply,
+            } => {
                 let result = scan::apply_manual_relocations(
                     &state,
                     &database_name,
                     &mut connection,
+                    &root,
                     &relocations,
                 );
                 let _ = reply.send(result);
@@ -1856,6 +1764,22 @@ fn owner_main(
             }
             Command::ReadPhoto { photo_id, reply } => {
                 let _ = reply.send(queries::read_photo(&connection, &versions, &photo_id));
+            }
+            Command::ReadEditRecipeSurface { photo_id, reply } => {
+                // One serialized owner operation: the Photo facts and the
+                // recipe read below cannot straddle a scan publication, so
+                // every guard derives from a single published state.
+                let _ = reply.send(
+                    queries::read_photo(&connection, &versions, &photo_id).and_then(|photo| {
+                        photo
+                            .map(|photo| {
+                                edit_recipe::read_edit_recipe(&connection, &photo_id)
+                                    .map(|read| read.map(|read| (photo, read)))
+                            })
+                            .transpose()
+                            .map(|surface| surface.flatten())
+                    }),
+                );
             }
             Command::ReadEditRecipe { photo_id, reply } => {
                 let _ = reply.send(edit_recipe::read_edit_recipe(&connection, &photo_id));

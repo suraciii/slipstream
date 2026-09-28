@@ -90,6 +90,12 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
             .unwrap();
         if let Some(expected) = vector["expected"]["body"].as_object() {
             let actual: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if actual.get("updatedMs").is_some() {
+                assert!(actual["updatedMs"].as_u64().is_some());
+            }
+            if actual.get("scan").is_some() {
+                assert!(actual["scan"]["updatedMs"].as_u64().is_some());
+            }
             if captured_album_id.is_empty()
                 && let Some(id) = actual["albums"][0]["id"].as_str()
             {
@@ -108,6 +114,16 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
                 &captured_album_id,
                 &captured_publication,
             );
+            let mut actual = actual;
+            if let Some(scan) = actual
+                .get_mut("scan")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                scan.remove("updatedMs");
+            }
+            if let Some(body) = actual.as_object_mut() {
+                body.remove("updatedMs");
+            }
             assert_eq!(
                 actual.as_object().unwrap(),
                 expected.as_object().unwrap(),
@@ -376,6 +392,19 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
         if let (Some(actual_value), Some(expected)) =
             (actual.as_ref(), vector["expected"]["body"].as_object())
         {
+            if let Some(scan) = actual_value.get("scan") {
+                assert!(scan["updatedMs"].as_u64().is_some(), "{name}");
+            }
+            let mut actual_value = actual_value.clone();
+            if let Some(scan) = actual_value
+                .get_mut("scan")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                scan.remove("updatedMs");
+            }
+            if let Some(body) = actual_value.as_object_mut() {
+                body.remove("updatedMs");
+            }
             let expected = substitute(&serde_json::Value::Object(expected.clone()), &captures);
             assert_eq!(
                 actual_value.as_object().unwrap(),

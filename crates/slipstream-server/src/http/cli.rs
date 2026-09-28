@@ -131,6 +131,10 @@ pub(crate) async fn capabilities(request: Request<Body>) -> Response<Body> {
                 album_reorder_members_maximum: ALBUM_PHOTO_IDS_MAX,
                 retained_query_ids_maximum: MAXIMUM_RETAINED_IDS,
                 retained_query_idle_seconds: QUERY_IDLE.as_secs(),
+                recovery_page_maximum: crate::recovery_review::MAXIMUM_RECOVERY_PAGE,
+                recovery_mappings_maximum: crate::recovery_review::MAXIMUM_RECOVERY_MAPPINGS,
+                recovery_apply_maximum: crate::recovery_review::MAXIMUM_RECOVERY_APPLY,
+                recovery_review_idle_seconds: QUERY_IDLE.as_secs(),
             },
         },
     )
@@ -184,11 +188,13 @@ pub(super) fn list_limit(value: Option<&str>) -> CliBoundaryResult<usize> {
     }
 }
 
-fn query_token(application: &Application, kind: RetainedKind) -> String {
+pub(super) fn query_token(application: &Application, kind: RetainedKind) -> String {
     let prefix = match kind {
         RetainedKind::Album => 'a',
         RetainedKind::Photo => 'p',
         RetainedKind::Browse => 'b',
+        RetainedKind::RecoveryUnavailable => 'u',
+        RetainedKind::RecoveryMappings => 'm',
     };
     format!(
         "{prefix}{:032x}{:016x}",
@@ -246,6 +252,12 @@ pub(super) fn query_cursor_error(kind: &'static str, error: CursorError) -> Resp
             "cursor_expired",
             "List Folders again from the current Published Library.",
             serde_json::json!({"cursorKind": "folder", "reason": "publication_replaced"}),
+        ),
+        CursorError::Idle => cli_error(
+            StatusCode::GONE,
+            "cursor_expired",
+            "Start a new query with the same filter.",
+            serde_json::json!({"cursorKind": kind, "reason": "idle_or_evicted"}),
         ),
     }
 }

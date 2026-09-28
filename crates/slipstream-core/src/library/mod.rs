@@ -75,6 +75,10 @@ pub struct ScanProgress {
     pub hashed: u64,
     /// Total fingerprint hashes required by the recovering phase.
     pub hash_total: Option<u64>,
+    /// Milliseconds since the UNIX epoch of the last scanner progress
+    /// update, so a bounded status read can distinguish a phase that is
+    /// advancing from one that has stalled.
+    pub updated_ms: u64,
 }
 
 /// The committed outcome of the most recent completed scan, for truthful
@@ -514,6 +518,22 @@ impl Library {
             .map_err(Into::into)
     }
 
+    /// Current facts of the retained review memberships, in the requested
+    /// order. `None` means the record no longer exists.
+    pub async fn recovery_records(
+        &self,
+        original_ids: Vec<String>,
+    ) -> Result<Vec<Option<crate::recovery::RecoveryRecord>>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.recovery_records_receiver(original_ids)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
     /// Revalidates and commits one confirmed manual relocation batch
     /// atomically. Filesystem evidence was gathered through confined
     /// descriptors before submission; the transaction rechecks every
@@ -524,7 +544,8 @@ impl Library {
     ) -> Result<AppliedRelocations, LibraryError> {
         let receive = {
             let _admission = self.admit()?;
-            self.persistence.apply_relocations_receiver(relocations)
+            self.persistence
+                .apply_relocations_receiver(self.root.clone(), relocations)
         }?;
         receive
             .await
@@ -596,6 +617,25 @@ impl Library {
         let receive = {
             let _admission = self.admit()?;
             self.persistence.photo_receiver(photo_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Reads the Photo facts and the recipe read of one Photo in a single
+    /// serialized owner operation, so a scan publication cannot land between
+    /// them: every guard below derives from one published state.
+    ///
+    /// `None` means the Photo no longer exists.
+    pub async fn edit_recipe_surface(
+        &self,
+        photo_id: &str,
+    ) -> Result<Option<(PhotoRead, EditRecipeRead)>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.edit_recipe_surface_receiver(photo_id)
         }?;
         receive
             .await

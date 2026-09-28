@@ -19,6 +19,7 @@ mod lifecycle;
 mod metadata;
 mod preview;
 mod protocol;
+mod recovery;
 mod removal;
 mod server;
 mod startup;

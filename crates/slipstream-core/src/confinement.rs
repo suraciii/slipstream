@@ -443,56 +443,77 @@ impl OriginalCapability {
     /// the same descriptor; a file that changes while being read yields
     /// `Changed` instead of an unusable digest.
     pub fn digest_file(&self) -> Result<RevisionCheckedDigest, ConfinementError> {
-        use sha2::{Digest as _, Sha256};
         let file = self.root.open_confined(&self.path, false)?;
-        let before = stat_regular(file.as_raw_fd())?;
-        let size = validated_size(&before)?;
-        if size > MAXIMUM_DIGEST_BYTES {
-            return Err(ConfinementError::ResourceLimit(
-                "Original File exceeds fingerprint read limit",
-            ));
+        digest_open_file(&file)
+    }
+
+    /// Streams the revision-checked digest of the Original File only when one
+    /// exists at the Location. `None` reports an absent Location, so a caller
+    /// distinguishing absence from an unreadable entry never reads a failed
+    /// open of nothing as unreadable content.
+    pub fn digest_file_if_present(
+        &self,
+    ) -> Result<Option<RevisionCheckedDigest>, ConfinementError> {
+        match self.root.open_confined_if_present(&self.path)? {
+            Some(file) => digest_open_file(&file).map(Some),
+            None => Ok(None),
         }
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0_u8; DIGEST_CHUNK_BYTES];
-        let mut consumed = 0_u64;
-        while consumed < size {
-            let length = buffer
-                .len()
-                .min(usize::try_from(size - consumed).map_err(|_| {
-                    ConfinementError::ResourceLimit("Original File exceeds fingerprint read limit")
-                })?);
-            let chunk = &mut buffer[..length];
-            let count = match sys::pread(file.as_raw_fd(), chunk, consumed) {
-                Ok(count) => count,
-                Err(_) => {
-                    return Err(read_failure_after_revision_check(
-                        file.as_raw_fd(),
-                        &before,
-                        "Original File could not be read completely",
-                    ));
-                }
-            };
-            if count == 0 {
+    }
+}
+
+/// Digests one already-opened Original File between two revisions of the same
+/// descriptor.
+fn digest_open_file(file: &File) -> Result<RevisionCheckedDigest, ConfinementError> {
+    use sha2::{Digest as _, Sha256};
+    let before = stat_regular(file.as_raw_fd())?;
+    let size = validated_size(&before)?;
+    if size > MAXIMUM_DIGEST_BYTES {
+        return Err(ConfinementError::ResourceLimit(
+            "Original File exceeds fingerprint read limit",
+        ));
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; DIGEST_CHUNK_BYTES];
+    let mut consumed = 0_u64;
+    while consumed < size {
+        let length = buffer
+            .len()
+            .min(usize::try_from(size - consumed).map_err(|_| {
+                ConfinementError::ResourceLimit("Original File exceeds fingerprint read limit")
+            })?);
+        let chunk = &mut buffer[..length];
+        let count = match sys::pread(file.as_raw_fd(), chunk, consumed) {
+            Ok(count) => count,
+            Err(_) => {
                 return Err(read_failure_after_revision_check(
                     file.as_raw_fd(),
                     &before,
                     "Original File could not be read completely",
                 ));
             }
-            hasher.update(&chunk[..count]);
-            consumed += u64::try_from(count)
-                .map_err(|_| ConfinementError::Io("Original File could not be read completely"))?;
+        };
+        if count == 0 {
+            return Err(read_failure_after_revision_check(
+                file.as_raw_fd(),
+                &before,
+                "Original File could not be read completely",
+            ));
         }
-        let after = stat_regular(file.as_raw_fd())?;
-        if !same_revision(&before, &after) {
-            return Err(ConfinementError::Changed);
-        }
-        Ok(RevisionCheckedDigest {
-            digest: format!("{:x}", hasher.finalize()),
-            facts: facts_from_stat(&before)?,
-        })
+        hasher.update(&chunk[..count]);
+        consumed += u64::try_from(count)
+            .map_err(|_| ConfinementError::Io("Original File could not be read completely"))?;
     }
+    let after = stat_regular(file.as_raw_fd())?;
+    if !same_revision(&before, &after) {
+        return Err(ConfinementError::Changed);
+    }
+    Ok(RevisionCheckedDigest {
+        digest: format!("{:x}", hasher.finalize()),
+        facts: facts_from_stat(&before)?,
+    })
+}
 
+impl OriginalCapability {
     /// Copies the complete Original through the retained confined descriptor
     /// into a caller-owned writer while hashing the exact bytes that were
     /// written. The caller must discard partial output when this returns an

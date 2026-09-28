@@ -544,6 +544,7 @@ async fn current_source_revision(application: &Application, photo_id: &str) -> S
         .unwrap()
         .expect("the Photo must exist")
         .current_source_revision
+        .expect("settled Photo must have a published source revision")
 }
 
 async fn save_recipe(
@@ -971,17 +972,13 @@ async fn export_submit_reports_requires_rebind_for_a_stale_recipe_binding() {
     let photo_id = photo_id_for(&config, "pair.ARW");
     let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
 
-    // The Original's contents change under the retained recipe: the
-    // stored binding is now stale against the newly published revision.
-    let connection =
-        rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
-    connection
-        .execute(
-            "UPDATE original_files SET size = size + 1 WHERE relative_path = 'pair.ARW'",
-            [],
-        )
-        .unwrap();
-    drop(connection);
+    // A new scan publishes the changed source facts and keeps the saved
+    // recipe bound to the prior revision until explicit rebind.
+    let original = config.library_root.join("pair.ARW");
+    let mut bytes = fs::read(&original).unwrap();
+    bytes.push(0);
+    fs::write(&original, bytes).unwrap();
+    application.rescan().await.unwrap();
     let new_source_revision = current_source_revision(&application, &photo_id).await;
     assert_ne!(new_source_revision, recipe.source_revision);
 

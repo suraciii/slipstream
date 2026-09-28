@@ -24,7 +24,10 @@ import {
   type ExportArtifact,
 } from "./photo-export.js";
 import {
+  asEditorSupportReason,
   createPhotoEditor,
+  isRetryableSupportReason,
+  supportReasonExplanation,
   type EditorFacts,
   type EditorStep,
   type PhotoEditor,
@@ -404,7 +407,7 @@ export function createEditorController(
             whiteBalance: Object.freeze({ mode: "as-shot" }),
           },
           sourceSupport: "unavailable",
-          supportReason: "unreadable",
+          supportReason: "",
           processingAvailable: false,
           controls: {
             minimumEv: 0,
@@ -993,8 +996,21 @@ export function createEditorController(
         return "This deployment cannot admit preview renders yet, so no Edit Preview is presented. Editing, Export, and download still work.";
       return "Processing is not available for this Photo right now, so no Edit Preview is presented.";
     }
-    if (code === "resource_unavailable")
+    if (code === "resource_unavailable") {
+      // A refusal that follows from the Photo's source state carries the
+      // same closed reason the recipe read reports, so the preview surface
+      // agrees with the read: a retryable wait names its retry, a confirmed
+      // outcome explains the permanent read failure, and only the
+      // deployment's own limits keep the allowance wording.
+      const sourceReason = asEditorSupportReason(reason);
+      if (sourceReason !== "") {
+        const note = `${supportReasonExplanation(sourceReason)}, so no Edit Preview is presented.`;
+        return isRetryableSupportReason(sourceReason)
+          ? `${note} Request it again once the current Library work settles.`
+          : note;
+      }
       return "The deployment could not render the Edit Preview within its resource allowance. Request it again when the deployment has capacity.";
+    }
     if (code === "unsupported_photo")
       return "This Photo's source class is not supported for development, so no Edit Preview is presented.";
     if (code === "unknown_photo")

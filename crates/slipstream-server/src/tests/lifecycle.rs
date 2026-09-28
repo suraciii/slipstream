@@ -100,12 +100,28 @@ async fn cancelled_raw_metadata_requests_retain_admission_until_native_work_fini
         );
         tokio::task::yield_now().await;
     }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(first) = application.library.try_admit_native_work()
+            && let Some(second) = application.library.try_admit_native_work()
+        {
+            drop((first, second));
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "native enrollment did not release admission"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     let gate = Arc::new((Mutex::new((0_usize, false)), Condvar::new()));
     struct ReleaseGate(Arc<(Mutex<(usize, bool)>, Condvar)>);
     impl Drop for ReleaseGate {
         fn drop(&mut self) {
             let (lock, signal) = &*self.0;
-            lock.lock().unwrap().1 = true;
+            lock.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .1 = true;
             signal.notify_all();
         }
     }
@@ -983,18 +999,17 @@ async fn recovery_http_restores_unavailable_photo_without_fingerprint() {
     fs::write(config.library_root.join("moved/a.JPG"), b"jpeg-bytes-a").unwrap();
 
     let unavailable = response_json(
-        send(
+        post_json(
             &router,
-            authenticated_request()
-                .uri("https://camera.local/api/recovery/unavailable")
-                .body(Body::empty())
-                .unwrap(),
+            "/api/recovery/unavailable",
+            serde_json::json!({}),
+            Some("https://camera.local"),
         )
         .await,
     )
     .await;
-    assert_eq!(unavailable["unavailable"].as_array().unwrap().len(), 1);
-    let record = &unavailable["unavailable"][0];
+    assert_eq!(unavailable["items"].as_array().unwrap().len(), 1);
+    let record = &unavailable["items"][0];
     assert_eq!(record["location"], "shoot/a.JPG");
     assert_eq!(record["kind"], "jpeg");
     assert_eq!(record["rating"], 3);
@@ -1012,7 +1027,7 @@ async fn recovery_http_restores_unavailable_photo_without_fingerprint() {
         .await,
     )
     .await;
-    let proposal = &proposals["proposals"][0];
+    let proposal = &proposals["items"][0];
     assert_eq!(proposal["outcome"], "matched");
     assert_eq!(proposal["verified"], false);
     assert_eq!(proposal["toLocation"], "moved/a.JPG");
@@ -1021,13 +1036,18 @@ async fn recovery_http_restores_unavailable_photo_without_fingerprint() {
         post_json(
             &router,
             "/api/recovery/apply",
-            serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
+            serde_json::json!({"mappings":[{
+                "originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "newLocation":"moved/a.JPG",
+                "mappingId":proposal["mappingId"],
+                "confirmUnverifiedContent":true
+            }]}),
             Some("https://camera.local"),
         )
         .await,
     )
     .await;
-    assert_eq!(applied["relocatedPhotos"], 1);
+    assert_eq!(applied["appliedMappings"], 1);
     assert_eq!(applied["unavailablePhotos"], 0);
 
     // The restored Photo keeps its identity, decisions, and Album membership.
@@ -1077,7 +1097,7 @@ async fn recovery_http_retires_discovered_destination_photo() {
         .await,
     )
     .await;
-    let proposal = &proposals["proposals"][0];
+    let proposal = &proposals["items"][0];
     assert_eq!(proposal["outcome"], "occupied");
     assert_eq!(proposal["retire"]["photoId"].as_str().unwrap(), discovered);
 
@@ -1085,7 +1105,12 @@ async fn recovery_http_retires_discovered_destination_photo() {
     let refused = post_json(
         &router,
         "/api/recovery/apply",
-        serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
+        serde_json::json!({"mappings":[{
+            "originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "newLocation":"moved/a.JPG",
+            "mappingId":proposal["mappingId"],
+            "confirmUnverifiedContent":true
+        }]}),
         Some("https://camera.local"),
     )
     .await;
@@ -1095,13 +1120,19 @@ async fn recovery_http_retires_discovered_destination_photo() {
         post_json(
             &router,
             "/api/recovery/apply",
-            serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG","retireDestination":true}]}),
+            serde_json::json!({"mappings":[{
+                "originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "newLocation":"moved/a.JPG",
+                "mappingId":proposal["mappingId"],
+                "confirmUnverifiedContent":true,
+                "retirePhotoId":proposal["retire"]["photoId"]
+            }]}),
             Some("https://camera.local"),
         )
         .await,
     )
     .await;
-    assert_eq!(applied["relocatedPhotos"], 1);
+    assert_eq!(applied["appliedMappings"], 1);
 
     let window = library_window(&router).await;
     assert_eq!(window["total"], 1);
@@ -1134,12 +1165,17 @@ async fn recovery_http_verifies_fingerprints_and_rejects_mismatches() {
         .await,
     )
     .await;
-    assert_eq!(proposals["proposals"][0]["outcome"], "content-mismatch");
+    let proposal = &proposals["items"][0];
+    assert_eq!(proposal["outcome"], "content-mismatch");
 
     let refused = post_json(
         &router,
         "/api/recovery/apply",
-        serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
+        serde_json::json!({"mappings":[{
+            "originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "newLocation":"moved/a.JPG",
+            "mappingId":proposal["mappingId"]
+        }]}),
         Some("https://camera.local"),
     )
     .await;
@@ -1159,8 +1195,9 @@ async fn recovery_http_verifies_fingerprints_and_rejects_mismatches() {
         .await,
     )
     .await;
-    assert_eq!(proposals["proposals"][0]["outcome"], "matched");
-    assert_eq!(proposals["proposals"][0]["verified"], true);
+    let proposal = &proposals["items"][0];
+    assert_eq!(proposal["outcome"], "matched");
+    assert_eq!(proposal["verified"], true);
 
     let single = response_json(
         post_json(
@@ -1172,6 +1209,7 @@ async fn recovery_http_verifies_fingerprints_and_rejects_mismatches() {
         .await,
     )
     .await;
+    let single = &single["items"][0];
     assert_eq!(single["outcome"], "matched");
     assert_eq!(single["verified"], true);
 
@@ -1179,13 +1217,17 @@ async fn recovery_http_verifies_fingerprints_and_rejects_mismatches() {
         post_json(
             &router,
             "/api/recovery/apply",
-            serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
+            serde_json::json!({"mappings":[{
+                "originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "newLocation":"moved/a.JPG",
+                "mappingId":single["mappingId"]
+            }]}),
             Some("https://camera.local"),
         )
         .await,
     )
     .await;
-    assert_eq!(applied["relocatedPhotos"], 1);
+    assert_eq!(applied["appliedMappings"], 1);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -1205,30 +1247,35 @@ async fn recovery_http_rejects_duplicate_source_mappings() {
     let refused = post_json(
         &router,
         "/api/recovery/apply",
-        serde_json::json!({"relocations":[
-            {"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"},
-            {"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/b.JPG"}
+        serde_json::json!({"mappings":[
+            {
+                "originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "newLocation":"moved/a.JPG",
+                "mappingId":"reviewed-a"
+            },
+            {
+                "originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "newLocation":"moved/b.JPG",
+                "mappingId":"reviewed-b"
+            }
         ]}),
         Some("https://camera.local"),
     )
     .await;
-    assert_eq!(refused.status(), StatusCode::CONFLICT);
-    let body = response_json(refused).await;
-    assert_eq!(body["rejections"][0]["reason"], "colliding");
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
 
-    // The refusal leaves the Library untouched.
+    // The invalid request leaves the Library untouched.
     let unavailable = response_json(
-        send(
+        post_json(
             &router,
-            authenticated_request()
-                .uri("https://camera.local/api/recovery/unavailable")
-                .body(Body::empty())
-                .unwrap(),
+            "/api/recovery/unavailable",
+            serde_json::json!({}),
+            Some("https://camera.local"),
         )
         .await,
     )
     .await;
-    assert_eq!(unavailable["unavailable"].as_array().unwrap().len(), 1);
+    assert_eq!(unavailable["items"].as_array().unwrap().len(), 1);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -1261,7 +1308,7 @@ async fn recovery_http_validates_requests() {
     let empty = post_json(
         &router,
         "/api/recovery/apply",
-        serde_json::json!({"relocations":[]}),
+        serde_json::json!({"mappings":[]}),
         Some("https://camera.local"),
     )
     .await;
@@ -1270,7 +1317,11 @@ async fn recovery_http_validates_requests() {
     let stale = post_json(
         &router,
         "/api/recovery/apply",
-        serde_json::json!({"relocations":[{"originalId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","newLocation":"moved/a.JPG"}]}),
+        serde_json::json!({"mappings":[{
+            "originalId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "newLocation":"moved/a.JPG",
+            "mappingId":"stale"
+        }]}),
         Some("https://camera.local"),
     )
     .await;
@@ -1301,37 +1352,38 @@ async fn recovery_http_reports_missing_destination_without_fingerprint() {
         .await,
     )
     .await;
-    let proposal = &proposals["proposals"][0];
+    let proposal = &proposals["items"][0];
     assert_eq!(proposal["outcome"], "missing");
     assert_eq!(proposal["verified"], false);
     assert_eq!(proposal["toLocation"], "moved/a.JPG");
 
     // Applying the same mapping is refused, and the refusal changes nothing.
-    // The apply path judges the candidate in its own vocabulary: absent and
-    // unreadable are both refusals.
     let refused = post_json(
         &router,
         "/api/recovery/apply",
-        serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
+        serde_json::json!({"mappings":[{
+            "originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "newLocation":"moved/a.JPG",
+            "mappingId":proposal["mappingId"]
+        }]}),
         Some("https://camera.local"),
     )
     .await;
     assert_eq!(refused.status(), StatusCode::CONFLICT);
     let body = response_json(refused).await;
-    assert_eq!(body["rejections"][0]["reason"], "unreadable");
+    assert_eq!(body["rejections"][0]["reason"], "missing");
 
     let unavailable = response_json(
-        send(
+        post_json(
             &router,
-            authenticated_request()
-                .uri("https://camera.local/api/recovery/unavailable")
-                .body(Body::empty())
-                .unwrap(),
+            "/api/recovery/unavailable",
+            serde_json::json!({}),
+            Some("https://camera.local"),
         )
         .await,
     )
     .await;
-    assert_eq!(unavailable["unavailable"].as_array().unwrap().len(), 1);
+    assert_eq!(unavailable["items"].as_array().unwrap().len(), 1);
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);

@@ -21,7 +21,8 @@ pub(super) fn read_photo(
                     p.removed_at_ms,o.capture_metadata_state,o.capture_order_key,o.capture_time_field,
                     o.capture_offset_minutes,o.capture_source_revision,p.preview_state,
                     p.preview_source_revision,p.preview_width,p.preview_height,
-                    EXISTS(SELECT 1 FROM edit_recipes e WHERE e.photo_id=p.id)
+                    EXISTS(SELECT 1 FROM edit_recipes e WHERE e.photo_id=p.id),p.original_id,
+                    o.camera_identity_state,o.camera_make,o.camera_model
              FROM photos p JOIN original_files o ON o.id=p.original_id WHERE p.id=?",
             [photo_id],
             |row| {
@@ -35,6 +36,8 @@ pub(super) fn read_photo(
                 Ok(PhotoRead {
                     decision_version: versions.photo(photo_id),
                     id: row.get(0)?,
+                    original_id: row.get(17)?,
+                    original_location: path.clone(),
                     filename: path.rsplit('/').next().unwrap_or(&path).to_owned(),
                     original_kind: kind,
                     original_available: row.get::<_, i64>(3)? != 0,
@@ -50,6 +53,7 @@ pub(super) fn read_photo(
                         row.get(9)?,
                         row.get(10)?,
                         row.get(11)?,
+                        scan::parse_camera_identity(row.get(18)?, row.get(19)?, row.get(20)?)?,
                     )?,
                     preview_state,
                     preview_source: ready.then(|| kind.preview_source()),
@@ -77,7 +81,7 @@ pub(super) fn read_projected_photo(
     let decisions = connection
         .query_row(
             "SELECT p.selection_state,p.rating,p.removed_at_ms,
-                    EXISTS(SELECT 1 FROM edit_recipes e WHERE e.photo_id=p.id)
+                    EXISTS(SELECT 1 FROM edit_recipes e WHERE e.photo_id=p.id),p.original_id
              FROM photos p WHERE p.id=?",
             [photo_id],
             |row| {
@@ -86,12 +90,14 @@ pub(super) fn read_projected_photo(
                     row.get::<_, i64>(1)?,
                     row.get::<_, Option<i64>>(2)?,
                     row.get::<_, i64>(3)? != 0,
+                    row.get::<_, String>(4)?,
                 ))
             },
         )
         .optional()
         .map_err(|_| PersistenceError::Storage)?;
-    let Some((selection_state, rating, removed_at_ms, has_saved_edits)) = decisions else {
+    let Some((selection_state, rating, removed_at_ms, has_saved_edits, original_id)) = decisions
+    else {
         return Ok(None);
     };
     let selection_state =
@@ -100,6 +106,8 @@ pub(super) fn read_projected_photo(
     let ready = candidate.preview_state == PreviewState::Ready;
     Ok(Some(PhotoRead {
         id: candidate.photo_id.clone(),
+        original_id,
+        original_location: candidate.relative_path.clone(),
         filename: candidate
             .relative_path
             .rsplit('/')
@@ -431,6 +439,7 @@ mod tests {
             field: Some(CaptureTimeField::DateTimeOriginal),
             offset_minutes: Some(90),
             source_revision: Some("early-revision".to_owned()),
+            identity: crate::CameraIdentity::Pending,
         };
         let mut late = discovered("shoot/nested/late.RAF", OriginalKind::Raw, 2, 2.0);
         late.capture = CaptureFact {
@@ -439,6 +448,7 @@ mod tests {
             field: Some(CaptureTimeField::DateTimeOriginal),
             offset_minutes: None,
             source_revision: Some("late-revision".to_owned()),
+            identity: crate::CameraIdentity::Pending,
         };
         let missing_time = discovered("other/missing.JPG", OriginalKind::Jpeg, 3, 3.0);
         let upper = discovered("Shoot/upper.JPG", OriginalKind::Jpeg, 4, 4.0);
@@ -719,6 +729,7 @@ mod tests {
             field: Some(CaptureTimeField::DateTimeOriginal),
             offset_minutes: None,
             source_revision: Some(revision.to_owned()),
+            identity: crate::CameraIdentity::Pending,
         };
         let mut raw = discovered(
             disagreement.raw_path.as_deref().unwrap(),
@@ -787,6 +798,7 @@ mod tests {
             field: None,
             offset_minutes: None,
             source_revision: Some("raw-replaced".to_owned()),
+            identity: crate::CameraIdentity::Pending,
         };
         let replacement_fact = raw.capture.clone();
         let replaced = persistence.apply_scan(vec![raw], Vec::new()).await.unwrap();

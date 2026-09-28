@@ -227,6 +227,10 @@ pub struct AlbumSummary {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PhotoRead {
     pub id: String,
+    /// The Library identity of the associated Original File.
+    pub original_id: String,
+    /// The current Library-relative Location of that Original File.
+    pub original_location: String,
     pub filename: String,
     pub original_kind: OriginalKind,
     pub original_available: bool,
@@ -304,10 +308,15 @@ pub struct EditRecipe {
 }
 
 /// Current recipe and source facts from one serialized persistence read.
+///
+/// `None` means no capture inspection has published facts bound to the
+/// current observed source revision (for example, pending or transient I/O).
+/// A bound `failed` inspection still returns `Some`: it is a confirmed
+/// failure for that revision and must remain distinguishable from pending.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EditRecipeRead {
     pub recipe: Option<EditRecipe>,
-    pub current_source_revision: String,
+    pub current_source_revision: Option<String>,
     pub source_available: bool,
 }
 

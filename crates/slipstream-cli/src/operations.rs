@@ -35,6 +35,9 @@ pub(crate) enum Operation {
     TrashReview,
     TrashDelete,
     TrashRead,
+    RecoveryUnavailable,
+    RecoveryPropose,
+    RecoveryApply,
 }
 
 impl Operation {
@@ -74,6 +77,9 @@ impl Operation {
             Self::TrashReview => "trash-review",
             Self::TrashDelete => "trash-delete",
             Self::TrashRead => "trash-operation",
+            Self::RecoveryUnavailable => "recovery-unavailable",
+            Self::RecoveryPropose => "recovery-propose",
+            Self::RecoveryApply => "recovery-apply",
         }
     }
 }
@@ -123,6 +129,11 @@ pub(crate) fn command_operation(command: &Command) -> Operation {
             TrashCommand::Review(_) => Operation::TrashReview,
             TrashCommand::Delete { .. } => Operation::TrashDelete,
             TrashCommand::Operation { .. } => Operation::TrashRead,
+        },
+        Command::Recovery { command } => match command {
+            RecoveryCommand::Unavailable(_) => Operation::RecoveryUnavailable,
+            RecoveryCommand::Propose(_) => Operation::RecoveryPropose,
+            RecoveryCommand::Apply(_) => Operation::RecoveryApply,
         },
     }
 }
@@ -212,6 +223,7 @@ pub(crate) async fn membership_mutation(
         photo_ids: photo_ids.clone(),
         album_id: Some(args.album_id.clone()),
         album_name: None,
+        mappings: Vec::new(),
     };
     let result: Value = client
         .mutation(
@@ -730,6 +742,7 @@ pub(crate) async fn export_submission(
         photo_ids: vec![args.photo_id.clone()],
         album_id: None,
         album_name: None,
+        mappings: Vec::new(),
     };
     let result: ExportSubmitWire = client
         .mutation_admitting(
@@ -844,6 +857,116 @@ pub(crate) fn photo_value(photo: PhotoItem, origin: &Url) -> Result<Value, ()> {
         Value::String(web_url(origin, &photo.web_path)?),
     );
     Ok(value)
+}
+
+/// One validated `RecoveryItem` as printed data: the reviewed identity with
+/// an absolute Web URL. A field the service did not substantiate fails the
+/// whole read instead of printing a partial item.
+pub(crate) fn recovery_item_value(item: RecoveryItemWire, origin: &Url) -> Result<Value, ()> {
+    validate_nonempty(&item.original_id)?;
+    validate_nonempty(&item.photo_id)?;
+    if item.location.is_empty() || item.rating > 5 {
+        return Err(());
+    }
+    Ok(json!({
+        "state": item.state,
+        "originalId": item.original_id,
+        "photoId": item.photo_id,
+        "location": item.location,
+        "kind": item.kind,
+        "rating": item.rating,
+        "selectionState": item.selection_state,
+        "fingerprintEnrolled": item.fingerprint_enrolled,
+        "albumCount": item.album_count,
+        "webUrl": web_url(origin, &item.web_url)?,
+    }))
+}
+
+/// One validated `RecoveryMapping` as printed data, with the same
+/// absolute-URL and closed-value rules as the unavailable review items.
+pub(crate) fn recovery_mapping_value(mapping: RecoveryMappingWire) -> Result<Value, ()> {
+    validate_nonempty(&mapping.mapping_id)?;
+    validate_nonempty(&mapping.original_id)?;
+    validate_nonempty(&mapping.photo_id)?;
+    if mapping.from_location.is_empty()
+        || mapping.to_location.is_empty()
+        || !valid_original_location(&mapping.to_location)
+    {
+        return Err(());
+    }
+    if let Some(retire) = &mapping.retire {
+        validate_nonempty(&retire.photo_id)?;
+        validate_nonempty(&retire.original_id)?;
+        if retire.location.is_empty() {
+            return Err(());
+        }
+    }
+    Ok(json!({
+        "mappingId": mapping.mapping_id,
+        "originalId": mapping.original_id,
+        "photoId": mapping.photo_id,
+        "fromLocation": mapping.from_location,
+        "toLocation": mapping.to_location,
+        "kind": mapping.kind,
+        "outcome": mapping.outcome,
+        "verified": mapping.verified,
+        "blockedReason": mapping.blocked_reason,
+        "retire": mapping.retire,
+    }))
+}
+
+/// Validates one confirmed apply result against the submitted batch: the
+/// whole batch committed, in request order, with substantiated fields. A
+/// result that cannot prove the commit is an unknown outcome, never success.
+pub(crate) fn recovery_apply_value(
+    identity: &MutationIdentity,
+    result: RecoveryApplyData,
+    prepared: &PreparedRecoveryApply,
+    origin: &Url,
+) -> Result<Value, CommandFailure> {
+    let submitted = prepared.identities.len() as u64;
+    let mut mappings = Vec::with_capacity(result.mappings.len());
+    for (applied, submitted_mapping) in result.mappings.iter().zip(&prepared.identities) {
+        validate_nonempty(&applied.original_id)
+            .and_then(|()| validate_nonempty(&applied.photo_id))
+            .map_err(|()| CommandFailure::unknown(identity))?;
+        if applied.from_location.is_empty() || !valid_original_location(&applied.to_location) {
+            return Err(CommandFailure::unknown(identity));
+        }
+        if let Some(retired) = &applied.retired {
+            validate_nonempty(&retired.photo_id)
+                .and_then(|()| validate_nonempty(&retired.original_id))
+                .map_err(|()| CommandFailure::unknown(identity))?;
+            if retired.location.is_empty() {
+                return Err(CommandFailure::unknown(identity));
+            }
+        }
+        if applied.original_id != submitted_mapping["originalId"].as_str().unwrap_or("")
+            || applied.to_location != submitted_mapping["newLocation"].as_str().unwrap_or("")
+        {
+            return Err(CommandFailure::unknown(identity));
+        }
+        mappings.push(json!({
+            "originalId": applied.original_id,
+            "photoId": applied.photo_id,
+            "fromLocation": applied.from_location,
+            "toLocation": applied.to_location,
+            "webUrl": web_url(origin, &applied.web_url).map_err(|()| CommandFailure::unknown(identity))?,
+            "retired": applied.retired,
+        }));
+    }
+    if result.applied_mappings != submitted
+        || result.refused_mappings != 0
+        || result.mappings.len() as u64 != submitted
+    {
+        return Err(CommandFailure::unknown(identity));
+    }
+    Ok(json!({
+        "appliedMappings": result.applied_mappings,
+        "refusedMappings": result.refused_mappings,
+        "unavailablePhotos": result.unavailable_photos,
+        "mappings": mappings,
+    }))
 }
 
 pub(crate) fn list_expiry_valid<T>(list: &ListData<T>, page_limit: usize) -> bool {

@@ -17,6 +17,14 @@ pub struct CapabilityLimitsWire {
     pub album_reorder_members_maximum: usize,
     pub retained_query_ids_maximum: usize,
     pub retained_query_idle_seconds: u64,
+    /// The largest reviewed recovery page one request returns.
+    pub recovery_page_maximum: usize,
+    /// The largest Folder-prefix recovery scope the service evaluates.
+    pub recovery_mappings_maximum: usize,
+    /// The largest reviewed recovery batch one apply commits.
+    pub recovery_apply_maximum: usize,
+    /// The idle interval after which a recovery continuation expires.
+    pub recovery_review_idle_seconds: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -37,6 +45,7 @@ pub(crate) struct CliScanStatusWire {
     pub publication: Option<String>,
     pub completed: Option<usize>,
     pub total: Option<usize>,
+    pub updated_ms: u64,
     pub last_recovery: Option<ScanRecoveryWire>,
     pub fingerprints: Option<FingerprintProgressWire>,
 }
@@ -48,6 +57,7 @@ impl From<ScanStatusWire> for CliScanStatusWire {
             publication: value.publication,
             completed: value.completed,
             total: value.total,
+            updated_ms: value.updated_ms,
             last_recovery: value.last_recovery,
             fingerprints: value.fingerprints,
         }
@@ -326,6 +336,10 @@ pub(crate) enum PhotoListItemWire {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CliPhotoItemWire {
     pub id: String,
+    /// The Library identity of the associated Original File.
+    pub original_id: String,
+    /// The current Library-relative Location of that Original File.
+    pub location: String,
     pub filename: String,
     pub original_kind: &'static str,
     pub original_available: bool,
@@ -353,6 +367,8 @@ impl From<slipstream_core::PhotoRead> for CliPhotoItemWire {
         let web_path = photo_web_path(&value.id);
         Self {
             id: value.id,
+            original_id: value.original_id,
+            location: value.original_location,
             filename: value.filename,
             original_kind: match value.original_kind {
                 slipstream_core::OriginalKind::Raw => "raw",

@@ -107,6 +107,13 @@ expired or unknown Snapshot remains a distinct not-found failure.
 
 The Published Library is the most recent complete scan committed by the Library owner. The browser may use it while an ordinary rescan builds a replacement. A root binding, schema, confinement, or state admission failure remains fail-closed and prevents service admission.
 
+While any scan or recovery runs — including a saturated one — the last
+Published Library remains the authority for existing Photos: availability,
+metadata, source facts, and derivative eligibility continue to be served from
+it. Only a completed scan atomically replaces it. A deferred, failed, or
+interrupted scan publishes nothing, and a per-Original read that is empty,
+failed, or deferred never overwrites that Original's known published facts.
+
 ### Loading Status
 
 Loading Status reports real phases and counts. It distinguishes:
@@ -122,6 +129,16 @@ Loading Status reports real phases and counts. It distinguishes:
 - initializing when no Published Library exists.
 
 A phase may omit a total until that total is known. The protocol must not manufacture a percentage from elapsed time.
+The status includes the scanner's last progress update in Unix milliseconds;
+zero means no scan has started in this process. A recovering phase without
+an established total may still represent active planning. The timestamp
+changes only when the scanner reports phase or count progress, not on reads.
+
+Loading Status is the Library axis only: it never reports processing
+capability or a Photo's source-read state, and a `recovering` phase changes
+neither. A status answer preserves the latest observed phase and counts, so a
+follow-up `status` after an unknown `library check` outcome reports progress
+or the terminal result rather than a reset.
 
 ## Semantics
 
@@ -174,6 +191,12 @@ bounded Loading Status shape used by `GET /api/status` and no Photo facts.
 `Origin` does not determine scan admission; an unavailable, saturated, or
 failed scan is `5xx`. Wrong-method handling remains the shared `405`
 protocol rule.
+
+A waiter whose client command times out or disconnects receives no terminal
+claim: the outcome of the admitted cycle is unknown to that client, which
+reconciles through `GET /api/status`. A timeout is not a cancellation, a
+terminal failure, or a safe duplicate-retry signal; reissuing the request
+joins the still-running cycle and starts no second physical scan.
 
 ### Scan Cycle Ownership
 
@@ -596,6 +619,13 @@ These add reconnection protocols, deployment units, and coordination state witho
 Verification must include a generated Library projection with at least 40,000 Photos and prove:
 
 - Library Overview size does not grow with Photo count except encoded counts and Album summaries;
+- during a saturated or recovering scan, the Published Library remains
+  authoritative for existing Photos and no route publishes null or stale
+  facts over it;
+- a `library check` timeout returns an explicit unknown, non-terminal outcome
+  while the server-owned scan continues, a later `status` preserves the
+  latest phase and counts, and reissuing joins the running cycle without
+  starting a second physical scan;
 - every File Location Window respects an enforced maximum, retained windows share one publication, expiration reloads rather than mixes generations, and no route returns the complete Folder tree or complete recursive membership;
 - File Location counts count each Photo once and include remembered unavailable Photos at their last known Locations;
 - a moved Original File is restored before any new Photo is allocated, and an ambiguous or unprovable group stays unavailable without state transfer;

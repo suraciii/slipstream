@@ -56,6 +56,19 @@ label a camera Preview or Development Result as a successful Film Result.
 Entering Edit must restore the current Edit Recipe. It must not reset settings
 merely because the Photographer changes views or leaves an Album.
 
+Edit availability rests on three independent facts: whether the deployment's
+processing engine is usable, whether the Library is still scanning or
+recovering, and whether this Photo's Original File currently reads. A
+recovering Library or a busy engine must not be presented as an unreadable
+Original. While a Photo's source read is pending or waiting for read
+capacity, the workspace must keep that Photo's settings read-only, say the
+Photo is waiting, and offer to check again; a later read that publishes
+current source facts must resume editing without losing confirmed settings.
+A confirmed missing or unreadable Original must be explained as permanent for
+the current source. Saving, Edit Preview, and Export must stay disabled until
+the Photo's source reads; a refusal caused by the Photo's source state must
+name the same reason the Edit read reports.
+
 The Grid must retain its camera-produced thumbnails and indicate Photos with
 saved edits. Its bounded Photo summaries must report whether a saved Edit
 Recipe exists. This fact remains true when the recipe matches the processing

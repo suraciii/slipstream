@@ -59,6 +59,56 @@ export type EditorControls = Readonly<{
   adjustableWhiteBalance: ReadonlyArray<AdmittedWhiteBalance>;
 }>;
 
+/// The closed reason the service reports with an `unavailable` source, plus
+/// this client's empty "no reason reported". `original-missing` and
+/// `original-unreadable` are confirmed outcomes of the published source
+/// revision; `read-pending` and `resource-unavailable` are retryable waits
+/// the Library itself resolves while it recovers or shares read capacity.
+export type EditorSupportReason =
+  | ""
+  | "original-missing"
+  | "original-unreadable"
+  | "read-pending"
+  | "resource-unavailable";
+
+/// Parses one reported reason into the closed set; anything else is this
+/// client's empty "no reason reported".
+export const asEditorSupportReason = (value: unknown): EditorSupportReason =>
+  value === "original-missing" ||
+  value === "original-unreadable" ||
+  value === "read-pending" ||
+  value === "resource-unavailable"
+    ? value
+    : "";
+
+/// Whether the reason is a retryable wait the Library itself resolves —
+/// while it recovers or shares read capacity — rather than a confirmed
+/// outcome of the published source revision.
+export const isRetryableSupportReason = (
+  reason: EditorSupportReason,
+): boolean => reason === "read-pending" || reason === "resource-unavailable";
+
+/// The condition one closed reason names, in the workspace's words. The
+/// recipe read, a save refusal, and a preview refusal carry the same reason
+/// and agree on this one mapping, so a reason never changes meaning with the
+/// surface that reports it.
+export const supportReasonExplanation = (
+  reason: EditorSupportReason,
+): string => {
+  switch (reason) {
+    case "original-missing":
+      return "This Photo's Original File is missing from its remembered Location";
+    case "original-unreadable":
+      return "Reading this Photo's Original File failed for its current source revision";
+    case "read-pending":
+      return "This Photo's source read is still pending while the Library recovers";
+    case "resource-unavailable":
+      return "The Library could not spare the capacity to read this Photo's Original File";
+    default:
+      return "Current source facts are unavailable";
+  }
+};
+
 /// The facts of one `GET /api/photos/{id}/edit-recipe` read.
 export type EditorFacts = Readonly<{
   photoId: string;
@@ -66,7 +116,7 @@ export type EditorFacts = Readonly<{
   recipeVersion: string | null;
   settings: EditorSettings;
   sourceSupport: "supported" | "unsupported" | "unavailable";
-  supportReason: string;
+  supportReason: EditorSupportReason;
   processingAvailable: boolean;
   controls: EditorControls;
 }>;
@@ -82,10 +132,14 @@ export type SaveRequest = Readonly<{
 }>;
 
 /// The refusal of one guarded write, with the facts a conflict discloses.
+/// A refusal that follows from the Photo's source state carries the same
+/// closed `supportReason` the recipe read reports, so a retryable wait and a
+/// confirmed read failure present differently here too.
 export type SaveRefusal = Readonly<{
   status: number;
   code: string;
   message: string;
+  supportReason: EditorSupportReason;
   currentRecipeVersion: string | null;
   currentSourceRevision: string | null;
 }>;
@@ -286,15 +340,23 @@ const sameSettings = (left: EditorSettings, right: EditorSettings): boolean =>
 const asShot = (): AsShotIntent => Object.freeze({ mode: "as-shot" });
 
 /// Why this Photo has no editing, in the workspace's words. The service
-/// reports the closed state and reason; the surface explains them.
-const sourceUnavailableStatus = (facts: EditorFacts): string =>
-  facts.sourceSupport === "unsupported"
-    ? "This Photo's source class has no approved profile in this deployment, so its settings are read-only."
-    : facts.supportReason === "original-missing"
-      ? "This Photo's Original File is missing from its remembered Location, so its settings are read-only."
-      : facts.supportReason === "original-unreadable"
-        ? "This Photo's Original File cannot be read right now, so its settings are read-only."
-        : "Current source facts are unavailable, so this Photo's settings are read-only.";
+/// reports the closed state and reason; the surface explains them. A
+/// retryable wait names the one action that resolves it — reloading the
+/// recipe — while a confirmed outcome explains the read failure itself.
+const sourceUnavailableStatus = (facts: EditorFacts): string => {
+  if (facts.sourceSupport === "unsupported")
+    return "This Photo's source class has no approved profile in this deployment, so its settings are read-only.";
+  const explanation = supportReasonExplanation(facts.supportReason);
+  const readOnly = `${explanation}, so its settings are read-only.`;
+  switch (facts.supportReason) {
+    case "read-pending":
+      return `${readOnly} Reload the recipe to check for current source facts.`;
+    case "resource-unavailable":
+      return `${readOnly} Reload the recipe to retry once the current Library work settles.`;
+    default:
+      return readOnly;
+  }
+};
 
 const temperatureTint = (
   temperatureKelvin: number,
@@ -777,6 +839,11 @@ export const createPhotoEditor = (options: {
     if (photoId !== next.photoId) return open(next);
     const movedVersion = next.recipeVersion !== recipeVersion;
     const movedSource = next.sourceRevision !== sourceRevision;
+    // Whether this read leaves an unavailable source behind. The notice that
+    // explained the wait must not outlive the condition it explained.
+    const wasUnavailable =
+      facts !== null &&
+      (facts.sourceSupport !== "supported" || !facts.sourceRevision);
     facts = next;
     sourceRevision = next.sourceRevision;
     recipeVersion = next.recipeVersion;
@@ -786,6 +853,7 @@ export const createPhotoEditor = (options: {
       status = sourceUnavailableStatus(next);
       return Object.freeze({ presentation: presentation(), request: null });
     }
+    if (wasUnavailable) status = "";
     if (conflict !== null) {
       // A read is the authoritative current recipe. The conflict stays open
       // with the local intent retained, and its saved side becomes the recipe
@@ -906,6 +974,18 @@ export const createPhotoEditor = (options: {
       draftRequestSettings = request.settings;
       status =
         "The save outcome is unknown. Retry to resolve the same request.";
+      return Object.freeze({ presentation: presentation(), request: null });
+    }
+    if (refusal.code === "resource_unavailable" && refusal.supportReason) {
+      // A source-state refusal names the same closed reason the recipe read
+      // reports. The local settings stay unconfirmed and nothing stops
+      // autosave: a retryable wait resolves through a later read or retry,
+      // and a confirmed outcome is explained as permanent for this revision.
+      draftRequestSettings = null;
+      const explanation = supportReasonExplanation(refusal.supportReason);
+      status = isRetryableSupportReason(refusal.supportReason)
+        ? `The save was refused: ${explanation}. The settings are kept locally; retry once the current Library work settles.`
+        : `The save was refused: ${explanation}. The settings are kept locally.`;
       return Object.freeze({ presentation: presentation(), request: null });
     }
     draftRequestSettings = null;

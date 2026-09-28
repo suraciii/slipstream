@@ -5,6 +5,7 @@ mod cli;
 mod export;
 mod mutations;
 mod photo;
+mod recovery;
 mod static_web;
 
 pub(crate) use cli::{
@@ -18,9 +19,6 @@ pub(crate) use static_web::{
 /// at the HTTP boundary.
 const ALBUM_PHOTO_IDS_MAX: usize = 100;
 
-/// One manual recovery batch is bounded so a single request can never
-/// rewrite an unbounded slice of the Library.
-const MAXIMUM_RECOVERY_RELOCATIONS: usize = 10_000;
 fn parse_permanent_deletion_ids(
     body: &serde_json::Map<String, Value>,
     key: &str,
@@ -348,15 +346,23 @@ pub(crate) fn create_router_with_preview(
         )
         .route(
             "/api/recovery/unavailable",
-            get(browse::recovery_unavailable),
+            get(browse::method_not_allowed).post(recovery::open_unavailable_review),
+        )
+        .route(
+            "/api/recovery/unavailable/{cursor}",
+            get(recovery::unavailable_review_page),
         )
         .route(
             "/api/recovery/propose",
-            get(browse::method_not_allowed).post(browse::recovery_propose),
+            get(browse::method_not_allowed).post(recovery::open_proposal_review),
+        )
+        .route(
+            "/api/recovery/proposals/{cursor}",
+            get(recovery::proposal_review_page),
         )
         .route(
             "/api/recovery/apply",
-            get(browse::method_not_allowed).post(browse::recovery_apply),
+            get(browse::method_not_allowed).post(recovery::apply),
         )
         .route(
             "/api/private/derivatives/{photo_id}/{target}/{filename}",
@@ -742,6 +748,10 @@ impl From<ServerError> for ApiError {
             ServerError::FolderInvalid => Self {
                 status: StatusCode::BAD_REQUEST,
                 message: "Invalid Original Folder",
+            },
+            ServerError::RecoveryScope { .. } => Self {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                message: "Recovery review scope exceeds the advertised bound; narrow the Folder prefix",
             },
             ServerError::FolderNotFound => Self {
                 status: StatusCode::NOT_FOUND,

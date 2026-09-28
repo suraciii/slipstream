@@ -831,6 +831,7 @@ fn decision_batches_partition_from_validated_results_only() {
         photo_ids: vec!["a".to_owned(), "b".to_owned()],
         album_id: None,
         album_name: None,
+        mappings: Vec::new(),
     };
     let submitted = |ids: &[&str]| {
         ids.iter()
@@ -1092,6 +1093,7 @@ fn export_submit_response_must_echo_the_captured_revisions() {
         photo_ids: vec!["p1".to_owned()],
         album_id: None,
         album_name: None,
+        mappings: Vec::new(),
     };
     let confirmed = |result: ExportSubmitWire| {
         confirmed_export_submit(&identity, "film-jpeg", "recipe-2", "source-7", result)
@@ -1319,4 +1321,788 @@ fn development_surface_refusals_map_onto_the_closed_exit_codes() {
     let confirmed = mapped("export_conflict");
     assert_eq!(confirmed.payload.effect, "none");
     assert_eq!(confirmed.payload.details, json!({}));
+}
+
+#[test]
+fn recovery_commands_parse_their_closed_forms() {
+    for arguments in [
+        vec!["recovery", "unavailable"],
+        vec!["recovery", "unavailable", "--limit", "1"],
+        vec!["recovery", "unavailable", "--limit", "60"],
+        vec!["recovery", "unavailable", "--cursor", "opaque"],
+        vec![
+            "recovery",
+            "propose",
+            "--old-prefix",
+            "shoot",
+            "--new-prefix",
+            "moved",
+        ],
+        vec![
+            "recovery",
+            "propose",
+            "--old-prefix",
+            "",
+            "--new-prefix",
+            "",
+        ],
+        vec![
+            "recovery",
+            "propose",
+            "--old-prefix",
+            "shoot",
+            "--new-prefix",
+            "moved",
+            "--limit",
+            "2",
+        ],
+        vec!["recovery", "propose", "--cursor", "opaque"],
+        vec![
+            "recovery",
+            "propose",
+            "--original-id",
+            "00000000-0000-4000-8000-000000000001",
+            "--new-location",
+            "moved/a.JPG",
+        ],
+        vec!["recovery", "apply", "--input", "apply.json"],
+    ] {
+        assert!(
+            Cli::try_parse_from(std::iter::once("slipstream").chain(arguments.iter().copied()))
+                .is_ok(),
+            "must parse: {arguments:?}"
+        );
+    }
+    for arguments in [
+        vec!["recovery", "unavailable", "--limit", "0"],
+        vec!["recovery", "unavailable", "--limit", "61"],
+        vec!["recovery", "unavailable", "--limit", "abc"],
+        // A continuation accepts only --cursor and the global options.
+        vec![
+            "recovery",
+            "unavailable",
+            "--cursor",
+            "opaque",
+            "--limit",
+            "2",
+        ],
+        vec!["recovery", "propose", "--cursor", "opaque", "--limit", "2"],
+        vec![
+            "recovery",
+            "propose",
+            "--cursor",
+            "opaque",
+            "--old-prefix",
+            "shoot",
+            "--new-prefix",
+            "moved",
+        ],
+        vec![
+            "recovery",
+            "propose",
+            "--cursor",
+            "opaque",
+            "--original-id",
+            "00000000-0000-4000-8000-000000000001",
+            "--new-location",
+            "moved/a.JPG",
+        ],
+        vec![
+            "recovery",
+            "propose",
+            "--old-prefix",
+            "shoot",
+            "--new-prefix",
+            "moved",
+            "--original-id",
+            "00000000-0000-4000-8000-000000000001",
+            "--new-location",
+            "moved/a.JPG",
+        ],
+        vec![
+            "recovery",
+            "propose",
+            "--original-id",
+            "00000000-0000-4000-8000-000000000001",
+            "--new-location",
+            "moved/a.JPG",
+            "--limit",
+            "2",
+        ],
+        vec!["recovery", "apply"],
+    ] {
+        assert!(
+            Cli::try_parse_from(std::iter::once("slipstream").chain(arguments.iter().copied()))
+                .is_err(),
+            "must reject: {arguments:?}"
+        );
+    }
+}
+
+#[test]
+fn recovery_propose_forms_validate_before_network_access() {
+    let propose = |arguments: &[&str]| {
+        let full = std::iter::once("slipstream")
+            .chain(["recovery", "propose"])
+            .chain(arguments.iter().copied());
+        match Cli::try_parse_from(full).unwrap().command {
+            Command::Recovery {
+                command: RecoveryCommand::Propose(args),
+            } => args,
+            other => panic!("expected recovery propose, got {other:?}"),
+        }
+    };
+    let invalid = |arguments: &[&str], argument: &str| {
+        let failure = validate_command(&Command::Recovery {
+            command: RecoveryCommand::Propose(propose(arguments)),
+        })
+        .unwrap_err();
+        assert_eq!(failure.exit_code, 2, "for {arguments:?}");
+        assert_eq!(failure.payload.code, "invalid_input", "for {arguments:?}");
+        assert_eq!(
+            failure.payload.details["argument"], argument,
+            "for {arguments:?}"
+        );
+    };
+    // Missing selector, half of one form, and both forms together.
+    invalid(&[], "arguments");
+    invalid(&["--old-prefix", "shoot"], "old-prefix");
+    invalid(&["--new-location", "moved/a.JPG"], "original-id");
+    // Malformed prefixes, ids, and locations.
+    invalid(
+        &["--old-prefix", "/shoot", "--new-prefix", "moved"],
+        "old-prefix",
+    );
+    invalid(
+        &["--old-prefix", "shoot/", "--new-prefix", "moved"],
+        "old-prefix",
+    );
+    invalid(
+        &[
+            "--original-id",
+            "not-an-id",
+            "--new-location",
+            "moved/a.JPG",
+        ],
+        "original-id",
+    );
+    invalid(
+        &[
+            "--original-id",
+            "00000000-0000-4000-8000-000000000001",
+            "--new-location",
+            "/moved/a.JPG",
+        ],
+        "new-location",
+    );
+    // Both complete forms and the empty prefix stay valid.
+    for arguments in [
+        vec!["--old-prefix", "shoot", "--new-prefix", "moved"],
+        vec!["--old-prefix", "", "--new-prefix", ""],
+        vec![
+            "--original-id",
+            "00000000-0000-4000-8000-000000000001",
+            "--new-location",
+            "moved/a.JPG",
+        ],
+    ] {
+        assert!(
+            validate_command(&Command::Recovery {
+                command: RecoveryCommand::Propose(propose(&arguments)),
+            })
+            .is_ok(),
+            "must accept {arguments:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn recovery_apply_document_validates_completely_before_any_request() {
+    let original = "00000000-0000-4000-8000-000000000001";
+    let other = "00000000-0000-4000-8000-000000000002";
+    let retire = "00000000-0000-4000-8000-000000000003";
+    let mapping = "reviewed-mapping-identity";
+    let write = |name: &str, document: &Value| {
+        let path = std::env::temp_dir().join(format!("slipstream-recovery-apply-{name}.json"));
+        std::fs::write(&path, serde_json::to_vec(document).unwrap()).unwrap();
+        path.to_str().unwrap().to_owned()
+    };
+    let valid = json!({
+        "mappings": [
+            {
+                "originalId": original,
+                "newLocation": "moved/a.JPG",
+                "mappingId": mapping,
+                "confirmUnverifiedContent": true,
+                "retirePhotoId": retire
+            },
+            {
+                "originalId": other,
+                "newLocation": "moved/b.JPG",
+                "mappingId": "reviewed-mapping-identity-2"
+            }
+        ]
+    });
+    let prepared = read_recovery_apply(&write("valid", &valid)).await.unwrap();
+    assert_eq!(
+        prepared.body,
+        json!({
+            "mappings": [
+                {
+                    "originalId": original,
+                    "newLocation": "moved/a.JPG",
+                    "mappingId": mapping,
+                    "confirmUnverifiedContent": true,
+                    "retirePhotoId": retire
+                },
+                {
+                    "originalId": other,
+                    "newLocation": "moved/b.JPG",
+                    "mappingId": "reviewed-mapping-identity-2"
+                }
+            ]
+        })
+    );
+    assert_eq!(prepared.identities.len(), 2);
+    assert_eq!(prepared.identities[0]["mappingId"], mapping);
+
+    let oversized = json!({
+        "mappings": (0..=MAXIMUM_RECOVERY_APPLY).map(|index| json!({
+            "originalId": format!("00000000-0000-4000-8000-{index:012}"),
+            "newLocation": format!("moved/{index}.JPG"),
+            "mappingId": format!("mapping-{index}")
+        })).collect::<Vec<_>>()
+    });
+    for (name, expected_code, document) in [
+        ("not-json", "invalid_input", json!("[]")),
+        ("no-mappings", "invalid_input", json!({})),
+        (
+            "extra-key",
+            "invalid_input",
+            json!({"mappings": [], "force": true}),
+        ),
+        ("empty", "invalid_input", json!({"mappings": []})),
+        (
+            "not-object",
+            "invalid_input",
+            json!({"mappings": [original]}),
+        ),
+        (
+            "unknown-key",
+            "invalid_input",
+            json!({"mappings": [{"originalId": original, "newLocation": "moved/a.JPG", "mappingId": mapping, "force": true}]}),
+        ),
+        (
+            "missing-identity",
+            "invalid_input",
+            json!({"mappings": [{"originalId": original, "newLocation": "moved/a.JPG"}]}),
+        ),
+        (
+            "empty-mapping-id",
+            "invalid_input",
+            json!({"mappings": [{"originalId": original, "newLocation": "moved/a.JPG", "mappingId": ""}]}),
+        ),
+        (
+            "malformed-id",
+            "invalid_input",
+            json!({"mappings": [{"originalId": "not-an-id", "newLocation": "moved/a.JPG", "mappingId": mapping}]}),
+        ),
+        (
+            "malformed-location",
+            "invalid_input",
+            json!({"mappings": [{"originalId": original, "newLocation": "/moved/a.JPG", "mappingId": mapping}]}),
+        ),
+        (
+            "dot-segment",
+            "invalid_input",
+            json!({"mappings": [{"originalId": original, "newLocation": "moved/../a.JPG", "mappingId": mapping}]}),
+        ),
+        (
+            "bad-confirmation",
+            "invalid_input",
+            json!({"mappings": [{"originalId": original, "newLocation": "moved/a.JPG", "mappingId": mapping, "confirmUnverifiedContent": "yes"}]}),
+        ),
+        (
+            "bad-retire",
+            "invalid_input",
+            json!({"mappings": [{"originalId": original, "newLocation": "moved/a.JPG", "mappingId": mapping, "retirePhotoId": "not-a-photo"}]}),
+        ),
+        (
+            "duplicate-original",
+            "invalid_input",
+            json!({"mappings": [
+                {"originalId": original, "newLocation": "moved/a.JPG", "mappingId": mapping},
+                {"originalId": original, "newLocation": "moved/b.JPG", "mappingId": mapping}
+            ]}),
+        ),
+        (
+            "duplicate-location",
+            "invalid_input",
+            json!({"mappings": [
+                {"originalId": original, "newLocation": "moved/a.JPG", "mappingId": mapping},
+                {"originalId": other, "newLocation": "moved/a.JPG", "mappingId": mapping}
+            ]}),
+        ),
+        ("oversized", "limit_exceeded", oversized),
+    ] {
+        let failure = read_recovery_apply(&write(name, &document))
+            .await
+            .unwrap_err();
+        assert_eq!(failure.exit_code, 2, "{name}");
+        assert_eq!(failure.payload.code, expected_code, "{name}");
+        assert_eq!(failure.payload.effect, "none", "{name}");
+    }
+}
+
+#[test]
+fn recovery_list_items_validate_against_their_closed_shapes() {
+    let origin = Url::parse("https://library.test").unwrap();
+    let item = json!({
+        "state": "unavailable",
+        "originalId": "00000000-0000-4000-8000-000000000001",
+        "photoId": "00000000-0000-4000-8000-000000000002",
+        "location": "shoot/a.JPG",
+        "kind": "jpeg",
+        "rating": 3,
+        "selectionState": "selected",
+        "fingerprintEnrolled": false,
+        "albumCount": 1,
+        "webUrl": "/?photoId=00000000-0000-4000-8000-000000000002"
+    });
+    let wire: RecoveryItemWire = serde_json::from_value(item.clone()).unwrap();
+    let value = recovery_item_value(wire, &origin).unwrap();
+    assert_eq!(value["state"], "unavailable");
+    assert_eq!(
+        value["webUrl"],
+        "https://library.test/?photoId=00000000-0000-4000-8000-000000000002"
+    );
+    // A value outside the closed sets never deserializes into a printed
+    // item, and a substantiated-field failure fails the whole read.
+    assert!(
+        serde_json::from_value::<RecoveryItemWire>(json!({
+            "state": "vanished", "originalId": "00000000-0000-4000-8000-000000000001",
+            "photoId": "00000000-0000-4000-8000-000000000002", "location": "shoot/a.JPG",
+            "kind": "jpeg", "rating": 3, "selectionState": "selected",
+            "fingerprintEnrolled": false, "albumCount": 1, "webUrl": "/?photoId=x"
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<RecoveryItemWire>(json!({
+            "state": "unavailable", "originalId": "00000000-0000-4000-8000-000000000001",
+            "photoId": "00000000-0000-4000-8000-000000000002", "location": "shoot/a.JPG",
+            "kind": "tiff", "rating": 3, "selectionState": "selected",
+            "fingerprintEnrolled": false, "albumCount": 1, "webUrl": "/?photoId=x"
+        }))
+        .is_err()
+    );
+    let over_rated = serde_json::from_value::<RecoveryItemWire>(json!({
+        "state": "available", "originalId": "00000000-0000-4000-8000-000000000001",
+        "photoId": "00000000-0000-4000-8000-000000000002", "location": "shoot/a.JPG",
+        "kind": "raw", "rating": 6, "selectionState": "undecided",
+        "fingerprintEnrolled": true, "albumCount": 0, "webUrl": "/?photoId=x"
+    }))
+    .unwrap();
+    assert!(recovery_item_value(over_rated, &origin).is_err());
+
+    let mapping = json!({
+        "mappingId": mapping_id(),
+        "originalId": "00000000-0000-4000-8000-000000000001",
+        "photoId": "00000000-0000-4000-8000-000000000002",
+        "fromLocation": "shoot/a.JPG",
+        "toLocation": "moved/a.JPG",
+        "kind": "jpeg",
+        "outcome": "matched",
+        "verified": false,
+        "blockedReason": null,
+        "retire": null
+    });
+    let wire: RecoveryMappingWire = serde_json::from_value(mapping).unwrap();
+    let value = recovery_mapping_value(wire).unwrap();
+    assert_eq!(value["outcome"], "matched");
+    assert_eq!(value["blockedReason"], serde_json::Value::Null);
+    assert!(
+        serde_json::from_value::<RecoveryMappingWire>(json!({
+            "mappingId": mapping_id(), "originalId": "00000000-0000-4000-8000-000000000001",
+            "photoId": "00000000-0000-4000-8000-000000000002",
+            "fromLocation": "shoot/a.JPG", "toLocation": "moved/a.JPG",
+            "kind": "jpeg", "outcome": "relocated", "verified": false,
+            "blockedReason": null, "retire": null
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<RecoveryMappingWire>(json!({
+            "mappingId": mapping_id(), "originalId": "00000000-0000-4000-8000-000000000001",
+            "photoId": "00000000-0000-4000-8000-000000000002",
+            "fromLocation": "shoot/a.JPG", "toLocation": "moved/a.JPG",
+            "kind": "jpeg", "outcome": "matched", "verified": false,
+            "blockedReason": "destination-full", "retire": null
+        }))
+        .is_err()
+    );
+    let occupied = serde_json::from_value::<RecoveryMappingWire>(json!({
+        "mappingId": mapping_id(), "originalId": "00000000-0000-4000-8000-000000000001",
+        "photoId": "00000000-0000-4000-8000-000000000002",
+        "fromLocation": "shoot/a.JPG", "toLocation": "moved/a.JPG",
+        "kind": "jpeg", "outcome": "occupied", "verified": true,
+        "blockedReason": "destination-in-use",
+        "retire": {
+            "photoId": "00000000-0000-4000-8000-000000000003",
+            "originalId": "00000000-0000-4000-8000-000000000004",
+            "location": "moved/a.JPG"
+        }
+    }))
+    .unwrap();
+    let value = recovery_mapping_value(occupied).unwrap();
+    assert_eq!(value["blockedReason"], "destination-in-use");
+    assert_eq!(
+        value["retire"]["photoId"],
+        "00000000-0000-4000-8000-000000000003"
+    );
+}
+
+fn mapping_id() -> String {
+    "reviewed-mapping-identity".to_owned()
+}
+
+#[test]
+fn recovery_apply_result_must_prove_the_committed_batch() {
+    let origin = Url::parse("https://library.test").unwrap();
+    let identities = vec![json!({
+        "originalId": "00000000-0000-4000-8000-000000000001",
+        "newLocation": "moved/a.JPG",
+        "mappingId": mapping_id()
+    })];
+    let prepared = PreparedRecoveryApply {
+        body: json!({"mappings": []}),
+        identities: identities.clone(),
+    };
+    let identity = MutationIdentity {
+        mappings: identities,
+        ..MutationIdentity::bare(Operation::RecoveryApply)
+    };
+    let applied = RecoveryApplyData {
+        applied_mappings: 1,
+        refused_mappings: 0,
+        unavailable_photos: 0,
+        mappings: vec![
+            serde_json::from_value(json!({
+                "originalId": "00000000-0000-4000-8000-000000000001",
+                "photoId": "00000000-0000-4000-8000-000000000002",
+                "fromLocation": "shoot/a.JPG",
+                "toLocation": "moved/a.JPG",
+                "webUrl": "/?photoId=00000000-0000-4000-8000-000000000002",
+                "retired": null
+            }))
+            .unwrap(),
+        ],
+    };
+    let value = recovery_apply_value(&identity, applied, &prepared, &origin).unwrap();
+    assert_eq!(value["appliedMappings"], 1);
+    assert_eq!(value["refusedMappings"], 0);
+    assert_eq!(
+        value["mappings"][0]["webUrl"],
+        "https://library.test/?photoId=00000000-0000-4000-8000-000000000002"
+    );
+    for (name, result) in [
+        (
+            "short-count",
+            RecoveryApplyData {
+                applied_mappings: 0,
+                refused_mappings: 1,
+                unavailable_photos: 1,
+                mappings: Vec::new(),
+            },
+        ),
+        (
+            "wrong-order",
+            RecoveryApplyData {
+                applied_mappings: 1,
+                refused_mappings: 0,
+                unavailable_photos: 0,
+                mappings: vec![
+                    serde_json::from_value(json!({
+                        "originalId": "00000000-0000-4000-8000-000000000009",
+                        "photoId": "00000000-0000-4000-8000-000000000002",
+                        "fromLocation": "shoot/a.JPG",
+                        "toLocation": "moved/a.JPG",
+                        "webUrl": "/?photoId=x",
+                        "retired": null
+                    }))
+                    .unwrap(),
+                ],
+            },
+        ),
+    ] {
+        let failure = recovery_apply_value(&identity, result, &prepared, &origin).unwrap_err();
+        assert_eq!(failure.exit_code, 7, "{name}");
+        assert_eq!(failure.payload.code, "outcome_unknown", "{name}");
+        assert_eq!(failure.payload.effect, "unknown", "{name}");
+        assert_eq!(
+            failure.payload.details["mappings"],
+            json!(prepared.identities),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn recovery_failure_codes_validate_their_exact_details() {
+    let refusal = |code: &str, details: Value| ErrorPayload {
+        code: code.to_owned(),
+        message: "Read the reported mappings and review again.".to_owned(),
+        effect: "none".to_owned(),
+        details,
+    };
+    let mapped = |code: &str, details: Value, operation: Operation| {
+        validated_route_failure(refusal(code, details), operation, "")
+    };
+    let conflict = json!({
+        "appliedMappings": 0,
+        "refusedMappings": 2,
+        "rejections": [
+            {"originalId": "00000000-0000-4000-8000-000000000001", "reason": "reviewed-stale"},
+            {"originalId": "00000000-0000-4000-8000-000000000002", "reason": "content-unconfirmed"}
+        ]
+    });
+    let failure = mapped("recovery_conflict", conflict, Operation::RecoveryApply)
+        .expect("a complete batch refusal is confirmed");
+    assert_eq!(failure.exit_code, 4);
+    assert_eq!(failure.payload.effect, "none");
+    assert!(
+        mapped(
+            "recovery_conflict",
+            json!({"appliedMappings": 1, "refusedMappings": 1, "rejections": []}),
+            Operation::RecoveryApply
+        )
+        .is_none()
+    );
+    assert!(mapped(
+        "recovery_conflict",
+        json!({"appliedMappings": 0, "refusedMappings": 1, "rejections": [{"originalId": "", "reason": "stale"}]}),
+        Operation::RecoveryApply
+    )
+    .is_none());
+
+    let scope = json!({"evaluated": 10_001, "limit": 10_000});
+    let failure = mapped("recovery_scope_exceeded", scope, Operation::RecoveryPropose)
+        .expect("an over-bound scope refusal is confirmed");
+    assert_eq!(failure.exit_code, 2);
+    assert!(
+        mapped(
+            "recovery_scope_exceeded",
+            json!({"evaluated": 10_000, "limit": 10_000}),
+            Operation::RecoveryPropose
+        )
+        .is_none()
+    );
+
+    let missing = mapped(
+        "not_found",
+        json!({"resource": "original", "reference": "00000000-0000-4000-8000-000000000001"}),
+        Operation::RecoveryPropose,
+    )
+    .expect("an unknown Original is a confirmed missing object");
+    assert_eq!(missing.exit_code, 3);
+
+    for (kind, reason, operation) in [
+        (
+            "unavailable",
+            "process_restarted",
+            Operation::RecoveryUnavailable,
+        ),
+        ("mappings", "idle_or_evicted", Operation::RecoveryPropose),
+    ] {
+        let failure = mapped(
+            "cursor_expired",
+            json!({"cursorKind": kind, "reason": reason}),
+            operation,
+        )
+        .expect("an expired review continuation is confirmed");
+        assert_eq!(failure.exit_code, 6);
+    }
+
+    for (details, operation, ok) in [
+        (
+            json!({"operation": "recovery-apply", "retryAfterSeconds": null}),
+            Operation::RecoveryApply,
+            true,
+        ),
+        (
+            json!({"operation": "recovery-unavailable", "retryAfterSeconds": 30}),
+            Operation::RecoveryUnavailable,
+            true,
+        ),
+        (
+            json!({"operation": "recovery-apply", "retryAfterSeconds": null}),
+            Operation::RecoveryUnavailable,
+            false,
+        ),
+        (
+            json!({"operation": "recovery-propose"}),
+            Operation::RecoveryPropose,
+            false,
+        ),
+    ] {
+        assert_eq!(
+            mapped("server_busy", details, operation).is_some(),
+            ok,
+            "for {operation:?}"
+        );
+    }
+    assert!(
+        mapped(
+            "storage_failed",
+            json!({"operation": "recovery-apply"}),
+            Operation::RecoveryApply
+        )
+        .is_some()
+    );
+}
+
+#[test]
+fn deadline_expiry_maps_library_check_to_an_unknown_scan_outcome() {
+    // A `library check` deadline is never a connection failure: the scan is
+    // service-owned and may have been admitted and running whether or not
+    // this client handed the request over, so only `status` can report it.
+    let failure = deadline_failure(
+        Operation::LibraryCheck,
+        &PublicationState::default(),
+        &AdmissionState::default(),
+    );
+    assert_eq!(failure.exit_code, 7);
+    assert_eq!(failure.payload.code, "outcome_unknown");
+    assert_eq!(failure.payload.effect, "unknown");
+    assert_eq!(failure.payload.details["operation"], "library-check");
+    assert!(failure.payload.message.contains("status"));
+    assert!(!failure.payload.message.contains("connection"));
+}
+
+#[test]
+fn deadline_expiry_keeps_the_admitted_and_transport_mappings_elsewhere() {
+    // A read that never admitted a mutation stays a transport failure.
+    let transport = deadline_failure(
+        Operation::Status,
+        &PublicationState::default(),
+        &AdmissionState::default(),
+    );
+    assert_eq!(transport.exit_code, 6);
+    assert_eq!(transport.payload.code, "transport_failed");
+    assert_eq!(transport.payload.effect, "none");
+    // An admitted mutation keeps its unknown outcome and identity details.
+    let admission = AdmissionState::default();
+    admission.admit(MutationIdentity::bare(Operation::PhotosRecipeSave));
+    let admitted = deadline_failure(
+        Operation::PhotosRecipeSave,
+        &PublicationState::default(),
+        &admission,
+    );
+    assert_eq!(admitted.exit_code, 7);
+    assert_eq!(admitted.payload.code, "outcome_unknown");
+    assert_eq!(admitted.payload.details["operation"], "photos-recipe-save");
+}
+
+#[tokio::test]
+async fn a_timed_out_library_check_reports_the_unknown_scan_outcome() {
+    // The service accepts connections and never answers — the TLS handshake
+    // to a silent socket cannot complete — so the deadline, not a connection
+    // refusal, ends the command while the service-owned scan may be running.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let token = std::env::temp_dir().join("slipstream-cli-deadline-token");
+    std::fs::write(&token, "A".repeat(43)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&token).unwrap().permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&token, permissions).unwrap();
+    }
+    let cli = Cli::try_parse_from([
+        "slipstream",
+        "--server",
+        &format!("https://127.0.0.1:{port}"),
+        "--token-file",
+        token.to_str().unwrap(),
+        "library",
+        "check",
+    ])
+    .unwrap();
+    let result = invoke_until(
+        cli,
+        None,
+        tokio::time::Instant::now() + std::time::Duration::from_millis(500),
+    )
+    .await;
+    assert_eq!(result.exit_code, 7);
+    assert!(
+        result.stdout.contains("outcome_unknown"),
+        "{}",
+        result.stdout
+    );
+    assert!(result.stdout.contains("status"), "{}", result.stdout);
+    assert!(
+        !result.stdout.contains("transport_failed"),
+        "{}",
+        result.stdout
+    );
+    std::fs::remove_file(&token).ok();
+    drop(listener);
+}
+
+#[test]
+fn source_refusals_carry_the_closed_support_reason() {
+    // A save or rebind refused for the Photo's source state reports the same
+    // closed `supportReason` the recipe read reports, and a preview refusal
+    // names it as `reason`, so the retryable waits stay distinguishable from
+    // the confirmed outcomes in the failure envelope.
+    let refusal = |details: Value| ErrorPayload {
+        code: "resource_unavailable".to_owned(),
+        message: "Current source facts cannot be read, so no guarded write is possible.".to_owned(),
+        effect: "none".to_owned(),
+        details,
+    };
+    for reason in [
+        "original-missing",
+        "original-unreadable",
+        "read-pending",
+        "resource-unavailable",
+    ] {
+        let save = validated_route_failure(
+            refusal(json!({"photoId": "p1", "supportReason": reason})),
+            Operation::PhotosRecipeSave,
+            "",
+        )
+        .unwrap_or_else(|| panic!("{reason} is a confirmed source refusal"));
+        assert_eq!(save.exit_code, 6, "{reason}");
+        assert_eq!(save.payload.details["supportReason"], json!(reason));
+        let preview = validated_route_failure(
+            refusal(json!({"stage": "develop", "reason": reason})),
+            Operation::PhotosEditPreview,
+            "",
+        )
+        .unwrap_or_else(|| panic!("{reason} is a confirmed preview refusal"));
+        assert_eq!(preview.exit_code, 6, "{reason}");
+        assert_eq!(preview.payload.details["reason"], json!(reason));
+    }
+    // A reported `supportReason` outside the closed set is not a confirmed
+    // refusal; an internal preview reason such as `preview-superseded`
+    // stays a valid deployment-condition detail.
+    assert!(
+        validated_route_failure(
+            refusal(json!({"photoId": "p1", "supportReason": "original-rotated"})),
+            Operation::PhotosRecipeSave,
+            ""
+        )
+        .is_none()
+    );
+    assert!(
+        validated_route_failure(
+            refusal(json!({"stage": "develop", "reason": "preview-superseded"})),
+            Operation::PhotosEditPreview,
+            ""
+        )
+        .is_some()
+    );
 }

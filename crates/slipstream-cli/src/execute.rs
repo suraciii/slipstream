@@ -112,8 +112,14 @@ pub(crate) async fn execute(
         } => development::prepare(command).await?,
         _ => None,
     };
+    let pending_recovery_apply = match &cli.command {
+        Command::Recovery {
+            command: RecoveryCommand::Apply(args),
+        } => Some(read_recovery_apply(&args.input).await?),
+        _ => None,
+    };
     let client = ServiceClient::new(origin, token)?;
-    client.capabilities(operation).await?;
+    let limits = client.capabilities(operation).await?;
 
     let result = async {
         match &cli.command {
@@ -157,6 +163,7 @@ pub(crate) async fn execute(
                     photo_ids: Vec::new(),
                     album_id: None,
                     album_name: None,
+                    mappings: Vec::new(),
                 };
                 let scan: ScanStatus = match client
                     .mutation(
@@ -276,6 +283,7 @@ pub(crate) async fn execute(
                     photo_ids: Vec::new(),
                     album_id: None,
                     album_name: Some(name.clone()),
+                    mappings: Vec::new(),
                 };
                 let result: AlbumCreationWire = client
                     .mutation(
@@ -301,6 +309,7 @@ pub(crate) async fn execute(
                     photo_ids: Vec::new(),
                     album_id: Some(album_id.clone()),
                     album_name: Some(name.clone()),
+                    mappings: Vec::new(),
                 };
                 let result: AlbumRenameWire = client
                     .mutation(
@@ -325,6 +334,7 @@ pub(crate) async fn execute(
                     photo_ids: Vec::new(),
                     album_id: Some(album_id.clone()),
                     album_name: None,
+                    mappings: Vec::new(),
                 };
                 let result: AlbumDeleteWire = client
                     .mutation(
@@ -540,6 +550,7 @@ pub(crate) async fn execute(
                     photo_ids: vec![args.photo_id.clone()],
                     album_id: None,
                     album_name: None,
+                    mappings: Vec::new(),
                 };
                 let result: MetadataSaveResultWire = client
                     .metadata_mutation(
@@ -572,6 +583,7 @@ pub(crate) async fn execute(
                         .collect(),
                     album_id: None,
                     album_name: None,
+                    mappings: Vec::new(),
                 };
                 let result: PhotoDecisionWire = client
                     .mutation(
@@ -598,6 +610,7 @@ pub(crate) async fn execute(
                         .collect(),
                     album_id: None,
                     album_name: None,
+                    mappings: Vec::new(),
                 };
                 let result: PhotoRemovalWire = client
                     .mutation(
@@ -653,6 +666,7 @@ pub(crate) async fn execute(
                     photo_ids,
                     album_id: None,
                     album_name: None,
+                    mappings: Vec::new(),
                 };
                 match pending_restore.as_ref() {
                     Some(prepared) => {
@@ -780,6 +794,7 @@ pub(crate) async fn execute(
                     photo_ids: Vec::new(),
                     album_id: None,
                     album_name: None,
+                    mappings: Vec::new(),
                 };
                 client
                     .mutation(
@@ -805,6 +820,172 @@ pub(crate) async fn execute(
                     return Err(CommandFailure::transport(operation));
                 }
                 Ok(data)
+            }
+            Command::Recovery {
+                command: RecoveryCommand::Unavailable(args),
+            } => {
+                if let Some(limit) = args.limit
+                    && usize::from(limit) > limits.recovery_page_maximum
+                {
+                    return Err(CommandFailure::limit_exceeded(
+                        "recoveryPageMaximum",
+                        limits.recovery_page_maximum,
+                        usize::from(limit),
+                    ));
+                }
+                let data: ListData<RecoveryItemWire> = if let Some(cursor) = &args.cursor {
+                    client
+                        .json(
+                            operation,
+                            Method::GET,
+                            client.endpoint(&["api", "recovery", "unavailable", cursor]),
+                            None,
+                        )
+                        .await?
+                } else {
+                    let mut body = json!({});
+                    if let Some(limit) = args.limit {
+                        body["limit"] = json!(limit);
+                    }
+                    client
+                        .json(
+                            operation,
+                            Method::POST,
+                            client.endpoint(&["api", "recovery", "unavailable"]),
+                            Some(body),
+                        )
+                        .await?
+                };
+                let page_limit = if args.cursor.is_some() {
+                    limits.recovery_page_maximum
+                } else {
+                    args.limit.map_or(limits.recovery_page_maximum, usize::from)
+                };
+                if !list_expiry_valid(&data, page_limit)
+                    || data.next_cursor.as_deref().is_some_and(str::is_empty)
+                {
+                    return Err(CommandFailure::transport(operation));
+                }
+                let items = data
+                    .items
+                    .into_iter()
+                    .map(|item| recovery_item_value(item, &client.origin))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| CommandFailure::transport(operation))?;
+                Ok(json!({
+                    "items": items,
+                    "total": data.total,
+                    "nextCursor": data.next_cursor,
+                    "evaluatedAt": data.evaluated_at,
+                    "expiresAt": data.expires_at,
+                }))
+            }
+            Command::Recovery {
+                command: RecoveryCommand::Propose(args),
+            } => {
+                if let Some(limit) = args.limit
+                    && usize::from(limit) > limits.recovery_page_maximum
+                {
+                    return Err(CommandFailure::limit_exceeded(
+                        "recoveryPageMaximum",
+                        limits.recovery_page_maximum,
+                        usize::from(limit),
+                    ));
+                }
+                let data: ListData<RecoveryMappingWire> = if let Some(cursor) = &args.cursor {
+                    client
+                        .json(
+                            operation,
+                            Method::GET,
+                            client.endpoint(&["api", "recovery", "proposals", cursor]),
+                            None,
+                        )
+                        .await?
+                } else if let (Some(old_prefix), Some(new_prefix)) =
+                    (&args.old_prefix, &args.new_prefix)
+                {
+                    let mut body = json!({
+                        "oldPrefix": old_prefix,
+                        "newPrefix": new_prefix,
+                    });
+                    if let Some(limit) = args.limit {
+                        body["limit"] = json!(limit);
+                    }
+                    client
+                        .json(
+                            operation,
+                            Method::POST,
+                            client.endpoint(&["api", "recovery", "propose"]),
+                            Some(body),
+                        )
+                        .await?
+                } else {
+                    client
+                        .json(
+                            operation,
+                            Method::POST,
+                            client.endpoint(&["api", "recovery", "propose"]),
+                            Some(json!({
+                                "originalId": args.original_id,
+                                "newLocation": args.new_location,
+                            })),
+                        )
+                        .await?
+                };
+                let page_limit = if args.cursor.is_some() {
+                    limits.recovery_page_maximum
+                } else {
+                    args.limit.map_or(limits.recovery_page_maximum, usize::from)
+                };
+                if !list_expiry_valid(&data, page_limit)
+                    || data.next_cursor.as_deref().is_some_and(str::is_empty)
+                {
+                    return Err(CommandFailure::transport(operation));
+                }
+                let single_form = args.original_id.is_some();
+                if single_form && (data.total != 1 || data.next_cursor.is_some()) {
+                    return Err(CommandFailure::transport(operation));
+                }
+                let items = data
+                    .items
+                    .into_iter()
+                    .map(recovery_mapping_value)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| CommandFailure::transport(operation))?;
+                Ok(json!({
+                    "items": items,
+                    "total": data.total,
+                    "nextCursor": data.next_cursor,
+                    "evaluatedAt": data.evaluated_at,
+                    "expiresAt": data.expires_at,
+                }))
+            }
+            Command::Recovery {
+                command: RecoveryCommand::Apply(_args),
+            } => {
+                let prepared = pending_recovery_apply
+                    .as_ref()
+                    .expect("recovery apply input was prepared");
+                if prepared.identities.len() > limits.recovery_apply_maximum {
+                    return Err(CommandFailure::limit_exceeded(
+                        "recoveryApplyMaximum",
+                        limits.recovery_apply_maximum,
+                        prepared.identities.len(),
+                    ));
+                }
+                let identity = MutationIdentity {
+                    mappings: prepared.identities.clone(),
+                    ..MutationIdentity::bare(operation)
+                };
+                let result: RecoveryApplyData = client
+                    .mutation(
+                        &identity,
+                        admission,
+                        client.endpoint(&["api", "recovery", "apply"]),
+                        prepared.body.clone(),
+                    )
+                    .await?;
+                recovery_apply_value(&identity, result, prepared, &client.origin)
             }
         }
     }
@@ -947,6 +1128,67 @@ pub(crate) fn validate_command(command: &Command) -> Result<(), CommandFailure> 
             }
             Ok(())
         }
+        Command::Recovery {
+            command: RecoveryCommand::Propose(args),
+        } if args.cursor.is_none() => {
+            let prefix_form = args.old_prefix.is_some() || args.new_prefix.is_some();
+            let single_form = args.original_id.is_some() || args.new_location.is_some();
+            if prefix_form && single_form {
+                return Err(CommandFailure::invalid(
+                    "arguments",
+                    "recovery propose takes either --old-prefix with --new-prefix, or --original-id with --new-location.",
+                ));
+            }
+            if !prefix_form && !single_form {
+                return Err(CommandFailure::invalid(
+                    "arguments",
+                    "recovery propose needs --old-prefix and --new-prefix, or --original-id and --new-location, or --cursor.",
+                ));
+            }
+            if prefix_form {
+                let (Some(old_prefix), Some(new_prefix)) = (&args.old_prefix, &args.new_prefix)
+                else {
+                    return Err(CommandFailure::invalid(
+                        "old-prefix",
+                        "The Folder-prefix form needs both --old-prefix and --new-prefix.",
+                    ));
+                };
+                for (argument, value) in [("old-prefix", old_prefix), ("new-prefix", new_prefix)] {
+                    if !valid_location_prefix(value) {
+                        return Err(CommandFailure::invalid(
+                            argument,
+                            "A prefix is a Library-relative Folder Location with no leading or trailing separator.",
+                        ));
+                    }
+                }
+            } else {
+                let Some(original_id) = &args.original_id else {
+                    return Err(CommandFailure::invalid(
+                        "original-id",
+                        "The single-mapping form needs both --original-id and --new-location.",
+                    ));
+                };
+                let Some(new_location) = &args.new_location else {
+                    return Err(CommandFailure::invalid(
+                        "original-id",
+                        "The single-mapping form needs both --original-id and --new-location.",
+                    ));
+                };
+                if !valid_library_id(original_id) {
+                    return Err(CommandFailure::invalid(
+                        "original-id",
+                        "The Original id is not a Library identity.",
+                    ));
+                }
+                if !valid_original_location(new_location) {
+                    return Err(CommandFailure::invalid(
+                        "new-location",
+                        "The Location is a Library-relative Original Location including the filename.",
+                    ));
+                }
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -1074,6 +1316,31 @@ pub async fn invoke(cli: Cli, environment: Option<&str>) -> InvocationResult {
     invoke_until(cli, environment, deadline).await
 }
 
+/// The failure one deadline expiry reports. A published file is reported as
+/// committed whatever else was in flight. `library check` is the one
+/// operation whose expiry is never a connection failure: the scan is owned
+/// by the service, may already be admitted and running whether or not this
+/// client handed the request over, and its timeout neither cancels it nor
+/// proves a retry would not join it, so the outcome stays unknown and
+/// `status` carries the scan phase. Every other operation keeps its
+/// admitted-unknown or transport mapping.
+pub(crate) fn deadline_failure(
+    operation: Operation,
+    publication: &PublicationState,
+    admission: &AdmissionState,
+) -> CommandFailure {
+    if let Some(data) = publication.committed() {
+        return CommandFailure::published_file(data, false, publication.committed_noun());
+    }
+    if matches!(operation, Operation::LibraryCheck) {
+        return CommandFailure::library_check_deadline();
+    }
+    match admission.admitted() {
+        Some(identity) => CommandFailure::unknown(&identity),
+        None => CommandFailure::transport(operation),
+    }
+}
+
 pub async fn invoke_until(
     cli: Cli,
     environment: Option<&str>,
@@ -1102,15 +1369,7 @@ pub async fn invoke_until(
                 (failure.exit_code, envelope)
             }
             Err(_) => {
-                let failure = match publication.committed() {
-                    Some(data) => {
-                        CommandFailure::published_file(data, false, publication.committed_noun())
-                    }
-                    None => match admission.admitted() {
-                        Some(identity) => CommandFailure::unknown(&identity),
-                        None => CommandFailure::transport(operation),
-                    },
-                };
+                let failure = deadline_failure(operation, &publication, &admission);
                 let envelope = match failure.data {
                     Some(data) => Envelope::partial(*data, failure.payload),
                     None => Envelope::error(failure.payload),

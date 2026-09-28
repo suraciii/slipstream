@@ -1523,7 +1523,11 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
                 "albumReorderMembersMaximum": 100,
                 "removalPhotoIdsMaximum": 100,
                 "retainedQueryIdsMaximum": 1_000_000,
-                "retainedQueryIdleSeconds": 900
+                "retainedQueryIdleSeconds": 900,
+                "recoveryPageMaximum": 60,
+                "recoveryMappingsMaximum": 10_000,
+                "recoveryApplyMaximum": 100,
+                "recoveryReviewIdleSeconds": 900
             }
         })
     );
@@ -1755,7 +1759,9 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
             "filename".to_owned(),
             "hasSavedEdits".to_owned(),
             "id".to_owned(),
+            "location".to_owned(),
             "originalAvailable".to_owned(),
+            "originalId".to_owned(),
             "originalKind".to_owned(),
             "preview".to_owned(),
             "rating".to_owned(),
@@ -2557,6 +2563,11 @@ async fn cli_scan_check_reports_service_state_after_an_interrupted_request() {
     .await;
     assert_eq!(status["published"], true);
     assert_eq!(status["scan"]["state"], "idle");
+    assert!(
+        status["scan"]["updatedMs"]
+            .as_u64()
+            .is_some_and(|value| value > 0)
+    );
     assert_eq!(status["photoCount"], 1);
     // A later check reports a terminal state of its own.
     let settled = response_json(
@@ -2576,6 +2587,7 @@ async fn cli_scan_check_reports_service_state_after_an_interrupted_request() {
     assert_eq!(settled["state"], "idle");
     assert_eq!(settled["completed"], 1);
     assert_eq!(settled["total"], 1);
+    assert!(settled["updatedMs"].as_u64().is_some_and(|value| value > 0));
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }

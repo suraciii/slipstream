@@ -100,9 +100,8 @@ fn expand_library_command_updates_binding_and_location_then_scans() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        // Issue #327 added the Film Export target as schema v10; Issue #276
-        // added sidecar association records as schema v11.
-        11
+        // Camera identity joins published capture facts in schema v12.
+        12
     );
     assert_eq!(
         connection

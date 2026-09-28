@@ -13,14 +13,7 @@ import { fetchPhotoAlbums, fetchPhotoMetadata } from "./api/photo.js";
 import { createEditorController } from "./model/editor-controller.js";
 import { createMetadataPanel } from "./ui/external-metadata-panel.js";
 
-import {
-  applyRelocations,
-  fetchUnavailableOriginals,
-  proposeRelocations,
-  proposeSingleRelocation,
-  type RecoveryApplyItem,
-  type RecoveryProposal,
-} from "./api/recovery.js";
+import { createRecoveryReviewOwner } from "./model/recovery-review-owner.js";
 import {
   createFileLocationOwner,
   type FileLocationAuthority,
@@ -340,7 +333,9 @@ function mountPrivateLibraryBrowser(
         view.setSourceTitle(sourceGrid.name);
       }
     }
-    presentRecoveryNotice(presentation.overview.scan.lastRecovery);
+    recoveryReview.presentRecoveryNotice(
+      presentation.overview.scan.lastRecovery,
+    );
     renderMembershipControls();
     refreshMembershipFacts();
     renderSources();
@@ -3118,162 +3113,14 @@ function mountPrivateLibraryBrowser(
     })();
   };
 
-  let recoveryNoticeShown: string | undefined;
-  const presentRecoveryNotice = (
-    recovery:
-      | Readonly<{
-          relocatedPhotos: number;
-          fingerprintedOriginals: number;
-          unavailablePhotos: number;
-        }>
-      | undefined,
-  ): void => {
-    const relocated = recovery?.relocatedPhotos ?? 0;
-    const unavailable = recovery?.unavailablePhotos ?? 0;
-    if (relocated === 0 && unavailable === 0) {
-      recoveryNoticeShown = "none";
-      view.setRecoveryNotice({ relocatedPhotos: 0, unavailablePhotos: 0 });
-      return;
-    }
-    const signature = `${relocated}:${unavailable}`;
-    if (signature === recoveryNoticeShown) return;
-    recoveryNoticeShown = signature;
-    view.setRecoveryNotice({
-      relocatedPhotos: relocated,
-      unavailablePhotos: unavailable,
-    });
-  };
-
-  const mapRecoveryProposal = (proposal: RecoveryProposal) => ({
-    originalId: proposal.originalId,
-    fromLocation: proposal.fromLocation,
-    toLocation: proposal.toLocation,
-    kind: proposal.kind,
-    outcome: proposal.outcome,
-    verified: proposal.verified,
-    retire: proposal.retire
-      ? { photoId: proposal.retire.photoId, location: proposal.retire.location }
-      : null,
+  const recoveryReview = createRecoveryReviewOwner(fetcher, view, {
+    isAlive: () => applicationAlive,
+    setGridStatusText,
+    refreshSource,
+    refreshRecoveryOverview: async () => {
+      await application.refreshOverview().catch(() => {});
+    },
   });
-
-  const openRecoveryReview = async (): Promise<void> => {
-    view.setRecoveryPending(true);
-    const result = await fetchUnavailableOriginals(
-      fetcher,
-      new AbortController().signal,
-    );
-    view.setRecoveryPending(false);
-    if (!applicationAlive) return;
-    if (result.kind === "ok") {
-      view.openRecoveryPanel(
-        result.unavailable.map((entry) => ({
-          originalId: entry.originalId,
-          location: entry.location,
-          kind: entry.kind,
-          rating: entry.rating,
-          selectionState: entry.selectionState,
-          albumCount: entry.albumCount,
-          fingerprintEnrolled: entry.fingerprintEnrolled,
-        })),
-      );
-      view.setRecoveryMessage();
-      return;
-    }
-    view.setRecoveryMessage("Could not load unavailable originals. Retry.");
-  };
-
-  const proposeRecoveryBatch = async (
-    oldPrefix: string,
-    newPrefix: string,
-  ): Promise<void> => {
-    if (!oldPrefix || !newPrefix) {
-      view.setRecoveryMessage("Enter both folder prefixes.");
-      return;
-    }
-    view.setRecoveryPending(true);
-    const result = await proposeRelocations(
-      fetcher,
-      oldPrefix,
-      newPrefix,
-      new AbortController().signal,
-    );
-    view.setRecoveryPending(false);
-    if (!applicationAlive) return;
-    if (result.kind === "ok") {
-      view.renderRecoveryProposals(result.proposals.map(mapRecoveryProposal));
-      view.setRecoveryMessage(
-        result.proposals.length === 0
-          ? "No unavailable originals under that folder prefix."
-          : undefined,
-      );
-      return;
-    }
-    view.setRecoveryMessage(
-      "Could not propose mappings. Check the folder prefixes and retry.",
-    );
-  };
-
-  const proposeRecoverySingle = async (
-    originalId: string,
-    newLocation: string,
-  ): Promise<void> => {
-    if (!originalId || !newLocation) {
-      view.setRecoveryMessage("Choose an Original and enter its new location.");
-      return;
-    }
-    view.setRecoveryPending(true);
-    const result = await proposeSingleRelocation(
-      fetcher,
-      originalId,
-      newLocation,
-      new AbortController().signal,
-    );
-    view.setRecoveryPending(false);
-    if (!applicationAlive) return;
-    if (result.kind === "ok") {
-      view.renderRecoveryProposals(result.proposals.map(mapRecoveryProposal));
-      view.setRecoveryMessage();
-      return;
-    }
-    view.setRecoveryMessage(
-      "Could not propose that mapping. Check the location and retry.",
-    );
-  };
-
-  const applyRecovery = async (
-    items: ReadonlyArray<RecoveryApplyItem>,
-  ): Promise<void> => {
-    view.setRecoveryPending(true);
-    const result = await applyRelocations(
-      fetcher,
-      items,
-      new AbortController().signal,
-    );
-    view.setRecoveryPending(false);
-    if (!applicationAlive) return;
-    if (result.kind === "applied") {
-      view.closeRecoveryPanel();
-      // The committed counts are the freshest recovery truth until the next
-      // scan reports its own.
-      recoveryNoticeShown = `${result.relocatedPhotos}:${result.unavailablePhotos}`;
-      view.setRecoveryNotice({
-        relocatedPhotos: result.relocatedPhotos,
-        unavailablePhotos: result.unavailablePhotos,
-      });
-      void refreshSource();
-      return;
-    }
-    if (result.kind === "rejected" && result.status === 409) {
-      const reasons = result.rejections
-        .map((rejection) => rejection.reason)
-        .join(", ");
-      view.setRecoveryMessage(
-        `${result.message ?? "Recovery batch rejected without changes."}${reasons ? ` (${reasons})` : ""}`,
-      );
-      return;
-    }
-    view.setRecoveryMessage("Could not apply the mappings. Retry.");
-  };
 
   function handleViewIntent(intent: LibraryBrowserIntent): void {
     if (!applicationAlive) return;
@@ -3624,19 +3471,31 @@ function mountPrivateLibraryBrowser(
         toggleMembership(intent.albumId, intent.member);
         return;
       case "recovery-entry":
-        void openRecoveryReview();
+        void recoveryReview.openRecoveryReview();
         return;
       case "recovery-close":
         view.closeRecoveryPanel();
         return;
+      case "recovery-more":
+        void recoveryReview.loadMoreRecoveryEntries();
+        return;
+      case "recovery-mappings-more":
+        void recoveryReview.loadMoreRecoveryMappings();
+        return;
       case "recovery-propose":
-        void proposeRecoveryBatch(intent.oldPrefix, intent.newPrefix);
+        void recoveryReview.proposeRecoveryBatch(
+          intent.oldPrefix,
+          intent.newPrefix,
+        );
         return;
       case "recovery-propose-single":
-        void proposeRecoverySingle(intent.originalId, intent.newLocation);
+        void recoveryReview.proposeRecoverySingle(
+          intent.originalId,
+          intent.newLocation,
+        );
         return;
       case "recovery-apply":
-        void applyRecovery(intent.items);
+        void recoveryReview.applyRecovery(intent.items);
         return;
       case "membership-retry":
         refreshMembershipFacts();
