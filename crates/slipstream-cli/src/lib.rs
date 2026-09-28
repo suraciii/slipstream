@@ -27,6 +27,7 @@ const CONTRACT_HEADER: &str = "Slipstream-CLI-Contract";
 const MAXIMUM_JSON_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAXIMUM_INPUT_BYTES: usize = 64 * 1024;
 const MAXIMUM_MUTATION_PHOTO_IDS: usize = 100;
+const MAXIMUM_RECOVERY_APPLY: usize = 100;
 const MAXIMUM_TRASH_IDS: usize = 5_000;
 mod client;
 mod commands;
@@ -45,8 +46,9 @@ pub use commands::{
     FolderListArgs, InvocationResult, LibraryCommand, OrderArg, OriginalKindArg, OutputFormat,
     ParseErrorPreferences, PhotoCommand, PhotoDecisionArgs, PhotoExportCommand,
     PhotoExportDownloadArgs, PhotoExportSubmitArgs, PhotoListArgs, PhotoMetadataSaveArgs,
-    PhotoRemovalArgs, PhotoRestoreArgs, PreviewSize, ProcessingCommand, SelectionArg,
-    SetSelectionArg, TrashCommand, TrashListArgs, TrashReviewArgs, parse_error_preferences,
+    PhotoRemovalArgs, PhotoRestoreArgs, PreviewSize, ProcessingCommand, RecoveryApplyArgs,
+    RecoveryCommand, RecoveryProposeArgs, RecoveryUnavailableArgs, SelectionArg, SetSelectionArg,
+    TrashCommand, TrashListArgs, TrashReviewArgs, parse_error_preferences,
 };
 pub(crate) use execute::*;
 pub use execute::{invalid_invocation, invoke, invoke_until};

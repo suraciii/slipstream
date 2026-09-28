@@ -10,6 +10,7 @@ mod metadata;
 mod migrations;
 mod mutation;
 mod owner;
+mod owner_recovery;
 mod queries;
 mod removal;
 mod scan;
@@ -40,5 +41,6 @@ pub use metadata::{
 pub use owner::{MutationError, Persistence, PersistenceError, PhotoDecisionWriteError};
 pub use scan::{
     DiscoveredFingerprint, FingerprintCounts, FingerprintTarget, ScanApplication, ScanRecoveryPlan,
+    ScanRelocationSource,
 };
 pub use schema::{SchemaError, SchemaVersion, validate_canonical_schema};

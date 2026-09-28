@@ -347,7 +347,11 @@ fn capabilities_body() -> Value {
             "removalPhotoIdsMaximum": 100,
             "albumReorderMembersMaximum": 100,
             "retainedQueryIdsMaximum": 1000000,
-            "retainedQueryIdleSeconds": 900
+            "retainedQueryIdleSeconds": 900,
+            "recoveryPageMaximum": 60,
+            "recoveryMappingsMaximum": 10000,
+            "recoveryApplyMaximum": 100,
+            "recoveryReviewIdleSeconds": 900
         }
     })
 }

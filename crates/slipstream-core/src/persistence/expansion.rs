@@ -346,7 +346,7 @@ mod tests {
     use crate::persistence::PersistenceError;
     use crate::persistence::scan;
     use crate::persistence::test_support::*;
-    use crate::{RequestedRelocation, source_revision};
+    use crate::{LibraryRoot, RelativeOriginalPath, RequestedRelocation, source_revision};
     use rusqlite::Connection;
     use rusqlite::params;
     use std::fs;
@@ -389,9 +389,12 @@ mod tests {
         library
             .apply_relocations(vec![RequestedRelocation {
                 original_id: destination.original_id.clone(),
+                from_location: old_path.to_owned(),
                 to_location: new_path.to_string(),
+                mapping_id: "test-mapping".to_owned(),
+                fingerprint: None,
                 facts,
-                retire_destination: true,
+                retire_photo_id: Some(retiring.id.clone()),
             }])
             .await
             .unwrap();
@@ -436,7 +439,7 @@ mod tests {
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
-            include_str!("../../../../compatibility/sqlite/schema-v7.sql"),
+            include_str!("../../../../compatibility/sqlite/schema-v11.sql"),
         );
         let connection = Connection::open(&path).unwrap();
         connection
@@ -482,26 +485,37 @@ mod tests {
             )
             .unwrap();
 
+        fs::create_dir_all(library.canonical_path().join("moved")).unwrap();
+        fs::write(
+            library.canonical_path().join("moved/occupied.ARW"),
+            b"1234567890123456789",
+        )
+        .unwrap();
+        let root = LibraryRoot::open(library.canonical_path()).unwrap();
+        let facts = root
+            .original(RelativeOriginalPath::parse("moved/occupied.ARW").unwrap())
+            .unwrap()
+            .facts()
+            .unwrap();
         let result = scan::apply_manual_relocations(
             &state,
             &name,
             &mut Connection::open(&path).unwrap(),
+            &root,
             &[RequestedRelocation {
                 original_id: "missing-original".to_owned(),
+                from_location: "shoot/missing.ARW".to_owned(),
                 to_location: "moved/occupied.ARW".to_owned(),
-                facts: crate::OriginalFacts {
-                    size: 19,
-                    mtime_ms: 2_000.0,
-                    device: 0,
-                    inode: 0,
-                },
-                retire_destination: true,
+                mapping_id: "test-mapping".to_owned(),
+                fingerprint: None,
+                facts,
+                retire_photo_id: Some("occupant-photo".to_owned()),
             }],
         );
         assert!(matches!(
             result,
             Err(PersistenceError::InvalidRecoveryMapping {
-                reason: "occupied",
+                reason: "destination-in-use",
                 ..
             })
         ));

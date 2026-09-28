@@ -529,6 +529,134 @@ pub(crate) async fn read_restore_input(input: &str) -> Result<PreparedRestore, C
     parse_restore_input(read_input_bytes(input).await?)
 }
 
+/// Reads and completely validates one reviewed recovery apply document
+/// before any network access. Every shape rule the service enforces on the
+/// closed batch is checked locally, so an invalid batch can never depend on
+/// service reachability.
+pub(crate) async fn read_recovery_apply(
+    input: &str,
+) -> Result<PreparedRecoveryApply, CommandFailure> {
+    let bytes = read_input_bytes(input).await?;
+    let invalid = |reason: &'static str| CommandFailure::invalid("input", reason);
+    let document: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| invalid("The apply document is not valid JSON."))?;
+    let Some(mappings) = document
+        .as_object()
+        .filter(|object| object.len() == 1)
+        .and_then(|object| object.get("mappings"))
+        .and_then(Value::as_array)
+    else {
+        return Err(invalid(
+            "The apply document must be one JSON object with only a mappings array.",
+        ));
+    };
+    if mappings.is_empty() {
+        return Err(invalid(
+            "The mappings array must contain at least one reviewed mapping.",
+        ));
+    }
+    if mappings.len() > MAXIMUM_RECOVERY_APPLY {
+        return Err(CommandFailure::limit_exceeded(
+            "recoveryApplyMaximum",
+            MAXIMUM_RECOVERY_APPLY,
+            mappings.len(),
+        ));
+    }
+    let mut body = Vec::with_capacity(mappings.len());
+    let mut identities = Vec::with_capacity(mappings.len());
+    let mut original_ids = std::collections::HashSet::new();
+    let mut locations = std::collections::HashSet::new();
+    for mapping in mappings {
+        let Some(object) = mapping.as_object() else {
+            return Err(invalid("Every mapping must be a JSON object."));
+        };
+        if !object.keys().all(|key| {
+            matches!(
+                key.as_str(),
+                "originalId"
+                    | "newLocation"
+                    | "mappingId"
+                    | "confirmUnverifiedContent"
+                    | "retirePhotoId"
+            )
+        }) {
+            return Err(invalid("A mapping contains an unknown key."));
+        }
+        let field = |name: &str| object.get(name).and_then(Value::as_str);
+        let (Some(original_id), Some(new_location), Some(mapping_id)) = (
+            field("originalId"),
+            field("newLocation"),
+            field("mappingId"),
+        ) else {
+            return Err(invalid(
+                "Every mapping names its Original, Location, and reviewed identity.",
+            ));
+        };
+        if !valid_library_id(original_id) {
+            return Err(invalid(
+                "A mapping names an Original id that is not a Library identity.",
+            ));
+        }
+        if !valid_original_location(new_location) {
+            return Err(invalid(
+                "A mapping names a Location that is not a Library-relative Original Location.",
+            ));
+        }
+        if mapping_id.is_empty() {
+            return Err(invalid(
+                "Every mapping carries the mappingId of its reviewed proposal.",
+            ));
+        }
+        let confirm_unverified_content = match object.get("confirmUnverifiedContent") {
+            None | Some(Value::Null) => None,
+            Some(Value::Bool(value)) => Some(*value),
+            Some(_) => {
+                return Err(invalid(
+                    "confirmUnverifiedContent must be a boolean acknowledgement.",
+                ));
+            }
+        };
+        let retire_photo_id = match object.get("retirePhotoId") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value)) if valid_library_id(value) => Some(value.clone()),
+            Some(_) => {
+                return Err(invalid(
+                    "retirePhotoId must name one Photo identity of the reviewed retire candidate.",
+                ));
+            }
+        };
+        if !original_ids.insert(original_id.to_owned()) {
+            return Err(invalid("One Original appears in more than one mapping."));
+        }
+        if !locations.insert(new_location.to_owned()) {
+            return Err(invalid(
+                "One destination Location appears in more than one mapping.",
+            ));
+        }
+        let mut item = json!({
+            "originalId": original_id,
+            "newLocation": new_location,
+            "mappingId": mapping_id,
+        });
+        if let Some(value) = confirm_unverified_content {
+            item["confirmUnverifiedContent"] = json!(value);
+        }
+        if let Some(value) = retire_photo_id {
+            item["retirePhotoId"] = json!(value);
+        }
+        identities.push(json!({
+            "originalId": original_id,
+            "newLocation": new_location,
+            "mappingId": mapping_id,
+        }));
+        body.push(item);
+    }
+    Ok(PreparedRecoveryApply {
+        body: json!({ "mappings": body }),
+        identities,
+    })
+}
+
 /// Builds the one-item batch shared by the single-Photo forms. The command
 /// was semantically validated before any network access, so each required
 /// piece is present.

@@ -2183,6 +2183,25 @@
   font-size: 0.8rem;
 }
 
+.recovery-confirm {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.3rem;
+  font-size: 0.8rem;
+}
+
+.recovery-proposal-blocked {
+  margin: 0.1rem 0 0;
+  font-size: 0.8rem;
+  color: var(--danger, #e5484d);
+}
+
+.recovery-more {
+  display: flex;
+  margin: 0.25rem 0;
+}
+
 .recovery-actions {
   display: flex;
   justify-content: flex-end;

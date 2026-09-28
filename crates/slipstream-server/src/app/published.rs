@@ -308,7 +308,14 @@ impl Published {
 pub(crate) struct RecoveryApplyItem {
     pub original_id: String,
     pub new_location: String,
-    pub retire_destination: bool,
+    /// The reviewed identity of this mapping. The service recomputes it and
+    /// refuses a mapping that no longer matches what was reviewed.
+    pub mapping_id: String,
+    /// The explicit acknowledgement that historical content could not be
+    /// verified. Required exactly when the reviewed mapping is unverified.
+    pub confirm_unverified_content: bool,
+    /// The exact occupying Photo an explicit retire-and-bind replaces.
+    pub retire_photo_id: Option<String>,
 }
 
 /// Structured failure for one manual recovery apply request.
@@ -317,6 +324,14 @@ pub(crate) enum RecoveryApplyError {
     Rejected {
         message: &'static str,
         rejections: Vec<RecoveryRejectionWire>,
+        refused_mappings: u64,
+    },
+    /// The relocation batch committed, but the publication that follows the
+    /// commit failed. This is neither a refusal nor a confirmed storage
+    /// failure: every submitted mapping's outcome is unknown, and the caller
+    /// must reconcile the Library instead of resubmitting the batch.
+    OutcomeUnknown {
+        mappings: Vec<crate::wire::RecoverySubmittedMappingWire>,
     },
     Server(ServerError),
 }

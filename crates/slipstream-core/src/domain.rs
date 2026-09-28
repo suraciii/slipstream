@@ -227,6 +227,10 @@ pub struct AlbumSummary {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PhotoRead {
     pub id: String,
+    /// The Library identity of the associated Original File.
+    pub original_id: String,
+    /// The current Library-relative Location of that Original File.
+    pub original_location: String,
     pub filename: String,
     pub original_kind: OriginalKind,
     pub original_available: bool,

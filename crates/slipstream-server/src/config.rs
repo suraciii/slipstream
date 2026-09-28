@@ -315,6 +315,11 @@ pub enum ServerError {
     RemovalFilter,
     RemovedWindow,
     RestorationInvalid,
+    /// One Folder-prefix recovery review would evaluate more mappings than
+    /// the advertised bound.
+    RecoveryScope {
+        evaluated: usize,
+    },
 }
 
 impl fmt::Display for ServerError {
@@ -359,6 +364,10 @@ impl fmt::Display for ServerError {
             Self::RestorationInvalid => {
                 formatter.write_str("Restore names exactly one operation or a bounded Photo list")
             }
+            Self::RecoveryScope { evaluated } => write!(
+                formatter,
+                "Recovery review scope of {evaluated} mappings exceeds the advertised bound"
+            ),
         }
     }
 }

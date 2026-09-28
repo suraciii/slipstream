@@ -18,6 +18,7 @@ use std::{
 
 pub const ACCESS_TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const GENERATION: &str = "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE";
+#[allow(dead_code)]
 const TEST_CA: &[u8] = include_bytes!("../../../../tools/test-tls/cert.pem");
 const TEST_CERT: &[u8] = include_bytes!("../../../../tools/test-tls/server-cert.pem");
 const TEST_KEY: &[u8] = include_bytes!("../../../../tools/test-tls/server-key.pem");
@@ -63,6 +64,7 @@ pub fn test_ca_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/test-tls/cert.pem")
 }
 
+#[allow(dead_code)]
 pub fn test_certificate() -> reqwest::Certificate {
     reqwest::Certificate::from_pem(TEST_CA).expect("test CA certificate is valid PEM")
 }

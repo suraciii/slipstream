@@ -227,12 +227,7 @@ impl CommandFailure {
                 message: "Inspect the current state with a read command before continuing."
                     .to_owned(),
                 effect: "unknown".to_owned(),
-                details: json!({
-                    "operation": identity.operation.wire(),
-                    "photoIds": identity.photo_ids,
-                    "albumId": identity.album_id,
-                    "albumName": identity.album_name,
-                }),
+                details: identity.unknown_details(),
             },
         )
     }
@@ -244,12 +239,7 @@ impl CommandFailure {
                 code: "outcome_unknown".to_owned(),
                 message: "The command was interrupted and the outcome is unknown. Inspect the current state before continuing.".to_owned(),
                 effect: "unknown".to_owned(),
-                details: json!({
-                    "operation": identity.operation.wire(),
-                    "photoIds": identity.photo_ids,
-                    "albumId": identity.album_id,
-                    "albumName": identity.album_name,
-                }),
+                details: identity.unknown_details(),
             },
         )
     }
@@ -772,6 +762,118 @@ pub(crate) enum MetadataState {
     Missing,
     Invalid,
     Failed,
+}
+
+// The Reviewed Location Recovery wire contract mirrors the server's own
+// recovery shapes. Items validate against the closed value sets before they
+// are printed, so a malformed response fails as a transport-unknown outcome
+// instead of printing a lie.
+
+/// The current state of one reviewed unavailable-Photo identity.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum RecoveryItemState {
+    Unavailable,
+    Available,
+    Removed,
+    Missing,
+}
+
+/// One reviewed unavailable Photo in a recovery review window.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RecoveryItemWire {
+    pub(crate) state: RecoveryItemState,
+    pub(crate) original_id: String,
+    pub(crate) photo_id: String,
+    pub(crate) location: String,
+    pub(crate) kind: OriginalKind,
+    pub(crate) rating: u8,
+    pub(crate) selection_state: SelectionState,
+    pub(crate) fingerprint_enrolled: bool,
+    pub(crate) album_count: u64,
+    pub(crate) web_url: String,
+}
+
+/// The evaluated outcome of one reviewed relocation mapping.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum RecoveryOutcome {
+    Matched,
+    ContentMismatch,
+    Missing,
+    KindMismatch,
+    Unreadable,
+    Occupied,
+    Colliding,
+}
+
+/// Why one reviewed mapping cannot be applied; `null` means it can.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum RecoveryBlockReason {
+    Colliding,
+    ContentMismatch,
+    DestinationInUse,
+    DestinationRemoved,
+    KindMismatch,
+    Missing,
+    Unreadable,
+}
+
+/// The occupying Original a permitted retire-and-bind may replace.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RetireCandidateWire {
+    pub(crate) photo_id: String,
+    pub(crate) original_id: String,
+    pub(crate) location: String,
+}
+
+/// One reviewed proposed mapping for an unavailable Original.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RecoveryMappingWire {
+    pub(crate) mapping_id: String,
+    pub(crate) original_id: String,
+    pub(crate) photo_id: String,
+    pub(crate) from_location: String,
+    pub(crate) to_location: String,
+    pub(crate) kind: OriginalKind,
+    pub(crate) outcome: RecoveryOutcome,
+    pub(crate) verified: bool,
+    pub(crate) blocked_reason: Option<RecoveryBlockReason>,
+    pub(crate) retire: Option<RetireCandidateWire>,
+}
+
+/// One committed mapping of an applied recovery batch.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RecoveryAppliedWire {
+    pub(crate) original_id: String,
+    pub(crate) photo_id: String,
+    pub(crate) from_location: String,
+    pub(crate) to_location: String,
+    pub(crate) web_url: String,
+    pub(crate) retired: Option<RetireCandidateWire>,
+}
+
+/// Committed result of one reviewed relocation batch.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RecoveryApplyData {
+    pub(crate) applied_mappings: u64,
+    pub(crate) refused_mappings: u64,
+    pub(crate) unavailable_photos: u64,
+    pub(crate) mappings: Vec<RecoveryAppliedWire>,
+}
+
+/// One validated apply document: the exact server request body plus the
+/// submitted mapping identities an unknown-outcome report must carry.
+#[derive(Debug)]
+pub(crate) struct PreparedRecoveryApply {
+    pub(crate) body: Value,
+    pub(crate) identities: Vec<Value>,
 }
 
 #[derive(Debug, Serialize)]

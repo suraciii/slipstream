@@ -1523,7 +1523,11 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
                 "albumReorderMembersMaximum": 100,
                 "removalPhotoIdsMaximum": 100,
                 "retainedQueryIdsMaximum": 1_000_000,
-                "retainedQueryIdleSeconds": 900
+                "retainedQueryIdleSeconds": 900,
+                "recoveryPageMaximum": 60,
+                "recoveryMappingsMaximum": 10_000,
+                "recoveryApplyMaximum": 100,
+                "recoveryReviewIdleSeconds": 900
             }
         })
     );
@@ -1755,7 +1759,9 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
             "filename".to_owned(),
             "hasSavedEdits".to_owned(),
             "id".to_owned(),
+            "location".to_owned(),
             "originalAvailable".to_owned(),
+            "originalId".to_owned(),
             "originalKind".to_owned(),
             "preview".to_owned(),
             "rating".to_owned(),
