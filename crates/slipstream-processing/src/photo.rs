@@ -148,6 +148,19 @@ pub struct Recipe {
     pub white_balance_mode: String,
 }
 
+/// The closed workload/source-kind pairing of a production Photo Start: the
+/// two RAW workloads (`development-tiff`, `film-jpeg`) admit only a `raw`
+/// source, and `proxy-film` admits only a `development-proxy` source whose
+/// staged bytes already carry the semantic exposure transform. Every other
+/// pairing fails closed.
+pub(crate) fn source_kind_admitted(workload: &str, kind: &str) -> bool {
+    match workload {
+        crate::protocol::PHOTO_WORKLOAD | crate::protocol::PHOTO_WORKLOAD_FILM => kind == "raw",
+        crate::protocol::PHOTO_WORKLOAD_PROXY_FILM => kind == "development-proxy",
+        _ => false,
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(tag = "op", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Request {
@@ -309,7 +322,7 @@ impl Request {
                     || !hex(policy, 64)
                     || !hex(bundle, 64)
                     || !is_photo_workload(workload)
-                    || source.kind != "raw"
+                    || !source_kind_admitted(workload, &source.kind)
                     || !identifier(&source.profile_id, 64)
                     || source.size == 0
                     || source.size > MAX_SOURCE_BYTES
@@ -1278,6 +1291,63 @@ mod tests {
         assert!(Request::parse(&serde_json::to_vec(&start).unwrap()).is_ok());
         assert!(Request::parse(&serde_json::to_vec(&output).unwrap()).is_ok());
         assert!(Request::parse(&serde_json::to_vec(&validate_output).unwrap()).is_ok());
+    }
+
+    /// `proxy-film` is the one workload whose admitted source kind is
+    /// `development-proxy`, and the two RAW workloads admit only `raw`.
+    /// Every other workload/source-kind pairing fails closed at the
+    /// descriptor boundary.
+    #[test]
+    fn proxy_film_pairs_only_with_a_development_proxy_source() {
+        let mut start = start_request();
+        if let Request::Start {
+            workload,
+            source,
+            recipe,
+            ..
+        } = &mut start
+        {
+            *workload = crate::protocol::PHOTO_WORKLOAD_PROXY_FILM.into();
+            source.kind = "development-proxy".into();
+            recipe.exposure_milli_ev = 0;
+        }
+        assert!(Request::parse(&serde_json::to_vec(&start).unwrap()).is_ok());
+        for (workload_value, kind) in [
+            (crate::protocol::PHOTO_WORKLOAD, "development-proxy"),
+            (crate::protocol::PHOTO_WORKLOAD_FILM, "development-proxy"),
+            (crate::protocol::PHOTO_WORKLOAD_PROXY_FILM, "raw"),
+            (crate::protocol::PHOTO_WORKLOAD_PROXY_FILM, "proxy"),
+            (crate::protocol::PHOTO_WORKLOAD_PROXY_FILM, ""),
+            (
+                crate::protocol::PHOTO_WORKLOAD_PROXY_FILM,
+                "Development-Proxy",
+            ),
+        ] {
+            let mut mismatched = start.clone();
+            if let Request::Start {
+                workload, source, ..
+            } = &mut mismatched
+            {
+                *workload = workload_value.into();
+                source.kind = kind.into();
+            }
+            assert_eq!(
+                mismatched.validate(),
+                Err(ErrorCode::InvalidRequest),
+                "workload {workload_value:?} with source kind {kind:?} must be refused"
+            );
+        }
+        // The proxy target stays a closed output target of its own.
+        let output = Request::Output {
+            mode: PHOTO_MODE.into(),
+            version: PHOTO_PROTOCOL_VERSION,
+            instance: "0".repeat(32),
+            export_id: "export-1".into(),
+            incarnation: "1".repeat(32),
+            sequence: 1,
+            target: crate::protocol::PHOTO_WORKLOAD_PROXY_FILM.into(),
+        };
+        assert!(Request::parse(&serde_json::to_vec(&output).unwrap()).is_ok());
     }
 
     #[test]

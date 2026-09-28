@@ -25,26 +25,26 @@ COPY tools/processing/photo/film_adapter.py /opt/slipstream-photo/film_adapter.p
 # The linear ProPhoto RGB handoff profile comes verbatim from the qualified
 # image; the worker copies it into the container configdir before exec, and
 # darktable only resolves --icc-file against that registered copy.
-COPY --from=slipstream:development-qualification \
+COPY --from=slipstream:344-buffer-lifetimes \
      /opt/spektrafilm/src/spektrafilm/data/icc/ellelstone/LargeRGB-elle-V2-g10.icc \
      /opt/slipstream-photo/icc/LargeRGB-elle-V2-g10.icc
-# The fixed Film stage renders the handoff TIFF with the pinned numerical
-# runtime. The locked interpreter (the venv and the uv-managed CPython it
-# links), the patched spektrafilm source, and the shared development modules
-# come verbatim from the same qualified image, so the recipe identity pinned
-# by film_identity.py is the identity that renders here.
-COPY --from=slipstream:development-qualification /opt/python /opt/python
-COPY --from=slipstream:development-qualification /opt/runtime /opt/runtime
-COPY --from=slipstream:development-qualification /opt/spektrafilm /opt/spektrafilm
-COPY --from=slipstream:development-qualification \
+# The Film stage must use the same qualified numerical image as the pinned
+# recipe identity. A newer development qualification image can carry a
+# different processing-bundle manifest even when its engine files match.
+COPY --from=slipstream:344-buffer-lifetimes /opt/python /opt/python
+COPY --from=slipstream:344-buffer-lifetimes /opt/runtime /opt/runtime
+COPY --from=slipstream:344-buffer-lifetimes /opt/spektrafilm /opt/spektrafilm
+COPY --from=slipstream:344-buffer-lifetimes \
      /opt/probe/film.py \
      /opt/probe/bundle.py \
      /opt/probe/
 COPY tools/development/finished_jpeg.py \
      tools/development/film_identity.py \
      /opt/probe/
-COPY --from=slipstream:development-qualification \
+COPY --from=slipstream:344-buffer-lifetimes \
      /opt/processing-bundle.json /opt/processing-bundle.json
+RUN PYTHONPATH=/opt/spektrafilm/src:/opt/probe \
+    /opt/runtime/bin/python3 -c 'import sys; sys.path.insert(0, "/opt/slipstream-photo"); from film import make_simulator; from film_adapter import check_recipe; _, recipe = make_simulator(); check_recipe(recipe)'
 RUN sha256sum /opt/slipstream-photo/icc/LargeRGB-elle-V2-g10.icc \
         /opt/slipstream-photo/adapter.py /opt/slipstream-photo/film_adapter.py \
         /opt/os-packages.txt \

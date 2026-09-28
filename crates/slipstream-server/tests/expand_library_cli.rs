@@ -100,8 +100,8 @@ fn expand_library_command_updates_binding_and_location_then_scans() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        // Schema v12 adds published camera identity to capture facts.
-        12
+        // Schema v13 retains published camera identity and adds Development Proxies.
+        13
     );
     assert_eq!(
         connection

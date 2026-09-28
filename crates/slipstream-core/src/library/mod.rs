@@ -671,6 +671,67 @@ impl Library {
             .map_err(Into::into)
     }
 
+    /// Reads the recorded Development Proxy of one Photo. `None` means no
+    /// proxy was published (or retained) for the Photo.
+    pub async fn development_proxy(
+        &self,
+        photo_id: &str,
+    ) -> Result<Option<crate::DevelopmentProxyRecord>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.read_development_proxy_receiver(photo_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Records the publication of one Development Proxy. The artifact file
+    /// must already be durably installed in service-owned storage: this row
+    /// is the last step of publication.
+    pub async fn record_development_proxy(
+        &self,
+        record: crate::DevelopmentProxyRecord,
+    ) -> Result<bool, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.record_development_proxy_receiver(record)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Removes the Development Proxy record of one Photo; the caller owns
+    /// removing the artifact after the row is gone.
+    pub async fn remove_development_proxy(&self, photo_id: &str) -> Result<bool, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.remove_development_proxy_receiver(photo_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Every recorded Development Proxy, for startup reconciliation between
+    /// rows and the artifacts the service actually owns.
+    pub async fn all_development_proxies(
+        &self,
+    ) -> Result<Vec<crate::DevelopmentProxyRecord>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.all_development_proxies_receiver()
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
     /// Validates both expected revisions inside one serialized transaction,
     /// captures the immutable Export snapshot, reserves output capacity, and
     /// records the request-identity receipt. A repeated identity resolves to

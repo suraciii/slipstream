@@ -463,6 +463,8 @@ mod tests {
             "sqlite/schema-v11.sql",
             "sqlite/schema-v12.json",
             "sqlite/schema-v12.sql",
+            "sqlite/schema-v13.json",
+            "sqlite/schema-v13.sql",
             "sqlite/v0.sql",
             "sqlite/v1.sql",
             "startup/vectors.json",

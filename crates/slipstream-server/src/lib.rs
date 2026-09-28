@@ -42,6 +42,7 @@ mod access;
 mod app;
 pub use access::administer_access;
 mod config;
+mod development_proxy;
 mod edit_preview;
 mod edit_recipe;
 mod export_manager;

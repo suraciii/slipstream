@@ -3,6 +3,7 @@
 mod admission;
 mod albums;
 mod decisions;
+mod development_proxy;
 mod edit_recipe;
 mod expansion;
 mod export;

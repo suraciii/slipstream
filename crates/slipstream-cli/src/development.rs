@@ -6,7 +6,7 @@
 
 use super::{
     AdmissionState, CommandFailure, MutationIdentity, Operation, ServiceClient, read_input_bytes,
-    valid_request_identity, web_url,
+    valid_request_identity, valid_sha256, web_url,
 };
 use reqwest::Method;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -498,6 +498,13 @@ struct RecipeReadWire {
     support_reason: Option<String>,
     processing_available: bool,
     controls: ControlsWire,
+    /// Optional on older servers; absent means the recipe came from the
+    /// Original rather than a Development Proxy.
+    #[serde(default)]
+    edit_source: Option<String>,
+    /// Present exactly when `editSource` is `development-proxy`.
+    #[serde(default)]
+    edit_source_proxy_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -576,6 +583,14 @@ fn validated_recipe_read(
         read.source_support.as_str(),
         "supported" | "unavailable" | "unsupported"
     );
+    let edit_source_valid = match read.edit_source.as_deref() {
+        None | Some("original") => read.edit_source_proxy_id.is_none(),
+        Some("development-proxy") => read
+            .edit_source_proxy_id
+            .as_deref()
+            .is_some_and(valid_sha256),
+        Some(_) => false,
+    };
     let reason_valid = match read.support_reason.as_deref() {
         None => read.source_support != "unavailable",
         Some(reason) => {
@@ -629,6 +644,7 @@ fn validated_recipe_read(
         || !support_valid
         || !reason_valid
         || !revision_valid
+        || !edit_source_valid
         || !recipe_valid
         || !controls_valid
         || (read.processing_available && (read.source_support != "supported" || !recipe_admitted))
@@ -636,6 +652,9 @@ fn validated_recipe_read(
         return Err(invalid());
     }
     let web_url = web_url(origin, &format!("/?photoId={photo_id}")).map_err(|()| invalid())?;
+    let mut read = read;
+    read.edit_source
+        .get_or_insert_with(|| "original".to_owned());
     let mut value = serde_json::to_value(&read).map_err(|_| invalid())?;
     value["webUrl"] = Value::String(web_url);
     Ok(value)
@@ -1000,6 +1019,37 @@ mod tests {
             })
         );
         assert_eq!(value["webUrl"], "https://slipstream.example/?photoId=p1");
+    }
+
+    #[test]
+    fn recipe_read_validates_edit_source_provenance_and_defaults_legacy_reads() {
+        let legacy = validated_recipe_read(read_wire(read_fixture()), "p1", &origin())
+            .expect("legacy recipe read");
+        assert_eq!(legacy["editSource"], "original");
+        assert_eq!(legacy["editSourceProxyId"], Value::Null);
+
+        let mut proxy_read = read_fixture();
+        proxy_read["editSource"] = json!("development-proxy");
+        proxy_read["editSourceProxyId"] = json!("a".repeat(64));
+        let proxy = validated_recipe_read(read_wire(proxy_read), "p1", &origin())
+            .expect("proxy-backed recipe read");
+        assert_eq!(proxy["editSource"], "development-proxy");
+        assert_eq!(proxy["editSourceProxyId"], "a".repeat(64));
+
+        for (source, proxy_id) in [
+            (json!("development-proxy"), Value::Null),
+            (json!("original"), json!("a".repeat(64))),
+            (json!("future"), Value::Null),
+            (json!("development-proxy"), json!("not-a-digest")),
+        ] {
+            let mut invalid = read_fixture();
+            invalid["editSource"] = source;
+            invalid["editSourceProxyId"] = proxy_id;
+            assert!(
+                validated_recipe_read(read_wire(invalid), "p1", &origin()).is_err(),
+                "invalid provenance must be refused"
+            );
+        }
     }
 
     #[test]

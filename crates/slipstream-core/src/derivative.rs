@@ -229,34 +229,28 @@ pub(crate) fn process_jpeg_with_orientation(
     take_encoded_result(status, &mut result)
 }
 
-/// Convert one Development Result into the fixed sRGB display derivative.
-///
-/// `fd` must be a read-only descriptor for a float32 RGB TIFF that carries the
-/// pinned linear ProPhoto RGB source profile, and `long_edge` is the rendition
-/// geometry; the qualified Edit Preview geometry is
-/// [`DEVELOPMENT_PREVIEW_LONG_EDGE`]. The descriptor is read only. The linear
-/// samples are resampled in their own light before the pinned matrix, the
-/// per-channel clip, and the sRGB transfer function are applied, so this
-/// branch is the only place that clips, exactly as
-/// `design/development-color.md#display-and-comparison` defines.
-///
-/// The result is a display derivative of a Development Result. It must never
-/// replace, or be written back into, the Development TIFF or the Film input.
-///
-/// This conversion is also an integrity gate for the reader's inputs. It
-/// verifies the embedded source profile identity, refuses anything it cannot
-/// decode as a float32 RGB TIFF, and loads with `fail_on` set to
-/// `VIPS_FAIL_ON_ERROR`, so malformed input, truncated payloads, and decode
-/// failures inside the container are refused instead of decoding as partial
-/// or black data, while the private metadata warnings an engine writes into
-/// its own artifact do not refuse a decodable image. The
-/// byte length and digest of a published artifact are still established by
-/// the receipt that publishes it.
-pub fn process_development_tiff(
-    fd: RawFd,
-    target: DerivativeTarget,
-) -> Result<Derivative, DerivativeError> {
-    let long_edge = target.long_edge();
+/// One decoded scene-linear frame of a Development Result: float32 RGB
+/// samples in the pinned linear ProPhoto light plus the exact embedded ICC
+/// profile bytes. This is the Development Proxy artifact content and the
+/// qualified proxy exposure transform's input; it is never a display
+/// derivative and must never be written back over an Original or a
+/// Development TIFF Export artifact.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinearFrame {
+    pub width: u32,
+    pub height: u32,
+    /// `width * height * 3` row-major interleaved finite RGB samples.
+    pub planes: Vec<f32>,
+    /// The exact embedded ICC profile bytes of the decoded source.
+    pub profile: Vec<u8>,
+}
+
+/// Decodes one Development Result TIFF into its scene-linear frame,
+/// resampled in its own light down to the long-edge bound (never upscaled).
+/// The embedded profile identity is verified against the accepted pinned
+/// profiles exactly like [`process_development_tiff`], so a frame is always
+/// in the pinned linear ProPhoto light. `long_edge` must be positive.
+pub fn decode_development_frame(fd: RawFd, long_edge: u32) -> Result<LinearFrame, DerivativeError> {
     initialize()?;
     if fd < 0 || long_edge == 0 {
         return Err(DerivativeError::Internal);
@@ -285,8 +279,129 @@ pub fn process_development_tiff(
     if planes.len() != width as usize * height as usize * 3 {
         return Err(DerivativeError::Internal);
     }
-    let encoded = to_srgb8(&planes);
-    encode_srgb8(&encoded, width, height)
+    Ok(LinearFrame {
+        width,
+        height,
+        planes,
+        profile,
+    })
+}
+
+/// Applies the Development Proxy exposure transform policy: one scene-linear
+/// multiplication by `2^(exposure_milli_ev / 1000)`, the semantic exposure of
+/// the approved payload range over the recipe-neutral baseline frame. A zero
+/// exposure is the identity. The transform never clips: scene-linear samples
+/// stay scene-linear, and a sample that would stop being finite refuses the
+/// whole frame instead of publishing non-finite data. White balance is the
+/// advertised as-shot mode, so no white-balance term exists here.
+pub fn apply_proxy_exposure(
+    frame: &mut LinearFrame,
+    exposure_milli_ev: i64,
+) -> Result<(), DerivativeError> {
+    if exposure_milli_ev == 0 {
+        return Ok(());
+    }
+    let factor = 2_f64.powf(exposure_milli_ev as f64 / 1000.0);
+    if !factor.is_finite() || factor <= 0.0 {
+        return Err(DerivativeError::Internal);
+    }
+    for sample in &mut frame.planes {
+        let scaled = f64::from(*sample) * factor;
+        if !scaled.is_finite() || scaled > f64::from(f32::MAX) || scaled < -f64::from(f32::MAX) {
+            return Err(DerivativeError::Malformed);
+        }
+        *sample = scaled as f32;
+    }
+    Ok(())
+}
+
+/// Encodes one scene-linear frame as the immutable Development Proxy
+/// artifact: an uncompressed float32 RGB TIFF carrying the exact embedded
+/// source profile bytes, so the proxy keeps the pinned handoff identity the
+/// fixed Film stage validates. The frame must be a decoded Development
+/// frame shape: positive bounded geometry, matching plane length, finite
+/// samples, and an accepted pinned profile.
+pub fn encode_development_frame(frame: &LinearFrame) -> Result<Vec<u8>, DerivativeError> {
+    let valid = frame.width > 0
+        && frame.height > 0
+        && u64::from(frame.width) * u64::from(frame.height) <= MAXIMUM_PIXELS
+        && frame.planes.len() == frame.width as usize * frame.height as usize * 3
+        && !frame.profile.is_empty()
+        && ACCEPTED_SOURCE_PROFILE_DIGESTS.contains(&hex_digest(&frame.profile).as_str())
+        && frame.planes.iter().all(|sample| sample.is_finite());
+    if !valid {
+        return Err(DerivativeError::Malformed);
+    }
+    let mut pixels = Vec::with_capacity(frame.planes.len() * 4);
+    for sample in &frame.planes {
+        pixels.extend_from_slice(&sample.to_le_bytes());
+    }
+    Ok(tiff_bytes(
+        &pixels,
+        frame.width,
+        frame.height,
+        32,
+        3,
+        &frame.profile,
+    ))
+}
+
+/// Converts one scene-linear frame into the fixed sRGB display derivative:
+/// the pinned matrix, the per-channel clip, and the sRGB transfer function,
+/// exactly the [`process_development_tiff`] display branch over an already
+/// decoded frame.
+pub fn develop_linear_frame(frame: &LinearFrame) -> Result<Derivative, DerivativeError> {
+    if frame.planes.len() != frame.width as usize * frame.height as usize * 3 {
+        return Err(DerivativeError::Internal);
+    }
+    let encoded = to_srgb8(&frame.planes);
+    encode_srgb8(&encoded, frame.width, frame.height)
+}
+
+/// Renders one Development Proxy artifact into the fixed sRGB display
+/// derivative at the rendition geometry: decode the scene-linear proxy
+/// frame resampled to `target` in its own light, apply the qualified
+/// exposure transform, then the pinned display transform. This is the
+/// proxy-backed Develop Edit Preview path; it never touches the Original.
+pub fn process_development_proxy(
+    fd: RawFd,
+    exposure_milli_ev: i64,
+    target: DerivativeTarget,
+) -> Result<Derivative, DerivativeError> {
+    let mut frame = decode_development_frame(fd, target.long_edge())?;
+    apply_proxy_exposure(&mut frame, exposure_milli_ev)?;
+    develop_linear_frame(&frame)
+}
+
+/// Convert one Development Result into the fixed sRGB display derivative.
+///
+/// `fd` must be a read-only descriptor for a float32 RGB TIFF that carries the
+/// pinned linear ProPhoto RGB source profile, and `long_edge` is the rendition
+/// geometry; the qualified Edit Preview geometry is
+/// [`DEVELOPMENT_PREVIEW_LONG_EDGE`]. The descriptor is read only. The linear
+/// samples are resampled in their own light before the pinned matrix, the
+/// per-channel clip, and the sRGB transfer function are applied, so this
+/// branch is the only place that clips, exactly as
+/// `design/development-color.md#display-and-comparison` defines.
+///
+/// The result is a display derivative of a Development Result. It must never
+/// replace, or be written back into, the Development TIFF or the Film input.
+///
+/// This conversion is also an integrity gate for the reader's inputs. It
+/// verifies the embedded source profile identity, refuses anything it cannot
+/// decode as a float32 RGB TIFF, and loads with `fail_on` set to
+/// `VIPS_FAIL_ON_ERROR`, so malformed input, truncated payloads, and decode
+/// failures inside the container are refused instead of decoding as partial
+/// or black data, while the private metadata warnings an engine writes into
+/// its own artifact do not refuse a decodable image. The
+/// byte length and digest of a published artifact are still established by
+/// the receipt that publishes it.
+pub fn process_development_tiff(
+    fd: RawFd,
+    target: DerivativeTarget,
+) -> Result<Derivative, DerivativeError> {
+    let frame = decode_development_frame(fd, target.long_edge())?;
+    develop_linear_frame(&frame)
 }
 
 fn take_linear_result(
@@ -1085,6 +1200,138 @@ mod tests {
             .descriptor(|fd| process_development_tiff(fd, DerivativeTarget::Review2560))
             .unwrap();
         assert_eq!((derivative.width, derivative.height), (PATCH, PATCH * 2));
+    }
+
+    /// The proxy frame boundary: a decoded Development frame keeps its exact
+    /// samples, geometry, and embedded profile; the encoded proxy artifact
+    /// decodes back to the same frame, and the long-edge bound resamples
+    /// without upscaling.
+    #[test]
+    fn proxy_frame_roundtrip_keeps_samples_geometry_and_profile() {
+        let samples: Vec<f32> = (0..PATCH * PATCH * 2 * 3)
+            .map(|index| (index % 97) as f32 / 96.0)
+            .collect();
+        let fixture = Fixture {
+            bytes: development_tiff_fixture(&samples, PATCH, PATCH * 2),
+        };
+        let frame = fixture
+            .descriptor(|fd| decode_development_frame(fd, DEVELOPMENT_PREVIEW_LONG_EDGE))
+            .unwrap();
+        assert_eq!((frame.width, frame.height), (PATCH, PATCH * 2));
+        assert_eq!(frame.planes, samples);
+        assert_eq!(hex_digest(&frame.profile), SOURCE_PROFILE_ASSET_DIGEST);
+
+        let artifact = encode_development_frame(&frame).unwrap();
+        let republished = Fixture { bytes: artifact };
+        let decoded = republished
+            .descriptor(|fd| decode_development_frame(fd, DEVELOPMENT_PREVIEW_LONG_EDGE))
+            .unwrap();
+        assert_eq!(decoded, frame);
+
+        let halved = republished
+            .descriptor(|fd| decode_development_frame(fd, PATCH))
+            .unwrap();
+        assert_eq!(halved.width.max(halved.height), PATCH);
+    }
+
+    /// The qualified proxy exposure transform multiplies scene-linear
+    /// samples by 2^EV without clipping: values above the display white stay
+    /// scene-linear, a zero exposure is the identity, and a sample that
+    /// would stop being finite refuses the frame.
+    #[test]
+    fn proxy_exposure_scales_scene_linear_samples_without_clipping() {
+        let mut frame = LinearFrame {
+            width: 1,
+            height: 1,
+            planes: vec![0.25, 0.5, 1.0],
+            profile: SOURCE_PROFILE_ASSET.to_vec(),
+        };
+        apply_proxy_exposure(&mut frame, 0).unwrap();
+        assert_eq!(frame.planes, vec![0.25, 0.5, 1.0]);
+        apply_proxy_exposure(&mut frame, 1000).unwrap();
+        assert_eq!(frame.planes, vec![0.5, 1.0, 2.0]);
+
+        let mut overflowing = LinearFrame {
+            width: 1,
+            height: 1,
+            planes: vec![f32::MAX, 0.5, 0.25],
+            profile: SOURCE_PROFILE_ASSET.to_vec(),
+        };
+        assert_eq!(
+            apply_proxy_exposure(&mut overflowing, 1000),
+            Err(DerivativeError::Malformed)
+        );
+    }
+
+    /// The proxy artifact encoder refuses anything that is not the pinned
+    /// handoff identity: a foreign or absent profile, non-finite samples,
+    /// and a plane length that contradicts the geometry.
+    #[test]
+    fn proxy_artifact_encoder_refuses_foreign_identity_and_bad_samples() {
+        let frame = || LinearFrame {
+            width: 2,
+            height: 1,
+            planes: vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            profile: SOURCE_PROFILE_ASSET.to_vec(),
+        };
+        let mut foreign = frame();
+        foreign.profile = b"not-an-icc-profile".to_vec();
+        assert_eq!(
+            encode_development_frame(&foreign),
+            Err(DerivativeError::Malformed)
+        );
+        let mut empty = frame();
+        empty.profile = Vec::new();
+        assert_eq!(
+            encode_development_frame(&empty),
+            Err(DerivativeError::Malformed)
+        );
+        let mut non_finite = frame();
+        non_finite.planes[4] = f32::NAN;
+        assert_eq!(
+            encode_development_frame(&non_finite),
+            Err(DerivativeError::Malformed)
+        );
+        let mut mismatched = frame();
+        mismatched.planes.pop();
+        assert_eq!(
+            encode_development_frame(&mismatched),
+            Err(DerivativeError::Malformed)
+        );
+    }
+
+    /// The proxy-backed Develop preview applies the exposure transform to
+    /// the decoded proxy frame before the pinned display transform: a +1 EV
+    /// request over one baseline proxy matches the display derivative of
+    /// the same frame doubled in scene-linear light.
+    #[test]
+    fn proxy_develop_preview_applies_exposure_before_the_display_transform() {
+        let baseline = float_fixture(&[[0.25, 0.25, 0.25]], SOURCE_PROFILE_ASSET);
+        let proxy = baseline
+            .descriptor(|fd| process_development_proxy(fd, 1000, DerivativeTarget::Thumbnail512))
+            .unwrap();
+        let doubled = float_fixture(&[[0.5, 0.5, 0.5]], SOURCE_PROFILE_ASSET)
+            .descriptor(|fd| process_development_tiff(fd, DerivativeTarget::Thumbnail512))
+            .unwrap();
+        assert_eq!((proxy.width, proxy.height), (PATCH, PATCH));
+        assert_eq!(proxy.profile, DerivativeProfile::Srgb);
+        let proxy_pixel = decoded_pixels(&proxy.jpeg);
+        let doubled_pixel = decoded_pixels(&doubled.jpeg);
+        for (actual, expected) in proxy_pixel.pixels().zip(doubled_pixel.pixels()) {
+            for channel in 0..3 {
+                assert!(
+                    (i32::from(actual.0[channel]) - i32::from(expected.0[channel])).abs() <= 2,
+                    "proxy exposure render must match the doubled frame's display derivative"
+                );
+            }
+        }
+        let unexposed = baseline
+            .descriptor(|fd| process_development_proxy(fd, 0, DerivativeTarget::Thumbnail512))
+            .unwrap();
+        let baseline_render = baseline
+            .descriptor(|fd| process_development_tiff(fd, DerivativeTarget::Thumbnail512))
+            .unwrap();
+        assert_eq!(unexposed.jpeg, baseline_render.jpeg);
     }
 
     /// Runs the display branch over a real Development TIFF. Ignored by

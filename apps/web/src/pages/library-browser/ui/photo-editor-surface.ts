@@ -630,14 +630,16 @@ export function createPhotoEditorSurfaceController({
   editorProxyCreate.addEventListener(
     "click",
     () => {
-      if (editorPhotoId) send({ kind: "editor-proxy-create", photoId: editorPhotoId });
+      if (editorPhotoId)
+        send({ kind: "editor-proxy-create", photoId: editorPhotoId });
     },
     { signal: listeners.signal },
   );
   editorProxyRemove.addEventListener(
     "click",
     () => {
-      if (editorPhotoId) send({ kind: "editor-proxy-remove", photoId: editorPhotoId });
+      if (editorPhotoId)
+        send({ kind: "editor-proxy-remove", photoId: editorPhotoId });
     },
     { signal: listeners.signal },
   );

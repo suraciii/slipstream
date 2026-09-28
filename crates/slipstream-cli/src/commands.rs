@@ -348,6 +348,12 @@ pub enum PhotoCommand {
     },
     /// Request a Develop Edit Preview or download its ready rendition.
     EditPreview(edit_preview_download::EditPreviewArgs),
+    /// Read, build, or remove one Photo's on-demand Development Proxy
+    /// against an observed source revision.
+    Proxy {
+        #[command(subcommand)]
+        command: development_proxy::DevelopmentProxyCommand,
+    },
     /// Read one Photo's standard metadata with provenance, capture facts,
     /// association status, and the evidence a checked Save requires.
     Metadata {

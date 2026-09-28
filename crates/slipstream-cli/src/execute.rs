@@ -118,6 +118,12 @@ pub(crate) async fn execute(
         } => Some(read_recovery_apply(&args.input).await?),
         _ => None,
     };
+    let pending_proxy_create = match &cli.command {
+        Command::Photos {
+            command: PhotoCommand::Proxy { command },
+        } => development_proxy::prepare(command).await?,
+        _ => None,
+    };
     let client = ServiceClient::new(origin, token)?;
     let limits = client.capabilities(operation).await?;
 
@@ -137,6 +143,11 @@ pub(crate) async fn execute(
                     publication,
                 )
                 .await
+            }
+            Command::Photos {
+                command: PhotoCommand::Proxy { command },
+            } => {
+                development_proxy::execute(&client, admission, command, pending_proxy_create).await
             }
             Command::Status => {
                 let data: StatusData = client

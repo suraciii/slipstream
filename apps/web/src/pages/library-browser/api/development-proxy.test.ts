@@ -25,7 +25,10 @@ const proxy = {
 };
 
 const response = (body: unknown, status = 200): Response =>
-  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
 
 describe("development proxy wire contract", () => {
   test("reads current facts and rejects a proxy identity with the wrong Photo", () => {
@@ -35,26 +38,52 @@ describe("development proxy wire contract", () => {
     );
     expect(status?.proxy?.qualityLimit).toBe("2560-long-edge");
     expect(status?.proxy?.sourceRevision).toBe("rev-1");
-    expect(parseDevelopmentProxyStatus({ photoId: "photo-2", state: "current", proxy }, "photo-1")).toBeUndefined();
+    expect(
+      parseDevelopmentProxyStatus(
+        { photoId: "photo-2", state: "current", proxy },
+        "photo-1",
+      ),
+    ).toBeUndefined();
   });
 
   test("POST carries the guarded source revision and accepts an admitted build", async () => {
     let request: RequestInit | undefined;
-    const fetcher: BrowserFetch = async (_url, init) => {
+    const fetcher: BrowserFetch = (_url, init) => {
       request = init;
-      return response({ photoId: "photo-1", state: "building", proxy: null, failure: null }, 202);
+      return Promise.resolve(
+        response(
+          { photoId: "photo-1", state: "building", proxy: null, failure: null },
+          202,
+        ),
+      );
     };
     const result = await createDevelopmentProxy(fetcher, "photo-1", "rev-1");
     expect(result.kind).toBe("ok");
     expect(request?.method).toBe("POST");
-    expect(JSON.parse(String(request?.body))).toEqual({ expectedSourceRevision: "rev-1" });
+    expect(JSON.parse(request?.body as string)).toEqual({
+      expectedSourceRevision: "rev-1",
+    });
   });
 
   test("Original removal is idempotent and status reads preserve absent state", async () => {
-    const fetcher: BrowserFetch = async (url, init) =>
-      String(url).endsWith("development-proxy") && init?.method === "DELETE"
-        ? response({ photoId: "photo-1", state: "absent", proxy: null, removed: false })
-        : response({ photoId: "photo-1", state: "absent", proxy: null, failure: null });
+    const fetcher: BrowserFetch = (url, init) =>
+      Promise.resolve(
+        (url instanceof Request ? url.url : url.toString()).endsWith(
+          "development-proxy",
+        ) && init?.method === "DELETE"
+          ? response({
+              photoId: "photo-1",
+              state: "absent",
+              proxy: null,
+              removed: false,
+            })
+          : response({
+              photoId: "photo-1",
+              state: "absent",
+              proxy: null,
+              failure: null,
+            }),
+      );
     expect((await removeDevelopmentProxy(fetcher, "photo-1")).kind).toBe("ok");
     expect((await fetchDevelopmentProxy(fetcher, "photo-1")).kind).toBe("ok");
   });

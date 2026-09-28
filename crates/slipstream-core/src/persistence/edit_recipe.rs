@@ -276,9 +276,22 @@ pub(super) fn save_edit_recipe(
             return Ok(EditRecipeWriteOutcome::UnsupportedPhoto);
         }
         if !available || !current.source_available {
-            return Ok(EditRecipeWriteOutcome::Unavailable);
-        }
-        if current.current_source_revision != mutation.expected_source_revision {
+            // The Original is unavailable, so the only guarded save is one a
+            // current Development Proxy stands in for: the proxy was derived
+            // from exactly the last observed source revision, and the caller
+            // guards against that same revision. The stored recipe stays
+            // bound to the Original's source revision; nothing here rebinds
+            // it to the proxy. Any other offline save stays refused.
+            let guarded =
+                super::development_proxy::read_development_proxy(transaction, &mutation.photo_id)?
+                    .is_some_and(|proxy| {
+                        proxy.source_revision == mutation.expected_source_revision
+                            && proxy.source_revision == current.current_source_revision
+                    });
+            if !guarded {
+                return Ok(EditRecipeWriteOutcome::Unavailable);
+            }
+        } else if current.current_source_revision != mutation.expected_source_revision {
             return Ok(EditRecipeWriteOutcome::SourceChanged(current));
         }
         if current
@@ -988,6 +1001,133 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(missing, EditRecipeWriteOutcome::MissingPhoto);
+        persistence.shutdown().unwrap();
+    }
+
+    /// A current Development Proxy stands in for an unavailable Original:
+    /// the offline save stays guarded by exactly the source revision the
+    /// proxy was derived from, the stored recipe keeps its Original binding,
+    /// and every other offline save stays refused.
+    #[tokio::test]
+    async fn development_proxy_guards_offline_saves_against_the_derived_revision() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v13.sql"),
+        );
+        let mut connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "raw-original",
+                photo_id: "raw-photo",
+                relative_path: "shoot/proxy.ARW",
+                kind: "raw",
+                available: false,
+                size: 23,
+                mtime_ms: 3_000.0,
+            },
+        );
+        let derived = source_revision("shoot/proxy.ARW", 23, 3_000.0).unwrap();
+        let record = |revision: &str| crate::DevelopmentProxyRecord {
+            photo_id: "raw-photo".to_owned(),
+            source_revision: revision.to_owned(),
+            source_relative_path: "shoot/proxy.ARW".to_owned(),
+            source_sha256: "a".repeat(64),
+            source_size: 23,
+            profile_id: "sony-ilce-7rm5-arw".to_owned(),
+            pipeline_version: crate::DEVELOPMENT_PROXY_PIPELINE_VERSION.to_owned(),
+            bundle_sha256: "b".repeat(64),
+            long_edge: crate::DEVELOPMENT_PROXY_LONG_EDGE,
+            width: 2560,
+            height: 1707,
+            artifact_sha256: "c".repeat(64),
+            artifact_bytes: 2048,
+            created_at: 1_700_000_000,
+        };
+        assert!(
+            crate::persistence::development_proxy::record_development_proxy(
+                &state,
+                &name,
+                &mut connection,
+                record(&derived),
+            )
+            .unwrap()
+        );
+        drop(connection);
+        let persistence = Persistence::open(
+            crate::persistence::admission::StateDirectory::open_or_create(
+                &library,
+                state.canonical_path(),
+            )
+            .unwrap(),
+            name.clone(),
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        let save = |request_id: &str,
+                    expected_recipe_version: Option<String>,
+                    expected_source_revision: &str| {
+            let receiver = persistence
+                .save_edit_recipe_receiver(SaveEditRecipe {
+                    photo_id: "raw-photo".to_owned(),
+                    request_id: request_id.to_owned(),
+                    expected_recipe_version,
+                    expected_source_revision: expected_source_revision.to_owned(),
+                    settings: EditRecipeSettings {
+                        exposure_ev: 0.5,
+                        white_balance: WhiteBalanceIntent::AsShot,
+                    },
+                })
+                .unwrap();
+            async move { receiver.await.unwrap().unwrap() }
+        };
+        let saved = save("proxy-save-1", None, &derived).await;
+        let EditRecipeWriteOutcome::Saved(recipe) = saved else {
+            panic!("a proxy-guarded offline save must be admitted: {saved:?}");
+        };
+        assert_eq!(recipe.source_revision, derived);
+        assert_eq!(recipe.settings.exposure_ev, 0.5);
+        let read = persistence
+            .edit_recipe_receiver("raw-photo")
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!read.source_available);
+        assert_eq!(read.current_source_revision, derived);
+        assert_eq!(
+            read.recipe
+                .as_ref()
+                .map(|recipe| recipe.source_revision.as_str()),
+            Some(derived.as_str()),
+            "the stored recipe stays bound to the Original's source revision"
+        );
+
+        // A guard against any other revision is not the proxy's derivation.
+        let foreign = save("proxy-save-2", Some(recipe.revision.clone()), "rev-foreign").await;
+        assert_eq!(foreign, EditRecipeWriteOutcome::Unavailable);
+
+        // Without the proxy row the offline save is refused outright.
+        assert!(
+            crate::persistence::development_proxy::remove_development_proxy(
+                &state,
+                &name,
+                &mut Connection::open(&path).unwrap(),
+                "raw-photo",
+            )
+            .unwrap()
+        );
+        let unguarded = save("proxy-save-3", Some(recipe.revision), &derived).await;
+        assert_eq!(unguarded, EditRecipeWriteOutcome::Unavailable);
         persistence.shutdown().unwrap();
     }
 }

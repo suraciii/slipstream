@@ -177,6 +177,8 @@ pub struct Application {
     pub(crate) shared: Arc<SharedLibrary>,
     /// The Export lifecycle owner when the deployment configures processing.
     pub(crate) exports: Option<Arc<crate::export_manager::ExportManager>>,
+    /// Durable Development Proxy lifecycle, available with processing.
+    pub(crate) proxies: Option<Arc<crate::development_proxy::DevelopmentProxyManager>>,
     scan_cycle: ScanCycle,
     pub(crate) retained_queries: Mutex<QueryRegistry>,
     /// Bounded reviewed Location Recovery state.
@@ -370,6 +372,26 @@ impl Application {
             }
             _ => None,
         };
+        let proxies = match (&config.processing, exports.as_ref()) {
+            (Some(processing), Some(exports)) => {
+                let opened = crate::development_proxy::DevelopmentProxyManager::open(
+                    Arc::clone(&library),
+                    Arc::clone(exports),
+                    processing.clone(),
+                    &config.state_directory,
+                );
+                match opened {
+                    Ok(manager) => Some(Arc::new(manager)),
+                    Err(message) => {
+                        let library_for_close = Arc::clone(&library);
+                        let _ =
+                            tokio::task::spawn_blocking(move || library_for_close.shutdown()).await;
+                        return Err(ServerError::Export(message));
+                    }
+                }
+            }
+            _ => None,
+        };
         let library_for_preview = Arc::clone(&library);
         let preview = match tokio::task::spawn_blocking(move || {
             PreviewService::from_cache(library_for_preview, cache)
@@ -394,10 +416,11 @@ impl Application {
             access,
             library,
             library_root: config.library_root.clone(),
+            exports,
+            proxies,
+            scan_cycle: ScanCycle::new(),
             preview,
             shared,
-            exports,
-            scan_cycle: ScanCycle::new(),
             retained_queries: Mutex::new(QueryRegistry::production()),
             recovery_reviews: Mutex::new(crate::recovery_review::RecoveryReviews::production()),
             browse_counter: AtomicU64::new(0),
@@ -423,6 +446,9 @@ impl Application {
         if let Some(manager) = application.exports.as_ref() {
             manager.reconcile_after_restart();
             manager.schedule_expiry_sweep();
+        }
+        if let Some(manager) = application.proxies.as_ref() {
+            manager.reconcile_after_restart();
         }
         Ok(application)
     }

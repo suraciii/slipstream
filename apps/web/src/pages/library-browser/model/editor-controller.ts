@@ -706,7 +706,10 @@ export function createEditorController(
     void loadEditorExports(photoId);
   };
   const refreshEditor = (photoId: string): void => {
-    editorRecipeGenerations.set(photoId, (editorRecipeGenerations.get(photoId) ?? 0) + 1);
+    editorRecipeGenerations.set(
+      photoId,
+      (editorRecipeGenerations.get(photoId) ?? 0) + 1,
+    );
     void loadEditorFacts(photoId, "refresh");
     void loadEditorExports(photoId);
   };
@@ -1464,7 +1467,8 @@ export function createEditorController(
   const readProxy = async (photoId: string): Promise<void> => {
     const generation = ++editorProxyGeneration;
     const result = await fetchDevelopmentProxy(fetcher, photoId);
-    if (generation !== editorProxyGeneration || !editorOwnsPhoto(photoId)) return;
+    if (generation !== editorProxyGeneration || !editorOwnsPhoto(photoId))
+      return;
     if (result.kind === "failed") {
       editorProxyFailure = result.message;
       renderEditor();
@@ -1490,7 +1494,11 @@ export function createEditorController(
     editorProxyFailure = "";
     editorProxy = { photoId, state: "building", proxy: null, failure: null };
     renderEditor();
-    const result = await createDevelopmentProxy(fetcher, photoId, sourceRevision);
+    const result = await createDevelopmentProxy(
+      fetcher,
+      photoId,
+      sourceRevision,
+    );
     if (!editorOwnsPhoto(photoId)) return;
     if (result.kind === "failed") editorProxyFailure = result.message;
     else editorProxy = result.status;

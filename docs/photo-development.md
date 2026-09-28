@@ -190,6 +190,15 @@ A Photo with saved editing intent or retained Export references must count as
 referenced when assessing Retire and Bind eligibility. Recovery must not retire
 editing state as though it were an unused scan record.
 
+When a valid Development Proxy exists for the last observed source revision,
+Slipstream must expose that fact as `editSource: "development-proxy"` while the
+Original is unavailable. Develop Edit Previews may apply the numeric exposure
+against the proxy's scene-linear baseline and the pinned display transform
+without reopening the Original. Film Edit Previews must use the qualified Film
+worker over the proxy and must report failure when that worker is unavailable.
+The proxy must never make a full-resolution Export admissible: Development TIFF
+and Finished JPEG exports require the Original.
+
 ## Processing Capacity
 
 The deployment operator must be able to set a finite memory allowance for image

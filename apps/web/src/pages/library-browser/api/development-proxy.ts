@@ -29,7 +29,13 @@ const hex64 = (value: unknown): value is string =>
 
 const parseProxy = (value: unknown): DevelopmentProxyFacts | null => {
   if (!isRecord(value)) return null;
-  const numberKeys = ["sourceSize", "longEdge", "width", "height", "byteLength"] as const;
+  const numberKeys = [
+    "sourceSize",
+    "longEdge",
+    "width",
+    "height",
+    "byteLength",
+  ] as const;
   if (
     typeof value.proxyId !== "string" ||
     typeof value.sourceRevision !== "string" ||
@@ -40,8 +46,11 @@ const parseProxy = (value: unknown): DevelopmentProxyFacts | null => {
     !hex64(value.sha256) ||
     typeof value.createdAt !== "number" ||
     !Number.isFinite(value.createdAt) ||
-    numberKeys.some((key) => typeof value[key] !== "number" || !Number.isFinite(value[key] as number))
-  ) return null;
+    numberKeys.some(
+      (key) => typeof value[key] !== "number" || !Number.isFinite(value[key]),
+    )
+  )
+    return null;
   return Object.freeze({
     proxyId: value.proxyId,
     sourceRevision: value.sourceRevision,
@@ -55,7 +64,7 @@ const parseProxy = (value: unknown): DevelopmentProxyFacts | null => {
     qualityLimit: value.qualityLimit,
     byteLength: value.byteLength as number,
     sha256: value.sha256,
-    createdAt: value.createdAt as number,
+    createdAt: value.createdAt,
   });
 };
 
@@ -65,7 +74,13 @@ export const parseDevelopmentProxyStatus = (
 ): DevelopmentProxyStatus | undefined => {
   if (!isRecord(value) || value.photoId !== photoId) return undefined;
   const state = value.state;
-  if (state !== "absent" && state !== "building" && state !== "current" && state !== "stale") return undefined;
+  if (
+    state !== "absent" &&
+    state !== "building" &&
+    state !== "current" &&
+    state !== "stale"
+  )
+    return undefined;
   const proxy = value.proxy === null ? null : parseProxy(value.proxy);
   if (state === "current" && proxy === null) return undefined;
   const failureValue = value.failure;
@@ -85,12 +100,18 @@ export type ProxyOutcome =
   | Readonly<{ kind: "ok"; status: DevelopmentProxyStatus }>
   | Readonly<{ kind: "failed"; message: string }>;
 
-const read = async (response: Response, photoId: string): Promise<ProxyOutcome> => {
+const read = async (
+  response: Response,
+  photoId: string,
+): Promise<ProxyOutcome> => {
   const body: unknown = await response.json().catch(() => undefined);
   const status = parseDevelopmentProxyStatus(body, photoId);
   return status
     ? { kind: "ok", status }
-    : { kind: "failed", message: `Development Proxy response was invalid (${response.status}).` };
+    : {
+        kind: "failed",
+        message: `Development Proxy response was invalid (${response.status}).`,
+      };
 };
 
 export const fetchDevelopmentProxy = async (
@@ -99,9 +120,19 @@ export const fetchDevelopmentProxy = async (
   signal?: AbortSignal,
 ): Promise<ProxyOutcome> => {
   try {
-    return await read(await fetcher(proxyPath(photoId), { priority: "high", ...(signal ? { signal } : {}) }), photoId);
+    return await read(
+      await fetcher(proxyPath(photoId), {
+        priority: "high",
+        ...(signal ? { signal } : {}),
+      }),
+      photoId,
+    );
+  } catch {
+    return {
+      kind: "failed",
+      message: "The Development Proxy status could not be read.",
+    };
   }
-  catch { return { kind: "failed", message: "The Development Proxy status could not be read." }; }
 };
 
 export const createDevelopmentProxy = async (
@@ -111,14 +142,22 @@ export const createDevelopmentProxy = async (
   signal?: AbortSignal,
 ): Promise<ProxyOutcome> => {
   try {
-    return await read(await fetcher(proxyPath(photoId), {
-      method: "POST",
-      priority: "high",
-      ...(signal ? { signal } : {}),
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ expectedSourceRevision }),
-    }), photoId);
-  } catch { return { kind: "failed", message: "The Development Proxy could not be created." }; }
+    return await read(
+      await fetcher(proxyPath(photoId), {
+        method: "POST",
+        priority: "high",
+        ...(signal ? { signal } : {}),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expectedSourceRevision }),
+      }),
+      photoId,
+    );
+  } catch {
+    return {
+      kind: "failed",
+      message: "The Development Proxy could not be created.",
+    };
+  }
 };
 
 export const removeDevelopmentProxy = async (
@@ -127,7 +166,18 @@ export const removeDevelopmentProxy = async (
   signal?: AbortSignal,
 ): Promise<ProxyOutcome> => {
   try {
-    return await read(await fetcher(proxyPath(photoId), { method: "DELETE", priority: "high", ...(signal ? { signal } : {}) }), photoId);
+    return await read(
+      await fetcher(proxyPath(photoId), {
+        method: "DELETE",
+        priority: "high",
+        ...(signal ? { signal } : {}),
+      }),
+      photoId,
+    );
+  } catch {
+    return {
+      kind: "failed",
+      message: "The Development Proxy could not be removed.",
+    };
   }
-  catch { return { kind: "failed", message: "The Development Proxy could not be removed." }; }
 };

@@ -216,9 +216,9 @@ async fn unbounded_library_routes_are_retired() {
             .unwrap(),
     )
     .await;
-    // The request policy admits DELETE only for /api/browse/{token}, so
-    // the retired list endpoint is rejected 405 before routing instead
-    // of reaching the API 404 fallback.
+    // The request policy admits DELETE only for /api/browse/{token} and the
+    // Development Proxy removal, so the retired list endpoint is rejected 405
+    // before routing instead of reaching the API 404 fallback.
     assert_eq!(deleted.status(), StatusCode::METHOD_NOT_ALLOWED);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);

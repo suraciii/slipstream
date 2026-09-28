@@ -155,6 +155,7 @@ mod tests {
     const SCHEMA_V9_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v9.sql");
     const SCHEMA_V10_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v10.sql");
     const SCHEMA_V11_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v11.sql");
+    const SCHEMA_V12_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v12.sql");
     const SCHEMA_V13_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v13.sql");
 
     fn execute_fixture(sql: &str) -> Connection {

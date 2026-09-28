@@ -1299,14 +1299,17 @@ fn development_surface_refusals_map_onto_the_closed_exit_codes() {
     assert_eq!(mapped("recipe_conflict").exit_code, 4);
     assert_eq!(mapped("source_changed").exit_code, 4);
     assert_eq!(mapped("requires_rebind").exit_code, 4);
+    // A read with no source revision remains retryable; only the server's
+    // confirmed Original-required refusal is a conflict-style exit.
     assert_eq!(mapped("request_conflict").exit_code, 4);
+    assert_eq!(mapped("resource_unavailable").exit_code, 6);
+    assert_eq!(mapped("original_required").exit_code, 4);
     assert_eq!(mapped("export_conflict").exit_code, 4);
     assert_eq!(mapped("output_unavailable").exit_code, 4);
     assert_eq!(mapped("export_expired").exit_code, 6);
     assert_eq!(mapped("receipt_expired").exit_code, 6);
     assert_eq!(mapped("artifact_expired").exit_code, 6);
     assert_eq!(mapped("processing_unavailable").exit_code, 6);
-    assert_eq!(mapped("resource_unavailable").exit_code, 6);
     assert_eq!(mapped("retained_output_full").exit_code, 6);
     // A possibly admitted write keeps its unknown outcome; the mapped
     // confirmed refusals keep the service's message and effect.
@@ -1959,4 +1962,47 @@ fn recovery_failure_codes_validate_their_exact_details() {
         )
         .is_some()
     );
+}
+
+#[test]
+fn development_proxy_commands_parse_their_closed_forms() {
+    for arguments in [
+        vec!["photos", "proxy", "get", "photo-1"],
+        vec![
+            "photos",
+            "proxy",
+            "create",
+            "photo-1",
+            "--input",
+            "create.json",
+        ],
+        vec!["photos", "proxy", "remove", "photo-1"],
+    ] {
+        assert!(
+            Cli::try_parse_from(std::iter::once("slipstream").chain(arguments.iter().copied()))
+                .is_ok(),
+            "must parse: {arguments:?}"
+        );
+    }
+    for arguments in [
+        vec!["photos", "proxy", "get", ""],
+        vec!["photos", "proxy", "create", "photo-1"],
+        vec!["photos", "proxy", "create", "photo-1", "--input", ""],
+        vec![
+            "photos",
+            "proxy",
+            "create",
+            "photo-1",
+            "--expected-source-revision",
+            "source-1",
+        ],
+        vec!["photos", "proxy", "remove", ""],
+        vec!["photos", "proxy", "inspect", "photo-1"],
+    ] {
+        assert!(
+            Cli::try_parse_from(std::iter::once("slipstream").chain(arguments.iter().copied()))
+                .is_err(),
+            "must refuse: {arguments:?}"
+        );
+    }
 }

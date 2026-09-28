@@ -1266,29 +1266,6 @@ mod tests {
     }
     // album-language-legacy:end v4-migration-test
 
-    #[test]
-    fn newer_v13_database_is_rejected_without_changes() {
-        let (_base, library, state, name, path) = fixture();
-        seed(
-            &path,
-            include_str!("../../../../compatibility/sqlite/schema-v5.sql"),
-        );
-        Connection::open(&path)
-            .unwrap()
-            .pragma_update(None, "user_version", 13)
-            .unwrap();
-        let before = fs::read(&path).unwrap();
-        assert!(matches!(
-            Persistence::open(
-                state,
-                name,
-                library.canonical_path().to_str().unwrap().to_owned(),
-            ),
-            Err(PersistenceError::NewerSchema)
-        ));
-        assert_eq!(fs::read(&path).unwrap(), before);
-    }
-
     #[tokio::test]
     async fn migrates_v11_to_v13_preserving_every_fact_with_empty_camera_identity() {
         let (_base, library, state, name, path) = fixture();
@@ -1963,9 +1940,10 @@ mod tests {
     // album-language-legacy:end v2-reconciliation-test
 
     /// The v8 fixture carries the Photos, decisions, and Album membership the
-    /// migration must preserve, and the new removal marker starts empty.
+    /// migration chain must preserve; the resulting current schema starts
+    /// with an empty removal marker.
     #[tokio::test]
-    async fn v8_to_v9_migration_preserves_photos_and_starts_unremoved() {
+    async fn v8_to_current_migration_preserves_photos_and_starts_unremoved() {
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
@@ -2020,7 +1998,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            12
+            13
         );
         assert_eq!(
             connection

@@ -20,6 +20,7 @@ import { createRatingControls } from "./rating-controls.js";
 import { createPhotoToolsController } from "./photo-tools.js";
 import { createPhotoZoomController } from "./photo-zoom.js";
 import { createPhotoEditorSurfaceController } from "./photo-editor-surface.js";
+import type { EditorProxyViewModel } from "./editor-proxy-view-model.js";
 import { createSourceSurfaceController } from "./source-surface.js";
 import { createAlbumForm } from "./album-form.js";
 import {
@@ -131,8 +132,6 @@ export type GridProgressViewModel = Readonly<{
 /// Develop the Edit Preview of the Development Result, and Film the Edit
 /// Preview of the Film Result once that capability is enabled.
 export type EditorStage = "camera" | "develop" | "film";
-type EditorProxyViewModel = Readonly<{ state: "absent" | "building" | "current" | "stale"; note: string; proxy: Readonly<{ width: number; height: number; longEdge: number; qualityLimit: string; byteLength: number; sourceRevision: string; sourceProfileId: string; pipelineVersion: string }> | null; canCreate: boolean; canRemove: boolean }>;
-
 
 export type EditorExportViewModel = Readonly<{
   state:
@@ -235,7 +234,12 @@ export type LibraryBrowserIntent =
         | "editor-use-saved"
         | "editor-reapply"
         | "editor-discard-draft"
-        | "editor-proxy-create" | "editor-proxy-remove" | "editor-export-submit" | "editor-export-cancel" | "editor-export-retry" | "editor-export-download";
+        | "editor-proxy-create"
+        | "editor-proxy-remove"
+        | "editor-export-submit"
+        | "editor-export-cancel"
+        | "editor-export-retry"
+        | "editor-export-download";
       photoId: string;
     }>
   | Readonly<{ kind: "summary-action"; presentationId: number }>
@@ -802,7 +806,7 @@ export function createLibraryBrowserView(
                   <div class="photo-editor-controls" aria-label="Photo edit recipe">
                     <div class="photo-editor-stages" role="group" aria-label="Editing stage"><button type="button" data-photo-editor-stage="camera" aria-pressed="false">Camera</button><button type="button" data-photo-editor-stage="develop" aria-pressed="true">Develop</button><button type="button" data-photo-editor-stage="film" aria-pressed="false">Film</button></div>
                     <p class="photo-editor-stage-note" id="photo-editor-stage-note" data-photo-editor-stage-note role="status"></p>
-                    <p class="photo-editor-provenance" data-photo-editor-provenance role="status"></p>
+                    <p class="photo-editor-provenance" data-photo-editor-provenance role="status"></p><p class="photo-editor-note" data-photo-editor-capability role="status" hidden></p>
                     <img class="photo-editor-preview-image" data-photo-editor-preview-image alt="Current stage Edit Preview" hidden>
                     <p class="photo-editor-preview-note" data-photo-editor-preview-note hidden></p>
                     <div class="photo-editor-field"><label for="photo-editor-exposure">Exposure</label><output data-photo-editor-exposure-value for="photo-editor-exposure">0.000 EV</output><input id="photo-editor-exposure" data-photo-editor-exposure type="range" min="0" max="1" step="0.001" value="0" aria-label="Exposure" disabled><button type="button" class="quiet" data-photo-editor-reset-exposure disabled>Reset exposure</button></div>
