@@ -7,7 +7,11 @@ import {
   type RemovalReviewViewModel,
   type TrashReviewViewModel,
 } from "./removed-panels.js";
-import { createRecoveryPanel } from "./recovery-panel.js";
+import {
+  createRecoveryPanel,
+  RECOVERY_PANEL_TEMPLATE,
+  recoveryPanelElements,
+} from "./recovery-panel.js";
 import {
   createMembershipPanel,
   type MembershipPanelElements,
@@ -946,32 +950,7 @@ export function createLibraryBrowserView(
         <dialog class="album-dialog" data-album-form-dialog aria-labelledby="album-form-title">
           <div class="album-dialog-sheet" data-album-form-body></div>
         </dialog>
-        <dialog class="recovery-dialog" data-recovery-panel aria-labelledby="recovery-title">
-          <div class="recovery-sheet">
-            <header class="recovery-header"><h3 id="recovery-title">Review unavailable originals</h3><button type="button" class="quiet" data-recovery-close>Close</button></header>
-          <p class="recovery-summary" data-recovery-summary role="status"></p>
-          <ul class="recovery-list" data-recovery-list></ul>
-          <div class="recovery-more"><button type="button" class="quiet" data-recovery-more hidden>Load more</button></div>
-          <div class="recovery-forms">
-            <div class="recovery-batch">
-              <label>Old folder prefix<input data-recovery-old-prefix type="text" autocomplete="off" spellcheck="false" placeholder="2023/travel" /></label>
-              <label>New folder prefix<input data-recovery-new-prefix type="text" autocomplete="off" spellcheck="false" placeholder="2024/travel" /></label>
-              <button type="button" data-recovery-propose>Propose batch mappings</button>
-            </div>
-            <div class="recovery-single">
-              <label>Single Original<select data-recovery-single-original></select></label>
-              <label>New location<input data-recovery-single-location type="text" autocomplete="off" spellcheck="false" placeholder="2024/travel/renamed.ARW" /></label>
-              <button type="button" data-recovery-propose-single>Propose this mapping</button>
-            </div>
-          </div>
-          <p class="recovery-note" data-recovery-note hidden>Old content cannot be verified for Originals without a fingerprint. Review every mapping and confirm explicitly.</p>
-          <p class="recovery-summary" data-recovery-proposal-summary role="status" hidden></p>
-          <ul class="recovery-proposals" data-recovery-proposals hidden></ul>
-          <div class="recovery-more"><button type="button" class="quiet" data-recovery-mappings-more hidden>Load more</button></div>
-          <div class="recovery-actions"><button type="button" data-recovery-apply hidden>Apply mappings</button></div>
-          <p class="recovery-message" data-recovery-message role="alert" hidden></p>
-          </div>
-        </dialog>
+${RECOVERY_PANEL_TEMPLATE}
         <dialog class="removal-dialog" data-removal-review aria-labelledby="removal-title">
           <div class="removal-sheet">
             <header class="removal-header"><h3 id="removal-title">Remove rejected Photos</h3><button type="button" class="quiet" data-removal-close>Close</button></header>
@@ -1463,53 +1442,7 @@ export function createLibraryBrowserView(
     );
   };
   const recoveryPanelController = createRecoveryPanel({
-    elements: {
-      recoveryNotice: required<HTMLElement>(root, "[data-recovery-notice]"),
-      recoveryPanel: required<HTMLDialogElement>(root, "[data-recovery-panel]"),
-      recoverySummary: required<HTMLElement>(root, "[data-recovery-summary]"),
-      recoveryList: required<HTMLElement>(root, "[data-recovery-list]"),
-      recoveryMore: required<HTMLButtonElement>(root, "[data-recovery-more]"),
-      recoveryOldPrefix: required<HTMLInputElement>(
-        root,
-        "[data-recovery-old-prefix]",
-      ),
-      recoveryNewPrefix: required<HTMLInputElement>(
-        root,
-        "[data-recovery-new-prefix]",
-      ),
-      recoveryPropose: required<HTMLButtonElement>(
-        root,
-        "[data-recovery-propose]",
-      ),
-      recoverySingleOriginal: required<HTMLSelectElement>(
-        root,
-        "[data-recovery-single-original]",
-      ),
-      recoverySingleLocation: required<HTMLInputElement>(
-        root,
-        "[data-recovery-single-location]",
-      ),
-      recoveryProposeSingle: required<HTMLButtonElement>(
-        root,
-        "[data-recovery-propose-single]",
-      ),
-      recoveryNote: required<HTMLElement>(root, "[data-recovery-note]"),
-      recoveryProposalSummary: required<HTMLElement>(
-        root,
-        "[data-recovery-proposal-summary]",
-      ),
-      recoveryProposalList: required<HTMLElement>(
-        root,
-        "[data-recovery-proposals]",
-      ),
-      recoveryMappingsMore: required<HTMLButtonElement>(
-        root,
-        "[data-recovery-mappings-more]",
-      ),
-      recoveryApply: required<HTMLButtonElement>(root, "[data-recovery-apply]"),
-      recoveryMessage: required<HTMLElement>(root, "[data-recovery-message]"),
-      recoveryClose: required<HTMLButtonElement>(root, "[data-recovery-close]"),
-    },
+    elements: recoveryPanelElements(root),
     send,
     surfaces,
     selectionLabel,
