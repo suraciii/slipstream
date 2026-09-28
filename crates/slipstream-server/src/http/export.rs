@@ -180,6 +180,16 @@ pub(crate) async fn submit_export(
             );
         }
     }
+    if body.target == EXPORT_FILM_JPEG_TARGET {
+        // The photo launcher proves only Development. Finished Film output
+        // requires the separate qualified Film authority and is unavailable
+        // until that deployment gate is landed.
+        return export_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "processing_unavailable",
+            "The Film processing stage is not qualified for this deployment",
+        );
+    }
     if photo.original_kind != slipstream_core::OriginalKind::Raw {
         return export_error(
             StatusCode::UNPROCESSABLE_ENTITY,

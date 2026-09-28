@@ -124,8 +124,10 @@ enum Step {
     /// Answer the Edit Preview read with the pending admission.
     AdmitPreview,
     IndeterminatePreview,
-    /// Serve a complete, correctly described ready rendition.
+    /// Serve a complete, correctly described ready Develop rendition.
     ServeRendition,
+    /// Serve a complete, correctly described ready Film rendition.
+    ServeFilmRendition,
     /// Serve the rendition with a digest that names other bytes.
     ServeWrongDigest,
     /// Announce more body bytes than the transfer sends, then close.
@@ -297,17 +299,30 @@ fn answer(stream: &mut impl Write, step: &Step, rendition: &[u8]) {
             "Internal Server Error",
             &json!({"error":{"code":"outcome_unknown", "message":"The render admission outcome is unknown; request the preview again.", "effect":"none", "details":{"stage":"develop"}}}),
         ),
-        Step::ServeRendition => {
-            write_rendition(stream, &sha256_hex(rendition), rendition.len(), rendition)
-        }
+        Step::ServeRendition => write_rendition(
+            stream,
+            "develop",
+            &sha256_hex(rendition),
+            rendition.len(),
+            rendition,
+        ),
+        Step::ServeFilmRendition => write_rendition(
+            stream,
+            "film",
+            &sha256_hex(rendition),
+            rendition.len(),
+            rendition,
+        ),
         Step::ServeWrongDigest => write_rendition(
             stream,
+            "develop",
             &sha256_hex(b"other bytes"),
             rendition.len(),
             rendition,
         ),
         Step::ServeShortTransfer => write_rendition(
             stream,
+            "develop",
             &sha256_hex(rendition),
             rendition.len() + 24,
             &rendition[..rendition.len() / 2],
@@ -327,10 +342,21 @@ fn write_json_response(stream: &mut impl Write, status: u16, reason: &str, body:
 
 /// The ready-rendition response in the server's own header naming, with the
 /// declared digest, length, and body chosen by the caller.
-fn write_rendition(stream: &mut impl Write, digest: &str, declared: usize, sent: &[u8]) {
+fn write_rendition(
+    stream: &mut impl Write,
+    stage: &str,
+    digest: &str,
+    declared: usize,
+    sent: &[u8],
+) {
+    let display_transform = if stage == "film" {
+        "display-transform-v1"
+    } else {
+        "sRGB"
+    };
     let _ = write!(
         stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {declared}\r\nx-content-type-options: nosniff\r\nslipstream-edit-preview-photo-id: {PHOTO_ID}\r\nslipstream-edit-preview-stage: develop\r\nslipstream-edit-preview-settings: current\r\nslipstream-edit-preview-width: 8\r\nslipstream-edit-preview-height: 4\r\nslipstream-edit-preview-sha256: {digest}\r\nslipstream-edit-preview-source-revision: {}\r\nslipstream-edit-preview-recipe-version: recipe-7\r\nslipstream-edit-preview-display-transform: sRGB\r\nslipstream-edit-preview-expires-at: {EXPIRES_AT}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {declared}\r\nx-content-type-options: nosniff\r\nslipstream-edit-preview-photo-id: {PHOTO_ID}\r\nslipstream-edit-preview-stage: {stage}\r\nslipstream-edit-preview-settings: current\r\nslipstream-edit-preview-width: 8\r\nslipstream-edit-preview-height: 4\r\nslipstream-edit-preview-sha256: {digest}\r\nslipstream-edit-preview-source-revision: {}\r\nslipstream-edit-preview-recipe-version: recipe-7\r\nslipstream-edit-preview-display-transform: {display_transform}\r\nslipstream-edit-preview-expires-at: {EXPIRES_AT}\r\nConnection: close\r\n\r\n",
         hex_encode(SOURCE_REVISION)
     );
     let _ = stream.write_all(sent);
@@ -801,6 +827,47 @@ async fn a_ready_edit_preview_is_verified_and_published_once() {
     let (connections, requests) = service.finish();
     assert_eq!(connections, 2);
     assert_eq!(requests.len(), 2);
+    fs::remove_dir_all(base).unwrap();
+}
+/// Film uses the same source/recipe identity and framed metadata validation as
+/// Develop, while selecting the film route and its display transform.
+#[tokio::test]
+async fn a_ready_film_edit_preview_is_verified_and_published() {
+    let rendition = Arc::new(jpeg_bytes());
+    let base = temp_base("ready-film-preview");
+    let destination = base.join("film.jpg");
+    let service = fake_service_with(
+        vec![Step::Capabilities, Step::ServeFilmRendition],
+        Arc::clone(&rendition),
+    );
+    let (exit, envelope) = command(
+        &service.url,
+        &[
+            "photos",
+            "edit-preview",
+            PHOTO_ID,
+            "--file",
+            destination.to_str().unwrap(),
+            "--stage",
+            "film",
+        ],
+    )
+    .await;
+    assert_eq!(exit, 0);
+    let data = &envelope["data"];
+    assert_eq!(data["stage"], "film");
+    assert_eq!(data["sourceRevision"], SOURCE_REVISION);
+    assert_eq!(data["recipeVersion"], "recipe-7");
+    assert_eq!(data["displayTransform"], "display-transform-v1");
+    assert_eq!(data["sha256"], sha256_hex(&rendition));
+    assert_eq!(data["fileCommitted"], true);
+    assert_eq!(fs::read(&destination).unwrap(), *rendition);
+    let (connections, requests) = service.finish();
+    assert_eq!(connections, 2);
+    assert_eq!(
+        requests[1].request_line,
+        format!("GET /api/photos/{PHOTO_ID}/edit-preview/film?settings=current HTTP/1.1")
+    );
     fs::remove_dir_all(base).unwrap();
 }
 

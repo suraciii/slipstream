@@ -46,11 +46,14 @@ const DISPLAY_TRANSFORM_HEADER: &str = "slipstream-edit-preview-display-transfor
 const EXPIRES_AT_HEADER: &str = "slipstream-edit-preview-expires-at";
 
 /// The stage of `slipstream photos edit-preview`. The closed stage set of
-/// contract version 1 carries the develop stage only.
+/// contract version 1 renders either the retained Development Result or the
+/// retained Film Result through the same framed transfer contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum EditPreviewStage {
     /// The current development rendered through the pinned display transform.
     Develop,
+    /// The finished Film rendition, served in its own display encoding.
+    Film,
 }
 
 impl EditPreviewStage {
@@ -58,6 +61,7 @@ impl EditPreviewStage {
     fn route(self) -> &'static str {
         match self {
             Self::Develop => "develop",
+            Self::Film => "film",
         }
     }
 }
@@ -91,7 +95,7 @@ pub struct EditPreviewArgs {
     /// New local file path; an existing file or symbolic link is never replaced.
     #[arg(long, value_name = "PATH", required = true)]
     pub file: PathBuf,
-    /// The development stage to preview.
+    /// The Develop or Film stage to preview.
     #[arg(long, value_enum, value_name = "STAGE", required = true)]
     pub stage: EditPreviewStage,
     /// Which settings the rendition renders; the saved recipe by default.

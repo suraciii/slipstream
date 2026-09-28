@@ -1041,6 +1041,43 @@ async fn export_submit_reports_retained_output_capacity_before_acceptance() {
     let _ = fs::remove_dir_all(base);
 }
 
+#[tokio::test]
+async fn unqualified_film_export_refuses_without_a_receipt() {
+    let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+    let (application, router) = export_application(&base, &config).await;
+    let photo_id = photo_id_for(&config, "pair.ARW");
+    let request = serde_json::json!({
+        "requestId": "unqualified-film",
+        "expectedRecipeVersion": "recipe",
+        "expectedSourceRevision": "source",
+        "target": "film-jpeg",
+    });
+    let refused = submit_export_body(&router, &photo_id, request.clone()).await;
+    assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        error_code(&response_json(refused).await),
+        "processing_unavailable"
+    );
+    let listed = response_json(
+        send(
+            &router,
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/photos/{photo_id}/exports"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(listed["exports"], serde_json::json!([]));
+    let replay = submit_export_body(&router, &photo_id, request).await;
+    assert_eq!(replay.status(), StatusCode::SERVICE_UNAVAILABLE);
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
 /// A blocked or identity-mismatched launcher refuses the submission
 /// before acceptance, so no Export, receipt, or capacity reservation is
 /// consumed and the identity stays fresh.
@@ -1828,6 +1865,86 @@ async fn export_restart_recovers_an_already_published_artifact() {
         "recovery must not request a second transfer: {ops:?}"
     );
 
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// A previously accepted Film identity must remain inspectable after Film is
+/// withdrawn, even though a new Film submission can no longer be admitted.
+#[tokio::test]
+async fn unqualified_film_still_replays_an_existing_receipt() {
+    let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+    let (application, router) = export_application(&base, &config).await;
+    let photo_id = photo_id_for(&config, "pair.ARW");
+    let source_revision = current_source_revision(&application, &photo_id).await;
+    let recipe = save_recipe(&application, &photo_id, "save-film", None, 0.5).await;
+    let identity = "previous-film-request";
+    let digest = slipstream_core::export_submission_payload_digest(
+        "film-jpeg",
+        &recipe.revision,
+        &source_revision,
+    );
+    let export_id = "exp-prior-film";
+    let recipe_digest = slipstream_core::ExportRecipePayload::capture(
+        &slipstream_core::EditRecipeSettings {
+            exposure_ev: 0.5,
+            white_balance: slipstream_core::WhiteBalanceIntent::AsShot,
+        },
+        slipstream_core::ExportExposureRange {
+            minimum_milli_ev: i64::MIN,
+            maximum_milli_ev: i64::MAX,
+        },
+    )
+    .unwrap()
+    .digest();
+    let connection =
+        rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO exports(id,photo_id,target,state,recipe_revision,exposure_ev,
+                   white_balance_mode,source_revision,source_profile_id,source_kind,
+                   recipe_digest,policy_id,bundle_id,workload,created_at,outcome,retain_until)
+             VALUES(?1,?2,'film-jpeg','failed',?3,0.5,'as-shot',?4,
+                    'sony-ilce-7rm5-arw','raw',?5,?6,?7,'film-jpeg',?8,
+                    'processing launcher became unreachable while the attempt ran',?9)",
+            rusqlite::params![
+                export_id,
+                photo_id,
+                recipe.revision,
+                source_revision,
+                recipe_digest,
+                "b".repeat(64),
+                "c".repeat(64),
+                1_800_000_000_i64,
+                1_900_000_000_i64,
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO library_metadata(key,value) VALUES(?1,?2)",
+            rusqlite::params![
+                format!("export_receipt:{photo_id}\0{identity}"),
+                serde_json::json!({
+                    "payload_digest": digest,
+                    "export_id": export_id,
+                    "created_at": 1_800_000_000_u64,
+                    "settled_at": null
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    let body = serde_json::json!({
+        "requestId": identity,
+        "expectedRecipeVersion": recipe.revision,
+        "expectedSourceRevision": source_revision,
+        "target": "film-jpeg",
+    });
+    let replay = submit_export_body(&router, &photo_id, body).await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(response_json(replay).await["exportId"], export_id);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }

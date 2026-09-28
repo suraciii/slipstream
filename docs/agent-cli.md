@@ -83,10 +83,13 @@ sources, ranges and stages.
    exporting. Never generate a replacement ID merely because a response was lost.
 3. Run `photos recipe get PHOTO_ID` in a new process and retain the confirmed
    settings and recipe version. Request `photos edit-preview PHOTO_ID --stage
-   develop --file NEW_JPEG_PATH`. A queued/running result has no file; invoke
-   the read later. Inspect the ready rendition with its returned recipe/source
-   identity and detail limits. `--settings baseline` renders a comparison without
-   changing the saved recipe. `photos preview` remains the Camera Preview.
+   develop --file NEW_JPEG_PATH` or `--stage film` when the deployment reports
+   Film ready. Both stages use the same source/recipe/bundle identity framing
+   and validate response metadata, digest, and JPEG structure before writing.
+   A queued/running result has no file; invoke the read later. Inspect the
+   ready rendition with its returned recipe/source identity and detail limits.
+   `--settings baseline` renders a comparison without changing the saved
+   recipe. `photos preview` remains the Camera Preview.
 4. Run `photos export submit PHOTO_ID --target development-tiff --request-id
    NEW_REQUEST_ID`. Save the Export ID and captured revisions. If another client
    changed the recipe before submission, compare those revisions with the
