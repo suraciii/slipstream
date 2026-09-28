@@ -41,9 +41,9 @@ pub(crate) struct ProfileWire {
     white_balance_ranges: Option<()>,
 }
 
-/// One closed state per pipeline stage. Film remains unavailable until the
-/// separate qualified Film authority is deployed; photo-processing readiness
-/// only proves the Development workload.
+/// One closed state per pipeline stage. The photo-processing launcher only
+/// qualifies Development: Film is unavailable when that capability exists,
+/// and unsupported when no Photo source class is supported.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StageStatesWire {
@@ -55,7 +55,11 @@ impl StageStatesWire {
     fn new(develop: &'static str) -> Self {
         Self {
             develop,
-            film: "unavailable",
+            film: if develop == "unsupported" {
+                "unsupported"
+            } else {
+                "unavailable"
+            },
         }
     }
 }
@@ -291,6 +295,7 @@ mod tests {
             // The closed contract empties the profile list for this state.
             assert!(response.profiles.is_empty());
             assert_eq!(response.stages.develop, "unsupported");
+            assert_eq!(response.stages.film, "unsupported");
             assert!(response.bundle_id.is_some());
         }
     }
