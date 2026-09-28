@@ -8,6 +8,29 @@ import type {
   LibraryBrowserIntent,
 } from "./library-browser-view.js";
 
+export type EditorExportViewModel = Readonly<{
+  state:
+    | "idle"
+    | "submitting"
+    | "outcome-unknown"
+    | "queued"
+    | "running"
+    | "succeeded"
+    | "failed"
+    | "cancelled";
+  note: string;
+  artifact: Readonly<{
+    byteLength: number;
+    width: number;
+    height: number;
+    expiresAt: string;
+  }> | null;
+  canSubmit: boolean;
+  canCancel: boolean;
+  canRetry: boolean;
+  canDownload: boolean;
+}>;
+
 type EditorIntent = Extract<LibraryBrowserIntent, { kind: `editor-${string}` }>;
 
 export interface PhotoEditorSurfaceController {
