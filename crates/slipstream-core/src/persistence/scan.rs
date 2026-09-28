@@ -870,6 +870,10 @@ fn preview_state_name(state: PreviewState) -> &'static str {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ScanRecoveryPlan {
     pub relocations: HashMap<String, String>,
+    /// The Location each Original occupied when the scanner built the plan.
+    /// Applying a stale plan must not overwrite a manual recovery committed
+    /// while content inspection was in progress.
+    pub relocation_sources: HashMap<String, String>,
     pub fingerprints: Vec<DiscoveredFingerprint>,
 }
 
@@ -972,13 +976,13 @@ pub(super) fn apply_scan(
     recovery: &ScanRecoveryPlan,
     failure_after_first: bool,
 ) -> Result<ScanApplication, PersistenceError> {
-    let before = snapshot(connection)?;
-    let previous_originals = before
-        .originals
-        .iter()
-        .map(|original| (original.relative_path.as_str().to_owned(), original.clone()))
-        .collect::<std::collections::HashMap<_, _>>();
     write_transaction(state, database_name, connection, |transaction| {
+        let before = snapshot(transaction)?;
+        let previous_originals = before
+            .originals
+            .iter()
+            .map(|original| (original.relative_path.as_str().to_owned(), original.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
         // Validate every proposed relocation against the persisted state and
         // the complete discovered set before any write.
         let mut persisted_by_id = HashMap::with_capacity(before.originals.len());
@@ -995,10 +999,9 @@ pub(super) fn apply_scan(
             discovered_by_path.insert(original.path.as_str().to_owned(), original);
         }
         // Identities whose Photo was confirmed permanently deleted. A scan may
-        // neither relocate one (its bytes are gone by definition) nor let a
-        // file that later appears at its reviewed Location adopt it: the
-        // removed Photo must stay removed evidence, and the new file is a new
-        // Original.
+        // neither relocate them nor let a file that later appears at their
+        // reviewed Location adopt them: the removed Photo must stay removed
+        // evidence, and the new file is a new Original.
         let deleted_originals = permanently_deleted_original_ids(transaction)?
             .into_iter()
             .collect::<HashSet<_>>();
@@ -1010,6 +1013,12 @@ pub(super) fn apply_scan(
             let Some(persisted) = persisted_by_id.get(original_id) else {
                 return Err(PersistenceError::InvalidRecovery);
             };
+            let Some(source_path) = recovery.relocation_sources.get(original_id) else {
+                return Err(PersistenceError::InvalidRecovery);
+            };
+            if persisted.relative_path.as_str() != source_path {
+                return Err(PersistenceError::InvalidRecovery);
+            }
             let Some(discovered_original) = discovered_by_path.get(new_path.as_str()) else {
                 return Err(PersistenceError::InvalidRecovery);
             };
@@ -1586,6 +1595,7 @@ mod tests {
         let _ = digest;
         let recovery = ScanRecoveryPlan {
             relocations: [("moved/two.JPG".to_owned(), original_id.clone())].into(),
+            relocation_sources: [(original_id.clone(), "one.JPG".to_owned())].into(),
             fingerprints: vec![DiscoveredFingerprint {
                 path: "moved/two.JPG".to_owned(),
                 digest: crate::recovery::digest_bytes(&[]),
@@ -1610,7 +1620,23 @@ mod tests {
             relocated.snapshot.photos[0].preview_state,
             PreviewState::InspectionPending
         );
-        assert!(relocated.snapshot.photos[0].cache_revision.is_none());
+        assert!(
+            persistence
+                .apply_scan_recovered(
+                    vec![discovered("moved/two.JPG", OriginalKind::Jpeg, 4, 1000.0)],
+                    Vec::new(),
+                    ScanRecoveryPlan {
+                        relocations: [("moved/two.JPG".to_owned(), original_id.clone())].into(),
+                        relocation_sources: [(original_id.clone(), "one.JPG".to_owned())].into(),
+                        fingerprints: vec![DiscoveredFingerprint {
+                            path: "moved/two.JPG".to_owned(),
+                            digest: crate::recovery::digest_bytes(&[]),
+                        }],
+                    },
+                )
+                .await
+                .is_err()
+        );
         persistence.shutdown().unwrap();
     }
 

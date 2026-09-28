@@ -45,6 +45,7 @@ export interface RecoveryReviewSurface {
     paging: RecoveryPagingViewModel,
   ): void;
   clearRecoveryProposals(): void;
+  markRecoveryProposalsUnusable(): void;
   resetRecoveryProposalChoices(): void;
   setRecoveryPending(pending: boolean): void;
   setRecoveryMessage(text?: string): void;
@@ -117,6 +118,8 @@ export function createRecoveryReviewOwner(
   const mapRecoveryEntry = (entry: RecoveryItem) => ({
     state: entry.state,
     originalId: entry.originalId,
+    photoId: entry.photoId,
+    webUrl: entry.webUrl,
     location: entry.location,
     kind: entry.kind,
     rating: entry.rating,
@@ -149,6 +152,8 @@ export function createRecoveryReviewOwner(
   let recoveryMappings: ReadonlyArray<RecoveryMapping> = [];
   let recoveryMappingsTotal = 0;
   let recoveryMappingsCursor: string | null = null;
+  let reviewGeneration = 0;
+  let proposalGeneration = 0;
 
   const presentRecoveryEntries = (): void => {
     view.renderRecoveryEntries(recoveryEntries.map(mapRecoveryEntry), {
@@ -167,12 +172,15 @@ export function createRecoveryReviewOwner(
   };
 
   const openRecoveryReview = async (): Promise<void> => {
+    const generation = ++reviewGeneration;
+    proposalGeneration += 1;
     view.setRecoveryPending(true);
     const result = await openUnavailableReview(
       fetcher,
       { limit: RECOVERY_PAGE_LIMIT },
       new AbortController().signal,
     );
+    if (generation !== reviewGeneration) return;
     view.setRecoveryPending(false);
     if (!page.isAlive()) return;
     if (result.kind === "ok") {
@@ -187,10 +195,6 @@ export function createRecoveryReviewOwner(
       view.setRecoveryMessage();
       return;
     }
-    // The review never opened, so its dialog stays closed and nothing inside
-    // it can present this failure. The Grid status line is the visible
-    // surface the entry button sits beside; it names the failure without
-    // claiming any review happened.
     page.setGridStatusText("Could not load unavailable originals. Retry.");
   };
 
@@ -200,12 +204,14 @@ export function createRecoveryReviewOwner(
   const loadMoreRecoveryEntries = async (): Promise<void> => {
     const cursor = recoveryEntriesCursor;
     if (cursor === null) return;
+    const generation = reviewGeneration;
     view.setRecoveryPending(true);
     const result = await continueUnavailableReview(
       fetcher,
       cursor,
       new AbortController().signal,
     );
+    if (generation !== reviewGeneration) return;
     view.setRecoveryPending(false);
     if (!page.isAlive()) return;
     if (result.kind === "ok") {
@@ -240,6 +246,7 @@ export function createRecoveryReviewOwner(
       view.setRecoveryMessage("Enter both folder prefixes.");
       return;
     }
+    const generation = ++proposalGeneration;
     view.setRecoveryPending(true);
     const result = await proposeRelocationBatch(
       fetcher,
@@ -248,6 +255,7 @@ export function createRecoveryReviewOwner(
       { limit: RECOVERY_PAGE_LIMIT },
       new AbortController().signal,
     );
+    if (generation !== proposalGeneration) return;
     view.setRecoveryPending(false);
     if (!page.isAlive()) return;
     if (result.kind === "ok") {
@@ -283,6 +291,7 @@ export function createRecoveryReviewOwner(
       view.setRecoveryMessage("Choose an Original and enter its new location.");
       return;
     }
+    const generation = ++proposalGeneration;
     view.setRecoveryPending(true);
     const result = await proposeSingleRelocation(
       fetcher,
@@ -290,6 +299,7 @@ export function createRecoveryReviewOwner(
       newLocation,
       new AbortController().signal,
     );
+    if (generation !== proposalGeneration) return;
     view.setRecoveryPending(false);
     if (!page.isAlive()) return;
     if (result.kind === "ok") {
@@ -312,12 +322,14 @@ export function createRecoveryReviewOwner(
   const loadMoreRecoveryMappings = async (): Promise<void> => {
     const cursor = recoveryMappingsCursor;
     if (cursor === null) return;
+    const generation = proposalGeneration;
     view.setRecoveryPending(true);
     const result = await continueRelocationProposals(
       fetcher,
       cursor,
       new AbortController().signal,
     );
+    if (generation !== proposalGeneration) return;
     view.setRecoveryPending(false);
     if (!page.isAlive()) return;
     if (result.kind === "ok") {
@@ -352,12 +364,14 @@ export function createRecoveryReviewOwner(
       return;
     }
     if (mappings.length === 0) return;
+    const generation = proposalGeneration;
     view.setRecoveryPending(true);
     const result = await applyRecoveryMappings(
       fetcher,
       mappings,
       new AbortController().signal,
     );
+    if (generation !== proposalGeneration) return;
     view.setRecoveryPending(false);
     if (!page.isAlive()) return;
     if (result.kind === "applied") {
@@ -376,7 +390,8 @@ export function createRecoveryReviewOwner(
       const reasons = result.rejections
         .map((rejection) => rejection.reason)
         .join(", ");
-      view.clearRecoveryProposals();
+      proposalGeneration += 1;
+      view.markRecoveryProposalsUnusable();
       view.setRecoveryMessage(
         `${result.message}${reasons ? ` (${reasons})` : ""}`,
       );
@@ -386,7 +401,8 @@ export function createRecoveryReviewOwner(
       const ids = result.mappings
         .map((mapping) => mapping.originalId)
         .join(", ");
-      view.clearRecoveryProposals();
+      proposalGeneration += 1;
+      view.markRecoveryProposalsUnusable();
       view.setRecoveryMessage(
         `Apply outcome is unknown. Inspect these Photo identities before any new proposal: ${ids}`,
       );

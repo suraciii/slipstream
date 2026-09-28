@@ -75,6 +75,7 @@ export interface RecoveryPanel {
     paging: RecoveryPagingViewModel,
   ): void;
   clearRecoveryProposals(): void;
+  markRecoveryProposalsUnusable(): void;
   resetRecoveryProposalChoices(): void;
   setRecoveryPending(pending: boolean): void;
   setRecoveryMessage(text?: string): void;
@@ -114,6 +115,8 @@ export function createRecoveryPanel({
     recoveryClose,
   } = elements;
   let alive = true;
+  let recoveryPending = false;
+  let recoveryApplyBlocked = false;
   let recoveryCurrentMappings: ReadonlyArray<RecoveryMappingViewModel> = [];
   /// The explicit per-mapping choices the Photographer made. Both start
   /// unchosen; a default-selected control is not an explicit choice.
@@ -164,6 +167,7 @@ export function createRecoveryPanel({
         ? "Apply 1 mapping"
         : `Apply ${applicable.length} mappings`;
     recoveryApply.hidden = applicable.length === 0;
+    recoveryApply.disabled = recoveryPending || recoveryApplyBlocked;
   };
   /// Renders the entries the review has loaded. The summary always names how
   /// many of the total are shown, so a bounded first page is never read as
@@ -196,7 +200,16 @@ export function createRecoveryPanel({
           entry.state === "unavailable"
             ? ""
             : `${recoveryEntryStateLabel(entry.state)} — `;
-        item.textContent = `${state}${entry.location} — ${entry.kind.toUpperCase()} — ${decisions} — ${fingerprint}`;
+        const photoLink = document.createElement("a");
+        photoLink.href = entry.webUrl;
+        photoLink.textContent = `Photo ${entry.photoId}`;
+        photoLink.title = entry.photoId;
+        item.append(
+          document.createTextNode(
+            `${state}${entry.location} — ${entry.kind.toUpperCase()} — ${decisions} — ${fingerprint} — `,
+          ),
+          photoLink,
+        );
         return item;
       }),
     );
@@ -295,6 +308,7 @@ export function createRecoveryPanel({
       // for them; nothing carries over unreviewed.
       recoveryCurrentMappings = [];
       recoveryMappingChoices.clear();
+      recoveryApplyBlocked = false;
       renderRecoveryEntryRows(entries, paging);
       recoveryProposalList.replaceChildren();
       recoveryProposalList.hidden = true;
@@ -314,6 +328,7 @@ export function createRecoveryPanel({
     resetRecoveryProposalChoices() {
       if (!alive) return;
       recoveryMappingChoices.clear();
+      recoveryApplyBlocked = false;
       updateRecoveryApply();
     },
     renderRecoveryProposals(mappings, paging) {
@@ -412,6 +427,7 @@ export function createRecoveryPanel({
       if (!alive) return;
       recoveryCurrentMappings = [];
       recoveryMappingChoices.clear();
+      recoveryApplyBlocked = false;
       recoveryProposalList.replaceChildren();
       recoveryProposalList.hidden = true;
       recoveryProposalSummary.hidden = true;
@@ -419,13 +435,20 @@ export function createRecoveryPanel({
       recoveryNote.hidden = true;
       updateRecoveryApply();
     },
+    markRecoveryProposalsUnusable() {
+      if (!alive) return;
+      recoveryApplyBlocked = true;
+      recoveryMappingsMore.disabled = true;
+      updateRecoveryApply();
+    },
     setRecoveryPending(pending) {
       if (!alive) return;
+      recoveryPending = pending;
       recoveryPropose.disabled = pending;
       recoveryProposeSingle.disabled = pending;
-      recoveryApply.disabled = pending;
       recoveryMore.disabled = pending;
-      recoveryMappingsMore.disabled = pending;
+      recoveryMappingsMore.disabled = pending || recoveryApplyBlocked;
+      updateRecoveryApply();
     },
     setRecoveryMessage(text) {
       if (!alive) return;

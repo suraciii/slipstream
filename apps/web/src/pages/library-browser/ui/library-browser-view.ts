@@ -497,6 +497,8 @@ type GridPhotoViewModel = Readonly<{
 export type RecoveryEntryViewModel = Readonly<{
   state: "unavailable" | "available" | "removed" | "missing";
   originalId: string;
+  photoId: string;
+  webUrl: string;
   location: string;
   kind: "raw" | "jpeg";
   rating: number;
@@ -838,6 +840,7 @@ export interface LibraryBrowserView {
     paging: RecoveryPagingViewModel,
   ): void;
   clearRecoveryProposals(): void;
+  markRecoveryProposalsUnusable(): void;
   resetRecoveryProposalChoices(): void;
   setRecoveryPending(pending: boolean): void;
   setRecoveryMessage(text?: string): void;
@@ -5269,6 +5272,10 @@ export function createLibraryBrowserView(
     clearRecoveryProposals() {
       if (!alive) return;
       recoveryPanelController.clearRecoveryProposals();
+    },
+    markRecoveryProposalsUnusable() {
+      if (!alive) return;
+      recoveryPanelController.markRecoveryProposalsUnusable();
     },
     resetRecoveryProposalChoices() {
       if (!alive) return;

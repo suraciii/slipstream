@@ -178,8 +178,9 @@ pub fn plan_recovery(
 
     // Target files: hashed Locations whose owner (if any) does not keep its
     // own bytes there.
-    let mut relocations = HashMap::new();
+    let mut relocations: HashMap<String, String> = HashMap::new();
     let mut by_digest: HashMap<String, (Vec<&OriginalRecord>, Vec<String>)> = HashMap::new();
+    let mut relocation_sources: HashMap<String, String> = HashMap::new();
     for original in &eligible {
         if let Some(fingerprint) = fingerprints.get(&original.id) {
             by_digest
@@ -215,6 +216,10 @@ pub fn plan_recovery(
         let file = &hashed[path];
         if file.kind == original.kind && fingerprint.size == file.size {
             relocations.insert(path.clone(), original.id.clone());
+            relocation_sources.insert(
+                original.id.clone(),
+                original.relative_path.as_str().to_owned(),
+            );
         }
     }
 
@@ -235,7 +240,9 @@ pub fn plan_recovery(
         .cloned()
         .collect();
     for path in blocked_targets {
-        relocations.remove(&path);
+        if let Some(original_id) = relocations.remove(&path) {
+            relocation_sources.remove(&original_id);
+        }
     }
 
     ScanRecoveryPlan {
@@ -247,6 +254,7 @@ pub fn plan_recovery(
             })
             .collect(),
         relocations,
+        relocation_sources,
     }
 }
 
