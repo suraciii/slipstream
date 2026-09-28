@@ -75,7 +75,7 @@ Recovery must search only supported descendants of the admitted Library Folder. 
 
 ## Manual Recovery
 
-Every unavailable Original File must remain listed with its remembered Location, filename, kind, Rating, Selection State, Album count, and whether a fingerprint exists.
+Every unavailable Original File belonging to an active Photo must remain listed with its remembered Location, filename, kind, Rating, Selection State, Album count, and whether a fingerprint exists. Removed Photos remain in [Trash](library-management-trash.md); Location Recovery must not restore them or reverse Permanent Deletion.
 
 The Photographer must be able to review unavailable Originals and propose new Locations through one bounded `Review unavailable originals` entry from the scan result or an affected Photo.
 
@@ -91,6 +91,117 @@ Slipstream must apply a batch atomically with revalidation at commit. It must re
 A destination Location may already belong to a Photo discovered by an earlier scan. Slipstream must not silently merge the two Photos, and default Rating or Selection State must not be proof that the destination Photo is disposable. Slipstream may offer an explicit retire-and-bind action only when the destination Photo is otherwise unreferenced with no non-default decisions and no Album membership, and it must show which record will be retired. If the destination Photo has independent user state, Slipstream must preserve both Photos and report the conflict. Recovery must not delete any filesystem file.
 
 Recovery must use server-relative Library Locations. It must not require a client file upload or expose an arbitrary server path. Recovery must not import or write an XMP Sidecar and must preserve the Photo's Rating in Slipstream.
+
+### Human and Agent Access
+
+The Web and CLI must support the same inspection, proposal, confirmation, and
+application capabilities. A Photographer may review the correspondence directly
+or ask an external Agent to prepare and apply explicitly authorized mappings.
+Delegated recovery must not require browser automation, access to the server's
+database, or a client copy of an Original File.
+
+Unavailable-Photo inspection must provide stable Photo and Original File
+identities, the remembered facts above, the current availability, and an
+addressable Photo destination. Results must be paged within advertised finite
+limits and identify their evaluated scope, total, and continuation. Continuation
+must keep the evaluated membership; current facts may change. A recovered or
+removed item must not silently shift another item into its result position.
+Expired continuation must fail explicitly. An empty result means that no active
+Photo in that evaluated scope needs recovery, not that missing file bytes have
+been restored.
+
+The caller must also be able to inspect an identified Photo's current Original
+association and Location after it leaves the unavailable results. Location
+Recovery must leave the Photo's identity addressable for result inspection.
+
+### Review Scope and Confirmation
+
+Both proposal forms must return the affected Photo and Original File identities,
+remembered and proposed Locations, content-verification status, and any reason
+the mapping cannot be applied. An occupied destination must identify the Photo
+that would be retired and whether retirement is permitted. Missing, unreadable,
+wrong-kind, content-mismatched, colliding, and independently owned destinations
+must remain distinguishable. The absence of a fingerprint must not be presented
+as a content match.
+
+Folder-prefix proposals must report the complete matching scope and support
+bounded inspection. A result must not silently substitute a first page or
+newest subset for the complete proposal. A later matching Photo must not join
+an already reviewed set. The caller chooses explicit mappings from that set;
+applying a prefix or a live query must not choose additional targets.
+
+Confirmation must refer to the exact correspondence reviewed, including the
+remembered Original, proposed destination revision, content-verification
+status, and any destination Photo to retire. Confirming recovery without a
+fingerprint must explicitly acknowledge that the old content cannot be verified.
+Retire and Bind requires a separate explicit choice for that identified
+destination Photo. Neither permission follows from a general request to fix
+unavailable Photos, a matching filename, or default Photo decisions.
+
+Before committing, Slipstream must revalidate the reviewed facts and all
+eligibility rules. A changed Original Location, a changed destination revision
+or owner, a newly removed Photo, or a destination that gained independent user
+state must reject the affected batch. The caller must inspect a fresh proposal
+before confirming again. A retirement permission must not transfer to a
+different Photo that later occupies the same Location.
+
+One apply operation must contain a nonempty explicit set within the advertised
+mapping limit. Invalid request-wide input must be refused before mutation.
+If any mapping fails revalidation, none in that batch may change. The result
+must identify the refused mappings and explain that valid siblings were not
+applied. Multiple bounded operations are separate commits; earlier successful
+batches are not rolled back when a later batch fails. No interface may promise
+one atomic operation over an arbitrarily large prefix result.
+
+### Results and Continuation
+
+A successful result must identify each recovered Photo and Original File, its
+previous and current Location, and any explicitly retired destination record.
+Applied and refused counts must describe that submitted batch. Any remaining
+Library-wide unavailable count must be identified separately. The same Photo
+must keep its Selection State, Rating, Album membership and order, and saved
+Album positions. Other Photos must remain unchanged except for the explicitly
+permitted retirement.
+
+Recovery changes an association; it must not move, rename, overwrite, upload, or
+delete file bytes. A successful mapping is not proof that missing bytes were
+recreated. The [Preview](previews.md) must belong to the recovered Original;
+cached content from the old Location must not masquerade as current evidence.
+Existing [Edit Recipe and Export source rules](photo-development.md) still
+apply. Location Recovery must not silently rebind an Edit Recipe or recapture
+an existing Export's source or settings.
+
+A changed Original Location must invalidate earlier metadata read evidence
+under [Sidecar Association](library-management-metadata.md#sources-and-association).
+The caller must inspect metadata again before Save. Recovery must not relocate
+the old XMP Sidecar, copy its values to a new one, or apply its external Rating
+to the Library Rating.
+
+If a response is lost after application may have started, the caller must
+receive an unknown outcome and retain the reviewed mappings. It must inspect
+the same Photo identities before deciding what remains. Current Location and
+availability establish current state, not which attempt changed it. Clients
+must not silently retry application, retire a newly observed occupant, or
+describe a current-state match as proof of a historical success. New work
+requires a fresh proposal and confirmation for the remaining explicit set.
+
+### Examples
+
+- An unavailable Photo was renamed within the Library. The caller proposes its
+  new Location, inspects the content evidence, confirms the mapping, then opens
+  the same Photo in Web with its existing Rating and Album position.
+- A moved Folder produces more mappings than one apply operation accepts. The
+  caller inspects the complete paged proposal and confirms bounded explicit
+  batches. A Photo discovered later under the old prefix does not join them.
+- Two mappings were reviewed, but one destination acquired an Edit Recipe
+  before confirmation. The complete apply batch is refused; neither mapping
+  changes and the occupied Photo is not retired.
+- A proposed target changes after review when no old fingerprint exists. The
+  unverified-content confirmation does not authorize that new revision. A fresh
+  proposal and explicit confirmation are required.
+- The apply response is lost. Inspection shows the intended Location on the
+  same Photo. The caller reports the current association and the uncertain
+  historical outcome, without replaying the old request.
 
 ## Expanding a Photo Library
 
