@@ -669,7 +669,7 @@ async fn edit_preview_streams_the_current_rendition_with_the_closed_metadata() {
 }
 
 #[tokio::test]
-async fn edit_preview_admits_the_film_stage() {
+async fn edit_preview_refuses_the_unqualified_film_stage() {
     let (base, config, application, photo_id, _, _) =
         approved_photo_with_recipe_and_result("film-preview", 0.25).await;
     let gate = scripted_gate(std::collections::VecDeque::from([
@@ -683,10 +683,10 @@ async fn edit_preview_admits_the_film_stage() {
         gate_dyn,
     );
     let response = get_preview_response(&router, &preview_uri(&photo_id, "film")).await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
-        response_json(response).await,
-        serde_json::json!({"state": "queued", "stage": "film"})
+        error_code(&response_json(response).await),
+        "processing_unavailable"
     );
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);

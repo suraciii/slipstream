@@ -41,8 +41,9 @@ pub(crate) struct ProfileWire {
     white_balance_ranges: Option<()>,
 }
 
-/// One closed state per pipeline stage. Film follows the same launcher and
-/// bundle readiness as Develop; its worker contract is selected by workload.
+/// One closed state per pipeline stage. Film remains unavailable until the
+/// separate qualified Film authority is deployed; photo-processing readiness
+/// only proves the Development workload.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StageStatesWire {
@@ -54,7 +55,7 @@ impl StageStatesWire {
     fn new(develop: &'static str) -> Self {
         Self {
             develop,
-            film: if develop == "ready" { "ready" } else { develop },
+            film: "unavailable",
         }
     }
 }
@@ -265,9 +266,9 @@ mod tests {
             response.incarnation.as_deref(),
             Some("a".repeat(32).as_str())
         );
-        // The same proven launcher identity admits both closed Photo workloads.
+        // Photo readiness does not qualify the separate Film authority.
         assert_eq!(response.stages.develop, "ready");
-        assert_eq!(response.stages.film, "ready");
+        assert_eq!(response.stages.film, "unavailable");
         assert_eq!(
             response
                 .profiles

@@ -118,6 +118,16 @@ pub(crate) async fn submit_export(
             "The submission carries a value outside the closed wire shape",
         );
     }
+    if body.target == EXPORT_FILM_JPEG_TARGET {
+        // The photo launcher proves only Development. Finished Film output
+        // requires the separate qualified Film authority and is unavailable
+        // until that deployment gate is landed.
+        return export_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "processing_unavailable",
+            "The Film processing stage is not qualified for this deployment",
+        );
+    }
     // One serialized owner read: the Photo facts, the capture identity, and
     // the recipe source availability below all come from a single published
     // state, so a scan publication cannot change them mid-submission.

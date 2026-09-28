@@ -1427,11 +1427,9 @@ fn closed_settings(query: Option<&str>) -> Option<&'static str> {
     Some(selected)
 }
 
-/// The develop stage executes only when the deployment admits processing and
-/// the settings the request selects are representable by the qualified
-/// execution payload. The baseline selector names the processing baseline
-/// itself, so it is representable by construction and does not depend on the
-/// stored recipe.
+/// The Film stage has no production admission authority yet. The photo
+/// launcher only proves the closed Development workload; Film qualification
+/// is a separate deployment gate.
 fn develop_executable(
     state: &HttpState,
     stage: &'static str,
@@ -1441,6 +1439,12 @@ fn develop_executable(
     let Some(_config) = state.processing.as_ref() else {
         return Err(Box::new(processing_unavailable(stage, "operator-disabled")));
     };
+    if stage == "film" {
+        return Err(Box::new(processing_unavailable(
+            stage,
+            "film-not-qualified",
+        )));
+    }
     if settings == SETTINGS_BASELINE {
         return Ok(());
     }
