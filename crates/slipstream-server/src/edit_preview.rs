@@ -1878,7 +1878,11 @@ fn processing_unavailable(stage: &'static str, reason: &'static str) -> Response
     cli_error(
         StatusCode::SERVICE_UNAVAILABLE,
         "processing_unavailable",
-        "The develop stage cannot execute for this Photo right now.",
+        if stage == "film" {
+            "The film stage cannot execute for this Photo right now."
+        } else {
+            "The develop stage cannot execute for this Photo right now."
+        },
         serde_json::json!({"stage": stage, "reason": reason}),
     )
 }

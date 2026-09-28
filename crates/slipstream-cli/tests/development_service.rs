@@ -299,12 +299,20 @@ fn answer(stream: &mut impl Write, step: &Step, rendition: &[u8]) {
             "Internal Server Error",
             &json!({"error":{"code":"outcome_unknown", "message":"The render admission outcome is unknown; request the preview again.", "effect":"none", "details":{"stage":"develop"}}}),
         ),
-        Step::ServeRendition => {
-            write_rendition(stream, "develop", &sha256_hex(rendition), rendition.len(), rendition)
-        }
-        Step::ServeFilmRendition => {
-            write_rendition(stream, "film", &sha256_hex(rendition), rendition.len(), rendition)
-        }
+        Step::ServeRendition => write_rendition(
+            stream,
+            "develop",
+            &sha256_hex(rendition),
+            rendition.len(),
+            rendition,
+        ),
+        Step::ServeFilmRendition => write_rendition(
+            stream,
+            "film",
+            &sha256_hex(rendition),
+            rendition.len(),
+            rendition,
+        ),
         Step::ServeWrongDigest => write_rendition(
             stream,
             "develop",

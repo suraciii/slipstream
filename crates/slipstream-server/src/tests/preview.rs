@@ -684,9 +684,12 @@ async fn edit_preview_refuses_the_unqualified_film_stage() {
     );
     let response = get_preview_response(&router, &preview_uri(&photo_id, "film")).await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let refusal = response_json(response).await;
+    assert_eq!(error_code(&refusal), "processing_unavailable");
+    assert_eq!(refusal["error"]["details"]["reason"], "film-not-qualified");
     assert_eq!(
-        error_code(&response_json(response).await),
-        "processing_unavailable"
+        refusal["error"]["message"],
+        "The film stage cannot execute for this Photo right now."
     );
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);

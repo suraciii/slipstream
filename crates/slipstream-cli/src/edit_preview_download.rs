@@ -66,7 +66,6 @@ impl EditPreviewStage {
     }
 }
 
-
 /// The settings selector of `slipstream photos edit-preview`. `current` is
 /// the saved Edit Recipe's settings; `baseline` is the as-shot baseline the
 /// comparison presents, without saving.
@@ -96,7 +95,7 @@ pub struct EditPreviewArgs {
     /// New local file path; an existing file or symbolic link is never replaced.
     #[arg(long, value_name = "PATH", required = true)]
     pub file: PathBuf,
-    /// The development stage to preview.
+    /// The Develop or Film stage to preview.
     #[arg(long, value_enum, value_name = "STAGE", required = true)]
     pub stage: EditPreviewStage,
     /// Which settings the rendition renders; the saved recipe by default.
