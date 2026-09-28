@@ -126,7 +126,6 @@ The status includes `updatedAt` in Unix epoch milliseconds when progress last
 advanced, absent before any scan activity. Recovery progress counts cover
 eligible candidates examined during the current scan, not an estimate.
 
-
 ## Semantics
 
 ### Application Startup

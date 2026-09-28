@@ -94,8 +94,8 @@ pub use preview::{
 };
 pub use reconcile::{ReconciledPhoto, preview_should_preserve, reconcile, selected_source};
 pub use recovery::{
-    AppliedRelocations, ManualOutcome, ManualProposal, MappingBlock, RecoveryProgress,
-    RecoveryRecord, RecoverySurvey, RelocationSet, RequestedRelocation, RetireSummary,
-    count_prefix_scope, digest_bytes, evaluate_relocation, evidence_original_ids,
+    AppliedRelocations, ManualOutcome, ManualProposal, MappingBlock, RecoveryContext,
+    RecoveryProgress, RecoveryRecord, RecoverySurvey, RelocationSet, RequestedRelocation,
+    RetireSummary, count_prefix_scope, digest_bytes, evaluate_relocation, evidence_original_ids,
     parse_location_prefix, plan_manual_relocations, plan_recovery, plan_single_relocation,
 };

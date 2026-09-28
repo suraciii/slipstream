@@ -181,8 +181,10 @@ pub(super) fn scanner_main(
                             }
                         };
                         let recovery = crate::recovery::plan_recovery(
-                            &root,
-                            &native_work,
+                            crate::recovery::RecoveryContext {
+                                root: &root,
+                                native_work: &native_work,
+                            },
                             &result.originals,
                             &previous,
                             &fingerprints,

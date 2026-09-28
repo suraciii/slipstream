@@ -26,6 +26,12 @@ pub struct RecoveryProgress {
     pub failed_hashes: u64,
 }
 
+/// Shared native-work context for one recovery plan.
+pub struct RecoveryContext<'a> {
+    pub root: &'a crate::LibraryRoot,
+    pub native_work: &'a NativeWorkBudget,
+}
+
 /// Plans relocations and fresh fingerprints for one scan.
 ///
 /// `persisted_fingerprints` must contain every stored fingerprint for the
@@ -37,8 +43,7 @@ pub struct RecoveryProgress {
 /// deleted, and a file that later occupies their reviewed Location is a new
 /// Original instead of a recovered identity.
 pub fn plan_recovery(
-    root: &crate::LibraryRoot,
-    native_work: &NativeWorkBudget,
+    context: RecoveryContext<'_>,
     discovered: &[DiscoveredOriginal],
     previous: &ScanSnapshot,
     persisted_fingerprints: &[crate::OriginalFingerprint],
@@ -46,6 +51,8 @@ pub fn plan_recovery(
     progress: &mut RecoveryProgress,
     report: &dyn Fn(u64, u64),
 ) -> ScanRecoveryPlan {
+    let root = context.root;
+    let native_work = context.native_work;
     let mut discovered_by_path = HashMap::with_capacity(discovered.len());
     for original in discovered {
         discovered_by_path.insert(original.path.as_str().to_owned(), original);

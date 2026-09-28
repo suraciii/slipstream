@@ -891,7 +891,7 @@ mod tests {
         let read = source_read(OriginalKind::Raw, capture.clone());
         assert!(!identity_observation_needed(&read));
 
-        capture.source_revision = Some("rev-2\064\0123".to_owned());
+        capture.source_revision = Some("rev-2\0dev\0inode".to_owned());
         capture.state = slipstream_core::CaptureMetadataState::Known;
         capture.make = Some("SONY".to_owned());
         capture.model = Some("ILCE-7RM5".to_owned());
@@ -912,7 +912,7 @@ mod tests {
     fn support_distinguishes_retryable_observation_from_known_unsupported_class() {
         let mut capture = slipstream_core::CaptureFact::pending();
         capture.state = slipstream_core::CaptureMetadataState::Missing;
-        capture.source_revision = Some("rev-2\064\0123".to_owned());
+        capture.source_revision = Some("rev-2\0dev\0inode".to_owned());
         let mut read = source_read(OriginalKind::Raw, capture);
         assert!(identity_observation_needed(&read));
         assert_eq!(
