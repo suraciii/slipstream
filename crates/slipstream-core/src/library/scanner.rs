@@ -51,6 +51,11 @@ pub(super) fn inspect_capture_facts(
             original.capture = prior.capture.clone();
             continue;
         }
+        let transient = |prior: Option<&crate::OriginalRecord>| {
+            prior
+                .filter(|prior| prior.capture.source_revision.as_deref() == Some(revision.as_str()))
+                .map_or_else(CaptureFact::pending, |prior| prior.capture.clone())
+        };
         original.capture = match root.original(original.path.clone()) {
             Ok(capability) => {
                 let _permit = native_work.acquire();
@@ -63,12 +68,18 @@ pub(super) fn inspect_capture_facts(
                             original.facts = observation.facts;
                             observation.capture
                         }
+                        // The bounded fresh attempt is the second and last
+                        // attempt for this scan; an admitted failure keeps
+                        // the documented `failed` fact without a revision.
                         Err(_) => CaptureFact::failed(None),
                     },
                     Err(_) => CaptureFact::failed(Some(revision)),
                 }
             }
-            Err(_) => CaptureFact::failed(Some(revision)),
+            // A confined open failure is not an admitted read verdict for the
+            // current revision: keep the published fact when it still binds
+            // this revision, and otherwise leave the Photo waiting.
+            Err(_) => transient(prior),
         };
     }
 }

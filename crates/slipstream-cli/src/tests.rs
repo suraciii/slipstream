@@ -2050,3 +2050,59 @@ async fn a_timed_out_library_check_reports_the_unknown_scan_outcome() {
     std::fs::remove_file(&token).ok();
     drop(listener);
 }
+
+#[test]
+fn source_refusals_carry_the_closed_support_reason() {
+    // A save or rebind refused for the Photo's source state reports the same
+    // closed `supportReason` the recipe read reports, and a preview refusal
+    // names it as `reason`, so the retryable waits stay distinguishable from
+    // the confirmed outcomes in the failure envelope.
+    let refusal = |details: Value| ErrorPayload {
+        code: "resource_unavailable".to_owned(),
+        message: "Current source facts cannot be read, so no guarded write is possible.".to_owned(),
+        effect: "none".to_owned(),
+        details,
+    };
+    for reason in [
+        "original-missing",
+        "original-unreadable",
+        "read-pending",
+        "resource-unavailable",
+    ] {
+        let save = validated_route_failure(
+            refusal(json!({"photoId": "p1", "supportReason": reason})),
+            Operation::PhotosRecipeSave,
+            "",
+        )
+        .unwrap_or_else(|| panic!("{reason} is a confirmed source refusal"));
+        assert_eq!(save.exit_code, 6, "{reason}");
+        assert_eq!(save.payload.details["supportReason"], json!(reason));
+        let preview = validated_route_failure(
+            refusal(json!({"stage": "develop", "reason": reason})),
+            Operation::PhotosEditPreview,
+            "",
+        )
+        .unwrap_or_else(|| panic!("{reason} is a confirmed preview refusal"));
+        assert_eq!(preview.exit_code, 6, "{reason}");
+        assert_eq!(preview.payload.details["reason"], json!(reason));
+    }
+    // A reported `supportReason` outside the closed set is not a confirmed
+    // refusal; an internal preview reason such as `preview-superseded`
+    // stays a valid deployment-condition detail.
+    assert!(
+        validated_route_failure(
+            refusal(json!({"photoId": "p1", "supportReason": "original-rotated"})),
+            Operation::PhotosRecipeSave,
+            ""
+        )
+        .is_none()
+    );
+    assert!(
+        validated_route_failure(
+            refusal(json!({"stage": "develop", "reason": "preview-superseded"})),
+            Operation::PhotosEditPreview,
+            ""
+        )
+        .is_some()
+    );
+}

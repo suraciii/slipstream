@@ -457,7 +457,12 @@ pub(super) fn submit_export(
         let Some(recipe) = current.recipe.as_ref() else {
             return Ok(ExportSubmitOutcome::MissingRecipe);
         };
-        if current.current_source_revision != submission.expected_source_revision {
+        if current.current_source_revision.is_none() {
+            return Ok(ExportSubmitOutcome::Unavailable);
+        }
+        if current.current_source_revision.as_deref()
+            != Some(submission.expected_source_revision.as_str())
+        {
             return Ok(ExportSubmitOutcome::SourceChanged(current));
         }
         if recipe.source_revision != submission.expected_source_revision {
@@ -849,7 +854,9 @@ pub(super) fn retry_export(
         if !recipe.source_available {
             return Ok(ExportRetryOutcome::ResourceUnavailable);
         }
-        if recipe.current_source_revision != current.snapshot.source_revision {
+        if recipe.current_source_revision.as_deref()
+            != Some(current.snapshot.source_revision.as_str())
+        {
             return Ok(ExportRetryOutcome::OutputUnavailable);
         }
         if !reservable(transaction, now, allowance)? {
@@ -1048,6 +1055,15 @@ mod tests {
                 mtime_ms: 1_000.0,
             },
         );
+        connection
+            .execute(
+                "UPDATE original_files SET capture_source_revision=? WHERE id='raw-original'",
+                [format!(
+                    "{}\0fixture-device\0fixture-inode",
+                    export_test_revision("shoot/one.ARW", 17, 1_000.0)
+                )],
+            )
+            .unwrap();
         connection
             .execute(
                 "INSERT INTO edit_recipes(photo_id,revision,source_revision,exposure_ev,white_balance_mode)

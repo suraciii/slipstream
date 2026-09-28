@@ -195,6 +195,7 @@ pub(crate) async fn submit_export(
         crate::edit_recipe::source_facts(&photo),
         read.source_available,
         photo.original_available,
+        read.current_source_revision.as_deref(),
     );
     match support.state {
         "unsupported" => {

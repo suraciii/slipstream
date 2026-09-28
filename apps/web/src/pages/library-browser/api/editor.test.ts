@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { fetchEditRecipe } from "./editor.js";
+import { fetchEditRecipe, saveEditRecipe } from "./editor.js";
 
 const jsonResponse = (body: unknown, status = 200): Promise<Response> =>
   Promise.resolve(
@@ -77,5 +77,69 @@ describe("edit recipe read API", () => {
       );
       expect(result.kind).toBe("failed");
     }
+  });
+});
+
+describe("edit recipe save API", () => {
+  const saveRequest = {
+    id: "req-1",
+    photoId: "photo-1",
+    expectedRecipeVersion: null,
+    expectedSourceRevision: "rev-1",
+    settings: { exposureEv: 0.2, whiteBalance: { mode: "as-shot" as const } },
+  };
+
+  test("a source-state refusal carries the same closed reason the read reports", async () => {
+    for (const supportReason of [
+      "read-pending",
+      "resource-unavailable",
+      "original-missing",
+      "original-unreadable",
+    ] as const) {
+      const result = await saveEditRecipe(
+        () =>
+          jsonResponse(
+            {
+              error: {
+                code: "resource_unavailable",
+                message:
+                  "Current source facts cannot be read, so no guarded write is possible.",
+                effect: "none",
+                details: { photoId: "photo-1", supportReason },
+              },
+            },
+            503,
+          ),
+        saveRequest,
+        new AbortController().signal,
+      );
+      if (result.kind !== "refused") throw new Error("expected a refusal");
+      expect(result.refusal.code).toBe("resource_unavailable");
+      expect(result.refusal.supportReason).toBe(supportReason);
+    }
+  });
+
+  test("a reported reason outside the closed set is not believed", async () => {
+    const result = await saveEditRecipe(
+      () =>
+        jsonResponse(
+          {
+            error: {
+              code: "resource_unavailable",
+              message: "Current source facts cannot be read.",
+              effect: "none",
+              details: {
+                photoId: "photo-1",
+                supportReason: "original-rotated",
+              },
+            },
+          },
+          503,
+        ),
+      saveRequest,
+      new AbortController().signal,
+    );
+    if (result.kind !== "refused") throw new Error("expected a refusal");
+    expect(result.refusal.supportReason).toBe("");
   });
 });

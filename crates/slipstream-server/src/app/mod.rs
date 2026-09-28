@@ -835,6 +835,7 @@ impl Application {
                 publication: publication.clone(),
                 completed: Some(usize::try_from(progress.discovered).unwrap_or(usize::MAX)),
                 total: None,
+                updated_ms: progress.updated_ms,
                 last_recovery,
                 fingerprints,
             },
@@ -845,6 +846,7 @@ impl Application {
                 total: progress
                     .inspect_total
                     .map(|total| usize::try_from(total).unwrap_or(usize::MAX)),
+                updated_ms: progress.updated_ms,
                 last_recovery,
                 fingerprints,
             },
@@ -855,6 +857,7 @@ impl Application {
                 total: progress
                     .hash_total
                     .map(|total| usize::try_from(total).unwrap_or(usize::MAX)),
+                updated_ms: progress.updated_ms,
                 last_recovery,
                 fingerprints,
             },
@@ -863,6 +866,7 @@ impl Application {
                 publication: publication.clone(),
                 completed: None,
                 total: None,
+                updated_ms: progress.updated_ms,
                 last_recovery,
                 fingerprints,
             },
@@ -874,6 +878,7 @@ impl Application {
                         publication: publication.clone(),
                         completed: None,
                         total: None,
+                        updated_ms: progress.updated_ms,
                         last_recovery,
                         fingerprints,
                     }
@@ -882,6 +887,7 @@ impl Application {
                         state: "failed",
                         publication: publication.clone(),
                         completed: None,
+                        updated_ms: progress.updated_ms,
                         total: None,
                         last_recovery,
                         fingerprints,
@@ -892,6 +898,7 @@ impl Application {
                         state: "idle",
                         publication: publication.clone(),
                         completed: Some(photo_count),
+                        updated_ms: progress.updated_ms,
                         total: Some(photo_count),
                         last_recovery,
                         fingerprints,
@@ -902,6 +909,7 @@ impl Application {
                         publication,
                         completed: None,
                         total: None,
+                        updated_ms: progress.updated_ms,
                         last_recovery,
                         fingerprints,
                     }

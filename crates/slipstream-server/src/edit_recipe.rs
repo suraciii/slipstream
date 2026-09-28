@@ -53,7 +53,7 @@ const ORIGINAL_UNREADABLE: &str = "original-unreadable";
 /// The reason recorded when the source facts for the current revision have
 /// not been published yet: the scan's bounded inspection has not completed
 /// for the persisted revision. It is retryable and never a parse verdict.
-const READ_PENDING: &str = "read-pending";
+pub(crate) const READ_PENDING: &str = "read-pending";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -120,6 +120,7 @@ pub(crate) fn derive_support(
     facts: SourceFacts<'_>,
     source_available: bool,
     original_available: bool,
+    current_source_revision: Option<&str>,
 ) -> SupportClassification {
     if !source_available {
         // An Original absent from its remembered Location is missing; one
@@ -134,17 +135,24 @@ pub(crate) fn derive_support(
             }),
         };
     }
-    // A completed-but-failed inspection is a confirmed read failure for the
-    // persisted revision; it is never reclassified by another read.
+    // A failed inspection is confirmed unreadable only when persistence
+    // published a revision binding for that failure. A failure without that
+    // binding can be a transient retry (for example, a changed file whose
+    // bounded fresh read failed), so it remains retryable.
     if facts.capture.state == slipstream_core::CaptureMetadataState::Failed {
         return SupportClassification {
             state: "unavailable",
-            reason: Some(ORIGINAL_UNREADABLE),
+            reason: Some(if current_source_revision.is_some() {
+                ORIGINAL_UNREADABLE
+            } else {
+                READ_PENDING
+            }),
         };
     }
-    // Without a published capture revision the identity is not bound to the
-    // current source facts yet.
-    if facts.capture.source_revision.is_none() {
+    // Persistence exposes a revision only when the completed capture
+    // evidence is bound to the current source facts. None is therefore a
+    // publication gap, not a parse verdict.
+    if current_source_revision.is_none() {
         return SupportClassification {
             state: "unavailable",
             reason: Some(READ_PENDING),
@@ -508,7 +516,12 @@ pub(crate) async fn get_edit_recipe(
     let facts = source_facts(&photo);
     let condition = capability_condition(&state).await;
     let support = apply_capability_condition(
-        derive_support(facts, read.source_available, photo.original_available),
+        derive_support(
+            facts,
+            read.source_available,
+            photo.original_available,
+            read.current_source_revision.as_deref(),
+        ),
         condition,
     );
     let processing_available = processing_available(
@@ -520,7 +533,8 @@ pub(crate) async fn get_edit_recipe(
     let recipe = read.recipe.map(RecipeWire::from);
     ok_response(&EditRecipeResponse {
         source_revision: (support.state != "unavailable")
-            .then(|| read.current_source_revision.clone()),
+            .then(|| read.current_source_revision.clone())
+            .flatten(),
         recipe,
         source_support: support.state,
         support_reason: support.reason,
@@ -562,7 +576,12 @@ pub(crate) async fn post_edit_recipe(
     };
     let facts = source_facts(&photo);
     let support = apply_capability_condition(
-        derive_support(facts, read.source_available, photo.original_available),
+        derive_support(
+            facts,
+            read.source_available,
+            photo.original_available,
+            read.current_source_revision.as_deref(),
+        ),
         capability_condition(&state).await,
     );
     match support.state {
@@ -632,7 +651,12 @@ pub(crate) async fn post_edit_recipe_rebind(
     };
     let facts = source_facts(&photo);
     let support = apply_capability_condition(
-        derive_support(facts, read.source_available, photo.original_available),
+        derive_support(
+            facts,
+            read.source_available,
+            photo.original_available,
+            read.current_source_revision.as_deref(),
+        ),
         capability_condition(&state).await,
     );
     match support.state {
@@ -753,6 +777,7 @@ async fn map_write_outcome(
                     source_facts(&photo),
                     read.source_available,
                     photo.original_available,
+                    read.current_source_revision.as_deref(),
                 );
                 unavailable_source(photo_id, support.reason.or(Some("resource-unavailable")))
             }
@@ -967,5 +992,90 @@ mod tests {
             );
         }
         assert!(processing_available(support, "ready", true, Some(&recipe)));
+    }
+    fn support_facts<'a>(
+        capture: &'a slipstream_core::CaptureFact,
+        kind: OriginalKind,
+        filename: &'a str,
+    ) -> SourceFacts<'a> {
+        SourceFacts {
+            kind,
+            filename,
+            capture,
+        }
+    }
+
+    #[test]
+    fn source_support_requires_current_published_revision() {
+        let revision = "current-revision";
+        let approved = slipstream_core::CaptureFact {
+            state: slipstream_core::CaptureMetadataState::Missing,
+            order_key: None,
+            field: None,
+            offset_minutes: None,
+            source_revision: Some(revision.to_owned()),
+            identity: slipstream_core::CameraIdentity::Observed {
+                make: Some("SONY".to_owned()),
+                model: Some("ILCE-7RM5".to_owned()),
+            },
+        };
+        let facts = support_facts(&approved, OriginalKind::Raw, "photo.ARW");
+        assert_eq!(
+            derive_support(facts, true, true, Some(revision)),
+            SupportClassification {
+                state: "supported",
+                reason: None,
+            }
+        );
+        assert_eq!(
+            derive_support(facts, true, true, None),
+            SupportClassification {
+                state: "unavailable",
+                reason: Some(READ_PENDING),
+            }
+        );
+        let pending = slipstream_core::CaptureFact::pending();
+        assert_eq!(
+            derive_support(
+                support_facts(&pending, OriginalKind::Raw, "photo.ARW"),
+                true,
+                true,
+                None,
+            ),
+            SupportClassification {
+                state: "unavailable",
+                reason: Some(READ_PENDING),
+            }
+        );
+    }
+
+    #[test]
+    fn only_revision_bound_failures_are_confirmed_unreadable() {
+        let failed = slipstream_core::CaptureFact::failed(Some("current-revision".to_owned()));
+        assert_eq!(
+            derive_support(
+                support_facts(&failed, OriginalKind::Raw, "photo.ARW"),
+                true,
+                true,
+                Some("current-revision"),
+            ),
+            SupportClassification {
+                state: "unavailable",
+                reason: Some(ORIGINAL_UNREADABLE),
+            }
+        );
+        let transient = slipstream_core::CaptureFact::failed(None);
+        assert_eq!(
+            derive_support(
+                support_facts(&transient, OriginalKind::Raw, "photo.ARW"),
+                true,
+                true,
+                None,
+            ),
+            SupportClassification {
+                state: "unavailable",
+                reason: Some(READ_PENDING),
+            }
+        );
     }
 }

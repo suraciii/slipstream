@@ -407,11 +407,27 @@ pub(crate) fn validated_route_failure(
         "unsupported_photo" | "missing_recipe" | "request_conflict" => {
             details.is_empty() || string("photoId").is_some()
         }
+        // A refusal that follows from the Photo's source state carries the
+        // same closed `supportReason` the recipe read reports (save and
+        // rebind details) or names it as `reason` (preview details), so a
+        // retryable wait is distinguishable from a confirmed outcome. A
+        // reported `supportReason` outside the closed set is not believed.
         "resource_unavailable" | "processing_unavailable" => {
-            details.is_empty()
-                || string("operation").is_some()
-                || string("photoId").is_some()
-                || string("reason").is_some()
+            let support_reason_closed = string("supportReason").is_none_or(|reason| {
+                matches!(
+                    reason,
+                    "original-missing"
+                        | "original-unreadable"
+                        | "read-pending"
+                        | "resource-unavailable"
+                )
+            });
+            support_reason_closed
+                && (details.is_empty()
+                    || string("operation").is_some()
+                    || string("photoId").is_some()
+                    || string("reason").is_some()
+                    || string("supportReason").is_some())
         }
         // An outcome_unknown response never proves refusal of a write.
         "unknown_export"

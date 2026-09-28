@@ -892,7 +892,7 @@ fn real_service_fixture() -> (PathBuf, Config) {
     fs::create_dir(&web).unwrap();
     fs::write(web.join("index.html"), b"<main>fixture</main>").unwrap();
     for name in ["one.JPG", "two.JPG"] {
-        fs::write(originals.join("trip").join(name), format!("fixture-{name}")).unwrap();
+        fs::write(originals.join("trip").join(name), jpeg_bytes()).unwrap();
     }
     let config = Config {
         library_root: originals,
@@ -993,7 +993,7 @@ async fn the_real_service_refuses_an_edit_preview_of_a_jpeg_source() {
         ],
     )
     .await;
-    assert_eq!(exit, 2);
+    assert_eq!(exit, 2, "{refusal}");
     assert_eq!(refusal["error"]["code"], "unsupported_photo");
     assert_eq!(refusal["error"]["effect"], "none");
     assert_eq!(refusal["error"]["details"]["photoId"], photo_id);

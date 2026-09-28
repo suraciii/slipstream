@@ -1,11 +1,13 @@
 import type { BrowserFetch } from "../model/access-session.js";
-import type {
-  AdmittedWhiteBalance,
-  EditorFacts,
-  EditorWhiteBalance,
-  SaveRefusal,
-  SaveRequest,
-  WhiteBalanceRange,
+import {
+  asEditorSupportReason,
+  type AdmittedWhiteBalance,
+  type EditorFacts,
+  type EditorSupportReason,
+  type EditorWhiteBalance,
+  type SaveRefusal,
+  type SaveRequest,
+  type WhiteBalanceRange,
 } from "../model/photo-editor.js";
 
 const isStringArray = (value: unknown): value is string[] =>
@@ -269,18 +271,21 @@ const parseEditFacts = (
   });
 };
 
-/// The refusal of one guarded recipe write, with the conflict facts.
+/// The refusal of one guarded recipe write, with the conflict facts and the
+/// closed source reason a source-state refusal carries.
 const readEditRefusal = async (response: Response): Promise<SaveRefusal> => {
   const refusal: {
     status: number;
     code: string;
     message: string;
+    supportReason: EditorSupportReason;
     currentRecipeVersion: string | null;
     currentSourceRevision: string | null;
   } = {
     status: response.status,
     code: `HTTP ${response.status}`,
     message: "",
+    supportReason: "",
     currentRecipeVersion: null,
     currentSourceRevision: null,
   };
@@ -297,6 +302,7 @@ const readEditRefusal = async (response: Response): Promise<SaveRefusal> => {
   if (typeof error["message"] === "string") refusal.message = error["message"];
   const details = error["details"];
   if (isRecord(details)) {
+    refusal.supportReason = asEditorSupportReason(details["supportReason"]);
     if (typeof details["currentRecipeVersion"] === "string")
       refusal.currentRecipeVersion = details["currentRecipeVersion"];
     if (typeof details["currentSourceRevision"] === "string")
@@ -394,6 +400,7 @@ export const saveEditRecipe = async (
         status: 0,
         code: "transport_lost",
         message: "The save did not reach the service.",
+        supportReason: "",
         currentRecipeVersion: null,
         currentSourceRevision: null,
       }),
@@ -411,6 +418,7 @@ export const saveEditRecipe = async (
         status: response.status,
         code: "outcome_unknown",
         message: "The save outcome could not be read.",
+        supportReason: "",
         currentRecipeVersion: null,
         currentSourceRevision: null,
       }),
@@ -423,6 +431,7 @@ export const saveEditRecipe = async (
         status: response.status,
         code: "outcome_unknown",
         message: "The save outcome is outside the supported shape.",
+        supportReason: "",
         currentRecipeVersion: null,
         currentSourceRevision: null,
       }),
@@ -442,6 +451,7 @@ export const saveEditRecipe = async (
         status: response.status,
         code: "outcome_unknown",
         message: "The save outcome is outside the supported shape.",
+        supportReason: "",
         currentRecipeVersion: null,
         currentSourceRevision: null,
       }),
@@ -480,6 +490,7 @@ export const rebindEditRecipe = async (
         status: 0,
         code: "transport_lost",
         message: "The rebind did not reach the service.",
+        supportReason: "",
         currentRecipeVersion: null,
         currentSourceRevision: null,
       }),
@@ -497,6 +508,7 @@ export const rebindEditRecipe = async (
         status: response.status,
         code: "outcome_unknown",
         message: "The rebind outcome could not be read.",
+        supportReason: "",
         currentRecipeVersion: null,
         currentSourceRevision: null,
       }),
@@ -509,6 +521,7 @@ export const rebindEditRecipe = async (
         status: response.status,
         code: "outcome_unknown",
         message: "The rebind outcome is outside the supported shape.",
+        supportReason: "",
         currentRecipeVersion: null,
         currentSourceRevision: null,
       }),
@@ -527,6 +540,7 @@ export const rebindEditRecipe = async (
         status: response.status,
         code: "outcome_unknown",
         message: "The rebind outcome is outside the supported shape.",
+        supportReason: "",
         currentRecipeVersion: null,
         currentSourceRevision: null,
       }),

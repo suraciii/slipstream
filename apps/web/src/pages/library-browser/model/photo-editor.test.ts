@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  asEditorSupportReason,
   createPhotoEditor,
+  isRetryableSupportReason,
+  supportReasonExplanation,
   type DraftStore,
   type EditorFacts,
   type EditorStep,
@@ -170,6 +173,7 @@ describe("conflict reconciliation", () => {
       status: 409,
       code: "recipe_conflict",
       message: "The expected recipe revision is no longer current",
+      supportReason: "",
       currentRecipeVersion: "recipe-7",
       currentSourceRevision: "rev-1",
     });
@@ -193,6 +197,7 @@ describe("conflict reconciliation", () => {
       status: 409,
       code: "recipe_conflict",
       message: "conflict",
+      supportReason: "",
       currentRecipeVersion: "recipe-7",
       currentSourceRevision: "rev-1",
     });
@@ -216,6 +221,7 @@ describe("conflict reconciliation", () => {
       status: 409,
       code: "source_changed",
       message: "source moved",
+      supportReason: "",
       currentRecipeVersion: "recipe-1",
       currentSourceRevision: "rev-2",
     });
@@ -238,6 +244,7 @@ describe("conflict reconciliation", () => {
       status: 409,
       code: "recipe_conflict",
       message: "the recipe moved",
+      supportReason: "",
       currentRecipeVersion: "recipe-2",
       currentSourceRevision: "rev-1",
     });
@@ -270,6 +277,7 @@ describe("conflict reconciliation", () => {
       status: 409,
       code: "recipe_conflict",
       message: "the recipe moved",
+      supportReason: "",
       currentRecipeVersion: "recipe-2",
       currentSourceRevision: "rev-1",
     });
@@ -306,6 +314,7 @@ describe("conflict reconciliation", () => {
       status: 500,
       code: "outcome_unknown",
       message: "lost response",
+      supportReason: "",
       currentRecipeVersion: null,
       currentSourceRevision: null,
     });
@@ -525,6 +534,89 @@ describe("sources without editing", () => {
   });
 });
 
+describe("the one reason-to-behavior mapping", () => {
+  test("parses only the closed reasons and classifies the waits", () => {
+    for (const reason of [
+      "original-missing",
+      "original-unreadable",
+      "read-pending",
+      "resource-unavailable",
+    ] as const)
+      expect(asEditorSupportReason(reason)).toBe(reason);
+    expect(asEditorSupportReason("original-rotated")).toBe("");
+    expect(asEditorSupportReason(null)).toBe("");
+    expect(isRetryableSupportReason("read-pending")).toBe(true);
+    expect(isRetryableSupportReason("resource-unavailable")).toBe(true);
+    expect(isRetryableSupportReason("original-missing")).toBe(false);
+    expect(isRetryableSupportReason("original-unreadable")).toBe(false);
+    expect(supportReasonExplanation("original-unreadable")).toContain(
+      "failed for its current source revision",
+    );
+    expect(supportReasonExplanation("read-pending")).toContain("pending");
+    expect(supportReasonExplanation("read-pending")).not.toContain("failed");
+  });
+
+  test("a refused save on a retryable source wait keeps the settings and names the retry", () => {
+    const editor = createPhotoEditor({ nextRequestId: () => "req-1" });
+    editor.open(facts());
+    const written = request(editor.commitExposure(0.4));
+    const step = editor.refuse(written, {
+      status: 503,
+      code: "resource_unavailable",
+      message:
+        "Current source facts cannot be read, so no guarded write is possible.",
+      supportReason: "read-pending",
+      currentRecipeVersion: null,
+      currentSourceRevision: null,
+    });
+    // The refusal is the same retryable wait the read reports, never a
+    // claimed read failure; the local intent stays for a later write.
+    expect(step.request).toBeNull();
+    expect(step.presentation.status).toContain("pending");
+    expect(step.presentation.status).toContain("retry");
+    expect(step.presentation.status).not.toContain("failed");
+    expect(step.presentation.settings.exposureEv).toBe(0.4);
+    expect(step.presentation.confirmed.exposureEv).toBe(0);
+    // Autosave is not stopped: the next action writes again.
+    expect(editor.commitExposure(0.6).request).not.toBeNull();
+  });
+
+  test("a refused save on a confirmed unreadable source explains the permanent failure", () => {
+    const editor = createPhotoEditor({ nextRequestId: () => "req-1" });
+    editor.open(facts());
+    const written = request(editor.commitExposure(0.4));
+    const step = editor.refuse(written, {
+      status: 503,
+      code: "resource_unavailable",
+      message:
+        "Current source facts cannot be read, so no guarded write is possible.",
+      supportReason: "original-unreadable",
+      currentRecipeVersion: null,
+      currentSourceRevision: null,
+    });
+    expect(step.presentation.status).toContain(
+      "failed for its current source revision",
+    );
+    expect(step.presentation.status).not.toContain("retry once");
+    expect(step.presentation.settings.exposureEv).toBe(0.4);
+  });
+
+  test("a source refusal without a closed reason keeps the service's message", () => {
+    const editor = createPhotoEditor({ nextRequestId: () => "req-1" });
+    editor.open(facts());
+    const written = request(editor.commitExposure(0.4));
+    const step = editor.refuse(written, {
+      status: 503,
+      code: "resource_unavailable",
+      message: "The service is at capacity.",
+      supportReason: "",
+      currentRecipeVersion: null,
+      currentSourceRevision: null,
+    });
+    expect(step.presentation.status).toBe("The service is at capacity.");
+  });
+});
+
 describe("the closed white balance", () => {
   const admittedRange = {
     mode: "temperature-tint" as const,
@@ -733,6 +825,7 @@ describe("resolving a save whose outcome is unknown", () => {
     status: 500,
     code: "outcome_unknown",
     message: "lost response",
+    supportReason: "" as const,
     currentRecipeVersion: null,
     currentSourceRevision: null,
   });
@@ -772,6 +865,7 @@ describe("resolving a save whose outcome is unknown", () => {
       status: 410,
       code: "receipt_expired",
       message: "the receipt expired",
+      supportReason: "",
       currentRecipeVersion: null,
       currentSourceRevision: null,
     });
@@ -793,6 +887,7 @@ describe("resolving a save whose outcome is unknown", () => {
       status: 409,
       code: "request_conflict",
       message: "the identity was used with another payload",
+      supportReason: "",
       currentRecipeVersion: null,
       currentSourceRevision: null,
     });
@@ -820,6 +915,7 @@ describe("resolving a save whose outcome is unknown", () => {
       status: 422,
       code: "invalid_settings",
       message: "the settings are not valid",
+      supportReason: "",
       currentRecipeVersion: null,
       currentSourceRevision: null,
     });

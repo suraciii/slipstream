@@ -302,24 +302,77 @@ pub fn evidence_original_ids(
     discovered: &[DiscoveredOriginal],
     previous: &ScanSnapshot,
 ) -> Vec<String> {
-    let discovered_by_path: std::collections::HashSet<&str> = discovered
+    let discovered_by_path: HashMap<&str, &DiscoveredOriginal> = discovered
         .iter()
-        .map(|original| original.path.as_str())
+        .map(|original| (original.path.as_str(), original))
         .collect();
     let mut ids = Vec::new();
     for original in &previous.originals {
-        let present = discovered_by_path.contains(original.relative_path.as_str());
-        let changed = present
-            && discovered.iter().any(|item| {
-                item.path.as_str() == original.relative_path.as_str()
-                    && (item.facts.size != original.facts.size
-                        || item.facts.mtime_ms != original.facts.mtime_ms)
-            });
-        if !present || changed {
+        let changed = match discovered_by_path.get(original.relative_path.as_str()) {
+            Some(item) => {
+                item.facts.size != original.facts.size
+                    || item.facts.mtime_ms != original.facts.mtime_ms
+            }
+            None => true,
+        };
+        if changed {
             ids.push(original.id.clone());
         }
     }
     ids
+}
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+
+    #[test]
+    fn large_library_selects_only_missing_and_fact_changed_evidence() {
+        let facts = crate::OriginalFacts {
+            size: 10,
+            mtime_ms: 1_000.0,
+            device: 1,
+            inode: 1,
+        };
+        let mut discovered = Vec::with_capacity(20_000);
+        let mut previous = ScanSnapshot {
+            published: true,
+            originals: Vec::with_capacity(20_000),
+            photos: Vec::new(),
+            errors: Vec::new(),
+        };
+        for index in 0..20_000 {
+            let path = crate::RelativeOriginalPath::parse(format!("photos/{index}.ARW")).unwrap();
+            previous.originals.push(OriginalRecord {
+                id: index.to_string(),
+                relative_path: path.clone(),
+                kind: OriginalKind::Raw,
+                facts,
+                available: true,
+                error_category: None,
+                error_message: None,
+                capture: crate::CaptureFact::pending(),
+            });
+            if index != 19_998 {
+                discovered.push(DiscoveredOriginal {
+                    path,
+                    kind: OriginalKind::Raw,
+                    facts: if index == 19_999 {
+                        crate::OriginalFacts { size: 11, ..facts }
+                    } else {
+                        facts
+                    },
+                    error_category: None,
+                    error_message: None,
+                    capture: crate::CaptureFact::pending(),
+                });
+            }
+        }
+        assert_eq!(
+            evidence_original_ids(&discovered, &previous),
+            ["19998".to_owned(), "19999".to_owned()]
+        );
+    }
 }
 
 /// One unavailable Photo listed by the bounded recovery review entry.

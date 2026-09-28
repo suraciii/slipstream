@@ -100,12 +100,28 @@ async fn cancelled_raw_metadata_requests_retain_admission_until_native_work_fini
         );
         tokio::task::yield_now().await;
     }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(first) = application.library.try_admit_native_work()
+            && let Some(second) = application.library.try_admit_native_work()
+        {
+            drop((first, second));
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "native enrollment did not release admission"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     let gate = Arc::new((Mutex::new((0_usize, false)), Condvar::new()));
     struct ReleaseGate(Arc<(Mutex<(usize, bool)>, Condvar)>);
     impl Drop for ReleaseGate {
         fn drop(&mut self) {
             let (lock, signal) = &*self.0;
-            lock.lock().unwrap().1 = true;
+            lock.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .1 = true;
             signal.notify_all();
         }
     }

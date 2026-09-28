@@ -48,7 +48,7 @@ pub(super) fn read_edit_recipe(
         .query_row(
             "SELECT o.relative_path,o.size,o.mtime_ms,o.available,p.available,
                     e.revision,e.source_revision,e.exposure_ev,e.white_balance_mode,
-                    e.temperature_kelvin,e.tint_milli
+                    e.temperature_kelvin,e.tint_milli,o.capture_source_revision
              FROM photos p JOIN original_files o ON o.id=p.original_id
              LEFT JOIN edit_recipes e ON e.photo_id=p.id WHERE p.id=?",
             [photo_id],
@@ -88,16 +88,30 @@ pub(super) fn read_edit_recipe(
                     }
                     _ => return Err(rusqlite::Error::InvalidQuery),
                 };
-                Ok((relative_path, size, mtime_ms, source_available, recipe))
+                let published_revision: Option<String> = row.get(11)?;
+                Ok((
+                    relative_path,
+                    size,
+                    mtime_ms,
+                    source_available,
+                    recipe,
+                    published_revision,
+                ))
             },
         )
         .optional()
         .map_err(|_| PersistenceError::Storage)?;
-    let Some((relative_path, size, mtime_ms, source_available, recipe)) = row else {
+    let Some((relative_path, size, mtime_ms, source_available, recipe, published_revision)) = row
+    else {
         return Ok(None);
     };
-    let current_source_revision = crate::source_revision(&relative_path, size, mtime_ms)
+    let observed_revision = crate::source_revision(&relative_path, size, mtime_ms)
         .map_err(|_| PersistenceError::Storage)?;
+    let current_source_revision = published_revision
+        .as_deref()
+        .and_then(|revision| revision.strip_prefix(&observed_revision))
+        .filter(|descriptor| descriptor.starts_with('\0'))
+        .map(|_| observed_revision);
     Ok(Some(EditRecipeRead {
         recipe,
         current_source_revision,
@@ -233,7 +247,12 @@ pub(super) fn save_edit_recipe(
         if !available || !current.source_available {
             return Ok(EditRecipeWriteOutcome::Unavailable);
         }
-        if current.current_source_revision != mutation.expected_source_revision {
+        if current.current_source_revision.is_none() {
+            return Ok(EditRecipeWriteOutcome::Unavailable);
+        }
+        if current.current_source_revision.as_deref()
+            != Some(mutation.expected_source_revision.as_str())
+        {
             return Ok(EditRecipeWriteOutcome::SourceChanged(current));
         }
         if current
@@ -383,7 +402,11 @@ pub(super) fn rebind_edit_recipe(
         if recipe.revision != mutation.expected_recipe_version {
             return Ok(EditRecipeWriteOutcome::Conflict(current));
         }
-        if current.current_source_revision != mutation.new_source_revision {
+        if current.current_source_revision.is_none() {
+            return Ok(EditRecipeWriteOutcome::Unavailable);
+        }
+        if current.current_source_revision.as_deref() != Some(mutation.new_source_revision.as_str())
+        {
             return Ok(EditRecipeWriteOutcome::SourceChanged(current));
         }
         if recipe.source_revision == mutation.new_source_revision {
@@ -488,6 +511,7 @@ mod tests {
                 mtime_ms: 1_000.0,
             },
         );
+        connection.execute("UPDATE original_files SET capture_metadata_state='missing',capture_source_revision=? WHERE id='raw-original'", [format!("{}\0fixture-device\0fixture-inode", source_revision("shoot/one.ARW", 17, 1_000.0).unwrap())]).unwrap();
         drop(connection);
 
         let persistence = Persistence::open(
@@ -506,7 +530,10 @@ mod tests {
             .unwrap();
         assert!(initial.recipe.is_none());
         assert!(initial.source_available);
-        assert_eq!(initial.current_source_revision, initial_source);
+        assert_eq!(
+            initial.current_source_revision,
+            Some(initial_source.clone())
+        );
 
         let mutation = SaveEditRecipe {
             photo_id: "raw-photo".to_owned(),
@@ -594,8 +621,8 @@ mod tests {
         let connection = Connection::open(&path).unwrap();
         connection
             .execute(
-                "UPDATE original_files SET size=18,mtime_ms=2_000.0 WHERE id='raw-original'",
-                [],
+                "UPDATE original_files SET size=18,mtime_ms=2_000.0,capture_source_revision=? WHERE id='raw-original'",
+                [format!("{}\0fixture-device\0fixture-inode", source_revision("shoot/one.ARW", 18, 2_000.0).unwrap())],
             )
             .unwrap();
         drop(connection);

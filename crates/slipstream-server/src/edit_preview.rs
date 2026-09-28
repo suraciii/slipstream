@@ -1337,6 +1337,7 @@ fn classify_support(
         crate::edit_recipe::source_facts(photo),
         read.source_available,
         photo.original_available,
+        read.current_source_revision.as_deref(),
     )
 }
 
@@ -1476,7 +1477,10 @@ async fn serve_preview(
 ) -> Response<Body> {
     let owner = &state.edit_preview;
     let key = (photo_id.to_owned(), stage, settings);
-    let facts = current_facts(state, stage, settings, read);
+    let Some(source_revision) = read.current_source_revision.clone() else {
+        return resource_unavailable(stage, crate::edit_recipe::READ_PENDING);
+    };
+    let facts = current_facts(state, stage, settings, &source_revision, read);
     let retained = owner.retention.resolve(photo_id, &facts).await;
     let identity = PreviewIdentity::build(&facts, retained.as_ref());
     if let Some(rendition) = owner.current(&key, &identity).await {
@@ -1687,8 +1691,13 @@ async fn fresh_identity(
     if let Some(response) = support_refusal(&photo, &read, stage) {
         return Err(response);
     }
-    develop_executable(state, stage, settings, &read).map_err(|response| *response)?;
-    let facts = current_facts(state, stage, settings, &read);
+    let Some(source_revision) = read.current_source_revision.clone() else {
+        return Err(resource_unavailable(
+            stage,
+            crate::edit_recipe::READ_PENDING,
+        ));
+    };
+    let facts = current_facts(state, stage, settings, &source_revision, &read);
     let retained = state.edit_preview.retention.resolve(photo_id, &facts).await;
     Ok(PreviewIdentity::build(&facts, retained.as_ref()))
 }
@@ -1725,6 +1734,7 @@ fn current_facts(
     state: &HttpState,
     stage: &'static str,
     settings: &'static str,
+    source_revision: &str,
     read: &EditRecipeRead,
 ) -> PreviewFacts {
     let bundle_sha256 = state
@@ -1747,7 +1757,7 @@ fn current_facts(
         long_edge: DEVELOPMENT_PREVIEW_LONG_EDGE,
         display_transform: DISPLAY_TRANSFORM_VERSION,
         bundle_sha256,
-        source_revision: read.current_source_revision.clone(),
+        source_revision: source_revision.to_owned(),
         recipe_revision,
         exposure_milli_ev,
         white_balance: WHITE_BALANCE_AS_SHOT,

@@ -717,6 +717,8 @@ or `null`. Arrays preserve the ordering stated below.
   `idle`, or `failed`;
 - `publication`: an opaque string, or `null` before a Library is published;
 - `completed` and `total`: counts, or `null` while the phase cannot report them;
+- `updatedMs`: Unix milliseconds of the most recent scanner progress update, or
+  zero before a scan starts in this process;
 - `lastRecovery`: `null` or an object with count fields `relocatedPhotos`,
   `fingerprintedOriginals`, and `unavailablePhotos`; and
 - `fingerprints`: `null` or an object with count fields `enrolled` and `pending`.

@@ -1240,9 +1240,15 @@ pub(super) fn apply_scan(
                    camera_identity_state=excluded.camera_identity_state,
                    camera_make=excluded.camera_make,
                    camera_model=excluded.camera_model",
-            )
-            .map_err(|_| PersistenceError::Storage)?;
+            ).map_err(|_| PersistenceError::Storage)?;
         for (index, original) in discovered.iter().enumerate() {
+            let published_prior = original
+                .error_category
+                .is_some()
+                .then(|| previous_originals.get(original.path.as_str()))
+                .flatten()
+                .filter(|prior| prior.kind == original.kind);
+            let facts = published_prior.map_or(original.facts, |prior| prior.facts);
             let (identity_make, identity_model) = match &original.capture.identity {
                 crate::CameraIdentity::Observed { make, model } => {
                     (make.as_deref(), model.as_deref())
@@ -1261,8 +1267,8 @@ pub(super) fn apply_scan(
                         OriginalKind::Raw => "raw",
                         OriginalKind::Jpeg => "jpeg",
                     },
-                    i64::try_from(original.facts.size).map_err(|_| PersistenceError::Storage)?,
-                    original.facts.mtime_ms,
+                    i64::try_from(facts.size).map_err(|_| PersistenceError::Storage)?,
+                    facts.mtime_ms,
                     i64::from(original.error_category.is_none()),
                     original
                         .error_category
@@ -1610,6 +1616,49 @@ mod tests {
             restored_photo.preview_state,
             PreviewState::InspectionPending
         );
+        persistence.shutdown().unwrap();
+    }
+
+    /// An Original that discovery cannot inspect keeps the source facts of the
+    /// current publication. Replacing them with the unreadable discovery facts
+    /// would break the revision binding the published capture fact and the
+    /// recipe guard depend on.
+    #[tokio::test]
+    async fn an_unreadable_discovery_keeps_the_published_source_facts() {
+        let (_base, library, state, name, _path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let published = discovered("one.ARW", OriginalKind::Raw, 3, 1000.0);
+        let first = persistence
+            .apply_scan(vec![published.clone()], Vec::new())
+            .await
+            .unwrap();
+        let stored = first.originals[0].facts;
+        assert_eq!(
+            (stored.size, stored.mtime_ms),
+            (published.facts.size, published.facts.mtime_ms)
+        );
+        assert!(first.originals[0].available);
+
+        let mut unreadable = discovered("one.ARW", OriginalKind::Raw, 0, 0.0);
+        unreadable.facts = OriginalFacts::UNREADABLE;
+        unreadable.error_category = Some(crate::OriginalErrorCategory::Unreadable);
+        unreadable.error_message = Some("Original File could not be inspected".to_owned());
+        let second = persistence
+            .apply_scan(vec![unreadable], Vec::new())
+            .await
+            .unwrap();
+        let kept = &second.originals[0];
+        assert_eq!(
+            (kept.facts.size, kept.facts.mtime_ms),
+            (stored.size, stored.mtime_ms)
+        );
+        assert_eq!(kept.capture, published.capture);
+        assert!(!kept.available);
         persistence.shutdown().unwrap();
     }
 

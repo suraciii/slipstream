@@ -586,6 +586,8 @@ pub(crate) struct ScanStatus {
     pub(crate) publication: Option<String>,
     pub(crate) completed: Option<u64>,
     pub(crate) total: Option<u64>,
+    #[serde(default)]
+    pub(crate) updated_ms: u64,
     pub(crate) last_recovery: Option<RecoveryCounts>,
     pub(crate) fingerprints: Option<FingerprintCounts>,
 }

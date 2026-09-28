@@ -129,6 +129,10 @@ Loading Status reports real phases and counts. It distinguishes:
 - initializing when no Published Library exists.
 
 A phase may omit a total until that total is known. The protocol must not manufacture a percentage from elapsed time.
+The status includes the scanner's last progress update in Unix milliseconds;
+zero means no scan has started in this process. A recovering phase without
+an established total may still represent active planning. The timestamp
+changes only when the scanner reports phase or count progress, not on reads.
 
 Loading Status is the Library axis only: it never reports processing
 capability or a Photo's source-read state, and a `recovering` phase changes

@@ -249,6 +249,9 @@ impl ExportManager {
         if !read.source_available || !photo.original_available {
             return Err("the Original is unavailable".to_owned());
         }
+        let Some(source_revision) = read.current_source_revision.clone() else {
+            return Err("source facts are pending publication".to_owned());
+        };
         // The baseline selector names the processing baseline itself: 0 EV
         // against the documented baseline and as-shot white balance,
         // independently of the saved recipe. A Photo without a saved recipe
@@ -280,7 +283,7 @@ impl ExportManager {
             long_edge: DEVELOPMENT_PREVIEW_LONG_EDGE,
             display_transform: DISPLAY_TRANSFORM_VERSION,
             bundle_sha256: self.processing.bundle_sha256.clone(),
-            source_revision: read.current_source_revision.clone(),
+            source_revision,
             recipe_revision: match read.recipe.as_ref() {
                 Some(recipe) if !baseline => Some(recipe.revision.clone()),
                 _ => None,

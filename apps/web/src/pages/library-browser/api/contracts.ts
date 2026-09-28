@@ -33,6 +33,7 @@ export type LibraryOverviewResponse = Readonly<{
     publication?: string;
     completed?: number;
     total?: number;
+    updatedMs?: number;
     lastRecovery?: Readonly<{
       relocatedPhotos: number;
       fingerprintedOriginals: number;
