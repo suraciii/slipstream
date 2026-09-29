@@ -30,6 +30,10 @@ import { createPhotoEditorSurfaceController } from "./photo-editor-surface.js";
 import type { EditorProxyViewModel } from "./editor-proxy-view-model.js";
 import { createSourceSurfaceController } from "./source-surface.js";
 import {
+  createGridCellPresenter,
+  type GridCell,
+} from "./grid-cell-presenter.js";
+import {
   createFilmstripPresenter,
   type FilmstripPresenter,
   type FilmstripViewModel,
@@ -485,22 +489,6 @@ type GridViewModel = Readonly<{
   }>;
   photoAt(index: number): GridPhotoViewModel | undefined;
 }>;
-
-/// One rendered Grid cell. The signature covers everything the cell presents,
-/// so a merged render rebuilds only the cells whose Photo facts or delivery
-/// state changed and leaves every other button and its image in place.
-type RenderedGridCell = {
-  readonly cell: HTMLButtonElement;
-  signature: string;
-  deliveryFailed: boolean;
-  /// The thumbnail ownership this cell holds while it presents a Photo. A
-  /// cell that leaves the rendered range or is rebuilt hands it back so the
-  /// owner's image state follows the rendered Grid.
-  thumbnail: GridThumbnailBinding | undefined;
-};
-
-/// Placeholder cells present no Photo: they never initiate loading.
-const LOADING_CELL_SIGNATURE = "loading";
 
 type PhotoFactsViewModel = Readonly<{
   index: number;
@@ -1445,7 +1433,7 @@ ${RECOVERY_PANEL_TEMPLATE}
   let renderedColumnStride = 0;
   let renderedViewportHeight = 0;
   let gridRenderFrame: number | undefined;
-  const renderedCells = new Map<number, RenderedGridCell>();
+  const renderedCells = new Map<number, GridCell>();
   // The range the Grid last reported for admission. A render reports a
   // changed range, or the same range again while part of it has no Photo.
   let reportedGridRange: Readonly<{ start: number; end: number }> | undefined;
@@ -1550,6 +1538,23 @@ ${RECOVERY_PANEL_TEMPLATE}
       release: releaseThumbnail,
     },
     openPhoto: (index) => send({ kind: "open-photo", index }),
+  });
+  const gridCellPresenter = createGridCellPresenter({
+    compact: () => compactSources.matches,
+    rowPitch: () => rowPitch(),
+    interactionEnabled: () => gridInteractionEnabled,
+    multiSelected: (index) => gridMultiSelected(index),
+    multiMode: () => gridMultiMode,
+    send: (index, event) =>
+      send({
+        kind: "open-photo",
+        index,
+        ...(event.shiftKey ? { range: true } : {}),
+        ...(event.ctrlKey || event.metaKey ? { toggle: true } : {}),
+      }),
+    bindThumbnail,
+    releaseThumbnail,
+    target: gridThumbnailTarget,
   });
   /// Opens the explicit Rating choices. Only this surface or the Rating entry
   /// owns explicit Rating interaction at one time; the Rating Wheel stays the
@@ -2060,7 +2065,8 @@ ${RECOVERY_PANEL_TEMPLATE}
   /// while a source is replaced, and when Photo View hands the surface back
   /// without the Grid images it detached.
   const clearGridCells = () => {
-    for (const rendered of renderedCells.values()) releaseGridCell(rendered);
+    for (const rendered of renderedCells.values())
+      gridCellPresenter.release(rendered);
     renderedCells.clear();
     reportedGridRange = undefined;
     gridLayer.replaceChildren();
@@ -2084,9 +2090,9 @@ ${RECOVERY_PANEL_TEMPLATE}
       const image = rendered.cell.querySelector<HTMLImageElement>("img");
       if (!rendered.thumbnail || !image || image.getAttribute("src")) continue;
       const position = rendered.cell.nextSibling;
-      releaseGridCell(rendered);
+      gridCellPresenter.release(rendered);
       rendered.cell.remove();
-      const rebuilt = buildGridCell(
+      const rebuilt = gridCellPresenter.build(
         index,
         model.photoAt(index),
         model.total,
@@ -2097,170 +2103,12 @@ ${RECOVERY_PANEL_TEMPLATE}
       renderedCells.set(index, rebuilt);
     }
   };
-  /// Detaches the image of a cell that leaves the rendered range or is rebuilt
-  /// in place: an already-started transfer cannot keep owning a connection,
-  /// and its late error cannot claim a delivery failure for the Photo. The
-  /// cell also hands its thumbnail ownership back to the owner, whose image
-  /// state then follows the rendered Grid instead of every Photo a session
-  /// rendered.
-  const releaseGridCell = (rendered: RenderedGridCell) => {
-    const image = rendered.cell.querySelector<HTMLImageElement>("img");
-    if (image) {
-      image.onload = null;
-      image.onerror = null;
-      image.removeAttribute("src");
-    }
-    if (rendered.thumbnail) {
-      releaseThumbnail(rendered.thumbnail);
-      rendered.thumbnail = undefined;
-    }
-  };
-  const positionGridCell = (
-    cell: HTMLButtonElement,
-    index: number,
-    count: number,
-    stride: number,
-  ) => {
-    cell.style.left = `${(index % count) * stride}px`;
-    cell.style.top = `${Math.floor(index / count) * rowPitch()}px`;
-    cell.style.width = compactSources.matches
-      ? `${stride - GRID_CELL_GAP_X}px`
-      : "";
-  };
-  const buildGridCell = (
-    index: number,
-    photo: GridPhotoViewModel | undefined,
-    total: number,
-    count: number,
-    stride: number,
-  ): RenderedGridCell => {
-    const cell = document.createElement("button");
-    cell.type = "button";
-    cell.className = "photo-cell";
-    positionGridCell(cell, index, count, stride);
-    if (!photo) {
-      cell.disabled = true;
-      const placeholder = document.createElement("span");
-      placeholder.className = "cell-placeholder";
-      placeholder.textContent = "Loading…";
-      cell.append(placeholder);
-      return {
-        cell,
-        signature: LOADING_CELL_SIGNATURE,
-        deliveryFailed: false,
-        thumbnail: undefined,
-      };
-    }
-    cell.dataset.photoIndex = String(index);
-    cell.disabled = !gridInteractionEnabled;
-    // The image keeps its own media area so the complete Photo displays
-    // at its true aspect ratio; state, rating, and fact indicators render
-    // in the footer beneath it instead of over the image.
-    const media = document.createElement("span");
-    media.className = "cell-media";
-    const image = document.createElement("img");
-    image.alt = `Photo ${index + 1} of ${total}`;
-    image.loading = "lazy";
-    image.fetchPriority = "low";
-    image.decoding = "async";
-    image.draggable = false;
-    image.className = "thumbnail";
-    media.append(image);
-    const footer = document.createElement("span");
-    footer.className = "cell-footer";
-    const caption = document.createElement("span");
-    caption.className = "cell-caption";
-    // The position number and the Original filename are the visible identity
-    // of the cell; a Rating star follows when one is recorded.
-    const identity = photo.originalFilename
-      ? `${index + 1} · ${photo.originalFilename}`
-      : String(index + 1);
-    caption.textContent = photo.rating
-      ? `${identity} · ${photo.rating}★`
-      : identity;
-    if (photo.originalFilename) caption.title = photo.originalFilename;
-    const facts = document.createElement("span");
-    facts.className = "cell-facts";
-    const rendered: RenderedGridCell = {
-      cell,
-      signature: "",
-      deliveryFailed: false,
-      thumbnail: undefined,
-    };
-    const presentFacts = () => {
-      const values = gridPhotoFacts(photo, rendered.deliveryFailed);
-      facts.textContent = values.join(" · ");
-      facts.hidden = values.length === 0;
-      cell.setAttribute(
-        "aria-label",
-        [
-          `Photo ${index + 1} of ${total}`,
-          ...(photo.originalFilename ? [photo.originalFilename] : []),
-          selectionLabel(photo.selectionState),
-          photo.rating === 1 ? "1 star" : `${photo.rating} stars`,
-          ...values,
-        ].join(" — "),
-      );
-    };
-    presentFacts();
-    rendered.signature = gridCellSignature(
-      index,
-      photo,
-      rendered.deliveryFailed,
-    );
-    // Only a recorded decision earns a badge. An empty badge on every
-    // undecided cell reads as an unchecked control instead of a fact.
-    if (photo.selectionState === "undecided") {
-      caption.classList.add("cell-caption-wide");
-      footer.append(caption, facts);
-    } else {
-      const badge = document.createElement("span");
-      badge.className = `cell-state ${photo.selectionState}`;
-      badge.textContent = photo.selectionState === "selected" ? "✓" : "×";
-      footer.append(badge, caption, facts);
-    }
-    cell.append(media, footer);
-    cell.addEventListener("click", (event) =>
-      send({
-        kind: "open-photo",
-        index,
-        ...(event.shiftKey ? { range: true } : {}),
-        ...(event.ctrlKey || event.metaKey ? { toggle: true } : {}),
-      }),
-    );
-    applyGridCellMulti(cell, index);
-    if (alive) {
-      const binding: GridThumbnailBinding = {
-        photoId: photo.id,
-        preview: photo.preview,
-        target: gridThumbnailTarget(image, (failed) => {
-          rendered.deliveryFailed = failed;
-          rendered.signature = gridCellSignature(index, photo, failed);
-          presentFacts();
-        }),
-      };
-      rendered.thumbnail = binding;
-      bindThumbnail(binding);
-    }
-    return rendered;
-  };
-  /// Presents one cell's multi-selection. A multi-selected cell carries a
-  /// marker that does not depend on color alone, and every cell exposes the
-  /// pressed state while Select mode makes its activation toggle.
-  const applyGridCellMulti = (cell: HTMLButtonElement, index: number) => {
-    const selected = gridMultiSelected(index);
-    cell.classList.toggle("multi-selected", selected);
-    cell.dataset.multiSelected = String(selected);
-    if (selected) cell.setAttribute("aria-pressed", "true");
-    else if (gridMultiMode) cell.setAttribute("aria-pressed", "false");
-    else cell.removeAttribute("aria-pressed");
-  };
   /// Applies the multi-selection to every rendered cell in place. Rebuilding a
   /// cell would restart its Thumbnail transfer, so the marker is patched onto
   /// the cell that already presents the Photo.
   const applyGridMultiSelection = () => {
     for (const [index, rendered] of renderedCells)
-      applyGridCellMulti(rendered.cell, index);
+      gridCellPresenter.applyMulti(rendered.cell, index);
   };
   const renderBatch = () => {
     if (!alive) return;
@@ -2556,7 +2404,7 @@ ${RECOVERY_PANEL_TEMPLATE}
     for (const [index, rendered] of renderedCells)
       if (index < start || index >= end) {
         rendered.cell.remove();
-        releaseGridCell(rendered);
+        gridCellPresenter.release(rendered);
         renderedCells.delete(index);
       }
     let anchor: ChildNode | null = null;
@@ -2564,22 +2412,30 @@ ${RECOVERY_PANEL_TEMPLATE}
     for (let index = end - 1; index >= start; index -= 1) {
       const photo = model.photoAt(index);
       const existing = renderedCells.get(index);
-      const signature = photo
-        ? gridCellSignature(index, photo, existing?.deliveryFailed ?? false)
-        : LOADING_CELL_SIGNATURE;
+      const signature = gridCellPresenter.signature(
+        index,
+        photo,
+        existing?.deliveryFailed ?? false,
+      );
       if (!photo) incomplete = true;
-      let rendered: RenderedGridCell;
+      let rendered: GridCell;
       if (existing && existing.signature === signature) {
         rendered = existing;
-        positionGridCell(rendered.cell, index, count, stride);
+        gridCellPresenter.position(rendered.cell, index, count, stride);
       } else {
         // A rebuilt cell replaces its old node, so a stale placeholder or a
         // changed rendering never stays in the layer.
         if (existing) {
-          releaseGridCell(existing);
+          gridCellPresenter.release(existing);
           existing.cell.remove();
         }
-        rendered = buildGridCell(index, photo, model.total, count, stride);
+        rendered = gridCellPresenter.build(
+          index,
+          photo,
+          model.total,
+          count,
+          stride,
+        );
         renderedCells.set(index, rendered);
       }
       // Walking down keeps rendered cells in source order with the fewest
@@ -3645,42 +3501,6 @@ function selectionLabel(value?: ViewSelectionState): string {
     : value === "rejected"
       ? "Rejected"
       : "Undecided";
-}
-
-function gridPhotoFacts(
-  photo: GridPhotoViewModel,
-  deliveryFailed: boolean,
-): string[] {
-  const facts: string[] = [];
-  if (!photo.available) facts.push("Photo unavailable");
-  if (photo.original.kind === "raw") facts.push("RAW");
-  if (photo.hasSavedEdits) facts.push("Edited");
-  if (photo.preview.state === "unavailable") facts.push("Preview unavailable");
-  if (photo.preview.state === "failed") facts.push("Preview failed");
-  if (deliveryFailed) facts.push("Thumbnail delivery failed");
-  return facts;
-}
-
-/// Everything one rendered cell presents at its position. Two renders with the
-/// same signature leave the cell's button and thumbnail image untouched.
-function gridCellSignature(
-  index: number,
-  photo: GridPhotoViewModel,
-  deliveryFailed: boolean,
-): string {
-  return [
-    String(index),
-    photo.id,
-    photo.originalFilename ?? "",
-    photo.available ? "available" : "unavailable",
-    photo.original.kind,
-    photo.selectionState,
-    String(photo.rating),
-    photo.hasSavedEdits ? "edited" : "unedited",
-    photo.preview.state,
-    photo.preview.thumbnailUrl ?? "",
-    deliveryFailed ? "delivery-failed" : "delivered",
-  ].join("|");
 }
 
 function gridThumbnailTarget(
