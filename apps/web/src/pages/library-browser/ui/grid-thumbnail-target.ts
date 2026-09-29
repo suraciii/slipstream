@@ -3,7 +3,7 @@ import type { GridThumbnailTarget } from "./library-browser-view.js";
 export function gridThumbnailTarget(
   image: HTMLImageElement,
   setDeliveryFailed: (failed: boolean) => void,
-  setPreviewState: (state: "unavailable" | "failed") => void = () => {},
+  setThumbnailState: (state: "unavailable" | "failed") => void = () => {},
 ): GridThumbnailTarget {
   return {
     get complete() {
@@ -34,6 +34,6 @@ export function gridThumbnailTarget(
       image.removeAttribute(name);
     },
     setDeliveryFailed,
-    setPreviewState,
+    setThumbnailState,
   };
 }

@@ -375,10 +375,8 @@ export interface GridThumbnailTarget {
   onerror: GlobalEventHandlers["onerror"];
   removeAttribute(name: string): void;
   setDeliveryFailed(failed: boolean): void;
-  /// Reports the terminal Preview fact the Thumbnail endpoint answered with,
-  /// so the cell presents Preview unavailability or failure instead of a
-  /// delivery failure.
-  setPreviewState(state: "unavailable" | "failed"): void;
+  /// Reports a terminal Thumbnail result without changing Review Preview facts.
+  setThumbnailState(state: "unavailable" | "failed"): void;
 }
 
 interface ReviewImageTarget {
@@ -493,6 +491,7 @@ type RenderedGridCell = {
   readonly cell: HTMLButtonElement;
   signature: string;
   deliveryFailed: boolean;
+  thumbnailState: "unavailable" | "failed" | undefined;
   /// The thumbnail ownership this cell holds while it presents a Photo. A
   /// cell that leaves the rendered range or is rebuilt hands it back so the
   /// owner's image state follows the rendered Grid.
@@ -2201,6 +2200,7 @@ ${RECOVERY_PANEL_TEMPLATE}
         cell,
         signature: LOADING_CELL_SIGNATURE,
         deliveryFailed: false,
+        thumbnailState: undefined,
         thumbnail: undefined,
       };
     }
@@ -2238,13 +2238,15 @@ ${RECOVERY_PANEL_TEMPLATE}
       cell,
       signature: "",
       deliveryFailed: false,
+      thumbnailState: undefined,
       thumbnail: undefined,
     };
-    let previewOverride: GridPhotoPreview | undefined;
-    const presentedPhoto = (): GridPhotoViewModel =>
-      previewOverride ? { ...photo, preview: previewOverride } : photo;
     const presentFacts = () => {
-      const values = gridPhotoFacts(presentedPhoto(), rendered.deliveryFailed);
+      const values = gridPhotoFacts(
+        photo,
+        rendered.deliveryFailed,
+        rendered.thumbnailState,
+      );
       facts.textContent = values.join(" · ");
       facts.hidden = values.length === 0;
       cell.setAttribute(
@@ -2259,11 +2261,7 @@ ${RECOVERY_PANEL_TEMPLATE}
       );
     };
     presentFacts();
-    rendered.signature = gridCellSignature(
-      index,
-      presentedPhoto(),
-      rendered.deliveryFailed,
-    );
+    rendered.signature = gridCellSignature(index, photo, false);
     // Only a recorded decision earns a badge. An empty badge on every
     // undecided cell reads as an unchecked control instead of a fact.
     if (photo.selectionState === "undecided") {
@@ -2293,21 +2291,12 @@ ${RECOVERY_PANEL_TEMPLATE}
           image,
           (failed) => {
             rendered.deliveryFailed = failed;
-            rendered.signature = gridCellSignature(
-              index,
-              presentedPhoto(),
-              failed,
-            );
+            rendered.signature = gridCellSignature(index, photo, failed);
             presentFacts();
           },
           (state) => {
-            previewOverride = { state };
+            rendered.thumbnailState = state;
             rendered.deliveryFailed = false;
-            rendered.signature = gridCellSignature(
-              index,
-              presentedPhoto(),
-              false,
-            );
             presentFacts();
           },
         ),
@@ -2593,8 +2582,7 @@ ${RECOVERY_PANEL_TEMPLATE}
             rendered.deliveryFailed = failed;
             rendered.signature = filmstripCellSignature(cell, total, failed);
           },
-          // The strip presents no fact line; a terminal Preview answer just
-          // clears any delivery-failure reading.
+          // The strip has no Thumbnail fact line; clear delivery failure.
           () => {
             rendered.deliveryFailed = false;
             rendered.signature = filmstripCellSignature(cell, total, false);
@@ -3974,6 +3962,7 @@ function selectionLabel(value?: ViewSelectionState): string {
 function gridPhotoFacts(
   photo: GridPhotoViewModel,
   deliveryFailed: boolean,
+  thumbnailState?: "unavailable" | "failed",
 ): string[] {
   const facts: string[] = [];
   if (!photo.available) facts.push("Photo unavailable");
@@ -3981,6 +3970,9 @@ function gridPhotoFacts(
   if (photo.hasSavedEdits) facts.push("Edited");
   if (photo.preview.state === "unavailable") facts.push("Preview unavailable");
   if (photo.preview.state === "failed") facts.push("Preview failed");
+  if (thumbnailState === "unavailable" && photo.preview.state !== "unavailable")
+    facts.push("Thumbnail unavailable");
+  if (thumbnailState === "failed") facts.push("Thumbnail failed");
   if (deliveryFailed) facts.push("Thumbnail delivery failed");
   return facts;
 }
