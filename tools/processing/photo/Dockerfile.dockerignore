@@ -23,5 +23,6 @@ tools/processing/photo/**
 !tools/development/
 tools/development/**
 !tools/development/film_identity.py
+!tools/development/history.py
 !tools/development/finished_jpeg.py
 !tools/processing/photo/test_film_adapter.py

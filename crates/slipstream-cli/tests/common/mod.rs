@@ -1,5 +1,6 @@
 use rusqlite::Connection;
 use rustls::{ServerConfig, ServerConnection};
+use serde_json::{Value, json};
 use sha2::Digest;
 use slipstream_server::{Config, RunningServer, start_server};
 use std::{
@@ -58,6 +59,104 @@ pub fn cli_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_slipstream"));
     command.env("SSL_CERT_FILE", test_ca_path());
     command
+}
+/// Complete capabilities document shared by scripted CLI services.
+#[allow(dead_code)]
+pub fn capabilities_body() -> Value {
+    json!({
+        "serverVersion": "0.0.0",
+        "supportedCliContractVersions": [1],
+        "limits": {
+            "listPageMaximum": 60,
+            "mutationPhotoIdsMaximum": 100,
+            "removalPhotoIdsMaximum": 100,
+            "albumReorderMembersMaximum": 100,
+            "retainedQueryIdsMaximum": 1000000,
+            "retainedQueryIdleSeconds": 900,
+            "recoveryPageMaximum": 60,
+            "recoveryMappingsMaximum": 10000,
+            "recoveryApplyMaximum": 100,
+            "recoveryReviewIdleSeconds": 900
+        }
+    })
+}
+
+#[allow(dead_code)]
+pub async fn command(server: &str, arguments: &[&str]) -> (u8, Value) {
+    let server = server.to_owned();
+    let arguments = arguments
+        .iter()
+        .map(|argument| (*argument).to_owned())
+        .collect::<Vec<_>>();
+    tokio::task::spawn_blocking(move || {
+        let output = cli_command()
+            .arg("--token-file")
+            .arg(credential_file())
+            .arg("--server")
+            .arg(server)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.stderr.is_empty(),
+            "unexpected CLI stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (
+            output.status.code().unwrap() as u8,
+            serde_json::from_slice(&output.stdout).unwrap(),
+        )
+    })
+    .await
+    .unwrap()
+}
+
+#[allow(dead_code)]
+pub async fn command_with_stdin(server: &str, arguments: &[&str], stdin: &str) -> (u8, Value) {
+    let server = server.to_owned();
+    let arguments = arguments
+        .iter()
+        .map(|argument| (*argument).to_owned())
+        .collect::<Vec<_>>();
+    let stdin = stdin.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let mut child = cli_command()
+            .arg("--token-file")
+            .arg(credential_file())
+            .arg("--server")
+            .arg(server)
+            .args(arguments)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let _ = child.stdin.as_mut().unwrap().write_all(stdin.as_bytes());
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.stderr.is_empty(),
+            "unexpected CLI stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (
+            output.status.code().unwrap() as u8,
+            serde_json::from_slice(&output.stdout).unwrap(),
+        )
+    })
+    .await
+    .unwrap()
+}
+
+#[allow(dead_code)]
+pub async fn wait_until_idle(server: &str) {
+    for _ in 0..400 {
+        let (exit, result) = command(server, &["status"]).await;
+        if exit == 0 && result["data"]["scan"]["state"] == "idle" {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("fixture Library did not become idle");
 }
 
 pub fn test_ca_path() -> PathBuf {

@@ -192,6 +192,10 @@ fresh journal to clear this fence. A crash between first claim synchronization
 and journal creation may conservatively require operator reconciliation and a
 fresh instance. This is a host-wide ownership claim, not a second attempt journal.
 
+The host-global claim owns instance identity, exclusive locking, and the
+claim-file lease across launcher variants. The operational journal separately
+owns attempt receipts and recovery; neither can substitute for the other.
+
 A launcher holds these exclusive locks before it serves requests or reconciles
 runtime objects. Its journal stores a persistent registry
 incarnation, a monotonic admission sequence, the active slot, and attempt

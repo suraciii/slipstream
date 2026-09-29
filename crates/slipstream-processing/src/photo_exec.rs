@@ -8,7 +8,7 @@
 //! never resolves Photos, reads the Library, or publishes Exports.
 
 use crate::{
-    backend,
+    backend, instance_claim,
     journal::{self, ManagerPhase, ParentIdentity},
     photo::{self, Config, OutputReceipt, PhotoReceipt, Recipe, Request, ResultBody, Source},
     photo_profile,
@@ -435,7 +435,7 @@ impl PhotoExecutor {
         // never leaves a registry-less claim behind. The acquisition itself
         // arms the lease, so no call-site ordering can skip it; the retained
         // descriptor keeps the exclusive flock while the file is unlinked.
-        let claim = journal::claim_instance(&authority)?;
+        let claim = instance_claim::claim_instance(&authority)?;
         // The registry is made durable before any check that can refuse the
         // start. Every later failure leaves a claim with a durable registry,
         // which the next start loads instead of re-initializing.

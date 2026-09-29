@@ -1651,12 +1651,12 @@ fn a_failed_open_removes_only_the_claim_this_process_created() {
     let claim_root = root.display().to_string();
     // The acquisition itself arms the lease: a fresh claim is removed
     // when the open fails after claiming.
-    let claim = journal::hold_claim(&path, &root, &claim_root).unwrap();
+    let claim = instance_claim::hold_claim(&path, &root, &claim_root).unwrap();
     drop(claim);
     assert!(!path.try_exists().unwrap());
     // Disarming by value keeps the claim for the executor's lifetime.
     drop(
-        journal::hold_claim(&path, &root, &claim_root)
+        instance_claim::hold_claim(&path, &root, &claim_root)
             .unwrap()
             .take(),
     );
@@ -1667,7 +1667,7 @@ fn a_failed_open_removes_only_the_claim_this_process_created() {
     fs::File::create(root.join("registry.json")).unwrap();
     // Dropping the non-lease keeps the file: a failure here can never
     // remove a claim created by an earlier owner.
-    drop(journal::hold_claim(&path, &root, &claim_root).unwrap());
+    drop(instance_claim::hold_claim(&path, &root, &claim_root).unwrap());
     assert!(path.try_exists().unwrap());
     fs::remove_dir_all(&root).unwrap();
 }

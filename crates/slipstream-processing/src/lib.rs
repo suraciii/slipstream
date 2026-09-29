@@ -3,6 +3,7 @@
 mod backend;
 mod environment;
 mod faults;
+mod instance_claim;
 mod journal;
 pub mod photo;
 mod photo_exec;

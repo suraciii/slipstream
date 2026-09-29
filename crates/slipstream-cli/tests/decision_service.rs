@@ -11,7 +11,6 @@ use std::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     thread::JoinHandle,
-    time::Duration,
 };
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -28,22 +27,7 @@ enum MutationReply {
 }
 
 fn capabilities_body() -> Value {
-    json!({
-        "serverVersion": "0.0.0",
-        "supportedCliContractVersions": [1],
-        "limits": {
-            "listPageMaximum": 60,
-            "mutationPhotoIdsMaximum": 100,
-            "removalPhotoIdsMaximum": 100,
-            "albumReorderMembersMaximum": 100,
-            "retainedQueryIdsMaximum": 1000000,
-            "retainedQueryIdleSeconds": 900,
-            "recoveryPageMaximum": 60,
-            "recoveryMappingsMaximum": 10000,
-            "recoveryApplyMaximum": 100,
-            "recoveryReviewIdleSeconds": 900
-        }
-    })
+    common::capabilities_body()
 }
 
 fn write_json_response(stream: &mut impl Write, status: u16, body: &Value) {
@@ -146,43 +130,11 @@ fn fixture_with(photo_names: &[&str]) -> (PathBuf, Config) {
 }
 
 async fn command(server: &str, arguments: &[&str]) -> (u8, Value) {
-    command_with_stdin(server, arguments, "").await
+    common::command_with_stdin(server, arguments, "").await
 }
 
 async fn command_with_stdin(server: &str, arguments: &[&str], stdin: &str) -> (u8, Value) {
-    let server = server.to_owned();
-    let arguments = arguments
-        .iter()
-        .map(|argument| (*argument).to_owned())
-        .collect::<Vec<_>>();
-    let stdin = stdin.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let mut child = common::cli_command()
-            .arg("--token-file")
-            .arg(common::credential_file())
-            .arg("--server")
-            .arg(server)
-            .args(arguments)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        // A failed write only means the command exited before reading stdin.
-        let _ = child.stdin.as_mut().unwrap().write_all(stdin.as_bytes());
-        let output = child.wait_with_output().unwrap();
-        assert!(
-            output.stderr.is_empty(),
-            "unexpected CLI stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        (
-            output.status.code().unwrap() as u8,
-            serde_json::from_slice(&output.stdout).unwrap(),
-        )
-    })
-    .await
-    .unwrap()
+    common::command_with_stdin(server, arguments, stdin).await
 }
 
 async fn post_json(server: &str, path: &str, body: Value) -> reqwest::Response {
@@ -199,14 +151,7 @@ async fn post_json(server: &str, path: &str, body: Value) -> reqwest::Response {
 }
 
 async fn wait_until_idle(server: &str) {
-    for _ in 0..400 {
-        let (exit, result) = command(server, &["status"]).await;
-        if exit == 0 && result["data"]["scan"]["state"] == "idle" {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("fixture Library did not become idle");
+    common::wait_until_idle(server).await
 }
 
 async fn photo_page(server: &str) -> Vec<(String, String)> {
