@@ -294,6 +294,16 @@ export function createEditorController(
     }
   };
   const clearEditorPreview = (): void => {
+    editorPreviewAbort?.abort();
+    editorPreviewAbort = undefined;
+    editorPreviewGeneration += 1;
+    editorPreviewBusy = false;
+    editorPreviewIdentity = undefined;
+    editorPreviewAttempts = 0;
+    if (editorPreviewTimer !== undefined) {
+      clearTimeout(editorPreviewTimer);
+      editorPreviewTimer = undefined;
+    }
     if (editorPreviewUrl) URL.revokeObjectURL(editorPreviewUrl);
     editorPreviewUrl = undefined;
     editorPreviewNote = "";
@@ -425,7 +435,6 @@ export function createEditorController(
     }>,
   ): string => {
     if (presented.photoId === "") return "Loading edit…";
-    if (presented.saving || presented.dirty) return "Saving…";
     if (presented.conflict)
       return "Could not update — choose how to resolve it below.";
     const status = presented.status;
@@ -433,6 +442,7 @@ export function createEditorController(
       return "Checking result…";
     if (status.startsWith("The save was refused"))
       return "Could not update — Retry";
+    if (presented.saving || presented.dirty) return "Saving…";
     if (status.startsWith("This deployment does not admit the white-balance"))
       return "This white-balance mode is not available for this Photo.";
     if (status.startsWith("This deployment does not admit temperature"))
@@ -1214,6 +1224,7 @@ export function createEditorController(
       if (generation === editorPreviewGeneration) {
         editorPreviewBusy = false;
         editorPreviewNote = "The preview request did not reach the service.";
+        editorPreviewRefused = !editorPreviewUrl;
         editorPreviewOutcome = "failed";
         renderEditor();
       }
@@ -1410,7 +1421,9 @@ export function createEditorController(
     }
     if (inspection.state === "cancelled")
       return `The ${label} export was cancelled.`;
-    return "Could not create this result. Retry.";
+    return inspection.failureReason
+      ? `Could not create this result: ${inspection.failureReason}`
+      : "Could not create this result. Retry.";
   };
   const inspectEditorExport = async (
     photoId: string,

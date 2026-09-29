@@ -1366,7 +1366,7 @@ test("real-processing: autosaves an exposure, reopens it, compares the baseline,
   // rendition once that development has settled.
   const previewNote = page.locator("[data-photo-editor-preview-note]");
   const baseline =
-    /Develop baseline comparison \d+×\d+: the as-shot\/baseline development of this stage\./;
+    /Edit comparison: the unadjusted rendering, compared with the current settings\./;
   const compare = page.locator("[data-photo-editor-compare]");
   for (let attempt = 0; attempt < 12; attempt += 1) {
     if (baseline.test((await previewNote.textContent()) ?? "")) break;
@@ -1394,7 +1394,7 @@ test("real-processing: autosaves an exposure, reopens it, compares the baseline,
   // the retained artifact downloads as a TIFF.
   await page.locator("[data-photo-editor-export-submit]").click();
   await expect(page.locator("[data-photo-editor-export-state]")).toContainText(
-    /Development TIFF ready: [\d.]+ (?:B|KiB|MiB|GiB), \d+×\d+, downloadable until /,
+    /Ready to download — Development TIFF, [\d.]+ (?:B|KiB|MiB|GiB), \d+×\d+, available until /,
     { timeout: 300_000 },
   );
   const pending = page.waitForEvent("download");
