@@ -4,6 +4,8 @@ use crate::{
     protocol::*,
 };
 use serde::{Deserialize, Serialize};
+#[path = "qualification.rs"]
+mod qualification;
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
@@ -251,7 +253,7 @@ impl Executor {
             invalidations: qualified.as_ref().map(|_| Vec::new()),
         });
         validate_registry(&registry, &config)?;
-        restore_qualifications(&mut registry)?;
+        qualification::restore(&mut registry)?;
         for entry in fs::read_dir(root.join("attempts")).map_err(|_| ErrorCode::Unavailable)? {
             let entry = entry.map_err(|_| ErrorCode::Unavailable)?;
             if !registry
@@ -411,7 +413,7 @@ impl Executor {
                         .ok_or(ErrorCode::Uncertain)?;
                     let ready = matches!(self.availability(&data), Availability::Available)
                         && self.qualified_ready().is_ok();
-                    let availability = qualified_availability(
+                    let availability = qualification::availability(
                         ready,
                         &documents.envelope.cases,
                         &config.envelope_sha256,
@@ -569,7 +571,7 @@ impl Executor {
                         .invalidations
                         .as_ref()
                         .ok_or(ErrorCode::Uncertain)?;
-                    let (fixture, plan) = plan_qualified_start(
+                    let (fixture, plan) = qualification::plan(
                         documents,
                         invalidations,
                         &workload.fixture_id,
@@ -845,7 +847,7 @@ impl Executor {
         {
             record.receipt.outcome = Some(outcome);
         }
-        assess_qualification(&mut next, &mut record)?;
+        qualification::assess(&mut next, &mut record)?;
         if record.receipt.state == State::Settled {
             if record.receipt.cleanup != Cleanup::Complete || record.receipt.outcome.is_none() {
                 return Err(ErrorCode::Uncertain);
@@ -1421,9 +1423,9 @@ pub(crate) fn classify(
     worker: Option<Outcome>,
     requested: Option<Outcome>,
 ) -> Outcome {
-    if attempt_oom_killed(evidence)
+    if qualification::attempt_oom_killed(evidence)
         && (evidence.docker_oom_killed == Some(true)
-            || (evidence.exit_code == Some(137) && owned_limit_pressure(evidence)))
+            || (evidence.exit_code == Some(137) && qualification::owned_limit_pressure(evidence)))
     {
         return Outcome::Oom;
     }
@@ -1442,169 +1444,6 @@ pub(crate) fn classify(
     } else {
         Outcome::Unknown
     }
-}
-
-fn attempt_oom_killed(evidence: &Evidence) -> bool {
-    evidence
-        .attempt_before
-        .as_ref()
-        .zip(evidence.attempt_after.as_ref())
-        .is_some_and(|(before, after)| {
-            after
-                .oom_kill
-                .checked_sub(before.oom_kill)
-                .is_some_and(|delta| delta > 0)
-        })
-}
-
-fn owned_limit_pressure(evidence: &Evidence) -> bool {
-    // Hierarchical events retain pressure at a vanished workload leaf. Only
-    // local parent events exclude pressure from another subtree or ancestor.
-    evidence
-        .attempt_before
-        .as_ref()
-        .zip(evidence.attempt_after.as_ref())
-        .is_some_and(|(before, after)| after.oom.checked_sub(before.oom).is_some_and(|n| n > 0))
-        || evidence
-            .parent_before
-            .as_ref()
-            .zip(evidence.parent_after.as_ref())
-            .is_some_and(|(before, after)| {
-                after
-                    .local_oom
-                    .checked_sub(before.local_oom)
-                    .is_some_and(|n| n > 0)
-            })
-}
-
-fn qualified_availability(
-    boundary_ready: bool,
-    cases: &[crate::qualified::Case],
-    envelope: &str,
-    invalidations: &[crate::qualified::Invalidation],
-) -> crate::qualified::Availability {
-    use crate::qualified::{Availability, Case};
-    if !boundary_ready {
-        Availability::Blocked
-    } else if cases.iter().any(|case| {
-        matches!(case, Case::Qualified { .. })
-            && !invalidations
-                .iter()
-                .any(|entry| entry.envelope == envelope && entry.fixture_id == case.fixture_id())
-    }) {
-        Availability::Available
-    } else {
-        Availability::Unqualified
-    }
-}
-
-fn plan_qualified_start(
-    documents: &crate::qualified::Documents,
-    invalidations: &[crate::qualified::Invalidation],
-    fixture: &str,
-    envelope: &str,
-    memory: u64,
-) -> Result<(crate::film::Fixture, crate::qualified::Plan), ErrorCode> {
-    if invalidations.len() >= crate::qualified::INVALIDATIONS {
-        return Err(ErrorCode::Capacity);
-    }
-    if invalidations
-        .iter()
-        .any(|entry| entry.envelope == envelope && entry.fixture_id == fixture)
-    {
-        return Err(ErrorCode::UnqualifiedEnvelope);
-    }
-    documents.plan(fixture, envelope, memory)
-}
-
-fn qualification_failure(record: &Record) -> Option<crate::qualified::QualificationFailure> {
-    use crate::qualified::QualificationFailure as Failure;
-    let captured = record.film.as_ref()?;
-    let plan = captured.grant.plan.qualified()?;
-    if captured.qualification_observation_valid != Some(true) {
-        return None;
-    }
-    let outcome = record.receipt.outcome?;
-    let evidence = record.receipt.evidence.as_ref()?;
-    if evidence.populated != Some(false) {
-        return None;
-    }
-    // An actual retained attempt identity plus the terminal observation owns
-    // this peak. The pre-provisioning placeholder is not a measured zero.
-    if record.cgroup_inode.is_some()
-        && record.unit_invocation.is_some()
-        && evidence.peak_bytes > plan.empirical_ceiling_bytes
-    {
-        return Some(Failure::PeakExceeded);
-    }
-    // These are snapshots of the exact retained attempt and exclusively owned
-    // processing parent, never of an unrelated finite host ancestor. Kernel
-    // evidence can invalidate qualification even if a partial worker record
-    // or a non-137 exit prevents the terminal classifier from reporting OOM.
-    if record.cgroup_inode.is_some()
-        && record.unit_invocation.is_some()
-        && attempt_oom_killed(evidence)
-        && owned_limit_pressure(evidence)
-    {
-        return Some(Failure::ProcessingOom);
-    }
-    (outcome == Outcome::AllocationFailed).then_some(Failure::AllocationFailed)
-}
-
-fn assess_qualification(registry: &mut Registry, record: &mut Record) -> Result<(), ErrorCode> {
-    let failure = qualification_failure(record);
-    let Some(captured) = record.film.as_mut() else {
-        return Ok(());
-    };
-    if captured.grant.plan.qualified().is_none() {
-        return Ok(());
-    }
-    if captured.qualification_failure.is_some() && captured.qualification_failure != failure {
-        return Err(ErrorCode::Uncertain);
-    }
-    captured.qualification_failure = failure;
-    let Some(reason) = failure else {
-        return Ok(());
-    };
-    let invalidations = registry
-        .invalidations
-        .as_mut()
-        .ok_or(ErrorCode::Uncertain)?;
-    if let Some(existing) = invalidations.iter().find(|entry| {
-        entry.envelope == captured.resource_model && entry.fixture_id == captured.grant.fixture.id
-    }) {
-        if existing.reason != reason
-            || existing.incarnation != record.receipt.incarnation
-            || existing.sequence != record.receipt.sequence
-        {
-            return Err(ErrorCode::Uncertain);
-        }
-    } else {
-        if invalidations.len() >= crate::qualified::INVALIDATIONS {
-            return Err(ErrorCode::Capacity);
-        }
-        invalidations.push(crate::qualified::Invalidation {
-            envelope: captured.resource_model.clone(),
-            fixture_id: captured.grant.fixture.id.clone(),
-            reason,
-            incarnation: record.receipt.incarnation.clone(),
-            sequence: record.receipt.sequence,
-        });
-    }
-    Ok(())
-}
-
-fn restore_qualifications(registry: &mut Registry) -> Result<(), ErrorCode> {
-    // Called before any recovery manager effects, including for records whose
-    // cleanup had already completed. Either the entire assessment persists or
-    // startup retains the old registry and refuses admission.
-    let mut next = registry.clone();
-    for mut record in registry.records.values().cloned() {
-        assess_qualification(&mut next, &mut record)?;
-        next.records.insert(record.receipt.sequence, record);
-    }
-    *registry = next;
-    Ok(())
 }
 
 fn expire(registry: &mut Registry, time: u64, retention: u64) -> Result<(), ErrorCode> {
@@ -1817,6 +1656,10 @@ fn validate_registry(registry: &Registry, config: &Config) -> Result<(), ErrorCo
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::qualification::{
+        availability as qualified_availability, failure as qualification_failure,
+        plan as plan_qualified_start, restore as restore_qualifications,
+    };
     use super::*;
 
     fn events(kills: u64) -> Events {

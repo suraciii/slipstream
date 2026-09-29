@@ -3,6 +3,11 @@ import {
   type RecoveryClaim,
   type RecoveryTransition,
 } from "./model/async-ownership.js";
+import {
+  createBrowseRangeRecoveryOwner,
+  type BrowseRangeRecoveryOwner,
+  type GridRangeRetry,
+} from "./model/browse-range-recovery-owner.js";
 import type {
   AlbumSummary,
   FolderChild,
@@ -69,22 +74,6 @@ import { formatPhotoCount } from "./ui/photo-count.js";
 import { mountAccessBoundary } from "./access-boundary.js";
 import type { BrowserFetch } from "./model/access-session.js";
 
-type GridRangeRetry = Readonly<{
-  sourceAuthority: SourceAuthority;
-  operationKind: "source" | "grid";
-  anchorIndex: number;
-  start: number;
-  quiet: boolean;
-  priority: "high" | "low";
-  /// The exact failure presentation this range owns, so a later range status
-  /// report never hides the Retry message it shows.
-  message: string;
-}>;
-type BrowseRangeFailure = Readonly<{
-  claim: RecoveryClaim;
-  ownerScope: "source" | "photo";
-  retry?: GridRangeRetry;
-}>;
 type AlbumRecoveryRecord = Readonly<{
   claim: RecoveryClaim;
   sourceAuthority: SourceAuthority;
@@ -611,7 +600,6 @@ function mountPrivateLibraryBrowser(
     !pageBusy &&
     !photoOwner.busy &&
     !photoOwner.opening;
-  const browseRangeFailures = new Map<string, BrowseRangeFailure>();
   // Grid status text has one owner at a time. The range status rewrites the
   // line only when its own text changes, so merged window completions never
   // churn it, and every other status takes the line over until the range
@@ -632,53 +620,6 @@ function mountPrivateLibraryBrowser(
   const setDecisionStatus = (text: string) => {
     if (view.gridVisible()) setGridStatusText(text);
     else view.setPhotoStatus(text);
-  };
-  // The range the Grid last reported for admission, with the source it was
-  // reported for: window settlements present status only for that source.
-  let admittedRange:
-    | Readonly<{ start: number; end: number; authority: SourceAuthority }>
-    | undefined;
-  const firstMissingGridIndex = (
-    range: Readonly<{ start: number; end: number }>,
-  ): number | undefined => {
-    for (let index = range.start; index < range.end; index += 1)
-      if (sourceGrid.photoAt(index) === undefined) return index;
-    return undefined;
-  };
-  /// The exact Retry status of the failed window that owns the first Photo the
-  /// range is still missing, so a range report cannot hide an answered
-  /// failure behind a fresh loading line.
-  const rangeFailureStatus = (missing: number): string | undefined => {
-    for (const failure of browseRangeFailures.values()) {
-      if (failure.ownerScope !== "source" || !failure.retry) continue;
-      if (!recoveryGate.isActive(failure.claim)) continue;
-      if (!sourceGrid.isCurrent(failure.retry.sourceAuthority)) continue;
-      if (sourceGrid.alignedStart(missing) !== failure.retry.start) continue;
-      return failure.retry.message;
-    }
-    return undefined;
-  };
-  /// One truthful status for the reported range: the exact failure blocking
-  /// it, the aligned window still loading for it, or Ready once every Photo
-  /// in the range is present.
-  const presentRangeStatus = () => {
-    const range = admittedRange;
-    if (!range || !sourceGrid.isCurrent(range.authority)) return;
-    if (range.end <= range.start) return;
-    const missing = firstMissingGridIndex(range);
-    if (missing === undefined) {
-      setRangeStatusText(`Ready · ${formatPhotoCount(sourceGrid.total)}`);
-      return;
-    }
-    const failure = rangeFailureStatus(missing);
-    if (failure !== undefined) {
-      setRangeStatusText(failure);
-      return;
-    }
-    const window = sourceGrid.describeWindow(missing);
-    setRangeStatusText(
-      `Loading ${window.range} of ${sourceGrid.total.toLocaleString()}…`,
-    );
   };
   let albumRecovery: AlbumRecoveryRecord | undefined;
   const photoRecoveryKeys = new WeakMap<object, string>();
@@ -704,9 +645,7 @@ function mountPrivateLibraryBrowser(
   const syncConnection = (message?: string) => {
     if (!applicationAlive) return;
     currentAlbumRecovery();
-    for (const [key, failure] of browseRangeFailures)
-      if (!recoveryGate.isActive(failure.claim))
-        browseRangeFailures.delete(key);
+    rangeRecovery?.clearInactive();
     connected = connectionEstablished && recoveryGate.decisionReady;
     view.setConnection(
       connected,
@@ -722,6 +661,22 @@ function mountPrivateLibraryBrowser(
     if (value) recoveryGate.markReachable();
     syncConnection(message);
   };
+  const rangeRecovery: BrowseRangeRecoveryOwner =
+    createBrowseRangeRecoveryOwner({
+      gate: recoveryGate,
+      source: {
+        isCurrent: (authority) => sourceGrid.isCurrent(authority),
+        photoAt: (index) => sourceGrid.photoAt(index),
+        alignedStart: (index) => sourceGrid.alignedStart(index),
+        describeWindow: (index) => sourceGrid.describeWindow(index),
+        total: () => sourceGrid.total,
+      },
+      setRangeStatus: setRangeStatusText,
+      formatPhotoCount,
+      onFailure: syncConnection,
+      onRecovered: () => setConnected(true),
+    });
+  const presentRangeStatus = (): void => rangeRecovery?.presentStatus();
   const windowFailureMessage = (
     outcome: Readonly<{
       range: string;
@@ -742,56 +697,20 @@ function mountPrivateLibraryBrowser(
     transportLost: boolean,
     retryRange?: GridRangeRetry,
     transition?: RecoveryTransition,
-  ): void => {
-    const key = `${ownerScope}:${generation}:${start}`;
-    const active = browseRangeFailures.get(key);
-    if (active && recoveryGate.isActive(active.claim)) {
-      syncConnection();
-      return;
-    }
-    if (active) browseRangeFailures.delete(key);
-    const owner = { scope: ownerScope, generation };
-    let claim: RecoveryClaim | undefined;
-    if (transition) {
-      try {
-        const replacement = recoveryGate.issue("browse-window", key, {
-          owner,
-          transition,
-        });
-        if (
-          recoveryGate.failTransition(transition, replacement, {
-            transportLost,
-          })
-        )
-          claim = replacement;
-        else recoveryGate.discard(replacement);
-      } catch {
-        /* superseded transitions cannot affect the current range */
-      }
-    } else {
-      const candidate = recoveryGate.issue("browse-window", key, { owner });
-      if (recoveryGate.fail(candidate, { transportLost })) claim = candidate;
-      else recoveryGate.discard(candidate);
-    }
-    if (claim)
-      browseRangeFailures.set(key, {
-        claim,
-        ownerScope,
-        ...(retryRange ? { retry: retryRange } : {}),
-      });
-    syncConnection();
-  };
+  ): void =>
+    rangeRecovery?.fail(
+      ownerScope,
+      generation,
+      start,
+      transportLost,
+      retryRange,
+      transition,
+    );
   const recoverBrowseRange = (
     ownerScope: "source" | "photo",
     generation: string,
     start: number,
-  ): void => {
-    const key = `${ownerScope}:${generation}:${start}`;
-    const failure = browseRangeFailures.get(key);
-    if (!failure) return;
-    browseRangeFailures.delete(key);
-    if (recoveryGate.recover(failure.claim)) setConnected(true);
-  };
+  ): void => rangeRecovery?.recover(ownerScope, generation, start);
   const failPhotoRecovery = (
     authority: PhotoAuthority,
     kind: string,
@@ -2084,7 +2003,10 @@ function mountPrivateLibraryBrowser(
       // request too.
       if (outcome.changed && view.gridVisible()) view.scheduleGridRender();
       if (!quiet) {
-        if (admittedRange && sourceGrid.isCurrent(admittedRange.authority))
+        if (
+          rangeRecovery?.admittedRange &&
+          sourceGrid.isCurrent(rangeRecovery.admittedRange.authority)
+        )
           presentRangeStatus();
         else setGridStatusText(`Ready · ${formatPhotoCount(sourceGrid.total)}`);
       }
@@ -2769,32 +2691,12 @@ function mountPrivateLibraryBrowser(
   /// window starts before the first index that aligns to it (a 70-Photo range
   /// requests [10, 70) while index 10 still aligns to [0, 60)), so the anchor
   /// is the first index the Grid can report for that window.
-  const windowAnchorIndex = (windowStart: number): number => {
-    if (sourceGrid.alignedStart(windowStart) === windowStart)
-      return windowStart;
-    for (let index = windowStart + 1; index < sourceGrid.total; index += 1)
-      if (sourceGrid.alignedStart(index) === windowStart) return index;
-    return windowStart;
-  };
+  const windowAnchorIndex = (windowStart: number): number =>
+    rangeRecovery?.windowAnchorIndex(windowStart) ?? windowStart;
   const currentSourceRangeRetries = (
     alignedStart?: number,
-  ): Array<Readonly<{ claim: RecoveryClaim; retry: GridRangeRetry }>> => {
-    const retries: Array<
-      Readonly<{ claim: RecoveryClaim; retry: GridRangeRetry }>
-    > = [];
-    for (const failure of browseRangeFailures.values()) {
-      if (
-        failure.ownerScope !== "source" ||
-        !failure.retry ||
-        !recoveryGate.isActive(failure.claim) ||
-        !sourceGrid.isCurrent(failure.retry.sourceAuthority) ||
-        (alignedStart !== undefined && failure.retry.start !== alignedStart)
-      )
-        continue;
-      retries.push({ claim: failure.claim, retry: failure.retry });
-    }
-    return retries;
-  };
+  ): Array<Readonly<{ claim: RecoveryClaim; retry: GridRangeRetry }>> =>
+    rangeRecovery?.currentSourceRetries(alignedStart) ?? [];
   const retryCurrentSourceRanges = async (
     rangeRetries: ReadonlyArray<
       Readonly<{ claim: RecoveryClaim; retry: GridRangeRetry }>
@@ -3130,11 +3032,11 @@ function mountPrivateLibraryBrowser(
         return;
       case "grid-range":
         // Report only: the owner owns alignment, coalescing, and admission.
-        admittedRange = {
+        rangeRecovery?.setAdmittedRange({
           start: intent.start,
           end: intent.end,
           authority: sourceGrid.authority,
-        };
+        });
         sourceGrid.ensureRange(intent.start, intent.end, {
           // A source whose establishing window failed has an active claim and
           // placeholders still presenting its first required window. The
@@ -3142,8 +3044,8 @@ function mountPrivateLibraryBrowser(
           // same operation kind the recorded range Retry would use — or a
           // successful reload recovers the claim while every cell stays
           // disabled and no visible Retry remains.
-          kind: sourceGrid.isReady(admittedRange.authority) ? "grid" : "source",
-          authority: admittedRange.authority,
+          kind: sourceGrid.isReady(sourceGrid.authority) ? "grid" : "source",
+          authority: sourceGrid.authority,
         });
         presentRangeStatus();
         return;
