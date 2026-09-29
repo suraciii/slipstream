@@ -21,9 +21,10 @@ browser workspace boundary that composes those contracts.
 - Camera Preview, Edit Preview, and Film Result have different provenance and
   color contracts. The workspace must never substitute one for another.
 - Web and programmatic clients use the same service facts and revision guards.
-- The current product contract opens Film when the Film stage is ready and
-  opens Develop otherwise. A change to Edit-first is a separate product
-  decision and must update the Product Spec before implementation.
+- The product contract presents one Edit workspace that opens on the Develop
+  result. Film is an optional action when the Film stage is ready, and the
+  camera Preview is a separate reference action. Choosing a result view never
+  changes the recipe or source binding.
 
 ## Model
 
@@ -69,20 +70,24 @@ The service owns:
 Engine-private history, Python objects, and filesystem paths remain behind the
 processing boundary defined by [Photo Development Architecture](photo-development.md).
 
-### Stage relationship
+### Result relationship
 
-The workspace exposes three labels:
+The workspace composes three results with distinct provenance:
 
-- **Camera:** the existing camera-produced Preview. It is a reference only.
+- **Camera:** the existing camera-produced Preview. It is a reference only,
+  reached through the Original reference action.
 - **Develop:** the Edit Preview of the Development Result for the current Edit
-  Recipe snapshot. Its independent export target is `development-tiff`.
+  Recipe snapshot. It is the default editing view, and its independent export
+  target is `development-tiff`.
 - **Film:** the Edit Preview of the Film Result derived from that same Edit
-  Recipe snapshot and the fixed Film Recipe. Its export target is `film-jpeg`.
+  Recipe snapshot and the fixed Film Recipe. It is reachable through the Film
+  action only when the Film capability is `ready`; its export target is
+  `film-jpeg`.
 
-When Film capability is `ready`, entering the workspace selects Film. When Film
-is unavailable or unsupported, it selects Develop and explains the Film reason.
-Camera remains independently reachable in both cases. Selecting a stage never
-changes the recipe or source binding.
+Entering the workspace selects Develop. The Film action stays unavailable with
+the service's reason while Film is unavailable or unsupported. The Camera
+reference remains independently reachable in both cases. Selecting a result
+never changes the recipe or source binding.
 
 ## Workspace lifecycle
 
@@ -91,7 +96,7 @@ changes the recipe or source binding.
 1. Resolve the Photo by stable identity and obtain the current source, recipe,
    capability, and retained result facts.
 2. Create the Photo binding from that response.
-3. Select Film when its capability is ready; otherwise select Develop.
+3. Select Develop; enable the Film action only when its capability is `ready`.
 4. Restore the confirmed recipe or the baseline/as-shot values when no recipe
    exists.
 5. Render only a result whose identity matches the binding, stage, recipe
@@ -219,12 +224,13 @@ membership, and unrelated recipes remain unchanged in every failure path.
 
 ## Options
 
-### Selected: One Photo-scoped workspace with stage panels
+### Selected: One Photo-scoped workspace with one Edit surface
 
-A single Photo scope owns the binding, draft, revision guards, async generations,
-comparison, and Export entry. Camera, Develop, and Film are stage panels over
-that scope. This hides cross-stage ordering and prevents a Film panel from
-owning a competing recipe or source identity.
+A single Photo scope owns the binding, draft, revision guards, async
+generations, comparison, and Export entry. Develop, Film, and the camera
+reference are views over that scope, not separate owners. This hides
+cross-stage ordering and prevents a Film view from owning a competing recipe
+or source identity.
 
 ### Rejected: Independent editor pages per stage
 
@@ -252,8 +258,9 @@ diverge and could present stale pixels as current.
 An implementation is conforming when focused checks and a real supported-client
 run demonstrate all of the following:
 
-- Film opens by default only when the capability reports `ready`; Develop is the
-  fallback and states why Film is unavailable.
+- The workspace opens on the Develop result; the Film action is enabled only
+  when the capability reports `ready` and otherwise states why Film is
+  unavailable.
 - A change in one Photo cannot update another Photo after navigation.
 - One completed edit action creates one guarded save and one matching preview
   request, while intermediate drag positions remain local.
