@@ -29,6 +29,10 @@ each attempt. It runs outside the complete processing resource subtree. It owns
 only restricted execution and operational receipts, not a second Library, queue
 of Exports, or public processing API. Engine processes remain fresh per attempt.
 
+The processing backend's host-command runner lives in `backend/process.rs`.
+It owns the cleared environment, process group, bounded pipe capture, deadline,
+and child cleanup; callers retain attempt orchestration and policy decisions.
+
 The operator configures an instance identity, canonical private workspace root,
 fixed digest-addressed processing image, finite memory policy, and a private
 Unix-domain control socket. The Web service receives access to this socket, not
