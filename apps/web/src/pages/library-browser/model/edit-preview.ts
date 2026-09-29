@@ -90,7 +90,7 @@ export const comparisonRefusal = (
     stage !== expected.stage ||
     sourceRevision !== expectedSource
   )
-    return "A comparison for another Photo, stage, or source arrived and was discarded.";
+    return "A comparison for another Photo, result, or file arrived and was discarded.";
   return "";
 };
 

@@ -43,18 +43,40 @@ the Film Result. A Finished JPEG must always include the fixed Film Recipe.
 
 ## Editing Workspace
 
-Photo View must offer an Edit entry point when development is supported. The
-workspace must expose Camera, Develop, and Film views with clear provenance:
+Photo View must offer an Edit entry point when development is supported. Edit
+opens one workspace for the selected Photo, showing the current result with
+the development controls. The workspace must not present Camera, Develop, and
+Film as separate stage views or tabs the Photographer must choose between.
+The results remain distinct in provenance, but the Photographer acts on one
+current result:
 
-- Camera shows the existing camera-produced Preview.
-- Develop shows an Edit Preview of the Development Result.
-- Film shows an Edit Preview of the Film Result and is the default editing view
-  when the film capability is available.
+- The workspace opens on an Edit Preview of the Development Result. This is
+  the default editing view.
+- A Film control previews the fixed Film Result. It must be available only
+  when the service reports the film capability ready and the current Photo is
+  admitted; while Film is unavailable, the control must be hidden or disabled
+  with a short plain-language explanation, and it must not appear enabled
+  before Film is qualified. If Film becomes unavailable after the workspace
+  opens, the workspace must keep editing and Development TIFF export
+  available and replace the Film control with the unavailable explanation.
+- An Original reference action shows the existing camera-produced Preview. It
+  is a distinct action, not an editing view.
 
-If a stage is unavailable, its control must explain why. Slipstream must not
-label a camera Preview or Development Result as a successful Film Result.
-Entering Edit must restore the current Edit Recipe. It must not reset settings
-merely because the Photographer changes views or leaves an Album.
+A Film Preview or Finished JPEG must never fall back to the camera Preview or
+the Development Result, and Slipstream must not label either of them as a
+successful Film Result. Entering Edit must restore the current Edit Recipe.
+It must not reset settings merely because the Photographer previews Film,
+checks the Original reference, or leaves an Album.
+
+The workspace must present one compact status line in plain language: saving
+or waiting for a matching preview is `Updating preview`, a confirmed current
+result is `Ready`, a recoverable failure is `Could not update` with a retry
+action, and an uncertain outcome is `Checking result` until reconciliation.
+Technical evidence such as recipe revisions, request identities, and
+processing reasons must remain available behind an optional details
+affordance for support and programmatic clients. The primary flow must not
+show recipe revisions, processing bundle identifiers, launcher, queue, or
+memory terminology, or CLI command syntax.
 
 Edit availability rests on three independent facts: whether the deployment's
 processing engine is usable, whether the Library is still scanning or
@@ -128,11 +150,13 @@ full RAW development. If the bounded wait ends before settlement, it must say
 the result is still unknown and offer a fresh check. It must not keep showing
 "rendering" as though it is still following the request.
 
-Comparison must keep the chosen stage and display conversion constant while
-comparing the current settings with the as-shot/baseline development settings.
-Camera reference must remain a separately labeled view. If either comparison
-image is pending, the workspace must say so rather than compare unrelated images.
-The Development view uses the fixed conversion and clipping behavior in the
+Comparison must hold the displayed result and its display conversion constant
+while comparing the current settings with the as-shot/baseline development
+settings. The Original reference must remain a separately labeled action and
+must not serve as a comparison image. If either comparison image is pending,
+the workspace must say so rather than compare unrelated images.
+The Development Result display uses the fixed conversion and clipping
+behavior in the
 [Development Color Pipeline](../design/development-color.md#display-and-comparison).
 That display rendition must not feed the Development TIFF or Film stage.
 
@@ -163,9 +187,15 @@ A Finished JPEG must contain the Film Result at full developed dimensions,
 encoded for sRGB with the pinned destination profile and fixed JPEG quality
 85. Finished TIFF and expert output options are outside this capability.
 
-The export interface must name the intended output and processing stage. It
-must not present an ambiguous TIFF choice that could refer to either an
-intermediate development image or a finished film image.
+The workspace must offer one Export action whose visible name states the
+target in plain language: Development TIFF for the edited result, or Finished
+JPEG when Film is available and the Film result is current. It must not
+present an ambiguous TIFF choice that could refer to either an intermediate
+development image or a finished film image. Programmatic clients continue to
+address the processing stage explicitly; the CLI reference owns that syntax.
+Export states must use the same plain language as the workspace status:
+`Exporting` while accepted work is unfinished, `Ready to download` on
+completion, and `This export has expired. Export again` after expiry.
 
 Export must capture the control settings when the Photographer invokes it.
 Those settings must be confirmed by the service before the Export is accepted.
