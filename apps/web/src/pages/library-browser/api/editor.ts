@@ -382,6 +382,51 @@ type EditWriteOutcome =
   | Readonly<{ kind: "saved"; recipeVersion: string; sourceRevision: string }>
   | Readonly<{ kind: "refused"; refusal: SaveRefusal }>;
 
+const readEditWriteOutcome = async (
+  response: Response,
+  operation: "save" | "rebind",
+): Promise<EditWriteOutcome> => {
+  if (!response.ok)
+    return { kind: "refused", refusal: await readEditRefusal(response) };
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return {
+      kind: "refused",
+      refusal: Object.freeze({
+        status: response.status,
+        code: "outcome_unknown",
+        message: `The ${operation} outcome could not be read.`,
+        supportReason: "",
+        currentRecipeVersion: null,
+        currentSourceRevision: null,
+      }),
+    };
+  }
+  const recipeVersion = isRecord(body) ? body["recipeVersion"] : undefined;
+  const sourceRevision = isRecord(body) ? body["sourceRevision"] : undefined;
+  if (
+    !isRecord(body) ||
+    (body["outcome"] !== "saved" && body["outcome"] !== "unchanged") ||
+    typeof recipeVersion !== "string" ||
+    typeof sourceRevision !== "string"
+  ) {
+    return {
+      kind: "refused",
+      refusal: Object.freeze({
+        status: response.status,
+        code: "outcome_unknown",
+        message: `The ${operation} outcome is outside the supported shape.`,
+        supportReason: "",
+        currentRecipeVersion: null,
+        currentSourceRevision: null,
+      }),
+    };
+  }
+  return { kind: "saved", recipeVersion, sourceRevision };
+};
+
 export const saveEditRecipe = async (
   fetcher: BrowserFetch,
   request: SaveRequest,
@@ -427,58 +472,7 @@ export const saveEditRecipe = async (
       }),
     };
   }
-  if (!response.ok)
-    return { kind: "refused", refusal: await readEditRefusal(response) };
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    return {
-      kind: "refused",
-      refusal: Object.freeze({
-        status: response.status,
-        code: "outcome_unknown",
-        message: "The save outcome could not be read.",
-        supportReason: "",
-        currentRecipeVersion: null,
-        currentSourceRevision: null,
-      }),
-    };
-  }
-  if (!isRecord(body)) {
-    return {
-      kind: "refused",
-      refusal: Object.freeze({
-        status: response.status,
-        code: "outcome_unknown",
-        message: "The save outcome is outside the supported shape.",
-        supportReason: "",
-        currentRecipeVersion: null,
-        currentSourceRevision: null,
-      }),
-    };
-  }
-  const outcome = body["outcome"];
-  const recipeVersion = body["recipeVersion"];
-  const sourceRevision = body["sourceRevision"];
-  if (
-    (outcome !== "saved" && outcome !== "unchanged") ||
-    typeof recipeVersion !== "string" ||
-    typeof sourceRevision !== "string"
-  ) {
-    return {
-      kind: "refused",
-      refusal: Object.freeze({
-        status: response.status,
-        code: "outcome_unknown",
-        message: "The save outcome is outside the supported shape.",
-        supportReason: "",
-        currentRecipeVersion: null,
-        currentSourceRevision: null,
-      }),
-    };
-  }
-  return { kind: "saved", recipeVersion, sourceRevision };
+  return readEditWriteOutcome(response, "save");
 };
 
 /// Rebinds the stored recipe to the currently observed source revision, the
@@ -517,55 +511,5 @@ export const rebindEditRecipe = async (
       }),
     };
   }
-  if (!response.ok)
-    return { kind: "refused", refusal: await readEditRefusal(response) };
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    return {
-      kind: "refused",
-      refusal: Object.freeze({
-        status: response.status,
-        code: "outcome_unknown",
-        message: "The rebind outcome could not be read.",
-        supportReason: "",
-        currentRecipeVersion: null,
-        currentSourceRevision: null,
-      }),
-    };
-  }
-  if (!isRecord(body)) {
-    return {
-      kind: "refused",
-      refusal: Object.freeze({
-        status: response.status,
-        code: "outcome_unknown",
-        message: "The rebind outcome is outside the supported shape.",
-        supportReason: "",
-        currentRecipeVersion: null,
-        currentSourceRevision: null,
-      }),
-    };
-  }
-  const recipeVersion = body["recipeVersion"];
-  const sourceRevision = body["sourceRevision"];
-  if (
-    (body["outcome"] !== "saved" && body["outcome"] !== "unchanged") ||
-    typeof recipeVersion !== "string" ||
-    typeof sourceRevision !== "string"
-  ) {
-    return {
-      kind: "refused",
-      refusal: Object.freeze({
-        status: response.status,
-        code: "outcome_unknown",
-        message: "The rebind outcome is outside the supported shape.",
-        supportReason: "",
-        currentRecipeVersion: null,
-        currentSourceRevision: null,
-      }),
-    };
-  }
-  return { kind: "saved", recipeVersion, sourceRevision };
+  return readEditWriteOutcome(response, "rebind");
 };
