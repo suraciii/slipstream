@@ -78,7 +78,8 @@
         },
         "publication": "$publication",
         "state": "idle",
-        "total": 0
+        "total": 0,
+        "updatedAt": "$updatedAt"
       }
     }
   },

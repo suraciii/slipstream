@@ -1,18 +1,22 @@
 //! Fixed production Photo PID 1. It runs the pinned engine adapters for the
-//! closed Photo workloads — `development-tiff` (the darktable handoff TIFF)
-//! and `film-jpeg` (the fixed Film render over that TIFF) — inside the
-//! isolated attempt boundary and reports one bounded terminal outcome. It
-//! must never run as a host process.
+//! closed Photo workloads — `development-tiff` (the darktable handoff TIFF),
+//! `film-jpeg` (the fixed Film render over that TIFF), and `proxy-film` (the
+//! same fixed Film render over one staged Development Proxy TIFF) — inside
+//! the isolated attempt boundary and reports one bounded terminal outcome.
+//! It must never run as a host process.
 
 use sha2::{Digest, Sha256};
 use slipstream_processing::{
     photo::ICC_ASSET_SHA256,
-    protocol::{Outcome, PHOTO_WORKLOAD, PHOTO_WORKLOAD_FILM, is_photo_workload, now},
+    protocol::{
+        Outcome, PHOTO_WORKLOAD, PHOTO_WORKLOAD_FILM, PHOTO_WORKLOAD_PROXY_FILM, is_photo_workload,
+        now,
+    },
 };
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -27,6 +31,9 @@ const ADAPTER: &str = "/opt/slipstream-photo/adapter.py";
 /// numerical bundle the Film identity pins is the one that renders.
 const FILM_PYTHON: &str = "/opt/runtime/bin/python3";
 const FILM_ADAPTER: &str = "/opt/slipstream-photo/film_adapter.py";
+/// The maximum staged Development Proxy size copied into the private work
+/// directory. A larger input is refused before it can fill the attempt.
+const PROXY_SOURCE_BYTES_MAX: u64 = 2 * 1024 * 1024 * 1024;
 const RESULT_BYTES: usize = 4096;
 
 fn bad(message: &str) -> io::Error {
@@ -154,6 +161,7 @@ fn grant(launch: &str, workload: &str) -> io::Result<i64> {
         || value.launch_id != launch
         || value.workload != workload
         || !is_photo_workload(&value.workload)
+        || (value.workload == PHOTO_WORKLOAD_PROXY_FILM && value.exposure_milli_ev != 0)
         || value.white_balance_mode != "as-shot"
         || !(0..=1000).contains(&value.exposure_milli_ev)
         || value.profile_id.is_empty()
@@ -168,15 +176,19 @@ fn grant(launch: &str, workload: &str) -> io::Result<i64> {
 /// The attempt artifact paths of one closed workload: the darktable handoff
 /// TIFF and the published result. `development-tiff` publishes the handoff
 /// TIFF itself; `film-jpeg` develops into the private work directory and
-/// publishes only the fixed Film JPEG rendered from it. Any other workload
-/// has no admitted engine command and fails closed.
+/// publishes only the fixed Film JPEG rendered from it. `proxy-film` uses the
+/// same paths, but copies its sealed Development Proxy into the handoff path
+/// instead of running the develop adapter. Any other workload has no admitted
+/// engine command and fails closed.
 fn attempt_outputs(workload: &str) -> Option<(&'static str, &'static str)> {
     match workload {
         PHOTO_WORKLOAD => Some((
             "/work/output/development.tif",
             "/work/output/development.tif",
         )),
-        PHOTO_WORKLOAD_FILM => Some(("/work/developed.tif", "/work/output/finished.jpg")),
+        PHOTO_WORKLOAD_FILM | PHOTO_WORKLOAD_PROXY_FILM => {
+            Some(("/work/developed.tif", "/work/output/finished.jpg"))
+        }
         _ => None,
     }
 }
@@ -247,6 +259,45 @@ fn finish(mut file: &File, launch_id: &str, outcome: Outcome) -> io::Result<()> 
     file.sync_all()
 }
 
+/// Copy the sealed staged Development Proxy into the private handoff path
+/// read by the fixed Film stage. The proxy already carries the semantic
+/// exposure transform, so this replaces rather than repeats the develop
+/// adapter. The worker-private copy needs no fsync.
+fn stage_proxy_input(source: &Path, destination: &Path) -> io::Result<()> {
+    let mut input = File::open(source)?;
+    let metadata = input.metadata()?;
+    if !metadata.is_file() || metadata.len() > PROXY_SOURCE_BYTES_MAX {
+        return Err(bad("staged development proxy exceeds the bounded ceiling"));
+    }
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(destination)?;
+    let mut buffer = [0u8; 64 * 1024];
+    let mut copied = 0u64;
+    loop {
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        copied = copied
+            .checked_add(u64::try_from(read).map_err(|_| bad("proxy copy overflow"))?)
+            .ok_or_else(|| bad("proxy copy size overflow"))?;
+        if copied > PROXY_SOURCE_BYTES_MAX {
+            return Err(bad("staged development proxy exceeds the bounded ceiling"));
+        }
+        output.write_all(&buffer[..read])?;
+    }
+    if copied == 0 {
+        return Err(bad("staged development proxy is empty"));
+    }
+    Ok(())
+}
+
+/// Run one closed workload. The two RAW workloads invoke the pinned develop
+/// adapter; `proxy-film` instead feeds its sealed staged Development Proxy
+/// directly into the unchanged fixed Film stage.
 fn run(launch: &str, deadline: u64, workload: &str) -> io::Result<()> {
     gate(launch)?;
     let exposure_milli_ev = grant(launch, workload)?;
@@ -256,39 +307,45 @@ fn run(launch: &str, deadline: u64, workload: &str) -> io::Result<()> {
         return Err(bad("unsupported workload"));
     };
     ensure_before_deadline(deadline)?;
-    // One fixed adapter invocation per stage. No shell, no caller-controlled
-    // argv, no engine choice: the pinned bundle owns the exact engine command.
-    let status = Command::new("python3")
-        .arg(ADAPTER)
-        .arg("--input")
-        .arg(format!("/input/{input}"))
-        .arg("--exposure-milli-ev")
-        .arg(exposure_milli_ev.to_string())
-        .arg("--work")
-        .arg("/work")
-        .arg("--output")
-        .arg(developed)
-        .arg("--icc-asset")
-        .arg(ICC_ASSET)
-        .env_clear()
-        .env(
-            "PATH",
-            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        )
-        .env("TMPDIR", "/work/tmp")
-        .env("XDG_CONFIG_HOME", "/work/xdg")
-        .env("XDG_CACHE_HOME", "/work/cache")
-        .env("HOME", "/work/xdg")
-        .stdin(Stdio::null())
-        .status()?;
-    if !status.success() {
-        return Err(bad("pinned engine adapter failed"));
+    if workload == PHOTO_WORKLOAD_PROXY_FILM {
+        // The staged Development Proxy already carries the semantic
+        // exposure transform, so the develop adapter must not run.
+        stage_proxy_input(Path::new(&format!("/input/{input}")), Path::new(developed))?;
+    } else {
+        // One fixed adapter invocation per stage. No shell, no caller-controlled
+        // argv, no engine choice: the pinned bundle owns the exact engine command.
+        let status = Command::new("python3")
+            .arg(ADAPTER)
+            .arg("--input")
+            .arg(format!("/input/{input}"))
+            .arg("--exposure-milli-ev")
+            .arg(exposure_milli_ev.to_string())
+            .arg("--work")
+            .arg("/work")
+            .arg("--output")
+            .arg(developed)
+            .arg("--icc-asset")
+            .arg(ICC_ASSET)
+            .env_clear()
+            .env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            )
+            .env("TMPDIR", "/work/tmp")
+            .env("XDG_CONFIG_HOME", "/work/xdg")
+            .env("XDG_CACHE_HOME", "/work/cache")
+            .env("HOME", "/work/xdg")
+            .stdin(Stdio::null())
+            .status()?;
+        if !status.success() {
+            return Err(bad("pinned engine adapter failed"));
+        }
     }
     let developed_metadata = fs::metadata(developed)?;
     if !developed_metadata.is_file() || developed_metadata.len() == 0 {
         return Err(bad("adapter produced no output"));
     }
-    if workload == PHOTO_WORKLOAD_FILM {
+    if workload == PHOTO_WORKLOAD_FILM || workload == PHOTO_WORKLOAD_PROXY_FILM {
         // The fixed Film stage: one deterministic render over the handoff
         // TIFF with the pinned one-thread Numba runtime and private caches.
         let status = Command::new(FILM_PYTHON)
@@ -389,6 +446,10 @@ mod tests {
         );
         assert_eq!(
             attempt_outputs(PHOTO_WORKLOAD_FILM),
+            Some(("/work/developed.tif", "/work/output/finished.jpg"))
+        );
+        assert_eq!(
+            attempt_outputs(PHOTO_WORKLOAD_PROXY_FILM),
             Some(("/work/developed.tif", "/work/output/finished.jpg"))
         );
         for unknown in [

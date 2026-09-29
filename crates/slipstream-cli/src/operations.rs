@@ -7,6 +7,9 @@ pub(crate) enum Operation {
     PhotosRecipeSave,
     PhotosRecipeRebind,
     PhotosEditPreview,
+    PhotosProxyGet,
+    PhotosProxyCreate,
+    PhotosProxyRemove,
     LibraryCheck,
     FoldersList,
     AlbumsList,
@@ -48,8 +51,11 @@ impl Operation {
             Self::PhotosRecipeGet => "photos-recipe-get",
             Self::PhotosRecipeSave => "photos-recipe-save",
             Self::PhotosRecipeRebind => "photos-recipe-rebind",
-            Self::PhotosEditPreview => "photos-edit-preview",
             Self::LibraryCheck => "library-check",
+            Self::PhotosEditPreview => "photos-edit-preview",
+            Self::PhotosProxyGet => "photos-proxy-get",
+            Self::PhotosProxyCreate => "photos-proxy-create",
+            Self::PhotosProxyRemove => "photos-proxy-remove",
             Self::FoldersList => "folders-list",
             Self::AlbumsList => "albums-list",
             Self::AlbumsGet => "albums-get",
@@ -105,6 +111,15 @@ pub(crate) fn command_operation(command: &Command) -> Operation {
             PhotoCommand::Get { .. } => Operation::PhotosGet,
             PhotoCommand::Preview { .. } => Operation::PhotosPreview,
             PhotoCommand::EditPreview(_) => Operation::PhotosEditPreview,
+            PhotoCommand::Proxy { command } => match command {
+                development_proxy::DevelopmentProxyCommand::Get { .. } => Operation::PhotosProxyGet,
+                development_proxy::DevelopmentProxyCommand::Create { .. } => {
+                    Operation::PhotosProxyCreate
+                }
+                development_proxy::DevelopmentProxyCommand::Remove { .. } => {
+                    Operation::PhotosProxyRemove
+                }
+            },
             PhotoCommand::Recipe { command } => match command {
                 development::RecipeCommand::Get { .. } => Operation::PhotosRecipeGet,
                 development::RecipeCommand::Save(_) => Operation::PhotosRecipeSave,

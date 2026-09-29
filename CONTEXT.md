@@ -153,6 +153,9 @@ _Avoid_: camera Preview, film Original
 A displayable rendition of a specified Development Result or Film Result for editing and comparison. Its stage and detail limits are explicit; it is separate from the camera-produced Preview used for selection.
 _Avoid_: Preview when the kind is unclear
 
+**Development Proxy**:
+A service-owned, bounded scene-linear Development Result derived from a validated Original and retained as a rebuildable stand-in while that Original is unavailable. It carries the source revision, staged-byte evidence, approved profile, processing bundle, pipeline identity, and artifact identity. It is never an Original, a new Photo, or an Export source.
+
 **Export**:
 A request to produce a downloadable image from captured editing intent and a specified processing stage, together with its completion outcome. It does not create or modify an Original File.
 _Avoid_: save Original, imported Photo

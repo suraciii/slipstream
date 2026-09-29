@@ -182,7 +182,7 @@ const parseStoredWhiteBalance = (
 /// The closed reading of one `GET /api/photos/{id}/edit-recipe` response. The
 /// facts are the model's input, so an incomplete read is a refusal rather than
 /// a partially believed recipe.
-const parseEditFacts = (
+export const parseEditFacts = (
   value: unknown,
   photoId: string,
 ): EditorFacts | undefined => {
@@ -193,6 +193,8 @@ const parseEditFacts = (
   const recipe = value["recipe"];
   const processingAvailable = value["processingAvailable"];
   const controls = value["controls"];
+  const editSource = value["editSource"];
+  const editSourceProxyId = value["editSourceProxyId"];
   if (
     (sourceSupport !== "supported" &&
       sourceSupport !== "unsupported" &&
@@ -204,7 +206,18 @@ const parseEditFacts = (
       supportReason !== "original-missing" &&
       supportReason !== "original-unreadable" &&
       supportReason !== "read-pending" &&
-      supportReason !== "resource-unavailable")
+      supportReason !== "resource-unavailable") ||
+    // The edit source is closed when reported, and an older service simply
+    // omits the field: absence is the Original File, never an unknown kind.
+    // A proxy edit source must carry its identity digest — a replaced proxy
+    // changes it — and the Original File never does.
+    (editSource !== undefined &&
+      editSource !== "original" &&
+      editSource !== "development-proxy") ||
+    (editSource === "development-proxy" &&
+      (typeof editSourceProxyId !== "string" ||
+        !/^[0-9a-f]{64}$/.test(editSourceProxyId))) ||
+    (editSource !== "development-proxy" && editSourceProxyId !== undefined)
   )
     return undefined;
   const exposure = controls["exposure"];
@@ -246,7 +259,9 @@ const parseEditFacts = (
   if ((sourceSupport === "unavailable") !== (sourceRevision === null))
     return undefined;
   // The reason is reported exactly when the source is unavailable, the same
-  // coupling the service documents and the CLI believes.
+  // coupling the service documents: a supported or unsupported source never
+  // carries one, and an unavailable source either names its closed reason or
+  // reports none.
   if ((supportReason !== null) !== (sourceSupport === "unavailable"))
     return undefined;
   return Object.freeze({
@@ -256,6 +271,12 @@ const parseEditFacts = (
     settings: Object.freeze({ exposureEv, whiteBalance }),
     sourceSupport,
     supportReason: typeof supportReason === "string" ? supportReason : "",
+    editSource: editSource ?? "original",
+    editSourceProxyId:
+      editSource === "development-proxy" &&
+      typeof editSourceProxyId === "string"
+        ? editSourceProxyId
+        : null,
     processingAvailable,
     controls: Object.freeze({
       minimumEv,

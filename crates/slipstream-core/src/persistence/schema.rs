@@ -12,8 +12,9 @@ const SCHEMA_V7_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/
 const SCHEMA_V8_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v8.json");
 const SCHEMA_V9_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v9.json");
 const SCHEMA_V10_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v10.json");
-const SCHEMA_V12_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v12.json");
 const SCHEMA_V11_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v11.json");
+const SCHEMA_V12_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v12.json");
+const SCHEMA_V13_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v13.json");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchemaVersion {
@@ -29,6 +30,7 @@ pub enum SchemaVersion {
     V10,
     V11,
     V12,
+    V13,
 }
 
 impl SchemaVersion {
@@ -46,6 +48,7 @@ impl SchemaVersion {
             Self::V10 => SCHEMA_V10_MANIFEST,
             Self::V11 => SCHEMA_V11_MANIFEST,
             Self::V12 => SCHEMA_V12_MANIFEST,
+            Self::V13 => SCHEMA_V13_MANIFEST,
         }
     }
 }
@@ -153,6 +156,7 @@ mod tests {
     const SCHEMA_V10_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v10.sql");
     const SCHEMA_V11_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v11.sql");
     const SCHEMA_V12_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v12.sql");
+    const SCHEMA_V13_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v13.sql");
 
     fn execute_fixture(sql: &str) -> Connection {
         let connection = Connection::open_in_memory().unwrap();
@@ -161,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_v1_through_v12_manifests_match_shared_contracts() {
+    fn exact_v1_through_v13_manifests_match_shared_contracts() {
         let v1 = execute_fixture(SCHEMA_V1_SQL);
         validate_canonical_schema(&v1, SchemaVersion::V1).unwrap();
         let v2 = execute_fixture(SCHEMA_V2_SQL);
@@ -222,6 +226,12 @@ mod tests {
             expected_manifest(SchemaVersion::V12).unwrap()
         );
         validate_canonical_schema(&v12, SchemaVersion::V12).unwrap();
+        let v13 = execute_fixture(SCHEMA_V13_SQL);
+        assert_eq!(
+            schema_manifest(&v13).unwrap(),
+            expected_manifest(SchemaVersion::V13).unwrap()
+        );
+        validate_canonical_schema(&v13, SchemaVersion::V13).unwrap();
     }
 
     #[test]

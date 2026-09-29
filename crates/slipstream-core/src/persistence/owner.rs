@@ -2,7 +2,8 @@ use super::albums::AlbumWriteError;
 use super::scan::{FingerprintCounts, FingerprintTarget, ScanApplication, ScanRecoveryPlan};
 use super::{
     DatabaseName, StateDirectory, StateError, StateFileIdentity, admission::StateDatabaseLock,
-    albums, decisions, edit_recipe, export, metadata, migrations, mutation, queries, removal, scan,
+    albums, decisions, development_proxy, edit_recipe, export, metadata, migrations, mutation,
+    queries, removal, scan,
 };
 use crate::{
     AlbumBrowseTarget, AlbumCreationResult, AlbumMembershipMutation, AlbumMembershipResult,
@@ -383,6 +384,16 @@ pub(super) enum Command {
     },
     SaveEditRecipe(SaveEditRecipe, Reply<EditRecipeWriteOutcome>),
     RebindEditRecipe(RebindEditRecipe, Reply<EditRecipeWriteOutcome>),
+    ReadDevelopmentProxy {
+        photo_id: String,
+        reply: Reply<Option<crate::DevelopmentProxyRecord>>,
+    },
+    RecordDevelopmentProxy(crate::DevelopmentProxyRecord, Reply<bool>),
+    RemoveDevelopmentProxy {
+        photo_id: String,
+        reply: Reply<bool>,
+    },
+    AllDevelopmentProxies(Reply<Vec<crate::DevelopmentProxyRecord>>),
     ReadPhotos {
         photo_ids: Vec<String>,
         projection: Arc<PhotoQueryProjection>,
@@ -857,6 +868,52 @@ impl Persistence {
         Ok(receive)
     }
 
+    pub(crate) fn read_development_proxy_receiver(
+        &self,
+        photo_id: &str,
+    ) -> Result<
+        oneshot::Receiver<Result<Option<crate::DevelopmentProxyRecord>, PersistenceError>>,
+        PersistenceError,
+    > {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::ReadDevelopmentProxy {
+            photo_id: photo_id.to_owned(),
+            reply: send,
+        })?;
+        Ok(receive)
+    }
+
+    pub(crate) fn record_development_proxy_receiver(
+        &self,
+        record: crate::DevelopmentProxyRecord,
+    ) -> Result<oneshot::Receiver<Result<bool, PersistenceError>>, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::RecordDevelopmentProxy(record, send))?;
+        Ok(receive)
+    }
+
+    pub(crate) fn remove_development_proxy_receiver(
+        &self,
+        photo_id: &str,
+    ) -> Result<oneshot::Receiver<Result<bool, PersistenceError>>, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::RemoveDevelopmentProxy {
+            photo_id: photo_id.to_owned(),
+            reply: send,
+        })?;
+        Ok(receive)
+    }
+
+    pub(crate) fn all_development_proxies_receiver(
+        &self,
+    ) -> Result<
+        oneshot::Receiver<Result<Vec<crate::DevelopmentProxyRecord>, PersistenceError>>,
+        PersistenceError,
+    > {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::AllDevelopmentProxies(send))?;
+        Ok(receive)
+    }
     pub(crate) fn submit_export_receiver(
         &self,
         submission: ExportSubmission,
@@ -1783,6 +1840,32 @@ fn owner_main(
             }
             Command::ReadEditRecipe { photo_id, reply } => {
                 let _ = reply.send(edit_recipe::read_edit_recipe(&connection, &photo_id));
+            }
+            Command::ReadDevelopmentProxy { photo_id, reply } => {
+                let _ = reply.send(development_proxy::read_development_proxy(
+                    &connection,
+                    &photo_id,
+                ));
+            }
+            Command::RecordDevelopmentProxy(record, reply) => {
+                let result = development_proxy::record_development_proxy(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    record,
+                );
+                let _ = reply.send(result);
+            }
+            Command::RemoveDevelopmentProxy { photo_id, reply } => {
+                let _ = reply.send(development_proxy::remove_development_proxy(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    &photo_id,
+                ));
+            }
+            Command::AllDevelopmentProxies(reply) => {
+                let _ = reply.send(development_proxy::all_development_proxies(&connection));
             }
             Command::SaveEditRecipe(mutation, reply) => {
                 let result = edit_recipe::save_edit_recipe(

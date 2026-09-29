@@ -9,9 +9,15 @@ import {
 } from "./removed-panels.js";
 import {
   createRecoveryPanel,
+  type RecoveryReviewView,
   RECOVERY_PANEL_TEMPLATE,
   recoveryPanelElements,
 } from "./recovery-panel.js";
+import type {
+  RecoveryEntryViewModel,
+  RecoveryMappingViewModel,
+  RecoveryPagingViewModel,
+} from "./recovery-view-models.js";
 import {
   createMembershipPanel,
   type MembershipPanelElements,
@@ -21,6 +27,7 @@ import { createRatingControls } from "./rating-controls.js";
 import { createPhotoToolsController } from "./photo-tools.js";
 import { createPhotoZoomController } from "./photo-zoom.js";
 import { createPhotoEditorSurfaceController } from "./photo-editor-surface.js";
+import type { EditorProxyViewModel } from "./editor-proxy-view-model.js";
 import { createSourceSurfaceController } from "./source-surface.js";
 import { createAlbumForm } from "./album-form.js";
 import {
@@ -29,7 +36,11 @@ import {
 } from "../model/browser-navigation.js";
 import { formatCaptureTime } from "./capture-time.js";
 import { formatPhotoCount } from "./photo-count.js";
-import type { EditorWhiteBalancePresentation } from "../model/photo-editor.js";
+import type {
+  EditSourceKind,
+  EditSourceReadiness,
+  EditorWhiteBalancePresentation,
+} from "../model/photo-editor.js";
 import type { EditorExportViewModel } from "./photo-editor-surface.js";
 import type { RecoveryApplyMapping } from "../model/recovery-review.js";
 
@@ -39,8 +50,13 @@ export type {
   TrashOutcomeViewModel,
   TrashReviewViewModel,
 } from "./removed-panels.js";
+export type {
+  RecoveryEntryViewModel,
+  RecoveryMappingViewModel,
+  RecoveryPagingViewModel,
+} from "./recovery-view-models.js";
 
-type ViewSelectionState = "undecided" | "selected" | "rejected";
+export type ViewSelectionState = "undecided" | "selected" | "rejected";
 type ViewPreviewSource = "jpeg-original" | "raw-embedded-jpeg";
 
 /**
@@ -135,7 +151,17 @@ export type EditorViewModel = Readonly<{
   stageNote: string;
   /// Why the Film stage cannot be presented, when it cannot.
   filmReason: string;
-  sourceSupport: "supported" | "unsupported" | "unavailable" | "unknown";
+  editSourceReadiness: EditSourceReadiness;
+  editSourceKind: EditSourceKind;
+  /// The Source support fact line: the readiness word, the Library's scan
+  /// phase while the source is being checked, and proxy provenance.
+  sourceFactNote: string;
+  /// The Processing axis: the deployment's engine capability, separately
+  /// from this Photo's source.
+  processingReadiness: "checking" | "ready" | "waiting" | "unavailable";
+  /// The Edit Preview axis for the chosen stage, or `null` when no Edit
+  /// Preview is described on that stage.
+  previewState: "pending" | "ready" | "stale" | "failed" | null;
   processingAvailable: boolean;
   /// Why the deployment cannot execute development work, when it cannot. An
   /// unavailable deployment is explained instead of attempted.
@@ -149,6 +175,7 @@ export type EditorViewModel = Readonly<{
   /// The white-balance intent in force, the modes a Photographer may select,
   /// and why an adjustable mode is not offered.
   whiteBalance: EditorWhiteBalancePresentation;
+  proxy?: EditorProxyViewModel;
   canEdit: boolean;
   canPreview: boolean;
   previewing: boolean;
@@ -195,6 +222,8 @@ export type LibraryBrowserIntent =
         | "editor-use-saved"
         | "editor-reapply"
         | "editor-discard-draft"
+        | "editor-proxy-create"
+        | "editor-proxy-remove"
         | "editor-export-submit"
         | "editor-export-cancel"
         | "editor-export-retry"
@@ -427,63 +456,6 @@ type GridPhotoViewModel = Readonly<{
   preview: GridPhotoPreview;
 }>;
 
-/// One item the bounded recovery review lists: the remembered facts of an
-/// Original the review opened on, with the state the Library holds now.
-export type RecoveryEntryViewModel = Readonly<{
-  state: "unavailable" | "available" | "removed" | "missing";
-  originalId: string;
-  photoId: string;
-  webUrl: string;
-  location: string;
-  kind: "raw" | "jpeg";
-  rating: number;
-  selectionState: ViewSelectionState;
-  albumCount: number;
-  fingerprintEnrolled: boolean;
-}>;
-
-/// One inspectable reviewed mapping for an unavailable Original. A mapping
-/// with a blockedReason is presented as blocked and never applied; the
-/// retire candidate names the Photo an explicit choice may replace.
-export type RecoveryMappingViewModel = Readonly<{
-  mappingId: string;
-  originalId: string;
-  fromLocation: string;
-  toLocation: string;
-  kind: "raw" | "jpeg";
-  outcome:
-    | "matched"
-    | "content-mismatch"
-    | "missing"
-    | "kind-mismatch"
-    | "unreadable"
-    | "occupied"
-    | "colliding";
-  verified: boolean;
-  blockedReason:
-    | "colliding"
-    | "content-mismatch"
-    | "destination-in-use"
-    | "destination-removed"
-    | "kind-mismatch"
-    | "missing"
-    | "unreadable"
-    | null;
-  retire: Readonly<{
-    photoId: string;
-    originalId: string;
-    location: string;
-  }> | null;
-}>;
-
-/// The explicit paging of one recovery list: how many of the total are
-/// loaded, and whether a continuation page remains.
-export type RecoveryPagingViewModel = Readonly<{
-  shown: number;
-  total: number;
-  more: boolean;
-}>;
-
 type GridBatchResultViewModel = Readonly<{
   tone: "success" | "warning" | "failure";
   message: string;
@@ -618,7 +590,7 @@ export type BatchAlbumsViewModel = Readonly<{
   pending: boolean;
 }>;
 
-export interface LibraryBrowserView {
+export interface LibraryBrowserView extends RecoveryReviewView {
   readonly photoStatusSurface: object;
   readonly photoStatusEmpty: boolean;
   isPhotoStatusSurfaceCurrent(surface: object): boolean;
@@ -855,7 +827,7 @@ export function createLibraryBrowserView(
                   <div class="photo-editor-controls" aria-label="Photo edit recipe">
                     <div class="photo-editor-stages" role="group" aria-label="Editing stage"><button type="button" data-photo-editor-stage="camera" aria-pressed="false">Camera</button><button type="button" data-photo-editor-stage="develop" aria-pressed="true">Develop</button><button type="button" data-photo-editor-stage="film" aria-pressed="false">Film</button></div>
                     <p class="photo-editor-stage-note" id="photo-editor-stage-note" data-photo-editor-stage-note role="status"></p>
-                    <p class="photo-editor-provenance" data-photo-editor-provenance role="status"></p>
+                    <p class="photo-editor-provenance" data-photo-editor-provenance role="status"></p><p class="photo-editor-note" data-photo-editor-capability role="status" hidden></p>
                     <img class="photo-editor-preview-image" data-photo-editor-preview-image alt="Current stage Edit Preview" hidden>
                     <p class="photo-editor-preview-note" data-photo-editor-preview-note hidden></p>
                     <div class="photo-editor-field"><label for="photo-editor-exposure">Exposure</label><output data-photo-editor-exposure-value for="photo-editor-exposure">0.000 EV</output><input id="photo-editor-exposure" data-photo-editor-exposure type="range" min="0" max="1" step="0.001" value="0" aria-label="Exposure" disabled><button type="button" class="quiet" data-photo-editor-reset-exposure disabled>Reset exposure</button></div>
@@ -869,9 +841,7 @@ export function createLibraryBrowserView(
                     </div>
                     <div class="photo-editor-actions"><button type="button" class="quiet" data-photo-editor-undo disabled>Undo</button><button type="button" class="quiet" data-photo-editor-redo disabled>Redo</button><button type="button" class="quiet" data-photo-editor-reset disabled>Reset all</button><button type="button" class="quiet" data-photo-editor-compare aria-pressed="false" title="Press to compare the current settings with the as-shot/baseline development of this stage" disabled>Baseline comparison</button><button type="button" data-photo-editor-preview disabled>Refresh preview</button><button type="button" class="quiet" data-photo-editor-rebind hidden disabled>Rebind source</button><button type="button" class="quiet" data-photo-editor-refresh>Reload recipe</button></div>
                     <p class="photo-editor-fact"><span>White balance</span><span data-photo-editor-white-balance>As shot</span></p>
-                    <p class="photo-editor-fact"><span>Source support</span><span data-photo-editor-support>Checking…</span></p>
-                    <p class="photo-editor-fact"><span>Processing</span><span data-photo-editor-processing>Checking…</span></p>
-                    <p class="photo-editor-note" data-photo-editor-capability hidden></p>
+                    <p class="photo-editor-fact"><span>Edit source</span><span data-photo-editor-support>Checking…</span></p><p class="photo-editor-fact"><span>Development Proxy</span><span data-photo-editor-proxy-state>Checking…</span></p><div class="photo-editor-actions"><button type="button" class="quiet" data-photo-editor-proxy-create disabled>Create Development Proxy</button><button type="button" class="quiet" data-photo-editor-proxy-remove hidden disabled>Remove Development Proxy</button></div><p class="photo-editor-fact"><span>Processing</span><span data-photo-editor-processing>Checking…</span></p><p class="photo-editor-fact"><span>Edit Preview</span><span data-photo-editor-preview-state>Checking…</span></p>
                     <p class="photo-editor-draft" data-photo-editor-draft hidden role="status"></p>
                     <div class="photo-editor-conflict" data-photo-editor-conflict hidden><p data-photo-editor-conflict-message role="alert"></p><div class="photo-editor-actions"><button type="button" data-photo-editor-use-saved>Use saved recipe</button><button type="button" class="quiet" data-photo-editor-reapply>Reapply my settings</button><button type="button" class="quiet" data-photo-editor-discard-draft>Discard draft</button></div></div>
                     <div class="photo-editor-export" aria-label="Export"><p class="photo-editor-export-heading">Export <span data-photo-editor-export-target>Development TIFF</span></p><p class="photo-editor-export-state" data-photo-editor-export-state role="status"></p><div class="photo-editor-actions"><button type="button" data-photo-editor-export-submit>Export selected stage</button><button type="button" class="quiet" data-photo-editor-export-cancel hidden>Cancel</button><button type="button" class="quiet" data-photo-editor-export-retry hidden>Retry</button><button type="button" class="quiet" data-photo-editor-export-download hidden>Download</button></div></div>

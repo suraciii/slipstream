@@ -43,16 +43,14 @@ struct Segment {
 
 fn read_header(path: &Path) -> Result<Vec<u8>, ErrorCode> {
     let file = File::open(path).map_err(|_| ErrorCode::Uncertain)?;
-    // The frame geometry, tables and profile all precede the first scan, so
-    // the parsed head stays small and bounded; anything longer is not the
-    // qualified artifact shape.
+    // Read no more than the bounded marker region. Parsing stops at the first
+    // scan marker, so the entropy-coded body of a valid image may be far
+    // larger than this bound; a marker segment that crosses the bound is
+    // refused.
     let mut buffer = Vec::new();
-    file.take(HEAD_MAX as u64 + 1)
+    file.take(HEAD_MAX as u64)
         .read_to_end(&mut buffer)
         .map_err(|_| ErrorCode::Uncertain)?;
-    if buffer.len() > HEAD_MAX {
-        return Err(ErrorCode::Uncertain);
-    }
     Ok(buffer)
 }
 
@@ -460,6 +458,23 @@ mod tests {
         assert!(validate_for_icc(&empty, 64 * 1024 * 1024, &digest(&profile)).is_err());
         std::fs::remove_file(&empty).unwrap();
         std::fs::remove_dir_all(&_root).unwrap();
+    }
+
+    #[test]
+    fn pinned_header_admits_an_encoded_body_larger_than_the_header_limit() {
+        let asset = include_bytes!("../../slipstream-core/assets/srgb-iec61966-2-1.icc");
+        let mut bytes = Stream::new()
+            .icc(1, 1, asset)
+            .frame(6376, 9568, 3, 8)
+            .scan()
+            .finish();
+        bytes.splice(bytes.len() - 2..bytes.len() - 2, vec![0x33; HEAD_MAX]);
+        let (root, path) = write("large-encoded-body", &bytes);
+        let identity = validate(&path, bytes.len() as u64).unwrap();
+        assert_eq!((identity.width, identity.height), (6376, 9568));
+        assert_eq!(identity.sha256, digest(&bytes));
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 
     /// The pinned output identity is the byte identity of the repository's

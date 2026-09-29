@@ -452,7 +452,16 @@ pub(super) fn submit_export(
             return Ok(ExportSubmitOutcome::UnsupportedPhoto);
         }
         if !available || !current.source_available {
-            return Ok(ExportSubmitOutcome::Unavailable);
+            // A proxy never backs an Export: the Original itself is required
+            // for a full-resolution artifact. When a Development Proxy
+            // stands in, the refusal names that actionable state; without
+            // one the source facts simply cannot be read.
+            if super::development_proxy::read_development_proxy(transaction, &submission.photo_id)?
+                .is_none()
+            {
+                return Ok(ExportSubmitOutcome::Unavailable);
+            }
+            return Ok(ExportSubmitOutcome::OriginalRequired);
         }
         let Some(recipe) = current.recipe.as_ref() else {
             return Ok(ExportSubmitOutcome::MissingRecipe);
@@ -1057,7 +1066,7 @@ mod tests {
         );
         connection
             .execute(
-                "UPDATE original_files SET capture_source_revision=? WHERE id='raw-original'",
+                "UPDATE original_files SET capture_metadata_state='missing',capture_source_revision=? WHERE id='raw-original'",
                 [format!(
                     "{}\0fixture-device\0fixture-inode",
                     export_test_revision("shoot/one.ARW", 17, 1_000.0)
@@ -1542,6 +1551,115 @@ mod tests {
             .unwrap();
         assert_eq!(expired, ExportSubmitOutcome::Expired);
 
+        persistence.shutdown().unwrap();
+    }
+
+    /// An unavailable Original refuses every Export before acceptance. When
+    /// a Development Proxy stands in, the refusal is the actionable
+    /// `OriginalRequired` — a proxy never backs a full-resolution Export —
+    /// and no Export row or receipt is created; when the Original returns,
+    /// the same guarded submission is admitted again.
+    #[tokio::test]
+    async fn export_submit_refuses_original_required_only_while_a_proxy_stands_in() {
+        let (_base, library, state, name, path) = fixture();
+        seed_current_schema(&library, &path);
+        let (recipe_revision, source_revision) = {
+            let connection = Connection::open(&path).unwrap();
+            seed_export_photo(&connection)
+        };
+        let persistence = Persistence::open(
+            crate::persistence::admission::StateDirectory::open_or_create(
+                &library,
+                state.canonical_path(),
+            )
+            .unwrap(),
+            name.clone(),
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let submit = || {
+            let receiver = persistence
+                .submit_export_receiver(export_submission(
+                    "request-proxy",
+                    &recipe_revision,
+                    &source_revision,
+                    8 * 1024 * 1024 * 1024,
+                ))
+                .unwrap();
+            async move { receiver.await.unwrap().unwrap() }
+        };
+
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE original_files SET available=0 WHERE id='raw-original'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute("UPDATE photos SET available=0 WHERE id='raw-photo'", [])
+            .unwrap();
+        assert_eq!(
+            submit().await,
+            ExportSubmitOutcome::Unavailable,
+            "an unavailable Original without a proxy is a plain unreadable source"
+        );
+
+        assert!(
+            crate::persistence::development_proxy::record_development_proxy(
+                &state,
+                &name,
+                &mut Connection::open(&path).unwrap(),
+                crate::DevelopmentProxyRecord {
+                    photo_id: "raw-photo".to_owned(),
+                    source_revision: source_revision.clone(),
+                    source_relative_path: "shoot/one.ARW".to_owned(),
+                    source_sha256: "a".repeat(64),
+                    source_size: 17,
+                    profile_id: "sony-ilce-7rm5-arw".to_owned(),
+                    pipeline_version: crate::DEVELOPMENT_PROXY_PIPELINE_VERSION.to_owned(),
+                    bundle_sha256: "b".repeat(64),
+                    long_edge: crate::DEVELOPMENT_PROXY_LONG_EDGE,
+                    width: 2560,
+                    height: 1707,
+                    artifact_sha256: "c".repeat(64),
+                    artifact_bytes: 2048,
+                    created_at: 1_700_000_000,
+                },
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            submit().await,
+            ExportSubmitOutcome::OriginalRequired,
+            "a proxy never backs an Export, and the refusal must say so"
+        );
+        assert!(
+            persistence
+                .photo_exports_receiver("raw-photo")
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none_or(|records| records.is_empty()),
+            "a refused submission creates no Export row"
+        );
+
+        connection
+            .execute(
+                "UPDATE original_files SET available=1 WHERE id='raw-original'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute("UPDATE photos SET available=1 WHERE id='raw-photo'", [])
+            .unwrap();
+        drop(connection);
+        let admitted = submit().await;
+        assert!(
+            matches!(admitted, ExportSubmitOutcome::Created(_)),
+            "the Original's return admits the same guarded submission: {admitted:?}"
+        );
         persistence.shutdown().unwrap();
     }
 }

@@ -180,89 +180,82 @@ pub(crate) async fn submit_export(
             );
         }
     }
-    if body.target == EXPORT_FILM_JPEG_TARGET {
-        // The photo launcher proves only Development. Finished Film output
-        // requires the separate qualified Film authority and is unavailable
-        // until that deployment gate is landed.
-        return export_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "processing_unavailable",
-            "The Film processing stage is not qualified for this deployment",
-        );
-    }
-    if photo.original_kind != slipstream_core::OriginalKind::Raw {
-        return export_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "unsupported_photo",
-            "Only RAW Photos support the development-tiff and film-jpeg workloads",
-        );
-    }
-    // The support classification is shared with the Edit surface: it derives
-    // from the published capture evidence in the same owner read, carries
-    // the same closed refusal reasons, and never performs an on-demand
-    // metadata read, so native-work saturation cannot change it.
+    let proxy_profile = if !read.source_available {
+        match state.application.proxies.as_ref() {
+            Some(manager) => manager
+                .current_artifact(&photo_id)
+                .await
+                .map(|(proxy, _)| proxy.profile_id),
+            None => None,
+        }
+    } else {
+        None
+    };
     let support = crate::edit_recipe::derive_support(
         crate::edit_recipe::source_facts(&photo),
         read.source_available,
         photo.original_available,
         read.current_source_revision.as_deref(),
     );
-    match support.state {
-        "unsupported" => {
-            return export_error(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "unsupported_photo",
-                "This Photo's source class has no approved profile.",
-            );
+    let source_profile_id = if let Some(profile_id) = proxy_profile {
+        profile_id
+    } else {
+        match support.state {
+            "unsupported" => {
+                return export_error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "unsupported_photo",
+                    "This Photo's source class has no approved profile.",
+                );
+            }
+            "unavailable" => {
+                return cli_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "resource_unavailable",
+                    "Current source facts cannot be read, so no Export can be admitted.",
+                    serde_json::json!({"photoId": photo_id, "supportReason": support.reason}),
+                );
+            }
+            _ => {}
         }
-        "unavailable" => {
-            return cli_error(
+        let slipstream_core::CameraIdentity::Observed { make, model } = &photo.capture.identity
+        else {
+            return export_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "resource_unavailable",
                 "Current source facts cannot be read, so no Export can be admitted.",
-                serde_json::json!({
-                    "photoId": photo_id,
-                    "supportReason": support.reason,
-                }),
             );
-        }
-        _ => {}
-    }
-    let slipstream_core::CameraIdentity::Observed { make, model } = &photo.capture.identity else {
-        return export_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "resource_unavailable",
-            "Current source facts cannot be read, so no Export can be admitted.",
-        );
-    };
-    let (Some(make), Some(model)) = (make.as_deref(), model.as_deref()) else {
-        return export_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "unsupported_photo",
-            "The camera identity of the source could not be read",
-        );
-    };
-    let Some(container) =
-        slipstream_processing::photo_profile::container_of_filename(&photo.filename)
-    else {
-        return export_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "unsupported_photo",
-            "The source has no RAW container",
-        );
-    };
-    let Some(profile) = slipstream_processing::photo_profile::classify(make, model, &container)
-    else {
-        return export_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "unsupported_photo",
-            "The source class has no approved profile",
-        );
+        };
+        let (Some(make), Some(model)) = (make.as_deref(), model.as_deref()) else {
+            return export_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_photo",
+                "The camera identity of the source could not be read",
+            );
+        };
+        let Some(container) =
+            slipstream_processing::photo_profile::container_of_filename(&photo.filename)
+        else {
+            return export_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_photo",
+                "The source has no RAW container",
+            );
+        };
+        let Some(profile) = slipstream_processing::photo_profile::classify(make, model, &container)
+        else {
+            return export_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported_photo",
+                "The source class has no approved profile",
+            );
+        };
+        profile.profile_id.to_owned()
     };
     let submission = slipstream_core::ExportSubmission {
         request_id: body.request_id,
         photo_id,
-        source_profile_id: profile.profile_id.to_owned(),
+        source_profile_id,
         workload: body.target,
         policy_id: state
             .processing
@@ -345,6 +338,11 @@ pub(crate) async fn submit_export(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "invalid_settings",
                 "The saved recipe is outside the approved execution range",
+            ),
+            slipstream_core::ExportSubmitOutcome::OriginalRequired => export_error(
+                StatusCode::CONFLICT,
+                "original_required",
+                "The Original is required for a full-resolution Export",
             ),
             slipstream_core::ExportSubmitOutcome::RetainedOutputFull => export_error(
                 StatusCode::SERVICE_UNAVAILABLE,

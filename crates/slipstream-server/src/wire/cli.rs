@@ -42,6 +42,7 @@ pub(crate) struct CliStatusResponse {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CliScanStatusWire {
     pub state: &'static str,
+    pub updated_at: Option<u64>,
     pub publication: Option<String>,
     pub completed: Option<usize>,
     pub total: Option<usize>,
@@ -54,6 +55,7 @@ impl From<ScanStatusWire> for CliScanStatusWire {
     fn from(value: ScanStatusWire) -> Self {
         Self {
             state: value.state,
+            updated_at: value.updated_at,
             publication: value.publication,
             completed: value.completed,
             total: value.total,

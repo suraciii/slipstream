@@ -41,6 +41,8 @@ const WIDTH_HEADER: &str = "slipstream-edit-preview-width";
 const HEIGHT_HEADER: &str = "slipstream-edit-preview-height";
 const SHA256_HEADER: &str = "slipstream-edit-preview-sha256";
 const SOURCE_REVISION_HEADER: &str = "slipstream-edit-preview-source-revision";
+const SOURCE_HEADER: &str = "slipstream-edit-preview-source";
+const PROXY_ID_HEADER: &str = "slipstream-edit-preview-proxy-id";
 const RECIPE_VERSION_HEADER: &str = "slipstream-edit-preview-recipe-version";
 const DISPLAY_TRANSFORM_HEADER: &str = "slipstream-edit-preview-display-transform";
 const EXPIRES_AT_HEADER: &str = "slipstream-edit-preview-expires-at";
@@ -127,11 +129,11 @@ impl PendingPreview {
     }
 }
 
-/// The validated metadata of one ready rendition: exactly the typed response
-/// headers the wire contract frames ahead of the JPEG stream.
 struct RenditionMetadata {
     source_revision: String,
     recipe_version: String,
+    source: &'static str,
+    proxy_id: Option<String>,
     display_transform: String,
     width: u32,
     height: u32,
@@ -223,6 +225,27 @@ fn rendition_metadata(
     let source_revision = decode_source_revision(header_value(headers, SOURCE_REVISION_HEADER)?)?;
     let recipe_version =
         validated_recipe_version(header_value(headers, RECIPE_VERSION_HEADER)?, settings)?;
+    let source = if !headers.contains_key(SOURCE_HEADER) {
+        "original"
+    } else {
+        match header_value(headers, SOURCE_HEADER) {
+            Some("original") => "original",
+            Some("development-proxy") => "development-proxy",
+            Some(_) | None => return None,
+        }
+    };
+    let proxy_id = if source == "development-proxy" {
+        let proxy_id = header_value(headers, PROXY_ID_HEADER)?;
+        if !valid_sha256(proxy_id) {
+            return None;
+        }
+        Some(proxy_id.to_owned())
+    } else {
+        if headers.contains_key(PROXY_ID_HEADER) {
+            return None;
+        }
+        None
+    };
     let display_transform = bounded_text(header_value(headers, DISPLAY_TRANSFORM_HEADER)?)?;
     let expires_at = header_value(headers, EXPIRES_AT_HEADER)?;
     if !valid_utc_time(expires_at) {
@@ -231,6 +254,8 @@ fn rendition_metadata(
     Some(RenditionMetadata {
         source_revision,
         recipe_version,
+        source,
+        proxy_id,
         display_transform,
         width,
         height,
@@ -382,6 +407,8 @@ pub(super) async fn download(
         "state": "ready",
         "sourceRevision": metadata.source_revision,
         "recipeVersion": metadata.recipe_version,
+        "source": metadata.source,
+        "proxyId": metadata.proxy_id,
         "displayTransform": metadata.display_transform,
         "contentType": "image/jpeg",
         "width": metadata.width,
@@ -539,6 +566,61 @@ mod tests {
         assert!(
             rendition_metadata(&header::HeaderMap::new(), "photo", "develop", "current").is_none(),
             "a response without the framed facts refuses"
+        );
+    }
+    #[test]
+    fn provenance_headers_default_to_original_and_require_proxy_identity() {
+        let metadata = rendition_metadata(
+            &ready_headers("current", "recipe-7"),
+            "photo",
+            "develop",
+            "current",
+        )
+        .expect("legacy rendition defaults to Original");
+        assert_eq!(metadata.source, "original");
+        assert!(metadata.proxy_id.is_none());
+
+        let proxy_id = "b".repeat(64);
+        let mut proxy_headers = ready_headers("current", "recipe-7");
+        proxy_headers.insert(
+            header::HeaderName::from_static(SOURCE_HEADER),
+            header::HeaderValue::from_static("development-proxy"),
+        );
+        proxy_headers.insert(
+            header::HeaderName::from_static(PROXY_ID_HEADER),
+            header::HeaderValue::from_str(&proxy_id).unwrap(),
+        );
+        let metadata = rendition_metadata(&proxy_headers, "photo", "develop", "current")
+            .expect("proxy provenance");
+        assert_eq!(metadata.source, "development-proxy");
+        assert_eq!(metadata.proxy_id.as_deref(), Some(proxy_id.as_str()));
+
+        proxy_headers.remove(header::HeaderName::from_static(PROXY_ID_HEADER));
+        assert!(
+            rendition_metadata(&proxy_headers, "photo", "develop", "current").is_none(),
+            "proxy provenance without its identity is malformed"
+        );
+        let mut original_with_proxy = ready_headers("current", "recipe-7");
+        original_with_proxy.insert(
+            header::HeaderName::from_static(PROXY_ID_HEADER),
+            header::HeaderValue::from_str(&proxy_id).unwrap(),
+        );
+        assert!(
+            rendition_metadata(&original_with_proxy, "photo", "develop", "current").is_none(),
+            "Original provenance must not carry a proxy identity"
+        );
+        let mut invalid_digest = ready_headers("current", "recipe-7");
+        invalid_digest.insert(
+            header::HeaderName::from_static(SOURCE_HEADER),
+            header::HeaderValue::from_static("development-proxy"),
+        );
+        invalid_digest.insert(
+            header::HeaderName::from_static(PROXY_ID_HEADER),
+            header::HeaderValue::from_static("not-a-digest"),
+        );
+        assert!(
+            rendition_metadata(&invalid_digest, "photo", "develop", "current").is_none(),
+            "proxy identity must be a 64-hex digest"
         );
     }
 

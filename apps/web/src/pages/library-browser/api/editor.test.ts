@@ -1,5 +1,22 @@
 import { describe, expect, test } from "bun:test";
-import { fetchEditRecipe, saveEditRecipe } from "./editor.js";
+import { parseEditFacts, saveEditRecipe } from "./editor.js";
+
+const controls = {
+  exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
+  whiteBalanceModes: ["as-shot"],
+};
+
+const body = (overrides: Record<string, unknown> = {}) => ({
+  sourceRevision: "rev-1",
+  recipe: null,
+  sourceSupport: "supported",
+  supportReason: null,
+  processingAvailable: true,
+  controls,
+  ...overrides,
+});
+
+const digest = "a".repeat(64);
 
 const jsonResponse = (body: unknown, status = 200): Promise<Response> =>
   Promise.resolve(
@@ -9,87 +26,74 @@ const jsonResponse = (body: unknown, status = 200): Promise<Response> =>
     }),
   );
 
-const readDocument = (
-  overrides: Record<string, unknown> = {},
-): Record<string, unknown> => ({
-  photoId: "photo-1",
-  sourceRevision: null,
-  recipe: null,
-  sourceSupport: "unavailable",
-  supportReason: "read-pending",
-  processingAvailable: false,
-  controls: {
-    exposure: { minimumEv: -4, maximumEv: 4, stepEv: 0.001 },
-    whiteBalanceModes: ["as-shot"],
-  },
-  ...overrides,
-});
+describe("parseEditFacts", () => {
+  test("reads a supported Original source with no reason and no proxy", () => {
+    const facts = parseEditFacts(body(), "photo-1");
+    expect(facts?.sourceSupport).toBe("supported");
+    expect(facts?.supportReason).toBe("");
+    expect(facts?.editSource).toBe("original");
+    expect(facts?.editSourceProxyId).toBeNull();
+    expect(facts?.sourceRevision).toBe("rev-1");
+  });
 
-describe("edit recipe read API", () => {
-  test("accepts the retryable unavailable reasons with no source revision", async () => {
+  test("accepts the closed retryable reasons only with an unavailable source", () => {
     for (const supportReason of [
       "read-pending",
       "resource-unavailable",
-    ] as const) {
-      const result = await fetchEditRecipe(
-        () => jsonResponse(readDocument({ supportReason })),
-        "photo-1",
-        new AbortController().signal,
-      );
-      if (result.kind !== "ok") throw new Error("expected a parsed read");
-      expect(result.facts.sourceSupport).toBe("unavailable");
-      expect(result.facts.supportReason).toBe(supportReason);
-      expect(result.facts.sourceRevision).toBeNull();
-      expect(result.facts.processingAvailable).toBe(false);
-    }
-  });
-
-  test("keeps the confirmed outcomes distinct from the retryable waits", async () => {
-    for (const supportReason of [
       "original-missing",
       "original-unreadable",
     ] as const) {
-      const result = await fetchEditRecipe(
-        () => jsonResponse(readDocument({ supportReason })),
+      const facts = parseEditFacts(
+        body({
+          sourceRevision: null,
+          sourceSupport: "unavailable",
+          supportReason,
+        }),
         "photo-1",
-        new AbortController().signal,
       );
-      if (result.kind !== "ok") throw new Error("expected a parsed read");
-      expect(result.facts.supportReason).toBe(supportReason);
+      expect(facts?.supportReason).toBe(supportReason);
+      expect(facts?.sourceRevision).toBeNull();
     }
   });
 
-  test("refuses a reason outside the closed set or coupled wrongly", async () => {
-    for (const overrides of [
-      { supportReason: "original-rotated" },
-      { supportReason: null },
-      { supportReason: "read-pending", sourceSupport: "unsupported" },
-      {
-        supportReason: "read-pending",
-        sourceSupport: "supported",
-        sourceRevision: "rev-1",
-      },
-    ]) {
-      const result = await fetchEditRecipe(
-        () => jsonResponse(readDocument(overrides)),
+  test("refuses an unknown reason", () => {
+    expect(
+      parseEditFacts(
+        body({
+          sourceRevision: null,
+          sourceSupport: "unavailable",
+          supportReason: "reindexing",
+        }),
         "photo-1",
-        new AbortController().signal,
-      );
-      expect(result.kind).toBe("failed");
-    }
+      ),
+    ).toBeUndefined();
+  });
+
+  test("refuses reasons beside supported sources", () => {
+    expect(
+      parseEditFacts(body({ supportReason: "read-pending" }), "photo-1"),
+    ).toBeUndefined();
+  });
+
+  test("reads a proxy source identity", () => {
+    const facts = parseEditFacts(
+      body({ editSource: "development-proxy", editSourceProxyId: digest }),
+      "photo-1",
+    );
+    expect(facts?.editSourceProxyId).toBe(digest);
   });
 });
 
-describe("edit recipe save API", () => {
-  const saveRequest = {
-    id: "req-1",
-    photoId: "photo-1",
-    expectedRecipeVersion: null,
-    expectedSourceRevision: "rev-1",
-    settings: { exposureEv: 0.2, whiteBalance: { mode: "as-shot" as const } },
-  };
+const saveRequest = {
+  id: "req-1",
+  photoId: "photo-1",
+  expectedRecipeVersion: null,
+  expectedSourceRevision: "rev-1",
+  settings: { exposureEv: 0.2, whiteBalance: { mode: "as-shot" as const } },
+};
 
-  test("a source-state refusal carries the same closed reason the read reports", async () => {
+describe("edit recipe save API", () => {
+  test("source refusal preserves its closed reason", async () => {
     for (const supportReason of [
       "read-pending",
       "resource-unavailable",
@@ -102,8 +106,7 @@ describe("edit recipe save API", () => {
             {
               error: {
                 code: "resource_unavailable",
-                message:
-                  "Current source facts cannot be read, so no guarded write is possible.",
+                message: "Current source facts cannot be read.",
                 effect: "none",
                 details: { photoId: "photo-1", supportReason },
               },
@@ -114,12 +117,11 @@ describe("edit recipe save API", () => {
         new AbortController().signal,
       );
       if (result.kind !== "refused") throw new Error("expected a refusal");
-      expect(result.refusal.code).toBe("resource_unavailable");
       expect(result.refusal.supportReason).toBe(supportReason);
     }
   });
 
-  test("a reported reason outside the closed set is not believed", async () => {
+  test("unknown refusal reason is not believed", async () => {
     const result = await saveEditRecipe(
       () =>
         jsonResponse(

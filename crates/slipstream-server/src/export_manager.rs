@@ -16,12 +16,17 @@ use slipstream_core::{
 use slipstream_processing::{
     photo::{self, PhotoReceipt, Recipe, Request, ResultBody, Source},
     photo_profile::{self, APPROVED_EXPOSURE_MILLI_EV_MAX, APPROVED_EXPOSURE_MILLI_EV_MIN},
-    protocol::{Availability, PHOTO_MODE, PHOTO_PROTOCOL_VERSION, PHOTO_WORKLOAD},
+    protocol::{
+        Availability, PHOTO_MODE, PHOTO_PROTOCOL_VERSION, PHOTO_WORKLOAD, PHOTO_WORKLOAD_PROXY_FILM,
+    },
 };
 use std::{
     fs,
-    io::{self, Read, Seek, SeekFrom},
-    os::unix::{fs::OpenOptionsExt, io::AsRawFd},
+    io::{self, Read, Seek, SeekFrom, Write},
+    os::unix::{
+        fs::{OpenOptionsExt, PermissionsExt},
+        io::AsRawFd,
+    },
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -54,6 +59,9 @@ pub(crate) struct PreviewCancellation {
 }
 
 impl PreviewCancellation {
+    pub(crate) fn from_token(cancelled: Arc<AtomicBool>) -> Self {
+        Self { cancelled }
+    }
     pub(crate) fn new() -> Self {
         Self::default()
     }
@@ -67,9 +75,6 @@ impl PreviewCancellation {
     }
 }
 
-/// The validated result of one preview-class render. The target output remains
-/// in the preview-private workspace until ephemeral retention expires or a
-/// newer intent deletes it.
 pub(crate) struct PreviewRenderResult {
     pub(crate) attempt_key: String,
     pub(crate) path: PathBuf,
@@ -77,6 +82,10 @@ pub(crate) struct PreviewRenderResult {
     pub(crate) sha256: String,
     pub(crate) facts: crate::edit_preview::PreviewFacts,
     pub(crate) output_facts: DevelopmentTiffFacts,
+    pub(crate) source_size: u64,
+    pub(crate) source_sha256: String,
+    pub(crate) source_profile_id: String,
+    pub(crate) source_relative_path: String,
 }
 
 /// A service-minted preview attempt identity is opaque to the launcher and
@@ -290,6 +299,8 @@ impl ExportManager {
             },
             exposure_milli_ev: recipe.exposure_milli_ev,
             white_balance: "as-shot",
+            source: "original",
+            proxy_id: None,
         };
         let (staged, source_profile_id) = self
             .stage_preview_original(
@@ -304,16 +315,17 @@ impl ExportManager {
             return Err("preview render cancelled".to_owned());
         }
         let staged_facts = staged.facts();
+        let source_size = staged_facts.source_facts.size;
+        let source_sha256 = staged_facts.sha256.clone();
         let source = ExportSourceEvidence {
-            size: staged_facts.source_facts.size,
-            sha256: staged_facts.sha256,
+            size: source_size,
+            sha256: source_sha256.clone(),
         };
         let attempt_key = preview_attempt_key();
         let manifest_sha256 = manifest_digest_parts(
             &self.processing.policy_sha256,
             &self.processing.bundle_sha256,
-            &source_profile_id,
-            &source,
+            (&source_profile_id, "raw", &source),
             &recipe,
             workload,
             workload,
@@ -333,6 +345,7 @@ impl ExportManager {
         let start_recipe = recipe;
         let start_manifest = manifest_sha256;
         let start_workload = workload.to_owned();
+        let start_profile_id = source_profile_id.clone();
         let start_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
             let file = open_read_only(&staged_path)
                 .map_err(|_| "staged source could not be opened".to_owned())?;
@@ -348,7 +361,7 @@ impl ExportManager {
                 workload: start_workload,
                 source: Source {
                     kind: "raw".to_owned(),
-                    profile_id: source_profile_id,
+                    profile_id: start_profile_id,
                     size: start_source.size,
                     sha256: start_source.sha256,
                 },
@@ -547,6 +560,299 @@ impl ExportManager {
             sha256: published.sha256,
             facts,
             output_facts,
+            source_size,
+            source_sha256,
+            source_profile_id,
+            source_relative_path: (self.resolver)(photo_id)
+                .map(|path| path.as_str().to_owned())
+                .unwrap_or_default(),
+        })
+    }
+    /// Development Proxy frame. The frame is the only source descriptor the
+    /// launcher sees; the workload's closed plan admits `development-proxy`
+    /// and requires the zero exposure recipe because the transform happened
+    /// before this crossing.
+    pub(crate) async fn render_proxy_film_preview(
+        &self,
+        facts: crate::edit_preview::PreviewFacts,
+        frame_path: &Path,
+        source_profile_id: &str,
+        cancellation: PreviewCancellation,
+    ) -> Result<PreviewRenderResult, String> {
+        let _slot = self.admission.lock().await;
+        if cancellation.is_cancelled() {
+            return Err("preview render cancelled".to_owned());
+        }
+        self.ensure_admissible().await?;
+        let (incarnation, sequence) = self.reconcile_slot().await?;
+        let workload = PHOTO_WORKLOAD_PROXY_FILM;
+        let target = ExportTarget::FilmJpeg;
+        let recipe = ExportRecipePayload {
+            // `proxy-film` deliberately has a zero-EV payload. Apply the
+            // saved exposure to a private scene-linear handoff first.
+            exposure_milli_ev: 0,
+            white_balance_mode: "as-shot",
+        };
+        let attempt_key = preview_attempt_key();
+        let input_writer = self
+            .workspace
+            .begin_preview_artifact(
+                &format!("{attempt_key}-input"),
+                ExportTarget::DevelopmentTiff,
+            )
+            .map_err(|error| format!("proxy Film input staging failed: {error}"))?;
+        let input_path = input_writer.temporary_path().to_path_buf();
+        let input_output_path = input_path.clone();
+        let source_path = frame_path.to_path_buf();
+        let exposure = facts.exposure_milli_ev;
+        let (transformed_size, transformed_sha256) =
+            tokio::task::spawn_blocking(move || -> Result<(u64, String), String> {
+                let file = open_read_only(&source_path)
+                    .map_err(|_| "staged proxy frame could not be opened".to_owned())?;
+                let frame = slipstream_core::decode_development_frame(
+                    file.as_raw_fd(),
+                    DEVELOPMENT_PREVIEW_LONG_EDGE,
+                )
+                .map_err(|_| "staged proxy frame could not be decoded".to_owned())?;
+                let mut frame = frame;
+                slipstream_core::apply_proxy_exposure(&mut frame, exposure)
+                    .map_err(|_| "proxy exposure could not be applied".to_owned())?;
+                let encoded = slipstream_core::encode_development_frame(&frame)
+                    .map_err(|_| "proxy exposure handoff could not be encoded".to_owned())?;
+                let size = encoded.len() as u64;
+                let sha256 = {
+                    use sha2::{Digest, Sha256};
+                    format!("{:x}", Sha256::digest(&encoded))
+                };
+                stage_proxy_film_input(&input_output_path, &encoded)?;
+                Ok((size, sha256))
+            })
+            .await
+            .map_err(|error| format!("proxy Film input task failed: {error}"))??;
+        let frame_path = input_path;
+        let source = ExportSourceEvidence {
+            size: transformed_size,
+            sha256: transformed_sha256,
+        };
+        let manifest_sha256 = manifest_digest_parts(
+            &self.processing.policy_sha256,
+            &self.processing.bundle_sha256,
+            (source_profile_id, "development-proxy", &source),
+            &recipe,
+            workload,
+            workload,
+        );
+        let socket = self.processing.socket_path();
+        let instance = self.processing.instance.clone();
+        let start_path = frame_path.to_path_buf();
+        let start_id = attempt_key.clone();
+        let start_incarnation = incarnation.clone();
+        let start_policy = self.processing.policy_sha256.clone();
+        let start_bundle = self.processing.bundle_sha256.clone();
+        let start_profile = source_profile_id.to_owned();
+        let start_sha = source.sha256.clone();
+        let start_recipe = recipe;
+        let start_manifest = manifest_sha256;
+        let start_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let file = open_read_only(&start_path)
+                .map_err(|_| "staged proxy frame could not be opened".to_owned())?;
+            let request = Request::Start {
+                mode: PHOTO_MODE.to_owned(),
+                version: PHOTO_PROTOCOL_VERSION,
+                instance,
+                export_id: start_id,
+                incarnation: start_incarnation,
+                sequence,
+                policy: start_policy,
+                bundle: start_bundle,
+                workload: workload.to_owned(),
+                source: Source {
+                    kind: "development-proxy".to_owned(),
+                    profile_id: start_profile,
+                    size: source.size,
+                    sha256: start_sha,
+                },
+                recipe: Recipe {
+                    exposure_milli_ev: start_recipe.exposure_milli_ev,
+                    white_balance_mode: start_recipe.white_balance_mode.to_owned(),
+                },
+                recipe_digest: start_recipe.digest(),
+                manifest_sha256: start_manifest,
+            };
+            photo::request_with_descriptor(&socket, &request, file.as_raw_fd())
+                .map(|_| ())
+                .map_err(|_| "launcher refused the proxy Film start".to_owned())
+        })
+        .await
+        .map_err(|error| format!("proxy Film launcher task failed: {error}"))?;
+        if let Err(error) = start_result {
+            self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
+                .await;
+            return Err(error);
+        }
+        // The launcher copied and hashed the sealed handoff during Start; the
+        // private temporary has no further consumer and is removed now. Every
+        // earlier return dropped the writer the same way.
+        drop(input_writer);
+        let _receipt = match self
+            .follow_preview_attempt(&attempt_key, &incarnation, sequence, &cancellation)
+            .await
+        {
+            Ok(receipt) if is_completed_receipt(&receipt) => receipt,
+            Ok(receipt) => {
+                self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
+                    .await;
+                return Err(format!(
+                    "proxy Film attempt did not complete: {}",
+                    receipt.outcome.unwrap_or_else(|| "unknown".to_owned())
+                ));
+            }
+            Err(error) => {
+                self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
+                    .await;
+                return Err(error);
+            }
+        };
+        let writer = match self.workspace.begin_preview_artifact(&attempt_key, target) {
+            Ok(writer) => writer,
+            Err(error) => {
+                self.discard_preview_attempt(&attempt_key, &incarnation, sequence, None)
+                    .await;
+                return Err(format!("proxy Film output staging failed: {error}"));
+            }
+        };
+        let output_path = writer.temporary_path().to_path_buf();
+        let output_file = match open_writable(&output_path) {
+            Ok(file) => file,
+            Err(error) => {
+                self.discard_preview_attempt(&attempt_key, &incarnation, sequence, None)
+                    .await;
+                return Err(format!("proxy Film output could not be opened: {error}"));
+            }
+        };
+        let socket = self.processing.socket_path();
+        let instance = self.processing.instance.clone();
+        let output_id = attempt_key.clone();
+        let output_incarnation = incarnation.clone();
+        let output_receipt_result = tokio::task::spawn_blocking(move || {
+            let request = Request::Output {
+                mode: PHOTO_MODE.to_owned(),
+                version: PHOTO_PROTOCOL_VERSION,
+                instance,
+                export_id: output_id,
+                incarnation: output_incarnation,
+                sequence,
+                target: workload.to_owned(),
+            };
+            match photo::request_with_descriptor(&socket, &request, output_file.as_raw_fd())
+                .map_err(|_| "launcher could not transfer proxy Film output".to_owned())?
+            {
+                slipstream_processing::photo::Response::Result { result, .. } => match *result {
+                    ResultBody::Output { receipt } => Ok(receipt),
+                    _ => Err("launcher answered proxy Film output unexpectedly".to_owned()),
+                },
+                slipstream_processing::photo::Response::Error { .. } => {
+                    Err("launcher refused proxy Film output transfer".to_owned())
+                }
+            }
+        })
+        .await;
+        let output_receipt = match output_receipt_result {
+            Ok(Ok(receipt)) => receipt,
+            Ok(Err(error)) => {
+                self.discard_preview_attempt(&attempt_key, &incarnation, sequence, None)
+                    .await;
+                return Err(error);
+            }
+            Err(error) => {
+                self.discard_preview_attempt(&attempt_key, &incarnation, sequence, None)
+                    .await;
+                return Err(format!("proxy Film output task failed: {error}"));
+            }
+        };
+        let validation_path = output_path.clone();
+        let validation_receipt = output_receipt.clone();
+        let validation_result = tokio::task::spawn_blocking(move || {
+            verify_received_output(&validation_path, &validation_receipt, target)
+        })
+        .await;
+        let output_facts = match validation_result {
+            Ok(Ok(facts)) => facts,
+            Ok(Err(_)) => {
+                self.discard_preview_attempt(
+                    &attempt_key,
+                    &incarnation,
+                    sequence,
+                    Some(&output_receipt),
+                )
+                .await;
+                return Err(OUTPUT_VALIDATION_FAILED.to_owned());
+            }
+            Err(error) => {
+                self.discard_preview_attempt(
+                    &attempt_key,
+                    &incarnation,
+                    sequence,
+                    Some(&output_receipt),
+                )
+                .await;
+                return Err(format!("proxy Film validation task failed: {error}"));
+            }
+        };
+        let published = match writer.publish(|path| validate_output(path, target).map(|_| ())) {
+            Ok(published) => published,
+            Err(error) => {
+                self.discard_preview_attempt(
+                    &attempt_key,
+                    &incarnation,
+                    sequence,
+                    Some(&output_receipt),
+                )
+                .await;
+                return Err(format!("proxy Film publication failed: {error}"));
+            }
+        };
+        if cancellation.is_cancelled() {
+            self.discard_preview_attempt(
+                &attempt_key,
+                &incarnation,
+                sequence,
+                Some(&output_receipt),
+            )
+            .await;
+            return Err("preview render cancelled".to_owned());
+        }
+        if !self
+            .acknowledge_output(
+                &attempt_key,
+                &incarnation,
+                sequence,
+                true,
+                output_receipt.size,
+                &output_receipt.sha256,
+            )
+            .await
+        {
+            self.discard_preview_attempt(
+                &attempt_key,
+                &incarnation,
+                sequence,
+                Some(&output_receipt),
+            )
+            .await;
+            return Err("proxy Film output acknowledgement failed".to_owned());
+        }
+        Ok(PreviewRenderResult {
+            attempt_key,
+            path: published.path,
+            size: published.size,
+            sha256: published.sha256,
+            facts,
+            output_facts,
+            source_size: source.size,
+            source_sha256: source.sha256.clone(),
+            source_profile_id: source_profile_id.to_owned(),
+            source_relative_path: String::new(),
         })
     }
 
@@ -1829,6 +2135,30 @@ fn open_writable(path: &Path) -> io::Result<fs::File> {
         .open(path)
 }
 
+/// Writes one proxy Film exposure handoff into the prepared temporary path
+/// and seals it read-only. The launcher admits a source descriptor only when
+/// the file carries no write permission bits, so the writable staging mode
+/// the artifact writer created must be dropped before Start.
+fn stage_proxy_film_input(path: &Path, encoded: &[u8]) -> Result<(), String> {
+    let mut handoff = fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| "proxy exposure handoff could not be staged".to_owned())?;
+    handoff
+        .write_all(encoded)
+        .and_then(|()| handoff.sync_all())
+        .map_err(|_| "proxy exposure handoff could not be staged".to_owned())?;
+    let mut permissions = handoff
+        .metadata()
+        .map_err(|_| "proxy exposure handoff could not be sealed".to_owned())?
+        .permissions();
+    permissions.set_mode(0o400);
+    handoff
+        .set_permissions(permissions)
+        .map_err(|_| "proxy exposure handoff could not be sealed".to_owned())
+}
+
 /// The canonical manifest digest of the frozen protocol: compact JSON with
 /// sorted object keys over every field that affects execution, including the
 /// qualified source profile. The launcher recomputes the same digest and
@@ -1841,8 +2171,7 @@ fn manifest_digest(
     manifest_digest_parts(
         &snapshot.policy_id,
         &snapshot.bundle_id,
-        &snapshot.source_profile_id,
-        source,
+        (&snapshot.source_profile_id, "raw", source),
         recipe,
         &snapshot.workload,
         &snapshot.workload,
@@ -1852,19 +2181,20 @@ fn manifest_digest(
 fn manifest_digest_parts(
     policy_id: &str,
     bundle_id: &str,
-    source_profile_id: &str,
-    source: &ExportSourceEvidence,
+    input: (&str, &str, &ExportSourceEvidence),
     recipe: &ExportRecipePayload,
     target: &str,
     workload: &str,
 ) -> String {
+    let (source_profile_id, source_kind, source) = input;
     use sha2::{Digest, Sha256};
     let manifest = format!(
-        "{{\"bundle\":\"{}\",\"policy\":\"{}\",\"recipe\":[{},\"{}\"],\"source\":{{\"kind\":\"raw\",\"profile_id\":\"{}\",\"sha256\":\"{}\",\"size\":{}}},\"target\":\"{}\",\"workload\":\"{}\"}}",
+        "{{\"bundle\":\"{}\",\"policy\":\"{}\",\"recipe\":[{},\"{}\"],\"source\":{{\"kind\":\"{}\",\"profile_id\":\"{}\",\"sha256\":\"{}\",\"size\":{}}},\"target\":\"{}\",\"workload\":\"{}\"}}",
         bundle_id,
         policy_id,
         recipe.exposure_milli_ev,
         recipe.white_balance_mode,
+        source_kind,
         source_profile_id,
         source.sha256,
         source.size,
@@ -2455,6 +2785,66 @@ pub(crate) mod development_tiff_decode {
         let short_path = base.join("short.tif");
         write_development_tiff(&short_path, &short);
         assert!(validate_development_tiff(&short_path).is_err());
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// The proxy Film exposure handoff is staged into a writable temporary
+    /// but must satisfy the launcher's source descriptor contract before
+    /// Start: sealed read-only with the exact declared size. The same bytes
+    /// left in the writable staging mode are refused.
+    #[test]
+    fn proxy_film_input_is_sealed_read_only_for_the_launcher() {
+        use slipstream_processing::photo::{
+            DescriptorKind, DescriptorRequirement, validate_descriptor,
+        };
+        let base = std::env::temp_dir().join(format!(
+            "proxy-film-input-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let payload = b"proxy-film-handoff";
+        let requirement = DescriptorRequirement {
+            kind: DescriptorKind::Source,
+            peer_uid: unsafe { libc::getuid() },
+            declared_size: payload.len() as u64,
+            max_bytes: 1 << 20,
+        };
+
+        // Mirror begin_preview_artifact: a fresh private, writable staging
+        // file that the staging helper fills and seals.
+        let sealed = base.join("sealed.tiff");
+        fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o600)
+            .open(&sealed)
+            .unwrap();
+        stage_proxy_film_input(&sealed, payload).unwrap();
+        let file = open_read_only(&sealed).unwrap();
+        let metadata = validate_descriptor(file.as_raw_fd(), requirement).unwrap();
+        assert_eq!(metadata.size, payload.len() as u64);
+        assert_eq!(metadata.mode & 0o222, 0);
+        drop(file);
+        assert_eq!(fs::read(&sealed).unwrap(), payload);
+
+        let unsealed = base.join("unsealed.tiff");
+        fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o600)
+            .open(&unsealed)
+            .unwrap();
+        fs::write(&unsealed, payload).unwrap();
+        let file = open_read_only(&unsealed).unwrap();
+        assert!(validate_descriptor(file.as_raw_fd(), requirement).is_err());
+        drop(file);
 
         let _ = fs::remove_dir_all(base);
     }

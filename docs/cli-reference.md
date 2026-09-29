@@ -550,12 +550,14 @@ slipstream processing capability
 slipstream photos recipe get PHOTO_ID
 slipstream photos recipe save PHOTO_ID --input FILE
 slipstream photos recipe rebind PHOTO_ID --input FILE
+slipstream photos proxy get PHOTO_ID
+slipstream photos proxy create PHOTO_ID --input FILE
+slipstream photos proxy remove PHOTO_ID
 slipstream photos edit-preview PHOTO_ID --stage develop|film --file PATH [--settings current|baseline]
 slipstream photos export submit PHOTO_ID --target development-tiff|film-jpeg --request-id REQUEST_ID
 slipstream photos export list PHOTO_ID
 slipstream photos export status EXPORT_ID
 slipstream photos export download EXPORT_ID --file PATH
-```
 
 `film-jpeg` is an existing service target. The `edit-preview --stage film`
 route uses the same source revision, recipe version, bundle-bound rendition
@@ -569,8 +571,29 @@ step, white-balance modes and ranges, and per-stage availability. These facts
 control admissible processing; the client must not infer support from a camera
 name or a previously successful operation.
 
+`photos proxy get` reports `state` as `absent`, `building`, `current`, or
+`stale`, with nullable `proxy` facts and the last bounded `failure`. `proxy
+create` takes exactly this JSON object, sent once as the create body:
+
+```json
+{ "expectedSourceRevision": "observed-source-revision" }
+```
+
+Replace the example revision with the value observed by a prior read, copied
+verbatim. A RAW source revision carries NUL separators, so it can only travel
+in the document: copy the string with its `\u0000` escapes and never re-enter
+it by hand. A `building` response is accepted work, not a completed artifact;
+read the command again to reconcile it. The command never refreshes the
+revision or silently retries. `proxy remove` is idempotent. A proxy is a
+preview stand-in only: export submission still returns `original_required`
+while the Original is unavailable.
+
 `recipe get` returns `photoId`, nullable `sourceRevision`, nullable `recipe`,
-`sourceSupport`, nullable `supportReason`, `processingAvailable`, and `controls`.
+`sourceSupport`, nullable `supportReason`, `processingAvailable`, `controls`,
+`editSource` (`original` or `development-proxy`), and `editSourceProxyId`,
+which is present only when `editSource` is `development-proxy`. A valid proxy
+may make editing processing available while
+the Original remains unavailable; it never makes an Export admissible.
 Their meanings and closed values are defined by the shared
 [Edit Recipe wire contract](../design/photo-development.md#wire-contract).
 `supportReason` separates retryable wait states (`read-pending`,
@@ -717,6 +740,8 @@ or `null`. Arrays preserve the ordering stated below.
 
 - `state`: `initializing`, `discovering`, `inspecting`, `recovering`, `applying`,
   `idle`, or `failed`;
+- `updatedAt`: milliseconds since the Unix epoch when scan progress last advanced,
+  or `null` before any scan activity in this process;
 - `publication`: an opaque string, or `null` before a Library is published;
 - `completed` and `total`: counts, or `null` while the phase cannot report them;
 - `updatedMs`: Unix milliseconds of the most recent scanner progress update, or

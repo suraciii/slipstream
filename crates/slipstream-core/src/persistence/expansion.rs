@@ -53,9 +53,10 @@ pub(crate) fn expand_library_binding(
     )
     .map_err(|_| PersistenceError::Storage)?;
     // The read-only preflight accepts every schema the writable pass can
-    // migrate or use. In particular, an already current V12 database must
+    // migrate or use. In particular, an already current V13 database must
     // reach startup_schema instead of being rejected here.
-    if validate_canonical_schema(&readonly, SchemaVersion::V12).is_err()
+    if validate_canonical_schema(&readonly, SchemaVersion::V13).is_err()
+        && validate_canonical_schema(&readonly, SchemaVersion::V12).is_err()
         && validate_canonical_schema(&readonly, SchemaVersion::V11).is_err()
         && validate_canonical_schema(&readonly, SchemaVersion::V10).is_err()
         && validate_canonical_schema(&readonly, SchemaVersion::V9).is_err()
@@ -128,7 +129,7 @@ pub(crate) fn expand_library_binding(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V12)
+    validate_canonical_schema(&transaction, SchemaVersion::V13)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     if required_root_binding(&transaction)? != stored_root
         || expansion_projection(&transaction)? != preserved
@@ -138,7 +139,7 @@ pub(crate) fn expand_library_binding(
     for (index, (id, old_path, new_path)) in plan.originals.iter().enumerate() {
         let changed = transaction
             .execute(
-                "UPDATE original_files SET relative_path=?,capture_metadata_state='pending',capture_order_key=NULL,capture_time_field=NULL,capture_offset_minutes=NULL,capture_source_revision=NULL WHERE id=? AND relative_path=?",
+                "UPDATE original_files SET relative_path=?,capture_metadata_state='pending',capture_order_key=NULL,capture_time_field=NULL,capture_offset_minutes=NULL,capture_source_revision=NULL,camera_identity_state='pending',camera_make=NULL,camera_model=NULL WHERE id=? AND relative_path=?",
                 params![new_path, id, old_path],
             )
             .map_err(|_| PersistenceError::Storage)?;
@@ -196,7 +197,7 @@ pub(crate) fn expand_library_binding(
         return Err(PersistenceError::InvalidExpansion);
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V12)
+    validate_canonical_schema(&transaction, SchemaVersion::V13)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -440,7 +441,7 @@ mod tests {
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
-            include_str!("../../../../compatibility/sqlite/schema-v11.sql"),
+            include_str!("../../../../compatibility/sqlite/schema-v13.sql"),
         );
         let connection = Connection::open(&path).unwrap();
         connection

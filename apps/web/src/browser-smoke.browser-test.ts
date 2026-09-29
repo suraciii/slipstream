@@ -1208,7 +1208,7 @@ test("the Edit surface explains a deployment without processing and attempts no 
     "Unavailable",
   );
   await expect(page.locator("[data-photo-editor-support]")).toHaveText(
-    "unsupported",
+    "Unsupported source class",
   );
   await expect(page.locator("[data-photo-editor-status]")).toContainText(
     "no approved profile",
@@ -1293,12 +1293,10 @@ test("real-processing: autosaves an exposure, reopens it, compares the baseline,
   // The deployment admits this Photo: the capability is the launcher's, and
   // the RAW Original is a supported source class.
   await expect(page.locator("[data-photo-editor-processing]")).toHaveText(
-    "Available",
+    "Ready",
     { timeout: 60_000 },
   );
-  await expect(page.locator("[data-photo-editor-support]")).toHaveText(
-    "supported",
-  );
+  await expect(page.locator("[data-photo-editor-support]")).toHaveText("Ready");
   const exposure = page.locator("[data-photo-editor-exposure]");
   await expect(exposure).toBeEnabled();
   // One committed adjustment is one autosave. The value and its events are one

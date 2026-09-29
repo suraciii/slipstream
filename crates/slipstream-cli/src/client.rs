@@ -97,24 +97,31 @@ impl ServiceClient {
             .await
     }
 
-    /// One mutation whose contract admits more than one success status: the
-    /// Export submission returns 201 for new work and 200 for a replay of
-    /// the same identity and payload.
-    pub(crate) async fn mutation_admitting<T: DeserializeOwned>(
+    /// One mutation request under an explicit method whose contract admits
+    /// more than one success status. Returns the accepted status with the
+    /// raw body, so the caller applies its own outcome-specific strict
+    /// parsing. Everything after the request is handed to the transport can
+    /// only be reported as an unknown outcome, because a dropped, malformed,
+    /// or untrustworthy response is not evidence that the write was refused.
+    /// A connect-phase failure never sent the request.
+    pub(crate) async fn mutation_statuses(
         &self,
+        method: Method,
         identity: &MutationIdentity,
         admission: &AdmissionState,
         url: Url,
-        body: Value,
+        body: Option<Value>,
         accepted: &[StatusCode],
-    ) -> Result<T, CommandFailure> {
+    ) -> Result<(StatusCode, Vec<u8>), CommandFailure> {
         let operation = identity.operation;
-        let request = self
+        let mut request = self
             .client
-            .request(Method::POST, url)
+            .request(method, url)
             .header(CONTRACT_HEADER, CLI_CONTRACT_VERSION)
-            .bearer_auth(&self.token)
-            .json(&body);
+            .bearer_auth(&self.token);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
         admission.admit(identity.clone());
         let response = request.send().await.map_err(|error| {
             if error.is_connect() {
@@ -144,6 +151,23 @@ impl ServiceClient {
             return Err(validated_route_failure(error, operation, &self.token)
                 .unwrap_or_else(|| CommandFailure::unknown(identity)));
         }
+        Ok((status, bytes))
+    }
+
+    /// One mutation whose contract admits more than one success status: the
+    /// Export submission returns 201 for new work and 200 for a replay of
+    /// the same identity and payload.
+    pub(crate) async fn mutation_admitting<T: DeserializeOwned>(
+        &self,
+        identity: &MutationIdentity,
+        admission: &AdmissionState,
+        url: Url,
+        body: Value,
+        accepted: &[StatusCode],
+    ) -> Result<T, CommandFailure> {
+        let (_status, bytes) = self
+            .mutation_statuses(Method::POST, identity, admission, url, Some(body), accepted)
+            .await?;
         serde_json::from_slice(&bytes).map_err(|_| CommandFailure::unknown(identity))
     }
 
@@ -407,13 +431,8 @@ pub(crate) fn validated_route_failure(
         "unsupported_photo" | "missing_recipe" | "request_conflict" => {
             details.is_empty() || string("photoId").is_some()
         }
-        // A refusal that follows from the Photo's source state carries the
-        // same closed `supportReason` the recipe read reports (save and
-        // rebind details) or names it as `reason` (preview details), so a
-        // retryable wait is distinguishable from a confirmed outcome. A
-        // reported `supportReason` outside the closed set is not believed.
         "resource_unavailable" | "processing_unavailable" => {
-            let support_reason_closed = string("supportReason").is_none_or(|reason| {
+            let support_reason = |reason: &str| {
                 matches!(
                     reason,
                     "original-missing"
@@ -421,14 +440,18 @@ pub(crate) fn validated_route_failure(
                         | "read-pending"
                         | "resource-unavailable"
                 )
-            });
-            support_reason_closed
-                && (details.is_empty()
-                    || string("operation").is_some()
-                    || string("photoId").is_some()
-                    || string("reason").is_some()
-                    || string("supportReason").is_some())
+            };
+            (details.is_empty()
+                || string("operation").is_some()
+                || string("photoId").is_some()
+                || string("reason").is_some())
+                && details
+                    .get("supportReason")
+                    .is_none_or(|reason| reason.as_str().is_some_and(support_reason))
         }
+        // A full-resolution Export the service refused because the Original
+        // itself is unavailable: a confirmed refusal that changed nothing.
+        "original_required" => details.is_empty() || string("photoId").is_some(),
         // An outcome_unknown response never proves refusal of a write.
         "unknown_export"
         | "export_conflict"
@@ -451,7 +474,8 @@ pub(crate) fn validated_route_failure(
         | "recovery_scope_exceeded" => 2,
         "not_found" | "unknown_photo" | "unknown_export" | "missing_recipe" => 3,
         "conflict" | "name_conflict" | "recipe_conflict" | "source_changed" | "requires_rebind"
-        | "request_conflict" | "export_conflict" | "output_unavailable" | "recovery_conflict" => 4,
+        | "request_conflict" | "export_conflict" | "output_unavailable" | "recovery_conflict"
+        | "original_required" => 4,
         _ => 6,
     };
     Some(CommandFailure::from_payload(exit_code, error))

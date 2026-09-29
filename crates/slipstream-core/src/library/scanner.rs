@@ -68,10 +68,21 @@ pub(super) fn inspect_capture_facts(
                             original.facts = observation.facts;
                             observation.capture
                         }
+                        // A saturated bounded read is not a read verdict: the
+                        // Photo stays pending for the same revision and the
+                        // next scan retries the inspection.
+                        Err(crate::CaptureInspectionError::ResourceLimit) => CaptureFact {
+                            source_revision: Some(revision),
+                            ..CaptureFact::pending()
+                        },
                         // The bounded fresh attempt is the second and last
                         // attempt for this scan; an admitted failure keeps
                         // the documented `failed` fact without a revision.
                         Err(_) => CaptureFact::failed(None),
+                    },
+                    Err(crate::CaptureInspectionError::ResourceLimit) => CaptureFact {
+                        source_revision: Some(revision),
+                        ..CaptureFact::pending()
                     },
                     Err(_) => CaptureFact::failed(Some(revision)),
                 }

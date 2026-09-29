@@ -59,6 +59,7 @@ export type ApplicationCoordination =
     }>
   | Readonly<{ kind: "reset-file-locations" }>
   | Readonly<{ kind: "load-file-location-root" }>
+  | Readonly<{ kind: "publication-advanced" }>
   | Readonly<{
       kind: "fail-application-recovery";
       recovery: ApplicationRecovery;
@@ -457,6 +458,10 @@ export function createApplicationOwner(
       overviewDataFloor += 1;
     releaseScanFailure();
     releaseScanActive();
+    // A completed scan published new Library source facts: the Photo the
+    // Photographer has open is told now, so its Edit surface can re-read its
+    // bounded edit facts instead of waiting for a reload or a reopened Photo.
+    void emit({ kind: "publication-advanced" });
     if (scanCompletionNotice)
       applySummaryUpdate(notices.release(scanCompletionNotice));
     const notice = notices.issue(

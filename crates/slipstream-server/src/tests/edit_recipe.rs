@@ -23,6 +23,11 @@ async fn edit_recipe_read_reports_recipe_absence_support_and_controls() {
     assert!(!read["sourceRevision"].as_str().unwrap().is_empty());
     assert_eq!(read["sourceSupport"], "supported");
     assert!(read["supportReason"].is_null());
+    // An Original edit source omits the proxy identity entirely: the Web
+    // parser refuses the key on a non-proxy source, so it must not even
+    // serialize as null.
+    assert_eq!(read["editSource"], "original");
+    assert!(read.get("editSourceProxyId").is_none());
     // The deployment is configured but this test harness has no launcher
     // socket, so the reconciled condition is launcher-unavailable and
     // processing is not available for the Photo.

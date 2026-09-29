@@ -12,8 +12,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use slipstream_core::{
-    EditRecipe, EditRecipeRead, EditRecipeSettings, EditRecipeWriteOutcome, OriginalKind,
-    PhotoRead, RebindEditRecipe, SaveEditRecipe, WhiteBalanceIntent,
+    DevelopmentProxyRecord, EditRecipe, EditRecipeRead, EditRecipeSettings, EditRecipeWriteOutcome,
+    OriginalKind, PhotoRead, RebindEditRecipe, SaveEditRecipe, WhiteBalanceIntent,
 };
 use slipstream_processing::photo_profile::{
     self, APPROVED_EXPOSURE_MILLI_EV_MAX, APPROVED_EXPOSURE_MILLI_EV_MIN,
@@ -309,6 +309,11 @@ pub(crate) struct EditRecipeResponse {
     support_reason: Option<&'static str>,
     processing_available: bool,
     controls: ControlsWire,
+    edit_source: &'static str,
+    // The Web parser refuses this key on a non-proxy edit source, so an
+    // Original response omits it instead of serializing null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edit_source_proxy_id: Option<String>,
 }
 
 /// One guarded write result. `outcome` is the closed contract outcome; the
@@ -507,8 +512,6 @@ pub(crate) async fn get_edit_recipe(
     if !valid_id(&photo_id) {
         return invalid_cli("photoId", "The Photo ID is invalid.");
     }
-    // One serialized recipe read owns every response fact, so a rescan
-    // between reads cannot mix an old recipe with newer support facts.
     let (photo, read) = match load_facts(&state, &photo_id).await {
         Ok(facts) => facts,
         Err(response) => return response,
@@ -524,22 +527,52 @@ pub(crate) async fn get_edit_recipe(
         ),
         condition,
     );
-    let processing_available = processing_available(
-        support,
-        condition,
-        read.source_available,
-        read.recipe.as_ref(),
-    );
+    // A current Development Proxy is a valid offline source for the edit
+    // surface, but only when the Original itself is unavailable.
+    let proxy = if !read.source_available {
+        match state.application.proxies.as_ref() {
+            Some(manager) => manager.current_record(&photo_id).await,
+            None => None,
+        }
+    } else {
+        None
+    };
+    let proxy_current = proxy.is_some();
+    let proxy_id = proxy.as_ref().map(DevelopmentProxyRecord::identity_digest);
+    let processing_available = if proxy_current {
+        condition == "ready"
+            && read.recipe.as_ref().is_none_or(|recipe| {
+                representable(&recipe.settings)
+                    && matches!(recipe.settings.white_balance, WhiteBalanceIntent::AsShot)
+            })
+    } else {
+        processing_available(
+            support,
+            condition,
+            read.source_available,
+            read.recipe.as_ref(),
+        )
+    };
     let recipe = read.recipe.map(RecipeWire::from);
     ok_response(&EditRecipeResponse {
-        source_revision: (support.state != "unavailable")
+        source_revision: ((support.state != "unavailable") || proxy_current)
             .then(|| read.current_source_revision.clone())
             .flatten(),
         recipe,
-        source_support: support.state,
-        support_reason: support.reason,
+        source_support: if proxy_current {
+            "supported"
+        } else {
+            support.state
+        },
+        support_reason: if proxy_current { None } else { support.reason },
         processing_available,
         controls: approved_controls(),
+        edit_source: if proxy_current {
+            "development-proxy"
+        } else {
+            "original"
+        },
+        edit_source_proxy_id: proxy_id,
         photo_id,
     })
 }

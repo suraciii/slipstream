@@ -223,6 +223,12 @@ label differs from the configured bundle. Configure the printed digest as the
 instance `bundle` value and as `SLIPSTREAM_PROCESSING_BUNDLE_SHA256`, and pin
 the image by its `sha256:` identifier, not by tag.
 
+The Film runtime in this image comes from the same qualified numerical image
+that owns the fixed Film recipe identity. Image construction checks the actual
+runtime recipe against that identity; a different qualification image can have
+a different processing-bundle manifest despite matching engine source files.
+Do not bypass that check or change the copied numerical image independently.
+
 A refused start must not consume the instance. The launcher claims the
 instance identity before it verifies the image and host, and it makes the
 instance journal durable before any check that can refuse the start. A Photo

@@ -8,8 +8,10 @@ pub const TERMINAL_SNAPSHOT_BYTES: usize = 4 * 1024;
 pub const STORAGE_BYTES: u64 = 16 * 1024 * 1024;
 pub const PROFILE: &str = "slipstream-native-qualification-v1";
 
-// The production Photo admission uses the two closed workloads below. The
+// The production Photo admission uses the three closed workloads below. The
 // fixture transport remains separate from this descriptor-based boundary.
+// `proxy-film` is the one workload that admits no RAW source: it starts from
+// an already-development-transformed Development Proxy frame.
 pub const PHOTO_PROTOCOL_VERSION: u8 = 1;
 pub const PHOTO_MODE: &str = "photo-processing";
 pub const PHOTO_CAPABILITY: &str = "photo-processing";
@@ -18,11 +20,15 @@ pub const PHOTO_WORKLOAD: &str = "development-tiff";
 /// into the pinned linear ProPhoto TIFF, then render into a finished sRGB
 /// JPEG with the shared Film identity from `tools/development/film_identity.py`.
 pub const PHOTO_WORKLOAD_FILM: &str = "film-jpeg";
+/// The fixed Film stage rendered from one validated Development Proxy frame
+/// (source kind `development-proxy`) whose bytes already carry the semantic
+/// exposure transform; the pinned Film identity is unchanged.
+pub const PHOTO_WORKLOAD_PROXY_FILM: &str = "proxy-film";
 
 /// The closed production Photo workload set. Request workloads and output
 /// targets outside it fail closed; there is no default or fallback target.
 pub fn is_photo_workload(value: &str) -> bool {
-    value == PHOTO_WORKLOAD || value == PHOTO_WORKLOAD_FILM
+    value == PHOTO_WORKLOAD || value == PHOTO_WORKLOAD_FILM || value == PHOTO_WORKLOAD_PROXY_FILM
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -638,9 +644,10 @@ mod tests {
     }
 
     #[test]
-    fn photo_workload_set_admits_exactly_the_two_pinned_targets() {
+    fn photo_workload_set_admits_exactly_the_three_pinned_targets() {
         assert!(is_photo_workload(PHOTO_WORKLOAD));
         assert!(is_photo_workload(PHOTO_WORKLOAD_FILM));
+        assert!(is_photo_workload(PHOTO_WORKLOAD_PROXY_FILM));
         for unknown in [
             "",
             "film",
@@ -648,9 +655,12 @@ mod tests {
             "development-jpeg",
             "development-TIFF",
             "film-jpeg ",
+            "proxy",
+            "proxy-FILM",
+            "proxy-film ",
             "probe-success",
         ] {
-            assert!(!is_photo_workload(unknown));
+            assert!(!is_photo_workload(unknown), "{unknown:?}");
         }
     }
 }

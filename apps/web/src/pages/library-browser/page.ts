@@ -113,6 +113,18 @@ type SourceEstablishmentOptions = Readonly<{
   address?: "push" | "replace" | "none";
 }>;
 
+/// What one source opening needs: the source identity, an optional preferred
+/// Photo, and the view and establishment options forwarded to the open.
+type OpenSourceOptions = Readonly<{
+  kind: "library" | "album" | "folder";
+  album?: AlbumSummary;
+  preferredPhotoId?: string | undefined;
+  folder?: { location: string; name: string };
+  order?: SourceViewOrder;
+  selection?: SelectionFilter;
+  establishment?: SourceEstablishmentOptions;
+}>;
+
 const SOURCE_ESTABLISHED: SourceEstablishment = { kind: "established" };
 const SOURCE_SUPERSEDED: SourceEstablishment = { kind: "superseded" };
 const SOURCE_FAILED: SourceEstablishment = { kind: "failed" };
@@ -265,12 +277,16 @@ function mountPrivateLibraryBrowser(
     total: sourceGrid.total,
     index: 0,
   });
+  /// The Library's current scan phase, or "" while no scan is running. The
+  /// Edit surface names it alongside a `Checking source…` wait.
+  let libraryScanPhase = "";
   const editor = createEditorController(fetcher, view, {
     isAlive: () => applicationAlive,
     isCurrentPhoto: (photoId) =>
       photoOwner.isCurrent(photoOwner.authority) &&
       photoOwner.current?.id === photoId,
     currentPhoto: () => photoOwner.current,
+    libraryPhase: () => libraryScanPhase,
   });
   const {
     open: openEditor,
@@ -285,6 +301,8 @@ function mountPrivateLibraryBrowser(
     reapplyLocal: reapplyLocalSettings,
     discardDraft: discardEditorDraft,
     rebind: rebindEditor,
+    createProxy: createEditorProxy,
+    removeProxy: removeEditorProxy,
     submitExport: submitEditorExport,
     cancelExport: cancelEditorExport,
     retryExport: retryEditorExport,
@@ -315,6 +333,13 @@ function mountPrivateLibraryBrowser(
       summaryAction = presentation.summary.action
         ? { presentationId, action: presentation.summary.action }
         : undefined;
+      // The Library's current scan phase in its own words, kept for the Edit
+      // surface's `Checking source…` wait: a wait names what the Library is
+      // doing instead of presenting the Photo as failed.
+      libraryScanPhase =
+        presentation.summary.libraryCheckState === "active"
+          ? presentation.summary.text
+          : "";
       view.presentSummary(
         presentation.summary.text,
         presentation.summary.action
@@ -381,6 +406,17 @@ function mountPrivateLibraryBrowser(
       syncConnection();
       return;
     }
+    if (coordination.kind === "publication-advanced") {
+      // A completed scan published new Library source facts. The open
+      // Photo's Edit surface re-reads its bounded edit facts now, so a
+      // source whose read was pending while the Library recovered becomes
+      // editable without a reload or a reopened Photo. The read joins one
+      // already under way, and an Edit surface that is not presented stays
+      // untouched: opening it later reads the facts fresh anyway.
+      const photoId = photoOwner.current?.id;
+      if (photoId && view.editorVisible()) void refreshEditor(photoId);
+      return;
+    }
     if (coordination.kind === "reset-file-locations") {
       resetFileLocations();
       return;
@@ -389,7 +425,6 @@ function mountPrivateLibraryBrowser(
       await loadFolderWindow("", 0, false);
       return;
     }
-
     if (!fileLocations.publication && coordination.overview.published) {
       if (sourceGrid.lastSource?.kind === "folder" && !sourceGrid.token) {
         await awaitRootBinding();
@@ -1407,17 +1442,10 @@ function mountPrivateLibraryBrowser(
       )
         // The open Album's destination became invalid, so the current entry is
         // replaced with All Photos rather than left naming a deleted Album.
-        await openSource(
-          "library",
-          undefined,
-          undefined,
-          undefined,
-          "source-default",
-          "all",
-          {
-            address: "replace",
-          },
-        );
+        await openSource({
+          kind: "library",
+          establishment: { address: "replace" },
+        });
       return;
     }
 
@@ -1462,17 +1490,11 @@ function mountPrivateLibraryBrowser(
     )
       // Creating an Album from the Sources panel chooses a new destination, so
       // it creates one Grid entry exactly like choosing any other source.
-      await openSource(
-        "album",
-        createdAlbum,
-        undefined,
-        undefined,
-        "source-default",
-        "all",
-        {
-          address: "push",
-        },
-      );
+      await openSource({
+        kind: "album",
+        album: createdAlbum,
+        establishment: { address: "push" },
+      });
   };
 
   const addFolderToAlbum = (albumId: string): void => {
@@ -1544,23 +1566,20 @@ function mountPrivateLibraryBrowser(
     view.cancelGridRender();
   };
 
-  const openSource = async (
-    kind: "library" | "album" | "folder",
-    album?: AlbumSummary,
-    preferredPhotoId?: string,
-    folder?: { location: string; name: string },
-    order: SourceViewOrder = "source-default",
-    selection: SelectionFilter = "all",
-    establishment: SourceEstablishmentOptions = {},
-  ) => {
+  const openSource = async ({
+    kind,
+    album,
+    preferredPhotoId,
+    folder,
+    order,
+    selection,
+    establishment,
+  }: OpenSourceOptions) => {
     const descriptor: SourceGridSource =
       kind === "library"
         ? { kind: "library" }
         : kind === "album"
-          ? {
-              kind: "album",
-              album: { id: album!.id, name: album!.name },
-            }
+          ? { kind: "album", album: { id: album!.id, name: album!.name } }
           : {
               kind: "folder",
               folder: folder!,
@@ -2909,15 +2928,13 @@ function mountPrivateLibraryBrowser(
         (candidate) => candidate.id === sourceGrid.albumId,
       );
       if (album)
-        await openSource(
-          "album",
+        await openSource({
+          kind: "album",
           album,
-          undefined,
-          undefined,
-          sourceGrid.order,
-          sourceGrid.selection,
-          { address: "replace" },
-        );
+          order: sourceGrid.order,
+          selection: sourceGrid.selection,
+          establishment: { address: "replace" },
+        });
       return;
     }
     await openSourceDescriptor(
@@ -3188,6 +3205,12 @@ function mountPrivateLibraryBrowser(
       case "editor-discard-draft":
         discardEditorDraft(intent.photoId);
         return;
+      case "editor-proxy-create":
+        createEditorProxy(intent.photoId);
+        return;
+      case "editor-proxy-remove":
+        removeEditorProxy(intent.photoId);
+        return;
       case "editor-rebind":
         void rebindEditor(intent.photoId);
         return;
@@ -3223,45 +3246,26 @@ function mountPrivateLibraryBrowser(
         // with Photo View.
         const source = intent.source;
         if (source.kind === "library") {
-          void openSource(
-            "library",
-            undefined,
-            undefined,
-            undefined,
-            "source-default",
-            "all",
-            {
-              address: "push",
-            },
-          );
+          void openSource({
+            kind: "library",
+            establishment: { address: "push" },
+          });
         } else if (source.kind === "album") {
           const album = application.albums.find(
             (candidate) => candidate.id === source.id,
           );
           if (album)
-            void openSource(
-              "album",
+            void openSource({
+              kind: "album",
               album,
-              undefined,
-              undefined,
-              "source-default",
-              "all",
-              {
-                address: "push",
-              },
-            );
+              establishment: { address: "push" },
+            });
         } else if (fileLocations.publication) {
-          void openSource(
-            "folder",
-            undefined,
-            undefined,
-            source,
-            "source-default",
-            "all",
-            {
-              address: "push",
-            },
-          );
+          void openSource({
+            kind: "folder",
+            folder: source,
+            establishment: { address: "push" },
+          });
         }
         return;
       }
@@ -3871,17 +3875,10 @@ function mountPrivateLibraryBrowser(
   /// made for the invalid source.
   const fallbackToAllPhotos = async (message: string): Promise<boolean> => {
     navigation.replaceGrid(allPhotosDestination);
-    const outcome = await openSource(
-      "library",
-      undefined,
-      undefined,
-      undefined,
-      "source-default",
-      "all",
-      {
-        explanation: message,
-      },
-    );
+    const outcome = await openSource({
+      kind: "library",
+      establishment: { explanation: message },
+    });
     return outcome.kind === "established";
   };
 
@@ -4086,15 +4083,13 @@ function mountPrivateLibraryBrowser(
       return false;
     }
     if (destination.source === "library") {
-      const outcome = await openSource(
-        "library",
-        undefined,
-        photoId,
-        undefined,
-        destinationOrder(destination),
-        destination.selection,
-        options,
-      );
+      const outcome = await openSource({
+        kind: "library",
+        preferredPhotoId: photoId,
+        order: destinationOrder(destination),
+        selection: destination.selection,
+        establishment: options,
+      });
       return commitDestinationPhoto(destination, photoId, outcome, () =>
         fallbackToAllPhotos("This source is no longer available."),
       );
@@ -4105,15 +4100,14 @@ function mountPrivateLibraryBrowser(
       );
       if (!album)
         return fallbackToAllPhotos("This Album is no longer available.");
-      const outcome = await openSource(
-        "album",
+      const outcome = await openSource({
+        kind: "album",
         album,
-        photoId,
-        undefined,
-        destinationOrder(destination),
-        destination.selection,
-        options,
-      );
+        preferredPhotoId: photoId,
+        order: destinationOrder(destination),
+        selection: destination.selection,
+        establishment: options,
+      });
       return commitDestinationPhoto(destination, photoId, outcome, () =>
         fallbackToAllPhotos("This Album is no longer available."),
       );
@@ -4128,18 +4122,17 @@ function mountPrivateLibraryBrowser(
         return false;
       }
     }
-    const outcome = await openSource(
-      "folder",
-      undefined,
-      photoId,
-      {
+    const outcome = await openSource({
+      kind: "folder",
+      folder: {
         location: destination.folderPath ?? "",
         name: folderNameFor(destination.folderPath ?? ""),
       },
-      destinationOrder(destination),
-      destination.selection,
-      options,
-    );
+      preferredPhotoId: photoId,
+      order: destinationOrder(destination),
+      selection: destination.selection,
+      establishment: options,
+    });
     return commitDestinationPhoto(destination, photoId, outcome, () =>
       fallbackToAllPhotos(
         "This Folder is no longer part of the Library. Showing All Photos.",
@@ -4224,15 +4217,11 @@ function mountPrivateLibraryBrowser(
       sourceGrid.isReady(sourceGrid.authority);
     // The Album is opened without a preferred Photo, so the server resumes at
     // the durable saved position in its Browse response.
-    const outcome = await openSource(
-      "album",
+    const outcome = await openSource({
+      kind: "album",
       album,
-      undefined,
-      undefined,
-      "source-default",
-      "all",
-      { address: alreadyCurrent ? "replace" : "push" },
-    );
+      establishment: { address: alreadyCurrent ? "replace" : "push" },
+    });
     if (outcome.kind !== "established") return;
     const authority = sourceGrid.authority;
     const position = sourceGrid.readGridPosition(authority);

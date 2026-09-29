@@ -32,6 +32,8 @@ const facts = (overrides: Partial<EditorFacts> = {}): EditorFacts => ({
   settings: { exposureEv: 0, whiteBalance: { mode: "as-shot" } },
   sourceSupport: "supported",
   supportReason: "",
+  editSource: "original",
+  editSourceProxyId: null,
   processingAvailable: true,
   controls: {
     minimumEv: 0,
@@ -460,12 +462,12 @@ describe("sources without editing", () => {
         settings: { exposureEv: 0, whiteBalance: { mode: "as-shot" } },
       }),
     );
-    // The workspace explains the confirmed read failure for this revision,
-    // and no stale local history can be replayed against a source the
-    // service no longer admits.
+    // The workspace explains the source, and no stale local history can be
+    // replayed against a source the service no longer admits.
     expect(step.presentation.status).toContain(
       "failed for its current source revision",
     );
+    expect(step.presentation.editSourceReadiness).toBe("unreadable");
     expect(step.presentation.canEdit).toBe(false);
     expect(step.presentation.canUndo).toBe(false);
     expect(step.presentation.canRedo).toBe(false);
@@ -614,6 +616,107 @@ describe("the one reason-to-behavior mapping", () => {
       currentSourceRevision: null,
     });
     expect(step.presentation.status).toBe("The service is at capacity.");
+  });
+});
+
+describe("edit source readiness", () => {
+  test("a pending read is a retryable wait, never an unreadable Original", () => {
+    const editor = createPhotoEditor({ nextRequestId: () => "req-1" });
+    const step = editor.open(
+      facts({
+        sourceRevision: null,
+        recipeVersion: null,
+        sourceSupport: "unavailable",
+        supportReason: "read-pending",
+      }),
+    );
+    expect(step.request).toBeNull();
+    expect(step.presentation.editSourceReadiness).toBe("checking");
+    expect(step.presentation.canEdit).toBe(false);
+    expect(step.presentation.status).toContain("Checking source…");
+    expect(step.presentation.status).toContain("read-only");
+    expect(step.presentation.status).not.toContain("unreadable");
+    expect(step.presentation.status).not.toContain("cannot be read");
+  });
+
+  test("a capacity wait names the Library's read capacity, not a read failure", () => {
+    const editor = createPhotoEditor({ nextRequestId: () => "req-1" });
+    const step = editor.open(
+      facts({
+        sourceRevision: null,
+        recipeVersion: null,
+        sourceSupport: "unavailable",
+        supportReason: "resource-unavailable",
+      }),
+    );
+    expect(step.presentation.editSourceReadiness).toBe("checking");
+    expect(step.presentation.status).toContain("read capacity");
+    expect(step.presentation.status).not.toContain("unreadable");
+    // The wait is not a confirmed outcome, so no write is admitted against it.
+    expect(editor.commitExposure(0.4).request).toBeNull();
+  });
+
+  test("a later read that publishes current source facts re-enables editing and leaves no stale wait", () => {
+    const editor = createPhotoEditor({ nextRequestId: () => "req-1" });
+    editor.open(
+      facts({
+        sourceRevision: null,
+        recipeVersion: null,
+        sourceSupport: "unavailable",
+        supportReason: "read-pending",
+      }),
+    );
+    const step = editor.refresh(facts({ sourceRevision: "rev-2" }));
+    expect(step.presentation.editSourceReadiness).toBe("ready");
+    expect(step.presentation.canEdit).toBe(true);
+    expect(step.presentation.status).toBe("");
+    const write = request(editor.commitExposure(0.3));
+    expect(write.expectedSourceRevision).toBe("rev-2");
+  });
+
+  test("readiness names each confirmed outcome", () => {
+    const editor = createPhotoEditor({ nextRequestId: () => "req-1" });
+    expect(
+      editor.open(facts({ sourceSupport: "unsupported" })).presentation
+        .editSourceReadiness,
+    ).toBe("unsupported");
+    expect(
+      editor.open(
+        facts({
+          sourceRevision: null,
+          recipeVersion: null,
+          sourceSupport: "unavailable",
+          supportReason: "original-missing",
+        }),
+      ).presentation.editSourceReadiness,
+    ).toBe("missing");
+    expect(
+      editor.open(
+        facts({
+          sourceRevision: null,
+          recipeVersion: null,
+          sourceSupport: "unavailable",
+          supportReason: "original-unreadable",
+        }),
+      ).presentation.editSourceReadiness,
+    ).toBe("unreadable");
+    expect(editor.open(facts()).presentation.editSourceReadiness).toBe("ready");
+  });
+
+  test("a proxy edit source is carried as provenance, not a second source model", () => {
+    const editor = createPhotoEditor({ nextRequestId: () => "req-1" });
+    const step = editor.open(
+      facts({
+        editSource: "development-proxy",
+        editSourceProxyId:
+          "a3f5c4790b8d2e614f7a9c0b5d8e2134769afc0db152e6374f8a9c0b1d2e3f45",
+      }),
+    );
+    expect(step.presentation.editSourceKind).toBe("development-proxy");
+    expect(step.presentation.editSourceReadiness).toBe("ready");
+    // The proxy-bound revision guards the write exactly as an Original's.
+    const write = request(editor.commitExposure(0.3));
+    expect(write.expectedSourceRevision).toBe("rev-1");
   });
 });
 

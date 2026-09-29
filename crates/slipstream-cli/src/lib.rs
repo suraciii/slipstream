@@ -15,6 +15,7 @@ use url::Url;
 
 mod compatibility;
 mod development;
+mod development_proxy;
 mod edit_preview_download;
 mod export_download;
 mod preview_download;

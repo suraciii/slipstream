@@ -307,17 +307,31 @@ pub struct EditRecipe {
     pub settings: EditRecipeSettings,
 }
 
-/// Current recipe and source facts from one serialized persistence read.
+/// Current recipe and source facts from one serialized persistence read. The
+/// Photo's availability, Original kind and Location, persisted error class,
+/// and published Capture fact arrive from the same committed state, so a
+/// scan committed between two reads can never mix an old recipe with newer
+/// support facts.
 ///
-/// `None` means no capture inspection has published facts bound to the
-/// current observed source revision (for example, pending or transient I/O).
-/// A bound `failed` inspection still returns `Some`: it is a confirmed
-/// failure for that revision and must remain distinguishable from pending.
+/// `current_source_revision` is `None` when no capture inspection has
+/// published facts bound to the current observed source revision (for
+/// example, pending or transient I/O). A bound `failed` inspection still
+/// returns `Some`: it is a confirmed failure for that revision and must
+/// remain distinguishable from pending.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EditRecipeRead {
     pub recipe: Option<EditRecipe>,
     pub current_source_revision: Option<String>,
     pub source_available: bool,
+    /// The Original's availability as the Photo read model reports it.
+    pub original_available: bool,
+    /// The Original's Library-relative Location.
+    pub original_location: String,
+    pub original_kind: OriginalKind,
+    /// The persisted discovery error class of the Original, if any.
+    pub original_error: Option<OriginalErrorCategory>,
+    /// The published Capture fact of the Original.
+    pub capture: CaptureFact,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1492,6 +1506,112 @@ pub enum ExportSubmitOutcome {
     /// Current source facts cannot be read, so no guarded submission is
     /// possible.
     Unavailable,
+    /// The Original is unavailable and only a Development Proxy stands in
+    /// for it. A proxy never backs an Export, so the submission is refused
+    /// with an actionable result until the Original returns.
+    OriginalRequired,
+}
+
+/// The versioned identity of the Development Proxy derivation pipeline: the
+/// qualified baseline `development-tiff` workload, the bounded proxy
+/// geometry, and the native linear-light downscale that produces the proxy
+/// artifact. Changing any of them is a new pipeline and a new proxy.
+pub const DEVELOPMENT_PROXY_PIPELINE_VERSION: &str = "development-proxy-v1";
+
+/// The qualified Development Proxy geometry: the long edge every proxy
+/// artifact is bounded to. It is at least the qualified Edit Preview
+/// geometry, so a proxy-backed preview never upscales, and it is far below
+/// the full-resolution Original, so offline editing stays cheap.
+pub const DEVELOPMENT_PROXY_LONG_EDGE: u32 = 2560;
+
+/// The durable Development Proxy record of one Photo: the immutable,
+/// rebuildable service-owned source that stands in for a temporarily
+/// unavailable Original. One row per Photo; the artifact path is derived
+/// from the identity digest and stays private to the service.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DevelopmentProxyRecord {
+    pub photo_id: String,
+    /// The published Library source revision the proxy was derived from and
+    /// stays valid for. A changed revision invalidates the proxy.
+    pub source_revision: String,
+    /// The Library-relative location recorded with that revision.
+    pub source_relative_path: String,
+    /// The staged content hash of the Original bytes the derivation read.
+    pub source_sha256: String,
+    pub source_size: u64,
+    /// The approved processing profile that qualified the derivation.
+    pub profile_id: String,
+    pub pipeline_version: String,
+    /// The deployment processing bundle that produced the artifact.
+    pub bundle_sha256: String,
+    /// The requested proxy long edge (the pipeline bound).
+    pub long_edge: u32,
+    /// The actual artifact dimensions: the Original geometry scaled down to
+    /// the long-edge bound, never larger than it.
+    pub width: u32,
+    pub height: u32,
+    pub artifact_sha256: String,
+    pub artifact_bytes: u64,
+    pub created_at: u64,
+}
+
+/// The current facts a Development Proxy must match to stand in for an
+/// Original: the published source revision, the approved profile, the
+/// pipeline version, and the deployment bundle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DevelopmentProxyExpectation<'a> {
+    pub source_revision: &'a str,
+    pub profile_id: &'a str,
+    pub pipeline_version: &'a str,
+    pub bundle_sha256: &'a str,
+}
+
+impl DevelopmentProxyRecord {
+    /// Whether this proxy matches the non-content identity facts.
+    ///
+    /// Call [`Self::current_against_source`] when the Original is available:
+    /// a source revision is an index token, not proof that the bytes still
+    /// match the derivation input.
+    pub fn current_against(&self, expected: &DevelopmentProxyExpectation<'_>) -> bool {
+        self.source_revision == expected.source_revision
+            && self.profile_id == expected.profile_id
+            && self.pipeline_version == expected.pipeline_version
+            && self.bundle_sha256 == expected.bundle_sha256
+    }
+
+    /// Whether this proxy is safe to use after re-reading the Original.
+    /// `source_sha256` must be freshly computed from the current Original
+    /// bytes, not copied from a cached photo row.
+    pub fn current_against_source(
+        &self,
+        expected: &DevelopmentProxyExpectation<'_>,
+        source_sha256: &str,
+    ) -> bool {
+        self.current_against(expected) && self.source_sha256 == source_sha256
+    }
+
+    /// The service-private artifact file stem derived from the complete
+    /// identity: Photo, location, revision, staged content hash, geometry,
+    /// pipeline, profile, and bundle. Two different identities never share
+    /// one artifact file.
+    pub fn identity_digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        for part in [
+            self.photo_id.as_bytes(),
+            self.source_relative_path.as_bytes(),
+            self.source_revision.as_bytes(),
+            self.source_sha256.as_bytes(),
+            self.long_edge.to_le_bytes().as_slice(),
+            self.pipeline_version.as_bytes(),
+            self.profile_id.as_bytes(),
+            self.bundle_sha256.as_bytes(),
+        ] {
+            hasher.update(part);
+            hasher.update([0]);
+        }
+        format!("{:x}", hasher.finalize())
+    }
 }
 
 /// Why a retry input was refused, or the re-armed Export it produced.

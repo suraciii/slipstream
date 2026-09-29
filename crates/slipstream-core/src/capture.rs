@@ -259,6 +259,17 @@ pub fn capture_source_revision(
     ))
 }
 
+/// Whether a published Capture fact revision belongs to the durable
+/// descriptor (path, size, and modification time) named by `current`. A
+/// published revision also carries the discovery device and inode, which are
+/// not persisted, so a metadata-only read decides currency from the durable
+/// leading components alone.
+pub fn capture_revision_matches_descriptor(published: &str, current: &str) -> bool {
+    published
+        .strip_prefix(current)
+        .is_some_and(|remainder| remainder.starts_with('\0'))
+}
+
 pub(crate) struct CaptureObservation {
     pub(crate) facts: OriginalFacts,
     pub(crate) capture: CaptureFact,

@@ -217,6 +217,12 @@ pub(crate) fn create_router_with_preview(
         )
         .route("/api/photos/{id}", get(cli::get_photo))
         .route(
+            "/api/photos/{id}/development-proxy",
+            get(crate::development_proxy::get_development_proxy)
+                .post(crate::development_proxy::post_development_proxy)
+                .delete(crate::development_proxy::delete_development_proxy),
+        )
+        .route(
             "/api/photos/{id}/edit-recipe",
             get(crate::edit_recipe::get_edit_recipe).post(crate::edit_recipe::post_edit_recipe),
         )
@@ -685,13 +691,33 @@ pub(crate) async fn request_policy(
     if mutation {
         let path = request.uri().path();
         let api_path = path == "/api" || path.starts_with("/api/");
-        let admitted = api_path
-            && (!request.method().as_str().eq("DELETE") || path.starts_with("/api/browse/"));
+        let admitted =
+            api_path && (!request.method().as_str().eq("DELETE") || delete_is_admitted(path));
         if !admitted {
             return api_error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed");
         }
     }
     next.run(request).await
+}
+
+/// DELETE is admitted only on the routes that declare it: the browsing session
+/// release and the Development Proxy removal. Every other DELETE is refused
+/// before routing, so a retired or renamed path can never be reached by a
+/// method the API does not publish.
+fn delete_is_admitted(path: &str) -> bool {
+    path.starts_with("/api/browse/") || is_development_proxy_route(path)
+}
+
+/// One `/api/photos/{id}/development-proxy` path: exactly one nonempty Photo ID
+/// segment before the fixed suffix, and no deeper path.
+fn is_development_proxy_route(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/photos/") else {
+        return false;
+    };
+    let Some(photo_id) = rest.strip_suffix("/development-proxy") else {
+        return false;
+    };
+    !photo_id.is_empty() && !photo_id.contains('/')
 }
 
 #[derive(Clone, Copy, Debug)]

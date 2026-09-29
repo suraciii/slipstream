@@ -52,24 +52,28 @@ type RecoveryNoticeModel = Readonly<{
   unavailablePhotos: number;
 }>;
 
-export interface RecoveryPanel {
+/// The recovery review surface the page view presents: the committed-counts
+/// notice, the bounded review listing with its explicit paging, and the
+/// reviewed mappings an explicit apply commits.
+export interface RecoveryReviewView {
+  /// Presents the committed recovery counts of the last scan and, while
+  /// Originals remain unavailable, the one bounded review entry.
   setRecoveryNotice(model: RecoveryNoticeModel): void;
   /// Opens the recovery review with the first page of its bounded listing:
-  /// every loaded entry, how many of the total are shown, and whether more
-  /// pages remain in the same review.
+  /// entries are the remembered facts, paging names how much of the total is
+  /// loaded and whether a continuation page remains.
   openRecoveryPanel(
     entries: ReadonlyArray<RecoveryEntryViewModel>,
     paging: RecoveryPagingViewModel,
   ): void;
-  /// Replaces the unavailable entries the open review presents, including
-  /// the pages a Load more appended.
+  /// Re-renders the entries of the open review, including its paging.
   renderRecoveryEntries(
     entries: ReadonlyArray<RecoveryEntryViewModel>,
     paging: RecoveryPagingViewModel,
   ): void;
-  /// Presents inspectable reviewed mappings with their explicit paging; a
-  /// blocked mapping carries its reason, and each mapping that needs an
-  /// explicit choice carries its own unchecked control.
+  /// Presents the reviewed mappings and their paging; each occupied
+  /// destination that an explicit retire-and-bind may replace carries its
+  /// checkbox.
   renderRecoveryProposals(
     mappings: ReadonlyArray<RecoveryMappingViewModel>,
     paging: RecoveryPagingViewModel,
@@ -80,6 +84,9 @@ export interface RecoveryPanel {
   setRecoveryPending(pending: boolean): void;
   setRecoveryMessage(text?: string): void;
   closeRecoveryPanel(): void;
+}
+
+export interface RecoveryPanel extends RecoveryReviewView {
   dispose(): void;
 }
 

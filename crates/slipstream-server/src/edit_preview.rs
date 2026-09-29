@@ -31,7 +31,7 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use slipstream_core::{
     DEVELOPMENT_PREVIEW_LONG_EDGE, DISPLAY_TRANSFORM_VERSION, EditRecipeRead, WhiteBalanceIntent,
-    process_development_tiff,
+    process_development_proxy, process_development_tiff,
 };
 
 use crate::{
@@ -105,6 +105,8 @@ pub(crate) struct PreviewFacts {
     pub(crate) recipe_revision: Option<String>,
     pub(crate) exposure_milli_ev: i64,
     pub(crate) white_balance: &'static str,
+    pub(crate) source: &'static str,
+    pub(crate) proxy_id: Option<String>,
 }
 
 /// The source content evidence of one rendition identity. Only a rendition
@@ -178,6 +180,8 @@ impl PreviewIdentity {
             facts.recipe_revision.as_deref().unwrap_or("").as_bytes(),
             facts.exposure_milli_ev.to_le_bytes().as_slice(),
             facts.white_balance.as_bytes(),
+            facts.source.as_bytes(),
+            facts.proxy_id.as_deref().unwrap_or("").as_bytes(),
         ] {
             hasher.update(part);
             hasher.update([0]);
@@ -825,20 +829,21 @@ struct PendingIntent {
     since: SystemTime,
 }
 
-/// The cancellable intent of one derivation: the token the conversion
-/// polls, plus the wakeup that releases a request still queued for the
-/// conversion slot the moment its intent is cancelled.
+/// The cancellable intent of one derivation, shared by requests for the same
+/// identity so polling cannot cancel work it is waiting for.
 #[derive(Clone)]
 struct DerivationSignal {
     cancelled: Arc<AtomicBool>,
     notify: Arc<tokio::sync::Notify>,
+    identity_digest: String,
 }
 
 impl DerivationSignal {
-    fn start() -> Self {
+    fn start(identity_digest: &str) -> Self {
         Self {
             cancelled: Arc::default(),
             notify: Arc::new(tokio::sync::Notify::new()),
+            identity_digest: identity_digest.to_owned(),
         }
     }
 
@@ -1073,16 +1078,22 @@ impl EditPreviewOwner {
         self.derivations_started.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Registers one in-flight derivation and returns its cancellation token.
-    /// A previous in-flight derivation of this owner is cancelled: a
-    /// superseded request must not publish, and its native result is
-    /// discarded instead of racing the newer identity.
-    async fn begin_derivation(&self, key: &OwnerKey) -> DerivationSignal {
+    /// Registers one in-flight derivation. Identical requests share its signal;
+    /// a changed identity cancels prior work before replacing it.
+    async fn begin_derivation(
+        &self,
+        key: &OwnerKey,
+        identity: &PreviewIdentity,
+    ) -> DerivationSignal {
+        let identity_digest = identity.digest();
         self.touch_entry(key, |entry| {
-            if let Some(previous) = entry.inflight.take() {
+            if let Some(previous) = entry.inflight.as_ref() {
+                if previous.identity_digest == identity_digest {
+                    return previous.clone();
+                }
                 previous.cancel();
             }
-            let signal = DerivationSignal::start();
+            let signal = DerivationSignal::start(&identity_digest);
             entry.inflight = Some(signal.clone());
             signal
         })
@@ -1364,19 +1375,25 @@ pub(crate) async fn get_edit_preview(
     if !valid_id(&photo_id) {
         return unknown_photo(&photo_id);
     }
-    // One serialized recipe read owns every identity fact, so a rescan
-    // between reads cannot mix an old recipe with newer source facts.
     let (photo, read) = match crate::edit_recipe::load_facts(&state, &photo_id).await {
         Ok(facts) => facts,
         Err(response) => return response,
     };
-    if let Some(response) = support_refusal(&photo, &read, stage) {
+    let proxy = if !read.source_available {
+        match state.application.proxies.as_ref() {
+            Some(manager) => manager.current_artifact(&photo_id).await,
+            None => None,
+        }
+    } else {
+        None
+    };
+    if let Some(response) = support_refusal(&photo, &read, stage, proxy.is_some()) {
         return response;
     }
-    if let Err(response) = develop_executable(&state, stage, settings, &read) {
+    if let Err(response) = develop_executable(&state, stage, settings, &read, proxy.is_some()) {
         return *response;
     }
-    serve_preview(&state, &photo_id, stage, settings, &read).await
+    serve_preview(&state, &photo_id, stage, settings, &read, proxy.as_ref()).await
 }
 
 /// The support refusal of one Photo, if its class or facts refuse the route.
@@ -1386,7 +1403,11 @@ fn support_refusal(
     photo: &slipstream_core::PhotoRead,
     read: &EditRecipeRead,
     stage: &'static str,
+    proxy_current: bool,
 ) -> Option<Response<Body>> {
+    if proxy_current {
+        return None;
+    }
     let support = classify_support(photo, read);
     match support.state {
         "unsupported" => Some(unsupported_photo(&photo.id, stage)),
@@ -1429,17 +1450,17 @@ fn closed_settings(query: Option<&str>) -> Option<&'static str> {
 
 /// The Film stage has no production admission authority yet. The photo
 /// launcher only proves the closed Development workload; Film qualification
-/// is a separate deployment gate.
 fn develop_executable(
     state: &HttpState,
     stage: &'static str,
     settings: &'static str,
     read: &EditRecipeRead,
+    proxy_current: bool,
 ) -> Result<(), Box<Response<Body>>> {
     let Some(_config) = state.processing.as_ref() else {
         return Err(Box::new(processing_unavailable(stage, "operator-disabled")));
     };
-    if stage == "film" {
+    if stage == "film" && !proxy_current {
         return Err(Box::new(processing_unavailable(
             stage,
             "film-not-qualified",
@@ -1478,17 +1499,87 @@ async fn serve_preview(
     stage: &'static str,
     settings: &'static str,
     read: &EditRecipeRead,
+    proxy: Option<&(slipstream_core::DevelopmentProxyRecord, std::path::PathBuf)>,
 ) -> Response<Body> {
     let owner = &state.edit_preview;
     let key = (photo_id.to_owned(), stage, settings);
-    let Some(source_revision) = read.current_source_revision.clone() else {
+    let Some(source_revision) = proxy
+        .map(|(record, _)| record.source_revision.clone())
+        .or_else(|| read.current_source_revision.clone())
+    else {
         return resource_unavailable(stage, crate::edit_recipe::READ_PENDING);
     };
-    let facts = current_facts(state, stage, settings, &source_revision, read);
-    let retained = owner.retention.resolve(photo_id, &facts).await;
-    let identity = PreviewIdentity::build(&facts, retained.as_ref());
+    let mut facts = current_facts(state, stage, settings, &source_revision, read);
+    if let Some((record, _)) = proxy {
+        facts.source = "development-proxy";
+        facts.proxy_id = Some(record.identity_digest());
+        facts.bundle_sha256 = record.bundle_sha256.clone();
+    }
+    let proxy_retained =
+        proxy
+            .filter(|_| stage != "film")
+            .map(|(record, path)| RetainedDevelopmentResult {
+                sha256: record.artifact_sha256.clone(),
+                byte_length: record.artifact_bytes,
+                recipe_revision: facts.recipe_revision.clone(),
+                exposure_milli_ev: facts.exposure_milli_ev,
+                white_balance: facts.white_balance,
+                source_revision: record.source_revision.clone(),
+                bundle_sha256: record.bundle_sha256.clone(),
+                path: path.clone(),
+                width: record.width,
+                height: record.height,
+            });
+    let retained = owner
+        .retention
+        .resolve(photo_id, &facts)
+        .await
+        .or(proxy_retained.clone());
+    let identity = PreviewIdentity::build(
+        &facts,
+        if proxy.is_some() && stage == "film" {
+            None
+        } else {
+            retained.as_ref()
+        },
+    );
     if let Some(rendition) = owner.current(&key, &identity).await {
         return rendition_response(photo_id, &rendition);
+    }
+    if let Some((record, path)) = proxy.filter(|_| stage == "film") {
+        let signal = owner.begin_derivation(&key, &identity).await;
+        let permit = owner.derive_permit(&key).await;
+        let _guard = tokio::select! {
+            biased;
+            _ = signal.cancelled() => {
+                return superseded_during_derivation(owner, &key, photo_id, stage, &identity).await;
+            }
+            guard = permit.lock() => guard,
+        };
+        if signal.is_cancelled() {
+            owner.end_derivation(&key, &signal).await;
+            return superseded_during_derivation(owner, &key, photo_id, stage, &identity).await;
+        }
+        if let Some(rendition) = owner.current(&key, &identity).await {
+            owner.end_derivation(&key, &signal).await;
+            return rendition_response(photo_id, &rendition);
+        }
+        let response = render_proxy_film_now(
+            state,
+            owner,
+            &key,
+            photo_id,
+            &facts,
+            &identity,
+            (
+                record,
+                path.as_path(),
+                PreviewCancellation::from_token(signal.token()),
+            ),
+        )
+        .await;
+        owner.end_derivation(&key, &signal).await;
+        return response;
     }
     // The admission path must stay reachable while another request's
     // derivation runs, so a newer intent can supersede and cancel in-flight
@@ -1517,8 +1608,13 @@ async fn serve_preview(
     if let Some(rendition) = owner.current(&key, &identity).await {
         return rendition_response(photo_id, &rendition);
     }
-    // The retention may have moved while this request waited for the permit.
-    let retained = owner.retention.resolve(photo_id, &facts).await;
+    // The retention may have moved while this request waited for the permit;
+    // a current proxy remains the authoritative retained source offline.
+    let retained = owner
+        .retention
+        .resolve(photo_id, &facts)
+        .await
+        .or(proxy_retained.clone());
     let Some(record) = retained.filter(|record| record.matches_facts(&facts)) else {
         return admit_render(
             owner,
@@ -1539,7 +1635,7 @@ async fn serve_preview(
     // Register the intent before queuing for the heavy conversion: a newer
     // admission can then cancel this signal while it waits, and the queued
     // request discovers the supersession before any native work starts.
-    let signal = owner.begin_derivation(&key).await;
+    let signal = owner.begin_derivation(&key, &identity).await;
     // One heavy native conversion at a time, instance-wide. The wait is
     // observable: cancellation wakes the queued request, and the wait is
     // bounded, so a stuck conversion cannot hold a request forever.
@@ -1568,6 +1664,8 @@ async fn serve_preview(
         record,
         stage,
         slipstream_core::DerivativeTarget::DevelopmentPreview1224,
+        facts.exposure_milli_ev,
+        proxy.is_some(),
         signal.token(),
     )
     .await;
@@ -1618,12 +1716,80 @@ async fn serve_preview(
     }
 }
 
+/// Runs qualified Film work over the current proxy, never the missing Original.
+async fn render_proxy_film_now(
+    state: &HttpState,
+    owner: &EditPreviewOwner,
+    key: &OwnerKey,
+    photo_id: &str,
+    facts: &PreviewFacts,
+    identity: &PreviewIdentity,
+    proxy: (
+        &slipstream_core::DevelopmentProxyRecord,
+        &std::path::Path,
+        PreviewCancellation,
+    ),
+) -> Response<Body> {
+    let (proxy, proxy_path, cancellation) = proxy;
+    let Some(exports) = state.application.exports.as_ref() else {
+        return processing_unavailable("film", "operator-disabled");
+    };
+    let result = match exports
+        .render_proxy_film_preview(facts.clone(), proxy_path, &proxy.profile_id, cancellation)
+        .await
+    {
+        Ok(result) => result,
+        Err(_) => return processing_unavailable("film", "film-worker-unavailable"),
+    };
+    let output_path = result.path.clone();
+    let bytes = match tokio::task::spawn_blocking(move || std::fs::read(output_path)).await {
+        Ok(Ok(bytes)) => bytes,
+        _ => {
+            exports.delete_preview_output(&result.attempt_key);
+            return processing_unavailable("film", "film-output-unavailable");
+        }
+    };
+    exports.delete_preview_output(&result.attempt_key);
+    let derived = DerivedRendition {
+        bytes: axum::body::Bytes::from(bytes),
+        sha256: result.sha256,
+        width: result.output_facts.width,
+        height: result.output_facts.height,
+    };
+    let settings = facts.settings;
+    match owner
+        .publish_if_current(
+            key,
+            identity,
+            || async { fresh_identity(state, photo_id, "film", settings).await.ok() },
+            derived,
+        )
+        .await
+    {
+        PublishOutcome::Published(rendition) => {
+            if owner
+                .confirm_publication(key, identity, || async {
+                    fresh_identity(state, photo_id, "film", settings).await.ok()
+                })
+                .await
+            {
+                rendition_response(photo_id, &rendition)
+            } else {
+                resource_unavailable("film", "preview-superseded")
+            }
+        }
+        PublishOutcome::Superseded => resource_unavailable("film", "preview-superseded"),
+    }
+}
+
 /// Reads a retained Film JPEG directly, or converts a retained Development
 /// TIFF through the pinned display transform.
 async fn derive_preview_display(
     record: RetainedDevelopmentResult,
     stage: &'static str,
     target: slipstream_core::DerivativeTarget,
+    exposure_milli_ev: i64,
+    proxy_backed: bool,
     cancelled: Arc<AtomicBool>,
 ) -> Result<Option<slipstream_core::Derivative>, slipstream_core::DerivativeError> {
     if cancelled.load(Ordering::Relaxed) {
@@ -1656,7 +1822,13 @@ async fn derive_preview_display(
         }
         std::fs::File::open(&path)
             .map_err(|_| slipstream_core::DerivativeError::Internal)
-            .and_then(|file| process_development_tiff(file.as_raw_fd(), target).map(Some))
+            .and_then(|file| {
+                if proxy_backed {
+                    process_development_proxy(file.as_raw_fd(), exposure_milli_ev, target).map(Some)
+                } else {
+                    process_development_tiff(file.as_raw_fd(), target).map(Some)
+                }
+            })
     })
     .await;
     match derived {
@@ -1692,18 +1864,64 @@ async fn fresh_identity(
         Ok(facts) => facts,
         Err(response) => return Err(response),
     };
-    if let Some(response) = support_refusal(&photo, &read, stage) {
+    let proxy = if !read.source_available {
+        match state.application.proxies.as_ref() {
+            Some(manager) => manager.current_artifact(photo_id).await,
+            None => None,
+        }
+    } else {
+        None
+    };
+    if let Some(response) = support_refusal(&photo, &read, stage, proxy.is_some()) {
         return Err(response);
     }
-    let Some(source_revision) = read.current_source_revision.clone() else {
+    let Some(source_revision) = proxy
+        .as_ref()
+        .map(|(record, _)| record.source_revision.clone())
+        .or_else(|| read.current_source_revision.clone())
+    else {
         return Err(resource_unavailable(
             stage,
             crate::edit_recipe::READ_PENDING,
         ));
     };
-    let facts = current_facts(state, stage, settings, &source_revision, &read);
-    let retained = state.edit_preview.retention.resolve(photo_id, &facts).await;
-    Ok(PreviewIdentity::build(&facts, retained.as_ref()))
+    develop_executable(state, stage, settings, &read, proxy.is_some())
+        .map_err(|response| *response)?;
+    let mut facts = current_facts(state, stage, settings, &source_revision, &read);
+    if let Some((record, _)) = proxy.as_ref() {
+        facts.source = "development-proxy";
+        facts.proxy_id = Some(record.identity_digest());
+        facts.bundle_sha256 = record.bundle_sha256.clone();
+    }
+    let proxy_retained = proxy
+        .as_ref()
+        .filter(|_| stage != "film")
+        .map(|(record, path)| RetainedDevelopmentResult {
+            sha256: record.artifact_sha256.clone(),
+            byte_length: record.artifact_bytes,
+            recipe_revision: facts.recipe_revision.clone(),
+            exposure_milli_ev: facts.exposure_milli_ev,
+            white_balance: facts.white_balance,
+            source_revision: record.source_revision.clone(),
+            bundle_sha256: record.bundle_sha256.clone(),
+            path: path.clone(),
+            width: record.width,
+            height: record.height,
+        });
+    let retained = state
+        .edit_preview
+        .retention
+        .resolve(photo_id, &facts)
+        .await
+        .or(proxy_retained);
+    Ok(PreviewIdentity::build(
+        &facts,
+        if proxy.is_some() && stage == "film" {
+            None
+        } else {
+            retained.as_ref()
+        },
+    ))
 }
 
 /// Admits one preview-class render when no current rendition or usable
@@ -1765,6 +1983,8 @@ fn current_facts(
         recipe_revision,
         exposure_milli_ev,
         white_balance: WHITE_BALANCE_AS_SHOT,
+        source: "original",
+        proxy_id: None,
     }
 }
 
@@ -1775,7 +1995,7 @@ fn current_facts(
 /// `recipeVersion`: no saved recipe produced it.
 fn rendition_response(photo_id: &str, rendition: &PublishedRendition) -> Response<Body> {
     let facts = &rendition.identity.facts;
-    Response::builder()
+    let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header(axum::http::header::CONTENT_TYPE, "image/jpeg")
         .header(
@@ -1805,10 +2025,18 @@ fn rendition_response(photo_id: &str, rendition: &PublishedRendition) -> Respons
             "slipstream-edit-preview-display-transform",
             facts.display_transform,
         )
+        .header("slipstream-edit-preview-source", facts.source)
         .header(
             "slipstream-edit-preview-expires-at",
             format_time(rendition.expires_at),
-        )
+        );
+    if facts.source == "development-proxy" {
+        builder = builder.header(
+            "slipstream-edit-preview-proxy-id",
+            facts.proxy_id.as_deref().unwrap_or(""),
+        );
+    }
+    builder
         .body(Body::from(rendition.bytes.clone()))
         .expect("valid edit preview response")
 }
@@ -1943,6 +2171,8 @@ mod tests {
             recipe_revision: Some("recipe-1".to_owned()),
             exposure_milli_ev,
             white_balance: WHITE_BALANCE_AS_SHOT,
+            source: "original",
+            proxy_id: None,
         }
     }
 
@@ -2348,7 +2578,9 @@ mod tests {
         let gate = ScriptedGate::queued(1);
         let owner = EditPreviewOwner::new(Arc::new(UnlandedRetention), gate);
         let key = ("photo".to_owned(), "develop", SETTINGS_CURRENT);
-        let signal = owner.begin_derivation(&key).await;
+        let signal = owner
+            .begin_derivation(&key, &scripted_identity("source", 250))
+            .await;
         assert!(!signal.is_cancelled());
         // A newer identity supersedes the in-flight derivation.
         let _admitted = owner
@@ -2377,6 +2609,8 @@ mod tests {
                 cancelled_record,
                 "develop",
                 slipstream_core::DerivativeTarget::DevelopmentPreview1224,
+                250,
+                false,
                 signal.token(),
             )
             .await,

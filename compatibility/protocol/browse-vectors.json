@@ -26,7 +26,8 @@
           },
           "publication": "$publication",
           "state": "idle",
-          "total": 3
+          "total": 3,
+          "updatedAt": "$updatedAt"
         }
       },
       "status": 200
@@ -930,7 +931,8 @@
         },
         "publication": "$publication",
         "state": "idle",
-        "total": 3
+        "total": 3,
+        "updatedAt": "$updatedAt"
       },
       "status": 200
     },

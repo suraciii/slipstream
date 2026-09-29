@@ -429,7 +429,8 @@ pub(super) fn apply_manual_relocations(
                     "SELECT p.id,p.rating,p.selection_state,p.removed_at_ms,
                         EXISTS(SELECT 1 FROM edit_recipes e WHERE e.photo_id=p.id),
                         (SELECT COUNT(*) FROM album_members m WHERE m.photo_id=p.id),
-                        (SELECT COUNT(*) FROM exports x WHERE x.photo_id=p.id)
+                        (SELECT COUNT(*) FROM exports x WHERE x.photo_id=p.id),
+                        EXISTS(SELECT 1 FROM development_proxies d WHERE d.photo_id=p.id)
                      FROM photos p WHERE p.original_id=?",
                     params![owner_id],
                     |row| {
@@ -441,6 +442,7 @@ pub(super) fn apply_manual_relocations(
                             row.get::<_, i64>(4)? != 0,
                             row.get::<_, i64>(5)?,
                             row.get::<_, i64>(6)?,
+                            row.get::<_, i64>(7)? != 0,
                         ))
                     },
                 )
@@ -454,6 +456,7 @@ pub(super) fn apply_manual_relocations(
                 has_saved_edits,
                 members,
                 exports,
+                has_proxy,
             )) = occupant
             else {
                 return Err(PersistenceError::InvalidRecoveryMapping {
@@ -480,6 +483,7 @@ pub(super) fn apply_manual_relocations(
                 || has_saved_edits
                 || members != 0
                 || exports != 0
+                || has_proxy
             {
                 return Err(PersistenceError::InvalidRecoveryMapping {
                     original_id: relocation.original_id.clone(),
@@ -731,7 +735,9 @@ pub(super) fn parse_kind(value: &str) -> rusqlite::Result<OriginalKind> {
     }
 }
 
-fn parse_error_category(value: Option<String>) -> rusqlite::Result<Option<OriginalErrorCategory>> {
+pub(super) fn parse_error_category(
+    value: Option<String>,
+) -> rusqlite::Result<Option<OriginalErrorCategory>> {
     value
         .map(|value| match value.as_str() {
             "unreadable" => Ok(OriginalErrorCategory::Unreadable),

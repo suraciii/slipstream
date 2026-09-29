@@ -31,6 +31,34 @@ fn substitute_protocol_captures(
     }
 }
 
+/// Keep the protocol vectors independent of a wall-clock reading. The scan
+/// progress timestamp has its own numeric assertion in the CLI route tests.
+fn mask_updated_at(body: &mut serde_json::Value, name: &str) {
+    fn mask_field(object: &mut serde_json::Value, name: &str) {
+        if let Some(updated_ms) = object.get("updatedMs") {
+            assert!(
+                updated_ms.as_u64().is_some(),
+                "{name} updatedMs must be numeric"
+            );
+        }
+        if let Some(entries) = object.as_object_mut() {
+            entries.remove("updatedMs");
+        }
+        let Some(updated_at) = object.get("updatedAt").and_then(|value| value.as_u64()) else {
+            return;
+        };
+        assert!(
+            updated_at > 0,
+            "{name} updatedAt must be a real epoch timestamp"
+        );
+        object["updatedAt"] = serde_json::Value::String("$updatedAt".to_owned());
+    }
+    mask_field(body, name);
+    if let Some(scan) = body.get_mut("scan") {
+        mask_field(scan, name);
+    }
+}
+
 #[tokio::test]
 async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
     let (base, config) = prepare_fixture();
@@ -89,13 +117,8 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
             .await
             .unwrap();
         if let Some(expected) = vector["expected"]["body"].as_object() {
-            let actual: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            if actual.get("updatedMs").is_some() {
-                assert!(actual["updatedMs"].as_u64().is_some());
-            }
-            if actual.get("scan").is_some() {
-                assert!(actual["scan"]["updatedMs"].as_u64().is_some());
-            }
+            let mut actual: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            mask_updated_at(&mut actual, vector["name"].as_str().unwrap());
             if captured_album_id.is_empty()
                 && let Some(id) = actual["albums"][0]["id"].as_str()
             {
@@ -114,16 +137,6 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
                 &captured_album_id,
                 &captured_publication,
             );
-            let mut actual = actual;
-            if let Some(scan) = actual
-                .get_mut("scan")
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                scan.remove("updatedMs");
-            }
-            if let Some(body) = actual.as_object_mut() {
-                body.remove("updatedMs");
-            }
             assert_eq!(
                 actual.as_object().unwrap(),
                 expected.as_object().unwrap(),
@@ -304,11 +317,14 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
         let body = axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024)
             .await
             .unwrap();
-        let actual: Option<serde_json::Value> = if vector["expected"]["body"].is_object() {
+        let mut actual: Option<serde_json::Value> = if vector["expected"]["body"].is_object() {
             Some(serde_json::from_slice(&body).unwrap())
         } else {
             None
         };
+        if let Some(actual_value) = actual.as_mut() {
+            mask_updated_at(actual_value, &name);
+        }
         if let Some(actual_value) = actual.as_ref() {
             if publication.is_empty()
                 && let Some(captured) = actual_value
@@ -392,19 +408,6 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
         if let (Some(actual_value), Some(expected)) =
             (actual.as_ref(), vector["expected"]["body"].as_object())
         {
-            if let Some(scan) = actual_value.get("scan") {
-                assert!(scan["updatedMs"].as_u64().is_some(), "{name}");
-            }
-            let mut actual_value = actual_value.clone();
-            if let Some(scan) = actual_value
-                .get_mut("scan")
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                scan.remove("updatedMs");
-            }
-            if let Some(body) = actual_value.as_object_mut() {
-                body.remove("updatedMs");
-            }
             let expected = substitute(&serde_json::Value::Object(expected.clone()), &captures);
             assert_eq!(
                 actual_value.as_object().unwrap(),

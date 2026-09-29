@@ -4,6 +4,7 @@ use super::{
         parse_white_balance_intent, photo_processing_source, random_uuid_v4,
         white_balance_intent_name, white_balance_intent_values, write_transaction,
     },
+    scan::{parse_camera_identity, parse_capture_fact, parse_error_category, parse_kind},
 };
 use crate::{
     EditRecipe, EditRecipeRead, EditRecipeSettings, EditRecipeWriteOutcome, RebindEditRecipe,
@@ -47,8 +48,12 @@ pub(super) fn read_edit_recipe(
     let row = connection
         .query_row(
             "SELECT o.relative_path,o.size,o.mtime_ms,o.available,p.available,
+                    o.kind,o.error_category,
+                    o.capture_metadata_state,o.capture_order_key,o.capture_time_field,
+                    o.capture_offset_minutes,o.capture_source_revision,
+                    o.camera_identity_state,o.camera_make,o.camera_model,
                     e.revision,e.source_revision,e.exposure_ev,e.white_balance_mode,
-                    e.temperature_kelvin,e.tint_milli,o.capture_source_revision
+                    e.temperature_kelvin,e.tint_milli
              FROM photos p JOIN original_files o ON o.id=p.original_id
              LEFT JOIN edit_recipes e ON e.photo_id=p.id WHERE p.id=?",
             [photo_id],
@@ -57,13 +62,24 @@ pub(super) fn read_edit_recipe(
                 let size = u64::try_from(row.get::<_, i64>(1)?)
                     .map_err(|_| rusqlite::Error::InvalidQuery)?;
                 let mtime_ms: f64 = row.get(2)?;
-                let source_available = row.get::<_, i64>(3)? != 0 && row.get::<_, i64>(4)? != 0;
-                let recipe_revision: Option<String> = row.get(5)?;
-                let recipe_source_revision: Option<String> = row.get(6)?;
-                let exposure_ev: Option<f64> = row.get(7)?;
-                let white_balance_mode: Option<String> = row.get(8)?;
-                let temperature_kelvin: Option<i32> = row.get(9)?;
-                let tint_milli: Option<i32> = row.get(10)?;
+                let original_available = row.get::<_, i64>(3)? != 0;
+                let photo_available = row.get::<_, i64>(4)? != 0;
+                let kind = parse_kind(&row.get::<_, String>(5)?)?;
+                let original_error = parse_error_category(row.get(6)?)?;
+                let capture = parse_capture_fact(
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    parse_camera_identity(row.get(12)?, row.get(13)?, row.get(14)?)?,
+                )?;
+                let recipe_revision: Option<String> = row.get(15)?;
+                let recipe_source_revision: Option<String> = row.get(16)?;
+                let exposure_ev: Option<f64> = row.get(17)?;
+                let white_balance_mode: Option<String> = row.get(18)?;
+                let temperature_kelvin: Option<i32> = row.get(19)?;
+                let tint_milli: Option<i32> = row.get(20)?;
                 let recipe = match (
                     recipe_revision,
                     recipe_source_revision,
@@ -88,35 +104,62 @@ pub(super) fn read_edit_recipe(
                     }
                     _ => return Err(rusqlite::Error::InvalidQuery),
                 };
-                let published_revision: Option<String> = row.get(11)?;
-                Ok((
+                Ok(FactsRow {
                     relative_path,
                     size,
                     mtime_ms,
-                    source_available,
+                    original_available,
+                    photo_available,
+                    kind,
+                    original_error,
+                    capture,
                     recipe,
-                    published_revision,
-                ))
+                })
             },
         )
         .optional()
         .map_err(|_| PersistenceError::Storage)?;
-    let Some((relative_path, size, mtime_ms, source_available, recipe, published_revision)) = row
-    else {
+    let Some(row) = row else {
         return Ok(None);
     };
-    let observed_revision = crate::source_revision(&relative_path, size, mtime_ms)
+    // The current source revision is published evidence only: it is named
+    // exactly when the published Capture fact revision is bound to the
+    // durable descriptor of the persisted source facts. Anything else is a
+    // publication gap (a retryable wait state), never a synthesized
+    // revision.
+    let observed_revision = crate::source_revision(&row.relative_path, row.size, row.mtime_ms)
         .map_err(|_| PersistenceError::Storage)?;
-    let current_source_revision = published_revision
+    let current_source_revision = row
+        .capture
+        .source_revision
         .as_deref()
-        .and_then(|revision| revision.strip_prefix(&observed_revision))
-        .filter(|descriptor| descriptor.starts_with('\0'))
+        .filter(|published| {
+            crate::capture_revision_matches_descriptor(published, &observed_revision)
+        })
         .map(|_| observed_revision);
     Ok(Some(EditRecipeRead {
-        recipe,
+        recipe: row.recipe,
         current_source_revision,
-        source_available,
+        source_available: row.original_available && row.photo_available,
+        original_available: row.original_available,
+        original_location: row.relative_path,
+        original_kind: row.kind,
+        original_error: row.original_error,
+        capture: row.capture,
     }))
+}
+
+/// The committed columns one recipe facts read derives its response from.
+struct FactsRow {
+    relative_path: String,
+    size: u64,
+    mtime_ms: f64,
+    original_available: bool,
+    photo_available: bool,
+    kind: crate::OriginalKind,
+    original_error: Option<crate::OriginalErrorCategory>,
+    capture: crate::CaptureFact,
+    recipe: Option<EditRecipe>,
 }
 
 fn validate_edit_recipe_request_id(request_id: &str) -> bool {
@@ -245,12 +288,27 @@ pub(super) fn save_edit_recipe(
             return Ok(EditRecipeWriteOutcome::UnsupportedPhoto);
         }
         if !available || !current.source_available {
+            // The Original is unavailable, so the only guarded save is one a
+            // current Development Proxy stands in for: the proxy was derived
+            // from exactly the last observed source revision, and the caller
+            // guards against that same revision. The stored recipe stays
+            // bound to the Original's source revision; nothing here rebinds
+            // it to the proxy. Any other offline save stays refused.
+            let guarded =
+                super::development_proxy::read_development_proxy(transaction, &mutation.photo_id)?
+                    .is_some_and(|proxy| {
+                        proxy.source_revision == mutation.expected_source_revision
+                            && current.current_source_revision.as_deref()
+                                == Some(proxy.source_revision.as_str())
+                    });
+            if !guarded {
+                return Ok(EditRecipeWriteOutcome::Unavailable);
+            }
+        } else if current.current_source_revision.is_none() {
+            // No published Capture fact is bound to the observed source
+            // facts: a retryable publication gap, not a confirmed change.
             return Ok(EditRecipeWriteOutcome::Unavailable);
-        }
-        if current.current_source_revision.is_none() {
-            return Ok(EditRecipeWriteOutcome::Unavailable);
-        }
-        if current.current_source_revision.as_deref()
+        } else if current.current_source_revision.as_deref()
             != Some(mutation.expected_source_revision.as_str())
         {
             return Ok(EditRecipeWriteOutcome::SourceChanged(current));
@@ -396,14 +454,16 @@ pub(super) fn rebind_edit_recipe(
         if !available || !current.source_available {
             return Ok(EditRecipeWriteOutcome::Unavailable);
         }
+        if current.current_source_revision.is_none() {
+            // No published Capture fact is bound to the observed source
+            // facts: a retryable publication gap, not a confirmed change.
+            return Ok(EditRecipeWriteOutcome::Unavailable);
+        }
         let Some(recipe) = current.recipe.as_ref() else {
             return Ok(EditRecipeWriteOutcome::MissingRecipe);
         };
         if recipe.revision != mutation.expected_recipe_version {
             return Ok(EditRecipeWriteOutcome::Conflict(current));
-        }
-        if current.current_source_revision.is_none() {
-            return Ok(EditRecipeWriteOutcome::Unavailable);
         }
         if current.current_source_revision.as_deref() != Some(mutation.new_source_revision.as_str())
         {
@@ -970,6 +1030,144 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(missing, EditRecipeWriteOutcome::MissingPhoto);
+        persistence.shutdown().unwrap();
+    }
+
+    /// A current Development Proxy stands in for an unavailable Original:
+    /// the offline save stays guarded by exactly the source revision the
+    /// proxy was derived from, the stored recipe keeps its Original binding,
+    /// and every other offline save stays refused.
+    #[tokio::test]
+    async fn development_proxy_guards_offline_saves_against_the_derived_revision() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v13.sql"),
+        );
+        let mut connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "raw-original",
+                photo_id: "raw-photo",
+                relative_path: "shoot/proxy.ARW",
+                kind: "raw",
+                available: false,
+                size: 23,
+                mtime_ms: 3_000.0,
+            },
+        );
+        let derived = source_revision("shoot/proxy.ARW", 23, 3_000.0).unwrap();
+        // The published Capture fact is bound to the same source revision
+        // the proxy was derived from, so the offline read names it.
+        connection
+            .execute(
+                "UPDATE original_files SET capture_metadata_state='missing',capture_source_revision=? WHERE id='raw-original'",
+                [format!("{}\0fixture-device\0fixture-inode", derived)],
+            )
+            .unwrap();
+        let record = |revision: &str| crate::DevelopmentProxyRecord {
+            photo_id: "raw-photo".to_owned(),
+            source_revision: revision.to_owned(),
+            source_relative_path: "shoot/proxy.ARW".to_owned(),
+            source_sha256: "a".repeat(64),
+            source_size: 23,
+            profile_id: "sony-ilce-7rm5-arw".to_owned(),
+            pipeline_version: crate::DEVELOPMENT_PROXY_PIPELINE_VERSION.to_owned(),
+            bundle_sha256: "b".repeat(64),
+            long_edge: crate::DEVELOPMENT_PROXY_LONG_EDGE,
+            width: 2560,
+            height: 1707,
+            artifact_sha256: "c".repeat(64),
+            artifact_bytes: 2048,
+            created_at: 1_700_000_000,
+        };
+        assert!(
+            crate::persistence::development_proxy::record_development_proxy(
+                &state,
+                &name,
+                &mut connection,
+                record(&derived),
+            )
+            .unwrap()
+        );
+        drop(connection);
+        let persistence = Persistence::open(
+            crate::persistence::admission::StateDirectory::open_or_create(
+                &library,
+                state.canonical_path(),
+            )
+            .unwrap(),
+            name.clone(),
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        let save = |request_id: &str,
+                    expected_recipe_version: Option<String>,
+                    expected_source_revision: &str| {
+            let receiver = persistence
+                .save_edit_recipe_receiver(SaveEditRecipe {
+                    photo_id: "raw-photo".to_owned(),
+                    request_id: request_id.to_owned(),
+                    expected_recipe_version,
+                    expected_source_revision: expected_source_revision.to_owned(),
+                    settings: EditRecipeSettings {
+                        exposure_ev: 0.5,
+                        white_balance: WhiteBalanceIntent::AsShot,
+                    },
+                })
+                .unwrap();
+            async move { receiver.await.unwrap().unwrap() }
+        };
+        let saved = save("proxy-save-1", None, &derived).await;
+        let EditRecipeWriteOutcome::Saved(recipe) = saved else {
+            panic!("a proxy-guarded offline save must be admitted: {saved:?}");
+        };
+        assert_eq!(recipe.source_revision, derived);
+        assert_eq!(recipe.settings.exposure_ev, 0.5);
+        let read = persistence
+            .edit_recipe_receiver("raw-photo")
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!read.source_available);
+        assert_eq!(
+            read.current_source_revision.as_deref(),
+            Some(derived.as_str())
+        );
+        assert_eq!(
+            read.recipe
+                .as_ref()
+                .map(|recipe| recipe.source_revision.as_str()),
+            Some(derived.as_str()),
+            "the stored recipe stays bound to the Original's source revision"
+        );
+
+        // A guard against any other revision is not the proxy's derivation.
+        let foreign = save("proxy-save-2", Some(recipe.revision.clone()), "rev-foreign").await;
+        assert_eq!(foreign, EditRecipeWriteOutcome::Unavailable);
+
+        // Without the proxy row the offline save is refused outright.
+        assert!(
+            crate::persistence::development_proxy::remove_development_proxy(
+                &state,
+                &name,
+                &mut Connection::open(&path).unwrap(),
+                "raw-photo",
+            )
+            .unwrap()
+        );
+        let unguarded = save("proxy-save-3", Some(recipe.revision), &derived).await;
+        assert_eq!(unguarded, EditRecipeWriteOutcome::Unavailable);
         persistence.shutdown().unwrap();
     }
 }

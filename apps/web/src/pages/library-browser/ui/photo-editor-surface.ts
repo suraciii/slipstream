@@ -127,6 +127,10 @@ export function createPhotoEditorSurfaceController({
     root,
     "[data-photo-editor-processing]",
   );
+  const editorPreviewState = required<HTMLElement>(
+    root,
+    "[data-photo-editor-preview-state]",
+  );
   const editorCapabilityNote = required<HTMLElement>(
     root,
     "[data-photo-editor-capability]",
@@ -137,6 +141,18 @@ export function createPhotoEditorSurfaceController({
   const editorProvenance = required<HTMLElement>(
     root,
     "[data-photo-editor-provenance]",
+  );
+  const editorProxyState = required<HTMLElement>(
+    root,
+    "[data-photo-editor-proxy-state]",
+  );
+  const editorProxyCreate = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-proxy-create]",
+  );
+  const editorProxyRemove = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-proxy-remove]",
   );
   const editorPreview = required<HTMLButtonElement>(
     root,
@@ -250,7 +266,11 @@ export function createPhotoEditorSurfaceController({
       stage: "develop",
       stageNote: "Develop: loading this Photo's edit facts.",
       filmReason: "",
-      sourceSupport: "unknown",
+      editSourceReadiness: "checking",
+      editSourceKind: "original",
+      sourceFactNote: "Checking source…",
+      processingReadiness: "checking",
+      previewState: null,
       processingAvailable: false,
       capabilityNote: "",
       exposureEv: 0,
@@ -372,12 +392,35 @@ export function createPhotoEditorSurfaceController({
       Math.abs(exposure - model.baselineExposureEv) < step / 2;
     editorResetWhiteBalance.disabled =
       model.loading || !model.canEdit || !whiteBalance.resettable;
-    editorSupport.textContent = model.sourceSupport;
-    editorProcessing.textContent = model.loading
+    // The three readiness axes are presented as the independent facts they
+    // are: the Edit source line carries its own wait or outcome, the
+    // Processing line names the deployment's engines, and the Edit Preview
+    // line names what the presented rendition is on this stage.
+    editorSupport.textContent = model.loading
       ? "Checking…"
-      : model.processingAvailable
-        ? "Available"
-        : "Unavailable";
+      : model.sourceFactNote;
+    editorProxyState.textContent = model.proxy?.note ?? "No Development Proxy.";
+    editorProxyCreate.disabled = model.loading || !model.proxy?.canCreate;
+    editorProxyRemove.disabled = model.loading || !model.proxy?.canRemove;
+    editorProxyRemove.hidden = !model.proxy?.canRemove;
+    editorProcessing.textContent =
+      model.processingReadiness === "checking"
+        ? "Checking…"
+        : model.processingReadiness === "ready"
+          ? "Ready"
+          : model.processingReadiness === "waiting"
+            ? "Waiting for capacity"
+            : "Unavailable";
+    editorPreviewState.textContent =
+      model.previewState === null
+        ? "—"
+        : model.previewState === "pending"
+          ? "Pending"
+          : model.previewState === "ready"
+            ? "Ready"
+            : model.previewState === "stale"
+              ? "Stale"
+              : "Failed";
     editorCapabilityNote.textContent = model.capabilityNote;
     editorCapabilityNote.hidden = !model.capabilityNote;
     for (const button of editorStages) {
@@ -606,6 +649,22 @@ export function createPhotoEditorSurfaceController({
     () => {
       if (editorPhotoId)
         send({ kind: "editor-discard-draft", photoId: editorPhotoId });
+    },
+    { signal: listeners.signal },
+  );
+  editorProxyCreate.addEventListener(
+    "click",
+    () => {
+      if (editorPhotoId)
+        send({ kind: "editor-proxy-create", photoId: editorPhotoId });
+    },
+    { signal: listeners.signal },
+  );
+  editorProxyRemove.addEventListener(
+    "click",
+    () => {
+      if (editorPhotoId)
+        send({ kind: "editor-proxy-remove", photoId: editorPhotoId });
     },
     { signal: listeners.signal },
   );

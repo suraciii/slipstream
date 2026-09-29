@@ -4,6 +4,7 @@ import {
   CURRENT_SETTINGS,
   comparisonIsCurrent,
   comparisonRefusal,
+  currentRenditionRefusal,
   editPreviewUri,
   encodedSourceRevision,
   type Comparison,
@@ -129,6 +130,134 @@ describe("comparisonRefusal", () => {
       comparisonRefusal(
         headers(served({ "slipstream-edit-preview-source-revision": "" })),
         unread,
+      ),
+    ).toBe("");
+  });
+});
+
+describe("currentRenditionRefusal", () => {
+  const digest = "b".repeat(64);
+  const renditionHeaders = (overrides: Record<string, string> = {}) => ({
+    "content-type": "image/jpeg",
+    "content-length": "4096",
+    "slipstream-edit-preview-photo-id": "photo-1",
+    "slipstream-edit-preview-stage": "develop",
+    "slipstream-edit-preview-width": "1280",
+    "slipstream-edit-preview-height": "854",
+    "slipstream-edit-preview-source-revision": encodedSourceRevision("rev-1"),
+    "slipstream-edit-preview-recipe-version": "recipe-1",
+    "slipstream-edit-preview-sha256": "c".repeat(64),
+    "slipstream-edit-preview-display-transform": "display-transform-v1",
+    ...overrides,
+  });
+  const expected = {
+    photoId: "photo-1",
+    stage: "develop",
+    sourceRevision: "rev-1",
+    recipeVersion: "recipe-1",
+    editSource: "original" as const,
+    editSourceProxyId: null,
+  };
+
+  test("accepts the requested rendition of the Original File", () => {
+    expect(
+      currentRenditionRefusal(headers(renditionHeaders()), 4096, expected),
+    ).toBe("");
+  });
+
+  test("refuses a rendition without its complete metadata", () => {
+    expect(
+      currentRenditionRefusal(
+        headers(renditionHeaders({ "content-length": "999" })),
+        4096,
+        expected,
+      ),
+    ).not.toBe("");
+    expect(
+      currentRenditionRefusal(
+        headers(renditionHeaders({ "content-type": "image/png" })),
+        4096,
+        expected,
+      ),
+    ).not.toBe("");
+  });
+
+  test("refuses a rendition of another source, stage, or settings snapshot", () => {
+    expect(
+      currentRenditionRefusal(
+        headers(
+          renditionHeaders({ "slipstream-edit-preview-photo-id": "photo-2" }),
+        ),
+        4096,
+        expected,
+      ),
+    ).not.toBe("");
+    expect(
+      currentRenditionRefusal(
+        headers(
+          renditionHeaders({
+            "slipstream-edit-preview-recipe-version": "recipe-2",
+          }),
+        ),
+        4096,
+        expected,
+      ),
+    ).not.toBe("");
+  });
+
+  test("refuses a proxy rendition while the Original File is the edit source", () => {
+    expect(
+      currentRenditionRefusal(
+        headers(
+          renditionHeaders({
+            "slipstream-edit-preview-source": "development-proxy",
+            "slipstream-edit-preview-proxy-id": digest,
+          }),
+        ),
+        4096,
+        expected,
+      ),
+    ).not.toBe("");
+  });
+
+  test("refuses an Original rendition while the proxy is the edit source", () => {
+    expect(
+      currentRenditionRefusal(headers(renditionHeaders()), 4096, {
+        ...expected,
+        editSource: "development-proxy",
+        editSourceProxyId: digest,
+      }),
+    ).not.toBe("");
+  });
+
+  test("a replaced proxy fails the identity digest even under an unchanged revision", () => {
+    const proxyExpectation = {
+      ...expected,
+      editSource: "development-proxy" as const,
+      editSourceProxyId: digest,
+    };
+    expect(
+      currentRenditionRefusal(
+        headers(
+          renditionHeaders({
+            "slipstream-edit-preview-source": "development-proxy",
+            "slipstream-edit-preview-proxy-id": "d".repeat(64),
+          }),
+        ),
+        4096,
+        proxyExpectation,
+      ),
+    ).not.toBe("");
+    expect(
+      currentRenditionRefusal(
+        headers(
+          renditionHeaders({
+            "slipstream-edit-preview-source": "development-proxy",
+            "slipstream-edit-preview-proxy-id": digest,
+          }),
+        ),
+        4096,
+        proxyExpectation,
       ),
     ).toBe("");
   });

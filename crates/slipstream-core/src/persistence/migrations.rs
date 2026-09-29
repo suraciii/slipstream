@@ -10,7 +10,7 @@ pub(super) fn preflight_schema(
     connection: &Connection,
     canonical_root: &str,
 ) -> Result<(), PersistenceError> {
-    preflight_schema_for_max_version(connection, canonical_root, 12)
+    preflight_schema_for_max_version(connection, canonical_root, 13)
 }
 
 pub(super) fn preflight_schema_for_max_version(
@@ -52,6 +52,8 @@ pub(super) fn preflight_schema_for_max_version(
             .map_err(|_| PersistenceError::UnsupportedSchema),
         12 => validate_canonical_schema(connection, SchemaVersion::V12)
             .map_err(|_| PersistenceError::UnsupportedSchema),
+        13 => validate_canonical_schema(connection, SchemaVersion::V13)
+            .map_err(|_| PersistenceError::UnsupportedSchema),
         _ => unreachable!(),
     }
 }
@@ -88,7 +90,7 @@ pub(super) fn startup_schema(
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| PersistenceError::Storage)?;
-    if version > 12 {
+    if version > 13 {
         return Err(PersistenceError::NewerSchema);
     }
     validate_root_binding(connection, canonical_root)?;
@@ -145,6 +147,8 @@ pub(super) fn startup_schema(
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
         12 => validate_canonical_schema(&transaction, SchemaVersion::V12)
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
+        13 => validate_canonical_schema(&transaction, SchemaVersion::V13)
+            .map_err(|_| PersistenceError::UnsupportedSchema)?,
         _ => unreachable!(),
     }
     if version < 6 {
@@ -168,6 +172,9 @@ pub(super) fn startup_schema(
     if version < 12 {
         migrate_v11(&transaction)?;
     }
+    if version < 13 {
+        migrate_v12(&transaction)?;
+    }
     let stored: Option<String> = transaction
         .query_row(
             "SELECT value FROM library_metadata WHERE key='canonical_root'",
@@ -185,7 +192,7 @@ pub(super) fn startup_schema(
             .map_err(|_| PersistenceError::Storage)?;
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V12)
+    validate_canonical_schema(&transaction, SchemaVersion::V13)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -791,6 +798,34 @@ fn migrate_v11(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
     validate_canonical_schema(transaction, SchemaVersion::V12)
         .map_err(|_| PersistenceError::UnsupportedSchema)
 }
+/// Persist the service-owned development proxy publication record.
+fn migrate_v12(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
+    validate_canonical_schema(transaction, SchemaVersion::V12)
+        .map_err(|_| PersistenceError::UnsupportedSchema)?;
+    transaction
+        .execute_batch(
+            "CREATE TABLE development_proxies(
+               photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE RESTRICT,
+               source_revision TEXT NOT NULL CHECK(length(source_revision) > 0),
+               source_relative_path TEXT NOT NULL CHECK(length(source_relative_path) > 0),
+               source_sha256 TEXT NOT NULL CHECK(length(source_sha256) = 64),
+               source_size INTEGER NOT NULL CHECK(source_size > 0),
+               profile_id TEXT NOT NULL CHECK(length(profile_id) BETWEEN 1 AND 64),
+               pipeline_version TEXT NOT NULL CHECK(length(pipeline_version) BETWEEN 1 AND 32),
+               bundle_sha256 TEXT NOT NULL CHECK(length(bundle_sha256) = 64),
+               long_edge INTEGER NOT NULL CHECK(long_edge > 0),
+               width INTEGER NOT NULL CHECK(width > 0),
+               height INTEGER NOT NULL CHECK(height > 0),
+               artifact_sha256 TEXT NOT NULL CHECK(length(artifact_sha256) = 64),
+               artifact_bytes INTEGER NOT NULL CHECK(artifact_bytes > 0),
+               created_at INTEGER NOT NULL CHECK(created_at >= 0)
+             );
+             PRAGMA user_version = 13;",
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    validate_canonical_schema(transaction, SchemaVersion::V13)
+        .map_err(|_| PersistenceError::UnsupportedSchema)
+}
 
 struct LegacyPhotoRow {
     id: String,
@@ -1019,7 +1054,7 @@ mod tests {
         );
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V12).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V13).unwrap();
     }
 
     #[tokio::test]
@@ -1099,12 +1134,12 @@ mod tests {
         );
         persistence.shutdown().unwrap();
         let connection = Connection::open(&path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V12).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V13).unwrap();
         assert_eq!(
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            12
+            13
         );
         assert_eq!(
             connection
@@ -1225,9 +1260,9 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            12
+            13
         );
-        validate_canonical_schema(&connection, SchemaVersion::V12).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V13).unwrap();
         // The legacy photo-set tables are gone rather than left as aliases.
         for legacy in ["photo_sets", "photo_set_members", "review_progress"] {
             assert!(!table_exists(&connection, legacy).unwrap(), "{legacy}");
@@ -1236,7 +1271,7 @@ mod tests {
     // album-language-legacy:end v4-migration-test
 
     #[test]
-    fn newer_v13_database_is_rejected_without_changes() {
+    fn newer_v14_database_is_rejected_without_changes() {
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
@@ -1244,7 +1279,7 @@ mod tests {
         );
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 13)
+            .pragma_update(None, "user_version", 14)
             .unwrap();
         let before = fs::read(&path).unwrap();
         assert!(matches!(
@@ -1317,8 +1352,8 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
-        validate_canonical_schema(&connection, SchemaVersion::V12).unwrap();
+        assert_eq!(version, 13);
+        validate_canonical_schema(&connection, SchemaVersion::V13).unwrap();
         let (state, order_key, source_revision, identity_state, make, model): (
             String,
             String,
@@ -1359,6 +1394,41 @@ mod tests {
             .unwrap();
         assert_eq!(revision, "recipe-revision-1");
         assert_eq!(recipe_source, "published-source-revision");
+    }
+
+    #[tokio::test]
+    async fn migrates_v12_to_v13_adds_development_proxies() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v12.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        persistence.shutdown().unwrap();
+
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            13
+        );
+        assert!(table_exists(&connection, "development_proxies").unwrap());
+        validate_canonical_schema(&connection, SchemaVersion::V13).unwrap();
     }
 
     #[test]
@@ -1425,7 +1495,7 @@ mod tests {
             .unwrap();
             persistence.shutdown().unwrap();
             let connection = Connection::open(&path).unwrap();
-            validate_canonical_schema(&connection, SchemaVersion::V12).unwrap();
+            validate_canonical_schema(&connection, SchemaVersion::V13).unwrap();
         }
         let (_base, library, state, name, path) = fixture();
         seed(
@@ -1597,7 +1667,7 @@ mod tests {
         assert_eq!(album.last_reviewed_photo_id.as_deref(), Some(photo_id));
         persistence.shutdown().unwrap();
         let connection = Connection::open(&path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V12).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V13).unwrap();
     }
     // album-language-legacy:end v3-migration-test
 
@@ -1897,9 +1967,10 @@ mod tests {
     // album-language-legacy:end v2-reconciliation-test
 
     /// The v8 fixture carries the Photos, decisions, and Album membership the
-    /// migration must preserve, and the new removal marker starts empty.
+    /// migration chain must preserve; the resulting current schema starts
+    /// with an empty removal marker.
     #[tokio::test]
-    async fn v8_to_v9_migration_preserves_photos_and_starts_unremoved() {
+    async fn v8_to_current_migration_preserves_photos_and_starts_unremoved() {
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
@@ -1954,7 +2025,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            12
+            13
         );
         assert_eq!(
             connection
@@ -2037,9 +2108,9 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            12
+            13
         );
-        validate_canonical_schema(&connection, SchemaVersion::V12).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V13).unwrap();
         assert_eq!(
             connection
                 .query_row(
