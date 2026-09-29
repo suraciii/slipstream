@@ -9,6 +9,8 @@ import type {
 } from "./library-browser-view.js";
 
 export type EditorExportViewModel = Readonly<{
+  target: "development-tiff" | "film-jpeg";
+  retainedTarget: "development-tiff" | "film-jpeg" | null;
   state:
     | "idle"
     | "submitting"
@@ -154,6 +156,10 @@ export function createPhotoEditorSurfaceController({
     root,
     "[data-photo-editor-proxy-remove]",
   );
+  const editorDetail = required<HTMLElement>(
+    root,
+    "[data-photo-editor-detail]",
+  );
   const editorPreview = required<HTMLButtonElement>(
     root,
     "[data-photo-editor-preview]",
@@ -264,7 +270,7 @@ export function createPhotoEditorSurfaceController({
       photoId,
       loading: true,
       stage: "develop",
-      stageNote: "Develop: loading this Photo's edit facts.",
+      stageNote: "Loading this Photo's edit…",
       filmReason: "",
       editSourceReadiness: "checking",
       editSourceKind: "original",
@@ -293,6 +299,8 @@ export function createPhotoEditorSurfaceController({
       conflict: null,
       draftNote: "",
       export: {
+        target: "development-tiff",
+        retainedTarget: null,
         state: "idle",
         note: "",
         artifact: null,
@@ -301,7 +309,8 @@ export function createPhotoEditorSurfaceController({
         canRetry: false,
         canDownload: false,
       },
-      status: "Loading edit recipe…",
+      status: "Loading edit…",
+      statusDetail: "",
     });
     send({ kind: "editor-open", photoId });
     openEditorSurface();
@@ -423,10 +432,14 @@ export function createPhotoEditorSurfaceController({
               : "Failed";
     editorCapabilityNote.textContent = model.capabilityNote;
     editorCapabilityNote.hidden = !model.capabilityNote;
+    // The view actions are toggles over the one Edit workspace: Film applies
+    // the optional film look, Original reference shows the camera preview,
+    // and pressing the active one returns to the edited result.
     for (const button of editorStages) {
       const stage = button.dataset.photoEditorStage as EditorStage | undefined;
       button.setAttribute("aria-pressed", String(stage === model.stage));
-      button.disabled = stage === "film" && Boolean(model.filmReason);
+      button.disabled =
+        stage === "film" && (model.loading || Boolean(model.filmReason));
       if (stage === "film") {
         button.title = model.filmReason;
         if (model.filmReason)
@@ -437,18 +450,18 @@ export function createPhotoEditorSurfaceController({
     editorStageNote.textContent = model.filmReason;
     editorStageNote.hidden = !model.filmReason;
     editorProvenance.textContent = model.stageNote;
-    // Reset all restores the processing baseline of both controls, so it is
+    // Reset restores the processing baseline of both controls, so it is
     // enabled exactly while the settings are away from that baseline. Local
-    // changes are discarded by Undo, never by a disabled Reset all.
+    // changes are discarded by Undo, never by a disabled Reset.
     const atBaseline =
       Math.abs(exposure - model.baselineExposureEv) < step / 2 &&
       !model.whiteBalance.resettable;
     editorUndo.disabled = model.loading || !model.canUndo;
     editorRedo.disabled = model.loading || !model.canRedo;
     editorReset.disabled = model.loading || model.saving || atBaseline;
-    // The comparison compares a stage's baseline development with the current
-    // settings; the Camera stage presents the camera Preview itself, so it
-    // offers no comparison of its own.
+    // The comparison compares the unadjusted rendering with the current
+    // settings; the Original reference presents the camera preview itself,
+    // so it offers no comparison of its own.
     editorCompare.disabled =
       model.loading || !model.canPreview || model.stage === "camera";
     editorCompare.setAttribute("aria-pressed", String(model.comparing));
@@ -466,7 +479,7 @@ export function createPhotoEditorSurfaceController({
     editorDiscardDraft.disabled = model.saving;
     const exported = model.export;
     const exportLabel =
-      model.stage === "film" ? "Finished JPEG" : "Development TIFF";
+      exported.target === "film-jpeg" ? "Finished JPEG" : "Development TIFF";
     editorExportTarget.textContent = exportLabel;
     editorExportState.textContent = exported.note;
     editorExportSubmit.textContent = `Export ${exportLabel}`;
@@ -475,16 +488,23 @@ export function createPhotoEditorSurfaceController({
     editorExportCancel.hidden = !exported.canCancel;
     editorExportRetry.hidden = !exported.canRetry;
     editorExportRetry.textContent =
-      exported.state === "outcome-unknown" ? "Reconcile" : "Retry";
+      exported.state === "outcome-unknown" ? "Check result" : "Retry";
+    editorExportDownload.textContent =
+      exported.retainedTarget === "film-jpeg"
+        ? "Download Finished JPEG"
+        : "Download Development TIFF";
     editorExportDownload.hidden = !exported.canDownload;
-    // The Edit Preview note describes the Develop or Film rendition. The
-    // Camera stage presents the camera Preview, which is not an Edit Preview.
+    // The preview note describes the current edit or Film rendition. The
+    // Original reference presents the camera preview, which has no note.
     const editPreviewStage = model.stage !== "camera";
     editorPreviewNote.textContent = editPreviewStage ? model.previewNote : "";
     editorPreviewNote.hidden = !editPreviewStage || !model.previewNote;
     editorPreviewNote.dataset.tone = model.previewStale ? "stale" : "";
     editorStatus.textContent = model.status;
     editorStatus.dataset.tone = model.status ? "notice" : "";
+    editorDetail.textContent = model.statusDetail;
+    editorDetail.hidden =
+      !model.statusDetail || model.statusDetail === model.status;
   };
 
   const presentPreview = (url: string): void => {
@@ -704,11 +724,14 @@ export function createPhotoEditorSurfaceController({
     button.addEventListener(
       "click",
       () => {
-        if (!editorPhotoId || button.disabled) return;
+        if (!editorPhotoId || !editorModel || button.disabled) return;
+        const stage = button.dataset.photoEditorStage as EditorStage;
+        // The Film and Original reference actions are toggles: pressing the
+        // active one returns to the current edit.
         send({
           kind: "editor-stage",
           photoId: editorPhotoId,
-          stage: button.dataset.photoEditorStage as EditorStage,
+          stage: editorModel.stage === stage ? "develop" : stage,
         });
       },
       { signal: listeners.signal },

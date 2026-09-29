@@ -1177,11 +1177,8 @@ test("Preview zoom is explicit, bounded, and never records a decision", async ({
   expect(stateRequests).toBe(0);
 });
 
-/// The Edit surface is the only place a deployment's processing state is
-/// named, and it must stay reachable when processing is unavailable: saved
-/// recipes and retained downloads stay usable in every state. A deployment
-/// without a launcher answers the capability report with `disabled`, so the
-/// surface explains that state and attempts no processing work.
+/// A deployment without processing leaves the Edit workspace reachable for
+/// saved settings and retained downloads, but offers no processing actions.
 test("the Edit surface explains a deployment without processing and attempts no processing work", async ({
   page,
 }) => {
@@ -1199,33 +1196,30 @@ test("the Edit surface explains a deployment without processing and attempts no 
   const running = await server(base, root);
   await startReview(page, running.url, "All Photos");
   await openPhotoToolsView(page, "edit");
-  await expect(page.locator("[data-photo-editor-capability]")).toContainText(
-    "Processing is not enabled in this deployment",
-  );
-  // The deployment's answer, this Photo's source class, and the reason it
-  // cannot be edited are all named.
-  await expect(page.locator("[data-photo-editor-processing]")).toHaveText(
-    "Unavailable",
-  );
-  await expect(page.locator("[data-photo-editor-support]")).toHaveText(
-    "Unsupported source class",
-  );
+  await expect(page.locator("[data-photo-editor-capability]")).toBeHidden();
   await expect(page.locator("[data-photo-editor-status]")).toContainText(
-    "no approved profile",
+    "not supported for editing",
   );
-  // The Film stage is closed with its own reason, and the provenance names
-  // the image that is actually presented.
   await expect(page.locator("[data-photo-editor-stage='film']")).toBeDisabled();
   await expect(page.locator("[data-photo-editor-stage-note]")).toHaveText(
-    "The Film capability is not enabled in this deployment, so no Film Result is presented.",
+    "Film is temporarily unavailable.",
   );
-  await expect(page.locator("[data-photo-editor-provenance]")).toHaveText(
-    "Develop: no Develop rendition is presented; the presented image is the camera Preview.",
+  await expect(
+    page.locator("[data-photo-editor-stage='camera']"),
+  ).toBeEnabled();
+  await expect(page.locator("[data-photo-editor-stage='camera']")).toHaveText(
+    "Original reference",
   );
+  await expect(page.locator("[data-photo-editor-stage='develop']")).toHaveCount(
+    0,
+  );
+  const originalReference = page.locator("[data-photo-editor-stage='camera']");
+  await originalReference.click();
+  await expect(originalReference).toHaveAttribute("aria-pressed", "true");
+  await originalReference.click();
+  await expect(originalReference).toHaveAttribute("aria-pressed", "false");
   await expect(page.locator("[data-photo-editor-exposure]")).toBeDisabled();
-  // The comparison is a rendition of its own, so it is offered exactly where
-  // the deployment can render one, and its label names the baseline
-  // development it compares against rather than the Camera view.
+  // Comparison needs an edited rendition; Original reference stays independent.
   await expect(page.locator("[data-photo-editor-compare]")).toBeDisabled();
   await expect(page.locator("[data-photo-editor-compare]")).toHaveText(
     "Baseline comparison",

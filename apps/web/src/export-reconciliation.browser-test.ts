@@ -219,7 +219,7 @@ for (const lostResponse of [
     await submit.click();
     await expect(
       page.locator("[data-photo-editor-export-state]"),
-    ).toContainText("outcome is unknown");
+    ).toContainText("Check its result before exporting again");
     await navigate(page, "Next");
     await expect(page.getByText("2 / 2")).toBeVisible();
     const exposure = page.locator("[data-photo-editor-exposure]");
@@ -234,15 +234,15 @@ for (const lostResponse of [
     await submit.click();
     await expect(
       page.locator("[data-photo-editor-export-state]"),
-    ).toContainText("succeeded");
+    ).toContainText("finished but no file was kept");
     await navigate(page, "Previous");
     await expect(submit).toBeDisabled();
     const reconcile = page.locator("[data-photo-editor-export-retry]");
-    await expect(reconcile).toHaveText("Reconcile");
+    await expect(reconcile).toHaveText("Check result");
     await reconcile.click();
     await expect(
       page.locator("[data-photo-editor-export-state]"),
-    ).toContainText("succeeded");
+    ).toContainText("finished but no file was kept");
     expect(submissions.get(first)).toHaveLength(2);
     expect(submissions.get(first)?.[1]).toEqual(submissions.get(first)?.[0]);
     expect(submissions.get(second)).toHaveLength(1);
@@ -251,6 +251,171 @@ for (const lostResponse of [
     );
   });
 }
+
+test("a Development Proxy supports editing but cannot start a full Export", async ({
+  page,
+}) => {
+  let submissions = 0;
+  await page.route("**/api/processing/capability", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        state: "ready",
+        stages: { develop: "ready", film: "ready" },
+        profiles: [],
+      }),
+    }),
+  );
+  await page.route("**/api/photos/*/edit-recipe", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sourceSupport: "supported",
+        supportReason: null,
+        sourceRevision: "source-1",
+        editSource: "development-proxy",
+        editSourceProxyId: "a".repeat(64),
+        recipe: {
+          recipeVersion: "recipe-1",
+          exposureEv: 0,
+          whiteBalance: { mode: "as-shot" },
+        },
+        processingAvailable: true,
+        controls: {
+          exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
+          whiteBalanceModes: ["as-shot"],
+        },
+      }),
+    }),
+  );
+  await page.route("**/api/photos/*/exports", (route) => {
+    if (route.request().method() === "POST") submissions += 1;
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ exports: [] }),
+    });
+  });
+
+  await page.goto(running.url);
+  await expect(page.locator("[data-grid-status]")).toContainText(
+    "Ready · 2 Photos",
+  );
+  await page.locator('[data-photo-index="0"]').click();
+  await openEdit(page);
+  await expect(page.locator("[data-photo-editor-exposure]")).toBeEnabled();
+  await expect(page.locator('[data-photo-editor-stage="film"]')).toBeEnabled();
+  await expect(
+    page.locator("[data-photo-editor-export-submit]"),
+  ).toBeDisabled();
+  expect(submissions).toBe(0);
+});
+
+test("a retained Finished JPEG keeps its download identity while Edit shows Development TIFF", async ({
+  page,
+}) => {
+  const artifact = {
+    target: "film-jpeg",
+    stage: "film",
+    contentType: "image/jpeg",
+    width: 16,
+    height: 12,
+    profileIdentity: "fixed-film",
+    byteLength: 3,
+    sha256: "a".repeat(64),
+    expiresAt: "2099-01-01T00:00:00Z",
+  };
+  await page.route("**/api/processing/capability", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        state: "ready",
+        stages: { develop: "ready", film: "unavailable" },
+        profiles: [],
+      }),
+    }),
+  );
+  await page.route("**/api/photos/*/edit-recipe", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sourceSupport: "supported",
+        supportReason: null,
+        sourceRevision: "source-1",
+        recipe: {
+          recipeVersion: "recipe-1",
+          exposureEv: 0,
+          whiteBalance: { mode: "as-shot" },
+        },
+        processingAvailable: true,
+        controls: {
+          exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
+          whiteBalanceModes: ["as-shot"],
+        },
+      }),
+    }),
+  );
+  await page.route("**/api/photos/*/exports", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ exports: [{ exportId: "retained-film" }] }),
+    }),
+  );
+  await page.route("**/api/exports/retained-film", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        exportId: "retained-film",
+        target: "film-jpeg",
+        state: "succeeded",
+        artifact,
+      }),
+    }),
+  );
+  await page.route("**/api/exports/retained-film/artifact", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "image/jpeg",
+      headers: {
+        "slipstream-artifact-export-id": "retained-film",
+        "slipstream-artifact-target": artifact.target,
+        "slipstream-artifact-stage": artifact.stage,
+        "slipstream-artifact-content-type": artifact.contentType,
+        "slipstream-artifact-width": String(artifact.width),
+        "slipstream-artifact-height": String(artifact.height),
+        "slipstream-artifact-profile-identity": artifact.profileIdentity,
+        "slipstream-artifact-byte-length": String(artifact.byteLength),
+        "slipstream-artifact-sha256": artifact.sha256,
+        "slipstream-artifact-expires-at": artifact.expiresAt,
+      },
+      body: "jpg",
+    }),
+  );
+
+  await page.goto(running.url);
+  await expect(page.locator("[data-grid-status]")).toContainText(
+    "Ready · 2 Photos",
+  );
+  await page.locator('[data-photo-index="0"]').click();
+  await openEdit(page);
+  await expect(page.locator("[data-photo-editor-export-submit]")).toHaveText(
+    "Export Development TIFF",
+  );
+  const downloadButton = page.locator("[data-photo-editor-export-download]");
+  await expect(downloadButton).toHaveText("Download Finished JPEG");
+  await expect(downloadButton).toBeEnabled();
+  const download = page.waitForEvent("download");
+  await downloadButton.click();
+  expect((await download).suggestedFilename()).toBe(
+    "slipstream-film-retained-film.jpg",
+  );
+});
 
 test("an admitted Edit Preview remains observable after the old 15-second polling limit", async ({
   page,
@@ -311,13 +476,13 @@ test("an admitted Edit Preview remains observable after the old 15-second pollin
   await page.locator('[data-photo-index="0"]').click();
   await openEdit(page);
   await expect(page.locator("[data-photo-editor-preview-note]")).toContainText(
-    "rendering",
+    "Rendering the preview",
   );
   for (let count = requests; count <= 21; count += 1) {
     await page.clock.runFor(751);
     await expect.poll(() => requests).toBeGreaterThan(count);
   }
   await expect(page.locator("[data-photo-editor-preview-note]")).toContainText(
-    "resource allowance",
+    "Could not create the preview right now",
   );
 });
