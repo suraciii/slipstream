@@ -13,6 +13,7 @@ export type GridThumbnailTarget = {
   onerror: GlobalEventHandlers["onerror"];
   removeAttribute(name: string): void;
   setDeliveryFailed(failed: boolean): void;
+  setThumbnailState(state: "unavailable" | "failed"): void;
 };
 export type GridThumbnailBinding = Readonly<{
   photoId: string;
@@ -35,6 +36,7 @@ export type GridCell = {
   readonly cell: HTMLButtonElement;
   signature: string;
   deliveryFailed: boolean;
+  thumbnailState: "unavailable" | "failed" | undefined;
   thumbnail: GridThumbnailBinding | undefined;
 };
 
@@ -50,6 +52,7 @@ type GridCellPresenterOptions = Readonly<{
   target: (
     image: HTMLImageElement,
     setDeliveryFailed: (failed: boolean) => void,
+    setThumbnailState: (state: "unavailable" | "failed") => void,
   ) => GridThumbnailTarget;
 }>;
 
@@ -67,6 +70,7 @@ function selectionLabel(value: GridSelectionState): string {
 function gridPhotoFacts(
   photo: GridPhotoViewModel,
   deliveryFailed: boolean,
+  thumbnailState?: "unavailable" | "failed",
 ): string[] {
   const facts: string[] = [];
   if (!photo.available) facts.push("Photo unavailable");
@@ -74,6 +78,9 @@ function gridPhotoFacts(
   if (photo.hasSavedEdits) facts.push("Edited");
   if (photo.preview.state === "unavailable") facts.push("Preview unavailable");
   if (photo.preview.state === "failed") facts.push("Preview failed");
+  if (thumbnailState === "unavailable" && photo.preview.state !== "unavailable")
+    facts.push("Thumbnail unavailable");
+  if (thumbnailState === "failed") facts.push("Thumbnail failed");
   if (deliveryFailed) facts.push("Thumbnail delivery failed");
   return facts;
 }
@@ -167,6 +174,7 @@ export function createGridCellPresenter(options: GridCellPresenterOptions) {
         cell,
         signature: LOADING_CELL_SIGNATURE,
         deliveryFailed: false,
+        thumbnailState: undefined,
         thumbnail: undefined,
       };
       return rendered;
@@ -204,10 +212,15 @@ export function createGridCellPresenter(options: GridCellPresenterOptions) {
       cell,
       signature: "",
       deliveryFailed: false,
+      thumbnailState: undefined,
       thumbnail: undefined,
     };
     const presentFacts = (): void => {
-      const values = gridPhotoFacts(photo, rendered.deliveryFailed);
+      const values = gridPhotoFacts(
+        photo,
+        rendered.deliveryFailed,
+        rendered.thumbnailState,
+      );
       facts.textContent = values.join(" · ");
       facts.hidden = values.length === 0;
       cell.setAttribute(
@@ -240,11 +253,19 @@ export function createGridCellPresenter(options: GridCellPresenterOptions) {
     rendered.thumbnail = {
       photoId: photo.id,
       preview: photo.preview,
-      target: target(image, (failed) => {
-        rendered.deliveryFailed = failed;
-        rendered.signature = gridCellSignature(index, photo, failed);
-        presentFacts();
-      }),
+      target: target(
+        image,
+        (failed) => {
+          rendered.deliveryFailed = failed;
+          rendered.signature = gridCellSignature(index, photo, failed);
+          presentFacts();
+        },
+        (state) => {
+          rendered.thumbnailState = state;
+          rendered.deliveryFailed = false;
+          presentFacts();
+        },
+      ),
     };
     bindThumbnail(rendered.thumbnail);
     return rendered;

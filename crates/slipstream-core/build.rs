@@ -13,7 +13,7 @@ fn main() {
         .file("native/raw_preview.cc")
         .file("native/vips_preview.cc")
         .file("native/vips_display.cc");
-    for package in ["libraw", "libjpeg", "vips"] {
+    for package in ["libraw_r", "libjpeg", "vips"] {
         let library = pkg_config::Config::new()
             .probe(package)
             .unwrap_or_else(|_| panic!("Issue #22 requires system {package} development files"));

@@ -153,6 +153,8 @@ export interface GridThumbnailImage {
   onerror: GlobalEventHandlers["onerror"];
   removeAttribute(name: string): void;
   setDeliveryFailed(failed: boolean): void;
+  /// Reports a terminal Thumbnail result without changing Review Preview facts.
+  setThumbnailState(state: "unavailable" | "failed"): void;
 }
 
 export interface SourceGridOwner {
@@ -409,6 +411,8 @@ export function createSourceGridOwner(
   let thumbnails = new Map<string, string>();
   // null means the endpoint failed before it supplied a Thumbnail URL.
   let thumbnailDeliveryFailures = new Map<string, string | null>();
+  // Terminal Thumbnail results are distinct from Review Preview facts.
+  let thumbnailStates = new Map<string, "unavailable" | "failed">();
   const renderedImages = new Map<string, GridThumbnailImage>();
   const imageTransfers = new Map<string, ImageTransfer>();
   const knownTokens = new Set<string>();
@@ -651,6 +655,7 @@ export function createSourceGridOwner(
       facts = new Map();
       thumbnails = new Map();
       thumbnailDeliveryFailures = new Map();
+      thumbnailStates = new Map();
       // A new source is described by its own fresh windows, so no decision
       // recorded for the replaced one can apply to it.
       committedDecisions.clear();
@@ -688,6 +693,7 @@ export function createSourceGridOwner(
           facts = new Map();
           thumbnails = new Map();
           thumbnailDeliveryFailures = new Map();
+          thumbnailStates = new Map();
         }
         return {
           kind: "opened",
@@ -1088,6 +1094,8 @@ export function createSourceGridOwner(
       return;
     }
     if (failedUrl !== undefined) thumbnailDeliveryFailures.delete(photoId);
+    // A real URL supersedes an earlier terminal Thumbnail answer.
+    thumbnailStates.delete(photoId);
     image.setDeliveryFailed(false);
     const transfer = gridTasks.beginLatest(`image:${photoId}`, {
       abortTransport: false,
@@ -1124,6 +1132,22 @@ export function createSourceGridOwner(
     }
   };
 
+  const noteTerminalThumbnailState = (
+    photoId: string,
+    image: GridThumbnailImage,
+    state: "unavailable" | "failed",
+  ) => {
+    if (renderedImages.get(photoId) !== image || closed) return;
+    thumbnailStates.delete(photoId);
+    thumbnailStates.set(photoId, state);
+    while (thumbnailStates.size > MAX_RETAINED_THUMBNAILS) {
+      const oldest = thumbnailStates.keys().next().value;
+      if (oldest === undefined) break;
+      thumbnailStates.delete(oldest);
+    }
+    image.setThumbnailState(state);
+  };
+
   async function loadThumbnail(
     photoId: string,
     image: GridThumbnailImage,
@@ -1133,6 +1157,11 @@ export function createSourceGridOwner(
     const cached = thumbnails.get(photoId);
     if (cached) {
       attachThumbnail(photoId, image, cached, true);
+      return;
+    }
+    const remembered = thumbnailStates.get(photoId);
+    if (remembered) {
+      image.setThumbnailState(remembered);
       return;
     }
     if (thumbnailDeliveryFailures.has(photoId)) {
@@ -1146,8 +1175,10 @@ export function createSourceGridOwner(
       { abortTransport: true, onCancel: () => undefined },
       (signal) => fetchThumbnail(fetcher, photoId, signal!),
     );
-    const url = await request.promise;
+    const outcome = await request.promise;
+    // A cancelled request resolves with the onCancel value, no outcome.
     if (
+      outcome === undefined ||
       !isCurrent(ownerAuthority) ||
       tasks !== gridTasks ||
       request.signal?.aborted
@@ -1156,9 +1187,11 @@ export function createSourceGridOwner(
     // A request may begin before the image-transfer lease exists. The latest
     // registered image object is authoritative while the request is coalesced.
     if (renderedImages.get(photoId) !== image) return;
-    if (url) {
-      rememberThumbnail(photoId, url);
-      attachThumbnail(photoId, image, url);
+    if (outcome.kind === "ready") {
+      rememberThumbnail(photoId, outcome.url);
+      attachThumbnail(photoId, image, outcome.url);
+    } else if (outcome.kind === "not-ready") {
+      noteTerminalThumbnailState(photoId, image, outcome.state);
     } else {
       markDeliveryFailed(photoId, image, null);
     }
@@ -1275,6 +1308,8 @@ export function createSourceGridOwner(
       if (!isCurrent(candidate) || index < 0 || index >= total) return false;
       const current = facts.get(index);
       if (!current || current.id !== expectedPhotoId) return false;
+      if (preview.state !== current.preview.state || preview.state === "ready")
+        thumbnailStates.delete(expectedPhotoId);
       facts.set(index, { ...current, preview });
       return true;
     },

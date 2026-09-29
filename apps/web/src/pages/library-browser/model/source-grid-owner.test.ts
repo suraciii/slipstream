@@ -78,6 +78,7 @@ const flushTasks = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 class FakeImage implements GridThumbnailImage {
   complete = false;
   deliveryFailed = false;
+  thumbnailState: "unavailable" | "failed" | undefined;
   isConnected = true;
   src = "";
   onload: GlobalEventHandlers["onload"] = null;
@@ -93,6 +94,10 @@ class FakeImage implements GridThumbnailImage {
 
   setDeliveryFailed(failed: boolean): void {
     this.deliveryFailed = failed;
+  }
+
+  setThumbnailState(state: "unavailable" | "failed"): void {
+    this.thumbnailState = state;
   }
 }
 
@@ -1309,6 +1314,241 @@ describe("SourceGridOwner", () => {
     );
     expect(replacement.deliveryFailed).toBe(true);
     expect(owner.retainedThumbnailDeliveryFailureCount).toBe(1);
+  });
+
+  test("presents a 404 as a Thumbnail fact without altering Review Preview", async () => {
+    let thumbnailRequests = 0;
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 60));
+      if (url.pathname.startsWith("/api/photos/")) {
+        thumbnailRequests += 1;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              state: "unavailable",
+              message: "No Original is readable.",
+            }),
+            { status: 404 },
+          ),
+        );
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      if (init?.method !== "POST")
+        return Promise.resolve(windowResponse(0, 60));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    expect(
+      await owner.loadWindow(0, { kind: "grid", authority }),
+    ).toMatchObject({ kind: "loaded" });
+
+    const image = new FakeImage();
+    await owner.loadThumbnail("photo-0", image);
+    expect(image.thumbnailState).toBe("unavailable");
+    expect(image.deliveryFailed).toBe(false);
+    expect(image.src).toBe("");
+    expect(owner.retainedThumbnailDeliveryFailureCount).toBe(0);
+    expect(owner.photoAt(0)?.preview.state).toBe("inspection-pending");
+
+    // A re-rendered cell reuses the terminal answer instead of requesting
+    // the Thumbnail again.
+    const rerendered = new FakeImage();
+    owner.releaseThumbnail("photo-0", image);
+    await owner.loadThumbnail("photo-0", rerendered);
+    expect(rerendered.thumbnailState).toBe("unavailable");
+    expect(rerendered.deliveryFailed).toBe(false);
+    expect(thumbnailRequests).toBe(1);
+  });
+
+  test("presents a failed Thumbnail separately from Review Preview", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 60));
+      if (url.pathname.startsWith("/api/photos/"))
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ state: "failed", message: "Rendering failed." }),
+            { status: 404 },
+          ),
+        );
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      if (init?.method !== "POST")
+        return Promise.resolve(windowResponse(0, 60));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    expect(
+      await owner.loadWindow(0, { kind: "grid", authority }),
+    ).toMatchObject({ kind: "loaded" });
+
+    const image = new FakeImage();
+    await owner.loadThumbnail("photo-0", image);
+    expect(image.thumbnailState).toBe("failed");
+    expect(image.deliveryFailed).toBe(false);
+    expect(owner.retainedThumbnailDeliveryFailureCount).toBe(0);
+    expect(owner.photoAt(0)?.preview.state).toBe("inspection-pending");
+  });
+
+  test("a stale terminal Thumbnail answer never mutates the replacement image", async () => {
+    const thumbnail = deferred<Response>();
+    let thumbnailRequests = 0;
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 1));
+      if (url.pathname === "/api/photos/photo-0/thumbnail") {
+        thumbnailRequests += 1;
+        return thumbnail.promise;
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    await openLibrary(owner);
+    const first = new FakeImage();
+    const replacement = new FakeImage();
+
+    const firstRequest = owner.loadThumbnail("photo-0", first);
+    const secondRequest = owner.loadThumbnail("photo-0", replacement);
+    thumbnail.resolve(
+      new Response(
+        JSON.stringify({ state: "unavailable", message: "Original missing." }),
+        { status: 404 },
+      ),
+    );
+    await Promise.all([firstRequest, secondRequest]);
+
+    expect(thumbnailRequests).toBe(1);
+    expect(first.thumbnailState).toBeUndefined();
+    expect(first.deliveryFailed).toBe(false);
+    expect(replacement.thumbnailState).toBe("unavailable");
+    expect(replacement.deliveryFailed).toBe(false);
+    expect(owner.retainedThumbnailDeliveryFailureCount).toBe(0);
+  });
+
+  test("bounds terminal Thumbnail answers and re-requests an evicted one", async () => {
+    const thumbnailRequests = new Map<string, number>();
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 241));
+      if (url.pathname.startsWith("/api/photos/")) {
+        const id = url.pathname.split("/")[3]!;
+        thumbnailRequests.set(id, (thumbnailRequests.get(id) ?? 0) + 1);
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ state: "unavailable", message: "Unavailable." }),
+            { status: 404 },
+          ),
+        );
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    await openLibrary(owner);
+
+    let previous: Readonly<{ id: string; image: FakeImage }> | undefined;
+    for (let index = 0; index < 241; index += 1) {
+      const id = `photo-${index}`;
+      const image = new FakeImage();
+      await owner.loadThumbnail(id, image);
+      expect(image.thumbnailState).toBe("unavailable");
+      expect(image.deliveryFailed).toBe(false);
+      if (previous) owner.releaseThumbnail(previous.id, previous.image);
+      previous = { id, image };
+    }
+    expect(owner.retainedThumbnailDeliveryFailureCount).toBe(0);
+
+    // The newest answer is still terminal; the evicted oldest one is
+    // re-established with exactly one new request.
+    const newest = new FakeImage();
+    await owner.loadThumbnail("photo-240", newest);
+    expect(newest.thumbnailState).toBe("unavailable");
+    expect(thumbnailRequests.get("photo-240")).toBe(1);
+    const evicted = new FakeImage();
+    owner.releaseThumbnail("photo-240", previous!.image);
+    await owner.loadThumbnail("photo-0", evicted);
+    expect(evicted.thumbnailState).toBe("unavailable");
+    expect(thumbnailRequests.get("photo-0")).toBe(2);
+  });
+
+  test("keeps a ready Review Preview when Thumbnail generation fails", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 1));
+      if (url.pathname === "/api/photos/photo-0/thumbnail")
+        return Promise.resolve(
+          new Response(JSON.stringify({ state: "failed" }), { status: 404 }),
+        );
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      if (init?.method !== "POST") return Promise.resolve(windowResponse(0, 1));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    await owner.loadWindow(0, { kind: "grid", authority });
+    expect(
+      owner.setPhotoPreview(authority, 0, "photo-0", {
+        state: "ready",
+        url: "/review.jpg",
+      }),
+    ).toBe(true);
+    const image = new FakeImage();
+    await owner.loadThumbnail("photo-0", image);
+    expect(image.thumbnailState).toBe("failed");
+    expect(image.deliveryFailed).toBe(false);
+    expect(owner.photoAt(0)?.preview).toMatchObject({
+      state: "ready",
+      url: "/review.jpg",
+    });
+  });
+
+  test("retries a terminal Thumbnail after Review Preview recovers", async () => {
+    let requests = 0;
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 1));
+      if (url.pathname === "/api/photos/photo-0/thumbnail") {
+        requests += 1;
+        return Promise.resolve(
+          new Response(
+            requests === 1
+              ? JSON.stringify({ state: "unavailable" })
+              : JSON.stringify({ state: "ready", url: "/thumbnail.jpg" }),
+            { status: requests === 1 ? 404 : 200 },
+          ),
+        );
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      if (init?.method !== "POST") return Promise.resolve(windowResponse(0, 1));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    await owner.loadWindow(0, { kind: "grid", authority });
+    const initial = new FakeImage();
+    await owner.loadThumbnail("photo-0", initial);
+    expect(initial.thumbnailState).toBe("unavailable");
+    expect(
+      owner.setPhotoPreview(authority, 0, "photo-0", {
+        state: "ready",
+        url: "/review.jpg",
+      }),
+    ).toBe(true);
+    owner.releaseThumbnail("photo-0", initial);
+    const recovered = new FakeImage();
+    await owner.loadThumbnail("photo-0", recovered);
+    expect(requests).toBe(2);
+    expect(recovered.src).toBe("/thumbnail.jpg");
+    expect(owner.photoAt(0)?.preview.state).toBe("ready");
   });
 
   test("retains the same failed hydrated URL across Grid replacement and accepts a changed URL", async () => {

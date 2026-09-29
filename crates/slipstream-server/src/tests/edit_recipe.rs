@@ -683,3 +683,212 @@ async fn edit_recipe_validates_settings_before_the_write() {
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
+
+/// A current Development Proxy stands in for an unavailable Original: the
+/// guarded save the read advertises reaches persistence and commits, its
+/// replay returns the committed receipt, and the stored recipe stays bound
+/// to the Original's source revision. A save guarding against any other
+/// revision, a stale proxy record the manager can no longer revalidate, and
+/// the offline rebind all keep the closed resource refusal.
+#[tokio::test]
+async fn offline_proxy_admits_guarded_save_and_refuses_stale_bindings() {
+    use sha2::{Digest, Sha256};
+
+    let (base, mut config) = prepare_fixture();
+    let original = config.library_root.join("approved.ARW");
+    let original_bytes = approved_raw_fixture(&original);
+    let stale_original = config.library_root.join("stale.ARW");
+    approved_raw_fixture(&stale_original);
+    config.processing = Some(ProcessingConfig {
+        instance: "f".repeat(32),
+        policy_sha256: "b".repeat(64),
+        bundle_sha256: "c".repeat(64),
+        socket_override: None,
+    });
+    config.export_retained_output_bytes = Some(1024 * 1024 * 1024);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = configured_router(&application, config.web_root());
+    let by_location = photo_ids_by_location(
+        &application,
+        &browse_photo_ids(&application, BrowseSourceRequest::Library).await,
+    )
+    .await;
+    let photo_id = by_location["approved.ARW"].clone();
+    let stale_id = by_location["stale.ARW"].clone();
+    let revision = application
+        .library
+        .edit_recipe(&photo_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .current_source_revision
+        .expect("settled scan publishes the source revision");
+
+    // One proxy the manager can revalidate against the observed source, with
+    // its artifact installed, and one stale record bound to a revision the
+    // observed source no longer has.
+    let frame = slipstream_core::derivative::development_tiff_fixture(&[0.25; 8 * 4 * 3], 8, 4);
+    let record = slipstream_core::DevelopmentProxyRecord {
+        photo_id: photo_id.clone(),
+        source_revision: revision.clone(),
+        source_relative_path: "approved.ARW".to_owned(),
+        source_sha256: format!("{:x}", Sha256::digest(&original_bytes)),
+        source_size: original_bytes.len() as u64,
+        profile_id: "sony-ilce-7rm5-arw".to_owned(),
+        pipeline_version: slipstream_core::DEVELOPMENT_PROXY_PIPELINE_VERSION.to_owned(),
+        bundle_sha256: "c".repeat(64),
+        long_edge: slipstream_core::DEVELOPMENT_PROXY_LONG_EDGE,
+        width: 8,
+        height: 4,
+        artifact_sha256: format!("{:x}", Sha256::digest(&frame)),
+        artifact_bytes: frame.len() as u64,
+        created_at: 1_700_000_000,
+    };
+    let artifact_root = config.state_directory.join("development-proxies");
+    fs::create_dir_all(&artifact_root).unwrap();
+    fs::write(
+        artifact_root.join(format!("{}.tiff", record.identity_digest())),
+        frame,
+    )
+    .unwrap();
+    assert!(
+        application
+            .library
+            .record_development_proxy(record)
+            .await
+            .unwrap()
+    );
+    assert!(
+        application
+            .library
+            .record_development_proxy(slipstream_core::DevelopmentProxyRecord {
+                photo_id: stale_id.clone(),
+                source_revision: "stale-revision".to_owned(),
+                source_relative_path: "stale.ARW".to_owned(),
+                source_sha256: "d".repeat(64),
+                source_size: 1,
+                profile_id: "sony-ilce-7rm5-arw".to_owned(),
+                pipeline_version: slipstream_core::DEVELOPMENT_PROXY_PIPELINE_VERSION.to_owned(),
+                bundle_sha256: "c".repeat(64),
+                long_edge: slipstream_core::DEVELOPMENT_PROXY_LONG_EDGE,
+                width: 8,
+                height: 4,
+                artifact_sha256: "e".repeat(64),
+                artifact_bytes: 1,
+                created_at: 1_700_000_000,
+            })
+            .await
+            .unwrap()
+    );
+
+    // Both Originals disappear; the scan publishes the unavailability.
+    fs::remove_file(&original).unwrap();
+    fs::remove_file(&stale_original).unwrap();
+    application.library.scan().await.unwrap();
+    assert!(
+        !application
+            .library
+            .edit_recipe(&photo_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .source_available
+    );
+    assert!(
+        application
+            .proxies
+            .as_ref()
+            .unwrap()
+            .current_record(&photo_id)
+            .await
+            .is_some()
+    );
+    assert!(
+        application
+            .proxies
+            .as_ref()
+            .unwrap()
+            .current_record(&stale_id)
+            .await
+            .is_none()
+    );
+
+    // The read advertises the proxy as the edit source of the first Photo,
+    // while the stale record changes nothing for the second.
+    let (_, read) = get_edit_recipe(&router, &photo_id).await;
+    assert_eq!(read["editSource"], "development-proxy");
+    assert_eq!(read["sourceRevision"], revision);
+    let (_, stale_read) = get_edit_recipe(&router, &stale_id).await;
+    assert_eq!(stale_read["sourceSupport"], "unavailable");
+    assert_eq!(stale_read["editSource"], "original");
+
+    // The guarded save the read advertised commits offline and stays bound
+    // to the Original's source revision.
+    let (status, saved) = save_recipe(
+        &router,
+        &photo_id,
+        save_body("offline-save-1", None, &revision, 0.5),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["outcome"], "saved");
+    assert_eq!(saved["sourceRevision"], revision);
+    let saved_revision = saved["recipeVersion"].as_str().unwrap().to_owned();
+
+    // The same identity and payload replay to the committed receipt.
+    let (status, replay) = save_recipe(
+        &router,
+        &photo_id,
+        save_body("offline-save-1", None, &revision, 0.5),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay["outcome"], "unchanged");
+    assert_eq!(replay["recipeVersion"], saved_revision);
+
+    // A save guarding against any other source revision than the one the
+    // current proxy was built from stays refused.
+    let (status, wrong_revision) = save_recipe(
+        &router,
+        &photo_id,
+        save_body("offline-save-2", None, "not-the-observed-revision", 0.5),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error_code(&wrong_revision), "resource_unavailable");
+    assert_eq!(
+        wrong_revision["error"]["details"]["supportReason"],
+        "original-missing"
+    );
+
+    // The stale proxy admits nothing: its guarded save keeps the closed
+    // refusal even when it names the revision the record carries.
+    let (status, stale_refused) = save_recipe(
+        &router,
+        &stale_id,
+        save_body("stale-save", None, "stale-revision", 0.5),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error_code(&stale_refused), "resource_unavailable");
+    assert_eq!(
+        stale_refused["error"]["details"]["supportReason"],
+        "original-missing"
+    );
+
+    // The offline rebind keeps the closed refusal: no new source revision
+    // can be observed while the Original is unavailable, so no rebind is
+    // admissible even with a current proxy.
+    let (status, rebind_refused) = rebind_recipe(
+        &router,
+        &photo_id,
+        rebind_body("offline-rebind", &saved_revision, &revision),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error_code(&rebind_refused), "resource_unavailable");
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}

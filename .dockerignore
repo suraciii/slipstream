@@ -82,3 +82,7 @@ previews
 **/*.[jJ][pP][gG]
 **/*.[jJ][pP][eE][gG]
 **/*.[pP][nN][gG]
+
+# Installed-application icons are product assets that must ship in the image,
+# not photographer-owned photos
+!apps/web/public/icons/*.[pP][nN][gG]

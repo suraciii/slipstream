@@ -22,8 +22,11 @@ The checked-in container input contract has three owners:
 - [`../docker/apt/ubuntu.sources`](../docker/apt/ubuntu.sources) selects one
   signed official Ubuntu snapshot for amd64.
 - The build and runtime lock lists in [`../docker/apt/`](../docker/apt/) pin
-  the direct native packages. The snapshot and digest-pinned base image fix
-  their transitive package choices.
+  direct native packages. The snapshot and digest-pinned base image fix their
+  transitive package choices.
+- The SHA-256-verified LibRaw release archive and version in the
+  [`../Dockerfile`](../Dockerfile) pin the RAW container decoder. The same
+  release supplies the build headers and the runtime shared library.
 
 The Rust image supplies the CA bundle needed to contact the Ubuntu HTTPS
 snapshot before Ubuntu installs its own locked `ca-certificates` package. That
@@ -55,6 +58,16 @@ one container dependency update. The same review must update every affected
 input and rerun the container input contract. No mutable mirror, image tag, or
 fallback source is permitted.
 
+The LibRaw release archive is fetched and hash-checked during the image build;
+an unavailable archive or mismatched hash fails the build. The service links
+against that release and resolves its runtime shared library from the image's
+dedicated `LD_LIBRARY_PATH`. Ubuntu's LibRaw package remains available for
+other native package dependencies but must not silently replace the service's
+version. This keeps camera support independent of the Ubuntu snapshot without
+mixing LibRaw headers and runtime binaries. When the release pin changes, bump
+the persisted RAW decoder revision in `crates/slipstream-core/src/persistence/migrations.rs`
+so previously unavailable RAW Photos get re-inspected once.
+
 ## Options
 
 ### Selected: Digest, Snapshot, and Direct Locks
@@ -63,6 +76,19 @@ An image digest makes the image index immutable. One Ubuntu snapshot fixes the
 available package repository, while the two small direct locks show the native
 libraries Slipstream intentionally requests. This keeps ordinary updates
 reviewable without hand-maintaining a duplicate lock for every APT dependency.
+
+### Selected: Verified LibRaw Release Alongside Ubuntu Packages
+
+The supported camera's Preview requires a LibRaw version newer than the
+snapshot's package. Pinning the upstream release archive by SHA-256 and
+isolating its build and runtime paths keeps the deployment reproducible while
+allowing the container's other native packages to remain snapshot-pinned.
+
+### Rejected: Parse Sony TIFF Preview Offsets in the Service
+
+An independent TIFF parser would add a second RAW container authority with
+camera-specific offset, bounds, and orientation rules. Updating the selected
+decoder instead preserves one bounded extraction path.
 
 ### Rejected: Pin Direct Packages Against a Moving Archive
 
@@ -83,4 +109,6 @@ through the existing `test:fast` and `verify` gates. The Compose focused
 contract verifies the digest-only service wiring. Release qualification builds
 the same Dockerfile for Linux amd64 and records output traceability separately
 from source reproducibility, as defined by the
-[deployment guide](../docs/deployment.md).
+[deployment guide](../docs/deployment.md). It must extract a Preview from a
+representative camera Original through the built service and confirm its
+Original bytes remain unchanged.

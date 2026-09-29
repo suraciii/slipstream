@@ -32,6 +32,7 @@ type FilmstripThumbnailTarget = {
   onerror: GlobalEventHandlers["onerror"];
   removeAttribute(name: string): void;
   setDeliveryFailed(failed: boolean): void;
+  setThumbnailState(state: "unavailable" | "failed"): void;
 };
 
 type FilmstripThumbnailBinding = Readonly<{
@@ -64,6 +65,7 @@ type FilmstripPresenterOptions = Readonly<{
     target: (
       image: HTMLImageElement,
       onDeliveryFailure: (failed: boolean) => void,
+      onThumbnailState: (state: "unavailable" | "failed") => void,
     ) => FilmstripThumbnailTarget;
     bind: (binding: FilmstripThumbnailBinding) => void;
     release: (binding: FilmstripThumbnailBinding) => void;
@@ -226,10 +228,17 @@ export function createFilmstripPresenter(
       const binding: FilmstripThumbnailBinding = {
         photoId: photo.id,
         preview: photo.preview,
-        target: thumbnails.target(image, (failed) => {
-          result.deliveryFailed = failed;
-          result.signature = cellSignature(cell, total, failed);
-        }),
+        target: thumbnails.target(
+          image,
+          (failed) => {
+            result.deliveryFailed = failed;
+            result.signature = cellSignature(cell, total, failed);
+          },
+          () => {
+            result.deliveryFailed = false;
+            result.signature = cellSignature(cell, total, false);
+          },
+        ),
       };
       result.thumbnail = binding;
       thumbnails.bind(binding);

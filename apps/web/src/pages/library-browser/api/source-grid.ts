@@ -255,23 +255,41 @@ export async function fetchBrowsePosition(
   }
 }
 
+/// The Thumbnail endpoint's answer, classified by what the Grid may claim.
+/// A 404 names the Preview fact (`unavailable` or `failed`); only a missing
+/// or unreadable transfer is a delivery failure.
+export type ThumbnailResult =
+  | Readonly<{ kind: "ready"; url: string }>
+  | Readonly<{ kind: "not-ready"; state: "unavailable" | "failed" }>
+  | Readonly<{ kind: "delivery-failed" }>;
+
 export async function fetchThumbnail(
   fetcher: SourceGridFetch,
   photoId: string,
   signal: AbortSignal,
-): Promise<string | undefined> {
+): Promise<ThumbnailResult> {
   try {
     const response = await fetcher(`/api/photos/${photoId}/thumbnail`, {
       signal,
       priority: "low",
     });
-    if (!response.ok) return undefined;
-    const value: unknown = await response.json();
-    return isRecord(value) && typeof value.url === "string"
-      ? value.url
-      : undefined;
+    let value: unknown;
+    try {
+      value = await response.json();
+    } catch {
+      return { kind: "delivery-failed" };
+    }
+    if (!isRecord(value)) return { kind: "delivery-failed" };
+    if (response.ok && value.state === "ready" && typeof value.url === "string")
+      return { kind: "ready", url: value.url };
+    if (
+      response.status === 404 &&
+      (value.state === "unavailable" || value.state === "failed")
+    )
+      return { kind: "not-ready", state: value.state };
+    return { kind: "delivery-failed" };
   } catch {
-    return undefined;
+    return { kind: "delivery-failed" };
   }
 }
 

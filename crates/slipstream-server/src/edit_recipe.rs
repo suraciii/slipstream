@@ -493,6 +493,26 @@ pub(crate) fn source_facts<'a>(photo: &'a PhotoRead) -> SourceFacts<'a> {
     }
 }
 
+/// The current Development Proxy of one Photo whose Original is unavailable:
+/// the proxy then stands in as the offline edit source. A stale record (one
+/// the manager can no longer revalidate against the observed source revision
+/// or its artifact) and a missing record both read as absent, so callers can
+/// treat `None` as the closed refusal condition. An available Original has no
+/// proxy participation.
+async fn offline_proxy(
+    state: &HttpState,
+    read: &EditRecipeRead,
+    photo_id: &str,
+) -> Option<DevelopmentProxyRecord> {
+    if read.source_available {
+        return None;
+    }
+    match state.application.proxies.as_ref() {
+        Some(manager) => manager.current_record(photo_id).await,
+        None => None,
+    }
+}
+
 // ---------------------------------------------------------------- handlers
 
 /// `GET /api/photos/{id}/edit-recipe`
@@ -527,16 +547,7 @@ pub(crate) async fn get_edit_recipe(
         ),
         condition,
     );
-    // A current Development Proxy is a valid offline source for the edit
-    // surface, but only when the Original itself is unavailable.
-    let proxy = if !read.source_available {
-        match state.application.proxies.as_ref() {
-            Some(manager) => manager.current_record(&photo_id).await,
-            None => None,
-        }
-    } else {
-        None
-    };
+    let proxy = offline_proxy(&state, &read, &photo_id).await;
     let proxy_current = proxy.is_some();
     let proxy_id = proxy.as_ref().map(DevelopmentProxyRecord::identity_digest);
     let processing_available = if proxy_current {
@@ -620,8 +631,14 @@ pub(crate) async fn post_edit_recipe(
     match support.state {
         // A known-unapproved class refuses every guarded write.
         "unsupported" => return unsupported_photo(&photo_id),
-        // The source facts that guard the write cannot be read.
-        "unavailable" => return unavailable_source(&photo_id, support.reason),
+        // An unavailable Original refuses the write unless a current
+        // Development Proxy stands in for it: the guarded save then reaches
+        // persistence, which re-checks the proxy's binding to the expected
+        // source revision inside the write transaction. A stale or absent
+        // proxy keeps the closed refusal.
+        "unavailable" if offline_proxy(&state, &read, &photo_id).await.is_none() => {
+            return unavailable_source(&photo_id, support.reason);
+        }
         _ => {}
     }
     let mutation = SaveEditRecipe {
@@ -695,8 +712,13 @@ pub(crate) async fn post_edit_recipe_rebind(
     match support.state {
         // A known-unapproved class refuses every guarded write.
         "unsupported" => return unsupported_photo(&photo_id),
-        // The source facts that guard the write cannot be read.
-        "unavailable" => return unavailable_source(&photo_id, support.reason),
+        // The rebind follows the same offline admission as the save: a
+        // current Development Proxy lets the request reach persistence,
+        // which owns the guarded decision inside the write transaction. A
+        // stale or absent proxy keeps the closed refusal.
+        "unavailable" if offline_proxy(&state, &read, &photo_id).await.is_none() => {
+            return unavailable_source(&photo_id, support.reason);
+        }
         _ => {}
     }
     let mutation = RebindEditRecipe {

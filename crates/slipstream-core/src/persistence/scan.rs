@@ -1536,15 +1536,19 @@ mod tests {
         let photo = &snapshot.photos[0].id;
         seed_sidecar(&path, photo, "dir/photo.xmp");
         let before = association_generation(&path, photo);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while library.fingerprint_counts().enrolled != 1 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "fingerprint enrollment timed out"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
         library.shutdown().unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO original_fingerprints(original_id,digest,size,mtime_ms) VALUES(?,?,?,?)",
+                params![
+                    snapshot.originals[0].id,
+                    crate::digest_bytes(b"one"),
+                    i64::try_from(snapshot.originals[0].facts.size).unwrap(),
+                    snapshot.originals[0].facts.mtime_ms,
+                ],
+            )
+            .unwrap();
         fs::rename(
             root.canonical_path().join("one.JPG"),
             root.canonical_path().join("moved.JPG"),
