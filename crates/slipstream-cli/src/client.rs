@@ -432,10 +432,22 @@ pub(crate) fn validated_route_failure(
             details.is_empty() || string("photoId").is_some()
         }
         "resource_unavailable" | "processing_unavailable" => {
-            details.is_empty()
+            let support_reason = |reason: &str| {
+                matches!(
+                    reason,
+                    "original-missing"
+                        | "original-unreadable"
+                        | "read-pending"
+                        | "resource-unavailable"
+                )
+            };
+            (details.is_empty()
                 || string("operation").is_some()
                 || string("photoId").is_some()
-                || string("reason").is_some()
+                || string("reason").is_some())
+                && details
+                    .get("supportReason")
+                    .is_none_or(|reason| reason.as_str().is_some_and(support_reason))
         }
         // A full-resolution Export the service refused because the Original
         // itself is unavailable: a confirmed refusal that changed nothing.

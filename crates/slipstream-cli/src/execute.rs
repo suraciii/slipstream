@@ -1322,6 +1322,22 @@ pub(crate) fn canonical_access_token(token: &[u8]) -> bool {
         )
 }
 
+pub(crate) fn deadline_failure(
+    operation: Operation,
+    publication: &PublicationState,
+    admission: &AdmissionState,
+) -> CommandFailure {
+    if let Some(data) = publication.committed() {
+        CommandFailure::published_file(data, false, publication.committed_noun())
+    } else if let Some(identity) = admission.admitted() {
+        CommandFailure::unknown(&identity)
+    } else if matches!(operation, Operation::LibraryCheck) {
+        CommandFailure::library_check_deadline()
+    } else {
+        CommandFailure::transport(operation)
+    }
+}
+
 pub async fn invoke(cli: Cli, environment: Option<&str>) -> InvocationResult {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(cli.timeout);
     invoke_until(cli, environment, deadline).await
@@ -1355,15 +1371,7 @@ pub async fn invoke_until(
                 (failure.exit_code, envelope)
             }
             Err(_) => {
-                let failure = match publication.committed() {
-                    Some(data) => {
-                        CommandFailure::published_file(data, false, publication.committed_noun())
-                    }
-                    None => match admission.admitted() {
-                        Some(identity) => CommandFailure::unknown(&identity),
-                        None => CommandFailure::transport(operation),
-                    },
-                };
+                let failure = deadline_failure(operation, &publication, &admission);
                 let envelope = match failure.data {
                     Some(data) => Envelope::partial(*data, failure.payload),
                     None => Envelope::error(failure.payload),

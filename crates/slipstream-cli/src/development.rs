@@ -570,9 +570,11 @@ struct StageStatesWire {
 /// Validates one recipe read against the closed wire contract and renders
 /// the CLI result with the added Photo Destination `webUrl`. `sourceRevision`
 /// is null exactly when `sourceSupport` is `unavailable`, `supportReason` is
-/// non-null only with `unavailable`, and a retained recipe stays inside the
-/// shared field shapes. A response outside the contract is a transport
-/// failure, not a claimed state.
+/// non-null only with `unavailable` and carries a closed reason — the
+/// confirmed `original-missing`/`original-unreadable` outcomes or the
+/// retryable `read-pending`/`resource-unavailable` waits — and a retained
+/// recipe stays inside the shared field shapes. A response outside the
+/// contract is a transport failure, not a claimed state.
 fn validated_recipe_read(
     read: RecipeReadWire,
     photo_id: &str,
@@ -1054,20 +1056,32 @@ mod tests {
 
     #[test]
     fn recipe_read_accepts_an_unavailable_source_with_its_closed_reason() {
-        let document = json!({
-            "photoId": "p1",
-            "sourceRevision": Value::Null,
-            "recipe": Value::Null,
-            "sourceSupport": "unavailable",
-            "supportReason": "original-unreadable",
-            "processingAvailable": false,
-            "controls": {
-                "exposure": {"minimumEv": -4.0, "maximumEv": 4.0, "stepEv": 0.001},
-                "whiteBalanceModes": ["as-shot"],
-            },
-        });
-        validated_recipe_read(read_wire(document), "p1", &origin())
-            .expect("unavailable source with its reason is valid");
+        // The confirmed outcomes and the retryable waits are all closed
+        // reasons this client believes without downgrading the read.
+        for reason in [
+            "original-missing",
+            "original-unreadable",
+            "read-pending",
+            "resource-unavailable",
+        ] {
+            let document = json!({
+                "photoId": "p1",
+                "sourceRevision": Value::Null,
+                "recipe": Value::Null,
+                "sourceSupport": "unavailable",
+                "supportReason": reason,
+                "processingAvailable": false,
+                "controls": {
+                    "exposure": {"minimumEv": -4.0, "maximumEv": 4.0, "stepEv": 0.001},
+                    "whiteBalanceModes": ["as-shot"],
+                },
+            });
+            let value = validated_recipe_read(read_wire(document), "p1", &origin())
+                .unwrap_or_else(|failure| panic!("{reason} is a closed reason: {failure:?}"));
+            assert_eq!(value["sourceSupport"], "unavailable");
+            assert_eq!(value["supportReason"], json!(reason));
+            assert_eq!(value["sourceRevision"], Value::Null);
+        }
     }
 
     #[test]
@@ -1164,6 +1178,9 @@ mod tests {
         // closed reason.
         let mut document = read_fixture();
         document["supportReason"] = json!("original-missing");
+        invalid(document);
+        let mut document = read_fixture();
+        document["supportReason"] = json!("read-pending");
         invalid(document);
         let mut document = read_fixture();
         document["sourceSupport"] = json!("unavailable");

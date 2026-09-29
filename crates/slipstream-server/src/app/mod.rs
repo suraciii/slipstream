@@ -193,25 +193,6 @@ pub struct Application {
     pub(crate) shutdown: Mutex<bool>,
 }
 
-/// The outcome of one bounded live camera-identity observation of an
-/// Original whose published Capture fact does not carry an identity. The
-/// observation never publishes; it only lets the read classify the source
-/// class without waiting for the next scan.
-pub(crate) enum SourceIdentityObservation {
-    /// Native-work capacity is exhausted. Observing the identity is
-    /// retryable and never evidence about the Original itself.
-    Saturated,
-    /// The bounded read could not complete against the published revision.
-    /// Retryable; only a later scan records a confirmed failure.
-    Unreadable,
-    /// The bytes at the remembered Location differ from the published
-    /// revision, so the Photo is waiting for inspection.
-    Changed,
-    /// The read completed for the published revision. The camera identity
-    /// may still be absent from the bytes.
-    Observed(slipstream_core::CaptureReviewMetadata),
-}
-
 impl Application {
     pub(crate) fn admit_scan_cycle(
         self: &Arc<Self>,
@@ -508,61 +489,6 @@ impl Application {
             request,
         )
         .await
-    }
-
-    /// Observes one Original's camera identity from its current bytes for
-    /// the published revision, through the same confined-descriptor and
-    /// source-revision evidence the scanner records: the descriptor is
-    /// checked against the published revision (size, mtime, device, and
-    /// inode) before and after parsing, so identity from a different
-    /// in-flight source revision can never be adopted.
-    pub(crate) async fn observe_source_identity(
-        &self,
-        relative_path: &str,
-        kind: slipstream_core::OriginalKind,
-        expected_revision: &str,
-    ) -> SourceIdentityObservation {
-        // Admission is deliberately nonblocking and happens before a
-        // blocking task exists, so saturation cannot queue a worker that
-        // waits for Library-native capacity.
-        let Some(permit) = self.library.try_admit_native_work() else {
-            return SourceIdentityObservation::Saturated;
-        };
-        let root = self.library_root.clone();
-        let path = relative_path.to_owned();
-        let expected = expected_revision.to_owned();
-        let observed = tokio::task::spawn_blocking(move || {
-            // Keep admission in the worker through observation, parsing,
-            // and descriptor revalidation.
-            let _permit = permit;
-            let Ok(root) = slipstream_core::LibraryRoot::open(root) else {
-                return SourceIdentityObservation::Unreadable;
-            };
-            let Ok(relative_path) = slipstream_core::RelativeOriginalPath::parse(path.clone())
-            else {
-                return SourceIdentityObservation::Unreadable;
-            };
-            let Ok(capability) = root.original(relative_path) else {
-                return SourceIdentityObservation::Unreadable;
-            };
-            let Ok(facts) = capability.facts() else {
-                return SourceIdentityObservation::Unreadable;
-            };
-            let Ok(observed_revision) =
-                slipstream_core::capture_source_revision(path.as_str(), facts)
-            else {
-                return SourceIdentityObservation::Unreadable;
-            };
-            if observed_revision != expected {
-                return SourceIdentityObservation::Changed;
-            }
-            match slipstream_core::inspect_review_metadata(&capability, kind, facts) {
-                Ok(review) => SourceIdentityObservation::Observed(review),
-                Err(_) => SourceIdentityObservation::Unreadable,
-            }
-        })
-        .await;
-        observed.unwrap_or(SourceIdentityObservation::Unreadable)
     }
 
     async fn inspect_metadata_source(
@@ -936,6 +862,7 @@ impl Application {
                 publication: publication.clone(),
                 completed: Some(usize::try_from(progress.discovered).unwrap_or(usize::MAX)),
                 total: None,
+                updated_ms: progress.updated_ms,
                 last_recovery,
                 fingerprints,
             },
@@ -947,6 +874,7 @@ impl Application {
                 total: progress
                     .inspect_total
                     .map(|total| usize::try_from(total).unwrap_or(usize::MAX)),
+                updated_ms: progress.updated_ms,
                 last_recovery,
                 fingerprints,
             },
@@ -958,6 +886,7 @@ impl Application {
                 total: progress
                     .hash_total
                     .map(|total| usize::try_from(total).unwrap_or(usize::MAX)),
+                updated_ms: progress.updated_ms,
                 last_recovery,
                 fingerprints,
             },
@@ -967,6 +896,7 @@ impl Application {
                 publication: publication.clone(),
                 completed: None,
                 total: None,
+                updated_ms: progress.updated_ms,
                 last_recovery,
                 fingerprints,
             },
@@ -979,6 +909,7 @@ impl Application {
                         publication: publication.clone(),
                         completed: None,
                         total: None,
+                        updated_ms: progress.updated_ms,
                         last_recovery,
                         fingerprints,
                     }
@@ -988,6 +919,7 @@ impl Application {
                         updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
                         publication: publication.clone(),
                         completed: None,
+                        updated_ms: progress.updated_ms,
                         total: None,
                         last_recovery,
                         fingerprints,
@@ -999,6 +931,7 @@ impl Application {
                         updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
                         publication: publication.clone(),
                         completed: Some(photo_count),
+                        updated_ms: progress.updated_ms,
                         total: Some(photo_count),
                         last_recovery,
                         fingerprints,
@@ -1010,6 +943,7 @@ impl Application {
                         publication,
                         completed: None,
                         total: None,
+                        updated_ms: progress.updated_ms,
                         last_recovery,
                         fingerprints,
                     }

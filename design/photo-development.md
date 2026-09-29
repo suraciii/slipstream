@@ -352,11 +352,31 @@ until that stage is qualified. A Photo read reports the support state of its own
 source class against the same bundle; a Photo whose source class is not approved
 is `unsupported` and its edit controls are read-only.
 
+Capability is one of three axes a client observes independently. The engine
+axis is this capability report; the Library axis is the scan and recovery
+phase of the Published Library ([Scalable Library
+Browsing](library-browsing.md#loading-status)); the Photo axis is one Photo's
+source-read state. `ready` means the engine and bundle are available; it does
+not imply that the Library scan is idle or that any Photo source is readable,
+and a recovering Library does not change the engine axis. While a scan or
+recovery runs, the last Published Library remains the authority for existing
+Photos: a Photo whose publication holds current readable source facts stays
+`supported` with that source revision, and a Photo without current source
+facts reports a retryable wait state, never a confirmed read failure.
+`processingAvailable` is `true` only when the engine axis is `ready` and the
+Photo axis is `supported`.
+
 For each approved source class, the report names the white-balance modes, and
 the temperature and tint ranges, that the capability admits for that class
 against the observed bundle. This report is the only source of truth for which
 modes and ranges an editor may enable; a mode or range outside it is never
 executed and never substituted with another mode.
+
+Bounded diagnostics compose exactly these axes: the capability report, the
+Loading Status, and the Photo's recipe read together name the reason an edit
+is disabled — engine condition, Library phase, or Photo source-read state
+with its closed reason — and expose no host path, secret, or engine-private
+setting.
 
 ### Edit Recipe
 
@@ -369,22 +389,29 @@ enabled execution payload remains readable and reports processing as unavailable
 for that Photo rather than being rewritten or silently substituted with as-shot
 execution.
 
+A recipe read derives its source facts from the same Published Library that
+serves Photo and capture-metadata reads, so one response is coherent with
+them: it either reports the published readable source revision with
+`supported`, or a retryable wait state with no source revision. A transient
+native-work, admission, or launcher-reconciliation condition must never
+surface as a confirmed `original-missing` or `original-unreadable` outcome.
+
 A guarded save returns exactly one outcome:
 
-| Outcome            | Meaning                                                                                   |
-| ------------------ | ----------------------------------------------------------------------------------------- |
-| `saved`            | The settings were committed as a new recipe revision.                                     |
-| `unchanged`        | The same caller request identity already committed these settings.                        |
-| `unknown`          | The response was lost or the commit is unconfirmed; admission is unproven.                |
-| `receipt_expired`  | The request identity's receipt retention has expired; see the save-receipt rules.         |
-| `recipe_conflict`  | The expected recipe revision is no longer current; the response carries current facts.    |
-| `source_changed`   | The expected source revision is not the current published revision; the draft is refused. |
-| `requires_rebind`  | The stored binding is stale and no ordinary save may adopt the new source.                |
-| `request_conflict` | The request identity was already used with a different payload.                           |
-| `missing_recipe`   | A write requiring an existing recipe found none.                                          |
-| `unsupported`      | The Photo's source class has no approved profile.                                         |
-| `invalid_settings` | The settings are outside the approved range or shape.                                     |
-| `unavailable`      | Current source facts cannot be read, so no guarded write is possible.                     |
+| Outcome            | Meaning                                                                                             |
+| ------------------ | --------------------------------------------------------------------------------------------------- |
+| `saved`            | The settings were committed as a new recipe revision.                                               |
+| `unchanged`        | The same caller request identity already committed these settings.                                  |
+| `unknown`          | The response was lost or the commit is unconfirmed; admission is unproven.                          |
+| `receipt_expired`  | The request identity's receipt retention has expired; see the save-receipt rules.                   |
+| `recipe_conflict`  | The expected recipe revision is no longer current; the response carries current facts.              |
+| `source_changed`   | The expected source revision is not the current published revision; the draft is refused.           |
+| `requires_rebind`  | The stored binding is stale and no ordinary save may adopt the new source.                          |
+| `request_conflict` | The request identity was already used with a different payload.                                     |
+| `missing_recipe`   | A write requiring an existing recipe found none.                                                    |
+| `unsupported`      | The Photo's source class has no approved profile.                                                   |
+| `invalid_settings` | The settings are outside the approved range or shape.                                               |
+| `unavailable`      | Current source facts cannot be read — confirmed or still pending — so no guarded write is possible. |
 
 A save that carries a white-balance mode the service can read but the
 capability does not admit is accepted as editing intent, committed like any
@@ -605,27 +632,46 @@ retained artifacts stay usable in every state. It has no error body.
 `GET /api/photos/{id}/edit-recipe` returns 200 with `photoId`,
 `sourceRevision`, `recipe` (`null` or an object with `recipeVersion`,
 `exposureEv`, and `whiteBalance`), `sourceSupport` (`supported`,
-`unavailable`, or `unsupported`), `supportReason` (`null`, `original-missing`,
-`original-unreadable`, `read-pending`, or `resource-unavailable`, non-null only
-with `unavailable`),
+`unavailable`, or `unsupported`), `supportReason` (`null` with `supported`
+and `unsupported`; with `unavailable` exactly one of `original-missing`,
+`original-unreadable`, `read-pending`, or `resource-unavailable`),
 `processingAvailable` (boolean), and `controls` (`exposure` with `minimumEv`,
 `maximumEv`, `stepEv`, and `whiteBalanceModes`). A stored `whiteBalance` whose
 mode is absent from `controls.whiteBalanceModes` is not currently admitted:
 the client renders it read-only as retained intent, and the service reports
 the Photo processing-unavailable with `processing_unavailable` until the
 capability report admits the mode again. `sourceRevision` is `null`
-exactly when `sourceSupport` is `unavailable`, so a missing or unreadable
-Original reports one state and never `supported` or `unsupported` with
-processing unavailable. A client that observes `unavailable` must not save,
-rebind, preview, or export against that source and must reconcile from a later
-read; a guarded save or rebind against it returns 503 `resource_unavailable`
-until current source facts are readable again. `read-pending` means the
-published inspection is absent or belongs to another source revision.
-`resource-unavailable` means a bounded observation could not complete; neither
-is evidence that the Original is unreadable. A completed Capture fact for the
-current source revision carries observed camera identity, and source support
-is classified from that committed evidence. The only read error is 404
-`unknown_photo`.
+exactly when `sourceSupport` is `unavailable`, and it names only the
+currently published readable source facts: it is never synthesized from
+stale metadata, another Photo, or a scan that has not published. A missing
+or unreadable Original reports `unavailable`, not `supported` or
+`unsupported` with processing unavailable. A client that observes
+`unavailable` must not save, rebind, preview, or export against that Original
+and must reconcile from a later read; a current Development Proxy remains a
+separate preview source while the Original is unavailable. A guarded save or
+rebind without an available Original or current proxy returns 503
+`resource_unavailable` until source facts can be read, and that refusal's
+error details carry the same closed `supportReason` the read reports.
+`read-pending` means the published inspection is absent or belongs to another
+source revision. `resource-unavailable` means a bounded observation could not
+complete; neither is evidence that the Original is unreadable. A completed
+Capture fact for the current source revision carries observed camera identity,
+and source support is classified from that committed evidence. The only read
+error is 404 `unknown_photo`.
+
+The closed reason set separates confirmed source outcomes from retryable
+wait states. `original-missing` is a confirmed absence from the remembered
+Location; `original-unreadable` is a confirmed read or parse failure for the
+current source revision; both are permanent for that source revision and
+explain the read failure. `read-pending` means current source facts have not
+been inspected and published yet; `resource-unavailable` means native-work
+admission, shared capacity, or launcher/attempt reconciliation is currently
+unavailable. Both are retryable without a restart: the client disables
+writes, preview, and export with a retry or refresh action, and the service
+resolves them through a later admitted scan or freed capacity. A preview
+refusal that follows from the Photo's source state carries the same closed
+`supportReason` in its error details, so read and refusal agree on one
+reason-to-behavior mapping across Web and CLI.
 
 `POST /api/photos/{id}/edit-recipe` takes `requestId`,
 `expectedRecipeVersion` (string or `null`), `expectedSourceRevision`, and
@@ -746,7 +792,12 @@ reports `processing_unavailable` with 503: the stage or the qualified mode for
 this Photo cannot execute, including an unqualified source class or mode
 reported by a read. A resource refusal reports `resource_unavailable` with 503,
 or `retained_output_full` with 503 for exhausted retained-output capacity: the
-service lacks facts, capacity, or admission resources, not the capability.
+service lacks facts, capacity, or admission resources, not the capability. A
+retryable `supportReason` (`read-pending` or `resource-unavailable`) is
+therefore always a resource refusal, never a processing failure and never a
+confirmed `original-unreadable` outcome; the retry becomes meaningful when
+the named condition clears, not when the engine changes.
+
 The save outcome `unsupported` is a permanent source-class refusal and reports
 `unsupported_photo` with 422, distinct from both. Guarded saves and rebinds
 never report a processing failure because they admit no engine work; their
@@ -799,6 +850,10 @@ Tests must derive expected behavior from the Product Spec and prove:
 - undo/redo, reset and export ordering with later edits and concurrent clients;
 - latest-preview ownership, comparison isolation and source invalidation;
 - queue limits, fairness, memory/disk failures and browsing responsiveness;
+- native-work saturation, deferred inspection, and interrupted recovery leave
+  the Published Library's source facts, source revision, and recipe bindings
+  intact, publish retryable (`read-pending`, `resource-unavailable`) rather
+  than confirmed-failure reasons, and map one reason to one Web/CLI behavior;
 - request deduplication, receipt expiry and export snapshot identity;
 - cancel/complete races, process cleanup, restart and publication recovery;
 - active-download retention, backup/restore and engine-upgrade behavior;

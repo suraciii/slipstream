@@ -75,8 +75,9 @@ pub struct ScanProgress {
     pub hashed: u64,
     /// Total fingerprint hashes required by the recovering phase.
     pub hash_total: Option<u64>,
-    /// Milliseconds since the epoch of the last phase or counter advance.
-    /// Zero means no advance has been observed in this process.
+    /// Milliseconds since the UNIX epoch of the last scanner progress
+    /// update, so a bounded status read can distinguish a phase that is
+    /// advancing from one that has stalled.
     pub updated_ms: u64,
 }
 
@@ -616,6 +617,25 @@ impl Library {
         let receive = {
             let _admission = self.admit()?;
             self.persistence.photo_receiver(photo_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Reads the Photo facts and the recipe read of one Photo in a single
+    /// serialized owner operation, so a scan publication cannot land between
+    /// them: every guard below derives from one published state.
+    ///
+    /// `None` means the Photo no longer exists.
+    pub async fn edit_recipe_surface(
+        &self,
+        photo_id: &str,
+    ) -> Result<Option<(PhotoRead, EditRecipeRead)>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.edit_recipe_surface_receiver(photo_id)
         }?;
         receive
             .await

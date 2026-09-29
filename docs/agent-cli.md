@@ -62,11 +62,19 @@ Run commands in JSON mode and inspect their exit code and envelope before using
 the returned data. Help lists grammar; capability discovery controls available
 sources, ranges and stages.
 
-1. Run `processing capability`, then `photos recipe get PHOTO_ID`. Preserve the
-   complete recipe read, including the nullable recipe version, source revision
-   and `webUrl`. Continue only for an available supported source and the
-   intended stage. Read the reported exposure range/step and white-balance modes;
-   do not infer them from the camera name. An absent recipe has `recipe: null`.
+1. Run `processing capability`, then `photos recipe get PHOTO_ID`. Preserve
+   the complete recipe read, including the nullable recipe version, source
+   revision and `webUrl`. Continue only for an available supported source and
+   the intended stage. Read the reported exposure range/step and
+   white-balance modes; do not infer them from the camera name. An absent
+   recipe has `recipe: null`. Diagnose a disabled edit across three
+   independent axes — `processing capability` (engine), `status` (Library
+   scan phase), and the read's `sourceSupport`/`supportReason` (this Photo's
+   source) — and report them separately. A retryable reason
+   (`read-pending`, `resource-unavailable`) means wait and re-read after the
+   scan or capacity frees; only a confirmed reason (`original-missing`,
+   `original-unreadable`) is permanent. Never treat a recovering Library or a
+   busy engine as an unreadable Original.
 2. Construct the complete save JSON shown in the
    [CLI Reference](cli-reference.md#photo-development). Copy the observed guards,
    choose a new request ID, and set the intended exposure and white balance.
@@ -75,10 +83,13 @@ sources, ranges and stages.
    exporting. Never generate a replacement ID merely because a response was lost.
 3. Run `photos recipe get PHOTO_ID` in a new process and retain the confirmed
    settings and recipe version. Request `photos edit-preview PHOTO_ID --stage
-   develop --file NEW_JPEG_PATH`. A queued/running result has no file; invoke
-   the read later. Inspect the ready rendition with its returned recipe/source
-   identity and detail limits. `--settings baseline` renders a comparison without
-   changing the saved recipe. `photos preview` remains the Camera Preview.
+   develop --file NEW_JPEG_PATH` or `--stage film` when the deployment reports
+   Film ready. Both stages use the same source/recipe/bundle identity framing
+   and validate response metadata, digest, and JPEG structure before writing.
+   A queued/running result has no file; invoke the read later. Inspect the
+   ready rendition with its returned recipe/source identity and detail limits.
+   `--settings baseline` renders a comparison without changing the saved
+   recipe. `photos preview` remains the Camera Preview.
 4. Run `photos export submit PHOTO_ID --target development-tiff --request-id
    NEW_REQUEST_ID`. Save the Export ID and captured revisions. If another client
    changed the recipe before submission, compare those revisions with the
@@ -95,8 +106,11 @@ sources, ranges and stages.
    receipt as proof of a downloaded image.
 
 Reset uses a new guarded save of 0 EV/as-shot. Source replacement requires a
-deliberate `photos recipe rebind PHOTO_ID --input FILE` with the observed recipe
-version and new source revision; never rebind automatically. A refused source,
-engine or stage requires the reported recovery action. Do not substitute Camera
-Preview or TIFF for a refused Film result. Film qualification, cancellation and
-retained-snapshot retry are separate from this Develop walkthrough.
+deliberate `photos recipe rebind PHOTO_ID --input FILE` with the observed
+recipe version and new source revision; never rebind automatically. A
+refused source, engine or stage requires the reported recovery action: a
+retryable `supportReason` is re-read after the admitted scan or capacity
+frees, while a confirmed reason names the permanent condition for the
+current source revision. Do not substitute Camera Preview or TIFF for a
+refused Film result. Film qualification, cancellation and retained-snapshot
+retry are separate from this Develop walkthrough.

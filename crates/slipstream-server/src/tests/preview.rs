@@ -37,7 +37,8 @@ async fn offline_proxy_develop_returns_and_reuses_current_jpeg() {
         .await
         .unwrap()
         .unwrap()
-        .current_source_revision;
+        .current_source_revision
+        .expect("settled scan publishes the source revision");
     let frame = slipstream_core::derivative::development_tiff_fixture(&[0.25; 8 * 4 * 3], 8, 4);
     let record = slipstream_core::DevelopmentProxyRecord {
         photo_id: photo_id.clone(),
@@ -845,7 +846,7 @@ async fn edit_preview_streams_the_current_rendition_with_the_closed_metadata() {
 }
 
 #[tokio::test]
-async fn edit_preview_admits_the_film_stage() {
+async fn edit_preview_refuses_the_unqualified_film_stage() {
     let (base, config, application, photo_id, _, _) =
         approved_photo_with_recipe_and_result("film-preview", 0.25).await;
     let gate = scripted_gate(std::collections::VecDeque::from([
@@ -859,10 +860,13 @@ async fn edit_preview_admits_the_film_stage() {
         gate_dyn,
     );
     let response = get_preview_response(&router, &preview_uri(&photo_id, "film")).await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let refusal = response_json(response).await;
+    assert_eq!(error_code(&refusal), "processing_unavailable");
+    assert_eq!(refusal["error"]["details"]["reason"], "film-not-qualified");
     assert_eq!(
-        response_json(response).await,
-        serde_json::json!({"state": "queued", "stage": "film"})
+        refusal["error"]["message"],
+        "The film stage cannot execute for this Photo right now."
     );
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);

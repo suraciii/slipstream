@@ -87,7 +87,10 @@ slipstream albums get ALBUM_ID
 `status` returns client/server versions, supported CLI contract version,
 published availability, Photo count, and the existing scan facts. A reachable
 service with an initializing or failed scan is a successful status query; the
-scan state remains explicit. An incompatible service is an error.
+scan state remains explicit. An incompatible service is an error. The scan
+facts are the Library axis only; `processing capability` and a Photo's
+`sourceSupport` are separate axes that a recovering or saturated scan does
+not change.
 
 Compatibility is checked before any operational request. Use a client and service
 built from the same candidate source revision. Contract version 1 alone does not
@@ -99,6 +102,10 @@ missing or invalid field. Install a matching candidate; do not bypass negotiatio
 `library check` waits within the command timeout for the existing scan cycle's
 terminal result. A failed scan is a command error with its last confirmed status.
 A timeout tells the caller to query `status`; it does not claim cancellation.
+The timeout outcome is unknown and non-terminal: the admitted, server-owned
+scan keeps running, later `status` answers preserve the latest scan phase and
+counts, and reissuing `library check` joins the running cycle instead of
+starting a second physical scan.
 
 Folder Locations are Library-relative and recursive for Photo queries. The
 empty parent denotes the Library Folder; omission uses that parent. Folder
@@ -546,15 +553,17 @@ slipstream photos recipe rebind PHOTO_ID --input FILE
 slipstream photos proxy get PHOTO_ID
 slipstream photos proxy create PHOTO_ID --input FILE
 slipstream photos proxy remove PHOTO_ID
-slipstream photos edit-preview PHOTO_ID --stage develop --file PATH [--settings current|baseline]
+slipstream photos edit-preview PHOTO_ID --stage develop|film --file PATH [--settings current|baseline]
 slipstream photos export submit PHOTO_ID --target development-tiff|film-jpeg --request-id REQUEST_ID
 slipstream photos export list PHOTO_ID
 slipstream photos export status EXPORT_ID
 slipstream photos export download EXPORT_ID --file PATH
 
-`film-jpeg` is an existing service target. Its presence in help is not evidence
-of native or deployment qualification. Use it only with a separately qualified
-Film deployment; a Develop workflow pass does not qualify Film.
+`film-jpeg` is an existing service target. The `edit-preview --stage film`
+route uses the same source revision, recipe version, bundle-bound rendition
+identity, response metadata, digest, and JPEG validation as `develop`; it is
+admissible only for a separately qualified Film deployment. A Develop workflow
+pass does not qualify Film.
 
 `processing capability` returns the service's processing capability report,
 including state, observed bundle and incarnation, profiles, exposure range and
@@ -587,9 +596,13 @@ may make editing processing available while
 the Original remains unavailable; it never makes an Export admissible.
 Their meanings and closed values are defined by the shared
 [Edit Recipe wire contract](../design/photo-development.md#wire-contract).
-The CLI adds `webUrl`, the Photo Destination. An absent recipe is a successful
-read with `recipe: null`, not a saved baseline. Retained unsupported settings
-remain readable and must not be presented as currently executable.
+`supportReason` separates retryable wait states (`read-pending`,
+`resource-unavailable` — re-read after the admitted scan or capacity frees)
+from confirmed outcomes (`original-missing`, `original-unreadable` —
+permanent for the current source revision). The CLI adds `webUrl`, the Photo
+Destination. An absent recipe is a successful read with `recipe: null`, not a
+saved baseline. Retained unsupported settings remain readable and must not
+be presented as currently executable.
 
 `recipe save` takes exactly this JSON object. Replace the example revisions
 with the observed values; `expectedRecipeVersion: null` explicitly requires
@@ -674,8 +687,12 @@ exit 4; `receipt_expired`, `export_expired`, `artifact_expired`,
 `processing_unavailable`, `resource_unavailable`, and `retained_output_full`
 exit 6. Confirmed refusals have effect `none`; unusable write responses retain
 effect `unknown`. Conflict details carry current revisions when the service
-provides them. No command silently rebinds a source, changes decisions or Albums,
-enables an unavailable stage, or submits an Export after an uncertain save.
+provides them. A `resource_unavailable` refusal that follows from the Photo's
+source state carries the closed `supportReason` in its details, so a retryable
+pending or resource-exhausted source is distinguishable from a confirmed
+unreadable one. No command silently rebinds a source, changes decisions or
+Albums, enables an unavailable stage, or submits an Export after an uncertain
+save.
 
 ## Output Envelope
 
@@ -727,6 +744,8 @@ or `null`. Arrays preserve the ordering stated below.
   or `null` before any scan activity in this process;
 - `publication`: an opaque string, or `null` before a Library is published;
 - `completed` and `total`: counts, or `null` while the phase cannot report them;
+- `updatedMs`: Unix milliseconds of the most recent scanner progress update, or
+  zero before a scan starts in this process;
 - `lastRecovery`: `null` or an object with count fields `relocatedPhotos`,
   `fingerprintedOriginals`, and `unavailablePhotos`; and
 - `fingerprints`: `null` or an object with count fields `enrolled` and `pending`.

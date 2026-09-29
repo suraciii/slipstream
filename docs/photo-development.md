@@ -56,6 +56,19 @@ label a camera Preview or Development Result as a successful Film Result.
 Entering Edit must restore the current Edit Recipe. It must not reset settings
 merely because the Photographer changes views or leaves an Album.
 
+Edit availability rests on three independent facts: whether the deployment's
+processing engine is usable, whether the Library is still scanning or
+recovering, and whether this Photo's Original File currently reads. A
+recovering Library or a busy engine must not be presented as an unreadable
+Original. While a Photo's source read is pending or waiting for read
+capacity, the workspace must keep that Photo's settings read-only, say the
+Photo is waiting, and offer to check again; a later read that publishes
+current source facts must resume editing without losing confirmed settings.
+A confirmed missing or unreadable Original must be explained as permanent for
+the current source. Saving, Edit Preview, and Export must stay disabled until
+the Photo's source reads; a refusal caused by the Photo's source state must
+name the same reason the Edit read reports.
+
 The Grid must retain its camera-produced thumbnails and indicate Photos with
 saved edits. Its bounded Photo summaries must report whether a saved Edit
 Recipe exists. This fact remains true when the recipe matches the processing
@@ -109,6 +122,11 @@ Saved settings and completed previews are separate facts. Rendering failure
 must not discard a saved recipe or a recoverable draft. Late, cancelled, or
 obsolete results must not replace the current view. A successful image for a
 different source, stage, or settings snapshot is not the requested preview.
+
+The workspace must continue checking an admitted Preview long enough for a
+full RAW development. If the bounded wait ends before settlement, it must say
+the result is still unknown and offer a fresh check. It must not keep showing
+"rendering" as though it is still following the request.
 
 Comparison must keep the chosen stage and display conversion constant while
 comparing the current settings with the as-shot/baseline development settings.
@@ -235,6 +253,13 @@ A completed artifact must not be exposed before it is fully written and
 validated. An interrupted Export must have an explicit recoverable outcome.
 Cancellation must settle to the actual terminal result if completion races it.
 A dropped response alone must not imply that the request failed to take effect.
+
+In the browser, an Export submission whose response is lost or cannot establish
+acceptance retains its Photo's request identity and captured settings. Reconcile
+repeats that exact request; a new Export or a dependent edit of that Photo waits
+until the service resolves it. Other Photos remain editable. This in-session
+recovery does not survive a browser reload; retained Exports can be inspected
+after reopening, but an unconfirmed request cannot be inferred from a list.
 
 Edit Recipes require backup. Intermediate images and Edit Previews may be
 reconstructed while their source and processing assets remain available.

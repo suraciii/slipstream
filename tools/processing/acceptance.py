@@ -112,6 +112,18 @@ CAPABILITY_STATES = (
 )
 STAGE_STATES = ("ready", "unavailable", "unsupported")
 SOURCE_SUPPORT_STATES = ("supported", "unavailable", "unsupported")
+# The closed `supportReason` set from the Edit Recipe wire contract
+# (design/photo-development.md#wire-contract).  `original-missing` and
+# `original-unreadable` are confirmed outcomes for the current source
+# revision; `read-pending` and `resource-unavailable` are retryable wait
+# states the service resolves without a restart.
+SUPPORT_REASONS = (
+    "original-missing",
+    "original-unreadable",
+    "read-pending",
+    "resource-unavailable",
+)
+RETRYABLE_SUPPORT_REASONS = ("read-pending", "resource-unavailable")
 
 ARTIFACT_METADATA_FIELDS = (
     "exportId",
@@ -371,7 +383,7 @@ def validate_recipe_read(payload: object, photo_id: str) -> tuple[dict, list]:
     if support == "unavailable":
         if source_revision is not None:
             problems.append("sourceRevision-must-be-null-when-unavailable")
-        if payload.get("supportReason") not in ("original-missing", "original-unreadable"):
+        if payload.get("supportReason") not in SUPPORT_REASONS:
             problems.append("supportReason-invalid-for-unavailable")
     else:
         if payload.get("supportReason") is not None:
@@ -1529,35 +1541,52 @@ class Runner:
         return {"photoId": self.photo_id, "photosSeen": seen, "listPageMaximum": page_limit}
 
     def _step_recipe_read(self) -> dict:
-        response, payload = self.client.request_json(
-            "GET", EDIT_RECIPE_PATH.format(id=self.photo_id)
-        )
-        require_success(response, payload, "recipe-read")
-        facts, problems = validate_recipe_read(payload, self.photo_id)
-        if problems:
-            raise AcceptanceFailure("recipe-read-invalid", {"problems": problems})
-        if facts["sourceSupport"] == "unavailable":
-            raise AcceptanceFailure(
-                "source-unavailable",
-                {"supportReason": payload.get("supportReason")},
+        deadline = self.monotonic() + self.settlement_timeout
+        polls = 0
+        while True:
+            response, payload = self.client.request_json(
+                "GET", EDIT_RECIPE_PATH.format(id=self.photo_id)
             )
-        if facts["sourceSupport"] == "unsupported":
-            raise AcceptanceFailure(
-                "source-unsupported",
-                {"profiles": self.capability.get("profiles")},
-            )
-        self.source_revision = facts["sourceRevision"]
-        self.observed_recipe = facts.get("recipe")
-        self.controls = facts.get("controls") or {}
-        recipe = facts.get("recipe") or {}
-        self.recipe_version = recipe.get("recipeVersion")
-        self.identities["sourceRevision"] = self.source_revision
-        self.identities["recipeVersionObserved"] = self.recipe_version
-        return {
-            "sourceRevision": self.source_revision,
-            "hadSavedRecipe": facts.get("recipe") is not None,
-            "processingAvailable": payload.get("processingAvailable"),
-        }
+            require_success(response, payload, "recipe-read")
+            facts, problems = validate_recipe_read(payload, self.photo_id)
+            if problems:
+                raise AcceptanceFailure("recipe-read-invalid", {"problems": problems})
+            reason = payload.get("supportReason")
+            if facts["sourceSupport"] == "unavailable":
+                # A retryable reason is a wait state, not a contract failure:
+                # the Published Library stays authoritative and a later read
+                # serves the source revision once the scan or capacity frees.
+                if reason in RETRYABLE_SUPPORT_REASONS:
+                    if self.monotonic() >= deadline:
+                        raise AcceptanceFailure(
+                            "source-read-pending",
+                            {"supportReason": reason, "polls": polls},
+                        )
+                    polls += 1
+                    time.sleep(self.poll_interval)
+                    continue
+                raise AcceptanceFailure(
+                    "source-unavailable",
+                    {"supportReason": reason},
+                )
+            if facts["sourceSupport"] == "unsupported":
+                raise AcceptanceFailure(
+                    "source-unsupported",
+                    {"profiles": self.capability.get("profiles")},
+                )
+            self.source_revision = facts["sourceRevision"]
+            self.observed_recipe = facts.get("recipe")
+            self.controls = facts.get("controls") or {}
+            recipe = facts.get("recipe") or {}
+            self.recipe_version = recipe.get("recipeVersion")
+            self.identities["sourceRevision"] = self.source_revision
+            self.identities["recipeVersionObserved"] = self.recipe_version
+            return {
+                "sourceRevision": self.source_revision,
+                "hadSavedRecipe": facts.get("recipe") is not None,
+                "processingAvailable": payload.get("processingAvailable"),
+                "readWaits": polls,
+            }
 
     def _baseline_exposure(self) -> float | None:
         if self.observed_recipe and isinstance(

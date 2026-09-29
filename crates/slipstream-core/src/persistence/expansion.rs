@@ -139,7 +139,7 @@ pub(crate) fn expand_library_binding(
     for (index, (id, old_path, new_path)) in plan.originals.iter().enumerate() {
         let changed = transaction
             .execute(
-                "UPDATE original_files SET relative_path=?,capture_metadata_state='pending',capture_order_key=NULL,capture_time_field=NULL,capture_offset_minutes=NULL,capture_source_revision=NULL,capture_make=NULL,capture_model=NULL WHERE id=? AND relative_path=?",
+                "UPDATE original_files SET relative_path=?,capture_metadata_state='pending',capture_order_key=NULL,capture_time_field=NULL,capture_offset_minutes=NULL,capture_source_revision=NULL,camera_identity_state='pending',camera_make=NULL,camera_model=NULL WHERE id=? AND relative_path=?",
                 params![new_path, id, old_path],
             )
             .map_err(|_| PersistenceError::Storage)?;
@@ -196,6 +196,7 @@ pub(crate) fn expand_library_binding(
     {
         return Err(PersistenceError::InvalidExpansion);
     }
+    validate_database(&transaction)?;
     validate_canonical_schema(&transaction, SchemaVersion::V13)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)

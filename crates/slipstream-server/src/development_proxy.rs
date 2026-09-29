@@ -284,7 +284,11 @@ impl DevelopmentProxyManager {
     pub(crate) async fn current_record(&self, photo_id: &str) -> Option<DevelopmentProxyRecord> {
         let (photo, read) = self.read_facts(photo_id).await.ok()?;
         let record = self.library.development_proxy(photo_id).await.ok()??;
-        let expected = self.expectation(&read.current_source_revision, &record.profile_id);
+        // Without a published Capture fact bound to the observed source the
+        // record cannot be revalidated; fail closed instead of accepting a
+        // proxy built from an unpublished identity.
+        let expected =
+            self.expectation(read.current_source_revision.as_deref()?, &record.profile_id);
         if !record.current_against(&expected) {
             return None;
         }
@@ -318,7 +322,14 @@ impl DevelopmentProxyManager {
         let state = if building {
             "building"
         } else if let Some(record) = record.as_ref() {
-            let expected = self.expectation(&read.current_source_revision, &record.profile_id);
+            // A pending publication gives no bound revision to revalidate
+            // against: the record is stale until publication settles.
+            let identity_current =
+                read.current_source_revision
+                    .as_deref()
+                    .is_some_and(|revision| {
+                        record.current_against(&self.expectation(revision, &record.profile_id))
+                    });
             let source_current = if photo.original_available {
                 self.source_hash(&photo)
                     .await
@@ -329,10 +340,7 @@ impl DevelopmentProxyManager {
             } else {
                 true
             };
-            if record.current_against(&expected)
-                && source_current
-                && self.artifact_valid(record).await
-            {
+            if identity_current && source_current && self.artifact_valid(record).await {
                 "current"
             } else {
                 "stale"
@@ -435,8 +443,14 @@ impl DevelopmentProxyManager {
         if !photo.original_available || !read.source_available {
             return Err(ProxyError::Unavailable);
         }
-        if expected_revision != read.current_source_revision {
-            return Err(ProxyError::SourceChanged(read.current_source_revision));
+        let current_revision = read.current_source_revision.as_deref();
+        if current_revision != Some(expected_revision.as_str()) {
+            return Err(match current_revision {
+                Some(actual) => ProxyError::SourceChanged(actual.to_owned()),
+                // No published Capture fact is bound to the observed source:
+                // a retryable publication gap, not a confirmed change.
+                None => ProxyError::Pending,
+            });
         }
         // The approved profile is classified from the staged Original during
         // the build; an existing record's profile is the identity the prior
@@ -447,7 +461,7 @@ impl DevelopmentProxyManager {
             .await
             .map_err(|_| ProxyError::Storage)?
         {
-            let expected = self.expectation(&read.current_source_revision, &record.profile_id);
+            let expected = self.expectation(&expected_revision, &record.profile_id);
             let source_current =
                 self.source_hash(&photo)
                     .await
@@ -466,10 +480,7 @@ impl DevelopmentProxyManager {
                 return Ok(false);
             }
         }
-        let identity = format!(
-            "{}:{}",
-            read.current_source_revision, self.processing.bundle_sha256
-        );
+        let identity = format!("{}:{}", expected_revision, self.processing.bundle_sha256);
         let claim = {
             let mut builds = self.builds.lock().await;
             if let Some(current) = builds.get(&photo_id) {
@@ -653,8 +664,18 @@ impl DevelopmentProxyManager {
             .await
             .map_err(|_| BuildFailure::transient("source revision could not be re-read"))?
             .ok_or_else(|| BuildFailure::terminal("source revision is absent"))?;
-        if current.current_source_revision != *expected_revision {
-            return Err(BuildFailure::terminal("source changed during proxy build"));
+        match current.current_source_revision.as_deref() {
+            Some(revision) if revision == expected_revision.as_str() => {}
+            Some(_) => {
+                return Err(BuildFailure::terminal("source changed during proxy build"));
+            }
+            // No published Capture fact is bound to the observed source: a
+            // retryable publication gap, not a confirmed change.
+            None => {
+                return Err(BuildFailure::transient(
+                    "source revision publication is pending",
+                ));
+            }
         }
         let photo = self
             .library
@@ -815,6 +836,7 @@ impl DevelopmentProxyManager {
 enum ProxyError {
     Storage,
     Unavailable,
+    Pending,
     Unsupported,
     Conflict,
     Capacity,
@@ -844,6 +866,12 @@ fn proxy_error(error: ProxyError, photo_id: &str) -> Response<Body> {
             "resource_unavailable",
             "The Original is unavailable or unreadable",
             serde_json::json!({"photoId":photo_id,"reason":"original-missing"}),
+        ),
+        ProxyError::Pending => cli_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "resource_unavailable",
+            "The source facts are pending publication; retry once the read settles",
+            serde_json::json!({"photoId":photo_id,"reason":crate::edit_recipe::READ_PENDING}),
         ),
         ProxyError::Unsupported => cli_error(
             StatusCode::UNPROCESSABLE_ENTITY,

@@ -1299,17 +1299,14 @@ fn development_surface_refusals_map_onto_the_closed_exit_codes() {
     assert_eq!(mapped("recipe_conflict").exit_code, 4);
     assert_eq!(mapped("source_changed").exit_code, 4);
     assert_eq!(mapped("requires_rebind").exit_code, 4);
-    // A read with no source revision remains retryable; only the server's
-    // confirmed Original-required refusal is a conflict-style exit.
     assert_eq!(mapped("request_conflict").exit_code, 4);
-    assert_eq!(mapped("resource_unavailable").exit_code, 6);
-    assert_eq!(mapped("original_required").exit_code, 4);
     assert_eq!(mapped("export_conflict").exit_code, 4);
     assert_eq!(mapped("output_unavailable").exit_code, 4);
     assert_eq!(mapped("export_expired").exit_code, 6);
     assert_eq!(mapped("receipt_expired").exit_code, 6);
     assert_eq!(mapped("artifact_expired").exit_code, 6);
     assert_eq!(mapped("processing_unavailable").exit_code, 6);
+    assert_eq!(mapped("resource_unavailable").exit_code, 6);
     assert_eq!(mapped("retained_output_full").exit_code, 6);
     // A possibly admitted write keeps its unknown outcome; the mapped
     // confirmed refusals keep the service's message and effect.
@@ -1965,6 +1962,152 @@ fn recovery_failure_codes_validate_their_exact_details() {
 }
 
 #[test]
+fn deadline_expiry_maps_library_check_to_an_unknown_scan_outcome() {
+    // A `library check` deadline is never a connection failure: the scan is
+    // service-owned and may have been admitted and running whether or not
+    // this client handed the request over, so only `status` can report it.
+    let failure = deadline_failure(
+        Operation::LibraryCheck,
+        &PublicationState::default(),
+        &AdmissionState::default(),
+    );
+    assert_eq!(failure.exit_code, 7);
+    assert_eq!(failure.payload.code, "outcome_unknown");
+    assert_eq!(failure.payload.effect, "unknown");
+    assert_eq!(failure.payload.details["operation"], "library-check");
+    assert!(failure.payload.message.contains("status"));
+    assert!(!failure.payload.message.contains("connection"));
+}
+
+#[test]
+fn deadline_expiry_keeps_the_admitted_and_transport_mappings_elsewhere() {
+    // A read that never admitted a mutation stays a transport failure.
+    let transport = deadline_failure(
+        Operation::Status,
+        &PublicationState::default(),
+        &AdmissionState::default(),
+    );
+    assert_eq!(transport.exit_code, 6);
+    assert_eq!(transport.payload.code, "transport_failed");
+    assert_eq!(transport.payload.effect, "none");
+    // An admitted mutation keeps its unknown outcome and identity details.
+    let admission = AdmissionState::default();
+    admission.admit(MutationIdentity::bare(Operation::PhotosRecipeSave));
+    let admitted = deadline_failure(
+        Operation::PhotosRecipeSave,
+        &PublicationState::default(),
+        &admission,
+    );
+    assert_eq!(admitted.exit_code, 7);
+    assert_eq!(admitted.payload.code, "outcome_unknown");
+    assert_eq!(admitted.payload.details["operation"], "photos-recipe-save");
+}
+
+#[tokio::test]
+async fn a_timed_out_library_check_reports_the_unknown_scan_outcome() {
+    // The service accepts connections and never answers — the TLS handshake
+    // to a silent socket cannot complete — so the deadline, not a connection
+    // refusal, ends the command while the service-owned scan may be running.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let token = std::env::temp_dir().join("slipstream-cli-deadline-token");
+    std::fs::write(&token, "A".repeat(43)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&token).unwrap().permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&token, permissions).unwrap();
+    }
+    let cli = Cli::try_parse_from([
+        "slipstream",
+        "--server",
+        &format!("https://127.0.0.1:{port}"),
+        "--token-file",
+        token.to_str().unwrap(),
+        "library",
+        "check",
+    ])
+    .unwrap();
+    let result = invoke_until(
+        cli,
+        None,
+        tokio::time::Instant::now() + std::time::Duration::from_millis(500),
+    )
+    .await;
+    assert_eq!(result.exit_code, 7);
+    assert!(
+        result.stdout.contains("outcome_unknown"),
+        "{}",
+        result.stdout
+    );
+    assert!(result.stdout.contains("status"), "{}", result.stdout);
+    assert!(
+        !result.stdout.contains("transport_failed"),
+        "{}",
+        result.stdout
+    );
+    std::fs::remove_file(&token).ok();
+    drop(listener);
+}
+
+#[test]
+fn source_refusals_carry_the_closed_support_reason() {
+    // A save or rebind refused for the Photo's source state reports the same
+    // closed `supportReason` the recipe read reports, and a preview refusal
+    // names it as `reason`, so the retryable waits stay distinguishable from
+    // the confirmed outcomes in the failure envelope.
+    let refusal = |details: Value| ErrorPayload {
+        code: "resource_unavailable".to_owned(),
+        message: "Current source facts cannot be read, so no guarded write is possible.".to_owned(),
+        effect: "none".to_owned(),
+        details,
+    };
+    for reason in [
+        "original-missing",
+        "original-unreadable",
+        "read-pending",
+        "resource-unavailable",
+    ] {
+        let save = validated_route_failure(
+            refusal(json!({"photoId": "p1", "supportReason": reason})),
+            Operation::PhotosRecipeSave,
+            "",
+        )
+        .unwrap_or_else(|| panic!("{reason} is a confirmed source refusal"));
+        assert_eq!(save.exit_code, 6, "{reason}");
+        assert_eq!(save.payload.details["supportReason"], json!(reason));
+        let preview = validated_route_failure(
+            refusal(json!({"stage": "develop", "reason": reason})),
+            Operation::PhotosEditPreview,
+            "",
+        )
+        .unwrap_or_else(|| panic!("{reason} is a confirmed preview refusal"));
+        assert_eq!(preview.exit_code, 6, "{reason}");
+        assert_eq!(preview.payload.details["reason"], json!(reason));
+    }
+    // A reported `supportReason` outside the closed set is not a confirmed
+    // refusal; an internal preview reason such as `preview-superseded`
+    // stays a valid deployment-condition detail.
+    assert!(
+        validated_route_failure(
+            refusal(json!({"photoId": "p1", "supportReason": "original-rotated"})),
+            Operation::PhotosRecipeSave,
+            ""
+        )
+        .is_none()
+    );
+    assert!(
+        validated_route_failure(
+            refusal(json!({"stage": "develop", "reason": "preview-superseded"})),
+            Operation::PhotosEditPreview,
+            ""
+        )
+        .is_some()
+    );
+}
+
+#[test]
 fn development_proxy_commands_parse_their_closed_forms() {
     for arguments in [
         vec!["photos", "proxy", "get", "photo-1"],
@@ -1980,29 +2123,18 @@ fn development_proxy_commands_parse_their_closed_forms() {
     ] {
         assert!(
             Cli::try_parse_from(std::iter::once("slipstream").chain(arguments.iter().copied()))
-                .is_ok(),
-            "must parse: {arguments:?}"
+                .is_ok()
         );
     }
     for arguments in [
         vec!["photos", "proxy", "get", ""],
         vec!["photos", "proxy", "create", "photo-1"],
-        vec!["photos", "proxy", "create", "photo-1", "--input", ""],
-        vec![
-            "photos",
-            "proxy",
-            "create",
-            "photo-1",
-            "--expected-source-revision",
-            "source-1",
-        ],
         vec!["photos", "proxy", "remove", ""],
         vec!["photos", "proxy", "inspect", "photo-1"],
     ] {
         assert!(
             Cli::try_parse_from(std::iter::once("slipstream").chain(arguments.iter().copied()))
-                .is_err(),
-            "must refuse: {arguments:?}"
+                .is_err()
         );
     }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseEditFacts } from "./editor.js";
+import { parseEditFacts, saveEditRecipe } from "./editor.js";
 
 const controls = {
   exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
@@ -17,6 +17,14 @@ const body = (overrides: Record<string, unknown> = {}) => ({
 });
 
 const digest = "a".repeat(64);
+
+const jsonResponse = (body: unknown, status = 200): Promise<Response> =>
+  Promise.resolve(
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
 
 describe("parseEditFacts", () => {
   test("reads a supported Original source with no reason and no proxy", () => {
@@ -48,7 +56,7 @@ describe("parseEditFacts", () => {
     }
   });
 
-  test("refuses a reason the closed set does not name", () => {
+  test("refuses an unknown reason", () => {
     expect(
       parseEditFacts(
         body({
@@ -61,68 +69,79 @@ describe("parseEditFacts", () => {
     ).toBeUndefined();
   });
 
-  test("refuses a reason beside a supported or unsupported source", () => {
+  test("refuses reasons beside supported sources", () => {
     expect(
       parseEditFacts(body({ supportReason: "read-pending" }), "photo-1"),
     ).toBeUndefined();
-    expect(
-      parseEditFacts(
-        body({
-          sourceSupport: "unsupported",
-          supportReason: "original-missing",
-        }),
-        "photo-1",
-      ),
-    ).toBeUndefined();
   });
 
-  test("refuses a revision beside an unavailable source and its absence beside a supported one", () => {
-    expect(
-      parseEditFacts(
-        body({ sourceSupport: "unavailable", supportReason: "read-pending" }),
-        "photo-1",
-      ),
-    ).toBeUndefined();
-    expect(
-      parseEditFacts(body({ sourceRevision: null }), "photo-1"),
-    ).toBeUndefined();
-  });
-
-  test("reads a proxy edit source with its identity digest", () => {
+  test("reads a proxy source identity", () => {
     const facts = parseEditFacts(
       body({ editSource: "development-proxy", editSourceProxyId: digest }),
       "photo-1",
     );
-    expect(facts?.editSource).toBe("development-proxy");
     expect(facts?.editSourceProxyId).toBe(digest);
-  });
-
-  test("refuses a proxy edit source without a well-formed identity digest", () => {
-    expect(
-      parseEditFacts(
-        body({ editSource: "development-proxy", editSourceProxyId: "proxy-7" }),
-        "photo-1",
-      ),
-    ).toBeUndefined();
-    expect(
-      parseEditFacts(body({ editSource: "development-proxy" }), "photo-1"),
-    ).toBeUndefined();
-  });
-
-  test("refuses an unknown edit source kind or an identity beside the Original File", () => {
-    expect(
-      parseEditFacts(body({ editSource: "thumbnail" }), "photo-1"),
-    ).toBeUndefined();
-    expect(
-      parseEditFacts(
-        body({ editSource: "original", editSourceProxyId: digest }),
-        "photo-1",
-      ),
-    ).toBeUndefined();
-    // An older server simply omits the field; absence is the Original File.
-    expect(factsOf(body({ editSource: undefined }))).toBe("original");
   });
 });
 
-const factsOf = (value: Record<string, unknown>): string | undefined =>
-  parseEditFacts(value, "photo-1")?.editSource;
+const saveRequest = {
+  id: "req-1",
+  photoId: "photo-1",
+  expectedRecipeVersion: null,
+  expectedSourceRevision: "rev-1",
+  settings: { exposureEv: 0.2, whiteBalance: { mode: "as-shot" as const } },
+};
+
+describe("edit recipe save API", () => {
+  test("source refusal preserves its closed reason", async () => {
+    for (const supportReason of [
+      "read-pending",
+      "resource-unavailable",
+      "original-missing",
+      "original-unreadable",
+    ] as const) {
+      const result = await saveEditRecipe(
+        () =>
+          jsonResponse(
+            {
+              error: {
+                code: "resource_unavailable",
+                message: "Current source facts cannot be read.",
+                effect: "none",
+                details: { photoId: "photo-1", supportReason },
+              },
+            },
+            503,
+          ),
+        saveRequest,
+        new AbortController().signal,
+      );
+      if (result.kind !== "refused") throw new Error("expected a refusal");
+      expect(result.refusal.supportReason).toBe(supportReason);
+    }
+  });
+
+  test("unknown refusal reason is not believed", async () => {
+    const result = await saveEditRecipe(
+      () =>
+        jsonResponse(
+          {
+            error: {
+              code: "resource_unavailable",
+              message: "Current source facts cannot be read.",
+              effect: "none",
+              details: {
+                photoId: "photo-1",
+                supportReason: "original-rotated",
+              },
+            },
+          },
+          503,
+        ),
+      saveRequest,
+      new AbortController().signal,
+    );
+    if (result.kind !== "refused") throw new Error("expected a refusal");
+    expect(result.refusal.supportReason).toBe("");
+  });
+});

@@ -346,7 +346,7 @@ pub enum PhotoCommand {
         #[command(subcommand)]
         command: development::RecipeCommand,
     },
-    /// Request a Develop Edit Preview or download its ready rendition.
+    /// Request an Edit Preview for the selected stage or download its ready rendition.
     EditPreview(edit_preview_download::EditPreviewArgs),
     /// Read, build, or remove one Photo's on-demand Development Proxy
     /// against an observed source revision.

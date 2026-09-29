@@ -32,9 +32,9 @@ pub use cache::{
     derivative_cache_key, manifest_identity,
 };
 pub use capture::{
-    CaptureFact, CaptureInspectionError, CaptureMetadataState, CaptureReviewMetadata,
-    CaptureTimeField, MAXIMUM_CAPTURE_METADATA_BYTES, capture_revision_matches_descriptor,
-    capture_source_revision, inspect_review_metadata,
+    CameraIdentity, CaptureFact, CaptureInspectionError, CaptureMetadataState,
+    CaptureReviewMetadata, CaptureTimeField, MAXIMUM_CAPTURE_METADATA_BYTES,
+    capture_revision_matches_descriptor, capture_source_revision, inspect_review_metadata,
 };
 pub use confinement::{LibraryRoot, OriginalCapability, OriginalDeletionOutcome, ScanLimits};
 pub use derivative::{
@@ -97,8 +97,8 @@ pub use preview::{
 };
 pub use reconcile::{ReconciledPhoto, preview_should_preserve, reconcile, selected_source};
 pub use recovery::{
-    AppliedRelocations, ManualOutcome, ManualProposal, MappingBlock, RecoveryContext,
-    RecoveryProgress, RecoveryRecord, RecoverySurvey, RelocationSet, RequestedRelocation,
-    RetireSummary, count_prefix_scope, digest_bytes, evaluate_relocation, evidence_original_ids,
+    AppliedRelocations, ManualOutcome, ManualProposal, MappingBlock, RecoveryProgress,
+    RecoveryRecord, RecoverySurvey, RelocationSet, RequestedRelocation, RetireSummary,
+    count_prefix_scope, digest_bytes, evaluate_relocation, evidence_original_ids,
     parse_location_prefix, plan_manual_relocations, plan_recovery, plan_single_relocation,
 };

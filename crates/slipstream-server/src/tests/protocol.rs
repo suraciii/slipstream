@@ -31,10 +31,19 @@ fn substitute_protocol_captures(
     }
 }
 
-/// Masks the wall-clock `updatedAt` progress timestamp so the exact contract
-/// comparison pins its presence and shape without pinning a clock reading.
+/// Keep the protocol vectors independent of a wall-clock reading. The scan
+/// progress timestamp has its own numeric assertion in the CLI route tests.
 fn mask_updated_at(body: &mut serde_json::Value, name: &str) {
     fn mask_field(object: &mut serde_json::Value, name: &str) {
+        if let Some(updated_ms) = object.get("updatedMs") {
+            assert!(
+                updated_ms.as_u64().is_some(),
+                "{name} updatedMs must be numeric"
+            );
+        }
+        if let Some(entries) = object.as_object_mut() {
+            entries.remove("updatedMs");
+        }
         let Some(updated_at) = object.get("updatedAt").and_then(|value| value.as_u64()) else {
             return;
         };

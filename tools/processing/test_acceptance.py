@@ -156,6 +156,7 @@ class StubDeployment:
         preview_body_override: bytes | None = None,
         list_page_maximum: int = 60,
         query_pages: list | None = None,
+        recipe_pending_first: int = 0,
     ):
         self.capability_payload = {
             "state": capability_state,
@@ -203,6 +204,8 @@ class StubDeployment:
         self.preview_body_override = preview_body_override
         self.list_page_maximum = list_page_maximum
         self.query_pages = query_pages if query_pages is not None else [self.photos]
+        self.recipe_pending_first = recipe_pending_first
+        self.recipe_reads = 0
         self.requests: list[dict] = []
         self.export_recipe_version: str | None = None
         self.artifact_expiry = iso_at_now_plus(7 * 86400)
@@ -222,6 +225,19 @@ class StubDeployment:
         }
 
     def recipe_read(self) -> dict:
+        if self.recipe_pending_first and self.recipe_reads <= self.recipe_pending_first:
+            return {
+                "photoId": PHOTO_ID,
+                "sourceRevision": None,
+                "recipe": None,
+                "sourceSupport": "unavailable",
+                "supportReason": "read-pending",
+                "processingAvailable": False,
+                "controls": {
+                    "exposure": {"minimumEv": -5.0, "maximumEv": 5.0, "stepEv": 0.5},
+                    "whiteBalanceModes": ["as-shot"],
+                },
+            }
         return {
             "photoId": PHOTO_ID,
             "sourceRevision": self.source_revision,
@@ -429,6 +445,7 @@ class StubDeployment:
             if "edit-recipe" in self.disabled_routes:
                 return 404, b"", []
             if method == "GET":
+                self.recipe_reads += 1
                 return 200, json.dumps(self.recipe_read()).encode(), []
             refused = self.validate_save_body(parsed_body)
             if refused is not None:
@@ -773,6 +790,26 @@ class HelperTests(unittest.TestCase):
         self.assertIn("sourceRevision-must-be-null-when-unavailable", problems)
         self.assertIn("supportReason-invalid-for-unavailable", problems)
         _, problems = acceptance.validate_recipe_read(dict(good, supportReason="original-missing"), PHOTO_ID)
+        self.assertIn("supportReason-must-be-null-unless-unavailable", problems)
+        # The closed reason set admits the retryable wait states alongside the
+        # confirmed outcomes, always with a null source revision.
+        for reason in ("read-pending", "resource-unavailable", "original-missing", "original-unreadable"):
+            pending = dict(
+                good,
+                sourceRevision=None,
+                sourceSupport="unavailable",
+                supportReason=reason,
+            )
+            facts, problems = acceptance.validate_recipe_read(pending, PHOTO_ID)
+            self.assertEqual(problems, [])
+            self.assertEqual(facts["sourceSupport"], "unavailable")
+            self.assertIsNone(facts["sourceRevision"])
+        _, problems = acceptance.validate_recipe_read(
+            dict(good, sourceRevision=None, sourceSupport="unavailable", supportReason="queued"),
+            PHOTO_ID,
+        )
+        self.assertIn("supportReason-invalid-for-unavailable", problems)
+        _, problems = acceptance.validate_recipe_read(dict(good, supportReason="read-pending"), PHOTO_ID)
         self.assertIn("supportReason-must-be-null-unless-unavailable", problems)
 
     def test_save_response_validation(self):
@@ -1314,6 +1351,28 @@ class DryRunTests(AcceptanceTestCase):
         self.assertEqual(preview["status"], "fail")
         self.assertEqual(preview["reason"], "preview-render-timeout")
         self.assertGreater(preview["detail"]["polls"], 0)
+
+    def test_recipe_read_waits_through_retryable_pending(self):
+        stub = StubDeployment(recipe_pending_first=2)
+        with RunningStub(stub) as running:
+            code, report, _ = run_main(self.invocation(running))
+        self.assertEqual(code, 0)
+        read = next(step for step in report["steps"] if step["name"] == "read-recipe")
+        self.assertEqual(read["status"], "pass")
+        self.assertEqual(read["detail"]["readWaits"], 2)
+        self.assertEqual(stub.recipe_reads, 3)
+
+    def test_recipe_read_pending_timeout_fails_the_run(self):
+        stub = StubDeployment(recipe_pending_first=10**9)
+        with RunningStub(stub) as running:
+            code, report, _ = run_main(
+                self.invocation(running, ["--settlement-timeout", "0.05"])
+            )
+        self.assertEqual(code, 1)
+        read = next(step for step in report["steps"] if step["name"] == "read-recipe")
+        self.assertEqual(read["status"], "fail")
+        self.assertEqual(read["reason"], "source-read-pending")
+        self.assertEqual(read["detail"]["supportReason"], "read-pending")
 
     def test_wrong_token_fails_with_auth_reason(self):
         with RunningStub(StubDeployment(wrong_token=True)) as stub:

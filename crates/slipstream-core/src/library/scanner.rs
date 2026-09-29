@@ -16,21 +16,6 @@ pub(super) struct Scanner {
     pub(super) state: Arc<(Mutex<ScanState>, Condvar)>,
     pub(super) join: Mutex<Option<JoinHandle<()>>>,
 }
-
-/// Milliseconds since the epoch of the current instant, so Loading Status
-/// can report the last observed progress advance without inventing a rate.
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|value| u64::try_from(value.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or_default()
-}
-
-/// Marks one truthful progress advance.
-fn touch(progress: &mut ScanProgress) {
-    progress.updated_ms = now_ms();
-}
-
 pub(super) fn inspect_capture_facts(
     root: &LibraryRoot,
     native_work: &NativeWorkBudget,
@@ -66,6 +51,11 @@ pub(super) fn inspect_capture_facts(
             original.capture = prior.capture.clone();
             continue;
         }
+        let transient = |prior: Option<&crate::OriginalRecord>| {
+            prior
+                .filter(|prior| prior.capture.source_revision.as_deref() == Some(revision.as_str()))
+                .map_or_else(CaptureFact::pending, |prior| prior.capture.clone())
+        };
         original.capture = match root.original(original.path.clone()) {
             Ok(capability) => {
                 let _permit = native_work.acquire();
@@ -78,10 +68,16 @@ pub(super) fn inspect_capture_facts(
                             original.facts = observation.facts;
                             observation.capture
                         }
+                        // A saturated bounded read is not a read verdict: the
+                        // Photo stays pending for the same revision and the
+                        // next scan retries the inspection.
                         Err(crate::CaptureInspectionError::ResourceLimit) => CaptureFact {
                             source_revision: Some(revision),
                             ..CaptureFact::pending()
                         },
+                        // The bounded fresh attempt is the second and last
+                        // attempt for this scan; an admitted failure keeps
+                        // the documented `failed` fact without a revision.
                         Err(_) => CaptureFact::failed(None),
                     },
                     Err(crate::CaptureInspectionError::ResourceLimit) => CaptureFact {
@@ -91,7 +87,10 @@ pub(super) fn inspect_capture_facts(
                     Err(_) => CaptureFact::failed(Some(revision)),
                 }
             }
-            Err(_) => CaptureFact::failed(Some(revision)),
+            // A confined open failure is not an admitted read verdict for the
+            // current revision: keep the published fact when it still binds
+            // this revision, and otherwise leave the Photo waiting.
+            Err(_) => transient(prior),
         };
     }
 }
@@ -173,38 +172,26 @@ pub(super) fn scanner_main(
                         let fingerprints = persistence
                             .recovery_facts_blocking(evidence_ids)
                             .map_err(LibraryError::from)?;
-                        let mut recovery_progress = crate::recovery::RecoveryProgress::default();
                         {
                             let mut progress = progress.lock().unwrap();
                             progress.phase = ScanPhase::Recovering;
                             touch(&mut progress);
                         }
-                        let recovery_report = {
-                            let progress = Arc::clone(&progress);
-                            move |hashed: u64, hash_total: u64| {
-                                let mut progress = progress.lock().unwrap();
-                                progress.hashed = hashed;
-                                progress.hash_total = Some(hash_total);
-                                touch(&mut progress);
-                            }
+                        // The planner reports hashing progress as it happens,
+                        // so a status read during the plan observes the phase
+                        // moving instead of a zeroed counter held until the end.
+                        let mut reporter = ScanProgressReporter {
+                            progress: progress.clone(),
                         };
                         let recovery = crate::recovery::plan_recovery(
-                            crate::recovery::RecoveryContext {
-                                root: &root,
-                                native_work: &native_work,
-                            },
+                            &root,
+                            &native_work,
                             &result.originals,
                             &previous,
                             &fingerprints,
                             &deleted_originals,
-                            &mut recovery_progress,
-                            &recovery_report,
+                            &mut reporter,
                         );
-                        {
-                            let mut progress = progress.lock().unwrap();
-                            progress.hashed = recovery_progress.hashed;
-                            progress.hash_total = Some(recovery_progress.hash_total);
-                        }
                         {
                             let mut progress = progress.lock().unwrap();
                             progress.phase = ScanPhase::Applying;
@@ -263,4 +250,29 @@ pub(super) fn scanner_main(
         }
     }
     signal.notify_all();
+}
+
+/// Stamps one progress update with the current wall-clock time, so a bounded
+/// status read can tell an advancing phase from a stalled one.
+fn touch(progress: &mut ScanProgress) {
+    progress.updated_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .map(|milliseconds| u64::try_from(milliseconds).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+}
+
+/// Forwards recovery-phase hashing counters into the shared scan progress as
+/// the planner reports them.
+struct ScanProgressReporter {
+    progress: Arc<Mutex<ScanProgress>>,
+}
+
+impl crate::recovery::RecoveryReporter for ScanProgressReporter {
+    fn recovery_progress(&mut self, recovery: crate::recovery::RecoveryProgress) {
+        let mut progress = self.progress.lock().unwrap();
+        progress.hashed = recovery.hashed;
+        progress.hash_total = Some(recovery.hash_total);
+        touch(&mut progress);
+    }
 }

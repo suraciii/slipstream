@@ -22,8 +22,14 @@ CREATE TABLE original_files(
   capture_time_field TEXT CHECK(capture_time_field IS NULL OR capture_time_field IN ('date-time-original','date-time-digitized')),
   capture_offset_minutes INTEGER CHECK(capture_offset_minutes IS NULL OR capture_offset_minutes BETWEEN -840 AND 840),
   capture_source_revision TEXT,
-  capture_make TEXT CHECK(capture_make IS NULL OR (length(capture_make) >= 1 AND length(capture_make) <= 64)),
-  capture_model TEXT CHECK(capture_model IS NULL OR (length(capture_model) >= 1 AND length(capture_model) <= 64))
+  camera_identity_state TEXT NOT NULL DEFAULT 'pending'
+    CHECK(camera_identity_state IN ('pending','observed')),
+  camera_make TEXT CHECK(camera_make IS NULL OR (
+    length(camera_make) > 0 AND length(camera_make) <= 128 AND
+    camera_make NOT GLOB '*[^ -~]*')),
+  camera_model TEXT CHECK(camera_model IS NULL OR (
+    length(camera_model) > 0 AND length(camera_model) <= 128 AND
+    camera_model NOT GLOB '*[^ -~]*'))
 );
 CREATE TABLE photos(
   id TEXT PRIMARY KEY,

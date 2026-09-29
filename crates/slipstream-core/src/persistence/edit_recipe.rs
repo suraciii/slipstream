@@ -4,7 +4,7 @@ use super::{
         parse_white_balance_intent, photo_processing_source, random_uuid_v4,
         white_balance_intent_name, white_balance_intent_values, write_transaction,
     },
-    scan::{parse_capture_fact, parse_error_category, parse_kind},
+    scan::{parse_camera_identity, parse_capture_fact, parse_error_category, parse_kind},
 };
 use crate::{
     EditRecipe, EditRecipeRead, EditRecipeSettings, EditRecipeWriteOutcome, RebindEditRecipe,
@@ -50,7 +50,8 @@ pub(super) fn read_edit_recipe(
             "SELECT o.relative_path,o.size,o.mtime_ms,o.available,p.available,
                     o.kind,o.error_category,
                     o.capture_metadata_state,o.capture_order_key,o.capture_time_field,
-                    o.capture_offset_minutes,o.capture_source_revision,o.capture_make,o.capture_model,
+                    o.capture_offset_minutes,o.capture_source_revision,
+                    o.camera_identity_state,o.camera_make,o.camera_model,
                     e.revision,e.source_revision,e.exposure_ev,e.white_balance_mode,
                     e.temperature_kelvin,e.tint_milli
              FROM photos p JOIN original_files o ON o.id=p.original_id
@@ -71,15 +72,14 @@ pub(super) fn read_edit_recipe(
                     row.get(9)?,
                     row.get(10)?,
                     row.get(11)?,
-                    row.get(12)?,
-                    row.get(13)?,
+                    parse_camera_identity(row.get(12)?, row.get(13)?, row.get(14)?)?,
                 )?;
-                let recipe_revision: Option<String> = row.get(14)?;
-                let recipe_source_revision: Option<String> = row.get(15)?;
-                let exposure_ev: Option<f64> = row.get(16)?;
-                let white_balance_mode: Option<String> = row.get(17)?;
-                let temperature_kelvin: Option<i32> = row.get(18)?;
-                let tint_milli: Option<i32> = row.get(19)?;
+                let recipe_revision: Option<String> = row.get(15)?;
+                let recipe_source_revision: Option<String> = row.get(16)?;
+                let exposure_ev: Option<f64> = row.get(17)?;
+                let white_balance_mode: Option<String> = row.get(18)?;
+                let temperature_kelvin: Option<i32> = row.get(19)?;
+                let tint_milli: Option<i32> = row.get(20)?;
                 let recipe = match (
                     recipe_revision,
                     recipe_source_revision,
@@ -122,9 +122,21 @@ pub(super) fn read_edit_recipe(
     let Some(row) = row else {
         return Ok(None);
     };
-    let current_source_revision =
-        crate::source_revision(&row.relative_path, row.size, row.mtime_ms)
-            .map_err(|_| PersistenceError::Storage)?;
+    // The current source revision is published evidence only: it is named
+    // exactly when the published Capture fact revision is bound to the
+    // durable descriptor of the persisted source facts. Anything else is a
+    // publication gap (a retryable wait state), never a synthesized
+    // revision.
+    let observed_revision = crate::source_revision(&row.relative_path, row.size, row.mtime_ms)
+        .map_err(|_| PersistenceError::Storage)?;
+    let current_source_revision = row
+        .capture
+        .source_revision
+        .as_deref()
+        .filter(|published| {
+            crate::capture_revision_matches_descriptor(published, &observed_revision)
+        })
+        .map(|_| observed_revision);
     Ok(Some(EditRecipeRead {
         recipe: row.recipe,
         current_source_revision,
@@ -286,12 +298,19 @@ pub(super) fn save_edit_recipe(
                 super::development_proxy::read_development_proxy(transaction, &mutation.photo_id)?
                     .is_some_and(|proxy| {
                         proxy.source_revision == mutation.expected_source_revision
-                            && proxy.source_revision == current.current_source_revision
+                            && current.current_source_revision.as_deref()
+                                == Some(proxy.source_revision.as_str())
                     });
             if !guarded {
                 return Ok(EditRecipeWriteOutcome::Unavailable);
             }
-        } else if current.current_source_revision != mutation.expected_source_revision {
+        } else if current.current_source_revision.is_none() {
+            // No published Capture fact is bound to the observed source
+            // facts: a retryable publication gap, not a confirmed change.
+            return Ok(EditRecipeWriteOutcome::Unavailable);
+        } else if current.current_source_revision.as_deref()
+            != Some(mutation.expected_source_revision.as_str())
+        {
             return Ok(EditRecipeWriteOutcome::SourceChanged(current));
         }
         if current
@@ -435,13 +454,19 @@ pub(super) fn rebind_edit_recipe(
         if !available || !current.source_available {
             return Ok(EditRecipeWriteOutcome::Unavailable);
         }
+        if current.current_source_revision.is_none() {
+            // No published Capture fact is bound to the observed source
+            // facts: a retryable publication gap, not a confirmed change.
+            return Ok(EditRecipeWriteOutcome::Unavailable);
+        }
         let Some(recipe) = current.recipe.as_ref() else {
             return Ok(EditRecipeWriteOutcome::MissingRecipe);
         };
         if recipe.revision != mutation.expected_recipe_version {
             return Ok(EditRecipeWriteOutcome::Conflict(current));
         }
-        if current.current_source_revision != mutation.new_source_revision {
+        if current.current_source_revision.as_deref() != Some(mutation.new_source_revision.as_str())
+        {
             return Ok(EditRecipeWriteOutcome::SourceChanged(current));
         }
         if recipe.source_revision == mutation.new_source_revision {
@@ -546,6 +571,7 @@ mod tests {
                 mtime_ms: 1_000.0,
             },
         );
+        connection.execute("UPDATE original_files SET capture_metadata_state='missing',capture_source_revision=? WHERE id='raw-original'", [format!("{}\0fixture-device\0fixture-inode", source_revision("shoot/one.ARW", 17, 1_000.0).unwrap())]).unwrap();
         drop(connection);
 
         let persistence = Persistence::open(
@@ -564,7 +590,10 @@ mod tests {
             .unwrap();
         assert!(initial.recipe.is_none());
         assert!(initial.source_available);
-        assert_eq!(initial.current_source_revision, initial_source);
+        assert_eq!(
+            initial.current_source_revision,
+            Some(initial_source.clone())
+        );
 
         let mutation = SaveEditRecipe {
             photo_id: "raw-photo".to_owned(),
@@ -652,8 +681,8 @@ mod tests {
         let connection = Connection::open(&path).unwrap();
         connection
             .execute(
-                "UPDATE original_files SET size=18,mtime_ms=2_000.0 WHERE id='raw-original'",
-                [],
+                "UPDATE original_files SET size=18,mtime_ms=2_000.0,capture_source_revision=? WHERE id='raw-original'",
+                [format!("{}\0fixture-device\0fixture-inode", source_revision("shoot/one.ARW", 18, 2_000.0).unwrap())],
             )
             .unwrap();
         drop(connection);
@@ -1035,6 +1064,14 @@ mod tests {
             },
         );
         let derived = source_revision("shoot/proxy.ARW", 23, 3_000.0).unwrap();
+        // The published Capture fact is bound to the same source revision
+        // the proxy was derived from, so the offline read names it.
+        connection
+            .execute(
+                "UPDATE original_files SET capture_metadata_state='missing',capture_source_revision=? WHERE id='raw-original'",
+                [format!("{}\0fixture-device\0fixture-inode", derived)],
+            )
+            .unwrap();
         let record = |revision: &str| crate::DevelopmentProxyRecord {
             photo_id: "raw-photo".to_owned(),
             source_revision: revision.to_owned(),
@@ -1103,7 +1140,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!read.source_available);
-        assert_eq!(read.current_source_revision, derived);
+        assert_eq!(
+            read.current_source_revision.as_deref(),
+            Some(derived.as_str())
+        );
         assert_eq!(
             read.recipe
                 .as_ref()

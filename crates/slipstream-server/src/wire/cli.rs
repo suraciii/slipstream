@@ -46,6 +46,7 @@ pub(crate) struct CliScanStatusWire {
     pub publication: Option<String>,
     pub completed: Option<usize>,
     pub total: Option<usize>,
+    pub updated_ms: u64,
     pub last_recovery: Option<ScanRecoveryWire>,
     pub fingerprints: Option<FingerprintProgressWire>,
 }
@@ -58,6 +59,7 @@ impl From<ScanStatusWire> for CliScanStatusWire {
             publication: value.publication,
             completed: value.completed,
             total: value.total,
+            updated_ms: value.updated_ms,
             last_recovery: value.last_recovery,
             fingerprints: value.fingerprints,
         }

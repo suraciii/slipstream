@@ -430,6 +430,10 @@ async fn edit_recipe_reports_unavailable_originals_with_closed_reasons() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error_code(&refused), "resource_unavailable");
+    assert_eq!(
+        refused["error"]["details"]["supportReason"],
+        "original-unreadable"
+    );
     let (status, rebind_refused) = rebind_recipe(
         &router,
         &photo_id,
@@ -442,6 +446,10 @@ async fn edit_recipe_reports_unavailable_originals_with_closed_reasons() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error_code(&rebind_refused), "resource_unavailable");
+    assert_eq!(
+        rebind_refused["error"]["details"]["supportReason"],
+        "original-unreadable"
+    );
 
     // The metadata response reports the absent camera identity as absent
     // values, not as a failure.
@@ -475,6 +483,10 @@ async fn edit_recipe_reports_unavailable_originals_with_closed_reasons() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error_code(&refused), "resource_unavailable");
+    assert_eq!(
+        refused["error"]["details"]["supportReason"],
+        "original-missing"
+    );
     let (status, missing_rebind) = rebind_recipe(
         &router,
         &vanishing_id,
@@ -487,6 +499,10 @@ async fn edit_recipe_reports_unavailable_originals_with_closed_reasons() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error_code(&missing_rebind), "resource_unavailable");
+    assert_eq!(
+        missing_rebind["error"]["details"]["supportReason"],
+        "original-missing"
+    );
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);

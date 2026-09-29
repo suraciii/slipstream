@@ -773,21 +773,25 @@ fn migrate_v10(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
         .map_err(|_| PersistenceError::UnsupportedSchema)
 }
 
-/// Issue: Preview/Edit Readiness. Capture inspection publishes the camera
-/// identity it observed together with the rest of the Capture fact, so a
-/// saturated bounded read can never be mistaken for an unreadable Original
-/// and the last Published Library stays authoritative for Edit support.
-/// Existing rows keep every fact; the identity columns start empty and are
-/// recorded by the next inspection of each revision.
+/// Issue #6a14efa4: the camera identity that names a RAW source class must
+/// be published atomically with the capture facts it was read with, so
+/// source support derives from the same published read evidence instead of
+/// an on-demand metadata read. Existing rows keep their capture facts and
+/// carry `pending` identities; the next scan re-inspects them once (a
+/// pending identity is not reusable) and publishes the observed identity.
 fn migrate_v11(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
     validate_canonical_schema(transaction, SchemaVersion::V11)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction
         .execute_batch(
-            "ALTER TABLE original_files ADD COLUMN capture_make TEXT
-               CHECK(capture_make IS NULL OR (length(capture_make) >= 1 AND length(capture_make) <= 64));
-             ALTER TABLE original_files ADD COLUMN capture_model TEXT
-               CHECK(capture_model IS NULL OR (length(capture_model) >= 1 AND length(capture_model) <= 64));
+            "ALTER TABLE original_files ADD COLUMN camera_identity_state TEXT NOT NULL DEFAULT 'pending'
+               CHECK(camera_identity_state IN ('pending','observed'));
+             ALTER TABLE original_files ADD COLUMN camera_make TEXT CHECK(camera_make IS NULL OR (
+               length(camera_make) > 0 AND length(camera_make) <= 128 AND
+               camera_make NOT GLOB '*[^ -~]*'));
+             ALTER TABLE original_files ADD COLUMN camera_model TEXT CHECK(camera_model IS NULL OR (
+               length(camera_model) > 0 AND length(camera_model) <= 128 AND
+               camera_model NOT GLOB '*[^ -~]*'));
              PRAGMA user_version = 12;",
         )
         .map_err(|_| PersistenceError::Storage)?;
@@ -1266,106 +1270,130 @@ mod tests {
     }
     // album-language-legacy:end v4-migration-test
 
-    #[tokio::test]
-    async fn migrates_v11_to_v13_preserving_every_fact_with_empty_camera_identity() {
+    #[test]
+    fn newer_v14_database_is_rejected_without_changes() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v5.sql"),
+        );
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", 14)
+            .unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(matches!(
+            Persistence::open(
+                state,
+                name,
+                library.canonical_path().to_str().unwrap().to_owned(),
+            ),
+            Err(PersistenceError::NewerSchema)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn v11_migration_preserves_populated_rows_with_pending_camera_identity() {
+        // A populated v11 database keeps every published fact — capture
+        // state, capture revision, and saved recipe — through the v12
+        // migration, while the camera identity starts `pending` with null
+        // make/model until the next scan publishes the observed identity.
+        // The rollback binary cannot read v12, so a verified snapshot is the
+        // only rollback path (see RUNBOOK).
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
             include_str!("../../../../compatibility/sqlite/schema-v11.sql"),
         );
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute(
-                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
-                [library.canonical_path().to_str().unwrap()],
-            )
-            .unwrap();
-        add_recipe_test_photo(
-            &connection,
-            RecipeTestPhoto {
-                original_id: "raw-original",
-                photo_id: "raw-photo",
-                relative_path: "shoot/one.ARW",
-                kind: "raw",
-                available: true,
-                size: 17,
-                mtime_ms: 1_000.0,
-            },
-        );
-        connection
-            .execute(
-                "UPDATE original_files SET capture_metadata_state='known',
-                     capture_order_key='2026-01-01T10:00:00.000000000',
-                     capture_time_field='date-time-original',capture_offset_minutes=60,
-                     capture_source_revision='capture-revision'
-                 WHERE id='raw-original'",
-                [],
-            )
-            .unwrap();
-        drop(connection);
-
-        let persistence = Persistence::open(
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO original_files(
+                       id,relative_path,kind,size,mtime_ms,available,
+                       capture_metadata_state,capture_order_key,capture_time_field,
+                       capture_offset_minutes,capture_source_revision
+                     ) VALUES(
+                       'raw-original','shoot/raw.ARW','raw',11,1.0,1,
+                       'known','2026-09-28T10:00:00.000000000','date-time-original',60,
+                       'published-source-revision'
+                     )",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO photos(id,original_id,available,preview_state,sort_path)
+                     VALUES('photo-one','raw-original',1,'inspection-pending','shoot/raw.ARW')",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO edit_recipes(
+                       photo_id,revision,source_revision,exposure_ev,white_balance_mode
+                     ) VALUES(
+                       'photo-one','recipe-revision-1','published-source-revision',0.0,'as-shot'
+                     )",
+                    [],
+                )
+                .unwrap();
+        }
+        Persistence::open(
             state,
             name,
-            library.canonical_path().to_string_lossy().into_owned(),
+            library.canonical_path().to_str().unwrap().to_owned(),
         )
+        .unwrap()
+        .shutdown()
         .unwrap();
-        let snapshot = persistence
-            .snapshot_receiver()
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
-        // Every earlier fact survives; the identity columns start empty and
-        // wait for the next inspection of the revision.
-        let original = &snapshot.originals[0];
-        assert_eq!(original.capture.state, CaptureMetadataState::Known);
-        assert_eq!(
-            original.capture.order_key.as_deref(),
-            Some("2026-01-01T10:00:00.000000000")
-        );
-        assert_eq!(
-            original.capture.source_revision.as_deref(),
-            Some("capture-revision")
-        );
-        assert_eq!(original.capture.make, None);
-        assert_eq!(original.capture.model, None);
-        persistence.shutdown().unwrap();
-
         let connection = Connection::open(&path).unwrap();
-        assert_eq!(
-            connection
-                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
-                .unwrap(),
-            13
-        );
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 13);
         validate_canonical_schema(&connection, SchemaVersion::V13).unwrap();
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT capture_metadata_state,capture_order_key,capture_make,capture_model,
-                            capture_source_revision
-                     FROM original_files WHERE id='raw-original'",
-                    [],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, Option<String>>(2)?,
-                            row.get::<_, Option<String>>(3)?,
-                            row.get::<_, String>(4)?,
-                        ))
-                    },
-                )
-                .unwrap(),
-            (
-                "known".to_owned(),
-                "2026-01-01T10:00:00.000000000".to_owned(),
-                None,
-                None,
-                "capture-revision".to_owned()
+        let (state, order_key, source_revision, identity_state, make, model): (
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = connection
+            .query_row(
+                "SELECT capture_metadata_state,capture_order_key,capture_source_revision,
+                        camera_identity_state,camera_make,camera_model
+                 FROM original_files WHERE id='raw-original'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
             )
-        );
+            .unwrap();
+        assert_eq!(state, "known");
+        assert_eq!(order_key, "2026-09-28T10:00:00.000000000");
+        assert_eq!(source_revision, "published-source-revision");
+        assert_eq!(identity_state, "pending");
+        assert_eq!(make, None);
+        assert_eq!(model, None);
+        let (revision, recipe_source): (String, String) = connection
+            .query_row(
+                "SELECT revision,source_revision FROM edit_recipes WHERE photo_id='photo-one'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(revision, "recipe-revision-1");
+        assert_eq!(recipe_source, "published-source-revision");
     }
 
     #[tokio::test]
@@ -1624,8 +1652,7 @@ mod tests {
                 field: Some(CaptureTimeField::DateTimeOriginal),
                 offset_minutes: Some(60),
                 source_revision: Some("capture-revision".to_owned()),
-                make: None,
-                model: None,
+                identity: crate::CameraIdentity::Pending,
             }
         );
         let album = persistence.list_albums().await.unwrap().remove(0);

@@ -311,6 +311,125 @@ fn resource_limited_capture_remains_retryable_for_the_same_revision() {
     );
 }
 
+/// An interrupted inspection is not a read verdict for the current revision:
+/// the published fact stays authoritative while it binds the observed
+/// revision, and a Photo without one waits for inspection instead of being
+/// published as a confirmed failure.
+#[test]
+fn an_interrupted_inspection_keeps_the_published_fact_and_otherwise_waits() {
+    let (_base, config) = fixture();
+    fs::write(
+        config.library_root.join("kept.ARW"),
+        raw_capture_fixture("2026:02:03 04:05:06"),
+    )
+    .unwrap();
+    fs::write(
+        config.library_root.join("waiting.ARW"),
+        raw_capture_fixture("2026:02:03 04:05:07"),
+    )
+    .unwrap();
+    let root = LibraryRoot::open(&config.library_root).unwrap();
+    let mut published = root.scan(ScanLimits::default()).unwrap().originals;
+    inspect_capture_facts(
+        &root,
+        &NativeWorkBudget::new(),
+        &mut published,
+        &[],
+        &Mutex::new(ScanProgress::default()),
+    );
+    let bound = published
+        .iter()
+        .find(|original| original.path.as_str() == "kept.ARW")
+        .unwrap();
+    assert_eq!(bound.capture.state, crate::CaptureMetadataState::Known);
+    let previous = vec![crate::OriginalRecord {
+        id: "kept-original".to_owned(),
+        relative_path: bound.path.clone(),
+        kind: bound.kind,
+        facts: bound.facts,
+        available: true,
+        error_category: None,
+        error_message: None,
+        capture: bound.capture.clone(),
+    }];
+    let published_fact = bound.capture.clone();
+
+    // Discovery sees both Originals at unchanged facts; the Library then
+    // stops before either one can be read.
+    let mut originals = root.scan(ScanLimits::default()).unwrap().originals;
+    assert_eq!(originals.len(), 2);
+    root.close();
+    inspect_capture_facts(
+        &root,
+        &NativeWorkBudget::new(),
+        &mut originals,
+        &previous,
+        &Mutex::new(ScanProgress::default()),
+    );
+
+    let kept = originals
+        .iter()
+        .find(|original| original.path.as_str() == "kept.ARW")
+        .unwrap();
+    assert_eq!(kept.capture, published_fact);
+    assert!(kept.capture.source_revision.is_some());
+    let waiting = originals
+        .iter()
+        .find(|original| original.path.as_str() == "waiting.ARW")
+        .unwrap();
+    assert_eq!(waiting.capture.state, crate::CaptureMetadataState::Pending);
+    assert_eq!(waiting.capture.source_revision, None);
+}
+
+/// Native-work admission is not an inspection outcome. A saturated budget
+/// defers the attempt until capacity frees, and the retry then publishes the
+/// real fact instead of a failure.
+#[test]
+fn a_saturated_native_work_budget_defers_inspection_without_a_failure_fact() {
+    let (_base, config) = fixture();
+    fs::write(
+        config.library_root.join("deferred.ARW"),
+        raw_capture_fixture("2026:02:03 04:05:06"),
+    )
+    .unwrap();
+    let root = LibraryRoot::open(&config.library_root).unwrap();
+    let mut originals = root.scan(ScanLimits::default()).unwrap().originals;
+    let discovery_facts = originals[0].facts;
+
+    let budget = NativeWorkBudget::new();
+    let mut held = Vec::new();
+    while let Some(permit) = budget.try_acquire() {
+        held.push(permit);
+    }
+    assert!(!held.is_empty());
+
+    let progress = Mutex::new(ScanProgress::default());
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            inspect_capture_facts(&root, &budget, &mut originals, &[], &progress);
+            done.send(()).unwrap();
+        });
+        assert!(
+            matches!(
+                finished.recv_timeout(std::time::Duration::from_millis(250)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "a saturated budget waits for admission instead of recording an outcome"
+        );
+        held.clear();
+        finished
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("inspection resumes once capacity frees");
+    });
+
+    assert_eq!(originals[0].facts, discovery_facts);
+    assert_eq!(
+        originals[0].capture.state,
+        crate::CaptureMetadataState::Known
+    );
+}
+
 #[tokio::test]
 async fn fresh_capture_publication_preserves_identity_decisions_album_order_and_resume() {
     let (_base, config) = fixture();
@@ -1741,13 +1860,13 @@ fn seed_fingerprint(base: &TempTree, relative_path: &str, bytes: &[u8]) {
 #[tokio::test]
 async fn scan_recovery_follows_a_unique_exact_candidate() {
     let (base, initial_config) = fixture();
-    let raw_bytes = b"raw-bytes-a";
-    fs::write(base.0.join("originals/a.ARW"), raw_bytes).unwrap();
+    let raw_bytes = raw_capture_fixture("2026:02:03 04:05:06");
+    fs::write(base.0.join("originals/a.ARW"), &raw_bytes).unwrap();
     let library = Library::open(initial_config).unwrap();
     let first = library.scan().await.unwrap();
     let photo_id = first.photos[0].id.clone();
     let current = library.edit_recipe(&photo_id).await.unwrap().unwrap();
-    let original_source_revision = current.current_source_revision;
+    let original_source_revision = current.current_source_revision.expect("published source");
     let saved = library
         .save_edit_recipe(crate::SaveEditRecipe {
             photo_id: photo_id.clone(),
@@ -1766,7 +1885,7 @@ async fn scan_recovery_follows_a_unique_exact_candidate() {
         outcome => panic!("first recipe save should succeed, got {outcome:?}"),
     };
     library.shutdown().unwrap();
-    seed_fingerprint(&base, "a.ARW", raw_bytes);
+    seed_fingerprint(&base, "a.ARW", &raw_bytes);
     fs::create_dir(base.0.join("originals/moved")).unwrap();
     fs::rename(
         base.0.join("originals/a.ARW"),
@@ -1798,8 +1917,8 @@ async fn scan_recovery_follows_a_unique_exact_candidate() {
     assert_eq!(recovered_recipe.revision, saved.revision);
     assert_eq!(recovered_recipe.settings, saved.settings);
     assert_ne!(
-        recovered.current_source_revision,
-        recovered_recipe.source_revision
+        recovered.current_source_revision.as_deref(),
+        Some(recovered_recipe.source_revision.as_str())
     );
     assert!(matches!(
         library
@@ -1807,7 +1926,9 @@ async fn scan_recovery_follows_a_unique_exact_candidate() {
                 photo_id: photo_id.clone(),
                 request_id: "library-stale-save".to_owned(),
                 expected_recipe_version: Some(saved.revision),
-                expected_source_revision: recovered.current_source_revision,
+                expected_source_revision: recovered
+                    .current_source_revision
+                    .expect("recovered source"),
                 settings: crate::EditRecipeSettings {
                     exposure_ev: 1.0,
                     white_balance: crate::WhiteBalanceIntent::AsShot,

@@ -477,7 +477,7 @@
     {
       "type": "table",
       "name": "original_files",
-      "sql": "createtableoriginal_files(idtextprimarykey,relative_pathtextnotnullunique,kindtextnotnullcheck(kindin('raw','jpeg')),sizeintegernotnullcheck(size>=0),mtime_msrealnotnullcheck(mtime_ms>=0),availableintegernotnullcheck(availablein(0,1)),error_categorytextcheck(error_categoryisnullorerror_categoryin('unreadable','changed')),error_messagetextcheck(error_messageisnullorlength(error_message)<=120),capture_metadata_statetextnotnulldefault'pending'check(capture_metadata_statein('pending','known','missing','invalid','failed')),capture_order_keytextcheck(capture_order_keyisnullor(length(capture_order_key)=29andsubstr(capture_order_key,5,1)='-'andsubstr(capture_order_key,8,1)='-'andsubstr(capture_order_key,11,1)='t'andsubstr(capture_order_key,14,1)=':'andsubstr(capture_order_key,17,1)=':'andsubstr(capture_order_key,20,1)='.'andreplace(replace(replace(replace(capture_order_key,'-',''),':',''),'t',''),'.','')notglob'*^0-9*')),capture_time_fieldtextcheck(capture_time_fieldisnullorcapture_time_fieldin('date-time-original','date-time-digitized')),capture_offset_minutesintegercheck(capture_offset_minutesisnullorcapture_offset_minutesbetween-840and840),capture_source_revisiontext,capture_maketextcheck(capture_makeisnullor(length(capture_make)>=1andlength(capture_make)<=64)),capture_modeltextcheck(capture_modelisnullor(length(capture_model)>=1andlength(capture_model)<=64)))",
+      "sql": "createtableoriginal_files(idtextprimarykey,relative_pathtextnotnullunique,kindtextnotnullcheck(kindin('raw','jpeg')),sizeintegernotnullcheck(size>=0),mtime_msrealnotnullcheck(mtime_ms>=0),availableintegernotnullcheck(availablein(0,1)),error_categorytextcheck(error_categoryisnullorerror_categoryin('unreadable','changed')),error_messagetextcheck(error_messageisnullorlength(error_message)<=120),capture_metadata_statetextnotnulldefault'pending'check(capture_metadata_statein('pending','known','missing','invalid','failed')),capture_order_keytextcheck(capture_order_keyisnullor(length(capture_order_key)=29andsubstr(capture_order_key,5,1)='-'andsubstr(capture_order_key,8,1)='-'andsubstr(capture_order_key,11,1)='t'andsubstr(capture_order_key,14,1)=':'andsubstr(capture_order_key,17,1)=':'andsubstr(capture_order_key,20,1)='.'andreplace(replace(replace(replace(capture_order_key,'-',''),':',''),'t',''),'.','')notglob'*^0-9*')),capture_time_fieldtextcheck(capture_time_fieldisnullorcapture_time_fieldin('date-time-original','date-time-digitized')),capture_offset_minutesintegercheck(capture_offset_minutesisnullorcapture_offset_minutesbetween-840and840),capture_source_revisiontext,camera_identity_statetextnotnulldefault'pending'check(camera_identity_statein('pending','observed')),camera_maketextcheck(camera_makeisnullor(length(camera_make)>0andlength(camera_make)<=128andcamera_makenotglob'*^-~*')),camera_modeltextcheck(camera_modelisnullor(length(camera_model)>0andlength(camera_model)<=128andcamera_modelnotglob'*^-~*')))",
       "columns": [
         {
           "name": "id",
@@ -571,14 +571,21 @@
           "primaryKey": 0
         },
         {
-          "name": "capture_make",
+          "name": "camera_identity_state",
+          "type": "TEXT",
+          "notNull": true,
+          "default": "'pending'",
+          "primaryKey": 0
+        },
+        {
+          "name": "camera_make",
           "type": "TEXT",
           "notNull": false,
           "default": null,
           "primaryKey": 0
         },
         {
-          "name": "capture_model",
+          "name": "camera_model",
           "type": "TEXT",
           "notNull": false,
           "default": null,

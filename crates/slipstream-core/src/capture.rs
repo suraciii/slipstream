@@ -58,72 +58,33 @@ pub struct CaptureFact {
     pub field: Option<CaptureTimeField>,
     pub offset_minutes: Option<i16>,
     pub source_revision: Option<String>,
-    /// The camera identity observed for `source_revision`. Make and model
-    /// are recorded together or not at all, and only an inspection that
-    /// completed for that revision may record one. They are the published
-    /// evidence a RAW Photo's source class is derived from, so a saturated
-    /// bounded read can never be mistaken for an unreadable Original.
-    pub make: Option<String>,
-    pub model: Option<String>,
+    pub identity: CameraIdentity,
 }
 
-impl CaptureFact {
-    pub fn pending() -> Self {
-        Self {
-            state: CaptureMetadataState::Pending,
-            order_key: None,
-            field: None,
-            offset_minutes: None,
-            source_revision: None,
-            make: None,
-            model: None,
-        }
-    }
+/// The camera identity published by one completed capture inspection of a
+/// source revision. The identity names the source class of a RAW Original,
+/// so it is captured by the same bounded read as the Capture Time and is
+/// published atomically with the revision it describes.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum CameraIdentity {
+    /// No completed identity observation is bound to the current source
+    /// revision yet: the inspection has not run, or it has not completed
+    /// for the revision that the persisted facts describe.
+    #[default]
+    Pending,
+    /// A completed observation. `make` and `model` are the recorded camera
+    /// strings, or `None` when the completed bounded read found no camera
+    /// identity, so the class cannot be named.
+    Observed {
+        make: Option<String>,
+        model: Option<String>,
+    },
+}
 
-    pub fn failed(source_revision: Option<String>) -> Self {
-        Self {
-            state: CaptureMetadataState::Failed,
-            order_key: None,
-            field: None,
-            offset_minutes: None,
-            source_revision,
-            make: None,
-            model: None,
-        }
-    }
-
-    fn completed(
-        state: CaptureMetadataState,
-        order_key: Option<String>,
-        field: Option<CaptureTimeField>,
-        offset_minutes: Option<i16>,
-        source_revision: String,
-        review: &CaptureReviewMetadata,
-    ) -> Self {
-        // A partial identity cannot name a source class, so an inspection
-        // records make and model only when both halves were observed.
-        let identity = match (&review.make, &review.model) {
-            (Some(make), Some(model)) => (Some(make.clone()), Some(model.clone())),
-            _ => (None, None),
-        };
-        Self {
-            state,
-            order_key,
-            field,
-            offset_minutes,
-            source_revision: Some(source_revision),
-            make: identity.0,
-            model: identity.1,
-        }
-    }
-
-    pub(crate) fn is_reusable_for(&self, source_revision: &str) -> bool {
-        matches!(
-            self.state,
-            CaptureMetadataState::Known
-                | CaptureMetadataState::Missing
-                | CaptureMetadataState::Invalid
-        ) && self.source_revision.as_deref() == Some(source_revision)
+impl CameraIdentity {
+    /// True when a completed observation is bound to the current revision.
+    pub fn is_observed(&self) -> bool {
+        matches!(self, Self::Observed { .. })
     }
 }
 
@@ -140,6 +101,63 @@ pub struct CaptureReviewMetadata {
     /// source class of a RAW Original and are not user-editable facts.
     pub make: Option<String>,
     pub model: Option<String>,
+}
+
+impl CaptureFact {
+    pub fn pending() -> Self {
+        Self {
+            state: CaptureMetadataState::Pending,
+            order_key: None,
+            field: None,
+            offset_minutes: None,
+            source_revision: None,
+            identity: CameraIdentity::Pending,
+        }
+    }
+
+    pub fn failed(source_revision: Option<String>) -> Self {
+        Self {
+            state: CaptureMetadataState::Failed,
+            order_key: None,
+            field: None,
+            offset_minutes: None,
+            source_revision,
+            identity: CameraIdentity::Pending,
+        }
+    }
+
+    fn completed(
+        state: CaptureMetadataState,
+        order_key: Option<String>,
+        field: Option<CaptureTimeField>,
+        offset_minutes: Option<i16>,
+        source_revision: String,
+        identity: CameraIdentity,
+    ) -> Self {
+        Self {
+            state,
+            order_key,
+            field,
+            offset_minutes,
+            source_revision: Some(source_revision),
+            identity,
+        }
+    }
+
+    /// A completed capture fact is reusable for one source revision when its
+    /// completed inspection is bound to that revision and its camera
+    /// identity observation is published. A pending identity is not
+    /// reusable, so the next scan re-inspects and publishes it instead of
+    /// carrying an unobserved identity forward.
+    pub(crate) fn is_reusable_for(&self, source_revision: &str) -> bool {
+        matches!(
+            self.state,
+            CaptureMetadataState::Known
+                | CaptureMetadataState::Missing
+                | CaptureMetadataState::Invalid
+        ) && self.source_revision.as_deref() == Some(source_revision)
+            && self.identity.is_observed()
+    }
 }
 
 #[derive(Debug)]
@@ -339,7 +357,7 @@ fn complete_capture(
             Some(field),
             offset_minutes,
             source_revision,
-            &review,
+            camera_identity(&review),
         ),
         ParseOutcome::Missing { review } => CaptureFact::completed(
             CaptureMetadataState::Missing,
@@ -347,7 +365,7 @@ fn complete_capture(
             None,
             None,
             source_revision,
-            &review,
+            camera_identity(&review),
         ),
         ParseOutcome::Invalid { review } => CaptureFact::completed(
             CaptureMetadataState::Invalid,
@@ -355,13 +373,25 @@ fn complete_capture(
             None,
             None,
             source_revision,
-            &review,
+            camera_identity(&review),
         ),
     };
     Ok(CaptureObservation {
         facts: observation.facts,
         capture,
     })
+}
+
+/// The camera identity of one completed parse. Every completed outcome
+/// carries the review view built from the same bounded read, so the
+/// identity is bound to the same source revision as the Capture Time. A
+/// completed read that yields no camera strings is an observed absence,
+/// not a pending one: the bounded reader cannot name the class.
+fn camera_identity(review: &CaptureReviewMetadata) -> CameraIdentity {
+    CameraIdentity::Observed {
+        make: review.make.clone(),
+        model: review.model.clone(),
+    }
 }
 
 /// Inspects review facts from one already-confined Original descriptor. A

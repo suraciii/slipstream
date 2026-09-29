@@ -298,6 +298,8 @@ pub(super) fn validate_photo_state_batch_mutation(
 }
 
 type Reply<T> = oneshot::Sender<Result<T, PersistenceError>>;
+type EditRecipeSurfaceReceiver =
+    oneshot::Receiver<Result<Option<(PhotoRead, EditRecipeRead)>, PersistenceError>>;
 
 /// Bounded per-Photo Album membership query result.
 type PhotoAlbums = Result<Option<Vec<PhotoAlbumMembership>>, PersistenceError>;
@@ -371,6 +373,10 @@ pub(super) enum Command {
     ReadPhoto {
         photo_id: String,
         reply: Reply<Option<PhotoRead>>,
+    },
+    ReadEditRecipeSurface {
+        photo_id: String,
+        reply: Reply<Option<(PhotoRead, EditRecipeRead)>>,
     },
     ReadEditRecipe {
         photo_id: String,
@@ -837,6 +843,18 @@ impl Persistence {
     {
         let (send, receive) = oneshot::channel();
         self.submit(Command::SaveEditRecipe(mutation, send))?;
+        Ok(receive)
+    }
+
+    pub(crate) fn edit_recipe_surface_receiver(
+        &self,
+        photo_id: &str,
+    ) -> Result<EditRecipeSurfaceReceiver, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::ReadEditRecipeSurface {
+            photo_id: photo_id.to_owned(),
+            reply: send,
+        })?;
         Ok(receive)
     }
 
@@ -1803,6 +1821,22 @@ fn owner_main(
             }
             Command::ReadPhoto { photo_id, reply } => {
                 let _ = reply.send(queries::read_photo(&connection, &versions, &photo_id));
+            }
+            Command::ReadEditRecipeSurface { photo_id, reply } => {
+                // One serialized owner operation: the Photo facts and the
+                // recipe read below cannot straddle a scan publication, so
+                // every guard derives from a single published state.
+                let _ = reply.send(
+                    queries::read_photo(&connection, &versions, &photo_id).and_then(|photo| {
+                        photo
+                            .map(|photo| {
+                                edit_recipe::read_edit_recipe(&connection, &photo_id)
+                                    .map(|read| read.map(|read| (photo, read)))
+                            })
+                            .transpose()
+                            .map(|surface| surface.flatten())
+                    }),
+                );
             }
             Command::ReadEditRecipe { photo_id, reply } => {
                 let _ = reply.send(edit_recipe::read_edit_recipe(&connection, &photo_id));

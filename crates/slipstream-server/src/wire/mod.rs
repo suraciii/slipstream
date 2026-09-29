@@ -59,6 +59,8 @@ pub struct ScanStatusWire {
     pub completed: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<usize>,
+    /// Last scanner progress update in Unix milliseconds; zero before a scan starts.
+    pub updated_ms: u64,
     /// The committed recovery result of the most recent completed scan, once
     /// one has completed since the server started.
     #[serde(skip_serializing_if = "Option::is_none")]
