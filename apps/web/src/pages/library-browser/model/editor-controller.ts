@@ -440,13 +440,18 @@ export function createEditorController(
     const status = presented.status;
     if (status.startsWith("The save outcome is unknown"))
       return "Checking result…";
-    if (status.startsWith("The save was refused"))
+    if (
+      status.startsWith("The save was refused") ||
+      (presented.dirty && !presented.saving)
+    )
       return "Could not update — Retry";
-    if (presented.saving || presented.dirty) return "Saving…";
+    if (presented.saving) return "Saving…";
     if (status.startsWith("This deployment does not admit the white-balance"))
       return "This white-balance mode is not available for this Photo.";
     if (status.startsWith("This deployment does not admit temperature"))
       return "Temperature and tint are not available for this Photo.";
+    if (presented.canEdit && !presented.processingAvailable)
+      return "Processing is not available for this Photo right now.";
     if (
       editorStage !== "camera" &&
       presented.canEdit &&
@@ -494,7 +499,9 @@ export function createEditorController(
         filmUnavailableReason ||
         (!presented.canEdit && presented.photoId !== ""
           ? "Film is not available for this Photo."
-          : ""),
+          : !presented.processingAvailable && presented.photoId !== ""
+            ? "Film is temporarily unavailable for this Photo."
+            : ""),
       editSourceReadiness: presented.editSourceReadiness,
       editSourceKind: presented.editSourceKind,
       sourceFactNote: sourceFactNote(
@@ -579,6 +586,8 @@ export function createEditorController(
         artifact: editorExportArtifact,
         canSubmit:
           exportable &&
+          !presented.saving &&
+          !presented.dirty &&
           (editorStage !== "film" || currentFilm) &&
           editorExportState !== "submitting" &&
           editorExportState !== "outcome-unknown",

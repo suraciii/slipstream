@@ -380,6 +380,141 @@ test("an uncertain edit reports checking instead of Saving", async ({
   await expect(page.locator("[data-photo-editor-status]")).toHaveText(
     "Checking result…",
   );
+  await expect(
+    page.locator("[data-photo-editor-export-submit]"),
+  ).toBeDisabled();
+});
+
+test("a transport-lost edit offers a retry instead of remaining on Saving", async ({
+  page,
+}) => {
+  let writes = 0;
+  let savedExposure = 0;
+  let savedVersion = "recipe-1";
+  await page.route("**/api/processing/capability", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        state: "ready",
+        stages: { develop: "ready", film: "unavailable" },
+        profiles: [],
+      }),
+    }),
+  );
+  await page.route("**/api/photos/*/edit-recipe", (route) => {
+    if (route.request().method() === "POST") {
+      writes += 1;
+      if (writes === 1) return route.abort("failed");
+      savedExposure = 0.5;
+      savedVersion = "recipe-2";
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          outcome: "saved",
+          recipeVersion: savedVersion,
+          sourceRevision: "source-1",
+        }),
+      });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sourceSupport: "supported",
+        supportReason: null,
+        sourceRevision: "source-1",
+        recipe: {
+          recipeVersion: savedVersion,
+          exposureEv: savedExposure,
+          whiteBalance: { mode: "as-shot" },
+        },
+        processingAvailable: true,
+        controls: {
+          exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
+          whiteBalanceModes: ["as-shot"],
+        },
+      }),
+    });
+  });
+  await page.goto(running.url);
+  await expect(page.locator("[data-grid-status]")).toContainText(
+    "Ready · 2 Photos",
+  );
+  await page.locator('[data-photo-index="0"]').click();
+  await openEdit(page);
+  const exposure = page.locator("[data-photo-editor-exposure]");
+  await expect(exposure).toBeEnabled();
+  await exposure.evaluate((element: HTMLInputElement) => {
+    element.value = "0.5";
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await expect(page.locator("[data-photo-editor-status]")).toHaveText(
+    "Could not update — Retry",
+  );
+  expect(writes).toBe(1);
+  await page.locator("[data-photo-editor-refresh]").click();
+  await expect.poll(() => writes).toBe(2);
+  await expect(page.locator("[data-photo-editor-detail]")).toHaveText("Saved.");
+  await expect(page.locator("[data-photo-editor-exposure-value]")).toHaveText(
+    "0.500 EV",
+  );
+});
+
+test("a Photo without processing does not offer Film or claim Ready", async ({
+  page,
+}) => {
+  await page.route("**/api/processing/capability", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        state: "ready",
+        stages: { develop: "ready", film: "ready" },
+        profiles: [],
+      }),
+    }),
+  );
+  await page.route("**/api/photos/*/edit-recipe", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sourceSupport: "supported",
+        supportReason: null,
+        sourceRevision: "source-1",
+        recipe: {
+          recipeVersion: "recipe-1",
+          exposureEv: 0,
+          whiteBalance: { mode: "as-shot" },
+        },
+        processingAvailable: false,
+        controls: {
+          exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
+          whiteBalanceModes: ["as-shot"],
+        },
+      }),
+    }),
+  );
+  await page.goto(running.url);
+  await expect(page.locator("[data-grid-status]")).toContainText(
+    "Ready · 2 Photos",
+  );
+  await page.locator('[data-photo-index="0"]').click();
+  await openEdit(page);
+  await expect(page.locator("[data-photo-editor-exposure]")).toBeEnabled();
+  await expect(page.locator('[data-photo-editor-stage="film"]')).toBeDisabled();
+  await expect(page.locator("[data-photo-editor-stage-note]")).toContainText(
+    "Film is temporarily unavailable for this Photo.",
+  );
+  await expect(page.locator("[data-photo-editor-status]")).toHaveText(
+    "Processing is not available for this Photo right now.",
+  );
+  await expect(
+    page.locator("[data-photo-editor-export-submit]"),
+  ).toBeDisabled();
 });
 
 test("Original reference ignores an earlier edit preview response", async ({
@@ -465,14 +600,27 @@ test("Original reference ignores an earlier edit preview response", async ({
     await page.locator('[data-photo-index="0"]').click();
     await openEdit(page);
     await previewRequest;
+    await expect(page.locator("[data-stage] img")).toBeVisible();
+    const cameraPreview = await page
+      .locator("[data-stage] img")
+      .getAttribute("src");
+    expect(cameraPreview).toBeTruthy();
     const original = page.locator('[data-photo-editor-stage="camera"]');
     await original.click();
     await expect(original).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("[data-stage] img")).toHaveAttribute(
+      "src",
+      cameraPreview!,
+    );
     releasePreview?.();
     await settled;
     await expect(
       page.locator("[data-photo-editor-preview-image]"),
     ).toBeHidden();
+    await expect(page.locator("[data-stage] img")).toHaveAttribute(
+      "src",
+      cameraPreview!,
+    );
   } finally {
     releasePreview?.();
   }

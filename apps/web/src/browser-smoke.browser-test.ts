@@ -1196,7 +1196,10 @@ test("the Edit surface explains a deployment without processing and attempts no 
   const running = await server(base, root);
   await startReview(page, running.url, "All Photos");
   await openPhotoToolsView(page, "edit");
-  await expect(page.locator("[data-photo-editor-capability]")).toBeHidden();
+  await page.locator(".photo-editor-details summary").click();
+  await expect(page.locator("[data-photo-editor-capability]")).toContainText(
+    "Editing previews and Export are not enabled in this deployment.",
+  );
   await expect(page.locator("[data-photo-editor-status]")).toContainText(
     "not supported for editing",
   );
