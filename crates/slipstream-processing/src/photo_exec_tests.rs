@@ -2,6 +2,7 @@ use super::*;
 
 use crate::protocol::{PHOTO_MODE, PHOTO_PROTOCOL_VERSION};
 use std::{
+    collections::BTreeMap,
     os::unix::fs::OpenOptionsExt,
     time::{SystemTime, UNIX_EPOCH},
 };
