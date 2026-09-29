@@ -1,6 +1,7 @@
 import "./library-browser.css";
 
 import { createModalSurfaces } from "./modal-surface.js";
+import { gridThumbnailTarget } from "./grid-thumbnail-target.js";
 import {
   createRemovedPanels,
   type RemovedPanelViewModel,
@@ -374,6 +375,10 @@ export interface GridThumbnailTarget {
   onerror: GlobalEventHandlers["onerror"];
   removeAttribute(name: string): void;
   setDeliveryFailed(failed: boolean): void;
+  /// Reports the terminal Preview fact the Thumbnail endpoint answered with,
+  /// so the cell presents Preview unavailability or failure instead of a
+  /// delivery failure.
+  setPreviewState(state: "unavailable" | "failed"): void;
 }
 
 interface ReviewImageTarget {
@@ -2235,8 +2240,11 @@ ${RECOVERY_PANEL_TEMPLATE}
       deliveryFailed: false,
       thumbnail: undefined,
     };
+    let previewOverride: GridPhotoPreview | undefined;
+    const presentedPhoto = (): GridPhotoViewModel =>
+      previewOverride ? { ...photo, preview: previewOverride } : photo;
     const presentFacts = () => {
-      const values = gridPhotoFacts(photo, rendered.deliveryFailed);
+      const values = gridPhotoFacts(presentedPhoto(), rendered.deliveryFailed);
       facts.textContent = values.join(" · ");
       facts.hidden = values.length === 0;
       cell.setAttribute(
@@ -2253,7 +2261,7 @@ ${RECOVERY_PANEL_TEMPLATE}
     presentFacts();
     rendered.signature = gridCellSignature(
       index,
-      photo,
+      presentedPhoto(),
       rendered.deliveryFailed,
     );
     // Only a recorded decision earns a badge. An empty badge on every
@@ -2281,11 +2289,28 @@ ${RECOVERY_PANEL_TEMPLATE}
       const binding: GridThumbnailBinding = {
         photoId: photo.id,
         preview: photo.preview,
-        target: gridThumbnailTarget(image, (failed) => {
-          rendered.deliveryFailed = failed;
-          rendered.signature = gridCellSignature(index, photo, failed);
-          presentFacts();
-        }),
+        target: gridThumbnailTarget(
+          image,
+          (failed) => {
+            rendered.deliveryFailed = failed;
+            rendered.signature = gridCellSignature(
+              index,
+              presentedPhoto(),
+              failed,
+            );
+            presentFacts();
+          },
+          (state) => {
+            previewOverride = { state };
+            rendered.deliveryFailed = false;
+            rendered.signature = gridCellSignature(
+              index,
+              presentedPhoto(),
+              false,
+            );
+            presentFacts();
+          },
+        ),
       };
       rendered.thumbnail = binding;
       bindThumbnail(binding);
@@ -2562,10 +2587,19 @@ ${RECOVERY_PANEL_TEMPLATE}
       const binding: GridThumbnailBinding = {
         photoId: photo.id,
         preview: photo.preview,
-        target: gridThumbnailTarget(image, (failed) => {
-          rendered.deliveryFailed = failed;
-          rendered.signature = filmstripCellSignature(cell, total, failed);
-        }),
+        target: gridThumbnailTarget(
+          image,
+          (failed) => {
+            rendered.deliveryFailed = failed;
+            rendered.signature = filmstripCellSignature(cell, total, failed);
+          },
+          // The strip presents no fact line; a terminal Preview answer just
+          // clears any delivery-failure reading.
+          () => {
+            rendered.deliveryFailed = false;
+            rendered.signature = filmstripCellSignature(cell, total, false);
+          },
+        ),
       };
       rendered.thumbnail = binding;
       bindThumbnail(binding);
@@ -3985,41 +4019,6 @@ function filmstripCellSignature(
     cell.current ? "current" : "neighbor",
     photo ? gridCellSignature(cell.index, photo, deliveryFailed) : "loading",
   ].join("|");
-}
-function gridThumbnailTarget(
-  image: HTMLImageElement,
-  setDeliveryFailed: (failed: boolean) => void,
-): GridThumbnailTarget {
-  return {
-    get complete() {
-      return image.complete;
-    },
-    get isConnected() {
-      return image.isConnected;
-    },
-    get src() {
-      return image.src;
-    },
-    set src(value) {
-      image.src = value;
-    },
-    get onload() {
-      return image.onload;
-    },
-    set onload(value) {
-      image.onload = value;
-    },
-    get onerror() {
-      return image.onerror;
-    },
-    set onerror(value) {
-      image.onerror = value;
-    },
-    removeAttribute(name) {
-      image.removeAttribute(name);
-    },
-    setDeliveryFailed,
-  };
 }
 
 function sourceLabel(source?: ViewPreviewSource): string {

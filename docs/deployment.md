@@ -627,8 +627,10 @@ equivalent inspection is acceptable.
 Slipstream supports Linux amd64 release images. The Dockerfile fixes every
 non-scratch base image by digest. Its Ubuntu build and runtime inputs use the
 official snapshot and direct package locks in [`../docker/apt/`](../docker/apt/).
-The [container input design](../design/container-inputs.md) defines their
-ownership and update rule.
+The RAW decoder uses the upstream LibRaw `0.22.2` archive with its SHA-256
+verified during the image build; the image's isolated library must match its
+build headers. The [container input design](../design/container-inputs.md)
+defines ownership and update rules.
 
 Use the explicit `docker buildx build --platform linux/amd64` command above
 for release qualification. Supported Compose does not build from this checkout:
@@ -643,9 +645,9 @@ candidate selects the same base image indexes and native package inputs. They
 do not promise a byte-identical output image. A resulting digest, timestamp,
 or other output record establishes a single build's traceability only.
 
-Change an image digest, the Ubuntu snapshot, or either direct package lock in
-one reviewed dependency update. Do not substitute a moving tag, archive, or
-fallback mirror.
+Change an image digest, the Ubuntu snapshot, either direct package lock, or
+the LibRaw release and its verified checksum in one reviewed dependency update.
+Do not substitute a moving tag, archive, or fallback mirror.
 
 ## Qualification Evidence
 
@@ -669,10 +671,13 @@ advisory review.
 ## Backup
 
 The deployment precondition for image cutover, expansion, and any state
-recovery is a transactionally consistent backup of the quiescent state
-database, taken with the service stopped so no sidecar or in-flight write can
-be torn. SQLite's backup API (or a filesystem snapshot with equivalently
-proven consistency) is the requirement; the backup tool is operator-provided.
+recovery is a transactionally consistent backup of both the Library state
+database and the Access database. Stop the service first so the two SQLite
+stores share one quiescent recovery point. Use SQLite's backup API (or a
+filesystem snapshot with equivalently proven consistency), and verify that
+both databases can be restored together without losing the credential.
+Retained Export artifacts are not reconstructible from these databases; an
+operator backup that excludes them must refuse while any are retained.
 Restore into a proven isolated copy, never over live state. The 0.1 support
 boundary, rollback criteria, and rollback-artifact retirement rules are defined
 in [`0.1-support-and-release.md`](0.1-support-and-release.md).

@@ -162,6 +162,12 @@ A Grid cell must show, when available:
 - Preview unavailability or failure without removing the Photo from its position; and
 - thumbnail delivery failure without replacing the Photo or Preview facts above.
 
+When a Photo's Preview is already known to be unavailable, the Grid must not
+request its thumbnail or report a thumbnail delivery failure for that Photo.
+A thumbnail delivery failure applies only when an otherwise available Preview
+could not be transferred or displayed. A failed Preview must remain distinct
+from a failed transfer.
+
 The Original filename is the basename of the Photo's ordering Original Location
 defined under Source Order. A Grid cell must keep the position number visible
 and must truncate a long filename instead of breaking the cell layout.

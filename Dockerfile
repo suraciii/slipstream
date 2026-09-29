@@ -32,6 +32,18 @@ RUN --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     && apt-get install --no-install-recommends --yes $(cat /tmp/apt-packages.lock) \
     && rm --force /etc/apt/apt.conf.d/00slipstream-bootstrap-ca /usr/local/share/slipstream-ca-certificates.crt /tmp/apt-packages.lock
 
+# The Ubuntu LibRaw package predates ILCE-7CM2. Use the same verified upstream
+# release for the service's headers and its isolated runtime shared library.
+ADD --checksum=sha256:de86b035655accff8d4010f1a221fdf50d353cb7b1422ba26f14a0db92612cfa \
+    https://www.libraw.org/data/LibRaw-0.22.2.tar.gz /tmp/libraw.tar.gz
+RUN tar -xzf /tmp/libraw.tar.gz -C /tmp \
+    && cd /tmp/LibRaw-0.22.2 \
+    && ./configure --prefix=/opt/slipstream-libraw --disable-static --disable-examples --disable-openmp --disable-lcms \
+    && make -j2 \
+    && make install \
+    && rm -rf /tmp/LibRaw-0.22.2 /tmp/libraw.tar.gz
+ENV PKG_CONFIG_PATH=/opt/slipstream-libraw/lib/pkgconfig
+
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY compatibility compatibility
@@ -58,6 +70,8 @@ RUN --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     && install -d -o 1000 -g 1000 -m 0700 /home/slipstream /state /cache /tmp/slipstream
 
 COPY --from=rust-build /src/target/release/slipstream-server /usr/local/bin/slipstream-server
+COPY --from=rust-build /opt/slipstream-libraw/lib/libraw_r.so.25.0.0 /usr/local/lib/slipstream/libraw_r.so.25
+COPY --from=rust-build /opt/slipstream-libraw/share/doc/libraw/ /usr/share/doc/slipstream-libraw/
 COPY --from=web-build /src/apps/web/dist /app/web
 COPY LICENSE THIRD-PARTY-NOTICES.md RUST-LICENSES.html /usr/share/doc/slipstream/
 RUN chown -R 1000:1000 /app /usr/local/bin/slipstream-server \
@@ -78,6 +92,7 @@ ENV SLIPSTREAM_LIBRARY_ROOT=/originals \
     SLIPSTREAM_WEB_ROOT=/app/web \
     SLIPSTREAM_HOST=0.0.0.0 \
     SLIPSTREAM_PORT=3000 \
+    LD_LIBRARY_PATH=/usr/local/lib/slipstream \
     HOME=/home/slipstream \
     TMPDIR=/tmp/slipstream \
     XDG_CACHE_HOME=/tmp/slipstream \

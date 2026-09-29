@@ -191,6 +191,20 @@ SLIPSTREAM_RAW_SAMPLE=/absolute/path/to/sample.ARW bun run test:raw
 
 `test:raw` runs every native, service, and browser real-camera scenario serially and fails clearly when `SLIPSTREAM_RAW_SAMPLE` is absent or does not identify the configured sample. Each scenario compares the operated Original's SHA-256 digest and stable filesystem metadata before and after its read, LibRaw, or Preview workflow. A scenario that copies the sample into an isolated Library checks both that copy and the source sample.
 
+The ILCE-7CM2 camera qualification uses its own opt-in Original, not the
+`SLIPSTREAM_RAW_SAMPLE` fixture. With LibRaw `0.22.2` available to the Rust
+build and loader, exercise native selection and both derivatives with:
+
+```sh
+SLIPSTREAM_ILCE7CM2_SAMPLE=/absolute/path/to/_DSC1891.ARW \
+  cargo test -p slipstream-core --locked \
+  ilce_7cm2_embedded_preview_delivers_both_derivatives_without_changing_original \
+  -- --ignored
+```
+
+This test checks the configured sample digest, derived JPEG dimensions, and
+unchanged Original bytes and filesystem metadata. It does not ship the photo.
+
 The opt-in processing smoke needs the sample and all four pinned launcher/export inputs, so it runs outside `test:raw` and skips with the missing-variable reason wherever the host has an incomplete configuration:
 
 ```sh

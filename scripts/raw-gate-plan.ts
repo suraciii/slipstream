@@ -34,6 +34,8 @@ export const rawGatePlan: readonly RawGateStep[] = [
       // here.
       "--skip",
       "development_tiff_derivative_handles_a_real_artifact",
+      "--skip",
+      "ilce_7cm2_embedded_preview_delivers_both_derivatives_without_changing_original",
     ],
     expectedTests: nativeAndServiceTests,
   },

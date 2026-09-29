@@ -597,4 +597,45 @@ mod tests {
         decoder.set_format(image::ImageFormat::Jpeg);
         assert_eq!(decoder.into_dimensions().unwrap(), (9504, 6336));
     }
+
+    #[test]
+    #[ignore = "requires SLIPSTREAM_ILCE7CM2_SAMPLE"]
+    fn ilce_7cm2_embedded_preview_delivers_both_derivatives_without_changing_original() {
+        use crate::derivative::{DerivativeTarget, process_jpeg_with_orientation};
+
+        let path = std::path::PathBuf::from(
+            std::env::var_os("SLIPSTREAM_ILCE7CM2_SAMPLE")
+                .expect("SLIPSTREAM_ILCE7CM2_SAMPLE is required"),
+        );
+        let before = original_snapshot(&path);
+        assert_eq!(
+            before.sha256,
+            "ded66fbb094734a209418b7dd12a23b90f12e2ffabdbcd4a1a9e6d3138883b71"
+        );
+        let root = LibraryRoot::open(path.parent().unwrap()).unwrap();
+        let relative =
+            RelativeOriginalPath::parse(path.file_name().unwrap().to_str().unwrap()).unwrap();
+        let capability = root.original(relative).unwrap();
+        let preview = extract_embedded_jpeg(&capability).unwrap();
+        assert_eq!(preview.candidate_index, Some(2));
+        assert_eq!((preview.width, preview.height), (4608, 3072));
+        assert_eq!(preview.container_orientation, Some(1));
+        let mut source = image::ImageReader::new(Cursor::new(&preview.jpeg));
+        source.set_format(image::ImageFormat::Jpeg);
+        assert_eq!(source.into_dimensions().unwrap(), (4608, 3072));
+
+        for (target, expected) in [
+            (DerivativeTarget::Thumbnail512, (512, 341)),
+            (DerivativeTarget::Review2560, (2560, 1707)),
+        ] {
+            let result =
+                process_jpeg_with_orientation(&preview.jpeg, preview.container_orientation, target)
+                    .unwrap();
+            assert_eq!((result.width, result.height), expected);
+            let mut decoded = image::ImageReader::new(Cursor::new(result.jpeg));
+            decoded.set_format(image::ImageFormat::Jpeg);
+            assert_eq!(decoded.into_dimensions().unwrap(), expected);
+        }
+        assert_eq!(original_snapshot(&path), before);
+    }
 }

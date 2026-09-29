@@ -26,8 +26,17 @@ The built Web application includes Vite's module-preload helper under the follow
 
 The production image contains a flattened Ubuntu 26.04 userspace and the native runtime packages `ca-certificates`, `curl`, `libjpeg-turbo8`, `liblcms2-2`, `libraw23t64`, and `libvips42t64`, together with their package dependencies. The image preserves every installed package's copyright and license material under `/usr/share/doc/<package>/copyright`.
 
-LibRaw is available under LGPL-2.1 or CDDL-1.0, and libvips is available under LGPL-2.1. Slipstream dynamically links these and the other native image libraries. Recipients may replace them by rebuilding the image with compatible Ubuntu packages. Ubuntu source package identities and exact installed versions are available from `dpkg-query`; corresponding source is available from the Ubuntu archive and Launchpad.
+Slipstream also builds and dynamically links the hash-pinned upstream LibRaw
+0.22.2 release for its own RAW Preview service. Its `COPYRIGHT`, `LICENSE.LGPL`,
+and `LICENSE.CDDL` notices ship under `/usr/share/doc/slipstream-libraw/`.
+LibRaw is available under LGPL-2.1 or CDDL-1.0, and libvips is available under LGPL-2.1.
+The LibRaw source archive is available from https://www.libraw.org/data/LibRaw-0.22.2.tar.gz.
+Recipients may rebuild the image with a compatible LibRaw release. Ubuntu package
+identities and exact installed versions are available from `dpkg-query`; corresponding
+Ubuntu package sources are available from the Ubuntu archive and Launchpad.
 
-Redistributors must preserve these notices and the Ubuntu package copyright files. When a package's terms require corresponding source, redistributors must keep that source available for the distributed package version.
+Redistributors must preserve these notices, the LibRaw source offer, and the
+Ubuntu package copyright files. When a package's terms require corresponding
+source, redistributors must keep that source available for the distributed version.
 
 Canonical publishes the Ubuntu OCI build recipe and release-specific rootfs references in the [ubuntu-base repository](https://code.launchpad.net/~cloud-images-release-managers/cloud-images/+oci/ubuntu-base/+git/ubuntu-base).
