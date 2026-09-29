@@ -22,3 +22,8 @@ export const hasExactKeys = (
 /// A non-negative integer count.
 export const validCount = (value: unknown): value is number =>
   Number.isInteger(value) && Number(value) >= 0;
+
+export const validOptional = (
+  value: unknown,
+  predicate: (candidate: unknown) => boolean,
+): boolean => value === undefined || predicate(value);

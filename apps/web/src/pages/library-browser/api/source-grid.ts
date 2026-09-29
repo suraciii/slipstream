@@ -6,6 +6,7 @@ import type {
   SelectionCounts,
   SelectionFilter,
 } from "./contracts.js";
+import { isRecord, validOptional } from "./guards.js";
 
 export type SourceGridFetch = (
   input: RequestInfo | URL,
@@ -46,14 +47,6 @@ export type BrowseSourceRequest =
 export type SourceGridApiResult<T> =
   | Readonly<{ kind: "ok"; value: T }>
   | Readonly<{ kind: "failed"; status?: number; malformed?: true }>;
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null;
-
-const validOptional = (
-  value: unknown,
-  predicate: (candidate: unknown) => boolean,
-): boolean => value === undefined || predicate(value);
 
 /// One Grid Photo summary as the server presents it. Shared with the removal
 /// client, whose Removed Photos listing carries the same facts.

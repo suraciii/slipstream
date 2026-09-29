@@ -5,6 +5,7 @@ import type {
   SelectionState,
   UndoDescription,
 } from "./contracts.js";
+import { hasExactKeys, isRecord, validOptional } from "./guards.js";
 
 export type PhotoFetch = (
   input: string,
@@ -59,36 +60,24 @@ export type PhotoAlbumsResult =
   | Readonly<{ kind: "ok"; value: PhotoAlbumsResponse }>
   | Readonly<{ kind: "failed"; status?: number }>;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null;
-
-const hasExactKeys = (
-  value: Record<string, unknown>,
-  keys: ReadonlyArray<string>,
-): boolean =>
-  Object.keys(value).length === keys.length &&
-  keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
-
-const optional = (
-  value: unknown,
-  predicate: (candidate: unknown) => boolean,
-): boolean => value === undefined || predicate(value);
-
 const validPreview = (value: unknown): value is PreviewResponse =>
   isRecord(value) &&
   (value.state === "ready" ||
     value.state === "unavailable" ||
     value.state === "failed") &&
-  optional(
+  validOptional(
     value.source,
     (source) => source === "jpeg-original" || source === "raw-embedded-jpeg",
   ) &&
-  optional(value.stale, (stale) => typeof stale === "boolean") &&
-  optional(value.width, Number.isInteger) &&
-  optional(value.height, Number.isInteger) &&
-  optional(value.limitedDetail, (limited) => typeof limited === "boolean") &&
-  optional(value.url, (url) => typeof url === "string") &&
-  optional(value.message, (message) => typeof message === "string");
+  validOptional(value.stale, (stale) => typeof stale === "boolean") &&
+  validOptional(value.width, Number.isInteger) &&
+  validOptional(value.height, Number.isInteger) &&
+  validOptional(
+    value.limitedDetail,
+    (limited) => typeof limited === "boolean",
+  ) &&
+  validOptional(value.url, (url) => typeof url === "string") &&
+  validOptional(value.message, (message) => typeof message === "string");
 
 const validStateValue = (
   field: "selectionState" | "rating",
@@ -108,11 +97,14 @@ const validUndo = (value: unknown): value is UndoDescription =>
 
 const validMetadata = (value: unknown): value is PhotoMetadataResponse =>
   isRecord(value) &&
-  optional(value.captureTime, (item) => typeof item === "string") &&
-  optional(value.aperture, (item) => typeof item === "string") &&
-  optional(value.iso, (item) => Number.isInteger(item) && Number(item) >= 0) &&
-  optional(value.shutterSpeed, (item) => typeof item === "string") &&
-  optional(value.focalLength, (item) => typeof item === "string");
+  validOptional(value.captureTime, (item) => typeof item === "string") &&
+  validOptional(value.aperture, (item) => typeof item === "string") &&
+  validOptional(
+    value.iso,
+    (item) => Number.isInteger(item) && Number(item) >= 0,
+  ) &&
+  validOptional(value.shutterSpeed, (item) => typeof item === "string") &&
+  validOptional(value.focalLength, (item) => typeof item === "string");
 
 const validBatchApplied = (
   value: unknown,

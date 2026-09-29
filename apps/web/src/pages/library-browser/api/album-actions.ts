@@ -1,4 +1,5 @@
 import type { AlbumSummary } from "./contracts.js";
+import { isRecord, validCount } from "./guards.js";
 
 export type AlbumActionFetch = (
   input: string,
@@ -43,9 +44,6 @@ export type AlbumCreateResult =
   | Readonly<{ kind: "rejected"; status: number }>
   | Readonly<{ kind: "malformed" }>;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null;
-
 const isAlbumSummary = (value: unknown): value is AlbumSummary =>
   isRecord(value) &&
   typeof value.id === "string" &&
@@ -57,9 +55,6 @@ const isAlbumSummary = (value: unknown): value is AlbumSummary =>
 
 const albumNameKey = (name: string): string =>
   name.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
-
-const validCount = (value: unknown): value is number =>
-  Number.isInteger(value) && Number(value) >= 0;
 
 const validAlbumSummaries = (
   value: unknown,
