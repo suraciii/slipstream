@@ -1041,15 +1041,38 @@ async fn export_submit_reports_retained_output_capacity_before_acceptance() {
     let _ = fs::remove_dir_all(base);
 }
 
+/// A fresh Film identity is refused before any state change even while the
+/// launcher is healthy and admits the Development target: the launcher
+/// qualifies only Development, so a full-resolution Film Export records no
+/// Export and no receipt.
 #[tokio::test]
 async fn unqualified_film_export_refuses_without_a_receipt() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+    let processing = config.processing.clone().unwrap();
+    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+    let mut config = config;
+    config.processing = Some(launcher.processing_config());
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
+    let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+    let source_revision = current_source_revision(&application, &photo_id).await;
+
+    // The same healthy launcher admits the Development target, so the Film
+    // refusal below is the qualification gate, not launcher availability.
+    let developed = submit_export_request(
+        &router,
+        &photo_id,
+        "develop-1",
+        &recipe.revision,
+        &source_revision,
+    )
+    .await;
+    assert_eq!(developed.status(), StatusCode::CREATED);
+
     let request = serde_json::json!({
         "requestId": "unqualified-film",
-        "expectedRecipeVersion": "recipe",
-        "expectedSourceRevision": "source",
+        "expectedRecipeVersion": recipe.revision,
+        "expectedSourceRevision": source_revision,
         "target": "film-jpeg",
     });
     let refused = submit_export_body(&router, &photo_id, request.clone()).await;
@@ -1058,6 +1081,7 @@ async fn unqualified_film_export_refuses_without_a_receipt() {
         error_code(&response_json(refused).await),
         "processing_unavailable"
     );
+    // The refusal recorded no Export: only the Development admission lists.
     let listed = response_json(
         send(
             &router,
@@ -1071,7 +1095,10 @@ async fn unqualified_film_export_refuses_without_a_receipt() {
         .await,
     )
     .await;
-    assert_eq!(listed["exports"], serde_json::json!([]));
+    let exports = listed["exports"].as_array().unwrap();
+    assert_eq!(exports.len(), 1);
+    assert_eq!(exports[0]["target"], "development-tiff");
+    // And no receipt: the same identity is refused again, not replayed.
     let replay = submit_export_body(&router, &photo_id, request).await;
     assert_eq!(replay.status(), StatusCode::SERVICE_UNAVAILABLE);
     application.shutdown().await.unwrap();
@@ -1871,9 +1898,15 @@ async fn export_restart_recovers_an_already_published_artifact() {
 
 /// A previously accepted Film identity must remain inspectable after Film is
 /// withdrawn, even though a new Film submission can no longer be admitted.
+/// The launcher is healthy, so the replay proves receipt resolution precedes
+/// the qualification gate.
 #[tokio::test]
 async fn unqualified_film_still_replays_an_existing_receipt() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+    let processing = config.processing.clone().unwrap();
+    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+    let mut config = config;
+    config.processing = Some(launcher.processing_config());
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let source_revision = current_source_revision(&application, &photo_id).await;

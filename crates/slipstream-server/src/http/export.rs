@@ -180,6 +180,19 @@ pub(crate) async fn submit_export(
             );
         }
     }
+    // The Film qualification gate follows receipt resolution: a recorded
+    // Film identity still replays, expires, or conflicts from its receipt
+    // alone, but no fresh Film identity is admitted. The photo-processing
+    // launcher qualifies only the Development workload, so a full-resolution
+    // Film Export has no qualified stage to run; the refusal is a closed
+    // `processing_unavailable` and records neither an Export nor a receipt.
+    if body.target == EXPORT_FILM_JPEG_TARGET {
+        return export_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "processing_unavailable",
+            "The Film stage is not qualified for a full-resolution Export",
+        );
+    }
     let proxy_profile = if !read.source_available {
         match state.application.proxies.as_ref() {
             Some(manager) => manager
