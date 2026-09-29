@@ -328,6 +328,55 @@ test("each Ubuntu stage has one pinned CA, source, lock, update, install, and cl
   expect(dockerfile).not.toContain("trusted=yes");
 });
 
+test("the RAW decoder build and runtime use the same verified LibRaw release", async () => {
+  const dockerfile = await text("Dockerfile");
+  const build = dockerfileStage(dockerfile, "rust-build");
+  const runtimeRoot = dockerfileStage(dockerfile, "runtime-rootfs");
+  const runtime = dockerfileStage(dockerfile, "runtime");
+  expect(
+    build.some(
+      ({ command, value }) =>
+        command === "ADD" &&
+        value.includes(
+          "--checksum=sha256:de86b035655accff8d4010f1a221fdf50d353cb7b1422ba26f14a0db92612cfa",
+        ) &&
+        value.includes("https://www.libraw.org/data/LibRaw-0.22.2.tar.gz"),
+    ),
+  ).toBeTrue();
+  expect(
+    build.some(
+      ({ command, value }) =>
+        command === "RUN" &&
+        value.includes("./configure --prefix=/opt/slipstream-libraw") &&
+        value.includes("make install"),
+    ),
+  ).toBeTrue();
+  expect(
+    build.some(
+      ({ command, value }) =>
+        command === "ENV" &&
+        value.includes("PKG_CONFIG_PATH=/opt/slipstream-libraw/lib/pkgconfig"),
+    ),
+  ).toBeTrue();
+  expect(
+    runtimeRoot.some(
+      ({ command, value }) =>
+        command === "COPY" &&
+        value.includes(
+          "--from=rust-build /opt/slipstream-libraw/lib/libraw_r.so.25.0.0 /usr/local/lib/slipstream/libraw_r.so.25",
+        ),
+    ),
+  ).toBeTrue();
+  expect(
+    runtime.some(
+      ({ command, value }) =>
+        command === "ENV" &&
+        value.includes("LD_LIBRARY_PATH=/usr/local/lib/slipstream"),
+    ),
+  ).toBeTrue();
+  expect(await text("crates/slipstream-core/build.rs")).toContain('"libraw_r"');
+});
+
 test("the container and Compose focused contracts are wired through test:fast and verify", async () => {
   const scripts = (await packageManifest()).scripts;
   expect(scripts?.["test:container-input"]).toBe(

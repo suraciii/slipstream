@@ -6,6 +6,14 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use std::collections::{HashMap, HashSet};
 
 const SCHEMA_V1_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v1.sql");
+/// Issue #472: identifies the RAW Preview decoder generation that persists
+/// unavailable facts. An unavailable RAW Preview recorded by a previous
+/// decoder (production LibRaw 0.21.5b rejected the Sony ILCE-7CM2 ARW at
+/// open) must not suppress extraction under the current decoder, so startup
+/// transitions those facts back to inspection once per decoder revision.
+/// Bump when the pinned decoder changes (see the Dockerfile LibRaw pin).
+const RAW_PREVIEW_DECODER_REVISION: &str = "libraw-0.22.2";
+
 pub(super) fn preflight_schema(
     connection: &Connection,
     canonical_root: &str,
@@ -188,6 +196,39 @@ pub(super) fn startup_schema(
             .execute(
                 "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
                 [canonical_root],
+            )
+            .map_err(|_| PersistenceError::Storage)?;
+    }
+    let recorded_decoder: Option<String> = transaction
+        .query_row(
+            "SELECT value FROM library_metadata WHERE key='raw_preview_decoder'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| PersistenceError::Storage)?;
+    if recorded_decoder.as_deref() != Some(RAW_PREVIEW_DECODER_REVISION) {
+        // Only active Photos whose own Original is RAW return to inspection.
+        // Missing (available=0, including removed) Photos keep their state —
+        // a scan already re-inspects them when the Original returns — and
+        // ready, failed, and JPEG unavailable facts are never decoder-bound.
+        // Selection, rating, Album membership, and Original rows are
+        // untouched.
+        transaction
+            .execute(
+                "UPDATE photos SET preview_state='inspection-pending',
+                   preview_source_revision=NULL,preview_width=NULL,
+                   preview_height=NULL,cache_revision=NULL
+                 WHERE preview_state='unavailable' AND available=1
+                   AND original_id IN (SELECT id FROM original_files WHERE kind='raw')",
+                [],
+            )
+            .map_err(|_| PersistenceError::Storage)?;
+        transaction
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('raw_preview_decoder',?)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [RAW_PREVIEW_DECODER_REVISION],
             )
             .map_err(|_| PersistenceError::Storage)?;
     }
@@ -1429,6 +1470,144 @@ mod tests {
         );
         assert!(table_exists(&connection, "development_proxies").unwrap());
         validate_canonical_schema(&connection, SchemaVersion::V13).unwrap();
+    }
+
+    #[test]
+    fn startup_transitions_stale_unavailable_raw_previews_once_per_decoder() {
+        // Issue #472: an unavailable RAW Preview fact recorded under a
+        // previous decoder returns to inspection-pending exactly once, so the
+        // upgraded decoder re-inspects the Photo. Ready and failed RAW facts,
+        // unavailable JPEG facts, missing-Original records, and the Photo's
+        // own decisions stay untouched, and a decoder-fresh database never
+        // resets an unavailable fact again.
+        let (base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v13.sql"),
+        );
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available)
+                     VALUES
+                       ('raw-stale','shoot/stale.ARW','raw',11,1.0,1),
+                       ('raw-ready','shoot/ready.ARW','raw',12,1.0,1),
+                       ('jpeg-stale','shoot/stale.JPG','jpeg',13,1.0,1),
+                       ('raw-missing','shoot/missing.ARW','raw',14,1.0,0);
+                     INSERT INTO photos(
+                       id,original_id,available,preview_state,preview_source_revision,
+                       preview_width,preview_height,cache_revision,sort_path,
+                       selection_state,rating
+                     ) VALUES
+                       ('photo-stale','raw-stale',1,'unavailable','stale-revision',NULL,NULL,NULL,
+                        'shoot/stale.ARW','selected',4),
+                       ('photo-ready','raw-ready',1,'ready','ready-revision',1600,1200,'cache-1',
+                        'shoot/ready.ARW','rejected',2),
+                       ('photo-jpeg','jpeg-stale',1,'unavailable','jpeg-revision',NULL,NULL,NULL,
+                        'shoot/stale.JPG','undecided',0),
+                       ('photo-missing','raw-missing',0,'unavailable',NULL,NULL,NULL,NULL,
+                        'shoot/missing.ARW','undecided',0);",
+                )
+                .unwrap();
+        }
+        Persistence::open(
+            state,
+            name.clone(),
+            library.canonical_path().to_str().unwrap().to_owned(),
+        )
+        .unwrap()
+        .shutdown()
+        .unwrap();
+
+        let connection = Connection::open(&path).unwrap();
+        let facts = |photo: &str| {
+            connection
+                .query_row(
+                    "SELECT preview_state,preview_source_revision,preview_width,preview_height,
+                            cache_revision,selection_state,rating
+                     FROM photos WHERE id=?",
+                    [photo],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, i64>(6)?,
+                        ))
+                    },
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            facts("photo-stale"),
+            (
+                "inspection-pending".to_owned(),
+                None,
+                None,
+                None,
+                None,
+                "selected".to_owned(),
+                4
+            )
+        );
+        assert_eq!(
+            facts("photo-ready"),
+            (
+                "ready".to_owned(),
+                Some("ready-revision".to_owned()),
+                Some(1600),
+                Some(1200),
+                Some("cache-1".to_owned()),
+                "rejected".to_owned(),
+                2
+            )
+        );
+        assert_eq!(facts("photo-jpeg").0, "unavailable");
+        assert_eq!(facts("photo-missing").0, "unavailable");
+        let recorded: String = connection
+            .query_row(
+                "SELECT value FROM library_metadata WHERE key='raw_preview_decoder'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded, RAW_PREVIEW_DECODER_REVISION);
+
+        // A Photo the current decoder itself found unavailable is durable
+        // again: the recorded decoder gates the transition, so a reopen never
+        // resets it.
+        connection
+            .execute(
+                "UPDATE photos SET preview_state='unavailable',
+                   preview_source_revision='current-revision'
+                 WHERE id='photo-stale'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let reopened = StateDirectory::open_or_create(&library, base.0.join("state")).unwrap();
+        Persistence::open(
+            reopened,
+            name,
+            library.canonical_path().to_str().unwrap().to_owned(),
+        )
+        .unwrap()
+        .shutdown()
+        .unwrap();
+        let connection = Connection::open(&path).unwrap();
+        let (state_after, revision_after): (String, Option<String>) = connection
+            .query_row(
+                "SELECT preview_state,preview_source_revision FROM photos WHERE id='photo-stale'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state_after, "unavailable");
+        assert_eq!(revision_after.as_deref(), Some("current-revision"));
     }
 
     #[test]

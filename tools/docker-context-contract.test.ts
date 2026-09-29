@@ -79,6 +79,86 @@ async function gitIgnoredPaths(paths: readonly string[]): Promise<Set<string>> {
   );
 }
 
+const doubleStar = Symbol("double-star");
+
+type PatternSegment = RegExp | typeof doubleStar;
+
+// Docker evaluates .dockerignore with anchored patterns relative to the
+// context root: `*` and `?` never cross `/`, `**` matches any number of
+// whole segments including none, and the last matching rule decides.
+function compileSegment(segment: string): PatternSegment {
+  if (segment === "**") return doubleStar;
+  let source = "";
+  let index = 0;
+  while (index < segment.length) {
+    const character = segment[index]!;
+    if (character === "*") {
+      source += "[^/]*";
+    } else if (character === "?") {
+      source += "[^/]";
+    } else if (character === "[") {
+      const end = segment.indexOf("]", index + 1);
+      if (end === -1)
+        throw new Error(`unsupported unterminated class in: ${segment}`);
+      const content = segment
+        .slice(index + 1, end)
+        .replace(/\\/g, "\\\\")
+        .replace(/]/g, "\\]");
+      source += `[${content}]`;
+      index = end;
+    } else {
+      source += character.replace(/[.+^${}()|\\]/g, "\\$&");
+    }
+    index += 1;
+  }
+  return new RegExp(`^${source}$`);
+}
+
+function matchSegments(
+  pattern: readonly PatternSegment[],
+  path: readonly string[],
+): boolean {
+  if (pattern.length === 0) return path.length === 0;
+  const [head, ...rest] = pattern;
+  if (head === doubleStar) {
+    for (let skip = 0; skip <= path.length; skip += 1) {
+      if (matchSegments(rest, path.slice(skip))) return true;
+    }
+    return false;
+  }
+  if (path.length === 0) return false;
+  return head.test(path[0]!) && matchSegments(rest, path.slice(1));
+}
+
+function dockerContextIncludes(dockerignore: string, path: string): boolean {
+  const segments = path.split("/");
+  let included = true;
+  for (const line of activePatterns(dockerignore)) {
+    const negated = line.startsWith("!");
+    const pattern = (negated ? line.slice(1) : line)
+      .split("/")
+      .map(compileSegment);
+    if (matchSegments(pattern, segments)) included = negated;
+  }
+  return included;
+}
+
+async function trackedPaths(): Promise<string[]> {
+  const child = Bun.spawn(["git", "ls-files", "-z"], {
+    cwd: repositoryRoot.pathname,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (exitCode !== 0)
+    throw new Error(stderr.trim() || `git ls-files exited ${exitCode}`);
+  return stdout.split("\0").filter(Boolean);
+}
+
 test("Git and Docker ignores cover every supported Original extension", async () => {
   const identitySource = await Bun.file(
     new URL("crates/slipstream-core/src/identity.rs", repositoryRoot),
@@ -95,7 +175,7 @@ test("Git and Docker ignores cover every supported Original extension", async ()
   expect(missingPatterns(dockerignore, extensions)).toEqual([]);
   expect(
     activePatterns(dockerignore).filter((line) => line.startsWith("!")),
-  ).toEqual(["!.env.example"]);
+  ).toEqual(["!.env.example", "!apps/web/public/icons/*.[pP][nN][gG]"]);
 
   const candidates = extensions.flatMap((extension) => {
     const mixedCase = mixedCaseExtension(extension);
@@ -140,4 +220,49 @@ test("Git and Docker ignores cover every supported Original extension", async ()
       trackedError.trim() || `git ls-files exited ${trackedExitCode}`,
     );
   expect(trackedOutput.trim()).toBe(fixturePath);
+});
+
+test("the Docker context ships exactly the product icons, not photo PNGs", async () => {
+  const dockerignore = await Bun.file(
+    new URL(".dockerignore", repositoryRoot),
+  ).text();
+  const patterns = activePatterns(dockerignore);
+  const photoRule = "**/*.[pP][nN][gG]";
+  const iconRule = "!apps/web/public/icons/*.[pP][nN][gG]";
+  // Docker applies the last matching rule, so the exception must follow the
+  // broad photo exclusion it re-includes from.
+  expect(patterns.indexOf(photoRule)).toBeGreaterThanOrEqual(0);
+  expect(patterns.indexOf(iconRule)).toBeGreaterThan(
+    patterns.indexOf(photoRule),
+  );
+
+  const icons = [
+    "apps/web/public/icons/apple-touch-icon.png",
+    "apps/web/public/icons/slipstream-192.png",
+    "apps/web/public/icons/slipstream-512.png",
+    "apps/web/public/icons/slipstream-maskable-512.png",
+  ];
+  const trackedPngs = (await trackedPaths()).filter((path) =>
+    /\.png$/i.test(path),
+  );
+  expect([...trackedPngs].sort()).toEqual(icons);
+  expect(
+    trackedPngs.filter((path) => dockerContextIncludes(dockerignore, path)),
+  ).toEqual(icons);
+
+  const photos = [
+    "photo.png",
+    "nested/session/Photo.PNG",
+    "apps/photo.pNg",
+    "apps/web/public/photo.png",
+    "apps/web/public/icons/nested/photo.png",
+  ];
+  expect(
+    photos.filter((path) => dockerContextIncludes(dockerignore, path)),
+  ).toEqual([]);
+
+  const tampered = dockerignore.replace(`${iconRule}\n`, "");
+  expect(
+    trackedPngs.filter((path) => dockerContextIncludes(tampered, path)),
+  ).toEqual([]);
 });

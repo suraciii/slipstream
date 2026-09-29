@@ -1,6 +1,7 @@
 import "./library-browser.css";
 
 import { createModalSurfaces } from "./modal-surface.js";
+import { gridThumbnailTarget } from "./grid-thumbnail-target.js";
 import {
   createRemovedPanels,
   type RemovedPanelViewModel,
@@ -376,6 +377,8 @@ export interface GridThumbnailTarget {
   onerror: GlobalEventHandlers["onerror"];
   removeAttribute(name: string): void;
   setDeliveryFailed(failed: boolean): void;
+  /// Reports a terminal Thumbnail result without changing Review Preview facts.
+  setThumbnailState(state: "unavailable" | "failed"): void;
 }
 
 interface ReviewImageTarget {
@@ -490,6 +493,7 @@ type RenderedGridCell = {
   readonly cell: HTMLButtonElement;
   signature: string;
   deliveryFailed: boolean;
+  thumbnailState: "unavailable" | "failed" | undefined;
   /// The thumbnail ownership this cell holds while it presents a Photo. A
   /// cell that leaves the rendered range or is rebuilt hands it back so the
   /// owner's image state follows the rendered Grid.
@@ -2196,6 +2200,7 @@ ${RECOVERY_PANEL_TEMPLATE}
         cell,
         signature: LOADING_CELL_SIGNATURE,
         deliveryFailed: false,
+        thumbnailState: undefined,
         thumbnail: undefined,
       };
     }
@@ -2233,10 +2238,15 @@ ${RECOVERY_PANEL_TEMPLATE}
       cell,
       signature: "",
       deliveryFailed: false,
+      thumbnailState: undefined,
       thumbnail: undefined,
     };
     const presentFacts = () => {
-      const values = gridPhotoFacts(photo, rendered.deliveryFailed);
+      const values = gridPhotoFacts(
+        photo,
+        rendered.deliveryFailed,
+        rendered.thumbnailState,
+      );
       facts.textContent = values.join(" · ");
       facts.hidden = values.length === 0;
       cell.setAttribute(
@@ -2251,11 +2261,7 @@ ${RECOVERY_PANEL_TEMPLATE}
       );
     };
     presentFacts();
-    rendered.signature = gridCellSignature(
-      index,
-      photo,
-      rendered.deliveryFailed,
-    );
+    rendered.signature = gridCellSignature(index, photo, false);
     // Only a recorded decision earns a badge. An empty badge on every
     // undecided cell reads as an unchecked control instead of a fact.
     if (photo.selectionState === "undecided") {
@@ -2281,11 +2287,19 @@ ${RECOVERY_PANEL_TEMPLATE}
       const binding: GridThumbnailBinding = {
         photoId: photo.id,
         preview: photo.preview,
-        target: gridThumbnailTarget(image, (failed) => {
-          rendered.deliveryFailed = failed;
-          rendered.signature = gridCellSignature(index, photo, failed);
-          presentFacts();
-        }),
+        target: gridThumbnailTarget(
+          image,
+          (failed) => {
+            rendered.deliveryFailed = failed;
+            rendered.signature = gridCellSignature(index, photo, failed);
+            presentFacts();
+          },
+          (state) => {
+            rendered.thumbnailState = state;
+            rendered.deliveryFailed = false;
+            presentFacts();
+          },
+        ),
       };
       rendered.thumbnail = binding;
       bindThumbnail(binding);
@@ -2562,10 +2576,18 @@ ${RECOVERY_PANEL_TEMPLATE}
       const binding: GridThumbnailBinding = {
         photoId: photo.id,
         preview: photo.preview,
-        target: gridThumbnailTarget(image, (failed) => {
-          rendered.deliveryFailed = failed;
-          rendered.signature = filmstripCellSignature(cell, total, failed);
-        }),
+        target: gridThumbnailTarget(
+          image,
+          (failed) => {
+            rendered.deliveryFailed = failed;
+            rendered.signature = filmstripCellSignature(cell, total, failed);
+          },
+          // The strip has no Thumbnail fact line; clear delivery failure.
+          () => {
+            rendered.deliveryFailed = false;
+            rendered.signature = filmstripCellSignature(cell, total, false);
+          },
+        ),
       };
       rendered.thumbnail = binding;
       bindThumbnail(binding);
@@ -3940,6 +3962,7 @@ function selectionLabel(value?: ViewSelectionState): string {
 function gridPhotoFacts(
   photo: GridPhotoViewModel,
   deliveryFailed: boolean,
+  thumbnailState?: "unavailable" | "failed",
 ): string[] {
   const facts: string[] = [];
   if (!photo.available) facts.push("Photo unavailable");
@@ -3947,6 +3970,9 @@ function gridPhotoFacts(
   if (photo.hasSavedEdits) facts.push("Edited");
   if (photo.preview.state === "unavailable") facts.push("Preview unavailable");
   if (photo.preview.state === "failed") facts.push("Preview failed");
+  if (thumbnailState === "unavailable" && photo.preview.state !== "unavailable")
+    facts.push("Thumbnail unavailable");
+  if (thumbnailState === "failed") facts.push("Thumbnail failed");
   if (deliveryFailed) facts.push("Thumbnail delivery failed");
   return facts;
 }
@@ -3985,41 +4011,6 @@ function filmstripCellSignature(
     cell.current ? "current" : "neighbor",
     photo ? gridCellSignature(cell.index, photo, deliveryFailed) : "loading",
   ].join("|");
-}
-function gridThumbnailTarget(
-  image: HTMLImageElement,
-  setDeliveryFailed: (failed: boolean) => void,
-): GridThumbnailTarget {
-  return {
-    get complete() {
-      return image.complete;
-    },
-    get isConnected() {
-      return image.isConnected;
-    },
-    get src() {
-      return image.src;
-    },
-    set src(value) {
-      image.src = value;
-    },
-    get onload() {
-      return image.onload;
-    },
-    set onload(value) {
-      image.onload = value;
-    },
-    get onerror() {
-      return image.onerror;
-    },
-    set onerror(value) {
-      image.onerror = value;
-    },
-    removeAttribute(name) {
-      image.removeAttribute(name);
-    },
-    setDeliveryFailed,
-  };
 }
 
 function sourceLabel(source?: ViewPreviewSource): string {
