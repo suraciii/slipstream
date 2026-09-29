@@ -1357,14 +1357,29 @@ fn publish_derivative(
         std::process::id(),
         NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed)
     ));
-    write_new_file(&temporary, &processed.jpeg)?;
-    match fs::rename(&temporary, final_path) {
+    publish_atomic(&temporary, final_path, &processed.jpeg)
+}
+
+fn publish_atomic(temporary: &Path, path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
+    write_new_file(temporary, bytes)?;
+    match fs::rename(temporary, path) {
         Ok(()) => Ok(()),
         Err(_) => {
-            let _ = fs::remove_file(&temporary);
+            let _ = fs::remove_file(temporary);
             Err(CacheError::Io)
         }
     }
+}
+
+// JSON publications intentionally derive a sibling temporary with `with_extension`;
+// changing that naming would alter cleanup and crash-recovery behavior.
+fn publish_json(path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
+    let temporary = path.with_extension(format!(
+        "json.{}.{}.tmp",
+        std::process::id(),
+        NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed)
+    ));
+    publish_atomic(&temporary, path, bytes)
 }
 
 fn publish_manifest(
@@ -1374,19 +1389,7 @@ fn publish_manifest(
 ) -> Result<(), CacheError> {
     let path = cache.manifest_path(identity)?;
     let bytes = serde_json::to_vec(manifest).map_err(|_| CacheError::Io)?;
-    let temporary = path.with_extension(format!(
-        "json.{}.{}.tmp",
-        std::process::id(),
-        NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed)
-    ));
-    write_new_file(&temporary, &bytes)?;
-    match fs::rename(&temporary, &path) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            let _ = fs::remove_file(&temporary);
-            Err(CacheError::Io)
-        }
-    }
+    publish_json(&path, &bytes)
 }
 
 fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
@@ -1670,17 +1673,7 @@ fn persist_failure(path: &Path, failure: FailureRecord) -> Result<(), CacheError
         fs::create_dir_all(parent).map_err(|_| CacheError::Io)?;
     }
     let bytes = serde_json::to_vec(&failure).map_err(|_| CacheError::Io)?;
-    let temporary = path.with_extension(format!(
-        "json.{}.{}.tmp",
-        std::process::id(),
-        NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed)
-    ));
-    write_new_file(&temporary, &bytes)?;
-    let result = fs::rename(&temporary, path).map_err(|_| CacheError::Io);
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    publish_json(path, &bytes)
 }
 
 fn remove_if_present(path: &Path) -> Result<(), CacheError> {

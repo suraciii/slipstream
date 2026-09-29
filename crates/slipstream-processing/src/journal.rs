@@ -408,11 +408,7 @@ impl Executor {
                         .invalidations
                         .as_ref()
                         .ok_or(ErrorCode::Uncertain)?;
-                    let ready = data.available
-                        && self
-                            .backend
-                            .admission_ready(data.registry.parent_identity.as_ref())
-                            .is_ok()
+                    let ready = matches!(self.availability(&data), Availability::Available)
                         && self.qualified_ready().is_ok();
                     let availability = qualified_availability(
                         ready,
@@ -460,16 +456,7 @@ impl Executor {
                             bundle: self.bundle.clone(),
                             catalogue: config.catalogue_sha256.clone(),
                             resource_model: config.resource_model_sha256.clone(),
-                            availability: if data.available
-                                && self
-                                    .backend
-                                    .admission_ready(data.registry.parent_identity.as_ref())
-                                    .is_ok()
-                            {
-                                Availability::Available
-                            } else {
-                                Availability::Blocked
-                            },
+                            availability: self.availability(&data),
                             active: data
                                 .registry
                                 .active
@@ -489,16 +476,7 @@ impl Executor {
                         .ok_or(ErrorCode::Capacity)?,
                     policy: self.policy.clone(),
                     bundle: self.bundle.clone(),
-                    availability: if data.available
-                        && self
-                            .backend
-                            .admission_ready(data.registry.parent_identity.as_ref())
-                            .is_ok()
-                    {
-                        Availability::Available
-                    } else {
-                        Availability::Blocked
-                    },
+                    availability: self.availability(&data),
                     active: data.registry.active.and_then(|sequence| {
                         data.registry
                             .records
@@ -813,6 +791,19 @@ impl Executor {
 
     pub(crate) fn config(&self) -> &Config {
         &self.config
+    }
+
+    fn availability(&self, data: &Data) -> Availability {
+        if data.available
+            && self
+                .backend
+                .admission_ready(data.registry.parent_identity.as_ref())
+                .is_ok()
+        {
+            Availability::Available
+        } else {
+            Availability::Blocked
+        }
     }
 
     fn record(&self, sequence: u64) -> Result<Record, ErrorCode> {

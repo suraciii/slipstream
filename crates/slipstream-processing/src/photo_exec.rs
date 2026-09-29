@@ -80,6 +80,34 @@ fn output_name(workload: &str) -> Option<&'static str> {
     }
 }
 
+// Keep this workload-to-format mapping aligned with `output_name`: the fixed
+// workspace path determines both what is validated and how it is reconciled.
+fn validate_output(
+    workload: &str,
+    path: &Path,
+    max_bytes: u64,
+) -> Result<OutputIdentity, ErrorCode> {
+    match workload {
+        protocol::PHOTO_WORKLOAD => {
+            crate::photo_tiff::validate(path, max_bytes).map(|value| OutputIdentity {
+                size: value.size,
+                sha256: value.sha256,
+                width: value.width,
+                height: value.height,
+            })
+        }
+        protocol::PHOTO_WORKLOAD_FILM | protocol::PHOTO_WORKLOAD_PROXY_FILM => {
+            crate::photo_jpeg::validate(path, max_bytes).map(|value| OutputIdentity {
+                size: value.size,
+                sha256: value.sha256,
+                width: value.width,
+                height: value.height,
+            })
+        }
+        _ => Err(ErrorCode::Uncertain),
+    }
+}
+
 /// The one admitted stage plan for a closed Photo workload. The plan is
 /// derived from the validated source facts, the configured bundle and the
 /// finite policy; it is never a request field.
@@ -948,31 +976,8 @@ impl PhotoExecutor {
             };
             let output_path = record.workspace(Path::new(&self.config.root));
             let output_path = output_path.join("work").join(name);
-            let identity = match record.workload.as_str() {
-                protocol::PHOTO_WORKLOAD => {
-                    crate::photo_tiff::validate(&output_path, self.config.output_bytes_max).map(
-                        |identity| OutputIdentity {
-                            size: identity.size,
-                            sha256: identity.sha256,
-                            width: identity.width,
-                            height: identity.height,
-                        },
-                    )
-                }
-                // `proxy-film` publishes the identical fixed sRGB Film JPEG,
-                // so it reuses the film-jpeg output validation unchanged.
-                protocol::PHOTO_WORKLOAD_FILM | protocol::PHOTO_WORKLOAD_PROXY_FILM => {
-                    crate::photo_jpeg::validate(&output_path, self.config.output_bytes_max).map(
-                        |identity| OutputIdentity {
-                            size: identity.size,
-                            sha256: identity.sha256,
-                            width: identity.width,
-                            height: identity.height,
-                        },
-                    )
-                }
-                _ => Err(ErrorCode::Uncertain),
-            };
+            let identity =
+                validate_output(&record.workload, &output_path, self.config.output_bytes_max);
             match identity {
                 Ok(identity) => {
                     let mut data = self.lock()?;
@@ -1224,31 +1229,7 @@ impl PhotoExecutor {
             .workspace(Path::new(&self.config.root))
             .join("work")
             .join(name);
-        let found = match record.workload.as_str() {
-            protocol::PHOTO_WORKLOAD => {
-                crate::photo_tiff::validate(&path, self.config.output_bytes_max).map(|identity| {
-                    OutputIdentity {
-                        size: identity.size,
-                        sha256: identity.sha256,
-                        width: identity.width,
-                        height: identity.height,
-                    }
-                })
-            }
-            // `proxy-film` publishes the identical fixed sRGB Film JPEG,
-            // so it reuses the film-jpeg presence validation unchanged.
-            protocol::PHOTO_WORKLOAD_FILM | protocol::PHOTO_WORKLOAD_PROXY_FILM => {
-                crate::photo_jpeg::validate(&path, self.config.output_bytes_max).map(|identity| {
-                    OutputIdentity {
-                        size: identity.size,
-                        sha256: identity.sha256,
-                        width: identity.width,
-                        height: identity.height,
-                    }
-                })
-            }
-            _ => return false,
-        };
+        let found = validate_output(&record.workload, &path, self.config.output_bytes_max);
         found.is_ok_and(|found| {
             found.size == identity.size
                 && found.sha256 == identity.sha256

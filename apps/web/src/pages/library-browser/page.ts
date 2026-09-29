@@ -9,10 +9,9 @@ import type {
   SelectionFilter,
   SelectionState,
 } from "./api/contracts.js";
-import { fetchPhotoAlbums, fetchPhotoMetadata } from "./api/photo.js";
 import { createEditorController } from "./model/editor-controller.js";
+import { createPhotoDetailsOwner } from "./model/photo-details-owner.js";
 import { createMetadataPanel } from "./ui/external-metadata-panel.js";
-
 import { createRecoveryReviewOwner } from "./model/recovery-review-owner.js";
 import {
   createFileLocationOwner,
@@ -155,7 +154,6 @@ function mountPrivateLibraryBrowser(
   let applicationAlive = true;
   const recoveryGate = new RecoveryGate();
   const sourceGrid = createSourceGridOwner(fetcher, releaseLease);
-  let photoMetadataAbort: AbortController | undefined;
   // The page-local navigation owner. Its traversal callback is bound once the
   // page controller's coordination functions exist, so the owner can be
   // created before them and still report every popstate.
@@ -560,7 +558,9 @@ function mountPrivateLibraryBrowser(
       albumActions,
       albums: () => application.albums,
       mutateAlbum: (start) => mutateAlbum(start, "summary"),
-      membershipAlbumName: (albumId) => membershipAlbumName(albumId),
+      membershipAlbumName: (albumId) =>
+        application.albums.find((album) => album.id === albumId)?.name ??
+        "Album",
       loadWindow: (index, operation, quiet, priority) =>
         loadWindow(index, operation, quiet, priority),
       reopenExpired: (anchorIndex, generation) =>
@@ -1608,9 +1608,8 @@ function mountPrivateLibraryBrowser(
     pageBusy = true;
     updateControls();
     cancelScheduledGridRender();
-    photoMetadataAbort?.abort();
-    photoMetadataAbort = undefined;
     metadataPanel.show(undefined);
+    photoDetails.clearMetadata();
     retryableTraversal = undefined;
     pendingDestination = {
       source: requested.kind,
@@ -2292,211 +2291,31 @@ function mountPrivateLibraryBrowser(
     });
   };
 
-  type MembershipFacts =
-    | Readonly<{ kind: "loading" }>
-    | Readonly<{
-        kind: "ready";
-        albums: ReadonlyArray<Readonly<{ id: string; name: string }>>;
-      }>
-    | Readonly<{ kind: "failed" }>;
-  let membershipFacts: MembershipFacts = { kind: "loading" };
-  let membershipPhotoId: string | undefined;
-  let membershipMessage: string | undefined;
-  let membershipAbort: AbortController | undefined;
-  let membershipRevision = 0;
-  const membershipAlbumName = (albumId: string): string =>
-    application.albums.find((album) => album.id === albumId)?.name ?? "Album";
-
-  const renderMembershipControls = () => {
-    if (!applicationAlive) return;
-    const photo = currentPhoto();
-    const photoId = photo?.id;
-    const facts: MembershipFacts =
-      photoId !== undefined && membershipPhotoId === photoId
-        ? membershipFacts
-        : { kind: "loading" };
-    const containing = facts.kind === "ready" ? facts.albums : [];
-    const memberIds = new Set(containing.map((album) => album.id));
-    const pending = photoId
-      ? application.albums
-          .filter(
-            (album) =>
-              albumActions.isMembershipAdmitted("add", album.id, photoId) ||
-              albumActions.isMembershipAdmitted("remove", album.id, photoId),
-          )
-          .map((album) => album.id)
-      : [];
-    view.renderMembership({
-      photoPresent: Boolean(photo),
-      loading: Boolean(photo) && facts.kind === "loading",
-      failed: Boolean(photo) && facts.kind === "failed",
-      ...(membershipMessage ? { message: membershipMessage } : {}),
-      containing,
-      options: application.albums.map((album) => ({
-        id: album.id,
-        name: album.name,
-        member: memberIds.has(album.id),
-      })),
-      pendingAlbumIds: pending,
-    });
-  };
-
-  /// Loads the current Photo's Album membership. The read is fenced to the
-  /// Photo, to the generation, and to any membership toggle admitted while it
-  /// runs: a response that arrives after its Photo stopped being current, or
-  /// after a toggle took over the panel, is discarded. A revalidation keeps
-  /// the stated facts while it runs so the panel does not flicker.
-  const loadPhotoAlbums = async (
-    authority: PhotoAuthority,
-    photoId: string | undefined,
-    options: Readonly<{ force?: boolean; keepFacts?: boolean }> = {},
-  ): Promise<void> => {
-    if (
-      !options.force &&
-      photoId !== undefined &&
-      photoId === membershipPhotoId &&
-      membershipFacts.kind !== "failed"
-    )
-      return;
-    const showLoading = !options.keepFacts || photoId !== membershipPhotoId;
-    membershipAbort?.abort();
-    membershipAbort = undefined;
-    membershipPhotoId = photoId;
-    membershipMessage = undefined;
-    membershipRevision += 1;
-    const revision = membershipRevision;
-    if (!photoId) {
-      membershipFacts = { kind: "loading" };
-      renderMembershipControls();
-      return;
-    }
-    if (showLoading) {
-      membershipFacts = { kind: "loading" };
-      renderMembershipControls();
-    }
-    const controller = new AbortController();
-    membershipAbort = controller;
-    const result = await fetchPhotoAlbums(fetcher, photoId, controller.signal);
-    if (
-      controller.signal.aborted ||
-      membershipRevision !== revision ||
-      !photoOwner.isCurrent(authority) ||
-      currentPhoto()?.id !== photoId
-    )
-      return;
-    membershipFacts =
-      result.kind === "ok"
-        ? { kind: "ready", albums: result.value.albums }
-        : { kind: "failed" };
-    renderMembershipControls();
-  };
-
-  const refreshMembershipFacts = (): void => {
-    if (!applicationAlive) return;
-    const photo = currentPhoto();
-    if (!photo) return;
-    void loadPhotoAlbums(photoOwner.authority, photo.id, {
-      force: true,
-      keepFacts: true,
-    });
-  };
-
-  /// Sends one admitted membership toggle for the current Photo. The
-  /// checkbox shows the intended state while the mutation is in flight, and
-  /// a failed mutation keeps the panel truthful and names the action.
+  const photoDetails = createPhotoDetailsOwner(fetcher, {
+    isAlive: () => applicationAlive,
+    currentPhoto,
+    authority: () => photoOwner.authority,
+    isCurrent: (authority) => photoOwner.isCurrent(authority),
+    albums: () => application.albums,
+    isMembershipAdmitted: (kind, albumId, photoId) =>
+      albumActions.isMembershipAdmitted(kind, albumId, photoId),
+    mutateAlbum: (start, authority) => mutateAlbum(start, "photo", authority),
+    addMembership: (albumId, photoId, context) =>
+      albumActions.addMembership(albumId, photoId, context),
+    removeMembership: (albumId, photoId, context) =>
+      albumActions.removeMembership(albumId, photoId, context),
+    sourceAlbumId: () => sourceGrid.albumId,
+    renderMembership: (model) => view.renderMembership(model),
+    renderMetadata: (metadata) => view.renderPhotoMetadata(metadata),
+  });
+  const renderMembershipControls = (): void => photoDetails.renderMembership();
+  const loadPhotoAlbums = photoDetails.loadAlbums;
+  const refreshMembershipFacts = photoDetails.refreshAlbums;
   const toggleMembership = (albumId: string, member: boolean): void => {
     gridMulti.expireCompensation();
-    const photo = currentPhoto();
-    if (!photo || !albumId) return;
-    const photoId = photo.id;
-    const kind = member ? "add" : "remove";
-    if (albumActions.isMembershipAdmitted(kind, albumId, photoId)) return;
-    const photoAuthority = photoOwner.authority;
-    const revision = ++membershipRevision;
-    const prior = membershipFacts;
-    if (membershipFacts.kind === "ready") {
-      const others = membershipFacts.albums.filter(
-        (album) => album.id !== albumId,
-      );
-      membershipFacts = {
-        kind: "ready",
-        albums: member
-          ? [...others, { id: albumId, name: membershipAlbumName(albumId) }]
-          : others,
-      };
-    }
-    membershipMessage = undefined;
-    renderMembershipControls();
-    void (async () => {
-      const settlement = member
-        ? mutateAlbum(
-            (context) => albumActions.addMembership(albumId, photoId, context),
-            "photo",
-            photoAuthority,
-          )
-        : mutateAlbum(
-            (context) =>
-              albumActions.removeMembership(albumId, photoId, context),
-            "photo",
-            photoAuthority,
-          );
-      // The admission is registered now: show the checkbox as in flight.
-      renderMembershipControls();
-      const { ok, announce } = await settlement;
-      const stillCurrent =
-        photoOwner.isCurrent(photoAuthority) && currentPhoto()?.id === photoId;
-      if (ok) {
-        if (stillCurrent) {
-          announce(
-            member
-              ? "Added to the Album."
-              : albumId === sourceGrid.albumId
-                ? "Removed from the Album. It stays in this open view until reopened."
-                : "Removed from the Album.",
-          );
-          void loadPhotoAlbums(photoAuthority, photoId, {
-            force: true,
-            keepFacts: true,
-          });
-        }
-        return;
-      }
-      // A failed toggle restores the prior true state. Facts that were still
-      // loading are not a true state: they become a load failure that offers
-      // the membership retry instead of stranding the panel on loading.
-      if (stillCurrent && membershipRevision === revision)
-        membershipFacts = prior.kind === "ready" ? prior : { kind: "failed" };
-      if (!stillCurrent) return;
-      membershipMessage = member
-        ? `Could not add this Photo to “${membershipAlbumName(albumId)}”.`
-        : `Could not remove this Photo from “${membershipAlbumName(albumId)}”.`;
-      renderMembershipControls();
-    })();
+    photoDetails.toggleMembership(albumId, member, photoOwner.authority);
   };
-
-  const loadPhotoMetadata = async (
-    authority: PhotoAuthority,
-    photoId: string | undefined,
-  ): Promise<void> => {
-    photoMetadataAbort?.abort();
-    photoMetadataAbort = undefined;
-    view.renderPhotoMetadata();
-    if (!photoId) return;
-    const controller = new AbortController();
-    photoMetadataAbort = controller;
-    const result = await fetchPhotoMetadata(
-      fetcher,
-      photoId,
-      controller.signal,
-    );
-    if (
-      controller.signal.aborted ||
-      !photoOwner.isCurrent(authority) ||
-      currentPhoto()?.id !== photoId
-    )
-      return;
-    view.renderPhotoMetadata(result.kind === "ok" ? result.value : undefined);
-  };
+  const loadPhotoMetadata = photoDetails.loadMetadata;
 
   const renderPhotoShell = (authority = photoOwner.authority): boolean => {
     const photo = currentPhoto();
@@ -2595,9 +2414,8 @@ function mountPrivateLibraryBrowser(
   /// recovery gate exactly as returning to the Grid does, so a pending
   /// transfer cannot paint a Photo the page has left.
   const leavePhotoView = () => {
-    photoMetadataAbort?.abort();
-    photoMetadataAbort = undefined;
     metadataPanel.show(undefined);
+    photoDetails.clearMetadata();
     leaveEditor();
     const authority = photoOwner.leave();
     const photoTransition = recoveryGate.beginTransition(
@@ -4266,9 +4084,8 @@ function mountPrivateLibraryBrowser(
   return () => {
     if (!applicationAlive) return;
     applicationAlive = false;
-    photoMetadataAbort?.abort();
+    photoDetails.dispose();
     metadataPanel.dispose();
-    membershipAbort?.abort();
     removedListing.dispose();
     removal.dispose();
     view.dispose();

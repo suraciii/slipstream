@@ -104,6 +104,7 @@ defined by Web Async Ownership:
 - The **Photo owner** owns the current Photo, foreground and adjacent Preview
   work, Photo View navigation, Selection State and Rating writes, browser-local
   undo, and Photo-scoped image transfers.
+- The **Photo details owner** keeps current-Photo membership and capture-metadata reads fenced to their Photo authority. It presents Album membership independently of decision readiness and delegates every membership write to the Album action owner; the page controller coordinates its lifecycle without duplicating those read policies.
 - The **Album action owner** keeps admitted Album create, rename, delete, and
   membership writes alive to settlement and applies their global latest-wins
   presentation and shared-data convergence rules.
