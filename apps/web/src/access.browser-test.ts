@@ -125,6 +125,86 @@ for (const viewport of [
   });
 }
 
+test("returning to the library keeps it visible while access is checked", async ({
+  page,
+}) => {
+  await page.goto(server.url);
+  await page.getByLabel("Access Token", { exact: true }).fill(server.token);
+  await page.getByRole("button", { name: "Open library", exact: true }).click();
+  const sources = page.getByRole("navigation", {
+    name: "Sources",
+    includeHidden: true,
+  });
+  await expect(sources).toBeAttached();
+
+  let releaseCheck!: () => void;
+  const checking = new Promise<void>((resolve) => {
+    releaseCheck = resolve;
+  });
+  let checkStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    checkStarted = resolve;
+  });
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "hidden",
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect(sources).toBeVisible();
+  await page.route("**/api/access/session", async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    checkStarted();
+    await checking;
+    await route.abort();
+  });
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "visible",
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await started;
+  await expect(sources).toBeVisible();
+  await expect(page.getByText("Checking access…")).toHaveCount(0);
+  const failedCheck = page.waitForEvent("requestfailed", (request) =>
+    request.url().endsWith("/api/access/session"),
+  );
+  releaseCheck();
+  await failedCheck;
+  await page.unroute("**/api/access/session");
+  await expect(sources).toBeVisible();
+  await expect(page.getByLabel("Access Token", { exact: true })).toHaveCount(0);
+});
+
+test("confirmed session loss on return removes the library", async ({
+  page,
+}) => {
+  await page.goto(server.url);
+  await page.getByLabel("Access Token", { exact: true }).fill(server.token);
+  await page.getByRole("button", { name: "Open library", exact: true }).click();
+  const sources = page.getByRole("navigation", {
+    name: "Sources",
+    includeHidden: true,
+  });
+  await expect(sources).toBeAttached();
+  await page.route("**/api/access/session", async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ authenticated: false, configured: true }),
+    });
+  });
+  await page.evaluate(() =>
+    document.dispatchEvent(new Event("visibilitychange")),
+  );
+  await expect(page.getByLabel("Access Token", { exact: true })).toBeVisible();
+  await expect(sources).toHaveCount(0);
+});
+
 test("cookie writes reject missing CSRF and revoked session cannot restore private views", async ({
   page,
   context,

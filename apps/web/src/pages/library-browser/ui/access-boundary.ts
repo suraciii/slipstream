@@ -646,8 +646,7 @@ export function mountAccessBoundary(
 
   const onResumeBoundary = (): void => {
     if (!session || !alive || document.visibilityState === "hidden") return;
-    detachPrivateHost();
-    void checkCurrentAccess();
+    void checkCurrentAccess(false);
   };
   const onHistoryTraversal = (event: PopStateEvent): void => {
     if (replayingHistoryTraversal) {
@@ -673,9 +672,7 @@ export function mountAccessBoundary(
     );
   };
   const onVisibilityChange = (): void => {
-    if (document.visibilityState === "hidden") {
-      if (session && alive) detachPrivateHost();
-    } else onResumeBoundary();
+    if (document.visibilityState === "visible") onResumeBoundary();
   };
   window.addEventListener("popstate", onHistoryTraversal);
   window.addEventListener("online", onResumeBoundary);

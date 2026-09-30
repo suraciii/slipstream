@@ -67,14 +67,21 @@ Someone retaining a copy of the Access Token can establish another session.
 
 On detected expiry, revocation, or rejection, the browser must stop new writes,
 remove private views, and offer access entry at the current Destination. Other
-tabs must react to local sign-out; returning tabs and restored history must
-validate access before redisplaying private content. A locally known expiry
-must hide content even while disconnected.
+tabs must react to local sign-out. A locally known expiry must hide content even
+while disconnected.
+
+Returning to a tab with an already displayed, unexpired Browser Session must
+leave the current view in place. The browser checks access in the background;
+confirmed rejection removes the view and opens access entry. A temporarily
+unreachable server must not replace the current view with a checking screen or
+ask the Photographer to retry access. Private requests still require server
+authorization, and ordinary disconnection follows the browsing contract.
+Reloading a page or restoring history before a private view is available must
+validate access before displaying private content.
 
 Requests admitted before revocation can finish. Reopening access must reconcile
 current server facts and must not automatically repeat uncertain mutations or
-claim they were saved. Ordinary disconnection remains distinct from rejected
-access and follows the existing browsing contract while access remains valid.
+claim they were saved.
 
 ## CLI and Deployment
 
