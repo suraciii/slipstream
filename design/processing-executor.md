@@ -32,6 +32,10 @@ of Exports, or public processing API. Engine processes remain fresh per attempt.
 The processing backend's host-command runner lives in `backend/process.rs`.
 It owns the cleared environment, process group, bounded pipe capture, deadline,
 and child cleanup; callers retain attempt orchestration and policy decisions.
+The backend also owns fixed Docker socket/client-configuration arguments and
+the systemctl system-manager prefix for both qualification and Photo executors.
+They share command construction and bounded execution, while each executor
+retains its own identity verification, journal and settlement rules.
 
 The operator configures an instance identity, canonical private workspace root,
 fixed digest-addressed processing image, finite memory policy, and a private

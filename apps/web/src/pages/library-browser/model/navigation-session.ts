@@ -1,6 +1,5 @@
 import {
   allPhotosDestination,
-  sameSourceView,
   type NavigationDestination,
   type NavigationGridRestoration,
   type NavigationStartup,
@@ -16,7 +15,22 @@ type StartupDestination = Readonly<{
   restoration?: NavigationGridRestoration;
 }>;
 
-export function createNavigationSession(startup: NavigationStartup) {
+export interface NavigationSession {
+  takeStartup(): StartupDestination | undefined;
+  begin(destination: NavigationDestination): DestinationEstablishment;
+  isCurrent(establishment: DestinationEstablishment): boolean;
+  fail(destination: NavigationDestination): void;
+  takeRetry(): NavigationDestination | undefined;
+  captureGrid(value: NavigationGridRestoration | undefined): void;
+  readonly gridRestoration: NavigationGridRestoration | undefined;
+  requireCurrentFolder(location: string): void;
+  takeCurrentFolder(): string | undefined;
+  dispose(): void;
+}
+
+export function createNavigationSession(
+  startup: NavigationStartup,
+): NavigationSession {
   let alive = true;
   let initial: StartupDestination | undefined =
     startup.kind === "invalid"
@@ -36,7 +50,7 @@ export function createNavigationSession(startup: NavigationStartup) {
               }
             : {}),
         };
-  let pending: DestinationEstablishment | undefined;
+  let current: DestinationEstablishment | undefined;
   let retry: NavigationDestination | undefined;
   let restoration: NavigationGridRestoration | undefined;
   let currentFolder: string | undefined;
@@ -50,24 +64,16 @@ export function createNavigationSession(startup: NavigationStartup) {
     begin(destination: NavigationDestination): DestinationEstablishment {
       const establishment = { destination };
       if (alive) {
-        pending = establishment;
+        current = establishment;
         retry = undefined;
       }
       return establishment;
     },
-    finish(establishment: DestinationEstablishment): void {
-      if (pending === establishment) pending = undefined;
-    },
-    allows(destination: NavigationDestination): boolean {
-      return (
-        alive && (!pending || sameSourceView(pending.destination, destination))
-      );
+    isCurrent(establishment: DestinationEstablishment): boolean {
+      return alive && current === establishment;
     },
     fail(destination: NavigationDestination): void {
       if (alive) retry = destination;
-    },
-    clearRetry(): void {
-      retry = undefined;
     },
     takeRetry(): NavigationDestination | undefined {
       const destination = alive ? retry : undefined;
@@ -92,7 +98,7 @@ export function createNavigationSession(startup: NavigationStartup) {
       if (!alive) return;
       alive = false;
       initial = undefined;
-      pending = undefined;
+      current = undefined;
       retry = undefined;
       restoration = undefined;
       currentFolder = undefined;

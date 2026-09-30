@@ -1237,14 +1237,7 @@ fn stop_container(
 // Host boundary --------------------------------------------------------
 
 fn docker(config: &Config, args: &[String]) -> Result<String, ErrorCode> {
-    let mut fixed = vec![
-        "--host".into(),
-        "unix:///var/run/docker.sock".into(),
-        "--config".into(),
-        format!("{}/docker-client", config.root),
-    ];
-    fixed.extend_from_slice(args);
-    backend::command("/usr/bin/docker", &fixed)
+    backend::docker(&config.root, args)
 }
 
 /// Resolve and verify the pinned worker image. The image entrypoint and the
@@ -1284,9 +1277,7 @@ fn inspect_image(config: &Config) -> Result<String, ErrorCode> {
 
 impl PhotoExecutor {
     fn systemctl(&self, args: &[String]) -> Result<String, ErrorCode> {
-        let mut fixed = vec!["--system".into()];
-        fixed.extend_from_slice(args);
-        backend::command("/usr/bin/systemctl", &fixed)
+        backend::systemctl(args)
     }
 
     fn property(&self, unit: &str, property: &str) -> Result<String, ErrorCode> {

@@ -28,15 +28,13 @@ impl Persistence {
         recovery: ScanRecoveryPlan,
     ) -> Result<oneshot::Receiver<Result<ScanApplication, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ApplyScan {
+        self.submit_persistence_receiver(|reply| Command::ApplyScan {
             discovered,
             errors,
             recovery,
             failure_after_first: false,
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     #[cfg(test)]
@@ -46,13 +44,12 @@ impl Persistence {
         discovered: Vec<DiscoveredOriginal>,
         errors: Vec<OriginalScanError>,
     ) -> Result<ScanApplication, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ApplyScan {
+        let receive = self.submit_persistence_receiver(|reply| Command::ApplyScan {
             discovered,
             errors,
             recovery: ScanRecoveryPlan::default(),
             failure_after_first: true,
-            reply: send,
+            reply,
         })?;
         receive.await.unwrap_or(Err(PersistenceError::OwnerStopped))
     }
@@ -63,39 +60,33 @@ impl Persistence {
         errors: Vec<OriginalScanError>,
         recovery: ScanRecoveryPlan,
     ) -> Result<ScanApplication, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ApplyScan {
+        self.submit_persistence_receiver(|reply| Command::ApplyScan {
             discovered,
             errors,
             recovery,
             failure_after_first: false,
-            reply: send,
-        })?;
-        receive
-            .blocking_recv()
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            reply,
+        })?
+        .blocking_recv()
+        .unwrap_or(Err(PersistenceError::OwnerStopped))
     }
 
     pub(crate) fn recovery_facts_blocking(
         &self,
         original_ids: Vec<String>,
     ) -> Result<Vec<OriginalFingerprint>, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::RecoveryFacts {
+        self.submit_persistence_receiver(|reply| Command::RecoveryFacts {
             original_ids,
-            reply: send,
-        })?;
-        receive
-            .blocking_recv()
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            reply,
+        })?
+        .blocking_recv()
+        .unwrap_or(Err(PersistenceError::OwnerStopped))
     }
 
     pub(crate) fn next_fingerprint_target_blocking(
         &self,
     ) -> Result<Option<FingerprintTarget>, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::NextFingerprintTarget(send))?;
-        receive
+        self.submit_persistence_receiver(Command::NextFingerprintTarget)?
             .blocking_recv()
             .unwrap_or(Err(PersistenceError::OwnerStopped))
     }
@@ -104,9 +95,7 @@ impl Persistence {
         &self,
         fingerprint: OriginalFingerprint,
     ) -> Result<(), PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::StoreFingerprint(fingerprint, send))?;
-        receive
+        self.submit_persistence_receiver(|reply| Command::StoreFingerprint(fingerprint, reply))?
             .blocking_recv()
             .unwrap_or(Err(PersistenceError::OwnerStopped))
     }
@@ -114,9 +103,7 @@ impl Persistence {
     pub(crate) fn fingerprint_counts_blocking(
         &self,
     ) -> Result<FingerprintCounts, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::FingerprintCounts(send))?;
-        receive
+        self.submit_persistence_receiver(Command::FingerprintCounts)?
             .blocking_recv()
             .unwrap_or(Err(PersistenceError::OwnerStopped))
     }
@@ -124,9 +111,7 @@ impl Persistence {
     pub(crate) fn recovery_survey_receiver(
         &self,
     ) -> Result<oneshot::Receiver<Result<RecoverySurvey, PersistenceError>>, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::RecoverySurvey(send))?;
-        Ok(receive)
+        self.submit_persistence_receiver(Command::RecoverySurvey)
     }
 
     /// Resolves current facts for one retained review membership, preserving
@@ -136,12 +121,10 @@ impl Persistence {
         original_ids: Vec<String>,
     ) -> Result<oneshot::Receiver<Result<RecoveryRecords, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::RecoveryRecords {
+        self.submit_persistence_receiver(|reply| Command::RecoveryRecords {
             original_ids,
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn apply_relocations_receiver(
@@ -150,12 +133,10 @@ impl Persistence {
         relocations: Vec<RequestedRelocation>,
     ) -> Result<oneshot::Receiver<Result<AppliedRelocations, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ApplyRelocations {
+        self.submit_persistence_receiver(|reply| Command::ApplyRelocations {
             root,
             relocations,
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 }
