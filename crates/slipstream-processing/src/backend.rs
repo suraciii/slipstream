@@ -130,23 +130,30 @@ pub(crate) fn delegate_workload_controllers(scope: &Path, leaf: &Path) -> Result
     read(&leaf.join("io.stat"))?;
     Ok(())
 }
+pub(crate) fn docker(root: &str, args: &[String]) -> Result<String> {
+    let mut fixed = vec![
+        "--host".into(),
+        "unix:///var/run/docker.sock".into(),
+        "--config".into(),
+        format!("{root}/docker-client"),
+    ];
+    fixed.extend_from_slice(args);
+    command("/usr/bin/docker", &fixed)
+}
+
+pub(crate) fn systemctl(args: &[String]) -> Result<String> {
+    let mut fixed = vec!["--system".into()];
+    fixed.extend_from_slice(args);
+    command("/usr/bin/systemctl", &fixed)
+}
 
 impl Backend {
     fn docker(&self, args: &[String]) -> Result<String> {
-        let mut fixed = vec![
-            "--host".into(),
-            "unix:///var/run/docker.sock".into(),
-            "--config".into(),
-            format!("{}/docker-client", self.config.root),
-        ];
-        fixed.extend_from_slice(args);
-        command("/usr/bin/docker", &fixed)
+        docker(&self.config.root, args)
     }
 
     fn systemctl(&self, args: &[String]) -> Result<String> {
-        let mut fixed = vec!["--system".into()];
-        fixed.extend_from_slice(args);
-        command("/usr/bin/systemctl", &fixed)
+        systemctl(args)
     }
 
     fn worker(&self) -> &'static str {

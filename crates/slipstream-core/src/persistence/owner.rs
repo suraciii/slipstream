@@ -688,8 +688,7 @@ impl Persistence {
     }
 
     pub async fn probe(&self) -> Result<u64, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::Probe(send))?;
+        let receive = self.submit_persistence_receiver(Command::Probe)?;
         receive.await.unwrap_or(Err(PersistenceError::OwnerStopped))
     }
 
@@ -701,9 +700,7 @@ impl Persistence {
     pub(crate) fn snapshot_receiver(
         &self,
     ) -> Result<oneshot::Receiver<Result<ScanSnapshot, PersistenceError>>, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::Snapshot(send))?;
-        Ok(receive)
+        self.submit_persistence_receiver(Command::Snapshot)
     }
 
     pub async fn apply_scan(
@@ -730,15 +727,11 @@ impl Persistence {
         preview: PreviewSeed,
     ) -> Result<oneshot::Receiver<Result<PreviewSeedResult, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::Preview(preview, send))?;
-        Ok(receive)
+        self.submit_persistence_receiver(|reply| Command::Preview(preview, reply))
     }
 
     pub(crate) fn snapshot_blocking(&self) -> Result<ScanSnapshot, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::Snapshot(send))?;
-        receive
+        self.submit_persistence_receiver(Command::Snapshot)?
             .blocking_recv()
             .unwrap_or(Err(PersistenceError::OwnerStopped))
     }
@@ -752,9 +745,7 @@ impl Persistence {
         &self,
     ) -> Result<oneshot::Receiver<Result<Vec<AlbumRecord>, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ListAlbums(send))?;
-        Ok(receive)
+        self.submit_persistence_receiver(Command::ListAlbums)
     }
 
     /// Bounded summaries for browser routes: counts and saved-position
@@ -763,9 +754,7 @@ impl Persistence {
         &self,
     ) -> Result<oneshot::Receiver<Result<Vec<AlbumSummary>, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ListAlbumSummaries(send))?;
-        Ok(receive)
+        self.submit_persistence_receiver(Command::ListAlbumSummaries)
     }
 
     pub(crate) fn album_receiver(
@@ -773,24 +762,17 @@ impl Persistence {
         album_id: &str,
     ) -> Result<oneshot::Receiver<Result<Option<AlbumSummary>, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ReadAlbum {
+        self.submit_persistence_receiver(|reply| Command::ReadAlbum {
             album_id: album_id.to_owned(),
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn albums_by_id_receiver(
         &self,
         album_ids: Vec<String>,
     ) -> Result<AlbumReadWindowReceiver, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ReadAlbums {
-            album_ids,
-            reply: send,
-        })?;
-        Ok(receive)
+        self.submit_persistence_receiver(|reply| Command::ReadAlbums { album_ids, reply })
     }
 
     pub(crate) fn create_album_query_receiver(
@@ -812,12 +794,10 @@ impl Persistence {
         photo_id: &str,
     ) -> Result<oneshot::Receiver<Result<Option<PhotoRead>, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ReadPhoto {
+        self.submit_persistence_receiver(|reply| Command::ReadPhoto {
             photo_id: photo_id.to_owned(),
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn edit_recipe_receiver(
@@ -825,12 +805,10 @@ impl Persistence {
         photo_id: &str,
     ) -> Result<oneshot::Receiver<Result<Option<EditRecipeRead>, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ReadEditRecipe {
+        self.submit_persistence_receiver(|reply| Command::ReadEditRecipe {
             photo_id: photo_id.to_owned(),
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn save_edit_recipe_receiver(
@@ -838,21 +816,17 @@ impl Persistence {
         mutation: SaveEditRecipe,
     ) -> Result<oneshot::Receiver<Result<EditRecipeWriteOutcome, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::SaveEditRecipe(mutation, send))?;
-        Ok(receive)
+        self.submit_persistence_receiver(|reply| Command::SaveEditRecipe(mutation, reply))
     }
 
     pub(crate) fn edit_recipe_surface_receiver(
         &self,
         photo_id: &str,
     ) -> Result<EditRecipeSurfaceReceiver, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ReadEditRecipeSurface {
+        self.submit_persistence_receiver(|reply| Command::ReadEditRecipeSurface {
             photo_id: photo_id.to_owned(),
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn rebind_edit_recipe_receiver(
@@ -860,9 +834,7 @@ impl Persistence {
         mutation: RebindEditRecipe,
     ) -> Result<oneshot::Receiver<Result<EditRecipeWriteOutcome, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::RebindEditRecipe(mutation, send))?;
-        Ok(receive)
+        self.submit_persistence_receiver(|reply| Command::RebindEditRecipe(mutation, reply))
     }
 
     pub(crate) fn read_development_proxy_receiver(
@@ -872,33 +844,27 @@ impl Persistence {
         oneshot::Receiver<Result<Option<crate::DevelopmentProxyRecord>, PersistenceError>>,
         PersistenceError,
     > {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ReadDevelopmentProxy {
+        self.submit_persistence_receiver(|reply| Command::ReadDevelopmentProxy {
             photo_id: photo_id.to_owned(),
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn record_development_proxy_receiver(
         &self,
         record: crate::DevelopmentProxyRecord,
     ) -> Result<oneshot::Receiver<Result<bool, PersistenceError>>, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::RecordDevelopmentProxy(record, send))?;
-        Ok(receive)
+        self.submit_persistence_receiver(|reply| Command::RecordDevelopmentProxy(record, reply))
     }
 
     pub(crate) fn remove_development_proxy_receiver(
         &self,
         photo_id: &str,
     ) -> Result<oneshot::Receiver<Result<bool, PersistenceError>>, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::RemoveDevelopmentProxy {
+        self.submit_persistence_receiver(|reply| Command::RemoveDevelopmentProxy {
             photo_id: photo_id.to_owned(),
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn all_development_proxies_receiver(
@@ -907,18 +873,14 @@ impl Persistence {
         oneshot::Receiver<Result<Vec<crate::DevelopmentProxyRecord>, PersistenceError>>,
         PersistenceError,
     > {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::AllDevelopmentProxies(send))?;
-        Ok(receive)
+        self.submit_persistence_receiver(Command::AllDevelopmentProxies)
     }
     pub(crate) fn submit_export_receiver(
         &self,
         submission: ExportSubmission,
     ) -> Result<oneshot::Receiver<Result<ExportSubmitOutcome, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::SubmitExport(submission, send))?;
-        Ok(receive)
+        self.submit_persistence_receiver(|reply| Command::SubmitExport(submission, reply))
     }
 
     pub(crate) fn export_receiver(
@@ -926,24 +888,20 @@ impl Persistence {
         export_id: &str,
     ) -> Result<oneshot::Receiver<Result<Option<ExportRecord>, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ReadExport {
+        self.submit_persistence_receiver(|reply| Command::ReadExport {
             export_id: export_id.to_owned(),
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn photo_exports_receiver(
         &self,
         photo_id: &str,
     ) -> Result<PhotoExportsReceiver, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ListPhotoExports {
+        self.submit_persistence_receiver(|reply| Command::ListPhotoExports {
             photo_id: photo_id.to_owned(),
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn cancel_export_receiver(
@@ -951,12 +909,10 @@ impl Persistence {
         export_id: &str,
     ) -> Result<oneshot::Receiver<Result<Option<ExportRecord>, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::CancelExport {
+        self.submit_persistence_receiver(|reply| Command::CancelExport {
             export_id: export_id.to_owned(),
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn settle_export_receiver(
@@ -965,13 +921,11 @@ impl Persistence {
         settlement: ExportSettlement,
     ) -> Result<oneshot::Receiver<Result<Option<ExportRecord>, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::SettleExport {
+        self.submit_persistence_receiver(|reply| Command::SettleExport {
             export_id: export_id.to_owned(),
             settlement,
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn begin_export_attempt_receiver(
@@ -980,13 +934,11 @@ impl Persistence {
         attempt: ExportAttempt,
     ) -> Result<oneshot::Receiver<Result<Option<ExportRecord>, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::BeginExportAttempt {
+        self.submit_persistence_receiver(|reply| Command::BeginExportAttempt {
             export_id: export_id.to_owned(),
             attempt,
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn record_export_source_receiver(
@@ -996,14 +948,12 @@ impl Persistence {
         sha256: &str,
     ) -> Result<oneshot::Receiver<Result<Option<ExportRecord>, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::RecordExportSource {
+        self.submit_persistence_receiver(|reply| Command::RecordExportSource {
             export_id: export_id.to_owned(),
             size,
             sha256: sha256.to_owned(),
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn retry_export_receiver(
@@ -1014,15 +964,13 @@ impl Persistence {
         allowance: u64,
     ) -> Result<oneshot::Receiver<Result<ExportRetryOutcome, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::RetryExport {
+        self.submit_persistence_receiver(|reply| Command::RetryExport {
             export_id: export_id.to_owned(),
             request_id: request_id.to_owned(),
             expected_bundle_id: expected_bundle_id.to_owned(),
             allowance,
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     /// Resolves a request identity without any admission or state change: a
@@ -1037,14 +985,12 @@ impl Persistence {
         oneshot::Receiver<Result<Option<ExportSubmissionResolution>, PersistenceError>>,
         PersistenceError,
     > {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ResolveExportSubmission {
+        self.submit_persistence_receiver(|reply| Command::ResolveExportSubmission {
             photo_id: photo_id.to_owned(),
             request_id: request_id.to_owned(),
             payload_digest: payload_digest.to_owned(),
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     /// Claims publication before the staged artifact is renamed into place.
@@ -1054,14 +1000,12 @@ impl Persistence {
         incarnation: &str,
         sequence: u64,
     ) -> Result<oneshot::Receiver<Result<bool, PersistenceError>>, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ClaimExportPublication {
+        self.submit_persistence_receiver(|reply| Command::ClaimExportPublication {
             export_id: export_id.to_owned(),
             incarnation: incarnation.to_owned(),
             sequence,
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     /// Reads the durable publication claim of an Export, if any.
@@ -1069,12 +1013,10 @@ impl Persistence {
         &self,
         export_id: &str,
     ) -> Result<oneshot::Receiver<ExportPublicationClaimReply>, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ExportPublicationClaim {
+        self.submit_persistence_receiver(|reply| Command::ExportPublicationClaim {
             export_id: export_id.to_owned(),
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     /// Refreshes a download lease's liveness anchor while its stream runs.
@@ -1083,13 +1025,11 @@ impl Persistence {
         lease_id: &str,
         now: u64,
     ) -> Result<oneshot::Receiver<Result<bool, PersistenceError>>, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::RenewExportLease {
+        self.submit_persistence_receiver(|reply| Command::RenewExportLease {
             lease_id: lease_id.to_owned(),
             now,
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn sweep_export_expiry_receiver(
@@ -1097,18 +1037,14 @@ impl Persistence {
         now: u64,
     ) -> Result<oneshot::Receiver<Result<ExportSweepResult, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::SweepExportExpiry { now, reply: send })?;
-        Ok(receive)
+        self.submit_persistence_receiver(|reply| Command::SweepExportExpiry { now, reply })
     }
 
     pub(crate) fn unfinished_exports_receiver(
         &self,
     ) -> Result<oneshot::Receiver<Result<Vec<ExportRecord>, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::UnfinishedExports(send))?;
-        Ok(receive)
+        self.submit_persistence_receiver(Command::UnfinishedExports)
     }
 
     pub(crate) fn acquire_export_lease_receiver(
@@ -1117,25 +1053,21 @@ impl Persistence {
         now: u64,
     ) -> Result<oneshot::Receiver<Result<ExportLeaseOutcome, PersistenceError>>, PersistenceError>
     {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::AcquireExportLease {
+        self.submit_persistence_receiver(|reply| Command::AcquireExportLease {
             export_id: export_id.to_owned(),
             now,
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn release_export_lease_receiver(
         &self,
         lease_id: &str,
     ) -> Result<oneshot::Receiver<Result<bool, PersistenceError>>, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ReleaseExportLease {
+        self.submit_persistence_receiver(|reply| Command::ReleaseExportLease {
             lease_id: lease_id.to_owned(),
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn photos_by_id_receiver(
@@ -1143,13 +1075,11 @@ impl Persistence {
         photo_ids: Vec<String>,
         projection: Arc<PhotoQueryProjection>,
     ) -> Result<PhotoReadWindowReceiver, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ReadPhotos {
+        self.submit_persistence_receiver(|reply| Command::ReadPhotos {
             photo_ids,
             projection,
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn create_photo_query_receiver(
@@ -1174,12 +1104,10 @@ impl Persistence {
         &self,
         photo_id: &str,
     ) -> Result<oneshot::Receiver<PhotoAlbums>, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::PhotoAlbums {
+        self.submit_persistence_receiver(|reply| Command::PhotoAlbums {
             photo_id: photo_id.to_owned(),
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     /// Ordered membership identity for one Album's Browse Snapshot.
@@ -1190,12 +1118,10 @@ impl Persistence {
         oneshot::Receiver<Result<Option<AlbumBrowseTarget>, PersistenceError>>,
         PersistenceError,
     > {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::AlbumBrowseTarget {
+        self.submit_persistence_receiver(|reply| Command::AlbumBrowseTarget {
             album_id: album_id.to_owned(),
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub async fn mutate_album(
@@ -1475,13 +1401,11 @@ impl Persistence {
         start: usize,
         limit: usize,
     ) -> Result<RemovedPhotoPageReceiver, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::RemovedPhotos {
+        self.submit_persistence_receiver(|reply| Command::RemovedPhotos {
             start,
             limit,
-            reply: send,
-        })?;
-        Ok(receive)
+            reply,
+        })
     }
 
     pub(crate) fn trash_candidates_receiver(
@@ -1582,9 +1506,7 @@ impl Persistence {
     pub(crate) fn permanently_deleted_original_ids_blocking(
         &self,
     ) -> Result<Vec<String>, PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::PermanentlyDeletedOriginalIds(send))?;
-        receive
+        self.submit_persistence_receiver(Command::PermanentlyDeletedOriginalIds)?
             .blocking_recv()
             .unwrap_or(Err(PersistenceError::OwnerStopped))
     }
@@ -1628,13 +1550,21 @@ impl Persistence {
     }
 
     pub async fn write_probe(&self) -> Result<(), PersistenceError> {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::WriteProbe(send))?;
+        let receive = self.submit_persistence_receiver(Command::WriteProbe)?;
         receive.await.unwrap_or(Err(PersistenceError::OwnerStopped))
     }
 
     pub(super) fn submit(&self, command: Command) -> Result<(), PersistenceError> {
         self.inner.submit(command)
+    }
+
+    pub(super) fn submit_persistence_receiver<T>(
+        &self,
+        build: impl FnOnce(Reply<T>) -> Command,
+    ) -> Result<oneshot::Receiver<Result<T, PersistenceError>>, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(build(send))?;
+        Ok(receive)
     }
 
     pub fn shutdown(&self) -> Result<(), PersistenceError> {

@@ -155,14 +155,18 @@ credential was supplied. The existing CLI envelope must map these boundary
 errors as specified in the CLI reference before ordinary result decoding.
 
 CSRF tokens must compare in constant time and belong to the presented session.
-The browser fetches status at startup, foreground/history restoration, and
-before reconnecting private views. Apply existing request-generation ownership
-so a stale status or image completion cannot restore access after local logout.
+The browser fetches status at startup, on a return to a displayed tab, and
+before restoring history. Apply existing request-generation ownership so a
+stale status or image completion cannot restore access after local logout.
 Status checks share one in-flight request and one session transition owner.
-Image failure checks preserve a valid view when the server is unreachable;
-foreground and history restoration keep private content hidden until verified.
-Foreground restoration means returning from a hidden document or restoring a
-persisted page, not a focus change while the document remains visible.
+Returning to an already displayed tab checks in the background, keeps its view
+on a network failure, and removes it on confirmed rejection. Existing private
+requests still rely on server-side admission; this can leave previously rendered
+content visible until rejection is observed after remote revocation. On a shared
+device, explicit sign-out removes the view in every open tab. Initial entry,
+known expiry, and restored history without an available view remain closed until
+verified. Image failure checks preserve a valid view when the server is
+unreachable.
 
 Browse owns lease release, including disposal. The page supplies its explicit
 release callback with authenticated transport before closing the access epoch.
@@ -177,7 +181,8 @@ conditional responses, must use `Cache-Control: no-store`. Server-side derivativ
 caching and identity remain intact. Keep bounded authenticated in-memory image
 reuse; do not add private service-worker caches. Detach in-flight image sources
 and private views on access loss and reject stale asynchronous completions.
-History restoration must revalidate before attaching private content.
+History restoration must revalidate before attaching private content; an ordinary
+tab return retains the existing view.
 
 Retire the old publicly cacheable image URL namespace. New pages must use the
 new protected namespace; old paths must not serve private content or redirect
