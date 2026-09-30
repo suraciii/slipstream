@@ -122,6 +122,10 @@ def main() -> None:
         tools = tools_result.get("tools")
         if not isinstance(tools, list):
             raise RuntimeError("darktable-mcp tools/list returned no tools array")
+        modules_result = request(
+            process, selector, 2, "tools/call",
+            {"name": "list_modules", "arguments": {}},
+        )
         normalized_modules = normalize_module_entries(
             decoded_tool_payload(modules_result, "list_modules")
         )
