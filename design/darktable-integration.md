@@ -84,8 +84,13 @@ source-descriptor authority defined by the existing processing protocol.
 Bundle construction must query the actual engine for module identities,
 parameter versions, structures, and supported execution operations. The
 resulting bounded metadata must be bound to that bundle and available to the
-service without launching an engine for every UI read. A runtime mismatch with
-the approved metadata must fail the affected capability.
+service without launching an engine for every UI read. Each attempt must query
+tool metadata and the schemas used by that request after starting its private
+MCP child, and compare them with the bundle's approved metadata before applying
+intent. A mismatch fails the attempt as an engine incompatibility; no output is
+published. It does not add a launcher readiness exchange or grant broader
+capabilities. The existing capability read owns how the operation's availability
+is reported, and a corrected engine requires a newly qualified bundle.
 
 The bridge must expose a recursive parameter representation with unambiguous
 field identity. Arrays must retain dimensions and element types; structures

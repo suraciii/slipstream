@@ -70,8 +70,11 @@ a proxy new editing capabilities.
 
 An invalid setting must be refused without rounding it into a different enum
 choice, truncating an integer, substituting zero, or ignoring the correction.
-The refusal must identify the affected control or unavailable capability. A
-failed engine request must not partially save the submitted Edit Recipe.
+The refusal must identify the affected control or unavailable capability.
+Recipe saves must remain atomic and independent from rendering. If an engine
+request fails after a save was confirmed, the confirmed Edit Recipe must remain
+saved; only the requested output fails. Rendering must not partially save,
+replace, or roll back editing intent.
 
 If an engine is unavailable, incompatible, canceled, or fails, Slipstream must
 report the affected operation without claiming a successful matching output.
