@@ -42,12 +42,13 @@ import {
   type FilmstripViewModel,
 } from "./filmstrip-presenter.js";
 import { createAlbumForm } from "./album-form.js";
+import { createSourceListPresenter } from "./source-list-presenter.js";
+import { createGridBatchPresenter } from "./grid-batch-presenter.js";
 import {
   addressFor,
   type NavigationGridRestoration,
 } from "../model/browser-navigation.js";
 import { formatCaptureTime } from "./capture-time.js";
-import { formatPhotoCount } from "./photo-count.js";
 import type {
   EditSourceKind,
   EditSourceReadiness,
@@ -420,7 +421,7 @@ type GridBatchResultViewModel = Readonly<{
   compensation?: Readonly<{ label: string }>;
 }>;
 
-type GridViewModel = Readonly<{
+export type GridViewModel = Readonly<{
   total: number;
   /// The Grid's multi-selection: whether every cell activation toggles its
   /// Photo, how many Photos are multi-selected, the bound one batch may
@@ -1368,47 +1369,9 @@ ${RECOVERY_PANEL_TEMPLATE}
   });
 
   let photoStatusSurface: object = {};
-  let sourceModel: SourceListViewModel | undefined;
-  let folderAlbumSelection = "";
   /// True while the empty-state action belongs to an explained destination
   /// state rather than to an empty source's Library check.
   let gridEmptyExplanation = false;
-  let batchAlbumSelection = "";
-  // The Grid's multi-selection presentation: the page model owns which Photos
-  // are multi-selected, and these mirror the last rendered model so a cell
-  // build, a keyboard key, and a merged render all read one state.
-  let gridMultiMode = false;
-  let gridMultiCount = 0;
-  let gridMultiLimit = 0;
-  let gridMultiEnabled = false;
-  let gridMultiResult: GridBatchResultViewModel | undefined;
-  let gridMultiSelected: (index: number) => boolean = () => false;
-  /// Presents the multi-selection the page model has just emptied, or one
-  /// whose bound the page model reports. A hidden tray clears the markers too,
-  /// so a cell never keeps a marker the tray no longer names, and a hidden Grid
-  /// keeps its retained DOM: only the visible Grid touches it.
-  const resetGridMultiSelection = () => {
-    if (!alive) return;
-    gridMultiMode = false;
-    gridMultiCount = 0;
-    gridMultiEnabled = false;
-    gridMultiResult = undefined;
-    gridMultiSelected = () => false;
-    if (gridView.hidden) return;
-    renderBatch();
-    applyGridMultiSelection();
-  };
-  // Whether one batch Add to Album is settling: its control stays disabled
-  // until the outcome is presented.
-  let batchAlbumsPending = false;
-  /// The batch-tray control that held keyboard focus when a settling batch
-  /// disabled the tray; parked and returned by renderBatch.
-  let heldBatchControl: HTMLButtonElement | HTMLSelectElement | null = null;
-  // The Album choices the batch tray presents. A hidden tray binds no options,
-  // so an option list never answers a query for a surface the Grid is not
-  // presenting.
-  let batchAlbums: ReadonlyArray<Readonly<{ id: string; name: string }>> = [];
-  let renderedBatchAlbumSignature = "";
   let photoSurface: object = {};
   let currentPhotoId: string | undefined;
   let currentSelection: ViewSelectionState = "undecided";
@@ -1453,13 +1416,34 @@ ${RECOVERY_PANEL_TEMPLATE}
     gridBatch,
     compact: compactSources,
     isAlive: () => alive,
-    multiMode: () => gridMultiMode,
-    multiCount: () => gridMultiCount,
-    multiSelected: (index) => gridMultiSelected(index),
-    renderBatch: () => renderBatch(),
+    multiMode: () => batchPresenter.multiMode(),
+    multiCount: () => batchPresenter.multiCount(),
+    multiSelected: (index) => batchPresenter.multiSelected(index),
+    renderBatch: () => batchPresenter.applyMulti(),
     send,
     bindThumbnail,
     releaseThumbnail,
+  });
+  const batchPresenter = createGridBatchPresenter({
+    elements: {
+      gridBatch,
+      gridTools,
+      gridSelection,
+      gridSelectMode,
+      multiDone,
+      batchCount,
+      batchRetained,
+      batchResult,
+      batchResultText,
+      batchCompensate,
+      batchSelect,
+      batchReject,
+      batchAlbumSelect,
+      batchAlbumAdd,
+    },
+    alive: () => alive,
+    send,
+    applyMultiSelection: () => gridPresenter.applyMulti(),
   });
   /// Opens the explicit Rating choices. Only this surface or the Rating entry
   /// owns explicit Rating interaction at one time; the Rating Wheel stays the
@@ -1585,7 +1569,9 @@ ${RECOVERY_PANEL_TEMPLATE}
     closePhotoTools: (restoreFocus) => photoToolsController.close(restoreFocus),
     closeRatingChoices,
     activeAlbumId: () =>
-      sourceModel?.albums.find((candidate) => candidate.active)?.id,
+      sourcePresenter
+        ?.sourceModel()
+        ?.albums.find((candidate) => candidate.active)?.id,
     onSizeChange: setGridThumbnailSize,
   });
   const albumFormController = createAlbumForm({
@@ -1598,6 +1584,36 @@ ${RECOVERY_PANEL_TEMPLATE}
         sourceList.querySelectorAll<HTMLElement>("[data-focus-key]"),
       ).find((candidate) => candidate.dataset.focusKey === focusKey),
   });
+  const sourcePresenter = createSourceListPresenter({
+    sourceList,
+    albumResume,
+    folderAlbumControls,
+    folderAlbumSelect,
+    addFolderToAlbum,
+    folderAlbumStatus,
+    alive: () => alive,
+    send,
+    sourceAddress: (source) =>
+      addressFor(
+        source.kind === "library"
+          ? { source: "library", selection: "all" }
+          : source.kind === "album"
+            ? { source: "album", albumId: source.id, selection: "all" }
+            : {
+                source: "folder",
+                folderPath: source.location,
+                selection: "all",
+              },
+      ),
+    openAlbumForm: (kind, albumId, name) =>
+      albumFormController.open(kind, albumId, name),
+    createAlbumTools: (album) => albumFormController.createAlbumTools(album),
+    actionFocusKey: () => albumFormController.actionFocusKey("create"),
+    restoreSourceFocus: (target) =>
+      albumFormController.restoreSourceFocus(target),
+  });
+  const renderSources = sourcePresenter.render;
+  const renderFolderAlbum = sourcePresenter.renderFolderAlbum;
   const zoomController = createPhotoZoomController({
     preview,
     stage,
@@ -1624,407 +1640,13 @@ ${RECOVERY_PANEL_TEMPLATE}
     send,
   });
 
-  /// The address one source destination resolves to. A source selection
-  /// always uses that source's default order and the All filter, so the
-  /// address is fully known before any request is made.
-  const sourceAddress = (source: SourceReference): string =>
-    addressFor(
-      source.kind === "library"
-        ? { source: "library", selection: "all" }
-        : source.kind === "album"
-          ? { source: "album", albumId: source.id, selection: "all" }
-          : { source: "folder", folderPath: source.location, selection: "all" },
-    );
-
-  /// Intercepts only an unmodified primary activation of a destination
-  /// anchor. A modified activation, a middle click, or a non-primary button
-  /// keeps its native new-tab, copy-link, and download behavior.
-  const interceptDestination = (
-    element: HTMLAnchorElement | HTMLButtonElement,
-    activate: () => void,
-  ) => {
-    element.addEventListener("click", (event) => {
-      const pointer = event as MouseEvent;
-      if (
-        pointer.defaultPrevented ||
-        pointer.button !== 0 ||
-        pointer.metaKey ||
-        pointer.ctrlKey ||
-        pointer.shiftKey ||
-        pointer.altKey
-      )
-        return;
-      pointer.preventDefault();
-      activate();
-    });
-  };
-
-  /// One source destination. A destination the Library can open right now is a
-  /// real same-origin anchor, so new-tab, copy-link, and download stay native.
-  /// A destination that cannot be opened yet — an unpublished Library Folder
-  /// root, or a Folder the current publication does not list — keeps button
-  /// semantics and no href, so an unmodified activation can never navigate the
-  /// document away from the application, and its native disabled state keeps
-  /// it out of the hover highlight.
-  const createSourceButton = (
-    name: string,
-    count: number,
-    active: boolean,
-    address: string,
-    openable: boolean,
-  ) => {
-    const element: HTMLAnchorElement | HTMLButtonElement = openable
-      ? document.createElement("a")
-      : document.createElement("button");
-    if (openable) (element as HTMLAnchorElement).href = address;
-    else {
-      const button = element as HTMLButtonElement;
-      button.type = "button";
-      button.disabled = true;
-    }
-    element.className = `source-card${active ? " active" : ""}`;
-    if (active) element.setAttribute("aria-current", "true");
-    // The name may be visually truncated; the title keeps the full name
-    // available on hover without changing the accessible name.
-    element.title = name;
-    element.innerHTML = "<strong></strong><span></span>";
-    required<HTMLElement>(element, "strong").textContent = name;
-    required<HTMLElement>(element, "span").textContent =
-      formatPhotoCount(count);
-    return element;
-  };
-
-  const createFolderPager = (
-    location: string,
-    pager: NonNullable<FolderViewModel["pager"]>,
-  ) => {
-    const depth = location ? location.split("/").length : 0;
-    const controls = document.createElement("div");
-    controls.className = "folder-pager";
-    controls.style.marginLeft = `${Math.min(depth, 6) * 12}px`;
-    const prior = document.createElement("button");
-    prior.type = "button";
-    prior.className = "folder-page-button";
-    prior.textContent = "Previous Folders";
-    prior.disabled = !pager.hasPrevious;
-    prior.addEventListener("click", () =>
-      send({ kind: "folder-page", location, direction: -1 }),
-    );
-    const label = document.createElement("span");
-    label.className = "folder-page-label";
-    label.textContent = `${pager.page + 1} / ${pager.pages}`;
-    const more = document.createElement("button");
-    more.type = "button";
-    more.className = "folder-page-button";
-    more.textContent = "More Folders";
-    more.disabled = !pager.hasNext;
-    more.addEventListener("click", () =>
-      send({ kind: "folder-page", location, direction: 1 }),
-    );
-    controls.append(prior, label, more);
-    return controls;
-  };
-
-  const appendFolder = (
-    fragment: DocumentFragment,
-    folder: FolderViewModel,
-  ) => {
-    const depth = folder.location.split("/").length;
-    const row = document.createElement("div");
-    row.className = "folder-row folder-child";
-    row.style.marginLeft = `${Math.min(depth - 1, 6) * 12}px`;
-    if (folder.hasDescendantFolders) {
-      const expand = document.createElement("button");
-      expand.type = "button";
-      expand.className = "folder-expand";
-      expand.setAttribute("aria-expanded", String(folder.expanded));
-      expand.textContent = folder.expanded ? "▾" : "▸";
-      expand.setAttribute("aria-label", `Toggle ${folder.name} subfolders`);
-      expand.addEventListener("click", () =>
-        send({
-          kind: "folder-toggle",
-          location: folder.location,
-          expanded: folder.expanded,
-        }),
-      );
-      row.append(expand);
-    }
-    // A Folder the current publication does not list is not an openable
-    // destination yet, so it keeps button semantics and no href.
-    const button = createSourceButton(
-      `${folder.name}${folder.hasDescendantFolders ? " · Subfolders" : ""}`,
-      folder.photoCount,
-      folder.active,
-      sourceAddress({
-        kind: "folder",
-        location: folder.location,
-        name: folder.name,
-      }),
-      folder.enabled,
-    );
-    interceptDestination(button, () =>
-      send({
-        kind: "source-open",
-        source: {
-          kind: "folder",
-          location: folder.location,
-          name: folder.name,
-        },
-      }),
-    );
-    row.append(button);
-    fragment.append(row);
-    if (!folder.expanded) return;
-    for (const child of folder.children) appendFolder(fragment, child);
-    if (folder.pager)
-      fragment.append(createFolderPager(folder.location, folder.pager));
-  };
-
-  const renderSources = (model: SourceListViewModel) => {
-    if (!alive) return;
-    sourceModel = model;
-    const focused = document.activeElement;
-    const focusedKey =
-      focused instanceof HTMLElement ? focused.dataset.focusKey : undefined;
-    sourceList.replaceChildren();
-    const library = createSourceButton(
-      "All Photos",
-      model.libraryCount,
-      model.libraryActive,
-      sourceAddress({ kind: "library" }),
-      true,
-    );
-    library.dataset.focusKey = "source:library";
-    interceptDestination(library, () =>
-      send({ kind: "source-open", source: { kind: "library" } }),
-    );
-    sourceList.append(library);
-    const fileHeading = document.createElement("h3");
-    fileHeading.textContent = "Folders";
-    sourceList.append(fileHeading);
-    for (const failure of model.fileLocationFailures) {
-      const retryFolders = document.createElement("button");
-      retryFolders.type = "button";
-      retryFolders.className = "folder-more";
-      retryFolders.textContent = `Retry Folders (${failure.range})`;
-      retryFolders.addEventListener("click", () =>
-        send({ kind: "file-location-retry", key: failure.key }),
-      );
-      sourceList.append(retryFolders);
-    }
-    // The Library Folder root opens only while the Library is published.
-    const rootCard = createSourceButton(
-      "Library Folder",
-      model.libraryCount,
-      model.rootActive,
-      sourceAddress({ kind: "folder", location: "", name: "Library Folder" }),
-      model.fileLocationsEnabled,
-    );
-    rootCard.dataset.focusKey = "source:folder:";
-    interceptDestination(rootCard, () =>
-      send({
-        kind: "source-open",
-        source: { kind: "folder", location: "", name: "Library Folder" },
-      }),
-    );
-    const rootRow = document.createElement("div");
-    rootRow.className = "folder-row folder-root";
-    const rootExpand = document.createElement("button");
-    rootExpand.type = "button";
-    rootExpand.className = "folder-expand";
-    rootExpand.setAttribute("aria-expanded", String(model.rootExpanded));
-    rootExpand.textContent = model.rootExpanded ? "▾" : "▸";
-    rootExpand.setAttribute("aria-label", "Toggle Library Folder subfolders");
-    rootExpand.addEventListener("click", () =>
-      send({
-        kind: "folder-toggle",
-        location: "",
-        expanded: model.rootExpanded,
-      }),
-    );
-    rootRow.append(rootExpand, rootCard);
-    const folders = document.createDocumentFragment();
-    folders.append(rootRow);
-    if (model.rootExpanded) {
-      for (const folder of model.rootChildren) appendFolder(folders, folder);
-      if (model.rootPager)
-        folders.append(createFolderPager("", model.rootPager));
-    }
-    sourceList.append(folders);
-    const albumHeadingRow = document.createElement("div");
-    albumHeadingRow.className = "album-heading";
-    const albumHeading = document.createElement("h3");
-    albumHeading.textContent = "Albums";
-    const newAlbum = document.createElement("button");
-    newAlbum.type = "button";
-    newAlbum.className = "album-new";
-    newAlbum.textContent = "New Album";
-    newAlbum.dataset.focusKey = albumFormController.actionFocusKey("create");
-    newAlbum.addEventListener("click", () =>
-      albumFormController.open("create"),
-    );
-    albumHeadingRow.append(albumHeading, newAlbum);
-    sourceList.append(albumHeadingRow);
-    // An Album with a saved position exposes Resume separately from opening
-    // its Grid: it resolves that position under the existing saved-position
-    // rules and opens Photo View, so it lives with the other source-specific
-    // actions in View options rather than beside the destination anchor.
-    const activeAlbum = model.albums.find((album) => album.active);
-    albumResume.hidden = activeAlbum?.hasSavedPosition !== true;
-    for (const album of model.albums) {
-      const button = createSourceButton(
-        album.name,
-        album.photoCount,
-        album.active,
-        sourceAddress({ kind: "album", id: album.id }),
-        true,
-      );
-      button.dataset.focusKey = `source:album:${album.id}`;
-      interceptDestination(button, () =>
-        send({ kind: "source-open", source: { kind: "album", id: album.id } }),
-      );
-      const row = document.createElement("div");
-      row.className = "album-row";
-      row.append(button, albumFormController.createAlbumTools(album));
-      sourceList.append(row);
-    }
-    const focusTarget = (focusKey: string) =>
-      Array.from(
-        sourceList.querySelectorAll<HTMLElement>("[data-focus-key]"),
-      ).find((candidate) => candidate.dataset.focusKey === focusKey);
-    if (albumFormController.restoreSourceFocus(focusTarget)) return;
-    const restored = focusedKey ? focusTarget(focusedKey) : undefined;
-    if (restored && !restored.matches(":disabled")) {
-      restored.focus();
-      return;
-    }
-  };
-
   const scheduleGridRender = gridPresenter.schedule;
   const cancelGridRender = gridPresenter.cancel;
   const clearGridCells = gridPresenter.clear;
   const rebindDetachedGridCells = gridPresenter.rebindDetached;
-  const applyGridMultiSelection = gridPresenter.applyMulti;
-  const renderBatch = () => {
-    if (!alive) return;
-    const count = gridMultiCount;
-    const visible = gridMultiMode || count > 0;
-    gridBatch.hidden = !visible;
-    // Select mode, and a desktop modifier selection, replace the normal
-    // header tools with the source, the count, and Done. A tool the
-    // Photographer was using leaves the layout, so focus moves to the control
-    // that replaced it rather than to the body.
-    gridSelectMode.setAttribute("aria-pressed", String(gridMultiMode));
-    const heldToolsFocus = gridTools.contains(document.activeElement);
-    const heldSelectionFocus = gridSelection.contains(document.activeElement);
-    gridTools.hidden = visible;
-    gridSelection.hidden = !visible;
-    if (heldToolsFocus && visible) multiDone.focus();
-    else if (heldSelectionFocus && !visible) gridSelectMode.focus();
-    if (!visible) {
-      batchCount.textContent = "";
-      batchRetained.hidden = true;
-      batchResult.hidden = true;
-      batchResultText.textContent = "";
-      batchCompensate.hidden = true;
-      batchCompensate.disabled = true;
-      batchAlbumSelect.replaceChildren();
-      renderedBatchAlbumSignature = "";
-      batchAlbumSelection = "";
-      // A hidden tray names no Photo, so no cell keeps a multi-selection
-      // marker beside it.
-      applyGridMultiSelection();
-      return;
-    }
-
-    const countText = `${count.toLocaleString()} / ${gridMultiLimit.toLocaleString()} Photos`;
-    const retainedHidden = count === 0 || gridMultiResult === undefined;
-    const resultHidden = gridMultiResult === undefined;
-    const resultText = gridMultiResult?.message ?? "";
-    const compensation = gridMultiResult?.compensation;
-    const review = gridMultiResult?.review;
-    const resultAction = compensation ?? review;
-    const compensationHidden = resultHidden || resultAction === undefined;
-    if (batchCount.textContent !== countText)
-      batchCount.textContent = countText;
-    if (batchRetained.hidden !== retainedHidden)
-      batchRetained.hidden = retainedHidden;
-    if (batchResult.hidden !== resultHidden) batchResult.hidden = resultHidden;
-    if (batchResultText.textContent !== resultText)
-      batchResultText.textContent = resultText;
-    batchCompensate.hidden = compensationHidden;
-    if (resultAction && batchCompensate.textContent !== resultAction.label)
-      batchCompensate.textContent = resultAction.label;
-    batchCompensate.dataset.action = compensation ? "compensate" : "review";
-    if (gridMultiResult) batchResult.dataset.tone = gridMultiResult.tone;
-    else batchResult.removeAttribute("data-tone");
-
-    const enabled = gridMultiEnabled && !batchAlbumsPending && count > 0;
-    if (count === 0) {
-      batchAlbumSelect.replaceChildren();
-      renderedBatchAlbumSignature = "";
-      batchAlbumSelection = "";
-      batchCompensate.hidden = true;
-      applyGridMultiSelection();
-    } else {
-      const signature = batchAlbums.map((album) => album.id).join(",");
-      if (signature !== renderedBatchAlbumSignature) {
-        renderedBatchAlbumSignature = signature;
-        if (!batchAlbums.some((album) => album.id === batchAlbumSelection))
-          batchAlbumSelection = batchAlbums[0]?.id ?? "";
-        batchAlbumSelect.replaceChildren(
-          ...batchAlbums.map((album) => {
-            const option = document.createElement("option");
-            option.value = album.id;
-            option.textContent = album.name;
-            option.selected = album.id === batchAlbumSelection;
-            return option;
-          }),
-        );
-      }
-    }
-    // Disabling a focused batch control would drop keyboard focus to the
-    // body, so the tray parks focus on the selection header's Done while a
-    // batch settles and returns it when interactivity resumes, mirroring the
-    // Grid's held-cell hand-off.
-    if (!enabled && heldBatchControl === null) {
-      const active = document.activeElement;
-      if (
-        active === batchSelect ||
-        active === batchReject ||
-        active === batchAlbumSelect ||
-        active === batchAlbumAdd ||
-        active === batchCompensate
-      ) {
-        heldBatchControl = active as HTMLButtonElement | HTMLSelectElement;
-        multiDone.focus();
-      }
-    }
-    batchSelect.disabled = !enabled;
-    batchReject.disabled = !enabled;
-    const albums = batchAlbumSelect.options.length > 0;
-    batchAlbumSelect.disabled = !enabled || !albums;
-    batchAlbumAdd.disabled = !enabled || !albums || !batchAlbumSelection;
-    batchCompensate.disabled = !enabled || resultAction === undefined;
-    if (enabled && heldBatchControl) {
-      const control = heldBatchControl;
-      heldBatchControl = null;
-      if (
-        control.isConnected &&
-        !control.disabled &&
-        (document.activeElement === document.body ||
-          document.activeElement === multiDone)
-      )
-        control.focus();
-    }
-  };
+  const resetGridMultiSelection = () => batchPresenter.reset();
   const renderGrid = (model: GridViewModel, position?: number) => {
-    gridMultiMode = model.multi.mode;
-    gridMultiCount = model.multi.count;
-    gridMultiLimit = model.multi.limit;
-    gridMultiEnabled = model.multi.enabled;
-    gridMultiResult = model.multi.result;
-    gridMultiSelected = model.multi.selected;
+    batchPresenter.render(model.multi);
     gridPresenter.render(model, position);
   };
 
@@ -2168,7 +1790,7 @@ ${RECOVERY_PANEL_TEMPLATE}
     if (photoView.hidden) {
       if (
         event.key === "Escape" &&
-        (gridMultiCount > 0 || gridMultiMode) &&
+        (batchPresenter.multiCount() > 0 || batchPresenter.multiMode()) &&
         gridView.contains(target)
       ) {
         event.preventDefault();
@@ -2240,34 +1862,6 @@ ${RECOVERY_PANEL_TEMPLATE}
       });
   };
 
-  const renderFolderAlbum = (model: FolderAlbumViewModel) => {
-    if (!alive) return;
-    folderAlbumControls.hidden = !model.visible;
-    if (!model.visible) {
-      folderAlbumSelect.replaceChildren();
-      folderAlbumStatus.textContent = "";
-      folderAlbumSelection = "";
-      return;
-    }
-    const selectedStillExists = model.albums.some(
-      (album) => album.id === folderAlbumSelection,
-    );
-    if (!selectedStillExists)
-      folderAlbumSelection = model.selectedAlbumId || model.albums[0]?.id || "";
-    folderAlbumSelect.replaceChildren();
-    for (const album of model.albums) {
-      const option = document.createElement("option");
-      option.value = album.id;
-      option.textContent = album.name;
-      option.selected = album.id === folderAlbumSelection;
-      folderAlbumSelect.append(option);
-    }
-    folderAlbumSelect.disabled = model.pending || !model.albums.length;
-    addFolderToAlbum.disabled =
-      model.pending || !model.albums.length || !folderAlbumSelection;
-    folderAlbumStatus.textContent = model.status ?? "";
-  };
-
   compactSources.addEventListener("change", onSourceViewportChange);
   mobileActionHierarchy.addEventListener("change", onSourceViewportChange);
   const onShortViewportChange = () => {
@@ -2335,47 +1929,13 @@ ${RECOVERY_PANEL_TEMPLATE}
       advance: true,
     }),
   );
-  folderAlbumSelect.addEventListener("change", () => {
-    if (!alive) return;
-    folderAlbumSelection = folderAlbumSelect.value;
-    addFolderToAlbum.disabled = !folderAlbumSelection;
-  });
-  addFolderToAlbum.addEventListener("click", () => {
-    if (folderAlbumSelection)
-      send({ kind: "folder-album-add", albumId: folderAlbumSelection });
-  });
   gridSelectMode.addEventListener("click", () => {
     if (!alive) return;
-    send({ kind: "grid-select-mode", mode: !gridMultiMode });
+    send({ kind: "grid-select-mode", mode: !batchPresenter.multiMode() });
   });
   // Done is the visible clear exit: it empties the multi-selection and leaves
   // Select mode without changing a Photo decision, exactly like Escape.
   multiDone.addEventListener("click", () => send({ kind: "grid-multi-clear" }));
-  batchSelect.addEventListener("click", () => {
-    if (!alive || batchSelect.disabled) return;
-    send({ kind: "grid-batch-mutation", value: "selected" });
-  });
-  batchReject.addEventListener("click", () => {
-    if (!alive || batchReject.disabled) return;
-    send({ kind: "grid-batch-mutation", value: "rejected" });
-  });
-  batchAlbumSelect.addEventListener("change", () => {
-    if (!alive) return;
-    batchAlbumSelection = batchAlbumSelect.value;
-    renderBatch();
-  });
-  batchAlbumAdd.addEventListener("click", () => {
-    if (!alive || batchAlbumAdd.disabled || !batchAlbumSelection) return;
-    send({ kind: "grid-batch-album-add", albumId: batchAlbumSelection });
-  });
-  batchCompensate.addEventListener("click", () => {
-    if (!alive || batchCompensate.disabled) return;
-    send(
-      batchCompensate.dataset.action === "review"
-        ? { kind: "grid-batch-review" }
-        : { kind: "grid-batch-album-remove" },
-    );
-  });
   sourceController.syncLayout();
   syncSecondarySurface();
   // The strip's home is only placed once a Photo can present it: the markup
@@ -2462,9 +2022,7 @@ ${RECOVERY_PANEL_TEMPLATE}
     renderFolderAlbum,
     renderBatchAlbums(model) {
       if (!alive) return;
-      batchAlbums = model.albums;
-      batchAlbumsPending = model.pending;
-      renderBatch();
+      batchPresenter.renderAlbums(model);
     },
     renderSort(model) {
       if (!alive) return;
@@ -2738,7 +2296,8 @@ ${RECOVERY_PANEL_TEMPLATE}
       stageObserver.disconnect();
       filmstripPresenter.dispose();
       zoomController?.dispose();
-      photoGestures?.dispose();
+      sourcePresenter?.dispose();
+      batchPresenter?.dispose();
       sourceController.dispose();
       gridPresenter.dispose();
       compactSources.removeEventListener("change", onSourceViewportChange);

@@ -10,7 +10,6 @@ import {
 } from "./model/browse-range-recovery-owner.js";
 import type {
   AlbumSummary,
-  FolderChild,
   SelectionFilter,
   SelectionState,
 } from "./api/contracts.js";
@@ -18,25 +17,16 @@ import { createEditorController } from "./model/editor-controller.js";
 import { createPhotoDetailsOwner } from "./model/photo-details-owner.js";
 import { createMetadataPanel } from "./ui/external-metadata-panel.js";
 import { createRecoveryReviewOwner } from "./model/recovery-review-owner.js";
-import {
-  createFileLocationOwner,
-  type FileLocationAuthority,
-  type FileLocationFailure,
-  type FileLocationOutcome,
-  type FileLocationWindow,
-} from "./model/file-location-owner.js";
+import { createFileLocationController } from "./model/file-location-controller.js";
 import {
   createApplicationOwner,
   type ApplicationCoordination,
   type ApplicationEvent,
   type ApplicationPresentation,
-  type ApplicationRecovery,
-  type ApplicationSummaryAction,
-  type FileLocationPresentation,
 } from "./model/application-owner.js";
+import { createApplicationPresentationController } from "./model/application-presentation-controller.js";
 import {
   createSourceGridOwner,
-  type SourceAuthority,
   type SourceGridSource,
   type SourceWindowOperation,
 } from "./model/source-grid-owner.js";
@@ -45,16 +35,16 @@ import {
   type SourceLifecycleOwner,
 } from "./model/source-open-owner.js";
 import { releaseBrowse, type SourceViewOrder } from "./api/source-grid.js";
-import { type RemovalResult, type RestorationResult } from "./api/removal.js";
 import { createRemovalOwner } from "./model/removal-owner.js";
 import { createRemovedListingOwner } from "./model/removed-listing-owner.js";
 import { createGridMultiSelectionOwner } from "./model/grid-multi-selection-owner.js";
+import { createAlbumActionOwner } from "./model/album-action-owner.js";
+import { createAlbumManagementController } from "./model/album-management-controller.js";
 import {
-  createAlbumActionOwner,
-  type AlbumActionAdmission,
-  type AlbumActionContext,
-  type AlbumFormAuthority,
-} from "./model/album-action-owner.js";
+  createRemovalReviewController,
+  restorationOutcomeMessage,
+} from "./model/removal-review-controller.js";
+import { createAlbumMutationController } from "./model/album-mutation-controller.js";
 import { createPhotoOwner, type PhotoAuthority } from "./model/photo-owner.js";
 import { createSavedPositionOwner } from "./model/saved-position-owner.js";
 import {
@@ -66,6 +56,7 @@ import {
   type NavigationGridRestoration,
   type NavigationTraversal,
 } from "./model/browser-navigation.js";
+import { createNavigationSession } from "./model/navigation-session.js";
 import {
   destinationOrder,
   folderNameFor,
@@ -76,45 +67,27 @@ import {
 } from "./model/destination-policy.js";
 import {
   createLibraryBrowserView,
-  type AlbumFormReference,
-  type FolderViewModel,
   type LibraryBrowserIntent,
   type LibraryBrowserView,
   type SourceListViewModel,
 } from "./ui/library-browser-view.js";
 import { formatPhotoCount } from "./ui/photo-count.js";
-import { mountAccessBoundary } from "./access-boundary.js";
+import { mountAccessBoundary } from "./ui/access-boundary.js";
 import type { BrowserFetch } from "./model/access-session.js";
 
-type AlbumRecoveryRecord = Readonly<{
-  claim: RecoveryClaim;
-  sourceAuthority: SourceAuthority;
-}>;
-/// How establishing a source destination reports back to its caller.
 type SourceEstablishment =
-  /// The destination is committed and its first window is admitted.
   | Readonly<{ kind: "established" }>
-  /// A newer destination superseded this one, so nothing was committed.
   | Readonly<{ kind: "superseded" }>
-  /// The request failed; the destination stays retryable.
   | Readonly<{ kind: "failed" }>
-  /// The server confirmed the requested Album or Folder is gone.
   | Readonly<{ kind: "missing" }>;
 
-/// What a destination supplies to the source establishment it asks for.
 type SourceEstablishmentOptions = Readonly<{
-  /// The Grid anchor and focus to restore once the source is established.
   restoration?: NavigationGridRestoration;
-  /// The Folder publication the requesting entry was established under.
   folderPublication?: string;
-  /// An explained note presented after the destination commits.
   explanation?: string;
-  /// How the committed destination is recorded in browser history.
   address?: "push" | "replace" | "none";
 }>;
 
-/// What one source opening needs: the source identity, an optional preferred
-/// Photo, and the view and establishment options forwarded to the open.
 type OpenSourceOptions = Readonly<{
   kind: "library" | "album" | "folder";
   album?: AlbumSummary;
@@ -155,48 +128,13 @@ function mountPrivateLibraryBrowser(
   let applicationAlive = true;
   const recoveryGate = new RecoveryGate();
   const sourceGrid = createSourceGridOwner(fetcher, releaseLease);
-  // The page-local navigation owner. Its traversal callback is bound once the
-  // page controller's coordination functions exist, so the owner can be
-  // created before them and still report every popstate.
-  let applyNavigationTraversal: (
-    traversal: NavigationTraversal,
-  ) => void = () => {};
-  // The Grid anchor is captured before Photo View takes the layout over, so a
-  // Photo entry can replace the Grid entry it came from with the position the
-  // Photographer left.
-  let pendingGridRestoration: NavigationGridRestoration | undefined;
   const navigation = createNavigationOwner(
-    { captureGridRestoration: () => pendingGridRestoration },
-    (traversal) => applyNavigationTraversal(traversal),
+    { captureGridRestoration: () => navigationSession.gridRestoration },
+    (traversal) => {
+      void applyTraversal(traversal);
+    },
   );
-  // Startup elects exactly one source bootstrap from the committed Overview:
-  // the address this document was loaded with. It replaces the unconditional
-  // All Photos bootstrap and never races a second source open.
-  const startup = navigation.start();
-  // An invalid address is explained and replaced once with All Photos before
-  // any request for the invalid source is made.
-  let startupDestination: NavigationDestination =
-    startup.kind === "destination" ? startup.destination : allPhotosDestination;
-  let startupConsumed = false;
-  /// The destination whose establishment is in flight, so a traversal that
-  /// arrives while a newer intent is establishing a different destination is
-  /// superseded instead of repainting it.
-  let pendingDestination: NavigationDestination | undefined;
-  /// The destination a failed traversal asked for, so the source Retry
-  /// re-establishes it instead of reloading the Overview.
-  let retryableTraversal: NavigationDestination | undefined;
-  let startupExplanation: string | undefined =
-    startup.kind === "invalid"
-      ? "That link is not a valid Library Browser address. Showing All Photos."
-      : undefined;
-  // A reloaded Grid entry keeps the anchor and focus target it recorded, so
-  // the destination it re-establishes restores where the Photographer left.
-  let startupRestoration: NavigationGridRestoration | undefined =
-    startup.kind === "destination" &&
-    startup.entry.anchor &&
-    startup.entry.focus
-      ? { anchor: startup.entry.anchor, focus: startup.entry.focus }
-      : undefined;
+  const navigationSession = createNavigationSession(navigation.start());
   const view: LibraryBrowserView = createLibraryBrowserView(
     root,
     handleViewIntent,
@@ -276,16 +214,13 @@ function mountPrivateLibraryBrowser(
     total: sourceGrid.total,
     index: 0,
   });
-  /// The Library's current scan phase, or "" while no scan is running. The
-  /// Edit surface names it alongside a `Checking source…` wait.
-  let libraryScanPhase = "";
   const editor = createEditorController(fetcher, view, {
     isAlive: () => applicationAlive,
     isCurrentPhoto: (photoId) =>
       photoOwner.isCurrent(photoOwner.authority) &&
       photoOwner.current?.id === photoId,
     currentPhoto: () => photoOwner.current,
-    libraryPhase: () => libraryScanPhase,
+    libraryPhase: () => applicationPresentation.scanPhase,
   });
   const {
     open: openEditor,
@@ -316,36 +251,11 @@ function mountPrivateLibraryBrowser(
     isPhotoCurrent: (authority, photoId) =>
       photoOwner.isCurrent(authority) && photoOwner.current?.id === photoId,
   });
-  const applicationRecoveries = new Map<ApplicationRecovery, RecoveryClaim>();
-  let nextSummaryPresentationId = 0;
-  let summaryAction:
-    | Readonly<{
-        presentationId: number;
-        action: ApplicationSummaryAction;
-      }>
-    | undefined;
 
   const presentApplication = (presentation: ApplicationPresentation): void => {
     if (!applicationAlive) return;
     if (presentation.kind === "summary") {
-      const presentationId = ++nextSummaryPresentationId;
-      summaryAction = presentation.summary.action
-        ? { presentationId, action: presentation.summary.action }
-        : undefined;
-      // The Library's current scan phase in its own words, kept for the Edit
-      // surface's `Checking source…` wait: a wait names what the Library is
-      // doing instead of presenting the Photo as failed.
-      libraryScanPhase =
-        presentation.summary.libraryCheckState === "active"
-          ? presentation.summary.text
-          : "";
-      view.presentSummary(
-        presentation.summary.text,
-        presentation.summary.action
-          ? { kind: presentation.summary.action.kind, presentationId }
-          : undefined,
-        presentation.summary.libraryCheckState,
-      );
+      applicationPresentation.presentSummary(presentation.summary);
       return;
     }
     if (sourceGrid.kind === "album" && sourceGrid.albumId) {
@@ -369,40 +279,13 @@ function mountPrivateLibraryBrowser(
     coordination: ApplicationCoordination,
   ): Promise<void> => {
     if (!applicationAlive) return;
-    if (coordination.kind === "mark-reachable") {
-      // The probe answers on every poll, so an already established connection
-      // under a reachable transport has nothing to restore and stays untouched.
-      if (connectionEstablished && recoveryGate.transportReachable) return;
-      setConnected(true);
-      return;
-    }
-    if (coordination.kind === "transport-lost") {
-      // Reachability is owned here, so a probe that repeats a loss the page
-      // already applied changes nothing.
-      if (!recoveryGate.transportReachable) return;
-      recoveryGate.markTransportLost();
-      syncConnection();
-      return;
-    }
-    if (coordination.kind === "fail-application-recovery") {
-      let claim = applicationRecoveries.get(coordination.recovery);
-      if (!claim) {
-        claim = recoveryGate.issue(
-          coordination.slot,
-          coordination.slot === "overview-reload" ? "overview" : "library",
-        );
-        applicationRecoveries.set(coordination.recovery, claim);
-      }
-      if (!recoveryGate.fail(claim, { transportLost: true }))
-        recoveryGate.discard(claim);
-      syncConnection();
-      return;
-    }
-    if (coordination.kind === "recover") {
-      const claim = applicationRecoveries.get(coordination.recovery);
-      if (claim) recoveryGate.recover(claim);
-      applicationRecoveries.delete(coordination.recovery);
-      syncConnection();
+    if (
+      coordination.kind === "mark-reachable" ||
+      coordination.kind === "transport-lost" ||
+      coordination.kind === "fail-application-recovery" ||
+      coordination.kind === "recover"
+    ) {
+      applicationPresentation.coordinate(coordination);
       return;
     }
     if (coordination.kind === "publication-advanced") {
@@ -434,17 +317,9 @@ function mountPrivateLibraryBrowser(
     }
     if (!coordination.isCurrent()) return;
     if (!sourceGrid.token && coordination.overview.published) {
-      if (!startupConsumed) {
-        // Startup elects exactly one source bootstrap: the destination this
-        // document was loaded with. It replaces the unconditional All Photos
-        // bootstrap and never races a second source open.
-        startupConsumed = true;
-        const destination = startupDestination;
-        const explanation = startupExplanation;
-        const restoration = startupRestoration;
-        startupDestination = allPhotosDestination;
-        startupExplanation = undefined;
-        startupRestoration = undefined;
+      const startup = navigationSession.takeStartup();
+      if (startup) {
+        const { destination, explanation, restoration } = startup;
         const established = await establishDestination(destination, {
           addressed: true,
           ...(restoration ? { restoration } : {}),
@@ -489,12 +364,30 @@ function mountPrivateLibraryBrowser(
   const application = createApplicationOwner(fetcher, {
     emit: handleApplicationEvent,
   });
+  const applicationPresentation = createApplicationPresentationController(
+    application,
+    recoveryGate,
+    {
+      isAlive: () => applicationAlive,
+      isConnectionEstablished: () => connectionEstablished,
+      presentSummary: (text, action, state) =>
+        view.presentSummary(
+          text,
+          action
+            ? {
+                kind: action.action.kind,
+                presentationId: action.presentationId,
+              }
+            : undefined,
+          state,
+        ),
+      setConnected: () => setConnected(true),
+      syncConnection: () => syncConnection(),
+    },
+  );
   const albumActions = createAlbumActionOwner(fetcher);
   const removal = createRemovalOwner(fetcher);
-  /// The Removed Photos listing (Trash) is one owner's state: its pages,
-  /// its selection, its permanent-deletion reviews, and its retained
-  /// operations. The page presents the models the owner computes and
-  /// coordinates the owners a committed write touches.
+  // Trash owns listing state; the page coordinates owners touched by writes.
   const removedListing = createRemovedListingOwner(fetcher, {
     removal,
     present: {
@@ -515,7 +408,7 @@ function mountPrivateLibraryBrowser(
     coordinate: {
       refreshLibrary: async () => {
         await application.refreshOverview().catch(() => {});
-        await refreshFolderCounts();
+        await folders.refreshCounts();
       },
       reopenSourceAfterRestore: async () => {
         if (
@@ -570,38 +463,6 @@ function mountPrivateLibraryBrowser(
         failPhotoRecovery(authority, kind),
     },
   });
-  let removalReviewed = 0;
-  let removalReviewOpen = false;
-  let removalResult:
-    | Readonly<{
-        tone: "success" | "warning" | "failure";
-        message: string;
-      }>
-    | undefined;
-  type AlbumFormRecord = Readonly<{
-    formId: string;
-    kind: AlbumFormReference["kind"];
-    authority: AlbumFormAuthority;
-    albumId?: string;
-    initialName: string;
-  }>;
-  let albumForm: AlbumFormRecord | undefined;
-  const dismissAlbumForm = (record: AlbumFormRecord): boolean => {
-    if (!albumActions.isFormCurrent(record.authority)) return false;
-    albumActions.closeForm(record.authority);
-    if (albumForm === record) albumForm = undefined;
-    view.dismissAlbumForm(record.formId);
-    return true;
-  };
-
-  const ALBUM_NAME_MAXIMUM = 120;
-  const albumNameError = (name: string): string | undefined => {
-    const trimmed = name.trim();
-    if (!trimmed) return "Enter an Album name.";
-    if (Array.from(trimmed).length > ALBUM_NAME_MAXIMUM)
-      return `Album names are at most ${ALBUM_NAME_MAXIMUM} characters.`;
-    return undefined;
-  };
 
   let connected = false;
   let connectionEstablished = false;
@@ -633,7 +494,6 @@ function mountPrivateLibraryBrowser(
     if (view.gridVisible()) setGridStatusText(text);
     else view.setPhotoStatus(text);
   };
-  let albumRecovery: AlbumRecoveryRecord | undefined;
   const photoRecoveryKeys = new WeakMap<object, string>();
   let nextPhotoRecoveryKey = 0;
   const photoRecoveryKey = (authority: PhotoAuthority): string => {
@@ -645,18 +505,9 @@ function mountPrivateLibraryBrowser(
   };
 
   const currentPhoto = () => photoOwner.current;
-  const currentAlbumRecovery = (): AlbumRecoveryRecord | undefined => {
-    if (
-      albumRecovery &&
-      (!sourceGrid.isCurrent(albumRecovery.sourceAuthority) ||
-        !recoveryGate.isActive(albumRecovery.claim))
-    )
-      albumRecovery = undefined;
-    return albumRecovery;
-  };
   const syncConnection = (message?: string) => {
     if (!applicationAlive) return;
-    currentAlbumRecovery();
+    albumMutations.clearInactive();
     rangeRecovery?.clearInactive();
     connected = connectionEstablished && recoveryGate.decisionReady;
     view.setConnection(
@@ -758,9 +609,6 @@ function mountPrivateLibraryBrowser(
       recoveryGate.discard(claim);
     syncConnection();
   };
-  /// The open source's order is view state: the select shows the order the
-  /// open snapshot was built with, and stays disabled while an open is
-  /// already busy so a second order cannot race the first.
   const renderSortControl = () => {
     if (!applicationAlive) return;
     const interactionBusy = pageBusy || photoRetryPending || photoOwner.busy;
@@ -771,9 +619,6 @@ function mountPrivateLibraryBrowser(
     });
   };
 
-  /// The Selection State filter is a view option of the open source, so the
-  /// control shows the filter that snapshot was built with and stays disabled
-  /// while an open is already busy.
   const renderFilterControl = () => {
     if (!applicationAlive) return;
     const interactionBusy = pageBusy || photoRetryPending || photoOwner.busy;
@@ -783,16 +628,11 @@ function mountPrivateLibraryBrowser(
     });
   };
 
-  /// Decision progress for the open source. The counts come from the server
-  /// when the source opens and follow confirmed decisions and Undo
-  /// afterwards; the loaded Grid windows are never their source.
+  // Counts cover the complete source, not just loaded or filtered windows.
   const renderProgress = () => {
     if (!applicationAlive) return;
     const counts = sourceGrid.selectionCounts;
     view.renderProgress({
-      // The counts belong to the complete source, while `total` belongs to
-      // the currently open filtered Snapshot. A source replacement clears the
-      // token, so the line never presents another source's counts.
       visible: sourceGrid.token !== "" || sourceGrid.total > 0,
       visibleTotal: sourceGrid.total,
       sourceTotal: counts.selected + counts.rejected + counts.undecided,
@@ -806,9 +646,6 @@ function mountPrivateLibraryBrowser(
     if (!applicationAlive) return;
     const photo = currentPhoto();
     const gridEnabled = canOpenGridPhoto();
-    // The strip's entries open Photos through the same path as the Grid's
-    // cells, so one admission fact gates both: an activation that would be
-    // refused silently is never presented as an enabled control.
     const filmstripEnabled = gridEnabled;
     const interactionBusy =
       pageBusy || photoRetryPending || photoOwner.busy || removal.busy;
@@ -849,285 +686,49 @@ function mountPrivateLibraryBrowser(
     renderSortControl();
     renderFilterControl();
     renderProgress();
-    // Every state that moves the presented result passes here, so a review
-    // that no longer covers it is withdrawn with the same update.
-    reconcileRemovalReview();
+    removalReview.reconcile();
   };
 
-  /// Sends one admitted Album mutation and reports truthful outcomes.
-  /// Admitted persistence is never aborted by a source or Photo change; the
-  /// response always refreshes the bounded Album list, while notices stay
-  /// owned by the initiating action, surface, generation, and epoch.
-  const mutateAlbum = (
-    start: (context: AlbumActionContext) => AlbumActionAdmission | undefined,
-    surface: "photo" | "summary",
-    photoOwnerAuthority = photoOwner.authority,
-    form?: AlbumFormAuthority,
-  ): Promise<{
-    admitted: boolean;
-    ok: boolean;
-    latest: boolean;
-    announce: (text: string) => void;
-    removedFromCurrentAlbum?: Readonly<{
-      albumId: string;
-      photoId: string;
-      sourceAuthority: SourceAuthority;
-    }>;
-    createdAlbum?: AlbumSummary;
-    folderAdd?: Readonly<{
-      matchedCount: number;
-      addedCount: number;
-      alreadyMemberCount: number;
-    }>;
-    membershipAdd?: Readonly<{
-      albumId: string;
-      addedPhotoIds: ReadonlyArray<string>;
-      alreadyMemberPhotoIds: ReadonlyArray<string>;
-      albums: ReadonlyArray<AlbumSummary>;
-    }>;
-    membershipRemove?: Readonly<{
-      albumId: string;
-      removedPhotoIds: ReadonlyArray<string>;
-      alreadyAbsentPhotoIds: ReadonlyArray<string>;
-      albums: ReadonlyArray<AlbumSummary>;
-    }>;
-  }> => {
-    const capturedPhotoStatus = view.photoStatusSurface;
-    const sourceOwner = sourceGrid.authority;
-    const ownsPhotoSurface = () =>
-      surface === "photo" &&
-      photoOwner.isCurrent(photoOwnerAuthority) &&
-      photoOwner.active &&
-      view.isPhotoStatusSurfaceCurrent(capturedPhotoStatus);
-    const action = start({
-      sourceAuthority: sourceOwner,
-      surface:
-        surface === "photo"
-          ? { kind: "photo", isCurrent: ownsPhotoSurface }
-          : { kind: "summary" },
-      ...(form ? { form } : {}),
-    });
-    if (!action)
-      return Promise.resolve({
-        admitted: false,
-        ok: false,
-        latest: false,
-        announce: () => {},
-      });
-    const summaryPresentation = application.claimAlbumSummary(action.noticeKey);
-    const disconnect = (authority: SourceAuthority) => {
-      if (!sourceGrid.isCurrent(authority)) return;
-      const active = currentAlbumRecovery();
-      if (active?.sourceAuthority === authority) {
-        recoveryGate.fail(active.claim, { transportLost: true });
-        syncConnection();
-        return;
-      }
-      const claim = recoveryGate.issue("album", action.noticeKey, {
-        owner: {
-          scope: "source",
-          generation: String(sourceGrid.generation),
-        },
-      });
-      if (recoveryGate.fail(claim, { transportLost: true }))
-        albumRecovery = Object.freeze({ claim, sourceAuthority: authority });
-      else recoveryGate.discard(claim);
+  const albumMutations = createAlbumMutationController({
+    actions: albumActions,
+    application,
+    source: sourceGrid,
+    gate: recoveryGate,
+    photo: photoOwner,
+    presentation: {
+      get surface() {
+        return view.photoStatusSurface;
+      },
+      isCurrent: (surface) => view.isPhotoStatusSurfaceCurrent(surface),
+      status: (message) => view.setPhotoStatus(message),
+    },
+    connectionChanged: syncConnection,
+    reachable: () => setConnected(true),
+  });
+  const mutateAlbum: typeof albumMutations.mutate = (...args) =>
+    albumMutations.mutate(...args);
+
+  const folders = createFileLocationController({
+    fetcher,
+    application,
+    recoveryGate,
+    isAlive: () => applicationAlive,
+    onChanged: () => {
       syncConnection();
-    };
-    const recoverConnection = (authority: SourceAuthority): void => {
-      const active = currentAlbumRecovery();
-      if (active?.sourceAuthority !== authority) return;
-      if (
-        recoveryGate.recover(active.claim) ||
-        !recoveryGate.isActive(active.claim)
-      )
-        albumRecovery = undefined;
-    };
-    return (async () => {
-      try {
-        const outcome = await action.settlement;
-        if (!applicationAlive)
-          return {
-            admitted: true,
-            ok: outcome.kind === "persisted",
-            latest: albumActions.isLatest(outcome.mutation),
-            announce: () => {},
-          };
-
-        if (outcome.kind === "failed") {
-          const presentOnPhoto = albumActions.canPresent(outcome.surface);
-          if (presentOnPhoto) view.setPhotoStatus(outcome.failureMessage);
-          else
-            application.presentAlbumSummary(
-              summaryPresentation,
-              outcome.failureMessage,
-            );
-          if (presentOnPhoto)
-            application.releaseAlbumSummary(summaryPresentation);
-          if (outcome.connectivity === "lost-if-latest") {
-            // Persistence is ambiguous even when a newer, unrelated Album
-            // action owns presentation, so always invalidate the exact
-            // position authority. Only the latest action may fence its
-            // successor Overview or change connectivity.
-            if (action.invalidatesSavedPositionFor)
-              application.invalidateSavedPositionAuthority(
-                action.invalidatesSavedPositionFor,
-              );
-            if (albumActions.isLatest(outcome.mutation)) {
-              application.advanceAlbumMutationFloor();
-              disconnect(outcome.sourceAuthority);
-            }
-          }
-          return {
-            admitted: true,
-            ok: false,
-            latest: albumActions.isLatest(outcome.mutation),
-            announce: () => {},
-          };
-        }
-
-        let disconnectAfterRefresh = false;
-        if (action.invalidatesSavedPositionFor)
-          application.invalidateSavedPositionAuthority(
-            action.invalidatesSavedPositionFor,
-          );
-        if (application.advanceAlbumMutationFloor()) {
-          try {
-            const committed = await application.refreshOverview();
-            if (
-              committed &&
-              albumActions.isLatest(outcome.mutation) &&
-              sourceGrid.isCurrent(outcome.sourceAuthority)
-            ) {
-              recoverConnection(outcome.sourceAuthority);
-              setConnected(true);
-            }
-            application.resolveAlbumSummary(summaryPresentation);
-          } catch {
-            if (applicationAlive && albumActions.isLatest(outcome.mutation)) {
-              disconnectAfterRefresh = true;
-              application.presentAlbumSummary(
-                summaryPresentation,
-                "The Album was saved but the Library summary could not be refreshed.",
-              );
-            } else application.releaseAlbumSummary(summaryPresentation);
-          }
-        }
-        const presentOnSurface = albumActions.canPresent(outcome.surface);
-        if (disconnectAfterRefresh) disconnect(outcome.sourceAuthority);
-        return {
-          admitted: true,
-          ok: true,
-          latest: albumActions.isLatest(outcome.mutation),
-          announce: (text: string) => {
-            if (presentOnSurface && ownsPhotoSurface())
-              view.setPhotoStatus(text);
-          },
-          ...(outcome.removedFromCurrentAlbum
-            ? { removedFromCurrentAlbum: outcome.removedFromCurrentAlbum }
-            : {}),
-          ...(outcome.createdAlbum
-            ? { createdAlbum: outcome.createdAlbum }
-            : {}),
-          ...(outcome.folderAdd
-            ? {
-                folderAdd: {
-                  matchedCount: outcome.folderAdd.matchedCount,
-                  addedCount: outcome.folderAdd.addedCount,
-                  alreadyMemberCount: outcome.folderAdd.alreadyMemberCount,
-                },
-              }
-            : {}),
-          ...(outcome.membershipAdd
-            ? { membershipAdd: outcome.membershipAdd }
-            : {}),
-          ...(outcome.membershipRemove
-            ? { membershipRemove: outcome.membershipRemove }
-            : {}),
-        };
-      } finally {
-        albumActions.finish(action.mutation);
-      }
-    })();
-  };
-
-  // File Location owns navigation lifetime, publication binding, retained
-  // windows, and exact failed ranges. Application owns shared Overview and
-  // Summary state; this page maps failures to exact global Recovery claims.
-  const fileLocations = createFileLocationOwner(fetcher);
-  type FileLocationPresentationRecord = Readonly<{
-    summary: FileLocationPresentation;
-    recovery: RecoveryClaim;
-  }>;
-  const fileLocationPresentations = new Map<
-    FileLocationFailure,
-    FileLocationPresentationRecord
-  >();
-  const fileLocationOutcomeSettlements = new WeakMap<object, Promise<void>>();
-  let publicationLocationPresentation:
-    | FileLocationPresentationRecord
-    | undefined;
-
-  const releaseFileLocationPresentation = (
-    presentation: FileLocationPresentationRecord,
-  ): void => {
-    application.releaseFileLocation(presentation.summary);
-    recoveryGate.recover(presentation.recovery);
-  };
-
-  const claimFileLocationPresentation = (
-    key: string,
-    message: string,
-    transportLost: boolean,
-  ): FileLocationPresentationRecord => {
-    const summary = application.claimFileLocation(key, message);
-    const recovery = recoveryGate.issue("file-location", key);
-    recoveryGate.fail(recovery, {
-      ...(transportLost ? { transportLost } : {}),
-    });
-    return { summary, recovery };
-  };
-
-  const releasePublicationLocationRecovery = (): void => {
-    if (publicationLocationPresentation)
-      releaseFileLocationPresentation(publicationLocationPresentation);
-    publicationLocationPresentation = undefined;
-    syncConnection();
-  };
-
-  const claimPublicationLocationNotice = (
-    key: string,
-    message: string,
-  ): void => {
-    releasePublicationLocationRecovery();
-    publicationLocationPresentation = claimFileLocationPresentation(
-      key,
-      message,
-      false,
-    );
-    syncConnection();
-  };
-
-  const resetFileLocations = (): FileLocationAuthority => {
-    const authority = fileLocations.reset();
-    if (publicationLocationPresentation)
-      releaseFileLocationPresentation(publicationLocationPresentation);
-    publicationLocationPresentation = undefined;
-    for (const presentation of fileLocationPresentations.values())
-      releaseFileLocationPresentation(presentation);
-    fileLocationPresentations.clear();
-    syncConnection();
-    renderSources();
-    return authority;
-  };
-
-  const rebindFileLocations = async (): Promise<FileLocationAuthority> => {
-    application.notePublicationConflict();
-    const authority = resetFileLocations();
-    await application.refreshOverview().catch(() => {});
-    await loadFolderWindow("", 0);
-    return authority;
-  };
+      renderSources();
+    },
+    onReachable: () => setConnected(true),
+  });
+  const fileLocations = folders.owner;
+  const resetFileLocations = () => folders.reset();
+  const rebindFileLocations = () => folders.rebind();
+  const loadFolderWindow: typeof folders.load = (...args) =>
+    folders.load(...args);
+  const awaitRootBinding = () => folders.awaitRootBinding();
+  const releasePublicationLocationRecovery = () =>
+    folders.releasePublicationNotice();
+  const claimPublicationLocationNotice: typeof folders.claimPublicationNotice =
+    (...args) => folders.claimPublicationNotice(...args);
   const sourceLifecycle: SourceLifecycleOwner = createSourceOpenOwner({
     sourceGrid,
     fileLocations,
@@ -1139,155 +740,23 @@ function mountPrivateLibraryBrowser(
       ),
   });
 
-  async function applyFileLocationOutcome(
-    outcome: FileLocationOutcome,
-  ): Promise<void> {
-    if (!fileLocations.accept(outcome)) return;
-    if (outcome.kind === "detached" || outcome.kind === "bound") return;
-    if (outcome.kind === "publication-conflict") {
-      const reboundAuthority = await rebindFileLocations();
-      if (
-        fileLocations.isCurrent(reboundAuthority) &&
-        fileLocations.publication
-      )
-        claimPublicationLocationNotice(
-          `publication:${fileLocations.publication}`,
-          "Library changed. Reloaded folders.",
-        );
-      return;
-    }
-    if (outcome.kind === "failed") {
-      if (outcome.replaced) {
-        const replaced = fileLocationPresentations.get(outcome.replaced);
-        if (replaced) releaseFileLocationPresentation(replaced);
-        fileLocationPresentations.delete(outcome.replaced);
-      }
-      const presentation = claimFileLocationPresentation(
-        `range:${outcome.generation}:${outcome.parent}:${outcome.page}`,
-        outcome.failure.message,
-        true,
-      );
-      fileLocationPresentations.set(outcome.failure, presentation);
-      syncConnection();
-      renderSources();
-      return;
-    }
-    if (outcome.recovered) {
-      const recovered = fileLocationPresentations.get(outcome.recovered);
-      if (recovered) releaseFileLocationPresentation(recovered);
-      fileLocationPresentations.delete(outcome.recovered);
-    }
-    if (outcome.remainingNewest) {
-      const remaining = fileLocationPresentations.get(outcome.remainingNewest);
-      if (remaining)
-        application.presentFileLocation(
-          remaining.summary,
-          outcome.remainingNewest.message,
-        );
-    }
-    if (outcome.markTransportReachable) setConnected(true);
-    renderSources();
-  }
-
-  function handleFileLocationOutcome(
-    outcome: FileLocationOutcome,
-  ): Promise<void> {
-    const pending = fileLocationOutcomeSettlements.get(outcome);
-    if (pending) return pending;
-    const settlement = Promise.resolve().then(() =>
-      applyFileLocationOutcome(outcome),
-    );
-    fileLocationOutcomeSettlements.set(outcome, settlement);
-    return settlement;
-  }
-
-  async function loadFolderWindow(
-    parent: string,
-    page: number,
-    expand = true,
-  ): Promise<void> {
-    await handleFileLocationOutcome(
-      await fileLocations.loadWindow(parent, page, expand),
-    );
-  }
-
-  const awaitRootBinding = async (): Promise<boolean> => {
-    const outcome = await fileLocations.awaitRootBinding();
-    const boundByThisOutcome =
-      outcome.kind === "bound" || outcome.kind === "loaded";
-    await handleFileLocationOutcome(outcome);
-    return boundByThisOutcome && Boolean(fileLocations.publication);
-  };
-
-  const fileLocationFailuresByKey = new Map<string, FileLocationFailure>();
-
-  type FolderAlbumOperation = Readonly<{
-    sourceAuthority: SourceAuthority;
-    albumId: string;
-    folderPath: string;
-    publication: string;
-    pending: boolean;
-    status?: string;
-  }>;
-  let folderAlbumOperation: FolderAlbumOperation | undefined;
-  let selectedFolderAlbumId = "";
-
-  const folderPagerModel = (
-    retained: FileLocationWindow | undefined,
-  ): FolderViewModel["pager"] => {
-    if (!retained || retained.total <= fileLocations.pageSize) return undefined;
-    return {
-      page: retained.page,
-      pages: Math.max(1, Math.ceil(retained.total / fileLocations.pageSize)),
-      hasPrevious: retained.page > 0,
-      hasNext: (retained.page + 1) * fileLocations.pageSize < retained.total,
-    };
-  };
-
-  const folderViewModel = (child: FolderChild): FolderViewModel => {
-    const expanded = fileLocations.isExpanded(child.location);
-    const retained = expanded
-      ? fileLocations.window(child.location)
-      : undefined;
-    const pager = folderPagerModel(retained);
-    return {
-      location: child.location,
-      name: child.name,
-      photoCount: child.photoCount,
-      hasDescendantFolders: child.hasDescendantFolders,
-      expanded,
-      enabled: Boolean(fileLocations.publication),
-      active:
-        sourceGrid.kind === "folder" &&
-        sourceGrid.folder?.location === child.location,
-      children: retained?.children.map(folderViewModel) ?? [],
-      ...(pager ? { pager } : {}),
-    };
-  };
-
   const renderSources = () => {
     if (!applicationAlive) return;
-    fileLocationFailuresByKey.clear();
-    const failures = fileLocations.failures().map((failure) => {
-      const key = `${failure.generation}:${failure.parent}:${failure.page}`;
-      fileLocationFailuresByKey.set(key, failure);
-      return { key, range: failure.range };
-    });
-    const rootWindow = fileLocations.window("");
-    const rootPager = folderPagerModel(rootWindow);
+    const tree = folders.tree(
+      (location) =>
+        sourceGrid.kind === "folder" &&
+        sourceGrid.folder?.location === location,
+    );
     const model: SourceListViewModel = {
       libraryCount: application.overview?.photoCount ?? 0,
       libraryActive: sourceGrid.kind === "library",
-      fileLocationsEnabled: Boolean(fileLocations.publication),
-      fileLocationFailures: failures,
-      rootExpanded: fileLocations.isExpanded(""),
+      fileLocationsEnabled: tree.enabled,
+      fileLocationFailures: tree.failures,
+      rootExpanded: tree.rootExpanded,
       rootActive:
         sourceGrid.kind === "folder" && sourceGrid.folder?.location === "",
-      rootChildren:
-        fileLocations.isExpanded("") && rootWindow
-          ? rootWindow.children.map(folderViewModel)
-          : [],
-      ...(rootPager ? { rootPager } : {}),
+      rootChildren: tree.rootChildren,
+      ...(tree.rootPager ? { rootPager: tree.rootPager } : {}),
       albums: application.albums.map((album) => ({
         id: album.id,
         name: album.name,
@@ -1297,211 +766,56 @@ function mountPrivateLibraryBrowser(
       })),
     };
     view.renderSources(model);
-    const folder = sourceGrid.kind === "folder" ? sourceGrid.folder : undefined;
-    const folderPublication =
-      sourceGrid.kind === "folder" ? fileLocations.publication : undefined;
-    const operation =
-      folder &&
-      folderPublication &&
-      folderAlbumOperation?.sourceAuthority === sourceGrid.authority &&
-      folderAlbumOperation.folderPath === folder.location &&
-      folderAlbumOperation.publication === folderPublication
-        ? folderAlbumOperation
-        : undefined;
-    if (!folder || !folderPublication || application.albums.length === 0) {
-      view.renderFolderAlbum({
-        visible: false,
-        folderPath: "",
-        albums: [],
-        selectedAlbumId: "",
-        pending: false,
-      });
-    } else {
-      const firstAlbum = application.albums[0];
-      if (
-        firstAlbum &&
-        !application.albums.some((album) => album.id === selectedFolderAlbumId)
-      )
-        selectedFolderAlbumId = firstAlbum.id;
-      view.renderFolderAlbum({
-        visible: true,
-        folderPath: folder.location,
-        albums: application.albums.map(({ id, name }) => ({ id, name })),
-        selectedAlbumId: selectedFolderAlbumId,
-        pending: operation?.pending ?? false,
-        ...(operation?.status ? { status: operation.status } : {}),
-      });
-    }
+    albumManagement.setAlbums(application.albums);
     gridMulti.renderBatchAlbums();
   };
 
-  const openAlbumForm = (form: AlbumFormReference): void => {
-    albumForm = {
-      formId: form.formId,
-      kind: form.kind,
-      authority: albumActions.openForm(form.formId),
-      ...(form.albumId ? { albumId: form.albumId } : {}),
-      initialName: form.name,
-    };
-  };
-
-  const closeAlbumForm = (formId: string): void => {
-    const record = albumForm;
-    if (!record || record.formId !== formId) return;
-    dismissAlbumForm(record);
-  };
-
-  const submitAlbumForm = async (
-    formId: string,
-    draft?: string,
-  ): Promise<void> => {
-    const record = albumForm;
-    if (
-      !record ||
-      record.formId !== formId ||
-      !albumActions.isFormCurrent(record.authority)
-    )
-      return;
-    if (record.kind === "delete") {
-      const albumId = record.albumId!;
-      view.setAlbumFormPending(formId, true);
-      const { ok: deleted } = await mutateAlbum(
-        (context) => albumActions.delete(albumId, context),
-        "summary",
-        photoOwner.authority,
-        record.authority,
-      );
-      if (albumActions.isFormCurrent(record.authority))
-        dismissAlbumForm(record);
-      if (deleted && gridMulti.expireCompensationForAlbum(albumId))
-        renderGrid();
+  const albumManagement = createAlbumManagementController({
+    actions: albumActions,
+    albums: () => application.albums,
+    source: {
+      get authority() {
+        return sourceGrid.authority;
+      },
+      current: () =>
+        sourceGrid.kind === "folder" &&
+        sourceGrid.folder &&
+        fileLocations.publication
+          ? {
+              authority: sourceGrid.authority,
+              path: sourceGrid.folder.location,
+              publication: fileLocations.publication,
+            }
+          : undefined,
+      isCurrent: (authority) => sourceGrid.isCurrent(authority),
+    },
+    photo: photoOwner,
+    mutate: mutateAlbum,
+    present: {
+      setFormPending: (id, pending, name) =>
+        view.setAlbumFormPending(id, pending, name),
+      setFormMessage: (id, message) => view.setAlbumFormMessage(id, message),
+      dismissForm: (id) => view.dismissAlbumForm(id),
+      renderFolder: (model) => view.renderFolderAlbum(model),
+    },
+    onCreatedAlbum: async (album) => {
+      await openSource({
+        kind: "album",
+        album,
+        establishment: { address: "push" },
+      });
+    },
+    onDeletedAlbum: async (albumId) => {
+      if (gridMulti.expireCompensationForAlbum(albumId)) renderGrid();
       renderSources();
-      if (
-        deleted &&
-        sourceGrid.kind === "album" &&
-        sourceGrid.albumId === albumId
-      )
-        // The open Album's destination became invalid, so the current entry is
-        // replaced with All Photos rather than left naming a deleted Album.
+      if (sourceGrid.kind === "album" && sourceGrid.albumId === albumId)
         await openSource({
           kind: "library",
           establishment: { address: "replace" },
         });
-      return;
-    }
-
-    const name = (draft ?? "").trim();
-    if (record.kind === "rename" && (!name || name === record.initialName)) {
-      dismissAlbumForm(record);
-      renderSources();
-      return;
-    }
-    const invalid = albumNameError(name);
-    if (invalid) {
-      view.setAlbumFormMessage(formId, invalid);
-      return;
-    }
-    view.setAlbumFormPending(formId, true, name);
-    const sourceAuthority = sourceGrid.authority;
-    const photoAuthority = photoOwner.authority;
-    const result = await mutateAlbum(
-      (context) =>
-        record.kind === "create"
-          ? albumActions.create(name, context)
-          : albumActions.rename(record.albumId!, name, context),
-      "summary",
-      photoAuthority,
-      record.authority,
-    );
-    const formIsCurrent = albumActions.isFormCurrent(record.authority);
-    const createdAlbum =
-      record.kind === "create" ? result.createdAlbum : undefined;
-    if (formIsCurrent) {
-      if (result.ok && (record.kind === "rename" || createdAlbum))
-        dismissAlbumForm(record);
-      else view.setAlbumFormPending(formId, false);
-    }
-    renderSources();
-    if (
-      formIsCurrent &&
-      sourceGrid.isCurrent(sourceAuthority) &&
-      photoOwner.isCurrent(photoAuthority) &&
-      result.ok &&
-      createdAlbum
-    )
-      // Creating an Album from the Sources panel chooses a new destination, so
-      // it creates one Grid entry exactly like choosing any other source.
-      await openSource({
-        kind: "album",
-        album: createdAlbum,
-        establishment: { address: "push" },
-      });
-  };
-
-  const addFolderToAlbum = (albumId: string): void => {
-    gridMulti.expireCompensation();
-    const folder = sourceGrid.kind === "folder" ? sourceGrid.folder : undefined;
-    const publication =
-      sourceGrid.kind === "folder" ? fileLocations.publication : undefined;
-    if (
-      !folder ||
-      !publication ||
-      !application.albums.some((album) => album.id === albumId)
-    )
-      return;
-    if (
-      albumActions.isFolderMembersAdmitted(
-        albumId,
-        folder.location,
-        publication,
-      )
-    )
-      return;
-    selectedFolderAlbumId = albumId;
-    const sourceAuthority = sourceGrid.authority;
-    const folderPath = folder.location;
-    folderAlbumOperation = {
-      sourceAuthority,
-      albumId,
-      folderPath,
-      publication,
-      pending: true,
-    };
-    renderSources();
-    void (async () => {
-      const result = await mutateAlbum(
-        (context) =>
-          albumActions.addFolderMembers(
-            albumId,
-            folderPath,
-            publication,
-            context,
-          ),
-        "summary",
-      );
-      if (
-        !sourceGrid.isCurrent(sourceAuthority) ||
-        sourceGrid.kind !== "folder" ||
-        sourceGrid.folder?.location !== folderPath ||
-        fileLocations.publication !== publication
-      )
-        return;
-      const status = result.ok
-        ? result.folderAdd
-          ? `Added ${result.folderAdd.addedCount.toLocaleString()} Photos. ${result.folderAdd.alreadyMemberCount.toLocaleString()} already in the Album.`
-          : "Folder added to the Album."
-        : "The Folder could not be added to the Album. Try again.";
-      folderAlbumOperation = {
-        sourceAuthority,
-        albumId,
-        folderPath,
-        publication,
-        pending: false,
-        status,
-      };
-      renderSources();
-    })();
-  };
+    },
+    onFolderChanged: renderSources,
+  });
 
   const cancelScheduledGridRender = () => {
     view.cancelGridRender();
@@ -1547,8 +861,7 @@ function mountPrivateLibraryBrowser(
     cancelScheduledGridRender();
     metadataPanel.show(undefined);
     photoDetails.clearMetadata();
-    retryableTraversal = undefined;
-    pendingDestination = {
+    const destinationEstablishment = navigationSession.begin({
       source: requested.kind,
       ...(requested.kind === "folder"
         ? { folderPath: requested.folder.location }
@@ -1556,7 +869,7 @@ function mountPrivateLibraryBrowser(
       ...(requested.kind === "album" ? { albumId: requested.album.id } : {}),
       ...(order !== "source-default" ? { order } : {}),
       selection,
-    };
+    });
     const lifecycleOpen = sourceLifecycle.beginOpen(requested, {
       ...(preferredPhotoId ? { preferredPhotoId } : {}),
       order,
@@ -1680,7 +993,7 @@ function mountPrivateLibraryBrowser(
       syncConnection();
       return SOURCE_FAILED;
     } finally {
-      pendingDestination = undefined;
+      navigationSession.finish(destinationEstablishment);
       if (sourceGrid.isCurrent(authority)) {
         pageBusy = false;
         updateControls();
@@ -2083,7 +1396,7 @@ function mountPrivateLibraryBrowser(
     if (!canOpenGridPhoto()) return false;
     // The anchor is read from the Grid before anything re-keys its focus or
     // hides its layout, so the Grid entry records where the Photographer left.
-    pendingGridRestoration = view.captureGridRestoration();
+    navigationSession.captureGrid(view.captureGridRestoration());
     const navigation = photoOwner.beginOpen(index);
     if (!navigation) return false;
     const photoTransition = recoveryGate.beginTransition(
@@ -2136,7 +1449,7 @@ function mountPrivateLibraryBrowser(
       // unloaded boundary window is still loading. A committed navigation has
       // already cleared this gate; every other path abandons its pending target.
       photoOwner.cancelOpen(navigation.authority);
-      pendingGridRestoration = undefined;
+      navigationSession.captureGrid(undefined);
       updateControls();
     }
     return true;
@@ -2169,16 +1482,8 @@ function mountPrivateLibraryBrowser(
     );
   };
 
-  /// The bounded neighbor radius of the filmstrip. The strip stays this
-  /// bounded however large the source is, and its entries follow the open
-  /// source's own order, so an Album order or a Selection State filter shows
-  /// the neighbors the Photographer actually moves through.
-  ///
-  /// The strip presents the facts the current Photo's loaded window already
-  /// holds and admits nothing itself: Photo View owns the UI while it is
-  /// open, so it starts no window work for a hidden surface, and a neighbor
-  /// outside the loaded window stays a placeholder until navigating to it
-  /// loads that window through the normal Photo path.
+  // Filmstrip reads loaded neighbors only. Navigating a placeholder admits
+  // its window through the Photo owner; a hidden strip starts no work.
   const FILMSTRIP_RADIUS = 2;
   const filmstripRange = (
     index: number,
@@ -2738,9 +2043,8 @@ function mountPrivateLibraryBrowser(
     // A traversal whose bounded lookup failed keeps its destination retryable,
     // so Retry re-establishes that destination rather than reloading the
     // Overview.
-    const traversal = retryableTraversal;
+    const traversal = navigationSession.takeRetry();
     if (traversal) {
-      retryableTraversal = undefined;
       void establishDestination(traversal, { addressed: true });
       return;
     }
@@ -2939,10 +2243,9 @@ function mountPrivateLibraryBrowser(
         void downloadEditorExport(intent.photoId);
         return;
       case "summary-action": {
-        const current = summaryAction;
-        if (!current || current.presentationId !== intent.presentationId)
-          return;
-        const outcome = application.activateSummaryAction(current.action);
+        const outcome = applicationPresentation.activateAction(
+          intent.presentationId,
+        );
         if (outcome?.kind === "refresh-current-source") void refreshSource();
         return;
       }
@@ -2987,37 +2290,27 @@ function mountPrivateLibraryBrowser(
       case "explained-action":
         void openCurrentFolder();
         return;
-      case "file-location-retry": {
-        const failure = fileLocationFailuresByKey.get(intent.key);
-        if (failure)
-          void fileLocations.retry(failure).then(handleFileLocationOutcome);
+      case "file-location-retry":
+        void folders.retryKey(intent.key);
         return;
-      }
       case "folder-toggle":
-        if (intent.expanded) {
-          if (fileLocations.collapse(intent.location)) renderSources();
-        } else {
-          void loadFolderWindow(intent.location, 0);
-        }
+        void folders.toggle(intent.location, intent.expanded);
         return;
-      case "folder-page": {
-        const retained = fileLocations.window(intent.location);
-        if (!retained) return;
-        const page = retained.page + intent.direction;
-        if (page >= 0) void loadFolderWindow(intent.location, page);
+      case "folder-page":
+        void folders.page(intent.location, intent.direction);
         return;
-      }
       case "folder-album-add":
-        addFolderToAlbum(intent.albumId);
+        gridMulti.expireCompensation();
+        void albumManagement.addFolderToAlbum(intent.albumId);
         return;
       case "album-form-open":
-        openAlbumForm(intent.form);
+        albumManagement.openForm(intent.form);
         return;
       case "album-form-close":
-        closeAlbumForm(intent.formId);
+        albumManagement.closeForm(intent.formId);
         return;
       case "album-form-submit":
-        void submitAlbumForm(intent.formId, intent.name);
+        void albumManagement.submitForm(intent.formId, intent.name);
         return;
       case "grid-render":
         renderGrid();
@@ -3093,17 +2386,16 @@ function mountPrivateLibraryBrowser(
         void gridMulti.reviewChanged();
         return;
       case "removal-review-open":
-        openRemovalReview();
+        removalReview.open();
         return;
       case "removal-review-close":
-        removalReviewOpen = false;
-        view.closeRemovalReview();
+        removalReview.close();
         return;
       case "removal-confirm":
-        void confirmRemoval();
+        void removalReview.confirm();
         return;
       case "removal-undo":
-        void undoRemoval(intent.surface);
+        void removalReview.undo(intent.surface);
         return;
       case "removed-list-open":
         removedListing.openPanel();
@@ -3218,47 +2510,17 @@ function mountPrivateLibraryBrowser(
     }
   }
 
-  /// The status one reopen presents when a removal or a restore is why the
-  /// current source is read again. The order-expiry texts would describe the
-  /// wrong cause.
-  const REMOVAL_REOPEN = Object.freeze({
-    progress: "Reopening this source after the removal…",
-    settled: "Source reopened after the removal.",
-  });
   const RESTORE_REOPEN = Object.freeze({
     progress: "Reopening this source after the restore…",
     settled: "Source reopened after the restore.",
   });
-  /// A review the server refused as gone cannot be repeated, so the source is
-  /// read again and the Photographer reviews the current rejected result.
-  const REVIEW_EXPIRED_REOPEN = Object.freeze({
-    progress: "Reopening this source with the current rejected result…",
-    settled: "Source reopened with the current rejected result.",
-  });
 
-  /// Reloads every Folder window the Sources surface presents, so the Folder
-  /// Photo counts it claims are the counts the Library now holds. A window the
-  /// tree does not present is left alone, and reloading never changes which
-  /// Folders are expanded.
-  const refreshFolderCounts = async (parent = ""): Promise<void> => {
-    const retained = fileLocations.window(parent);
-    if (!retained) return;
-    const children = [...retained.children];
-    await loadFolderWindow(parent, retained.page, false);
-    for (const child of children)
-      if (fileLocations.isExpanded(child.location))
-        await refreshFolderCounts(child.location);
-  };
-
-  /// Brings every surface a Library-visibility change touched back to the
-  /// committed Library: the Overview count and Album summaries, the Folder
-  /// Photo counts, and the open source Snapshot. A source that is not loaded
-  /// is not reopened, so an explained state is never replaced by one.
+  // Refresh shared facts; an explained destination without a Snapshot stays put.
   const refreshAfterLibraryChange = async (
     reason: Readonly<{ progress: string; settled: string }>,
   ): Promise<void> => {
     await application.refreshOverview().catch(() => {});
-    await refreshFolderCounts();
+    await folders.refreshCounts();
     if (sourceGrid.token === "" || !sourceGrid.isReady(sourceGrid.authority))
       return;
     const anchor =
@@ -3267,210 +2529,45 @@ function mountPrivateLibraryBrowser(
     await reopenExpired(anchor, sourceGrid.generation, undefined, reason);
   };
 
-  const photoCountText = (count: number): string =>
-    `${count.toLocaleString()} ${count === 1 ? "Photo" : "Photos"}`;
-
-  const removalOutcomeMessage = (counts: RemovalResult["counts"]): string => {
-    const parts = [
-      counts.removed > 0
-        ? `${photoCountText(counts.removed)} removed from the Library. Their Original Files are unchanged.`
-        : "No Photos were removed.",
-    ];
-    if (counts.changedElsewhere > 0)
-      parts.push(
-        `${photoCountText(counts.changedElsewhere)} no longer rejected, so they stayed in the Library.`,
-      );
-    if (counts.alreadyRemoved > 0)
-      parts.push(
-        `${photoCountText(counts.alreadyRemoved)} already removed by another operation.`,
-      );
-    if (counts.missing > 0)
-      parts.push(`${photoCountText(counts.missing)} no longer in the Library.`);
-    return parts.join(" ");
-  };
-
-  const restorationOutcomeMessage = (
-    counts: RestorationResult["counts"],
-  ): string => {
-    const parts = [
-      counts.restored > 0
-        ? `${photoCountText(counts.restored)} restored to the Library.`
-        : "Nothing was restored.",
-    ];
-    if (counts.changedElsewhere > 0)
-      parts.push(
-        `${photoCountText(counts.changedElsewhere)} could not be restored because their removal state changed elsewhere.`,
-      );
-    if (counts.missing > 0)
-      parts.push(`${photoCountText(counts.missing)} no longer in the Library.`);
-    return parts.join(" ");
-  };
-
-  /// Whether the presented result is still the one a review covers. A review
-  /// names the Snapshot token it was opened on, so a source that was reopened
-  /// or filtered since then cannot be confirmed against a result the
-  /// Photographer no longer sees.
-  const reviewCoversPresentedResult = (): boolean => {
-    const review = removal.review;
-    return (
-      review !== undefined &&
-      sourceGrid.token !== "" &&
-      sourceGrid.token === review.token &&
-      sourceGrid.total === review.reviewed &&
-      sourceGrid.authority === review.sourceAuthority &&
-      sourceGrid.selection === "rejected"
-    );
-  };
-
-  const removalReviewModel = (): Parameters<
-    LibraryBrowserView["renderRemovalReview"]
-  >[0] => {
-    const review = removal.review;
-    return {
-      reviewed: review?.reviewed ?? removalReviewed,
-      pending: removal.busy,
-      canConfirm: reviewCoversPresentedResult(),
-      ...(removalResult
-        ? { tone: removalResult.tone, message: removalResult.message }
-        : {}),
-      ...(removal.operation
-        ? { undo: { removed: removal.operation.removed } }
-        : {}),
-    };
-  };
-
-  const renderRemoval = () => {
-    if (!applicationAlive || !removalReviewOpen) return;
-    view.renderRemovalReview(removalReviewModel());
-  };
-
-  /// Withdraws a review whose result is no longer presented, so the dialog
-  /// never offers a confirmation the server would refuse. The Photographer
-  /// reviews the result that is presented instead.
-  const reconcileRemovalReview = () => {
-    if (!applicationAlive || !removalReviewOpen) return;
-    if (removal.review === undefined || reviewCoversPresentedResult()) return;
-    removal.discardReview();
-    removalResult = {
-      tone: "warning",
-      message:
-        "The reviewed result changed. Review the current rejected result again.",
-    };
-    renderRemoval();
-  };
-
-  /// Opens the review of the current `Rejected` result. The review names the
-  /// count it covers and the operation it would use, and removes nothing.
-  const openRemovalReview = () => {
-    if (
-      !connected ||
-      sourceGrid.selection !== "rejected" ||
-      sourceGrid.token === "" ||
-      sourceGrid.total === 0 ||
-      removal.busy
-    )
-      return;
-    const review = removal.openReview(
-      sourceGrid.token,
-      sourceGrid.total,
-      sourceGrid.authority,
-    );
-    if (!review) return;
-    removalReviewed = review.reviewed;
-    removalResult = undefined;
-    removalReviewOpen = true;
-    view.openRemovalReview(removalReviewModel());
-  };
-
-  const confirmRemoval = async (): Promise<void> => {
-    const admission = removal.confirm();
-    if (!admission) return;
-    renderRemoval();
-    updateControls();
-    const outcome = await admission.settlement;
-    if (outcome.kind === "detached") return;
-    if (outcome.kind === "failed") {
-      // A reviewed Snapshot that is gone cannot be reviewed again: the
-      // Photographer reviews the current rejected result instead of retrying
-      // a request the server would refuse a second time.
-      if (outcome.status === 404) {
-        removal.discardReview();
-        removalResult = {
-          tone: "warning",
-          message:
-            "The reviewed result is no longer available. Review the current rejected result again.",
-        };
-        await refreshAfterLibraryChange(REVIEW_EXPIRED_REOPEN);
-        renderRemoval();
-        updateControls();
-        return;
+  const removalReview = createRemovalReviewController({
+    removal,
+    current: () => ({
+      token: sourceGrid.token,
+      total: sourceGrid.total,
+      authority: sourceGrid.authority,
+      selection: sourceGrid.selection === "rejected" ? "rejected" : "other",
+    }),
+    connected: () => connected,
+    presentation: {
+      render: (model) => view.renderRemovalReview(model),
+      open: (model) => view.openRemovalReview(model),
+      close: () => view.closeRemovalReview(),
+      renderListingPending: () => removedListing.render(),
+      reloadListingAfterUndo: (message) =>
+        removedListing.reloadAfterUndo(message),
+      presentListingMessage: (message) =>
+        removedListing.presentMessage(message),
+    },
+    refreshAfterChange: refreshAfterLibraryChange,
+    refreshOverview: async () => {
+      await application.refreshOverview();
+    },
+    refreshFolders: () => folders.refreshCounts(),
+    reopenAfterRestore: async () => {
+      if (sourceGrid.token !== "" && sourceGrid.isReady(sourceGrid.authority)) {
+        const anchor =
+          sourceGrid.readGridPosition(sourceGrid.authority) ??
+          photoOwner.currentIndex;
+        await reopenExpired(
+          anchor,
+          sourceGrid.generation,
+          undefined,
+          RESTORE_REOPEN,
+        );
       }
-      removalResult = {
-        tone: "failure",
-        message: "The removal could not be confirmed. Retry to continue.",
-      };
-      renderRemoval();
-      updateControls();
-      return;
-    }
-    removalResult = {
-      tone: outcome.result.counts.removed > 0 ? "success" : "warning",
-      message: removalOutcomeMessage(outcome.result.counts),
-    };
-    renderRemoval();
-    await refreshAfterLibraryChange(REMOVAL_REOPEN);
-    renderRemoval();
-    updateControls();
-  };
-
-  /// Restores one confirmed operation. The surface that asked for it reports
-  /// the outcome: the review dialog keeps Undo beside the removal it confirmed,
-  /// and the listing offers it to a Photographer who came back to recover.
-  const undoRemoval = async (surface: "review" | "listing"): Promise<void> => {
-    const admission = removal.undo();
-    if (!admission) return;
-    if (surface === "review") renderRemoval();
-    else removedListing.render();
-    updateControls();
-    const outcome = await admission.settlement;
-    if (outcome.kind === "detached") return;
-    if (outcome.kind === "failed") {
-      const message = "The removal could not be undone. Retry to continue.";
-      if (surface === "review") {
-        removalResult = { tone: "failure", message };
-        renderRemoval();
-        updateControls();
-      } else {
-        removedListing.presentMessage(message);
-      }
-      return;
-    }
-    removal.forgetOperation(admission.operationId);
-    const message = restorationOutcomeMessage(outcome.result.counts);
-    const tone = outcome.result.counts.restored > 0 ? "success" : "warning";
-    await application.refreshOverview().catch(() => {});
-    await refreshFolderCounts();
-    if (surface === "review") {
-      removalResult = { tone, message };
-      renderRemoval();
-    } else {
-      // The listing reads the Library again before it reports the restore, so
-      // no row outlives the removal it presents.
-      await removedListing.reloadAfterUndo(message);
-    }
-    if (sourceGrid.token !== "" && sourceGrid.isReady(sourceGrid.authority)) {
-      const anchor =
-        sourceGrid.readGridPosition(sourceGrid.authority) ??
-        photoOwner.currentIndex;
-      await reopenExpired(
-        anchor,
-        sourceGrid.generation,
-        undefined,
-        RESTORE_REOPEN,
-      );
-    }
-    updateControls();
-  };
+    },
+    updateControls,
+  });
 
   /// An explained fallback: the confirmed invalid or missing target is named,
   /// the current entry is replaced once with All Photos, and no request is
@@ -3505,7 +2602,7 @@ function mountPrivateLibraryBrowser(
   const presentFolderPublicationChange = (
     destination: NavigationDestination,
   ): void => {
-    pendingCurrentFolder = destination.folderPath ?? "";
+    navigationSession.requireCurrentFolder(destination.folderPath ?? "");
     // The destination shell is the Grid: Photo View must not keep presenting
     // the Photo the traversal left.
     leavePhotoView();
@@ -3515,8 +2612,6 @@ function mountPrivateLibraryBrowser(
       { label: "Open current Folder" },
     );
   };
-
-  let pendingCurrentFolder: string | undefined;
 
   /// Opens the Photo a destination names against the live Snapshot. Undefined
   /// means a newer destination superseded this one.
@@ -3597,7 +2692,7 @@ function mountPrivateLibraryBrowser(
   const presentRetryableTraversal = (
     destination: NavigationDestination,
   ): boolean => {
-    retryableTraversal = destination;
+    navigationSession.fail(destination);
     leavePhotoView();
     view.prepareSourceOpen(sourceGrid.name);
     setGridStatusText("Could not load this source. Retry to continue.");
@@ -3671,8 +2766,7 @@ function mountPrivateLibraryBrowser(
     if (!applicationAlive) return false;
     // A newer intent is already establishing a different destination, so this
     // traversal is superseded rather than repainting what the page left.
-    if (pendingDestination && !sameSourceView(pendingDestination, destination))
-      return false;
+    if (!navigationSession.allows(destination)) return false;
     const photoId = destination.photoId;
     if (
       !options.reopen &&
@@ -3773,13 +2867,10 @@ function mountPrivateLibraryBrowser(
   /// Applies one browser traversal. The address has already been chosen by the
   /// browser, so the page renders a destination shell while resolving it and
   /// never undoes the traversal.
-  applyNavigationTraversal = (traversal: NavigationTraversal) => {
-    void applyTraversal(traversal);
-  };
 
   const applyTraversal = async (traversal: NavigationTraversal) => {
     if (!applicationAlive) return;
-    retryableTraversal = undefined;
+    navigationSession.clearRetry();
     view.closeTransientSurfaces();
     const entry = traversal.entry;
     await establishDestination(traversal.destination, {
@@ -3865,8 +2956,7 @@ function mountPrivateLibraryBrowser(
   /// Opens the current Folder after an entry's publication changed. The action
   /// replaces the entry's provenance and adds no history loop.
   const openCurrentFolder = async (): Promise<void> => {
-    const location = pendingCurrentFolder ?? "";
-    pendingCurrentFolder = undefined;
+    const location = navigationSession.takeCurrentFolder() ?? "";
     const destination: NavigationDestination = {
       source: "folder",
       folderPath: location,
@@ -3885,17 +2975,21 @@ function mountPrivateLibraryBrowser(
     photoDetails.dispose();
     metadataPanel.dispose();
     removedListing.dispose();
+    removalReview.dispose();
+    albumManagement.dispose();
     removal.dispose();
     view.dispose();
     cancelScheduledGridRender();
     unsubscribeWindowSettled();
     navigation.dispose();
-    albumRecovery = undefined;
+    navigationSession.dispose();
+    albumMutations.dispose();
     gridMulti.dispose();
     albumActions.dispose();
     savedPositions.dispose();
     application.dispose();
-    fileLocations.dispose();
+    applicationPresentation.dispose();
+    folders.dispose();
     photoOwner.dispose();
     sourceGrid.dispose();
     recoveryGate.close();

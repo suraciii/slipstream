@@ -104,6 +104,8 @@ Bun owns Web builds and browser-test tooling; the production server and Preview 
 Use the repository commands rather than invoking individual tools in CI or reviews:
 
 ```sh
+bun run check:fsd
+bun run test:fsd
 bun run test:rust
 bun run test:cli
 bun run test:cli-package
@@ -112,6 +114,13 @@ bun run test:container-input
 bun run test:fast
 bun run verify
 ```
+
+`check:fsd` parses the Web TypeScript project and enforces the current FSD
+boundary: app and page public APIs, downward dependencies, slice and segment
+ownership, resolvable internal imports, and runtime-cycle freedom. `test:fsd`
+also runs isolated parser-backed invalid and valid graph fixtures, then checks
+the production graph. Browser and source tests outside `app` and `pages` are
+tooling and are not treated as FSD slices.
 
 `test:cli` runs the focused command parser, output, and real CLI-to-service tests. It covers `status`, Library checks, Folder, Album, and Photo commands, including Preview downloads, without running the complete repository gate.
 
