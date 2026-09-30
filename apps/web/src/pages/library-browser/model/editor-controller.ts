@@ -173,6 +173,7 @@ export function createEditorController(
   /// automatic publication refresh joins the read already under way.
   const editorRecipeReads = new Map<string, Promise<void>>();
   const editorRecipeGenerations = new Map<string, number>();
+
   /// Resolves the writers waiting for this Photo's write stream to settle.
   let editorWriteWaiters: Array<() => void> = [];
   /// The automatic resolution of a save whose outcome is unknown: at most one
@@ -201,6 +202,7 @@ export function createEditorController(
     view.editorVisible() &&
     isCurrentPhoto(photoId) &&
     currentPhoto()?.id === photoId;
+
   const outputs = createWorkspaceOutputController(fetcher, {
     owns: editorOwnsPhoto,
     render: () => renderEditor(),
@@ -417,6 +419,7 @@ export function createEditorController(
       return "This white-balance mode is not available for this Photo.";
     if (status.startsWith("This deployment does not admit temperature"))
       return "Temperature and tint are not available for this Photo.";
+
     if (
       status === "" ||
       status === "Saved." ||
@@ -430,6 +433,7 @@ export function createEditorController(
     const session = currentEditor();
     if (!photoId || !session) return;
     const presented = session.presentation();
+
     view.renderEditor({
       photoId,
       loading: presented.photoId === "",
