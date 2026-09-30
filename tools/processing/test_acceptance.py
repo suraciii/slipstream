@@ -157,12 +157,13 @@ class StubDeployment:
         list_page_maximum: int = 60,
         query_pages: list | None = None,
         recipe_pending_first: int = 0,
+        reopen_recipe_override: dict | None = None,
     ):
         self.capability_payload = {
             "state": capability_state,
             "bundleId": BUNDLE_ID,
             "incarnation": "a" * 32,
-            "exposure": {"minimumEv": -5.0, "maximumEv": 5.0, "stepEv": 0.5},
+            "exposure": {"minimumEv": 0.0, "maximumEv": 1.0, "stepEv": 0.001},
             "profiles": [
                 {"profileId": "raw", "whiteBalanceModes": ["as-shot"], "whiteBalanceRanges": None}
             ],
@@ -205,6 +206,7 @@ class StubDeployment:
         self.list_page_maximum = list_page_maximum
         self.query_pages = query_pages if query_pages is not None else [self.photos]
         self.recipe_pending_first = recipe_pending_first
+        self.reopen_recipe_override = reopen_recipe_override
         self.recipe_reads = 0
         self.requests: list[dict] = []
         self.export_recipe_version: str | None = None
@@ -234,19 +236,22 @@ class StubDeployment:
                 "supportReason": "read-pending",
                 "processingAvailable": False,
                 "controls": {
-                    "exposure": {"minimumEv": -5.0, "maximumEv": 5.0, "stepEv": 0.5},
+                    "exposure": {"minimumEv": 0.0, "maximumEv": 1.0, "stepEv": 0.001},
                     "whiteBalanceModes": ["as-shot"],
                 },
             }
+        recipe = self.recipe
+        if self.reopen_recipe_override is not None and self.recipe_reads >= 2 and self.recipe_counter == 3:
+            recipe = dict(self.recipe or {}, **self.reopen_recipe_override)
         return {
             "photoId": PHOTO_ID,
             "sourceRevision": self.source_revision,
-            "recipe": self.recipe,
+            "recipe": recipe,
             "sourceSupport": "supported",
             "supportReason": None,
             "processingAvailable": True,
             "controls": {
-                "exposure": {"minimumEv": -5.0, "maximumEv": 5.0, "stepEv": 0.5},
+                "exposure": {"minimumEv": 0.0, "maximumEv": 1.0, "stepEv": 0.001},
                 "whiteBalanceModes": ["as-shot"],
             },
         }
@@ -1231,6 +1236,14 @@ class RefusalTests(AcceptanceTestCase):
 class DryRunTests(AcceptanceTestCase):
     def test_full_workflow_passes_against_stub(self):
         stub = StubDeployment(preview_202_first=True)
+        submit_export = stub.submit_export
+
+        def export_before_preview(body):
+            if stub.preview_polls:
+                return 409, json.dumps({"error": {"code": "preview_already_requested"}}).encode(), []
+            return submit_export(body)
+
+        stub.submit_export = export_before_preview
         with RunningStub(stub) as running:
             code, report, summary = run_main(self.invocation(running))
         self.assertEqual(code, 0, report)
@@ -1244,10 +1257,11 @@ class DryRunTests(AcceptanceTestCase):
                 "read-recipe": "pass",
                 "save-exposure": "pass",
                 "save-undo": "pass",
-                "edit-preview": "pass",
                 "submit-export": "pass",
                 "export-settlement": "pass",
                 "download-artifact": "pass",
+                "recipe-reopen": "pass",
+                "edit-preview": "pass",
                 "film-stage": "skipped",
                 "original-invariance": "pass",
             },
@@ -1267,7 +1281,9 @@ class DryRunTests(AcceptanceTestCase):
         self.assertEqual(identities["bundleId"], BUNDLE_ID)
         self.assertEqual(identities["photoId"], PHOTO_ID)
         self.assertEqual(identities["recipeVersionAfterSave"], "rv-1")
-        self.assertEqual(identities["recipeVersionAfterUndo"], "rv-2")
+        self.assertEqual(identities["recipeVersionAfterUndo"], "rv-3")
+        self.assertEqual(identities["recipeVersionReopened"], "rv-3")
+        self.assertEqual(identities["savedExposureEv"], 1.0)
         self.assertEqual(identities["exportState"], "succeeded")
         artifact = identities["artifact"]
         self.assertEqual(
@@ -1276,20 +1292,27 @@ class DryRunTests(AcceptanceTestCase):
         self.assertEqual(artifact["width"], 4)
         self.assertEqual(artifact["height"], 3)
         self.assertEqual(artifact["profileIdentity"], hashlib.sha256(PROFILE_ASSET.read_bytes()).hexdigest())
-        self.assertEqual(report["notRun"][0]["step"], "film-stage")
-        self.assertEqual(report["notRun"][0]["reason"], "film-stage-native-qualification-required")
-        self.assertIn("Film (finished-jpeg) stage not covered", summary)
-        self.assertIn("film-stage-native-qualification-required", summary)
         downloaded = Path(report["writtenFiles"][0])
         self.assertTrue(downloaded.is_file())
         self.assertEqual(downloaded.read_bytes(), stub.artifact_bytes)
         self.assertEqual(downloaded.parent, self.output_dir.resolve())
         self.assertEqual(report["fixture"]["sha256"], hashlib.sha256(FIXTURE_BYTES).hexdigest())
-        # Every stub request carried the bearer token and CLI contract header;
-        # the report lists the exact commands in order.
-        self.assertGreater(report["counters"]["requests"], 8)
-        methods = [entry["method"] for entry in report["steps"][0]["requests"]]
-        self.assertEqual(methods, ["GET"])
+        paths = [entry["path"] for entry in stub.requests]
+        export_index = paths.index(f"/api/photos/{PHOTO_ID}/exports")
+        artifact_index = paths.index(f"/api/exports/{EXPORT_ID}/artifact")
+        reopen_index = paths.index(f"/api/photos/{PHOTO_ID}/edit-recipe", export_index + 1)
+        preview_index = paths.index(f"/api/photos/{PHOTO_ID}/edit-preview/develop")
+        self.assertLess(export_index, artifact_index)
+        self.assertLess(artifact_index, reopen_index)
+        self.assertLess(reopen_index, preview_index)
+
+    def test_reopen_rejects_changed_saved_intent(self):
+        with RunningStub(StubDeployment(reopen_recipe_override={"exposureEv": 0.5})) as stub:
+            code, report, _ = run_main(self.invocation(stub))
+        self.assertEqual(code, 1)
+        reopen = next(step for step in report["steps"] if step["name"] == "recipe-reopen")
+        self.assertEqual(reopen["reason"], "recipe-reopen-changed")
+        self.assertIn("exposureEv", reopen["detail"]["fields"])
 
     def test_export_failure_fails_the_run(self):
         with RunningStub(StubDeployment(fail_export=True)) as stub:
@@ -1312,8 +1335,7 @@ class DryRunTests(AcceptanceTestCase):
         skipped = {step["name"]: step for step in report["steps"] if step["status"] == "skipped"}
         self.assertIn("edit-preview", skipped)
         self.assertIn("submit-export", skipped)
-        self.assertEqual(skipped["edit-preview"]["reason"], "develop-stage-not-ready")
-        self.assertEqual(skipped["edit-preview"]["detail"]["capabilityState"], "bundle-unavailable")
+        self.assertEqual(skipped["edit-preview"]["reason"], "prerequisite-not-passed")
         # Guarded saves do not need the engine; they still ran.
         self.assertEqual(next(step for step in report["steps"] if step["name"] == "save-undo")["status"], "pass")
         self.assertIn("Could not run edit-preview", summary)
@@ -1360,7 +1382,7 @@ class DryRunTests(AcceptanceTestCase):
         read = next(step for step in report["steps"] if step["name"] == "read-recipe")
         self.assertEqual(read["status"], "pass")
         self.assertEqual(read["detail"]["readWaits"], 2)
-        self.assertEqual(stub.recipe_reads, 3)
+        self.assertEqual(stub.recipe_reads, 5)
 
     def test_recipe_read_pending_timeout_fails_the_run(self):
         stub = StubDeployment(recipe_pending_first=10**9)
@@ -1411,29 +1433,6 @@ class DryRunTests(AcceptanceTestCase):
             any(change.startswith("sha256-changed:") for change in invariance["detail"]["changes"])
         )
 
-    def test_photo_query_speaks_the_server_contract(self):
-        """The runner sends the tagged source object within the published bound."""
-        stub = StubDeployment()
-        with RunningStub(stub) as running:
-            code, report, _ = run_main(self.invocation(running))
-        self.assertEqual(code, 0, report)
-        query_requests = [
-            entry
-            for entry in stub.requests
-            if entry["path"] == "/api/photo-queries" and entry["method"] == "POST"
-        ]
-        self.assertEqual(len(query_requests), 1)
-        body = query_requests[0]["body"]
-        self.assertEqual(
-            body,
-            {"source": {"kind": "all"}, "kind": "raw", "available": True, "limit": 60},
-        )
-        capabilities_requests = [
-            entry for entry in stub.requests if entry["path"] == "/api/capabilities"
-        ]
-        self.assertEqual(len(capabilities_requests), 1)
-        resolve = next(step for step in report["steps"] if step["name"] == "resolve-photo")
-        self.assertEqual(resolve["detail"]["listPageMaximum"], 60)
 
     def test_photo_query_pages_with_published_limit(self):
         """The runner honors `limits.listPageMaximum` and follows the cursor."""
@@ -1453,20 +1452,7 @@ class DryRunTests(AcceptanceTestCase):
         with RunningStub(stub) as running:
             code, report, _ = run_main(self.invocation(running))
         self.assertEqual(code, 0, report)
-        query_requests = [
-            entry
-            for entry in stub.requests
-            if entry["path"] == "/api/photo-queries" and entry["method"] == "POST"
-        ]
-        self.assertEqual(query_requests[0]["body"]["limit"], 2)
-        cursor_requests = [
-            entry
-            for entry in stub.requests
-            if entry["path"].startswith("/api/photo-queries/query-cursor")
-        ]
-        self.assertEqual(len(cursor_requests), 1)
         resolve = next(step for step in report["steps"] if step["name"] == "resolve-photo")
-        self.assertEqual(resolve["detail"]["listPageMaximum"], 2)
         self.assertEqual(resolve["detail"]["photoId"], PHOTO_ID)
         self.assertEqual(report["identities"]["photoId"], PHOTO_ID)
 

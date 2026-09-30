@@ -1342,35 +1342,26 @@ test("real-processing: autosaves an exposure, reopens it, compares the baseline,
   await expect(conflict).toBeVisible();
   await expect(
     page.locator("[data-photo-editor-conflict-message]"),
-  ).toContainText("The saved recipe changed elsewhere. Autosave stopped;");
+  ).toContainText("The saved edit changed elsewhere. Autosave stopped;");
   await page.locator("[data-photo-editor-use-saved]").click();
   await expect(conflict).toBeHidden();
   await expect(page.locator("[data-photo-editor-exposure-value]")).toHaveText(
     "0.250 EV",
   );
   // The baseline comparison develops the same Original without the saved
-  // exposure, so its own rendition is what the note and the image present. The
-  // workspace re-asks for a bounded window of its own, and a real 61 MP
-  // development outlives it, so the control is pressed again: each press asks
-  // for the same baseline identity, which the service serves from its retained
-  // rendition once that development has settled.
+  // exposure, so its own rendition is what the note and the image present.
+  // A cold native development can take several minutes; keep the admitted
+  // request alive while the UI polls its retained rendition.
   const previewNote = page.locator("[data-photo-editor-preview-note]");
-  const baseline =
-    /Edit comparison: the unadjusted rendering, compared with the current settings\./;
   const compare = page.locator("[data-photo-editor-compare]");
-  for (let attempt = 0; attempt < 12; attempt += 1) {
-    if (baseline.test((await previewNote.textContent()) ?? "")) break;
-    // Off, then on: the press is what asks for the baseline rendition again.
-    if ((await compare.getAttribute("aria-pressed")) === "true") {
-      await compare.click();
-      await expect(compare).toHaveAttribute("aria-pressed", "false");
-    }
+  if ((await compare.getAttribute("aria-pressed")) !== "true") {
     await compare.click();
-    await expect(compare).toHaveAttribute("aria-pressed", "true");
-    await page.waitForTimeout(20_000);
   }
-  await expect(previewNote).toContainText(baseline);
   await expect(compare).toHaveAttribute("aria-pressed", "true");
+  await expect(previewNote).toHaveText(
+    /Comparison \d+×\d+: the unadjusted rendering\. The current settings are unchanged\./,
+    { timeout: 300_000 },
+  );
   // The note alone could describe a rendition the surface never presented, so
   // the comparison's own image is what the assertion ends on.
   const comparison = page.locator("[data-photo-editor-preview-image]");

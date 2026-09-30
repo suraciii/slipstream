@@ -61,16 +61,17 @@ HTTP surface of the merged wire contract
 (`design/photo-development.md`, Service Surface): capability read, resolution
 of the Photo for an approved-profile RAW fixture, Edit Recipe read, a guarded
 exposure save and its guarded reversal (fresh request identities, expected
-recipe revision and source revision), the `develop` Edit Preview with its
-typed response-header metadata, a `development-tiff` Export through terminal
-settlement, and artifact download. It validates the download against the
-bytes: digest, byte length, geometry, content type, the embedded float32
-linear ProPhoto RGB framing, pinned source-profile identity, and decoded size
-of every Deflate strip. Decoding uses a fixed-size output bound, never retaining
-the full decompressed image. It hashes the fixture Original and any external
-XMP sidecar before and after the run and fails if bytes, size, mode, or
-modification time changed; it never opens them for writing. The only files it
-creates are downloaded artifacts inside the explicit output directory.
+recipe revision and source revision), a submitted `development-tiff` Export
+through terminal settlement, reopening the Photo to verify the saved intent,
+the `develop` Edit Preview from that saved intent, and artifact download. It
+validates the download against the bytes: digest, byte length, geometry,
+content type, the embedded float32 linear ProPhoto RGB framing, pinned
+source-profile identity, and decoded size of every Deflate strip. Decoding
+uses a fixed-size output bound, never retaining the full decompressed image.
+It hashes the fixture Original and any external XMP sidecar before and after
+the run and fails if bytes, size, mode, or modification time changed; it
+never opens them for writing. The only files it creates are downloaded
+artifacts inside the explicit output directory.
 
 The runner must never target an operator's live library. It refuses to start
 without an explicit acknowledgement flag, and it is meant for a dedicated
@@ -138,17 +139,34 @@ workflow alone.
 
 ## Build
 
-Build on the repository's Rust toolchain. A separate worker image has a fixed
-native entrypoint and no Python runtime:
+Build the production Photo worker in two passes with the native source and
+commit supplied explicitly:
 
 ```sh
-cargo build --locked -p slipstream-processing --bins
-docker build -f tools/processing/Dockerfile -t slipstream:processing-qualification .
-docker image inspect --format '{{.Id}}' slipstream:processing-qualification
+python3 tools/processing/photo/build.py \
+  --darktable-source /absolute/path/to/darktable-native \
+  --darktable-commit <40-lowercase-hex-commit> \
+  --tag slipstream:processing-photo
 ```
 
-Use the inspected immutable local image ID in operator configuration. The
-launcher does not pull images. Build a supported Web image using the repository's
+The helper requires the retained numerical parent image
+`slipstream:344-buffer-lifetimes` with identity
+`sha256:10aa79ce1148ba8aec83f6f68e6d39ba7edaa88f2369f21fac65d4784f4b495d`.
+It uses a BuildKit named context for the complete native checkout, verifies
+that checkout is clean and at the requested revision, caps native and Rust
+parallelism, and discovers the exact MCP tools/modules/schemas before deriving
+the bundle identity. The second pass pins that identity in the image label.
+The helper prints the immutable image ID and bundle digest; configure both
+identities in the launcher. It does not require a host `.git` path inside the
+BuildKit context.
+
+The production image has a fixed native entrypoint and no Python fallback
+adapter. The Rust worker and native bridge own the processing protocol; the
+Film stage consumes the native worker's Development TIFF and the pinned
+shared Film runtime.
+
+Use the inspected immutable image ID in operator configuration. The launcher
+does not pull images. Build a supported Web image using the repository's
 [deployment procedure](../../docs/deployment.md) for independent survivor checks.
 
 Run ordinary focused coverage without root or Docker:
@@ -158,8 +176,33 @@ cargo test --locked -p slipstream-processing
 cargo clippy --locked -p slipstream-processing --all-targets -- -D warnings
 ```
 
-These checks are also part of the workspace Rust gate. They do not replace the
-kernel qualification below.
+Native worker qualification is separate from this host-side isolation suite.
+From the native checkout configured with `BUILD_TESTING=ON`, run:
+
+```sh
+cmake --build build --target darktable-mcp test_mcp_paths test_mcp_params
+ctest --test-dir build --output-on-failure -R mcp
+```
+
+After building the worker image, run the RAW reference qualifier from the
+Slipstream checkout:
+
+```sh
+python3 tools/processing/photo/qualify.py \
+  --engine-image slipstream:processing-photo \
+  --fixture /absolute/private/fixtures/approved-camera.raw \
+  --reference-cli '/absolute/path/reference --input {input} --output {output} --exposure-milli-ev {exposure_milli_ev}' \
+  --icc tools/processing/photo/profile-fixtures/linear-prophoto.icc \
+  --output /absolute/private/native-qualification
+```
+
+The reference command must independently produce the requested Development TIFF
+and an adjacent `<output>.json` document. That document records the reference's
+exact `identity` and its initialized `temperature` fields: `red`, `green`, `blue`,
+`various`, and `preset`. The qualifier substitutes the three named placeholders,
+compares full-resolution zero and +1 EV output, checks generic parameter updates,
+and exercises restart and cancellation. The reference is qualification evidence,
+not a production fallback. Its output directory must not exist before the run.
 
 ## Operator setup
 
