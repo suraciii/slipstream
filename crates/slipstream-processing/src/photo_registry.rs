@@ -1,8 +1,8 @@
 //! Durable production Photo registry: strict snapshots and atomic persistence.
 
 use super::{
-    ATTEMPTS_MAX, Cleanup, Config, EXPOSURE_MILLI_EV_RANGE, ErrorCode, OUTCOMES, Phase,
-    PhotoRecord, Plan, REGISTRY_BYTES, State, hex, manifest_digest_parts, recipe_digest,
+    ATTEMPTS_MAX, Cleanup, Config, EXPOSURE_MILLI_EV_RANGE, ErrorCode, Phase, PhotoRecord, Plan,
+    REGISTRY_BYTES, State, hex, manifest_digest_parts, recipe_digest,
 };
 use crate::journal::ParentIdentity;
 use crate::{backend, photo, photo_profile, protocol};
@@ -142,10 +142,6 @@ pub(super) fn validate_registry(registry: &Registry, config: &Config) -> Result<
                         | "refused-output-validation"
                 )
             )
-            || record
-                .outcome
-                .as_deref()
-                .is_some_and(|outcome| !OUTCOMES.contains(&outcome))
             || (record.outcome.is_none() && record.cleanup != Cleanup::Pending)
             || (record.state == State::Settled)
                 != (record.outcome.is_some() && record.cleanup == Cleanup::Complete)

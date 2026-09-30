@@ -34,10 +34,7 @@ fn permanent_deletion_response(
             .map(|item| PermanentDeletionItemWire {
                 photo_id: item.photo_id,
                 original_location: item.relative_path.to_string(),
-                original_kind: match item.kind {
-                    slipstream_core::OriginalKind::Raw => "raw",
-                    slipstream_core::OriginalKind::Jpeg => "jpeg",
-                },
+                original_kind: crate::wire::original_kind(&item.kind),
                 state: permanent_deletion_state(item.state),
                 size: item.size,
                 message: item.message,
@@ -63,22 +60,10 @@ fn explicit_photo_removal_response(
         .into_iter()
         .map(|marker| (marker.photo_id, marker.removed_at_ms))
         .collect::<std::collections::HashMap<_, _>>();
-    let removed = removed
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::HashSet<_>>();
-    let changed_elsewhere = changed_elsewhere
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::HashSet<_>>();
-    let missing = missing
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::HashSet<_>>();
-    let already_removed = already_removed
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::HashSet<_>>();
+    let removed = as_str_set(&removed);
+    let changed_elsewhere = as_str_set(&changed_elsewhere);
+    let missing = as_str_set(&missing);
+    let already_removed = as_str_set(&already_removed);
     let results = ordered_photo_ids
         .into_iter()
         .map(|photo_id| {
@@ -124,22 +109,10 @@ fn explicit_photo_restore_response(
         changed_elsewhere,
         missing,
     } = result;
-    let restored = restored
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::HashSet<_>>();
-    let already_active = already_active
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::HashSet<_>>();
-    let changed_elsewhere = changed_elsewhere
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::HashSet<_>>();
-    let missing = missing
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::HashSet<_>>();
+    let restored = as_str_set(&restored);
+    let already_active = as_str_set(&already_active);
+    let changed_elsewhere = as_str_set(&changed_elsewhere);
+    let missing = as_str_set(&missing);
     let results = ordered_photo_ids
         .into_iter()
         .map(|photo_id| {
@@ -167,6 +140,32 @@ fn explicit_photo_restore_response(
         },
         results,
     }
+}
+
+/// One outcome set of Photo IDs, borrowed for per-ID outcome resolution.
+fn as_str_set(ids: &[String]) -> std::collections::HashSet<&str> {
+    ids.iter().map(String::as_str).collect()
+}
+
+/// The Preview facts of one published Photo and the Original record it
+/// references. A Photo whose Original the publication cannot resolve carries
+/// no Original facts.
+fn preview_facts_for(published: &Published, photo: &slipstream_core::PhotoRecord) -> PreviewFacts {
+    let originals = published
+        .originals_by_id
+        .get(&photo.original_id)
+        .and_then(|position| published.snapshot.originals.get(*position))
+        .into_iter()
+        .cloned()
+        .collect();
+    PreviewFacts::from_records(photo.clone(), originals)
+}
+
+/// Closes a Library whose Application failed to finish opening, off the
+/// async runtime.
+async fn close_partial_open(library: &Arc<Library>) {
+    let library_for_close = Arc::clone(library);
+    let _ = tokio::task::spawn_blocking(move || library_for_close.shutdown()).await;
 }
 
 pub struct Application {
@@ -344,9 +343,7 @@ impl Application {
                 match opened {
                     Ok(manager) => Some(Arc::new(manager)),
                     Err(message) => {
-                        let library_for_close = Arc::clone(&library);
-                        let _ =
-                            tokio::task::spawn_blocking(move || library_for_close.shutdown()).await;
+                        close_partial_open(&library).await;
                         return Err(ServerError::Export(message));
                     }
                 }
@@ -364,9 +361,7 @@ impl Application {
                 match opened {
                     Ok(manager) => Some(Arc::new(manager)),
                     Err(message) => {
-                        let library_for_close = Arc::clone(&library);
-                        let _ =
-                            tokio::task::spawn_blocking(move || library_for_close.shutdown()).await;
+                        close_partial_open(&library).await;
                         return Err(ServerError::Export(message));
                     }
                 }
@@ -382,8 +377,7 @@ impl Application {
         {
             Ok(preview) => preview,
             Err(error) => {
-                let library_for_close = Arc::clone(&library);
-                let _ = tokio::task::spawn_blocking(move || library_for_close.shutdown()).await;
+                close_partial_open(&library).await;
                 return Err(ServerError::Preview(error.to_string()));
             }
         };
@@ -563,6 +557,30 @@ impl Application {
         Ok(self.library.recovery_records(original_ids).await?)
     }
 
+    /// Runs one relocation evaluation on a blocking worker, with the Library
+    /// root opened and a native work budget admitted inside that worker.
+    async fn evaluate_relocation_blocking<T>(
+        &self,
+        work: impl FnOnce(
+            slipstream_core::LibraryRoot,
+            slipstream_core::NativeWorkBudget,
+        ) -> Result<T, ServerError>
+        + Send
+        + 'static,
+    ) -> Result<T, ServerError>
+    where
+        T: Send + 'static,
+    {
+        let root = self.library_root.clone();
+        tokio::task::spawn_blocking(move || {
+            let root =
+                slipstream_core::LibraryRoot::open(root).map_err(|_| ServerError::StorageLayout)?;
+            work(root, slipstream_core::NativeWorkBudget::new())
+        })
+        .await
+        .map_err(|error| ServerError::Join(error.to_string()))?
+    }
+
     /// Evaluates one Folder-prefix proposal over every unavailable Original
     /// under the reviewed prefix, reading candidates through confined
     /// descriptors. A scope larger than the advertised bound is refused
@@ -581,23 +599,19 @@ impl Application {
         let snapshot = self.library.snapshot().await?;
         let old = old_prefix.to_owned();
         let new = new_prefix.to_owned();
-        let root = self.library_root.clone();
-        let proposals = tokio::task::spawn_blocking(move || {
-            let root =
-                slipstream_core::LibraryRoot::open(root).map_err(|_| ServerError::StorageLayout)?;
-            let native_work = slipstream_core::NativeWorkBudget::new();
-            slipstream_core::plan_manual_relocations(
-                &root,
-                &native_work,
-                &survey,
-                &snapshot,
-                &old,
-                &new,
-            )
-            .map_err(|_| ServerError::FolderInvalid)
-        })
-        .await
-        .map_err(|error| ServerError::Join(error.to_string()))??;
+        let proposals = self
+            .evaluate_relocation_blocking(move |root, native_work| {
+                slipstream_core::plan_manual_relocations(
+                    &root,
+                    &native_work,
+                    &survey,
+                    &snapshot,
+                    &old,
+                    &new,
+                )
+                .map_err(|_| ServerError::FolderInvalid)
+            })
+            .await?;
         Ok(proposals
             .iter()
             .map(RecoveryMappingWire::from_proposal)
@@ -622,23 +636,19 @@ impl Application {
         }
         let original_id = original_id.to_owned();
         let location = new_location.to_owned();
-        let root = self.library_root.clone();
-        let proposal = tokio::task::spawn_blocking(move || {
-            let root =
-                slipstream_core::LibraryRoot::open(root).map_err(|_| ServerError::StorageLayout)?;
-            let native_work = slipstream_core::NativeWorkBudget::new();
-            slipstream_core::plan_single_relocation(
-                &root,
-                &native_work,
-                &survey,
-                &snapshot,
-                &original_id,
-                &location,
-            )
-            .map_err(|_| ServerError::FolderInvalid)
-        })
-        .await
-        .map_err(|error| ServerError::Join(error.to_string()))??;
+        let proposal = self
+            .evaluate_relocation_blocking(move |root, native_work| {
+                slipstream_core::plan_single_relocation(
+                    &root,
+                    &native_work,
+                    &survey,
+                    &snapshot,
+                    &original_id,
+                    &location,
+                )
+                .map_err(|_| ServerError::FolderInvalid)
+            })
+            .await?;
         Ok(RecoveryMappingWire::from_proposal(&proposal))
     }
 
@@ -675,114 +685,114 @@ impl Application {
                 mapping_id: item.mapping_id.clone(),
             })
             .collect::<Vec<_>>();
-        let root = self.library_root.clone();
-        let worker = tokio::task::spawn_blocking(move || {
-            let root =
-                slipstream_core::LibraryRoot::open(root).map_err(|_| ServerError::StorageLayout)?;
-            let native_work = slipstream_core::NativeWorkBudget::new();
-            // Every submitted Original vacates its remembered destination in
-            // this batch, so it is neither an occupant nor a conflict.
-            let relocating = items
-                .iter()
-                .map(|item| item.original_id.clone())
-                .collect::<std::collections::HashSet<_>>();
-            let mut claimed = std::collections::HashSet::new();
-            let mut rejections = Vec::new();
-            let mut relocations = Vec::new();
-            let mut applied = Vec::new();
-            for item in items {
-                let mut reject = |reason: &'static str| {
-                    rejections.push(RecoveryRejectionWire {
-                        original_id: item.original_id.clone(),
-                        reason,
-                    });
-                };
-                let proposal = match slipstream_core::evaluate_relocation(
-                    &root,
-                    &native_work,
-                    &survey,
-                    &snapshot,
-                    &item.original_id,
-                    &item.new_location,
-                    slipstream_core::RelocationSet {
-                        relocating: &relocating,
-                        claimed_destinations: &claimed,
-                    },
-                ) {
-                    Ok(proposal) => proposal,
-                    Err(_) => {
-                        reject("stale");
+        let worker = self
+            .evaluate_relocation_blocking(move |root, native_work| {
+                // Every submitted Original vacates its remembered destination in
+                // this batch, so it is neither an occupant nor a conflict.
+                let relocating = items
+                    .iter()
+                    .map(|item| item.original_id.clone())
+                    .collect::<std::collections::HashSet<_>>();
+                let mut claimed = std::collections::HashSet::new();
+                let mut rejections = Vec::new();
+                let mut relocations = Vec::new();
+                let mut applied = Vec::new();
+                for item in items {
+                    let mut reject = |reason: &'static str| {
+                        rejections.push(RecoveryRejectionWire {
+                            original_id: item.original_id.clone(),
+                            reason,
+                        });
+                    };
+                    let proposal = match slipstream_core::evaluate_relocation(
+                        &root,
+                        &native_work,
+                        &survey,
+                        &snapshot,
+                        &item.original_id,
+                        &item.new_location,
+                        slipstream_core::RelocationSet {
+                            relocating: &relocating,
+                            claimed_destinations: &claimed,
+                        },
+                    ) {
+                        Ok(proposal) => proposal,
+                        Err(_) => {
+                            reject("stale");
+                            continue;
+                        }
+                    };
+                    if let Some(block) = proposal.blocked {
+                        reject(block.code());
                         continue;
                     }
-                };
-                if let Some(block) = proposal.blocked {
-                    reject(block.code());
-                    continue;
-                }
-                if proposal.mapping_id != item.mapping_id {
-                    reject("reviewed-stale");
-                    continue;
-                }
-                let retire = match &proposal.outcome {
-                    slipstream_core::ManualOutcome::Occupied {
-                        retire: Some(candidate),
-                    } => match item.retire_photo_id.as_deref() {
-                        Some(photo_id) if photo_id == candidate.photo_id => Some(candidate.clone()),
-                        Some(_) => {
+                    if proposal.mapping_id != item.mapping_id {
+                        reject("reviewed-stale");
+                        continue;
+                    }
+                    let retire = match &proposal.outcome {
+                        slipstream_core::ManualOutcome::Occupied {
+                            retire: Some(candidate),
+                        } => match item.retire_photo_id.as_deref() {
+                            Some(photo_id) if photo_id == candidate.photo_id => {
+                                Some(candidate.clone())
+                            }
+                            Some(_) => {
+                                reject("retire-mismatch");
+                                continue;
+                            }
+                            None => {
+                                reject("retire-unconfirmed");
+                                continue;
+                            }
+                        },
+                        _ if item.retire_photo_id.is_some() => {
                             reject("retire-mismatch");
                             continue;
                         }
-                        None => {
-                            reject("retire-unconfirmed");
-                            continue;
-                        }
-                    },
-                    _ if item.retire_photo_id.is_some() => {
-                        reject("retire-mismatch");
+                        _ => None,
+                    };
+                    if !proposal.verified && !item.confirm_unverified_content {
+                        reject("content-unconfirmed");
                         continue;
                     }
-                    _ => None,
-                };
-                if !proposal.verified && !item.confirm_unverified_content {
-                    reject("content-unconfirmed");
-                    continue;
+                    let Some(facts) = proposal.destination_facts else {
+                        reject("missing");
+                        continue;
+                    };
+                    claimed.insert(item.new_location.clone());
+                    relocations.push(slipstream_core::RequestedRelocation {
+                        mapping_id: proposal.mapping_id.clone(),
+                        original_id: proposal.original_id.clone(),
+                        from_location: proposal.from_location.clone(),
+                        to_location: proposal.to_location.clone(),
+                        fingerprint: survey
+                            .unavailable
+                            .iter()
+                            .find(|record| record.original_id == proposal.original_id)
+                            .and_then(|record| record.fingerprint.clone()),
+                        facts,
+                        retire_photo_id: retire
+                            .as_ref()
+                            .map(|candidate| candidate.photo_id.clone()),
+                    });
+                    applied.push(RecoveryAppliedWire {
+                        original_id: proposal.original_id,
+                        photo_id: proposal.photo_id.clone(),
+                        from_location: proposal.from_location,
+                        to_location: proposal.to_location,
+                        web_url: photo_web_path(&proposal.photo_id),
+                        retired: retire.map(|candidate| RetireCandidateWire {
+                            photo_id: candidate.photo_id.to_owned(),
+                            original_id: candidate.original_id.to_owned(),
+                            location: candidate.location.to_owned(),
+                        }),
+                    });
                 }
-                let Some(facts) = proposal.destination_facts else {
-                    reject("missing");
-                    continue;
-                };
-                claimed.insert(item.new_location.clone());
-                relocations.push(slipstream_core::RequestedRelocation {
-                    mapping_id: proposal.mapping_id.clone(),
-                    original_id: proposal.original_id.clone(),
-                    from_location: proposal.from_location.clone(),
-                    to_location: proposal.to_location.clone(),
-                    fingerprint: survey
-                        .unavailable
-                        .iter()
-                        .find(|record| record.original_id == proposal.original_id)
-                        .and_then(|record| record.fingerprint.clone()),
-                    facts,
-                    retire_photo_id: retire.as_ref().map(|candidate| candidate.photo_id.clone()),
-                });
-                applied.push(RecoveryAppliedWire {
-                    original_id: proposal.original_id,
-                    photo_id: proposal.photo_id.clone(),
-                    from_location: proposal.from_location,
-                    to_location: proposal.to_location,
-                    web_url: photo_web_path(&proposal.photo_id),
-                    retired: retire.map(|candidate| RetireCandidateWire {
-                        photo_id: candidate.photo_id.to_owned(),
-                        original_id: candidate.original_id.to_owned(),
-                        location: candidate.location.to_owned(),
-                    }),
-                });
-            }
-            Ok::<_, ServerError>((rejections, relocations, applied))
-        })
-        .await
-        .map_err(|error| RecoveryApplyError::Server(ServerError::Join(error.to_string())))?
-        .map_err(RecoveryApplyError::Server)?;
+                Ok::<_, ServerError>((rejections, relocations, applied))
+            })
+            .await
+            .map_err(RecoveryApplyError::Server)?;
         let (rejections, relocations, applied) = worker;
         if !rejections.is_empty() {
             return Err(RecoveryApplyError::Rejected {
@@ -855,98 +865,45 @@ impl Application {
             enrolled: counts.enrolled,
             pending: counts.pending,
         });
+        // Every phase reports the same publication, progress timestamps, and
+        // counters; only the phase name and its measurable progress differ.
+        let row = |state, completed, total| ScanStatusWire {
+            state,
+            updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
+            publication: publication.clone(),
+            completed,
+            total,
+            updated_ms: progress.updated_ms,
+            last_recovery: last_recovery.clone(),
+            fingerprints,
+        };
+        let saturating = |count: u64| usize::try_from(count).unwrap_or(usize::MAX);
         match progress.phase {
-            ScanPhase::Discovering => ScanStatusWire {
-                state: "discovering",
-                updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
-                publication: publication.clone(),
-                completed: Some(usize::try_from(progress.discovered).unwrap_or(usize::MAX)),
-                total: None,
-                updated_ms: progress.updated_ms,
-                last_recovery,
-                fingerprints,
-            },
-            ScanPhase::Inspecting => ScanStatusWire {
-                state: "inspecting",
-                updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
-                publication: publication.clone(),
-                completed: Some(usize::try_from(progress.inspected).unwrap_or(usize::MAX)),
-                total: progress
-                    .inspect_total
-                    .map(|total| usize::try_from(total).unwrap_or(usize::MAX)),
-                updated_ms: progress.updated_ms,
-                last_recovery,
-                fingerprints,
-            },
-            ScanPhase::Recovering => ScanStatusWire {
-                state: "recovering",
-                updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
-                publication: publication.clone(),
-                completed: Some(usize::try_from(progress.hashed).unwrap_or(usize::MAX)),
-                total: progress
-                    .hash_total
-                    .map(|total| usize::try_from(total).unwrap_or(usize::MAX)),
-                updated_ms: progress.updated_ms,
-                last_recovery,
-                fingerprints,
-            },
-            ScanPhase::Applying => ScanStatusWire {
-                state: "applying",
-                updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
-                publication: publication.clone(),
-                completed: None,
-                total: None,
-                updated_ms: progress.updated_ms,
-                last_recovery,
-                fingerprints,
-            },
+            ScanPhase::Discovering => {
+                row("discovering", Some(saturating(progress.discovered)), None)
+            }
+            ScanPhase::Inspecting => row(
+                "inspecting",
+                Some(saturating(progress.inspected)),
+                progress.inspect_total.map(saturating),
+            ),
+            ScanPhase::Recovering => row(
+                "recovering",
+                Some(saturating(progress.hashed)),
+                progress.hash_total.map(saturating),
+            ),
+            ScanPhase::Applying => row("applying", None, None),
             ScanPhase::Idle => {
                 if self.shared.awaiting_scan.load(Ordering::Relaxed) > 0 {
                     // The scan finished; its result is being published.
-                    ScanStatusWire {
-                        state: "applying",
-                        updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
-                        publication: publication.clone(),
-                        completed: None,
-                        total: None,
-                        updated_ms: progress.updated_ms,
-                        last_recovery,
-                        fingerprints,
-                    }
+                    row("applying", None, None)
                 } else if self.shared.failed.load(Ordering::Relaxed) {
-                    ScanStatusWire {
-                        state: "failed",
-                        updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
-                        publication: publication.clone(),
-                        completed: None,
-                        updated_ms: progress.updated_ms,
-                        total: None,
-                        last_recovery,
-                        fingerprints,
-                    }
+                    row("failed", None, None)
                 } else if self.shared.published.load(Ordering::Relaxed) {
                     let photo_count = self.published_photo_count();
-                    ScanStatusWire {
-                        state: "idle",
-                        updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
-                        publication: publication.clone(),
-                        completed: Some(photo_count),
-                        updated_ms: progress.updated_ms,
-                        total: Some(photo_count),
-                        last_recovery,
-                        fingerprints,
-                    }
+                    row("idle", Some(photo_count), Some(photo_count))
                 } else {
-                    ScanStatusWire {
-                        state: "initializing",
-                        updated_at: (progress.updated_ms != 0).then_some(progress.updated_ms),
-                        publication,
-                        completed: None,
-                        total: None,
-                        updated_ms: progress.updated_ms,
-                        last_recovery,
-                        fingerprints,
-                    }
+                    row("initializing", None, None)
                 }
             }
         }
@@ -1351,42 +1308,24 @@ impl Application {
             // holds.
             let mut facts = Vec::with_capacity(ids.len());
             for id in &ids {
-                let Some(position) = source.photos_by_id.get(id).copied() else {
-                    return Err(ServerError::BrowseNotFound);
-                };
-                let Some(photo) = source.snapshot.photos.get(position) else {
+                let Some(photo) = source
+                    .photos_by_id
+                    .get(id)
+                    .copied()
+                    .and_then(|position| source.snapshot.photos.get(position))
+                else {
                     return Err(ServerError::BrowseNotFound);
                 };
                 if photo.removed {
                     return Err(ServerError::BrowseNotFound);
                 }
-                let originals = [Some(&photo.original_id)]
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|id| source.originals_by_id.get(id))
-                    .filter_map(|position| source.snapshot.originals.get(*position))
-                    .cloned()
-                    .collect();
-                facts.push(PreviewFacts::from_records(photo.clone(), originals));
+                facts.push(preview_facts_for(source, photo));
             }
             facts
         };
         let mut photos = Vec::with_capacity(facts.len());
         for facts in facts {
-            let (preview_url, thumbnail_url) = self.derivative_urls(&facts).await;
-            let originals_by_id = facts
-                .originals
-                .iter()
-                .enumerate()
-                .map(|(position, original)| (original.id.clone(), position))
-                .collect::<std::collections::HashMap<_, _>>();
-            photos.push(photo_summary_indexed_with_url(
-                &facts.photo,
-                &facts.originals,
-                &originals_by_id,
-                preview_url,
-                thumbnail_url,
-            ));
+            photos.push(self.indexed_photo_summary(&facts).await);
         }
         Ok(BrowseWindowResponse {
             start,
@@ -1426,6 +1365,25 @@ impl Application {
                 )
             });
         (preview_url, thumbnail_url)
+    }
+
+    /// One Photo's Grid summary with the current derivative URLs its Review
+    /// Preview and Thumbnail provide.
+    async fn indexed_photo_summary(&self, facts: &PreviewFacts) -> PhotoSummary {
+        let (preview_url, thumbnail_url) = self.derivative_urls(facts).await;
+        let originals_by_id = facts
+            .originals
+            .iter()
+            .enumerate()
+            .map(|(position, original)| (original.id.clone(), position))
+            .collect::<std::collections::HashMap<_, _>>();
+        photo_summary_indexed_with_url(
+            &facts.photo,
+            &facts.originals,
+            &originals_by_id,
+            preview_url,
+            thumbnail_url,
+        )
     }
 
     /// Confirms the removal of one reviewed rejected result.
@@ -1585,19 +1543,15 @@ impl Application {
             records
                 .into_iter()
                 .filter_map(|record| {
-                    let position = published.photos_by_id.get(&record.photo_id).copied()?;
-                    let photo = published.snapshot.photos.get(position)?;
-                    let originals = [Some(&photo.original_id)]
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|id| published.originals_by_id.get(id))
-                        .filter_map(|position| published.snapshot.originals.get(*position))
-                        .cloned()
-                        .collect();
+                    let photo = published
+                        .photos_by_id
+                        .get(&record.photo_id)
+                        .copied()
+                        .and_then(|position| published.snapshot.photos.get(position))?;
                     Some((
                         record.removed_at_ms,
                         record.pending_verification,
-                        PreviewFacts::from_records(photo.clone(), originals),
+                        preview_facts_for(published, photo),
                     ))
                 })
                 .collect::<Vec<_>>()
@@ -1611,30 +1565,13 @@ impl Application {
             else {
                 continue;
             };
-            let original_kind = match original.kind {
-                slipstream_core::OriginalKind::Raw => "raw",
-                slipstream_core::OriginalKind::Jpeg => "jpeg",
-            };
-            let (preview_url, thumbnail_url) = self.derivative_urls(&facts).await;
-            let originals_by_id = facts
-                .originals
-                .iter()
-                .enumerate()
-                .map(|(position, original)| (original.id.clone(), position))
-                .collect::<std::collections::HashMap<_, _>>();
             photos.push(RemovedPhotoWire {
                 removed_at_ms,
                 original_location: original.relative_path.to_string(),
-                original_kind,
+                original_kind: crate::wire::original_kind(&original.kind),
                 original_size: original.available.then_some(original.facts.size),
                 pending_verification_operation_id,
-                photo: photo_summary_indexed_with_url(
-                    &facts.photo,
-                    &facts.originals,
-                    &originals_by_id,
-                    preview_url,
-                    thumbnail_url,
-                ),
+                photo: self.indexed_photo_summary(&facts).await,
             });
         }
         Ok(RemovedPhotosResponse {
@@ -1669,11 +1606,7 @@ impl Application {
                     removed_at_ms: item.removed_at_ms,
                     original_id: item.original_id,
                     original_location: item.relative_path.to_string(),
-                    original_kind: match item.kind {
-                        slipstream_core::OriginalKind::Raw => "raw",
-                        slipstream_core::OriginalKind::Jpeg => "jpeg",
-                    }
-                    .to_owned(),
+                    original_kind: crate::wire::original_kind(&item.kind).to_owned(),
                     size: item.size,
                     albums: item
                         .albums
@@ -1993,16 +1926,7 @@ impl Application {
             .read()
             .expect("published Library poisoned");
         let published = guard.as_ref()?;
-        let position = published.photos_by_id.get(photo_id).copied()?;
-        let photo = published.snapshot.photos.get(position)?;
-        let originals = [Some(&photo.original_id)]
-            .into_iter()
-            .flatten()
-            .filter_map(|id| published.originals_by_id.get(id))
-            .filter_map(|position| published.snapshot.originals.get(*position))
-            .cloned()
-            .collect();
-        Some(PreviewFacts::from_records(photo.clone(), originals))
+        published_photo(published, photo_id).map(|photo| preview_facts_for(published, photo))
     }
 
     pub async fn preview(&self, photo_id: &str) -> Result<PreviewResponse, ServerError> {
