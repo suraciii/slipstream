@@ -31,18 +31,16 @@ use std::{
     fmt,
     num::NonZeroUsize,
     sync::{
-        Arc, Mutex,
-        mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
+        Arc,
+        mpsc::{Receiver, sync_channel},
     },
-    thread::{self, JoinHandle},
+    thread,
 };
 use tokio::sync::oneshot;
 
+mod lifecycle;
 #[cfg(test)]
 const DEFAULT_QUEUE_CAPACITY: usize = 64;
-const STATE_OPEN: u8 = 0;
-const STATE_CLOSING: u8 = 1;
-const STATE_CLOSED: u8 = 2;
 
 pub(super) struct MutationVersions {
     pub(super) epoch: String,
@@ -579,20 +577,9 @@ pub(super) enum Command {
     },
 }
 
-struct Admission {
-    state: u8,
-    sender: Option<SyncSender<Command>>,
-}
-
-struct Inner {
-    admission: Mutex<Admission>,
-    join: Mutex<Option<JoinHandle<()>>>,
-    shutdown: Mutex<Option<Result<(), PersistenceError>>>,
-}
-
 #[derive(Clone)]
 pub struct Persistence {
-    inner: Arc<Inner>,
+    inner: Arc<lifecycle::OwnerLifecycle>,
 }
 
 impl Persistence {
@@ -679,14 +666,7 @@ impl Persistence {
             return Err(error);
         }
         Ok(Self {
-            inner: Arc::new(Inner {
-                admission: Mutex::new(Admission {
-                    state: STATE_OPEN,
-                    sender: Some(sender),
-                }),
-                join: Mutex::new(Some(join)),
-                shutdown: Mutex::new(None),
-            }),
+            inner: Arc::new(lifecycle::OwnerLifecycle::new(sender, join)),
         })
     }
 
@@ -1638,54 +1618,11 @@ impl Persistence {
     }
 
     pub(super) fn submit(&self, command: Command) -> Result<(), PersistenceError> {
-        let admission = self.inner.admission.lock().unwrap();
-        if admission.state != STATE_OPEN {
-            return Err(PersistenceError::Closed);
-        }
-        let sender = admission.sender.as_ref().ok_or(PersistenceError::Closed)?;
-        sender.try_send(command).map_err(|error| match error {
-            TrySendError::Full(_) => PersistenceError::Saturated,
-            TrySendError::Disconnected(_) => PersistenceError::OwnerStopped,
-        })
+        self.inner.submit(command)
     }
 
     pub fn shutdown(&self) -> Result<(), PersistenceError> {
-        let mut shutdown = self.inner.shutdown.lock().unwrap();
-        if let Some(result) = shutdown.clone() {
-            return result;
-        }
-
-        // Hold the admission lock while transitioning and dropping the sender.
-        // submit() holds the same lock through try_send(), so no command can
-        // be accepted after shutdown begins and no accepted command is lost.
-        {
-            let mut admission = self.inner.admission.lock().unwrap();
-            admission.state = STATE_CLOSING;
-            admission.sender.take();
-        }
-        let result = self
-            .inner
-            .join
-            .lock()
-            .unwrap()
-            .take()
-            .map(|join| join.join().map_err(|_| PersistenceError::OwnerStopped))
-            .unwrap_or(Ok(()));
-        {
-            let mut admission = self.inner.admission.lock().unwrap();
-            admission.state = STATE_CLOSED;
-        }
-        *shutdown = Some(result.clone());
-        result
-    }
-}
-
-impl Drop for Inner {
-    fn drop(&mut self) {
-        self.admission.get_mut().unwrap().sender.take();
-        if let Some(join) = self.join.get_mut().unwrap().take() {
-            let _ = join.join();
-        }
+        self.inner.shutdown()
     }
 }
 

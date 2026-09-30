@@ -34,6 +34,11 @@ One server process owns:
 - the HTTP server and browser event transport;
 - process shutdown.
 
+SQLite command admission and worker shutdown live in `persistence/owner/lifecycle.rs`;
+`persistence/owner.rs` retains the command protocol, database initialization,
+and command dispatch. The bounded queue drains accepted work before shutdown
+joins the worker.
+
 Importing a module must not scan files, create storage, or bind a port.
 
 The default listener remains loopback. [Instance Access Architecture](access.md) owns authentication at the HTTP boundary. [Deployment](../docs/deployment.md) owns HTTPS proxy topology and public exposure. Authentication does not introduce user accounts or change Photo Library ownership.

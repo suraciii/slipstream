@@ -1,4 +1,4 @@
-import "./ui/access-entry.css";
+import "./access-entry.css";
 import {
   createPrivateFetcher,
   createAuthenticatedFetcher,
@@ -7,7 +7,7 @@ import {
   revokeBrowserSession,
   type BrowserFetch,
   type BrowserSession,
-} from "./model/access-session.js";
+} from "../model/access-session.js";
 
 type EntryOptions = Readonly<{
   message?: string;

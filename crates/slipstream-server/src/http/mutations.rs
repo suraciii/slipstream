@@ -12,8 +12,8 @@ use slipstream_core::{LibraryError, SelectionState};
 use super::{
     ALBUM_PHOTO_IDS_MAX, ApiError, CLI_CONTRACT_HEADER, HttpState, api_error, cli_error,
     has_exact_keys, invalid_cli, json_response, mutate_album_route, read_cli_json_body,
-    read_json_body, require_cli_contract, selection_state, valid_batch_selection, valid_id,
-    valid_ids, valid_name, valid_rating, valid_selection,
+    read_json_body, read_json_object, require_cli_contract, selection_state, valid_batch_selection,
+    valid_id, valid_ids, valid_name, valid_rating, valid_selection,
 };
 use crate::{
     folders::valid_folder_location,
@@ -505,24 +505,27 @@ pub(crate) async fn delete_album(
     }
 }
 
+async fn read_membership_photo_ids(
+    request: Request<Body>,
+    invalid_message: &'static str,
+) -> Result<Vec<String>, Response<Body>> {
+    let body = read_json_object(request, invalid_message).await?;
+    valid_ids(body.get("photoIds"), ALBUM_PHOTO_IDS_MAX)
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, invalid_message))
+}
+
 pub(crate) async fn add_album_members(
     State(state): State<HttpState>,
     axum::extract::Path(id): axum::extract::Path<String>,
     request: Request<Body>,
 ) -> Response<Body> {
-    let body = match read_json_body(request).await {
-        Ok(body) => body,
+    let photo_ids = match read_membership_photo_ids(request, "Invalid membership batch").await {
+        Ok(photo_ids) => photo_ids,
         Err(response) => return response,
-    };
-    let Some(body) = body.as_object() else {
-        return api_error(StatusCode::BAD_REQUEST, "Invalid membership batch");
     };
     if !valid_id(&id) {
         return api_error(StatusCode::BAD_REQUEST, "Invalid membership batch");
     }
-    let Some(photo_ids) = valid_ids(body.get("photoIds"), ALBUM_PHOTO_IDS_MAX) else {
-        return api_error(StatusCode::BAD_REQUEST, "Invalid membership batch");
-    };
     match state.application.add_album_members(&id, photo_ids).await {
         Ok(result) => json_response(StatusCode::OK, &result),
         Err(error) => ApiError::from(error).into_response(),
@@ -534,19 +537,14 @@ pub(crate) async fn remove_added_album_members(
     axum::extract::Path(id): axum::extract::Path<String>,
     request: Request<Body>,
 ) -> Response<Body> {
-    let body = match read_json_body(request).await {
-        Ok(body) => body,
-        Err(response) => return response,
-    };
-    let Some(body) = body.as_object() else {
-        return api_error(StatusCode::BAD_REQUEST, "Invalid membership compensation");
-    };
+    let photo_ids =
+        match read_membership_photo_ids(request, "Invalid membership compensation").await {
+            Ok(photo_ids) => photo_ids,
+            Err(response) => return response,
+        };
     if !valid_id(&id) {
         return api_error(StatusCode::BAD_REQUEST, "Invalid membership compensation");
     }
-    let Some(photo_ids) = valid_ids(body.get("photoIds"), ALBUM_PHOTO_IDS_MAX) else {
-        return api_error(StatusCode::BAD_REQUEST, "Invalid membership compensation");
-    };
     match state
         .application
         .remove_added_album_members(&id, photo_ids)
@@ -562,12 +560,9 @@ pub(crate) async fn add_folder_members(
     axum::extract::Path(id): axum::extract::Path<String>,
     request: Request<Body>,
 ) -> Response<Body> {
-    let body = match read_json_body(request).await {
+    let body = match read_json_object(request, "Invalid Folder Album body").await {
         Ok(body) => body,
         Err(response) => return response,
-    };
-    let Some(body) = body.as_object() else {
-        return api_error(StatusCode::BAD_REQUEST, "Invalid Folder Album body");
     };
     let Some(folder_path) = body.get("folderPath").and_then(Value::as_str) else {
         return api_error(StatusCode::BAD_REQUEST, "Invalid Folder Album body");
@@ -725,14 +720,11 @@ pub(crate) async fn mutate_photo_state_batch(
     State(state): State<HttpState>,
     request: Request<Body>,
 ) -> Response<Body> {
-    let body = match read_json_body(request).await {
+    let body = match read_json_object(request, "Invalid Photo state batch").await {
         Ok(body) => body,
         Err(response) => return response,
     };
-    let Some(body) = body.as_object() else {
-        return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch");
-    };
-    if !has_exact_keys(body, &["selectionState", "photos"]) {
+    if !has_exact_keys(&body, &["selectionState", "photos"]) {
         return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch");
     }
     let Some(value) = body.get("selectionState").and_then(valid_batch_selection) else {

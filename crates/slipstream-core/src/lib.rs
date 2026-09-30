@@ -16,6 +16,7 @@ pub mod identity;
 pub mod library;
 pub mod metadata;
 mod native;
+pub mod native_work;
 pub mod persistence;
 pub mod preview;
 pub mod reconcile;
@@ -28,8 +29,7 @@ pub use cache::{
     CacheDirectory, CacheError, CachedDerivative, DEFAULT_QUEUE_CAPACITY, DEFAULT_WAITER_CAPACITY,
     DEFAULT_WORKERS, DERIVATIVE_ALGORITHM_VERSION, DerivativeFailure, DerivativeFailureKind,
     DerivativeIdentity, DerivativePriority, DerivativeResult, DerivativeScheduler,
-    DerivativeSchedulerOptions, DerivativeSource, NativeWorkBudget, NativeWorkPermit,
-    derivative_cache_key, manifest_identity,
+    DerivativeSchedulerOptions, DerivativeSource, derivative_cache_key, manifest_identity,
 };
 pub use capture::{
     CameraIdentity, CaptureFact, CaptureInspectionError, CaptureMetadataState,
@@ -88,6 +88,7 @@ pub use native::{
     InspectedPreview, InspectedPreviewSource, NativePreview, NativePreviewError, PreviewError,
     extract_embedded_jpeg, inspect_matching_jpeg, inspect_preview_source,
 };
+pub use native_work::{NativeWorkBudget, NativeWorkPermit};
 pub use persistence::{AlbumWriteError, MutationError, PhotoDecisionWriteError};
 pub use preview::{
     DEFAULT_PREVIEW_QUEUE_CAPACITY, DEFAULT_PREVIEW_WAITER_CAPACITY, DEFAULT_PREVIEW_WORKERS,

@@ -1,8 +1,11 @@
 use crate::{
     backend::{Backend, secure_directory},
+    instance_claim::claim_instance,
     protocol::*,
 };
 use serde::{Deserialize, Serialize};
+#[path = "qualification.rs"]
+mod qualification;
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
@@ -11,7 +14,7 @@ use std::{
         fd::AsRawFd,
         unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     },
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -250,7 +253,7 @@ impl Executor {
             invalidations: qualified.as_ref().map(|_| Vec::new()),
         });
         validate_registry(&registry, &config)?;
-        restore_qualifications(&mut registry)?;
+        qualification::restore(&mut registry)?;
         for entry in fs::read_dir(root.join("attempts")).map_err(|_| ErrorCode::Unavailable)? {
             let entry = entry.map_err(|_| ErrorCode::Unavailable)?;
             if !registry
@@ -408,13 +411,9 @@ impl Executor {
                         .invalidations
                         .as_ref()
                         .ok_or(ErrorCode::Uncertain)?;
-                    let ready = data.available
-                        && self
-                            .backend
-                            .admission_ready(data.registry.parent_identity.as_ref())
-                            .is_ok()
+                    let ready = matches!(self.availability(&data), Availability::Available)
                         && self.qualified_ready().is_ok();
-                    let availability = qualified_availability(
+                    let availability = qualification::availability(
                         ready,
                         &documents.envelope.cases,
                         &config.envelope_sha256,
@@ -460,16 +459,7 @@ impl Executor {
                             bundle: self.bundle.clone(),
                             catalogue: config.catalogue_sha256.clone(),
                             resource_model: config.resource_model_sha256.clone(),
-                            availability: if data.available
-                                && self
-                                    .backend
-                                    .admission_ready(data.registry.parent_identity.as_ref())
-                                    .is_ok()
-                            {
-                                Availability::Available
-                            } else {
-                                Availability::Blocked
-                            },
+                            availability: self.availability(&data),
                             active: data
                                 .registry
                                 .active
@@ -489,16 +479,7 @@ impl Executor {
                         .ok_or(ErrorCode::Capacity)?,
                     policy: self.policy.clone(),
                     bundle: self.bundle.clone(),
-                    availability: if data.available
-                        && self
-                            .backend
-                            .admission_ready(data.registry.parent_identity.as_ref())
-                            .is_ok()
-                    {
-                        Availability::Available
-                    } else {
-                        Availability::Blocked
-                    },
+                    availability: self.availability(&data),
                     active: data.registry.active.and_then(|sequence| {
                         data.registry
                             .records
@@ -590,7 +571,7 @@ impl Executor {
                         .invalidations
                         .as_ref()
                         .ok_or(ErrorCode::Uncertain)?;
-                    let (fixture, plan) = plan_qualified_start(
+                    let (fixture, plan) = qualification::plan(
                         documents,
                         invalidations,
                         &workload.fixture_id,
@@ -815,6 +796,19 @@ impl Executor {
         &self.config
     }
 
+    fn availability(&self, data: &Data) -> Availability {
+        if data.available
+            && self
+                .backend
+                .admission_ready(data.registry.parent_identity.as_ref())
+                .is_ok()
+        {
+            Availability::Available
+        } else {
+            Availability::Blocked
+        }
+    }
+
     fn record(&self, sequence: u64) -> Result<Record, ErrorCode> {
         self.data
             .lock()
@@ -853,7 +847,7 @@ impl Executor {
         {
             record.receipt.outcome = Some(outcome);
         }
-        assess_qualification(&mut next, &mut record)?;
+        qualification::assess(&mut next, &mut record)?;
         if record.receipt.state == State::Settled {
             if record.receipt.cleanup != Cleanup::Complete || record.receipt.outcome.is_none() {
                 return Err(ErrorCode::Uncertain);
@@ -1429,9 +1423,9 @@ pub(crate) fn classify(
     worker: Option<Outcome>,
     requested: Option<Outcome>,
 ) -> Outcome {
-    if attempt_oom_killed(evidence)
+    if qualification::attempt_oom_killed(evidence)
         && (evidence.docker_oom_killed == Some(true)
-            || (evidence.exit_code == Some(137) && owned_limit_pressure(evidence)))
+            || (evidence.exit_code == Some(137) && qualification::owned_limit_pressure(evidence)))
     {
         return Outcome::Oom;
     }
@@ -1452,169 +1446,6 @@ pub(crate) fn classify(
     }
 }
 
-fn attempt_oom_killed(evidence: &Evidence) -> bool {
-    evidence
-        .attempt_before
-        .as_ref()
-        .zip(evidence.attempt_after.as_ref())
-        .is_some_and(|(before, after)| {
-            after
-                .oom_kill
-                .checked_sub(before.oom_kill)
-                .is_some_and(|delta| delta > 0)
-        })
-}
-
-fn owned_limit_pressure(evidence: &Evidence) -> bool {
-    // Hierarchical events retain pressure at a vanished workload leaf. Only
-    // local parent events exclude pressure from another subtree or ancestor.
-    evidence
-        .attempt_before
-        .as_ref()
-        .zip(evidence.attempt_after.as_ref())
-        .is_some_and(|(before, after)| after.oom.checked_sub(before.oom).is_some_and(|n| n > 0))
-        || evidence
-            .parent_before
-            .as_ref()
-            .zip(evidence.parent_after.as_ref())
-            .is_some_and(|(before, after)| {
-                after
-                    .local_oom
-                    .checked_sub(before.local_oom)
-                    .is_some_and(|n| n > 0)
-            })
-}
-
-fn qualified_availability(
-    boundary_ready: bool,
-    cases: &[crate::qualified::Case],
-    envelope: &str,
-    invalidations: &[crate::qualified::Invalidation],
-) -> crate::qualified::Availability {
-    use crate::qualified::{Availability, Case};
-    if !boundary_ready {
-        Availability::Blocked
-    } else if cases.iter().any(|case| {
-        matches!(case, Case::Qualified { .. })
-            && !invalidations
-                .iter()
-                .any(|entry| entry.envelope == envelope && entry.fixture_id == case.fixture_id())
-    }) {
-        Availability::Available
-    } else {
-        Availability::Unqualified
-    }
-}
-
-fn plan_qualified_start(
-    documents: &crate::qualified::Documents,
-    invalidations: &[crate::qualified::Invalidation],
-    fixture: &str,
-    envelope: &str,
-    memory: u64,
-) -> Result<(crate::film::Fixture, crate::qualified::Plan), ErrorCode> {
-    if invalidations.len() >= crate::qualified::INVALIDATIONS {
-        return Err(ErrorCode::Capacity);
-    }
-    if invalidations
-        .iter()
-        .any(|entry| entry.envelope == envelope && entry.fixture_id == fixture)
-    {
-        return Err(ErrorCode::UnqualifiedEnvelope);
-    }
-    documents.plan(fixture, envelope, memory)
-}
-
-fn qualification_failure(record: &Record) -> Option<crate::qualified::QualificationFailure> {
-    use crate::qualified::QualificationFailure as Failure;
-    let captured = record.film.as_ref()?;
-    let plan = captured.grant.plan.qualified()?;
-    if captured.qualification_observation_valid != Some(true) {
-        return None;
-    }
-    let outcome = record.receipt.outcome?;
-    let evidence = record.receipt.evidence.as_ref()?;
-    if evidence.populated != Some(false) {
-        return None;
-    }
-    // An actual retained attempt identity plus the terminal observation owns
-    // this peak. The pre-provisioning placeholder is not a measured zero.
-    if record.cgroup_inode.is_some()
-        && record.unit_invocation.is_some()
-        && evidence.peak_bytes > plan.empirical_ceiling_bytes
-    {
-        return Some(Failure::PeakExceeded);
-    }
-    // These are snapshots of the exact retained attempt and exclusively owned
-    // processing parent, never of an unrelated finite host ancestor. Kernel
-    // evidence can invalidate qualification even if a partial worker record
-    // or a non-137 exit prevents the terminal classifier from reporting OOM.
-    if record.cgroup_inode.is_some()
-        && record.unit_invocation.is_some()
-        && attempt_oom_killed(evidence)
-        && owned_limit_pressure(evidence)
-    {
-        return Some(Failure::ProcessingOom);
-    }
-    (outcome == Outcome::AllocationFailed).then_some(Failure::AllocationFailed)
-}
-
-fn assess_qualification(registry: &mut Registry, record: &mut Record) -> Result<(), ErrorCode> {
-    let failure = qualification_failure(record);
-    let Some(captured) = record.film.as_mut() else {
-        return Ok(());
-    };
-    if captured.grant.plan.qualified().is_none() {
-        return Ok(());
-    }
-    if captured.qualification_failure.is_some() && captured.qualification_failure != failure {
-        return Err(ErrorCode::Uncertain);
-    }
-    captured.qualification_failure = failure;
-    let Some(reason) = failure else {
-        return Ok(());
-    };
-    let invalidations = registry
-        .invalidations
-        .as_mut()
-        .ok_or(ErrorCode::Uncertain)?;
-    if let Some(existing) = invalidations.iter().find(|entry| {
-        entry.envelope == captured.resource_model && entry.fixture_id == captured.grant.fixture.id
-    }) {
-        if existing.reason != reason
-            || existing.incarnation != record.receipt.incarnation
-            || existing.sequence != record.receipt.sequence
-        {
-            return Err(ErrorCode::Uncertain);
-        }
-    } else {
-        if invalidations.len() >= crate::qualified::INVALIDATIONS {
-            return Err(ErrorCode::Capacity);
-        }
-        invalidations.push(crate::qualified::Invalidation {
-            envelope: captured.resource_model.clone(),
-            fixture_id: captured.grant.fixture.id.clone(),
-            reason,
-            incarnation: record.receipt.incarnation.clone(),
-            sequence: record.receipt.sequence,
-        });
-    }
-    Ok(())
-}
-
-fn restore_qualifications(registry: &mut Registry) -> Result<(), ErrorCode> {
-    // Called before any recovery manager effects, including for records whose
-    // cleanup had already completed. Either the entire assessment persists or
-    // startup retains the old registry and refuses admission.
-    let mut next = registry.clone();
-    for mut record in registry.records.values().cloned() {
-        assess_qualification(&mut next, &mut record)?;
-        next.records.insert(record.receipt.sequence, record);
-    }
-    *registry = next;
-    Ok(())
-}
-
 fn expire(registry: &mut Registry, time: u64, retention: u64) -> Result<(), ErrorCode> {
     let retention = retention.checked_mul(1000).ok_or(ErrorCode::Capacity)?;
     registry.records.retain(|_, record| {
@@ -1633,166 +1464,6 @@ fn random_id() -> Result<String, ErrorCode> {
         .and_then(|mut file| file.read_exact(&mut bytes))
         .map_err(|_| ErrorCode::Unavailable)?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
-/// The durable identity a claim records. It carries nothing else: a claim is
-/// pure instance identity, and completeness comes from the root's registry,
-/// never from the claim itself.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Claim {
-    version: u8,
-    root: String,
-}
-
-/// One exclusively held instance claim. A claim this process created is a
-/// lease: if the holder fails before disarming, the drop removes the file, so
-/// a refused start never leaves a registry-less claim behind. The retained
-/// descriptor keeps the exclusive flock while the file is unlinked, so no
-/// other owner can take the claim in between. A claim created by an earlier
-/// owner is never a lease and is never removed here. Disarm by value with
-/// [`InstanceClaim::take`] once the start owns the claim for its lifetime.
-pub(crate) struct InstanceClaim {
-    lease: Option<PathBuf>,
-    file: Option<File>,
-}
-
-impl InstanceClaim {
-    /// Disarm the lease and keep the claim for the executor's lifetime.
-    pub(crate) fn take(mut self) -> File {
-        self.file.take().expect("claim descriptor")
-    }
-}
-
-impl Drop for InstanceClaim {
-    fn drop(&mut self) {
-        if let (Some(path), Some(_)) = (self.lease.take(), self.file.as_ref()) {
-            let _ = fs::remove_file(path);
-        }
-    }
-}
-
-/// Create or adopt the instance claim file at `path` and take its exclusive
-/// flock. The identity semantics are shared by every processing executor:
-/// version 1, an exact root match, one claim per instance, and a busy refusal
-/// while another owner holds the flock. An existing claim whose root has no
-/// registry stays quarantined: the flock proves exclusivity, not
-/// completeness, so a lost or never-written registry is never adopted and the
-/// previous ownership evidence survives. A fresh claim whose write fails
-/// after the flock is taken is removed before the error returns, because the
-/// holder is then the only possible flock owner; a failure before the flock
-/// (including losing the create-to-flock race) leaves the file to the race
-/// winner or to the quarantine.
-pub(crate) fn hold_claim(
-    path: &Path,
-    namespace: &Path,
-    root: &str,
-) -> Result<InstanceClaim, ErrorCode> {
-    let (mut file, fresh) = match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-        .open(path)
-    {
-        Ok(file) => (file, true),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-                .open(path)
-                .map_err(|_| ErrorCode::Uncertain)?,
-            false,
-        ),
-        Err(_) => return Err(ErrorCode::Uncertain),
-    };
-    let metadata = file.metadata().map_err(|_| ErrorCode::Uncertain)?;
-    // The production launcher runs as root, so this is the root-owned check;
-    // focused tests exercise the same path as the invoking user.
-    if !metadata.is_file()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.nlink() != 1
-        || metadata.mode() & 0o077 != 0
-        || metadata.len() > REQUEST_BYTES as u64
-    {
-        return Err(ErrorCode::Uncertain);
-    }
-    // SAFETY: this exact open inode is retained for the owner's entire lifetime.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err(ErrorCode::Busy);
-    }
-    if fresh {
-        let write = (|| {
-            let bytes = serde_json::to_vec(&Claim {
-                version: 1,
-                root: root.to_owned(),
-            })
-            .map_err(|_| ErrorCode::Uncertain)?;
-            if bytes.len() > REQUEST_BYTES {
-                return Err(ErrorCode::Uncertain);
-            }
-            file.write_all(&bytes)
-                .and_then(|_| file.sync_all())
-                .map_err(|_| ErrorCode::Uncertain)?;
-            File::open(namespace)
-                .and_then(|file| file.sync_all())
-                .map_err(|_| ErrorCode::Uncertain)?;
-            Ok(())
-        })();
-        if let Err(error) = write {
-            // This process holds the only flock on this inode, so removing
-            // the file cannot take the claim from another owner; a failed
-            // creation must not quarantine the instance.
-            let _ = fs::remove_file(path);
-            return Err(error);
-        }
-    } else {
-        let mut bytes = Vec::new();
-        (&mut file)
-            .take(REQUEST_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| ErrorCode::Uncertain)?;
-        if bytes.len() > REQUEST_BYTES {
-            return Err(ErrorCode::Uncertain);
-        }
-        let claim: Claim = serde_json::from_slice(&bytes).map_err(|_| ErrorCode::Uncertain)?;
-        if claim.version != 1
-            || claim.root != root
-            || !Path::new(root)
-                .join("registry.json")
-                .try_exists()
-                .map_err(|_| ErrorCode::Uncertain)?
-        {
-            return Err(ErrorCode::Uncertain);
-        }
-    }
-    Ok(InstanceClaim {
-        lease: fresh.then(|| path.to_owned()),
-        file: Some(file),
-    })
-}
-
-pub(crate) fn claim_instance(config: &Config) -> Result<InstanceClaim, ErrorCode> {
-    let namespace = Path::new("/var/lib/slipstream-processing/instances");
-    for path in [Path::new("/var/lib/slipstream-processing"), namespace] {
-        if !path.try_exists().map_err(|_| ErrorCode::Uncertain)? {
-            fs::DirBuilder::new()
-                .mode(0o700)
-                .create(path)
-                .map_err(|_| ErrorCode::Uncertain)?;
-            File::open(path.parent().ok_or(ErrorCode::Uncertain)?)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|_| ErrorCode::Uncertain)?;
-        }
-        secure_directory(path, 0)?;
-    }
-    hold_claim(
-        &namespace.join(format!("{}.claim", config.instance)),
-        namespace,
-        &config.root,
-    )
 }
 
 fn prepare_private_directory(path: &Path) -> Result<(), ErrorCode> {
@@ -1985,159 +1656,11 @@ fn validate_registry(registry: &Registry, config: &Config) -> Result<(), ErrorCo
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::qualification::{
+        availability as qualified_availability, failure as qualification_failure,
+        plan as plan_qualified_start, restore as restore_qualifications,
+    };
     use super::*;
-
-    /// A scratch claim namespace outside the fixed host path, so the claim
-    /// semantics run under any CI UID.
-    fn claim_dir(tag: &str) -> std::path::PathBuf {
-        let dir: std::path::PathBuf = std::env::temp_dir().join(format!(
-            "slipstream-claim-{tag}-{}-{}",
-            std::process::id(),
-            random_id().unwrap()
-        ));
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .recursive(true)
-            .create(&dir)
-            .unwrap();
-        dir
-    }
-
-    /// Claims hold an exclusive descriptor, so assertions compare outcomes.
-    fn claim_error(claim: Result<InstanceClaim, ErrorCode>) -> ErrorCode {
-        claim.err().unwrap()
-    }
-
-    fn foreign_claim_bytes(root: &str) -> Vec<u8> {
-        serde_json::to_vec(&Claim {
-            version: 2,
-            root: root.to_owned(),
-        })
-        .unwrap()
-    }
-
-    fn write_claim_file(path: &Path, bytes: &[u8], mode: u32) {
-        use std::os::unix::fs::OpenOptionsExt;
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(path)
-            .unwrap()
-            .write_all(bytes)
-            .unwrap();
-    }
-
-    #[test]
-    fn a_claim_without_an_initialized_root_stays_quarantined_until_the_registry_exists() {
-        let dir = claim_dir("quarantine");
-        let path = dir.join("instance.claim");
-        let root = dir.display().to_string();
-        // Residue of a crash between claiming and the durable journal: a
-        // claim file with no live holder and no registry. The lease of a
-        // graceful failed start removes itself, so this state is written by
-        // hand the way the dead process left it.
-        write_claim_file(
-            &path,
-            &serde_json::to_vec(&Claim {
-                version: 1,
-                root: root.clone(),
-            })
-            .unwrap(),
-            0o600,
-        );
-        assert!(!dir.join("registry.json").try_exists().unwrap());
-        // The claim alone proves exclusivity, not completeness, so the
-        // registry-less state is never adopted.
-        assert_eq!(
-            claim_error(hold_claim(&path, &dir, &root)),
-            ErrorCode::Uncertain
-        );
-        // Once the root is initialized, the same claim is adoptable as a
-        // non-lease that a failure here can never remove.
-        fs::File::create(dir.join("registry.json")).unwrap();
-        let adopted = hold_claim(&path, &dir, &root).unwrap();
-        // Adoption keeps the recorded identity; it never rewrites the claim.
-        let claim: Claim = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(claim.version, 1);
-        assert_eq!(claim.root, root);
-        drop(adopted);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn a_held_claim_stays_busy() {
-        let dir = claim_dir("busy");
-        let path = dir.join("instance.claim");
-        let held = hold_claim(&path, &dir, "/var/lib/slipstream-processing/a").unwrap();
-        // Losing the create-to-flock race is a Busy refusal that leaves the
-        // file to the live holder; it is never removed by the loser.
-        assert_eq!(
-            claim_error(hold_claim(&path, &dir, "/var/lib/slipstream-processing/a")),
-            ErrorCode::Busy
-        );
-        assert!(path.try_exists().unwrap());
-        drop(held);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn foreign_root_and_foreign_version_claims_stay_refused() {
-        let dir = claim_dir("foreign");
-        let path = dir.join("instance.claim");
-        // A claim written for a different root is never adoptable.
-        write_claim_file(
-            &path,
-            &serde_json::to_vec(&Claim {
-                version: 1,
-                root: "/var/lib/slipstream-processing/other".to_owned(),
-            })
-            .unwrap(),
-            0o600,
-        );
-        assert_eq!(
-            claim_error(hold_claim(&path, &dir, "/var/lib/slipstream-processing/a")),
-            ErrorCode::Uncertain
-        );
-        fs::remove_file(&path).unwrap();
-        write_claim_file(
-            &path,
-            &foreign_claim_bytes("/var/lib/slipstream-processing/a"),
-            0o600,
-        );
-        assert_eq!(
-            claim_error(hold_claim(&path, &dir, "/var/lib/slipstream-processing/a")),
-            ErrorCode::Uncertain
-        );
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn nonconforming_claim_files_stay_refused() {
-        let dir = claim_dir("nonconforming");
-        let bytes = serde_json::to_vec(&Claim {
-            version: 1,
-            root: "/var/lib/slipstream-processing/a".to_owned(),
-        })
-        .unwrap();
-        // A group-readable claim file fails the private-mode check.
-        let path = dir.join("loose.claim");
-        write_claim_file(&path, &bytes, 0o644);
-        assert_eq!(
-            claim_error(hold_claim(&path, &dir, "/var/lib/slipstream-processing/a")),
-            ErrorCode::Uncertain
-        );
-        // A symlinked claim path fails the no-follow check.
-        let target = dir.join("target.claim");
-        write_claim_file(&target, &bytes, 0o600);
-        let link = dir.join("link.claim");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        assert_eq!(
-            claim_error(hold_claim(&link, &dir, "/var/lib/slipstream-processing/a")),
-            ErrorCode::Uncertain
-        );
-        fs::remove_dir_all(dir).unwrap();
-    }
 
     fn events(kills: u64) -> Events {
         Events {

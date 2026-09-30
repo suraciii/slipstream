@@ -22,6 +22,7 @@ RUN apt-get update \
 COPY --from=build /src/target/release/slipstream-processing-photo-worker /usr/local/bin/slipstream-processing-photo-worker
 COPY tools/processing/photo/adapter.py /opt/slipstream-photo/adapter.py
 COPY tools/processing/photo/film_adapter.py /opt/slipstream-photo/film_adapter.py
+COPY tools/development/history.py /opt/slipstream-photo/history.py
 # The linear ProPhoto RGB handoff profile comes verbatim from the qualified
 # image; the worker copies it into the container configdir before exec, and
 # darktable only resolves --icc-file against that registered copy.
@@ -46,7 +47,7 @@ COPY --from=slipstream:344-buffer-lifetimes \
 RUN PYTHONPATH=/opt/spektrafilm/src:/opt/probe \
     /opt/runtime/bin/python3 -c 'import sys; sys.path.insert(0, "/opt/slipstream-photo"); from film import make_simulator; from film_adapter import check_recipe; _, recipe = make_simulator(); check_recipe(recipe)'
 RUN sha256sum /opt/slipstream-photo/icc/LargeRGB-elle-V2-g10.icc \
-        /opt/slipstream-photo/adapter.py /opt/slipstream-photo/film_adapter.py \
+        /opt/slipstream-photo/adapter.py /opt/slipstream-photo/history.py /opt/slipstream-photo/film_adapter.py \
         /opt/os-packages.txt \
         | sed 's#  /#  #g' | sha256sum | cut -d' ' -f1 > /opt/slipstream-photo/bundle \
     && cat /opt/slipstream-photo/bundle

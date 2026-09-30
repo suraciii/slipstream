@@ -8,7 +8,6 @@ use std::{
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
     thread::JoinHandle,
-    time::Duration,
 };
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -16,22 +15,7 @@ static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 /// The complete capabilities document this CLI revision requires, including
 /// the Reviewed Location Recovery bounds.
 fn capabilities_body() -> Value {
-    json!({
-        "serverVersion": "0.0.0",
-        "supportedCliContractVersions": [1],
-        "limits": {
-            "listPageMaximum": 60,
-            "mutationPhotoIdsMaximum": 100,
-            "removalPhotoIdsMaximum": 100,
-            "albumReorderMembersMaximum": 100,
-            "retainedQueryIdsMaximum": 1000000,
-            "retainedQueryIdleSeconds": 900,
-            "recoveryPageMaximum": 60,
-            "recoveryMappingsMaximum": 10000,
-            "recoveryApplyMaximum": 100,
-            "recoveryReviewIdleSeconds": 900
-        }
-    })
+    common::capabilities_body()
 }
 
 /// A stub service that answers the capabilities handshake and then serves one
@@ -108,43 +92,11 @@ fn fixture() -> (PathBuf, Config) {
 }
 
 async fn command(server: &str, arguments: &[&str]) -> (u8, Value) {
-    let server = server.to_owned();
-    let arguments = arguments
-        .iter()
-        .map(|argument| (*argument).to_owned())
-        .collect::<Vec<_>>();
-    tokio::task::spawn_blocking(move || {
-        let output = common::cli_command()
-            .arg("--token-file")
-            .arg(common::credential_file())
-            .arg("--server")
-            .arg(server)
-            .args(arguments)
-            .output()
-            .unwrap();
-        assert!(
-            output.stderr.is_empty(),
-            "unexpected CLI stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        (
-            output.status.code().unwrap() as u8,
-            serde_json::from_slice(&output.stdout).unwrap(),
-        )
-    })
-    .await
-    .unwrap()
+    common::command(server, arguments).await
 }
 
 async fn wait_until_idle(server: &str) {
-    for _ in 0..400 {
-        let (exit, result) = command(server, &["status"]).await;
-        if exit == 0 && result["data"]["scan"]["state"] == "idle" {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("fixture Library did not become idle");
+    common::wait_until_idle(server).await
 }
 
 fn write_document(base: &std::path::Path, name: &str, document: &Value) -> String {

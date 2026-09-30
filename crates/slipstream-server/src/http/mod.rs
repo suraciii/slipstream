@@ -23,15 +23,7 @@ fn parse_permanent_deletion_ids(
     body: &serde_json::Map<String, Value>,
     key: &str,
 ) -> Option<Vec<String>> {
-    let values = body.get(key)?.as_array()?;
-    if values.len() > slipstream_core::PERMANENT_DELETION_MAX {
-        return None;
-    }
-    let ids = values
-        .iter()
-        .map(|value| value.as_str().filter(|id| valid_id(id)).map(str::to_owned))
-        .collect::<Option<Vec<_>>>()?;
-    (ids.iter().collect::<std::collections::HashSet<_>>().len() == ids.len()).then_some(ids)
+    valid_ids(body.get(key), slipstream_core::PERMANENT_DELETION_MAX)
 }
 
 #[derive(Clone)]
@@ -435,14 +427,11 @@ pub(crate) async fn mutate_album_route(
         &serde_json::Map<String, Value>,
     ) -> Result<slipstream_core::AlbumMutation, &'static str>,
 ) -> Response<Body> {
-    let body = match read_json_body(request).await {
+    let body = match read_json_object(request, "Invalid JSON body").await {
         Ok(body) => body,
         Err(response) => return response,
     };
-    let Some(body) = body.as_object() else {
-        return api_error(StatusCode::BAD_REQUEST, "Invalid JSON body");
-    };
-    let mutation = match build(body) {
+    let mutation = match build(&body) {
         Ok(mutation) => mutation,
         Err(message) => return api_error(StatusCode::BAD_REQUEST, message),
     };
@@ -456,6 +445,17 @@ pub(crate) async fn read_json_body(request: Request<Body>) -> Result<Value, Resp
     let bytes = read_body_bytes(request).await?;
     serde_json::from_slice(&bytes)
         .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid JSON body"))
+}
+
+pub(crate) async fn read_json_object(
+    request: Request<Body>,
+    invalid_message: &'static str,
+) -> Result<serde_json::Map<String, Value>, Response<Body>> {
+    let body = read_json_body(request).await?;
+    match body {
+        Value::Object(body) => Ok(body),
+        _ => Err(api_error(StatusCode::BAD_REQUEST, invalid_message)),
+    }
 }
 
 pub(crate) async fn read_cli_json_body<T: serde::de::DeserializeOwned>(
@@ -595,7 +595,7 @@ pub(crate) fn valid_ids(value: Option<&Value>, max_ids: usize) -> Option<Vec<Str
     if ids.iter().any(|id| !valid_id(id)) {
         return None;
     }
-    let unique = ids.iter().collect::<std::collections::BTreeSet<_>>().len();
+    let unique = ids.iter().collect::<std::collections::HashSet<_>>().len();
     (unique == ids.len()).then(|| ids.into_iter().map(str::to_owned).collect())
 }
 

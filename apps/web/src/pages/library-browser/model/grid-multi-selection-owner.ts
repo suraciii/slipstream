@@ -126,10 +126,10 @@ export function createGridMultiSelectionOwner(
     mutateAlbum,
     membershipAlbumName,
   } = coordinate;
-  let multiSelection = new Set<string>();
-  let multiMissingIds = new Set<string>();
+  const multiSelection = new Set<string>();
+  const multiMissingIds = new Set<string>();
   let multiChangedIds = new Set<string>();
-  let multiExpectedSelection = new Map<string, SelectionState>();
+  const multiExpectedSelection = new Map<string, SelectionState>();
   let multiAnchorId: string | undefined;
   let selectMode = false;
   let gridBatchResult: GridBatchResult | undefined;
@@ -164,10 +164,10 @@ export function createGridMultiSelectionOwner(
   };
 
   const clear = (): void => {
-    multiSelection = new Set();
-    multiMissingIds = new Set();
-    multiChangedIds = new Set();
-    multiExpectedSelection = new Map();
+    multiSelection.clear();
+    multiMissingIds.clear();
+    multiChangedIds.clear();
+    multiExpectedSelection.clear();
     multiAnchorId = undefined;
     selectMode = false;
     gridBatchResult = undefined;
@@ -181,6 +181,18 @@ export function createGridMultiSelectionOwner(
     );
   };
 
+  const addPhoto = (photoId: string): boolean => {
+    const photoIndex = sourceGrid.findPhotoIndex(photoId);
+    const photo =
+      photoIndex === undefined ? undefined : sourceGrid.photoAt(photoIndex);
+    if (!photo) return false;
+    multiSelection.add(photoId);
+    multiMissingIds.delete(photoId);
+    multiChangedIds.delete(photoId);
+    multiExpectedSelection.set(photoId, photo.selectionState);
+    return true;
+  };
+
   const toggle = (photoId: string): void => {
     if (multiSelection.delete(photoId)) {
       multiExpectedSelection.delete(photoId);
@@ -191,13 +203,7 @@ export function createGridMultiSelectionOwner(
         refuseBeyondBatchBound();
         return;
       }
-      const photoIndex = sourceGrid.findPhotoIndex(photoId);
-      const photo =
-        photoIndex === undefined ? undefined : sourceGrid.photoAt(photoIndex);
-      if (!photo) return;
-      multiSelection.add(photoId);
-      multiMissingIds.delete(photoId);
-      multiExpectedSelection.set(photoId, photo.selectionState);
+      if (!addPhoto(photoId)) return;
     }
     gridBatchResult = undefined;
     multiAnchorId = photoId;
@@ -214,12 +220,7 @@ export function createGridMultiSelectionOwner(
         refuseBeyondBatchBound();
         return;
       }
-      const photo = sourceGrid.photoAt(index);
-      if (!photo) return;
-      multiSelection.add(photoId);
-      multiMissingIds.delete(photoId);
-      multiChangedIds.delete(photoId);
-      multiExpectedSelection.set(photoId, photo.selectionState);
+      if (!addPhoto(photoId)) return;
       gridBatchResult = undefined;
       multiAnchorId = photoId;
       render();
@@ -238,16 +239,7 @@ export function createGridMultiSelectionOwner(
       refuseBeyondBatchBound();
       return;
     }
-    for (const photoIdToAdd of joined) {
-      const indexToAdd = sourceGrid.findPhotoIndex(photoIdToAdd);
-      const photo =
-        indexToAdd === undefined ? undefined : sourceGrid.photoAt(indexToAdd);
-      if (!photo) continue;
-      multiSelection.add(photoIdToAdd);
-      multiMissingIds.delete(photoIdToAdd);
-      multiChangedIds.delete(photoIdToAdd);
-      multiExpectedSelection.set(photoIdToAdd, photo.selectionState);
-    }
+    for (const photoIdToAdd of joined) addPhoto(photoIdToAdd);
     gridBatchResult = undefined;
     multiAnchorId = photoId;
     render();

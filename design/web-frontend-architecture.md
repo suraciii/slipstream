@@ -104,6 +104,7 @@ defined by Web Async Ownership:
 - The **Photo owner** owns the current Photo, foreground and adjacent Preview
   work, Photo View navigation, Selection State and Rating writes, browser-local
   undo, and Photo-scoped image transfers.
+- The **Photo details owner** keeps current-Photo membership and capture-metadata reads fenced to their Photo authority. It presents Album membership independently of decision readiness and delegates every membership write to the Album action owner; the page controller coordinates its lifecycle without duplicating those read policies.
 - The **Album action owner** keeps admitted Album create, rename, delete, and
   membership writes alive to settlement and applies their global latest-wins
   presentation and shared-data convergence rules.
@@ -118,19 +119,23 @@ defined by Web Async Ownership:
 - The **page UI** owns Library Browser markup, DOM bindings, semantic rendering,
   focus, keyboard, pointer, and responsive presentation. It reports user intent
   to the page model; it does not issue HTTP requests or decide async ownership.
-  Grid rendering is presentational: it never initiates loading, merges to at
-  most one update per animation frame, and reuses the DOM nodes of Photos that
-  stay visible. Grid keyboard focus is presentation state: one rendered cell
-  holds the Tab stop, arrow keys move cell focus and report the target row's
-  range through the same merged render, and the page UI owns the focus
-  restoration required by
+  The page-local Grid presenter owns thumbnail size, virtualized cells, merged
+  render scheduling, keyboard focus, and captured Grid restoration. It reports
+  visible ranges as intent; the source and Grid owner alone admits Browse
+  work. It reuses the DOM nodes of Photos that stay visible and restores focus
+  to one Tab stop without taking it from another surface. See
   [Library Browsing and Selection](../docs/library-browsing-and-selection.md).
-  It yields Fit-state vertical touch panning to native Photo View
-  scrolling, retains Fit-state horizontal decision gestures, and takes full
-  Preview drag ownership whenever the zoom state is manual. The page UI also
-  owns the transient mobile Quick Action Dock, Photo tools surface, pending
-  Rating Wheel gesture, Wheel candidate, and disclosure focus. These
-  values are presentation state and do not become Photo owner state.
+  The page-local Photo gesture controller owns Preview pointer capture, pending
+  holds, horizontal swipe feedback, and the handoff to zoom panning or pinch.
+  It reads the current Photo surface and decision readiness without owning
+  Photo facts, and emits only semantic mutation intents. Resetting a Photo,
+  leaving its surface, or disposing the view cancels the hold and releases
+  capture; a canceled or stale gesture never writes a decision. Fit-state
+  vertical touch panning remains native Photo View scrolling. Manual zoom
+  owns Preview dragging and never turns it into a decision.
+  Rating controls own the transient Wheel presentation and candidate; the
+  page UI also owns the Quick Action Dock, Photo tools, and disclosure focus.
+  None of these values become Photo owner state.
 - The **page API** owns Library Browser HTTP calls, wire response types, and
   response decoding. It accepts cancellation inputs from the calling owner but
   does not choose which operation supersedes another.
@@ -283,6 +288,40 @@ instead of requesting another rendition: per-step renditions would fragment
 the rebuildable cache and add derivative work for no visible gain. The Preview
 scheduling priority
 in [Scalable Library Browsing](library-browsing.md) is unchanged.
+
+### Destination and restoration policy
+
+One page-local model module answers how a browser address relates to the live
+source. It owns no state and issues no HTTP: it reads the open source's shape,
+the open Snapshot's readiness, and the File Location binding through narrow
+queries, and the page controller remains the only coordinator that commits
+what it answers.
+
+It decides the destination the open Snapshot presents, the wire order an
+address requests (an omitted order and an Album's own order both leave the
+order to the server), whether the open Snapshot can serve a traversal without
+reopening the source, and the display name of a Folder Location whose parent
+window may not be loaded. A captured Grid restoration resolves through the
+same module: the anchor's stable Photo identity is confirmed before its index
+hint is trusted, an anchor the Snapshot no longer holds clamps to the captured
+position and restores geometry without naming a focused cell, and a retryable
+lookup keeps the resolved position instead of presenting the Photo as gone.
+
+### Source opening settlement
+
+One page-local model boundary classifies source-open results for both a new
+destination and an expired Snapshot reopen. It binds a Folder request to the
+current File Location publication, captures the source authority established
+by the request, and admits the returned Grid position only for that authority.
+A publication conflict may rebind File Locations only while the source remains
+current; after rebinding, both source and File Location authorities must still
+match before the page receives a publication notice. Only a confirmed `404`
+identifies a missing source. Other failures remain retryable.
+
+The page coordinates Photo rebinding, the first bounded window, Recovery,
+presentation, and history. It checks authority again when consuming an awaited
+result, because another destination may supersede it between continuations.
+The source and Grid owner remains the only owner of Snapshot state and release.
 
 ### Styling
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseEditFacts, saveEditRecipe } from "./editor.js";
+import { parseEditFacts, rebindEditRecipe, saveEditRecipe } from "./editor.js";
 
 const controls = {
   exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
@@ -143,5 +143,68 @@ describe("edit recipe save API", () => {
     );
     if (result.kind !== "refused") throw new Error("expected a refusal");
     expect(result.refusal.supportReason).toBe("");
+  });
+});
+
+describe("edit recipe write outcomes", () => {
+  const invoke = [
+    (fetcher: Parameters<typeof saveEditRecipe>[0]) =>
+      saveEditRecipe(fetcher, saveRequest, new AbortController().signal),
+    (fetcher: Parameters<typeof rebindEditRecipe>[0]) =>
+      rebindEditRecipe(fetcher, "photo-1", "recipe-1", "rev-2"),
+  ];
+
+  test("accepts unchanged writes and retains their versions", async () => {
+    for (const write of invoke) {
+      expect(
+        await write(() =>
+          jsonResponse({
+            outcome: "unchanged",
+            recipeVersion: "recipe-1",
+            sourceRevision: "rev-2",
+          }),
+        ),
+      ).toEqual({
+        kind: "saved",
+        recipeVersion: "recipe-1",
+        sourceRevision: "rev-2",
+      });
+    }
+  });
+
+  test("keeps malformed success uncertain but reads conflict identities", async () => {
+    for (const write of invoke) {
+      const unknown = await write(() =>
+        jsonResponse({
+          outcome: "saved",
+          recipeVersion: 3,
+          sourceRevision: "rev-2",
+        }),
+      );
+      expect(unknown.kind).toBe("refused");
+      if (unknown.kind === "refused")
+        expect(unknown.refusal.code).toBe("outcome_unknown");
+
+      const conflict = await write(() =>
+        jsonResponse(
+          {
+            error: {
+              code: "conflict",
+              details: {
+                currentRecipeVersion: "recipe-2",
+                currentSourceRevision: "rev-3",
+              },
+            },
+          },
+          409,
+        ),
+      );
+      expect(conflict.kind).toBe("refused");
+      if (conflict.kind === "refused") {
+        expect(conflict.refusal.code).toBe("conflict");
+        expect(conflict.refusal.currentRecipeVersion).toBe("recipe-2");
+        expect(conflict.refusal.currentSourceRevision).toBe("rev-3");
+      }
+    }
   });
 });

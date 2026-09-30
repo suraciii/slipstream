@@ -29,6 +29,10 @@ each attempt. It runs outside the complete processing resource subtree. It owns
 only restricted execution and operational receipts, not a second Library, queue
 of Exports, or public processing API. Engine processes remain fresh per attempt.
 
+The processing backend's host-command runner lives in `backend/process.rs`.
+It owns the cleared environment, process group, bounded pipe capture, deadline,
+and child cleanup; callers retain attempt orchestration and policy decisions.
+
 The operator configures an instance identity, canonical private workspace root,
 fixed digest-addressed processing image, finite memory policy, and a private
 Unix-domain control socket. The Web service receives access to this socket, not
@@ -191,6 +195,10 @@ manager request can still complete. Never replace an existing claim or create a
 fresh journal to clear this fence. A crash between first claim synchronization
 and journal creation may conservatively require operator reconciliation and a
 fresh instance. This is a host-wide ownership claim, not a second attempt journal.
+
+The host-global claim owns instance identity, exclusive locking, and the
+claim-file lease across launcher variants. The operational journal separately
+owns attempt receipts and recovery; neither can substitute for the other.
 
 A launcher holds these exclusive locks before it serves requests or reconciles
 runtime objects. Its journal stores a persistent registry

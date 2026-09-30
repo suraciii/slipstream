@@ -27,16 +27,28 @@ import { createViewOptions, type ViewOptionsElements } from "./view-options.js";
 import { createRatingControls } from "./rating-controls.js";
 import { createPhotoToolsController } from "./photo-tools.js";
 import { createPhotoZoomController } from "./photo-zoom.js";
+import { createPhotoGestures } from "./photo-gestures.js";
 import { createPhotoEditorSurfaceController } from "./photo-editor-surface.js";
 import type { EditorProxyViewModel } from "./editor-proxy-view-model.js";
 import { createSourceSurfaceController } from "./source-surface.js";
+import { createGridPresenter } from "./grid-presenter.js";
+import type {
+  GridPhotoViewModel,
+  GridThumbnailBinding,
+} from "./grid-cell-presenter.js";
+import {
+  createFilmstripPresenter,
+  type FilmstripPresenter,
+  type FilmstripViewModel,
+} from "./filmstrip-presenter.js";
 import { createAlbumForm } from "./album-form.js";
+import { createSourceListPresenter } from "./source-list-presenter.js";
+import { createGridBatchPresenter } from "./grid-batch-presenter.js";
 import {
   addressFor,
   type NavigationGridRestoration,
 } from "../model/browser-navigation.js";
 import { formatCaptureTime } from "./capture-time.js";
-import { formatPhotoCount } from "./photo-count.js";
 import type {
   EditSourceKind,
   EditSourceReadiness,
@@ -44,6 +56,11 @@ import type {
 } from "../model/photo-editor.js";
 import type { EditorExportViewModel } from "./photo-editor-surface.js";
 import type { RecoveryApplyMapping } from "../model/recovery-review.js";
+export type {
+  GridPhotoPreview,
+  GridThumbnailBinding,
+  GridThumbnailTarget,
+} from "./grid-cell-presenter.js";
 
 export type {
   RemovedPanelViewModel,
@@ -60,33 +77,8 @@ export type {
 export type ViewSelectionState = "undecided" | "selected" | "rejected";
 type ViewPreviewSource = "jpeg-original" | "raw-embedded-jpeg";
 
-/**
- * Grid thumbnail sizes. Each step is the cell box the CSS renders; the Grid
- * adds the ordinary inter-cell gap to get the column and row pitch of its
- * virtualized layout, so one step drives the CSS cell box and every geometry
- * calculation together.
- */
-type GridThumbnailSize = "small" | "medium" | "large";
-const GRID_CELL_GAP_X = 10;
-const GRID_CELL_GAP_Y = 12;
-const GRID_THUMBNAIL_SIZE_STEPS: Readonly<
-  Record<
-    GridThumbnailSize,
-    Readonly<{ width: number; height: number; label: string }>
-  >
-> = {
-  small: { width: 108, height: 130, label: "Small" },
-  medium: { width: 140, height: 166, label: "Medium" },
-  large: { width: 216, height: 256, label: "Large" },
-};
-const DEFAULT_GRID_THUMBNAIL_SIZE: GridThumbnailSize = "medium";
 /** Full wording behind the compact limited-detail marker in the Preview fact. */
 const LIMITED_PREVIEW_DETAIL = "Limited by camera Preview resolution";
-const SWIPE_PENDING_PIXELS = 24;
-const SWIPE_COMMIT_PIXELS = 72;
-const SWIPE_COMMIT_VELOCITY = 0.5;
-const RATING_WHEEL_HOLD_MS = 450;
-const RATING_WHEEL_MOVE_PIXELS = 12;
 
 type SourceReference =
   | Readonly<{ kind: "library" }>
@@ -361,26 +353,6 @@ export type LibraryBrowserIntent =
       items: ReadonlyArray<RecoveryApplyMapping>;
     }>;
 
-/// One Thumbnail delivery request: the Photo the page's one image-delivery
-/// path binds, and the Grid, Filmstrip, or Removed Photos row that owns it.
-export type GridThumbnailBinding = Readonly<{
-  photoId: string;
-  preview: GridPhotoPreview;
-  target: GridThumbnailTarget;
-}>;
-
-export interface GridThumbnailTarget {
-  readonly complete: boolean;
-  readonly isConnected: boolean;
-  src: string;
-  onload: GlobalEventHandlers["onload"];
-  onerror: GlobalEventHandlers["onerror"];
-  removeAttribute(name: string): void;
-  setDeliveryFailed(failed: boolean): void;
-  /// Reports a terminal Thumbnail result without changing Review Preview facts.
-  setThumbnailState(state: "unavailable" | "failed"): void;
-}
-
 interface ReviewImageTarget {
   readonly connected: boolean;
   readonly source: string;
@@ -442,25 +414,6 @@ export type FolderAlbumViewModel = Readonly<{
   status?: string;
 }>;
 
-/// The Thumbnail facts one Photo presents: its Preview delivery state and,
-/// once ready, the URL its Thumbnail loads. The Removed Photos listing
-/// presents the same facts for its rows.
-export type GridPhotoPreview = Readonly<{
-  state: "inspection-pending" | "ready" | "unavailable" | "failed";
-  thumbnailUrl?: string;
-}>;
-
-type GridPhotoViewModel = Readonly<{
-  id: string;
-  available: boolean;
-  original: Readonly<{ kind: "raw" | "jpeg"; available: boolean }>;
-  originalFilename?: string;
-  selectionState: ViewSelectionState;
-  rating: number;
-  hasSavedEdits: boolean;
-  preview: GridPhotoPreview;
-}>;
-
 type GridBatchResultViewModel = Readonly<{
   tone: "success" | "warning" | "failure";
   message: string;
@@ -468,7 +421,7 @@ type GridBatchResultViewModel = Readonly<{
   compensation?: Readonly<{ label: string }>;
 }>;
 
-type GridViewModel = Readonly<{
+export type GridViewModel = Readonly<{
   total: number;
   /// The Grid's multi-selection: whether every cell activation toggles its
   /// Photo, how many Photos are multi-selected, the bound one batch may
@@ -486,36 +439,6 @@ type GridViewModel = Readonly<{
   photoAt(index: number): GridPhotoViewModel | undefined;
 }>;
 
-/// One rendered Grid cell. The signature covers everything the cell presents,
-/// so a merged render rebuilds only the cells whose Photo facts or delivery
-/// state changed and leaves every other button and its image in place.
-type RenderedGridCell = {
-  readonly cell: HTMLButtonElement;
-  signature: string;
-  deliveryFailed: boolean;
-  thumbnailState: "unavailable" | "failed" | undefined;
-  /// The thumbnail ownership this cell holds while it presents a Photo. A
-  /// cell that leaves the rendered range or is rebuilt hands it back so the
-  /// owner's image state follows the rendered Grid.
-  thumbnail: GridThumbnailBinding | undefined;
-};
-
-/// Placeholder cells present no Photo: they never initiate loading.
-const LOADING_CELL_SIGNATURE = "loading";
-
-/// One rendered filmstrip entry. The signature covers the facts and the
-/// current marker, so a strip render rebuilds only the entries that changed
-/// and every other entry keeps its thumbnail transfer. `presentsPhoto`
-/// separates a real entry from a placeholder, whose disabled state is
-/// permanent instead of following navigation interactivity.
-type RenderedFilmstripCell = {
-  readonly button: HTMLButtonElement;
-  signature: string;
-  deliveryFailed: boolean;
-  thumbnail: GridThumbnailBinding | undefined;
-  presentsPhoto: boolean;
-};
-
 type PhotoFactsViewModel = Readonly<{
   index: number;
   total: number;
@@ -530,23 +453,6 @@ type PhotoMetadataViewModel = Readonly<{
   iso?: number;
   shutterSpeed?: string;
   focalLength?: string;
-}>;
-
-/// One bounded neighbor entry. `photo` is absent while its facts are still
-/// loading, so the entry renders a quiet placeholder instead of guessing.
-type FilmstripCellViewModel = Readonly<{
-  index: number;
-  current: boolean;
-  photo: GridPhotoViewModel | undefined;
-}>;
-
-type FilmstripViewModel = Readonly<{
-  total: number;
-  /// True while activating an entry would open its Photo. Every real entry is
-  /// disabled otherwise, so the strip never offers an activation that would
-  /// be refused silently.
-  interactive: boolean;
-  cells: ReadonlyArray<FilmstripCellViewModel>;
 }>;
 
 type PhotoShellViewModel = PhotoFactsViewModel &
@@ -1463,96 +1369,13 @@ ${RECOVERY_PANEL_TEMPLATE}
   });
 
   let photoStatusSurface: object = {};
-  let sourceModel: SourceListViewModel | undefined;
-  let gridKeyboardIndex: number | undefined;
-  let gridTotal = 0;
-  let thumbnailSize: GridThumbnailSize = DEFAULT_GRID_THUMBNAIL_SIZE;
-  // The Photo whose row a pending size change keeps as the first visible row;
-  // the render that applies the new pitch consumes it.
-  let pendingGridAnchor: number | undefined;
-  let renderedColumns = 0;
-  let renderedColumnStride = 0;
-  let renderedViewportHeight = 0;
-  let gridRenderFrame: number | undefined;
-  const renderedCells = new Map<number, RenderedGridCell>();
-  const renderedFilmstripCells = new Map<number, RenderedFilmstripCell>();
-  // The range the Grid last reported for admission. A render reports a
-  // changed range, or the same range again while part of it has no Photo.
-  let reportedGridRange: Readonly<{ start: number; end: number }> | undefined;
-  let folderAlbumSelection = "";
   /// True while the empty-state action belongs to an explained destination
   /// state rather than to an empty source's Library check.
   let gridEmptyExplanation = false;
-  let batchAlbumSelection = "";
-  // The Grid's multi-selection presentation: the page model owns which Photos
-  // are multi-selected, and these mirror the last rendered model so a cell
-  // build, a keyboard key, and a merged render all read one state.
-  let gridMultiMode = false;
-  let gridMultiCount = 0;
-  let gridMultiLimit = 0;
-  let gridMultiEnabled = false;
-  let gridMultiResult: GridBatchResultViewModel | undefined;
-  let gridMultiSelected: (index: number) => boolean = () => false;
-  /// The cell an explicit focus request names. `focusGridIndex` moves focus to
-  /// a cell on purpose — Review focuses the Photos it refreshed — so the next
-  /// render focuses it even when another control holds focus. A merged
-  /// re-render without such a request only reclaims focus the Grid owns.
-  let pendingGridCellFocus: number | undefined;
-  /// The Grid's Photo facts for the current render. Restoration asks this for
-  /// the stable identity of the top visible Photo, so the view never keeps
-  /// Photo facts of its own.
-  let gridPhotoLookup: (index: number) => GridPhotoViewModel | undefined = () =>
-    undefined;
-  /// Presents the multi-selection the page model has just emptied, or one
-  /// whose bound the page model reports. A hidden tray clears the markers too,
-  /// so a cell never keeps a marker the tray no longer names, and a hidden Grid
-  /// keeps its retained DOM: only the visible Grid touches it.
-  const resetGridMultiSelection = () => {
-    if (!alive) return;
-    gridMultiMode = false;
-    gridMultiCount = 0;
-    gridMultiEnabled = false;
-    gridMultiResult = undefined;
-    gridMultiSelected = () => false;
-    if (gridView.hidden) return;
-    renderBatch();
-    applyGridMultiSelection();
-  };
-  // Whether one batch Add to Album is settling: its control stays disabled
-  // until the outcome is presented.
-  let batchAlbumsPending = false;
-  /// The batch-tray control that held keyboard focus when a settling batch
-  /// disabled the tray; parked and returned by renderBatch.
-  let heldBatchControl: HTMLButtonElement | HTMLSelectElement | null = null;
-  // The Album choices the batch tray presents. A hidden tray binds no options,
-  // so an option list never answers a query for a surface the Grid is not
-  // presenting.
-  let batchAlbums: ReadonlyArray<Readonly<{ id: string; name: string }>> = [];
-  let renderedBatchAlbumSignature = "";
   let photoSurface: object = {};
   let currentPhotoId: string | undefined;
   let currentSelection: ViewSelectionState = "undecided";
-  let gridInteractionEnabled = false;
   let decisionInteractionEnabled = false;
-  let ratingWheelHoldTimer: number | undefined;
-  let pointer:
-    | {
-        id: number;
-        startX: number;
-        startY: number;
-        lastX: number;
-        lastY: number;
-        startedAt: number;
-        vertical: boolean;
-        ratingPending: boolean;
-        ratingWheel: boolean;
-        // The zoom mode the gesture started in; it owns the drag until
-        // release even if Fit returns mid-gesture.
-        pan: boolean;
-        surface: object;
-        photoId: string;
-      }
-    | undefined;
 
   const compactSources = window.matchMedia("(max-width: 760px)");
   const mobileActionHierarchy = window.matchMedia(
@@ -1566,43 +1389,62 @@ ${RECOVERY_PANEL_TEMPLATE}
   // decision controls keep their space; the view mirrors that condition so a
   // hidden strip binds no thumbnails and rebuilds when the space returns.
   const shortViewport = window.matchMedia("(max-height: 480px)");
-  /// The last neighbor facts the page model reported. A disclosure rebuilds
-  /// the strip from them, so a closed strip holds no image demand at all.
-  let filmstripModel: FilmstripViewModel | undefined;
-  /// True while the Nearby Photos subview is the presented content of Photo
-  /// tools. The one strip node then lives inside that disclosure; otherwise it
-  /// lives beside the Preview, which only a wide layout shows.
   const stripInTools = () => photoToolsController.isNearbyOpen();
-  /// Places the one strip node where it is presented, and releases it
-  /// everywhere else: a strip that is not presented binds no thumbnail and
-  /// admits no window of its own.
-  const syncFilmstripHost = () => {
-    const presented = !stripIsDisclosed() || stripInTools();
-    const host = stripInTools() ? filmstripTools : filmstripHost;
-    if (filmstrip.parentElement !== host) host.append(filmstrip);
-    if (!presented) {
-      clearFilmstripCells();
-      return;
-    }
-    // The page model owns the strip's facts. A presented strip is rebuilt from
-    // the remembered facts — while the live readiness fact still decides
-    // whether an activation would be admitted — and a remembered model that
-    // holds no neighbors asks that owner to render again instead of claiming
-    // the source has none.
-    if (filmstripModel && filmstripModel.cells.length > 1) {
-      const interactive = filmstripInteractive;
-      rehomingRememberedStrip = true;
-      renderFilmstrip(filmstripModel);
-      rehomingRememberedStrip = false;
-      filmstripInteractive = interactive;
-      applyFilmstripInteractivity();
-      // The rebuild read the remembered interactivity, so the held entry is
-      // restored only now, against the live fact this re-homing put back.
-      restoreHeldStripFocus();
-      return;
-    }
-    send({ kind: "filmstrip-resize" });
-  };
+  const filmstripPresenter: FilmstripPresenter = createFilmstripPresenter({
+    elements: { photoView, filmstrip, filmstripHost, filmstripTools },
+    layout: {
+      isDisclosed: stripIsDisclosed,
+      isNearbyOpen: stripInTools,
+      requestResize: () => send({ kind: "filmstrip-resize" }),
+    },
+    thumbnails: {
+      target: gridThumbnailTarget,
+      bind: bindThumbnail,
+      release: releaseThumbnail,
+    },
+    openPhoto: (index) => send({ kind: "open-photo", index }),
+  });
+  const gridPresenter = createGridPresenter({
+    browser,
+    gridView,
+    viewport: gridViewport,
+    canvas: gridCanvas,
+    layer: gridLayer,
+    sizeSelect,
+    gridTools,
+    gridSelection,
+    gridBatch,
+    compact: compactSources,
+    isAlive: () => alive,
+    multiMode: () => batchPresenter.multiMode(),
+    multiCount: () => batchPresenter.multiCount(),
+    multiSelected: (index) => batchPresenter.multiSelected(index),
+    renderBatch: () => batchPresenter.applyMulti(),
+    send,
+    bindThumbnail,
+    releaseThumbnail,
+  });
+  const batchPresenter = createGridBatchPresenter({
+    elements: {
+      gridBatch,
+      gridTools,
+      gridSelection,
+      gridSelectMode,
+      multiDone,
+      batchCount,
+      batchRetained,
+      batchResult,
+      batchResultText,
+      batchCompensate,
+      batchSelect,
+      batchReject,
+      batchAlbumSelect,
+      batchAlbumAdd,
+    },
+    alive: () => alive,
+    send,
+    applyMultiSelection: () => gridPresenter.applyMulti(),
+  });
   /// Opens the explicit Rating choices. Only this surface or the Rating entry
   /// owns explicit Rating interaction at one time; the Rating Wheel stays the
   /// touch accelerator on the Preview.
@@ -1615,72 +1457,10 @@ ${RECOVERY_PANEL_TEMPLATE}
     if (!alive) return;
     ratingControls.closeChoices(restoreFocus);
   };
-  const cellBox = () => GRID_THUMBNAIL_SIZE_STEPS[thumbnailSize];
-  /// The column and row pitch of the virtualized layout: one cell box plus
-  /// the ordinary inter-cell gap. Every geometry calculation derives from
-  /// these, so the CSS cell box and the layout can never disagree.
-  const columnPitch = () => cellBox().width + GRID_CELL_GAP_X;
-  const rowPitch = () => cellBox().height + GRID_CELL_GAP_Y;
-  const applyGridThumbnailSize = () => {
-    const box = cellBox();
-    browser.style.setProperty("--grid-cell-width", `${box.width}px`);
-    browser.style.setProperty("--grid-cell-height", `${box.height}px`);
-  };
-  for (const [size, step] of Object.entries(GRID_THUMBNAIL_SIZE_STEPS)) {
-    const option = document.createElement("option");
-    option.value = size;
-    option.textContent = step.label;
-    sizeSelect.append(option);
-  }
-  sizeSelect.value = thumbnailSize;
-  applyGridThumbnailSize();
-  /// Re-lays out the Grid at another thumbnail size. The size is presentation
-  /// state of the open Grid: it changes cell geometry only, keeps the row the
-  /// Photographer was looking at as the first visible row, and reports the
-  /// new range through the merged render, so window admission follows exactly
-  /// as it does for scrolling.
-  const setGridThumbnailSize = (size: GridThumbnailSize) => {
-    if (!alive || size === thumbnailSize) return;
-    // The anchor is applied by the render that lays the Grid out at the new
-    // pitch: scrolling before that render would clamp against the previous
-    // canvas height.
-    pendingGridAnchor = firstVisibleGridIndex(columns());
-    thumbnailSize = size;
-    applyGridThumbnailSize();
-    scheduleGridRender();
-  };
-  const columns = () =>
-    Math.max(
-      1,
-      Math.floor(Math.max(320, gridViewport.clientWidth) / columnPitch()),
-    );
-  const columnStride = (count = columns()) =>
-    compactSources.matches ? gridViewport.clientWidth / count : columnPitch();
-  const effectiveViewportHeight = () =>
-    Math.max(360, Math.min(gridViewport.clientHeight, window.innerHeight));
+  const setGridThumbnailSize = (size: "small" | "medium" | "large") =>
+    gridPresenter.setSize(size);
 
-  const cancelRatingHold = () => {
-    if (ratingWheelHoldTimer !== undefined) {
-      window.clearTimeout(ratingWheelHoldTimer);
-      ratingWheelHoldTimer = undefined;
-    }
-  };
-  const clearPointer = () => {
-    cancelRatingHold();
-    const id = pointer?.id;
-    pointer = undefined;
-    if (id !== undefined && preview.hasPointerCapture(id))
-      preview.releasePointerCapture(id);
-    stage.style.transform = "";
-    selectFeedback.classList.remove("pending");
-    rejectFeedback.classList.remove("pending");
-  };
-  const resetGestures = () => {
-    cancelRatingHold();
-    ratingControls.closeWheel();
-    zoomController?.resetPointers();
-    clearPointer();
-  };
+  const resetGestures = () => photoGestures?.reset();
   const photoToolsController = createPhotoToolsController({
     elements: {
       photoToolsDialog,
@@ -1693,7 +1473,7 @@ ${RECOVERY_PANEL_TEMPLATE}
     isPhotoVisible: () => !photoView.hidden,
     currentPhotoId: () => currentPhotoId,
     resetGestures,
-    syncFilmstripHost,
+    syncFilmstripHost: filmstripPresenter.syncHost,
     syncSecondarySurface,
     openSources: () => sourceController.open(),
     openEditor: (photoId) => editorController.open(photoId),
@@ -1745,7 +1525,7 @@ ${RECOVERY_PANEL_TEMPLATE}
     sourceController.syncLayout();
     presentConnection();
     syncSecondarySurface();
-    syncFilmstripHost();
+    filmstripPresenter.syncHost();
   };
   const viewOptionsController = createViewOptions({
     elements: {
@@ -1789,7 +1569,9 @@ ${RECOVERY_PANEL_TEMPLATE}
     closePhotoTools: (restoreFocus) => photoToolsController.close(restoreFocus),
     closeRatingChoices,
     activeAlbumId: () =>
-      sourceModel?.albums.find((candidate) => candidate.active)?.id,
+      sourcePresenter
+        ?.sourceModel()
+        ?.albums.find((candidate) => candidate.active)?.id,
     onSizeChange: setGridThumbnailSize,
   });
   const albumFormController = createAlbumForm({
@@ -1802,6 +1584,36 @@ ${RECOVERY_PANEL_TEMPLATE}
         sourceList.querySelectorAll<HTMLElement>("[data-focus-key]"),
       ).find((candidate) => candidate.dataset.focusKey === focusKey),
   });
+  const sourcePresenter = createSourceListPresenter({
+    sourceList,
+    albumResume,
+    folderAlbumControls,
+    folderAlbumSelect,
+    addFolderToAlbum,
+    folderAlbumStatus,
+    alive: () => alive,
+    send,
+    sourceAddress: (source) =>
+      addressFor(
+        source.kind === "library"
+          ? { source: "library", selection: "all" }
+          : source.kind === "album"
+            ? { source: "album", albumId: source.id, selection: "all" }
+            : {
+                source: "folder",
+                folderPath: source.location,
+                selection: "all",
+              },
+      ),
+    openAlbumForm: (kind, albumId, name) =>
+      albumFormController.open(kind, albumId, name),
+    createAlbumTools: (album) => albumFormController.createAlbumTools(album),
+    actionFocusKey: () => albumFormController.actionFocusKey("create"),
+    restoreSourceFocus: (target) =>
+      albumFormController.restoreSourceFocus(target),
+  });
+  const renderSources = sourcePresenter.render;
+  const renderFolderAlbum = sourcePresenter.renderFolderAlbum;
   const zoomController = createPhotoZoomController({
     preview,
     stage,
@@ -1814,1092 +1626,28 @@ ${RECOVERY_PANEL_TEMPLATE}
     level: zoomLevel,
     isAlive: () => alive,
   });
-  const onPreviewContextMenu = (event: MouseEvent) => {
-    if (pointer?.ratingPending || ratingControls.isWheelOpen())
-      event.preventDefault();
-  };
+  const photoGestures = createPhotoGestures({
+    preview,
+    stage,
+    selectFeedback,
+    rejectFeedback,
+    zoom: zoomController,
+    rating: ratingControls,
+    isAlive: () => alive,
+    currentPhotoId: () => currentPhotoId,
+    currentSurface: () => photoSurface,
+    decisionEnabled: () => decisionInteractionEnabled,
+    send,
+  });
 
-  /// The address one source destination resolves to. A source selection
-  /// always uses that source's default order and the All filter, so the
-  /// address is fully known before any request is made.
-  const sourceAddress = (source: SourceReference): string =>
-    addressFor(
-      source.kind === "library"
-        ? { source: "library", selection: "all" }
-        : source.kind === "album"
-          ? { source: "album", albumId: source.id, selection: "all" }
-          : { source: "folder", folderPath: source.location, selection: "all" },
-    );
-
-  /// Intercepts only an unmodified primary activation of a destination
-  /// anchor. A modified activation, a middle click, or a non-primary button
-  /// keeps its native new-tab, copy-link, and download behavior.
-  const interceptDestination = (
-    element: HTMLAnchorElement | HTMLButtonElement,
-    activate: () => void,
-  ) => {
-    element.addEventListener("click", (event) => {
-      const pointer = event as MouseEvent;
-      if (
-        pointer.defaultPrevented ||
-        pointer.button !== 0 ||
-        pointer.metaKey ||
-        pointer.ctrlKey ||
-        pointer.shiftKey ||
-        pointer.altKey
-      )
-        return;
-      pointer.preventDefault();
-      activate();
-    });
-  };
-
-  /// One source destination. A destination the Library can open right now is a
-  /// real same-origin anchor, so new-tab, copy-link, and download stay native.
-  /// A destination that cannot be opened yet — an unpublished Library Folder
-  /// root, or a Folder the current publication does not list — keeps button
-  /// semantics and no href, so an unmodified activation can never navigate the
-  /// document away from the application, and its native disabled state keeps
-  /// it out of the hover highlight.
-  const createSourceButton = (
-    name: string,
-    count: number,
-    active: boolean,
-    address: string,
-    openable: boolean,
-  ) => {
-    const element: HTMLAnchorElement | HTMLButtonElement = openable
-      ? document.createElement("a")
-      : document.createElement("button");
-    if (openable) (element as HTMLAnchorElement).href = address;
-    else {
-      const button = element as HTMLButtonElement;
-      button.type = "button";
-      button.disabled = true;
-    }
-    element.className = `source-card${active ? " active" : ""}`;
-    if (active) element.setAttribute("aria-current", "true");
-    // The name may be visually truncated; the title keeps the full name
-    // available on hover without changing the accessible name.
-    element.title = name;
-    element.innerHTML = "<strong></strong><span></span>";
-    required<HTMLElement>(element, "strong").textContent = name;
-    required<HTMLElement>(element, "span").textContent =
-      formatPhotoCount(count);
-    return element;
-  };
-
-  const createFolderPager = (
-    location: string,
-    pager: NonNullable<FolderViewModel["pager"]>,
-  ) => {
-    const depth = location ? location.split("/").length : 0;
-    const controls = document.createElement("div");
-    controls.className = "folder-pager";
-    controls.style.marginLeft = `${Math.min(depth, 6) * 12}px`;
-    const prior = document.createElement("button");
-    prior.type = "button";
-    prior.className = "folder-page-button";
-    prior.textContent = "Previous Folders";
-    prior.disabled = !pager.hasPrevious;
-    prior.addEventListener("click", () =>
-      send({ kind: "folder-page", location, direction: -1 }),
-    );
-    const label = document.createElement("span");
-    label.className = "folder-page-label";
-    label.textContent = `${pager.page + 1} / ${pager.pages}`;
-    const more = document.createElement("button");
-    more.type = "button";
-    more.className = "folder-page-button";
-    more.textContent = "More Folders";
-    more.disabled = !pager.hasNext;
-    more.addEventListener("click", () =>
-      send({ kind: "folder-page", location, direction: 1 }),
-    );
-    controls.append(prior, label, more);
-    return controls;
-  };
-
-  const appendFolder = (
-    fragment: DocumentFragment,
-    folder: FolderViewModel,
-  ) => {
-    const depth = folder.location.split("/").length;
-    const row = document.createElement("div");
-    row.className = "folder-row folder-child";
-    row.style.marginLeft = `${Math.min(depth - 1, 6) * 12}px`;
-    if (folder.hasDescendantFolders) {
-      const expand = document.createElement("button");
-      expand.type = "button";
-      expand.className = "folder-expand";
-      expand.setAttribute("aria-expanded", String(folder.expanded));
-      expand.textContent = folder.expanded ? "▾" : "▸";
-      expand.setAttribute("aria-label", `Toggle ${folder.name} subfolders`);
-      expand.addEventListener("click", () =>
-        send({
-          kind: "folder-toggle",
-          location: folder.location,
-          expanded: folder.expanded,
-        }),
-      );
-      row.append(expand);
-    }
-    // A Folder the current publication does not list is not an openable
-    // destination yet, so it keeps button semantics and no href.
-    const button = createSourceButton(
-      `${folder.name}${folder.hasDescendantFolders ? " · Subfolders" : ""}`,
-      folder.photoCount,
-      folder.active,
-      sourceAddress({
-        kind: "folder",
-        location: folder.location,
-        name: folder.name,
-      }),
-      folder.enabled,
-    );
-    interceptDestination(button, () =>
-      send({
-        kind: "source-open",
-        source: {
-          kind: "folder",
-          location: folder.location,
-          name: folder.name,
-        },
-      }),
-    );
-    row.append(button);
-    fragment.append(row);
-    if (!folder.expanded) return;
-    for (const child of folder.children) appendFolder(fragment, child);
-    if (folder.pager)
-      fragment.append(createFolderPager(folder.location, folder.pager));
-  };
-
-  const renderSources = (model: SourceListViewModel) => {
-    if (!alive) return;
-    sourceModel = model;
-    const focused = document.activeElement;
-    const focusedKey =
-      focused instanceof HTMLElement ? focused.dataset.focusKey : undefined;
-    sourceList.replaceChildren();
-    const library = createSourceButton(
-      "All Photos",
-      model.libraryCount,
-      model.libraryActive,
-      sourceAddress({ kind: "library" }),
-      true,
-    );
-    library.dataset.focusKey = "source:library";
-    interceptDestination(library, () =>
-      send({ kind: "source-open", source: { kind: "library" } }),
-    );
-    sourceList.append(library);
-    const fileHeading = document.createElement("h3");
-    fileHeading.textContent = "Folders";
-    sourceList.append(fileHeading);
-    for (const failure of model.fileLocationFailures) {
-      const retryFolders = document.createElement("button");
-      retryFolders.type = "button";
-      retryFolders.className = "folder-more";
-      retryFolders.textContent = `Retry Folders (${failure.range})`;
-      retryFolders.addEventListener("click", () =>
-        send({ kind: "file-location-retry", key: failure.key }),
-      );
-      sourceList.append(retryFolders);
-    }
-    // The Library Folder root opens only while the Library is published.
-    const rootCard = createSourceButton(
-      "Library Folder",
-      model.libraryCount,
-      model.rootActive,
-      sourceAddress({ kind: "folder", location: "", name: "Library Folder" }),
-      model.fileLocationsEnabled,
-    );
-    rootCard.dataset.focusKey = "source:folder:";
-    interceptDestination(rootCard, () =>
-      send({
-        kind: "source-open",
-        source: { kind: "folder", location: "", name: "Library Folder" },
-      }),
-    );
-    const rootRow = document.createElement("div");
-    rootRow.className = "folder-row folder-root";
-    const rootExpand = document.createElement("button");
-    rootExpand.type = "button";
-    rootExpand.className = "folder-expand";
-    rootExpand.setAttribute("aria-expanded", String(model.rootExpanded));
-    rootExpand.textContent = model.rootExpanded ? "▾" : "▸";
-    rootExpand.setAttribute("aria-label", "Toggle Library Folder subfolders");
-    rootExpand.addEventListener("click", () =>
-      send({
-        kind: "folder-toggle",
-        location: "",
-        expanded: model.rootExpanded,
-      }),
-    );
-    rootRow.append(rootExpand, rootCard);
-    const folders = document.createDocumentFragment();
-    folders.append(rootRow);
-    if (model.rootExpanded) {
-      for (const folder of model.rootChildren) appendFolder(folders, folder);
-      if (model.rootPager)
-        folders.append(createFolderPager("", model.rootPager));
-    }
-    sourceList.append(folders);
-    const albumHeadingRow = document.createElement("div");
-    albumHeadingRow.className = "album-heading";
-    const albumHeading = document.createElement("h3");
-    albumHeading.textContent = "Albums";
-    const newAlbum = document.createElement("button");
-    newAlbum.type = "button";
-    newAlbum.className = "album-new";
-    newAlbum.textContent = "New Album";
-    newAlbum.dataset.focusKey = albumFormController.actionFocusKey("create");
-    newAlbum.addEventListener("click", () =>
-      albumFormController.open("create"),
-    );
-    albumHeadingRow.append(albumHeading, newAlbum);
-    sourceList.append(albumHeadingRow);
-    // An Album with a saved position exposes Resume separately from opening
-    // its Grid: it resolves that position under the existing saved-position
-    // rules and opens Photo View, so it lives with the other source-specific
-    // actions in View options rather than beside the destination anchor.
-    const activeAlbum = model.albums.find((album) => album.active);
-    albumResume.hidden = activeAlbum?.hasSavedPosition !== true;
-    for (const album of model.albums) {
-      const button = createSourceButton(
-        album.name,
-        album.photoCount,
-        album.active,
-        sourceAddress({ kind: "album", id: album.id }),
-        true,
-      );
-      button.dataset.focusKey = `source:album:${album.id}`;
-      interceptDestination(button, () =>
-        send({ kind: "source-open", source: { kind: "album", id: album.id } }),
-      );
-      const row = document.createElement("div");
-      row.className = "album-row";
-      row.append(button, albumFormController.createAlbumTools(album));
-      sourceList.append(row);
-    }
-    const focusTarget = (focusKey: string) =>
-      Array.from(
-        sourceList.querySelectorAll<HTMLElement>("[data-focus-key]"),
-      ).find((candidate) => candidate.dataset.focusKey === focusKey);
-    if (albumFormController.restoreSourceFocus(focusTarget)) return;
-    const restored = focusedKey ? focusTarget(focusedKey) : undefined;
-    if (restored && !restored.matches(":disabled")) {
-      restored.focus();
-      return;
-    }
-  };
-
-  const scheduleGridRender = () => {
-    if (!alive || gridRenderFrame !== undefined) return;
-    gridRenderFrame = requestAnimationFrame(() => {
-      gridRenderFrame = undefined;
-      send({ kind: "grid-render" });
-    });
-  };
-  const cancelGridRender = () => {
-    if (gridRenderFrame === undefined) return;
-    cancelAnimationFrame(gridRenderFrame);
-    gridRenderFrame = undefined;
-  };
-  /// Drops every rendered cell so the next render builds the range from
-  /// scratch. The Grid DOM is cleared here when it is rebuilt from nothing:
-  /// while a source is replaced, and when Photo View hands the surface back
-  /// without the Grid images it detached.
-  const clearGridCells = () => {
-    for (const rendered of renderedCells.values()) releaseGridCell(rendered);
-    renderedCells.clear();
-    reportedGridRange = undefined;
-    gridLayer.replaceChildren();
-  };
-  /// Builds the retained cells whose image the owner detached at a Grid
-  /// boundary again, in place. Only an image that had not finished loading
-  /// loses its source there, and binding the cell anew uses the URL the owner
-  /// still holds, so the thumbnails come back without a new request and
-  /// without a render: the range, its other cells, and the reported status
-  /// stay exactly as the boundary found them.
-  const rebindDetachedGridCells = (
-    model: Readonly<{
-      total: number;
-      photoAt(index: number): GridPhotoViewModel | undefined;
-    }>,
-  ) => {
-    if (!alive || gridView.hidden) return;
-    const count = columns();
-    const stride = columnStride(count);
-    for (const [index, rendered] of [...renderedCells]) {
-      const image = rendered.cell.querySelector<HTMLImageElement>("img");
-      if (!rendered.thumbnail || !image || image.getAttribute("src")) continue;
-      const position = rendered.cell.nextSibling;
-      releaseGridCell(rendered);
-      rendered.cell.remove();
-      const rebuilt = buildGridCell(
-        index,
-        model.photoAt(index),
-        model.total,
-        count,
-        stride,
-      );
-      gridLayer.insertBefore(rebuilt.cell, position);
-      renderedCells.set(index, rebuilt);
-    }
-  };
-  /// Detaches the image of a cell that leaves the rendered range or is rebuilt
-  /// in place: an already-started transfer cannot keep owning a connection,
-  /// and its late error cannot claim a delivery failure for the Photo. The
-  /// cell also hands its thumbnail ownership back to the owner, whose image
-  /// state then follows the rendered Grid instead of every Photo a session
-  /// rendered.
-  const releaseGridCell = (rendered: RenderedGridCell) => {
-    const image = rendered.cell.querySelector<HTMLImageElement>("img");
-    if (image) {
-      image.onload = null;
-      image.onerror = null;
-      image.removeAttribute("src");
-    }
-    if (rendered.thumbnail) {
-      releaseThumbnail(rendered.thumbnail);
-      rendered.thumbnail = undefined;
-    }
-  };
-  const positionGridCell = (
-    cell: HTMLButtonElement,
-    index: number,
-    count: number,
-    stride: number,
-  ) => {
-    cell.style.left = `${(index % count) * stride}px`;
-    cell.style.top = `${Math.floor(index / count) * rowPitch()}px`;
-    cell.style.width = compactSources.matches
-      ? `${stride - GRID_CELL_GAP_X}px`
-      : "";
-  };
-  const buildGridCell = (
-    index: number,
-    photo: GridPhotoViewModel | undefined,
-    total: number,
-    count: number,
-    stride: number,
-  ): RenderedGridCell => {
-    const cell = document.createElement("button");
-    cell.type = "button";
-    cell.className = "photo-cell";
-    positionGridCell(cell, index, count, stride);
-    if (!photo) {
-      cell.disabled = true;
-      const placeholder = document.createElement("span");
-      placeholder.className = "cell-placeholder";
-      placeholder.textContent = "Loading…";
-      cell.append(placeholder);
-      return {
-        cell,
-        signature: LOADING_CELL_SIGNATURE,
-        deliveryFailed: false,
-        thumbnailState: undefined,
-        thumbnail: undefined,
-      };
-    }
-    cell.dataset.photoIndex = String(index);
-    cell.disabled = !gridInteractionEnabled;
-    // The image keeps its own media area so the complete Photo displays
-    // at its true aspect ratio; state, rating, and fact indicators render
-    // in the footer beneath it instead of over the image.
-    const media = document.createElement("span");
-    media.className = "cell-media";
-    const image = document.createElement("img");
-    image.alt = `Photo ${index + 1} of ${total}`;
-    image.loading = "lazy";
-    image.fetchPriority = "low";
-    image.decoding = "async";
-    image.draggable = false;
-    image.className = "thumbnail";
-    media.append(image);
-    const footer = document.createElement("span");
-    footer.className = "cell-footer";
-    const caption = document.createElement("span");
-    caption.className = "cell-caption";
-    // The position number and the Original filename are the visible identity
-    // of the cell; a Rating star follows when one is recorded.
-    const identity = photo.originalFilename
-      ? `${index + 1} · ${photo.originalFilename}`
-      : String(index + 1);
-    caption.textContent = photo.rating
-      ? `${identity} · ${photo.rating}★`
-      : identity;
-    if (photo.originalFilename) caption.title = photo.originalFilename;
-    const facts = document.createElement("span");
-    facts.className = "cell-facts";
-    const rendered: RenderedGridCell = {
-      cell,
-      signature: "",
-      deliveryFailed: false,
-      thumbnailState: undefined,
-      thumbnail: undefined,
-    };
-    const presentFacts = () => {
-      const values = gridPhotoFacts(
-        photo,
-        rendered.deliveryFailed,
-        rendered.thumbnailState,
-      );
-      facts.textContent = values.join(" · ");
-      facts.hidden = values.length === 0;
-      cell.setAttribute(
-        "aria-label",
-        [
-          `Photo ${index + 1} of ${total}`,
-          ...(photo.originalFilename ? [photo.originalFilename] : []),
-          selectionLabel(photo.selectionState),
-          photo.rating === 1 ? "1 star" : `${photo.rating} stars`,
-          ...values,
-        ].join(" — "),
-      );
-    };
-    presentFacts();
-    rendered.signature = gridCellSignature(index, photo, false);
-    // Only a recorded decision earns a badge. An empty badge on every
-    // undecided cell reads as an unchecked control instead of a fact.
-    if (photo.selectionState === "undecided") {
-      caption.classList.add("cell-caption-wide");
-      footer.append(caption, facts);
-    } else {
-      const badge = document.createElement("span");
-      badge.className = `cell-state ${photo.selectionState}`;
-      badge.textContent = photo.selectionState === "selected" ? "✓" : "×";
-      footer.append(badge, caption, facts);
-    }
-    cell.append(media, footer);
-    cell.addEventListener("click", (event) =>
-      send({
-        kind: "open-photo",
-        index,
-        ...(event.shiftKey ? { range: true } : {}),
-        ...(event.ctrlKey || event.metaKey ? { toggle: true } : {}),
-      }),
-    );
-    applyGridCellMulti(cell, index);
-    if (alive) {
-      const binding: GridThumbnailBinding = {
-        photoId: photo.id,
-        preview: photo.preview,
-        target: gridThumbnailTarget(
-          image,
-          (failed) => {
-            rendered.deliveryFailed = failed;
-            rendered.signature = gridCellSignature(index, photo, failed);
-            presentFacts();
-          },
-          (state) => {
-            rendered.thumbnailState = state;
-            rendered.deliveryFailed = false;
-            presentFacts();
-          },
-        ),
-      };
-      rendered.thumbnail = binding;
-      bindThumbnail(binding);
-    }
-    return rendered;
-  };
-  const releaseFilmstripCell = (rendered: RenderedFilmstripCell) => {
-    const image = rendered.button.querySelector<HTMLImageElement>("img");
-    if (image) {
-      image.onload = null;
-      image.onerror = null;
-      image.removeAttribute("src");
-    }
-    if (rendered.thumbnail) {
-      releaseThumbnail(rendered.thumbnail);
-      rendered.thumbnail = undefined;
-    }
-  };
-  const clearFilmstripCells = () => {
-    for (const rendered of renderedFilmstripCells.values())
-      releaseFilmstripCell(rendered);
-    renderedFilmstripCells.clear();
-    filmstrip.replaceChildren();
-    filmstrip.hidden = true;
-  };
-  /// Whether activating a strip entry would open its Photo. A real entry
-  /// mirrors the Grid cell rule: the strip never presents an enabled control
-  /// whose activation would be refused silently. Placeholders stay disabled
-  /// for their own reason, so only entries that present a Photo follow this.
-  let filmstripInteractive = false;
-  /// The strip entry a keyboard Photographer had focused when the strip
-  /// became non-interactive. Disabling a focused button drops focus to the
-  /// body, so the strip parks focus on the Photo View and returns it when
-  /// interactivity resumes, exactly as the Grid does for its held cell. The
-  /// held entry is remembered by index because a settled decision rebuilds
-  /// the strip and replaces the old button element.
-  let heldStripIndex: number | null = null;
-  /// Whether the strip is being re-homed from the remembered model, whose
-  /// interactivity fact can predate the busy gate that just parked the focus.
-  /// The live fact is put back immediately after such a rebuild, so a held
-  /// entry is never restored against the stale one the rebuild read.
-  let rehomingRememberedStrip = false;
-  /// The native surface that currently holds the strip, when a compact layout
-  /// discloses it inside Photo tools. A modal makes the rest of the document
-  /// inert, so a focus move that would park on the Photo View lands on the
-  /// surface itself instead.
-  const stripSurface = (): HTMLElement | undefined =>
-    filmstrip.closest<HTMLElement>("dialog") ?? undefined;
-  const restoreHeldStripFocus = () => {
-    if (rehomingRememberedStrip) return;
-    if (heldStripIndex === null || !filmstripInteractive) return;
-    const surface = stripSurface();
-    // Only a focus this view parked is one it may return: any other owner
-    // keeps the keyboard, so the held entry stays held. A native modal makes
-    // the Photo View inert, so the surface that holds the strip — and anything
-    // focused inside it — is a parked owner too.
-    const parked =
-      document.activeElement === document.body ||
-      document.activeElement === photoView ||
-      (surface !== undefined && surface.contains(document.activeElement));
-    if (!parked) return;
-    // The held index survives until a presented, enabled entry actually takes
-    // the focus. A rebuild that replaces the entry lands after this update, so
-    // consuming the index here would leave nothing for that rebuild's retry.
-    const entry = filmstrip.querySelector<HTMLButtonElement>(
-      `[data-filmstrip-index="${heldStripIndex}"]`,
-    );
-    if (!entry || entry.disabled || entry.offsetParent === null) return;
-    heldStripIndex = null;
-    entry.focus();
-  };
-  const applyFilmstripInteractivity = () => {
-    for (const rendered of renderedFilmstripCells.values())
-      if (rendered.presentsPhoto)
-        rendered.button.disabled = !filmstripInteractive;
-  };
-  /// Presents one cell's multi-selection. A multi-selected cell carries a
-  /// marker that does not depend on color alone, and every cell exposes the
-  /// pressed state while Select mode makes its activation toggle.
-  const applyGridCellMulti = (cell: HTMLButtonElement, index: number) => {
-    const selected = gridMultiSelected(index);
-    cell.classList.toggle("multi-selected", selected);
-    cell.dataset.multiSelected = String(selected);
-    if (selected) cell.setAttribute("aria-pressed", "true");
-    else if (gridMultiMode) cell.setAttribute("aria-pressed", "false");
-    else cell.removeAttribute("aria-pressed");
-  };
-  /// Applies the multi-selection to every rendered cell in place. Rebuilding a
-  /// cell would restart its Thumbnail transfer, so the marker is patched onto
-  /// the cell that already presents the Photo.
-  const applyGridMultiSelection = () => {
-    for (const [index, rendered] of renderedCells)
-      applyGridCellMulti(rendered.cell, index);
-  };
-  const renderBatch = () => {
-    if (!alive) return;
-    const count = gridMultiCount;
-    const visible = gridMultiMode || count > 0;
-    gridBatch.hidden = !visible;
-    // Select mode, and a desktop modifier selection, replace the normal
-    // header tools with the source, the count, and Done. A tool the
-    // Photographer was using leaves the layout, so focus moves to the control
-    // that replaced it rather than to the body.
-    gridSelectMode.setAttribute("aria-pressed", String(gridMultiMode));
-    const heldToolsFocus = gridTools.contains(document.activeElement);
-    const heldSelectionFocus = gridSelection.contains(document.activeElement);
-    gridTools.hidden = visible;
-    gridSelection.hidden = !visible;
-    if (heldToolsFocus && visible) multiDone.focus();
-    else if (heldSelectionFocus && !visible) gridSelectMode.focus();
-    if (!visible) {
-      batchCount.textContent = "";
-      batchRetained.hidden = true;
-      batchResult.hidden = true;
-      batchResultText.textContent = "";
-      batchCompensate.hidden = true;
-      batchCompensate.disabled = true;
-      batchAlbumSelect.replaceChildren();
-      renderedBatchAlbumSignature = "";
-      batchAlbumSelection = "";
-      // A hidden tray names no Photo, so no cell keeps a multi-selection
-      // marker beside it.
-      applyGridMultiSelection();
-      return;
-    }
-
-    const countText = `${count.toLocaleString()} / ${gridMultiLimit.toLocaleString()} Photos`;
-    const retainedHidden = count === 0 || gridMultiResult === undefined;
-    const resultHidden = gridMultiResult === undefined;
-    const resultText = gridMultiResult?.message ?? "";
-    const compensation = gridMultiResult?.compensation;
-    const review = gridMultiResult?.review;
-    const resultAction = compensation ?? review;
-    const compensationHidden = resultHidden || resultAction === undefined;
-    if (batchCount.textContent !== countText)
-      batchCount.textContent = countText;
-    if (batchRetained.hidden !== retainedHidden)
-      batchRetained.hidden = retainedHidden;
-    if (batchResult.hidden !== resultHidden) batchResult.hidden = resultHidden;
-    if (batchResultText.textContent !== resultText)
-      batchResultText.textContent = resultText;
-    batchCompensate.hidden = compensationHidden;
-    if (resultAction && batchCompensate.textContent !== resultAction.label)
-      batchCompensate.textContent = resultAction.label;
-    batchCompensate.dataset.action = compensation ? "compensate" : "review";
-    if (gridMultiResult) batchResult.dataset.tone = gridMultiResult.tone;
-    else batchResult.removeAttribute("data-tone");
-
-    const enabled = gridMultiEnabled && !batchAlbumsPending && count > 0;
-    if (count === 0) {
-      batchAlbumSelect.replaceChildren();
-      renderedBatchAlbumSignature = "";
-      batchAlbumSelection = "";
-      batchCompensate.hidden = true;
-      applyGridMultiSelection();
-    } else {
-      const signature = batchAlbums.map((album) => album.id).join(",");
-      if (signature !== renderedBatchAlbumSignature) {
-        renderedBatchAlbumSignature = signature;
-        if (!batchAlbums.some((album) => album.id === batchAlbumSelection))
-          batchAlbumSelection = batchAlbums[0]?.id ?? "";
-        batchAlbumSelect.replaceChildren(
-          ...batchAlbums.map((album) => {
-            const option = document.createElement("option");
-            option.value = album.id;
-            option.textContent = album.name;
-            option.selected = album.id === batchAlbumSelection;
-            return option;
-          }),
-        );
-      }
-    }
-    // Disabling a focused batch control would drop keyboard focus to the
-    // body, so the tray parks focus on the selection header's Done while a
-    // batch settles and returns it when interactivity resumes, mirroring the
-    // Grid's held-cell hand-off.
-    if (!enabled && heldBatchControl === null) {
-      const active = document.activeElement;
-      if (
-        active === batchSelect ||
-        active === batchReject ||
-        active === batchAlbumSelect ||
-        active === batchAlbumAdd ||
-        active === batchCompensate
-      ) {
-        heldBatchControl = active as HTMLButtonElement | HTMLSelectElement;
-        multiDone.focus();
-      }
-    }
-    batchSelect.disabled = !enabled;
-    batchReject.disabled = !enabled;
-    const albums = batchAlbumSelect.options.length > 0;
-    batchAlbumSelect.disabled = !enabled || !albums;
-    batchAlbumAdd.disabled = !enabled || !albums || !batchAlbumSelection;
-    batchCompensate.disabled = !enabled || resultAction === undefined;
-    if (enabled && heldBatchControl) {
-      const control = heldBatchControl;
-      heldBatchControl = null;
-      if (
-        control.isConnected &&
-        !control.disabled &&
-        (document.activeElement === document.body ||
-          document.activeElement === multiDone)
-      )
-        control.focus();
-    }
-  };
-  /// One filmstrip entry. A neighbor whose facts are still loading renders as
-  /// a disabled placeholder, exactly like a Grid cell outside the loaded
-  /// window, so the bounded strip never invents a Photo.
-  const buildFilmstripCell = (
-    cell: FilmstripCellViewModel,
-    total: number,
-  ): RenderedFilmstripCell => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "filmstrip-cell";
-    button.dataset.filmstripIndex = String(cell.index);
-    const rendered: RenderedFilmstripCell = {
-      button,
-      signature: "",
-      deliveryFailed: false,
-      thumbnail: undefined,
-      presentsPhoto: false,
-    };
-    const photo = cell.photo;
-    if (!photo) {
-      button.disabled = true;
-      button.textContent = "…";
-      button.setAttribute("aria-label", `Photo ${cell.index + 1} of ${total}`);
-      rendered.signature = filmstripCellSignature(cell, total, false);
-      return rendered;
-    }
-    const image = document.createElement("img");
-    image.alt = "";
-    image.loading = "lazy";
-    image.fetchPriority = "low";
-    image.decoding = "async";
-    image.draggable = false;
-    image.className = "thumbnail";
-    button.append(image);
-    if (photo.selectionState !== "undecided") {
-      const badge = document.createElement("span");
-      badge.className = `cell-state ${photo.selectionState}`;
-      badge.textContent = photo.selectionState === "selected" ? "✓" : "×";
-      button.append(badge);
-    }
-    if (cell.current) button.setAttribute("aria-current", "true");
-    // The entry is named by its position and identity, and its decision and
-    // Rating travel in the description instead. A name carrying "Selected" or
-    // "Undecided" would make the entry indistinguishable from the Select,
-    // Reject, and Undo controls for anything that addresses controls by name.
-    button.setAttribute(
-      "aria-label",
-      [
-        `Photo ${cell.index + 1} of ${total}`,
-        ...(photo.originalFilename ? [photo.originalFilename] : []),
-      ].join(" — "),
-    );
-    button.title = [
-      selectionLabel(photo.selectionState),
-      photo.rating === 1 ? "1 star" : `${photo.rating} stars`,
-    ].join(" · ");
-    // The current entry is where the Photographer already is: it is marked as
-    // current and presents no activation, so nothing re-opens the same Photo
-    // and throws away manual zoom.
-    if (!cell.current)
-      button.addEventListener("click", () =>
-        send({ kind: "open-photo", index: cell.index }),
-      );
-    rendered.presentsPhoto = true;
-    button.disabled = !filmstripInteractive;
-    if (alive) {
-      const binding: GridThumbnailBinding = {
-        photoId: photo.id,
-        preview: photo.preview,
-        target: gridThumbnailTarget(
-          image,
-          (failed) => {
-            rendered.deliveryFailed = failed;
-            rendered.signature = filmstripCellSignature(cell, total, failed);
-          },
-          // The strip has no Thumbnail fact line; clear delivery failure.
-          () => {
-            rendered.deliveryFailed = false;
-            rendered.signature = filmstripCellSignature(cell, total, false);
-          },
-        ),
-      };
-      rendered.thumbnail = binding;
-      bindThumbnail(binding);
-    }
-    rendered.signature = filmstripCellSignature(cell, total, false);
-    return rendered;
-  };
-  const renderFilmstrip = (model: FilmstripViewModel) => {
-    if (!alive || photoView.hidden) return;
-    filmstripModel = model;
-    // A strip that is not presented — a source without neighbors, or a closed
-    // Nearby Photos disclosure — binds no thumbnails either: presenting
-    // entries for a hidden surface is the work the strip promises never to
-    // start. A compact layout discloses the strip inside Photo tools; a wide
-    // layout shows it beside the Preview.
-    const presented =
-      (!stripIsDisclosed() || stripInTools()) && model.cells.length > 1;
-    if (!presented || model.cells.length <= 1) {
-      clearFilmstripCells();
-      return;
-    }
-    filmstrip.hidden = false;
-    filmstripInteractive = model.interactive;
-    // The Photographer keeps their place when the strip rebuilds around a
-    // new current Photo: focus follows the current entry like the Grid's
-    // keyboard follows its cell.
-    const hadFocus = filmstrip.contains(document.activeElement);
-    const wanted = new Set(model.cells.map((cell) => cell.index));
-    for (const [index, rendered] of [...renderedFilmstripCells]) {
-      if (wanted.has(index)) continue;
-      releaseFilmstripCell(rendered);
-      rendered.button.remove();
-      renderedFilmstripCells.delete(index);
-    }
-    for (const cell of model.cells) {
-      const signature = filmstripCellSignature(cell, model.total, false);
-      let rendered = renderedFilmstripCells.get(cell.index);
-      if (rendered && rendered.signature !== signature) {
-        releaseFilmstripCell(rendered);
-        rendered.button.remove();
-        rendered = undefined;
-        renderedFilmstripCells.delete(cell.index);
-      }
-      if (!rendered) {
-        rendered = buildFilmstripCell(cell, model.total);
-        renderedFilmstripCells.set(cell.index, rendered);
-      } else if (
-        rendered.thumbnail &&
-        !rendered.deliveryFailed &&
-        !rendered.button.querySelector("img")?.getAttribute("src")
-      ) {
-        // A navigation hands the entry's in-flight thumbnail transfer back to
-        // the owner and drops its source, while the retained entry keeps its
-        // signature so the build path never runs again for it. Bind the
-        // thumbnail it still holds again instead of leaving the entry blank
-        // for the rest of the visit. A binding whose delivery already failed
-        // is left alone, so a failure cannot become a request on every
-        // render.
-        bindThumbnail(rendered.thumbnail);
-      }
-      // Appending an entry the strip already holds keeps its image element,
-      // so a moved entry never restarts its thumbnail transfer.
-      filmstrip.append(rendered.button);
-    }
-    applyFilmstripInteractivity();
-    filmstrip.hidden = false;
-    // A settled decision rebuilds the strip after interactivity resumes, so
-    // the held entry's restoration is retried once the rebuilt entry exists.
-    restoreHeldStripFocus();
-    if (!hadFocus) return;
-    const current = model.cells.find((cell) => cell.current);
-    if (!current) return;
-    const entry = renderedFilmstripCells.get(current.index)?.button;
-    if (
-      entry &&
-      entry.offsetParent !== null &&
-      document.activeElement !== entry
-    )
-      entry.focus();
-  };
-  /// True while the Grid owns keyboard focus, so Grid keys never act while
-  /// another surface (the Sources surface, the Album form, the Photo View) has
-  /// it.
-  const gridHoldsKeyboard = (): boolean => {
-    const active = document.activeElement;
-    return Boolean(active && gridViewport.contains(active));
-  };
-  const firstVisibleGridIndex = (count: number): number => {
-    if (gridTotal === 0) return 0;
-    const first = Math.floor(gridViewport.scrollTop / rowPitch()) * count;
-    return Math.max(0, Math.min(gridTotal - 1, first));
-  };
-  /// The Photo a Grid key addresses: the cell the keyboard owns while the
-  /// viewport still shows its row, or the first visible Photo after the
-  /// keyboard enters the Grid or a pointer scroll moved away from that row.
-  const gridKeyboardTarget = (count: number): number | undefined => {
-    if (gridTotal === 0) return undefined;
-    const first = firstVisibleGridIndex(count);
-    const index = gridKeyboardIndex;
-    if (index === undefined || index >= gridTotal) return first;
-    const firstRow = Math.floor(gridViewport.scrollTop / rowPitch());
-    const rows = Math.ceil(effectiveViewportHeight() / rowPitch());
-    const row = Math.floor(index / count);
-    return row >= firstRow && row < firstRow + rows ? index : first;
-  };
-  /// Moves the Grid keyboard to one cell. Scrolling reports the new range
-  /// through the merged render, so keyboard movement loads the same bounded
-  /// windows as scrolling.
-  const focusGridCell = (index: number, count: number) => {
-    gridKeyboardIndex = index;
-    const row = Math.floor(index / count) * rowPitch();
-    if (gridViewport.scrollTop !== row) gridViewport.scrollTop = row;
-    scheduleGridRender();
-  };
-  /// Keeps the Grid keyboard's cell focused across merged re-renders and
-  /// window replacement, and keeps exactly one Grid cell in the Tab order.
-  /// Focus is never taken from another surface that owns it.
-  const restoreGridKeyboardFocus = () => {
-    const index = gridKeyboardIndex;
-    for (const [position, rendered] of renderedCells)
-      rendered.cell.tabIndex = position === index ? 0 : -1;
-    const active = document.activeElement;
-    // An explicit focus request names the cell it wants. Otherwise only the
-    // Grid itself owns the keyboard position: focus on the body, on nothing,
-    // or inside the Grid viewport is reclaimable, while the header tools, the
-    // selection header, and the batch tray own their own focus, so a control
-    // the Photographer is using there is never pulled back into a cell while a
-    // batch settles.
-    const requested = pendingGridCellFocus !== undefined;
-    pendingGridCellFocus = undefined;
-    const owns =
-      requested ||
-      active === null ||
-      active === document.body ||
-      (gridViewport.contains(active) &&
-        !gridTools.contains(active) &&
-        !gridSelection.contains(active) &&
-        !gridBatch.contains(active));
-    if (!owns || index === undefined) return;
-    const cell = gridLayer.querySelector<HTMLButtonElement>(
-      `[data-photo-index="${index}"]`,
-    );
-    if (cell && !cell.disabled) {
-      // preventScroll keeps a focus move from scrolling the Grid the restore
-      // has just positioned, so the restored geometry survives it.
-      if (active !== cell) cell.focus({ preventScroll: true });
-      return;
-    }
-    // The bounded window that contains the cell is still loading. The Grid
-    // keeps focus and returns it to the cell once the window renders.
-    if (active !== gridViewport) gridViewport.focus();
-  };
-  /// Applies one Grid View key to the focused cell. Arrow keys move the cell
-  /// focus, and the decision and Rating keys address the focused Photo
-  /// through the page model exactly like the Photo View shortcuts.
-  const applyGridKey = (event: KeyboardEvent): void => {
-    if (event.key === "Escape" && (gridMultiCount > 0 || gridMultiMode)) {
-      // Escape takes the same exit as the tray's Done control: the
-      // multi-selection empties and Select mode ends.
-      event.preventDefault();
-      send({ kind: "grid-multi-clear" });
-      return;
-    }
-    const count = columns();
-    const step =
-      event.key === "ArrowRight"
-        ? 1
-        : event.key === "ArrowLeft"
-          ? -1
-          : event.key === "ArrowDown"
-            ? count
-            : event.key === "ArrowUp"
-              ? -count
-              : 0;
-    if (step !== 0) {
-      // The Grid owns arrow movement even at its edges, so a boundary key
-      // never scrolls the viewport by its native amount.
-      event.preventDefault();
-      const current = gridKeyboardTarget(count);
-      if (current === undefined) return;
-      // The first arrow enters the Grid at its first visible Photo instead of
-      // stepping past it.
-      const next = gridKeyboardIndex === current ? current + step : current;
-      if (next < 0 || next >= gridTotal) return;
-      focusGridCell(next, count);
-      return;
-    }
-    const key = event.key.toLowerCase();
-    const field =
-      key === "p" || key === "x" || key === "u"
-        ? "selectionState"
-        : /^[0-5]$/.test(event.key)
-          ? "rating"
-          : undefined;
-    if (!field) return;
-    const index = gridKeyboardTarget(count);
-    if (index === undefined) return;
-    event.preventDefault();
-    // A decision key also moves the keyboard to its Photo, so the focused
-    // cell always shows where the decision or Rating applies.
-    if (gridKeyboardIndex !== index) focusGridCell(index, count);
-    send({
-      kind: "grid-photo-mutation",
-      index,
-      field,
-      value:
-        field === "rating"
-          ? Number(event.key)
-          : key === "p"
-            ? "selected"
-            : key === "x"
-              ? "rejected"
-              : "undecided",
-    });
-  };
+  const scheduleGridRender = gridPresenter.schedule;
+  const cancelGridRender = gridPresenter.cancel;
+  const clearGridCells = gridPresenter.clear;
+  const rebindDetachedGridCells = gridPresenter.rebindDetached;
+  const resetGridMultiSelection = () => batchPresenter.reset();
   const renderGrid = (model: GridViewModel, position?: number) => {
-    // Photo View may keep the source Grid state alive while it owns the
-    // visible workflow. Do not let a retained hidden Grid admit window work;
-    // the visible Grid render after showGrid() owns that admission.
-    gridTotal = model.total;
-    gridMultiMode = model.multi.mode;
-    gridMultiCount = model.multi.count;
-    gridMultiLimit = model.multi.limit;
-    gridMultiEnabled = model.multi.enabled;
-    gridMultiResult = model.multi.result;
-    gridMultiSelected = model.multi.selected;
-    gridPhotoLookup = model.photoAt;
-    if (!alive || gridView.hidden) return;
-    renderBatch();
-    const count = columns();
-    const stride = columnStride(count);
-    const pitch = rowPitch();
-    const viewportHeight = effectiveViewportHeight();
-    renderedColumns = count;
-    renderedColumnStride = stride;
-    renderedViewportHeight = viewportHeight;
-    const height = `${Math.ceil(model.total / count) * pitch}px`;
-    gridCanvas.style.height = height;
-    gridLayer.style.height = height;
-    if (pendingGridAnchor !== undefined) {
-      // A size change scrolls the Photo it anchors on into the first row once
-      // the new canvas height can hold it.
-      gridViewport.scrollTop = Math.floor(pendingGridAnchor / count) * pitch;
-      pendingGridAnchor = undefined;
-    }
-    if (position !== undefined)
-      gridViewport.scrollTop = Math.floor(position / count) * pitch;
-    const firstRow = Math.max(
-      0,
-      Math.floor(gridViewport.scrollTop / pitch) - 2,
-    );
-    const visibleRows = Math.ceil(viewportHeight / pitch) + 4;
-    const start = firstRow * count;
-    const end = Math.min(model.total, start + visibleRows * count);
-    // Rendering is presentational: a cell that stays in the range and still
-    // presents the same Photo facts keeps its button and its thumbnail image,
-    // so a merged update never restarts a Thumbnail transfer. Only entering,
-    // leaving, or changed cells touch the DOM.
-    for (const [index, rendered] of renderedCells)
-      if (index < start || index >= end) {
-        rendered.cell.remove();
-        releaseGridCell(rendered);
-        renderedCells.delete(index);
-      }
-    let anchor: ChildNode | null = null;
-    let incomplete = false;
-    for (let index = end - 1; index >= start; index -= 1) {
-      const photo = model.photoAt(index);
-      const existing = renderedCells.get(index);
-      const signature = photo
-        ? gridCellSignature(index, photo, existing?.deliveryFailed ?? false)
-        : LOADING_CELL_SIGNATURE;
-      if (!photo) incomplete = true;
-      let rendered: RenderedGridCell;
-      if (existing && existing.signature === signature) {
-        rendered = existing;
-        positionGridCell(rendered.cell, index, count, stride);
-      } else {
-        // A rebuilt cell replaces its old node, so a stale placeholder or a
-        // changed rendering never stays in the layer.
-        if (existing) {
-          releaseGridCell(existing);
-          existing.cell.remove();
-        }
-        rendered = buildGridCell(index, photo, model.total, count, stride);
-        renderedCells.set(index, rendered);
-      }
-      // Walking down keeps rendered cells in source order with the fewest
-      // moves: a cell already positioned before the next rendered index is
-      // left untouched.
-      if (
-        rendered.cell.parentNode !== gridLayer ||
-        rendered.cell.nextSibling !== anchor
-      )
-        gridLayer.insertBefore(rendered.cell, anchor);
-      anchor = rendered.cell;
-    }
-    restoreGridKeyboardFocus();
-    applyGridMultiSelection();
-    // Report the presented range whenever it changes, and keep reporting it
-    // while part of it still has no Photo: the owner recomputes the windows
-    // it is missing for that range, coalesces them with any request already in
-    // flight, and retries a window that failed while the Grid presents it.
-    if (
-      end > start &&
-      (incomplete ||
-        reportedGridRange?.start !== start ||
-        reportedGridRange.end !== end)
-    ) {
-      reportedGridRange = { start, end };
-      send({ kind: "grid-range", start, end });
-    }
+    batchPresenter.render(model.multi);
+    gridPresenter.render(model, position);
   };
 
   const renderPhotoFacts = (model: PhotoFactsViewModel) => {
@@ -3016,184 +1764,6 @@ ${RECOVERY_PANEL_TEMPLATE}
     status.textContent = text;
   };
 
-  const pointerDown = (event: PointerEvent) => {
-    if (!alive || !currentPhotoId) return;
-    const zoom = zoomController;
-    if (!zoom) return;
-    const pointerCount = zoom.trackPointer(
-      event.pointerId,
-      event.clientX,
-      event.clientY,
-    );
-    if (pointerCount === 2) {
-      event.preventDefault();
-      cancelRatingHold();
-      ratingControls.closeWheel();
-      clearPointer();
-      zoom.beginPinch();
-      return;
-    }
-    if (pointerCount > 2 || zoom.isPinching() || pointer || !event.isPrimary)
-      return;
-    // Fit owns decision swipes; a manual zoom owns bounded panning. Neither
-    // state ever records a decision from a drag.
-    if (!zoom.isManual() && !decisionInteractionEnabled) return;
-    const ratingPending =
-      event.pointerType === "touch" &&
-      !zoom.isManual() &&
-      zoom.hasMeasurableImage() &&
-      decisionInteractionEnabled;
-    pointer = {
-      id: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      lastX: event.clientX,
-      lastY: event.clientY,
-      startedAt: event.timeStamp,
-      vertical: false,
-      ratingPending,
-      ratingWheel: false,
-      pan: zoom.isManual(),
-      surface: photoSurface,
-      photoId: currentPhotoId,
-    };
-    try {
-      preview.setPointerCapture(event.pointerId);
-    } catch {
-      // Synthetic PointerEvents used by browser qualification have no native
-      // active pointer to capture; the gesture state still remains testable.
-    }
-    if (ratingPending) {
-      const id = event.pointerId;
-      const surface = photoSurface;
-      const photoId = currentPhotoId;
-      ratingWheelHoldTimer = window.setTimeout(() => {
-        ratingWheelHoldTimer = undefined;
-        const active = pointer;
-        if (
-          !active ||
-          active.id !== id ||
-          !active.ratingPending ||
-          active.surface !== surface ||
-          active.photoId !== photoId ||
-          active.vertical ||
-          active.pan ||
-          zoom.isManual() ||
-          !decisionInteractionEnabled ||
-          !currentPhotoId
-        )
-          return;
-        active.ratingPending = false;
-        active.ratingWheel = true;
-        stage.style.transform = "";
-        selectFeedback.classList.remove("pending");
-        rejectFeedback.classList.remove("pending");
-        ratingControls.openWheel(active.lastX, active.lastY);
-        ratingControls.updateWheel(active.lastX, active.lastY);
-      }, RATING_WHEEL_HOLD_MS);
-    }
-  };
-  const pointerMove = (event: PointerEvent) => {
-    if (!alive) return;
-    const zoom = zoomController;
-    if (!zoom) return;
-    zoom.updatePointer(event.pointerId, event.clientX, event.clientY);
-    if (zoom.isPinching()) {
-      zoom.updatePinch();
-      return;
-    }
-    if (!pointer || pointer.id !== event.pointerId) return;
-    const dx = event.clientX - pointer.startX;
-    const dy = event.clientY - pointer.startY;
-    const stepX = event.clientX - pointer.lastX;
-    const stepY = event.clientY - pointer.lastY;
-    pointer.lastX = event.clientX;
-    pointer.lastY = event.clientY;
-    if (pointer.ratingWheel) {
-      ratingControls.updateWheel(event.clientX, event.clientY);
-      return;
-    }
-    if (pointer.pan || zoom.isManual()) {
-      zoom.panBy(stepX, stepY);
-      return;
-    }
-    if (
-      pointer.ratingPending &&
-      Math.hypot(dx, dy) > RATING_WHEEL_MOVE_PIXELS
-    ) {
-      pointer.ratingPending = false;
-      cancelRatingHold();
-      // The dominant axis owns the gesture. Equal movement yields to native
-      // vertical scrolling instead of guessing a decision direction.
-      if (Math.abs(dy) >= Math.abs(dx)) pointer.vertical = true;
-    } else if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 12) {
-      pointer.vertical = true;
-    }
-    if (pointer.vertical) return;
-    stage.style.transform = `translateX(${clamp(dx, -140, 140)}px)`;
-    selectFeedback.classList.toggle("pending", dx > SWIPE_PENDING_PIXELS);
-    rejectFeedback.classList.toggle("pending", dx < -SWIPE_PENDING_PIXELS);
-  };
-  const finishPointer = (event: PointerEvent, cancelled = false) => {
-    if (!alive) return;
-    const zoom = zoomController;
-    if (!zoom) return;
-    const remainingPointers = zoom.removePointer(event.pointerId);
-    if (zoom.isPinching()) {
-      // A pinch keeps ownership until fewer than two pointers remain; the
-      // finger that is still down never becomes a decision swipe.
-      if (remainingPointers >= 2) return;
-      zoom.endPinch();
-      return;
-    }
-    if (!pointer || pointer.id !== event.pointerId) return;
-    const active = pointer;
-    const wheelCandidate = active.ratingWheel
-      ? ratingControls.candidate()
-      : undefined;
-    if (active.ratingWheel) ratingControls.closeWheel();
-    clearPointer();
-    if (active.ratingWheel) {
-      if (
-        cancelled ||
-        wheelCandidate === undefined ||
-        !decisionInteractionEnabled ||
-        active.surface !== photoSurface ||
-        active.photoId !== currentPhotoId
-      )
-        return;
-      send({
-        kind: "photo-mutation",
-        field: "rating",
-        value: wheelCandidate,
-        advance: false,
-      });
-      return;
-    }
-    if (
-      active.pan ||
-      zoom.isManual() ||
-      cancelled ||
-      active.vertical ||
-      !decisionInteractionEnabled ||
-      active.surface !== photoSurface ||
-      active.photoId !== currentPhotoId
-    )
-      return;
-    const dx = event.clientX - active.startX;
-    const elapsed = Math.max(1, event.timeStamp - active.startedAt);
-    const velocity = Math.abs(dx) / elapsed;
-    if (
-      Math.abs(dx) >= SWIPE_COMMIT_PIXELS ||
-      (Math.abs(dx) >= 48 && velocity >= SWIPE_COMMIT_VELOCITY)
-    )
-      send({
-        kind: "photo-mutation",
-        field: "selectionState",
-        value: dx > 0 ? "selected" : "rejected",
-        advance: true,
-      });
-  };
   const keydown = (event: KeyboardEvent) => {
     if (!alive) return;
     const target = event.target as HTMLElement | null;
@@ -3220,7 +1790,7 @@ ${RECOVERY_PANEL_TEMPLATE}
     if (photoView.hidden) {
       if (
         event.key === "Escape" &&
-        (gridMultiCount > 0 || gridMultiMode) &&
+        (batchPresenter.multiCount() > 0 || batchPresenter.multiMode()) &&
         gridView.contains(target)
       ) {
         event.preventDefault();
@@ -3228,8 +1798,7 @@ ${RECOVERY_PANEL_TEMPLATE}
         return;
       }
       // Grid View keys act only while the Grid owns keyboard focus.
-      if (!modifier && !event.shiftKey && gridHoldsKeyboard())
-        applyGridKey(event);
+      if (!modifier && !event.shiftKey) gridPresenter.handleKey(event);
       return;
     }
     if (modifier) return;
@@ -3293,53 +1862,6 @@ ${RECOVERY_PANEL_TEMPLATE}
       });
   };
 
-  const onResize = () => {
-    requestAnimationFrame(() => {
-      if (!alive || gridView.hidden) return;
-      if (
-        columns() === renderedColumns &&
-        columnStride() === renderedColumnStride &&
-        effectiveViewportHeight() === renderedViewportHeight
-      )
-        return;
-      send({ kind: "grid-resize" });
-    });
-  };
-  const onScroll = () => {
-    if (!alive || gridView.hidden) return;
-    // Scrolling reports the visible range through the merged render; it never
-    // starts per-cell work.
-    scheduleGridRender();
-  };
-
-  const renderFolderAlbum = (model: FolderAlbumViewModel) => {
-    if (!alive) return;
-    folderAlbumControls.hidden = !model.visible;
-    if (!model.visible) {
-      folderAlbumSelect.replaceChildren();
-      folderAlbumStatus.textContent = "";
-      folderAlbumSelection = "";
-      return;
-    }
-    const selectedStillExists = model.albums.some(
-      (album) => album.id === folderAlbumSelection,
-    );
-    if (!selectedStillExists)
-      folderAlbumSelection = model.selectedAlbumId || model.albums[0]?.id || "";
-    folderAlbumSelect.replaceChildren();
-    for (const album of model.albums) {
-      const option = document.createElement("option");
-      option.value = album.id;
-      option.textContent = album.name;
-      option.selected = album.id === folderAlbumSelection;
-      folderAlbumSelect.append(option);
-    }
-    folderAlbumSelect.disabled = model.pending || !model.albums.length;
-    addFolderToAlbum.disabled =
-      model.pending || !model.albums.length || !folderAlbumSelection;
-    folderAlbumStatus.textContent = model.status ?? "";
-  };
-
   compactSources.addEventListener("change", onSourceViewportChange);
   mobileActionHierarchy.addEventListener("change", onSourceViewportChange);
   const onShortViewportChange = () => {
@@ -3347,12 +1869,10 @@ ${RECOVERY_PANEL_TEMPLATE}
     // Entering or leaving a short viewport only changes where the strip is
     // presented. The page model owns its facts, so it re-renders the strip in
     // either direction and the view places the single node accordingly.
-    syncFilmstripHost();
+    filmstripPresenter.syncHost();
     send({ kind: "filmstrip-resize" });
   };
   shortViewport.addEventListener("change", onShortViewportChange);
-  gridViewport.addEventListener("scroll", onScroll);
-  window.addEventListener("resize", onResize);
   window.addEventListener("keydown", keydown);
   const stageObserver = new ResizeObserver(() => {
     if (!alive) return;
@@ -3393,7 +1913,6 @@ ${RECOVERY_PANEL_TEMPLATE}
       advance: false,
     }),
   );
-  preview.addEventListener("contextmenu", onPreviewContextMenu);
   dockSelect.addEventListener("click", () =>
     send({
       kind: "photo-mutation",
@@ -3410,56 +1929,13 @@ ${RECOVERY_PANEL_TEMPLATE}
       advance: true,
     }),
   );
-  folderAlbumSelect.addEventListener("change", () => {
-    if (!alive) return;
-    folderAlbumSelection = folderAlbumSelect.value;
-    addFolderToAlbum.disabled = !folderAlbumSelection;
-  });
-  addFolderToAlbum.addEventListener("click", () => {
-    if (folderAlbumSelection)
-      send({ kind: "folder-album-add", albumId: folderAlbumSelection });
-  });
   gridSelectMode.addEventListener("click", () => {
     if (!alive) return;
-    send({ kind: "grid-select-mode", mode: !gridMultiMode });
+    send({ kind: "grid-select-mode", mode: !batchPresenter.multiMode() });
   });
   // Done is the visible clear exit: it empties the multi-selection and leaves
   // Select mode without changing a Photo decision, exactly like Escape.
   multiDone.addEventListener("click", () => send({ kind: "grid-multi-clear" }));
-  batchSelect.addEventListener("click", () => {
-    if (!alive || batchSelect.disabled) return;
-    send({ kind: "grid-batch-mutation", value: "selected" });
-  });
-  batchReject.addEventListener("click", () => {
-    if (!alive || batchReject.disabled) return;
-    send({ kind: "grid-batch-mutation", value: "rejected" });
-  });
-  batchAlbumSelect.addEventListener("change", () => {
-    if (!alive) return;
-    batchAlbumSelection = batchAlbumSelect.value;
-    renderBatch();
-  });
-  batchAlbumAdd.addEventListener("click", () => {
-    if (!alive || batchAlbumAdd.disabled || !batchAlbumSelection) return;
-    send({ kind: "grid-batch-album-add", albumId: batchAlbumSelection });
-  });
-  batchCompensate.addEventListener("click", () => {
-    if (!alive || batchCompensate.disabled) return;
-    send(
-      batchCompensate.dataset.action === "review"
-        ? { kind: "grid-batch-review" }
-        : { kind: "grid-batch-album-remove" },
-    );
-  });
-  preview.addEventListener("pointerdown", pointerDown);
-  preview.addEventListener("pointermove", pointerMove);
-  preview.addEventListener("pointerup", (event) => finishPointer(event));
-  preview.addEventListener("pointercancel", (event) =>
-    finishPointer(event, true),
-  );
-  preview.addEventListener("lostpointercapture", (event) =>
-    finishPointer(event, true),
-  );
   sourceController.syncLayout();
   syncSecondarySurface();
   // The strip's home is only placed once a Photo can present it: the markup
@@ -3534,7 +2010,7 @@ ${RECOVERY_PANEL_TEMPLATE}
       if (!alive) return;
       cancelGridRender();
       clearGridCells();
-      clearFilmstripCells();
+      filmstripPresenter.clear();
       gridEmpty.hidden = false;
       gridEmptyMessage.textContent = message;
       gridEmptyAction.hidden = !action;
@@ -3546,9 +2022,7 @@ ${RECOVERY_PANEL_TEMPLATE}
     renderFolderAlbum,
     renderBatchAlbums(model) {
       if (!alive) return;
-      batchAlbums = model.albums;
-      batchAlbumsPending = model.pending;
-      renderBatch();
+      batchPresenter.renderAlbums(model);
     },
     renderSort(model) {
       if (!alive) return;
@@ -3568,30 +2042,9 @@ ${RECOVERY_PANEL_TEMPLATE}
       // position on the viewport instead of losing it to the page while a
       // write settles or a source changes readiness, and takes the cell back
       // when the Grid becomes interactive again.
-      const focused = document.activeElement;
-      const heldCell = Boolean(
-        focused instanceof HTMLElement &&
-          gridLayer.contains(focused) &&
-          focused.matches("[data-photo-index]"),
-      );
-      const becameInteractive = !gridInteractionEnabled && model.gridEnabled;
-      gridInteractionEnabled = model.gridEnabled;
-      for (const cell of Array.from(
-        gridLayer.querySelectorAll<HTMLButtonElement>(
-          ".photo-cell[data-photo-index]",
-        ),
-      ))
-        cell.disabled = !gridInteractionEnabled;
-      if (heldCell && !gridInteractionEnabled) gridViewport.focus();
-      else if (becameInteractive) restoreGridKeyboardFocus();
+      gridPresenter.setInteractive(model.gridEnabled);
       decisionInteractionEnabled = model.decisionEnabled;
-      if (
-        !model.decisionEnabled &&
-        (ratingControls.isWheelOpen() ||
-          pointer?.ratingPending ||
-          pointer?.ratingWheel)
-      )
-        resetGestures();
+      if (!model.decisionEnabled) photoGestures?.cancelUnavailableDecision();
       ratingControls.setDecisionEnabled(model.decisionEnabled);
       dockSelect.disabled = !model.decisionEnabled;
       dockReject.disabled = !model.decisionEnabled;
@@ -3604,26 +2057,7 @@ ${RECOVERY_PANEL_TEMPLATE}
       dockNext.disabled = !model.nextEnabled;
       photoToolsUndo.disabled = !model.undoEnabled;
       removedPanels.setRemovalEnabled(model.removalEnabled);
-      const wasStripInteractive = filmstripInteractive;
-      filmstripInteractive = model.filmstripEnabled;
-      const heldElement = document.activeElement as HTMLElement | null;
-      const holdsStripFocus =
-        wasStripInteractive &&
-        !model.filmstripEnabled &&
-        heldElement?.dataset.filmstripIndex !== undefined;
-      applyFilmstripInteractivity();
-      if (holdsStripFocus) {
-        heldStripIndex = Number(heldElement.dataset.filmstripIndex);
-        // A native modal makes the rest of the document inert, so the Photo
-        // View cannot take a parked focus while the strip is disclosed inside
-        // Photo tools: the surface that holds the strip does, and the restore
-        // below recognizes it as the parked owner.
-        const surface = stripSurface();
-        if (surface) surface.focus();
-        else photoView.focus();
-      } else if (!wasStripInteractive && model.filmstripEnabled) {
-        restoreHeldStripFocus();
-      }
+      filmstripPresenter.setInteractive(model.filmstripEnabled);
       zoomController?.applyZoom();
     },
     renderMembership(model) {
@@ -3642,7 +2076,7 @@ ${RECOVERY_PANEL_TEMPLATE}
       gridView.hidden = false;
       photoView.hidden = true;
       clearGridCells();
-      clearFilmstripCells();
+      filmstripPresenter.clear();
       sourceController.close(false);
       sourceController.syncLayout();
       if (returnFocus) gridViewport.focus();
@@ -3657,7 +2091,7 @@ ${RECOVERY_PANEL_TEMPLATE}
       gridEmptyExplanation = false;
       currentPhotoId = undefined;
       photoSurface = {};
-      gridKeyboardIndex = undefined;
+      gridPresenter.resetKeyboard();
       // A new source starts with no multi-selection: the tray presents nothing
       // until the page model marks Photos again.
       resetGridMultiSelection();
@@ -3670,62 +2104,13 @@ ${RECOVERY_PANEL_TEMPLATE}
     resetGridMultiSelection,
     gridVisible: () => alive && !gridView.hidden,
     scrollToGridIndex(index) {
-      if (alive)
-        gridViewport.scrollTop = Math.floor(index / columns()) * rowPitch();
+      gridPresenter.scrollTo(index);
     },
     captureGridRestoration() {
-      if (!alive || gridView.hidden || gridTotal === 0) return undefined;
-      const count = columns();
-      const index = firstVisibleGridIndex(count);
-      const photo = gridPhotoLookup(index);
-      if (!photo) return undefined;
-      const offset = gridViewport.scrollTop % rowPitch();
-      const active = document.activeElement;
-      const holdsKeyboard =
-        active === gridViewport ||
-        (active instanceof HTMLElement && gridLayer.contains(active));
-      // The cell the keyboard owns, or the cell a pointer activation focused.
-      const activeCellIndex =
-        active instanceof HTMLElement && active.dataset.photoIndex !== undefined
-          ? Number(active.dataset.photoIndex)
-          : gridKeyboardIndex;
-      const focusedId =
-        activeCellIndex !== undefined &&
-        Number.isInteger(activeCellIndex) &&
-        activeCellIndex >= 0 &&
-        activeCellIndex < gridTotal
-          ? gridPhotoLookup(activeCellIndex)?.id
-          : undefined;
-      return {
-        anchor: { photoId: photo.id, indexHint: index, offset },
-        focus:
-          holdsKeyboard && focusedId
-            ? { kind: "photo", photoId: focusedId }
-            : { kind: "grid" },
-      };
+      return gridPresenter.captureRestoration();
     },
     restoreGridAnchor(model) {
-      if (!alive || gridView.hidden) return;
-      // The Grid itself owns focus when the restoration names no cell, and a
-      // cell that no longer exists leaves the Grid focused. The establishment
-      // path (a reload or a direct entry) has no activation that moved focus
-      // into the Grid, so the viewport takes it here rather than leaving the
-      // document body focused. preventScroll keeps the restored geometry.
-      gridKeyboardIndex =
-        model.focusIndex === undefined
-          ? undefined
-          : Math.max(0, Math.min(gridTotal - 1, model.focusIndex));
-      if (
-        gridKeyboardIndex === undefined &&
-        !gridLayer.contains(document.activeElement)
-      )
-        gridViewport.focus({ preventScroll: true });
-      if (gridTotal === 0) return;
-      const count = columns();
-      const target = Math.max(0, Math.min(gridTotal - 1, model.index));
-      gridViewport.scrollTop =
-        Math.floor(target / count) * rowPitch() + model.offset;
-      scheduleGridRender();
+      gridPresenter.restoreAnchor(model);
     },
     closeTransientSurfaces() {
       if (!alive) return;
@@ -3744,15 +2129,7 @@ ${RECOVERY_PANEL_TEMPLATE}
       surfaces.closeAll();
     },
     focusGridIndex(index) {
-      if (!alive) return;
-      const count = columns();
-      const target = Math.max(0, Math.min(Math.max(gridTotal - 1, 0), index));
-      gridKeyboardIndex = target;
-      // This is a deliberate focus move, so it survives a control that holds
-      // focus now, such as the tray's Review action.
-      pendingGridCellFocus = target;
-      gridViewport.scrollTop = Math.floor(target / count) * rowPitch();
-      scheduleGridRender();
+      gridPresenter.focusIndex(index);
     },
     showGrid(index) {
       if (!alive) return;
@@ -3765,17 +2142,14 @@ ${RECOVERY_PANEL_TEMPLATE}
       // Photo View detached the owner's Grid images, so the visible Grid
       // rebuilds its cells and re-attaches every thumbnail it still shows.
       clearGridCells();
-      clearFilmstripCells();
+      filmstripPresenter.clear();
       sourceController.close(false);
       sourceController.syncLayout();
       presentConnection();
       gridViewport.focus();
       // Returning from Photo View returns the Grid keyboard to that Photo
       // cell; the merged render focuses it once it is rendered.
-      gridKeyboardIndex = index;
-      if (index !== undefined)
-        gridViewport.scrollTop = Math.floor(index / columns()) * rowPitch();
-      scheduleGridRender();
+      gridPresenter.returnFromPhoto(index);
     },
     enterPhoto() {
       if (!alive) return;
@@ -3787,13 +2161,13 @@ ${RECOVERY_PANEL_TEMPLATE}
       photoView.hidden = false;
       photoView.scrollTop = 0;
       sourceController.syncLayout();
-      syncFilmstripHost();
+      filmstripPresenter.syncHost();
       presentConnection();
       photoView.focus();
       zoomController?.resetForImage();
       photoSurface = {};
     },
-    renderFilmstrip,
+    renderFilmstrip: filmstripPresenter.render,
     renderPhotoFacts,
     renderPhotoMetadata,
     renderPhotoShell,
@@ -3920,19 +2294,18 @@ ${RECOVERY_PANEL_TEMPLATE}
       ratingControls.dispose();
       viewOptionsController.dispose();
       stageObserver.disconnect();
-      clearFilmstripCells();
+      filmstripPresenter.dispose();
       zoomController?.dispose();
-      preview.removeEventListener("contextmenu", onPreviewContextMenu);
+      sourcePresenter?.dispose();
+      batchPresenter?.dispose();
       sourceController.dispose();
-      cancelGridRender();
+      gridPresenter.dispose();
       compactSources.removeEventListener("change", onSourceViewportChange);
       mobileActionHierarchy.removeEventListener(
         "change",
         onSourceViewportChange,
       );
       shortViewport.removeEventListener("change", onShortViewportChange);
-      gridViewport.removeEventListener("scroll", onScroll);
-      window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", keydown);
       surfaces.dispose();
     },
@@ -3959,70 +2332,12 @@ function selectionLabel(value?: ViewSelectionState): string {
       : "Undecided";
 }
 
-function gridPhotoFacts(
-  photo: GridPhotoViewModel,
-  deliveryFailed: boolean,
-  thumbnailState?: "unavailable" | "failed",
-): string[] {
-  const facts: string[] = [];
-  if (!photo.available) facts.push("Photo unavailable");
-  if (photo.original.kind === "raw") facts.push("RAW");
-  if (photo.hasSavedEdits) facts.push("Edited");
-  if (photo.preview.state === "unavailable") facts.push("Preview unavailable");
-  if (photo.preview.state === "failed") facts.push("Preview failed");
-  if (thumbnailState === "unavailable" && photo.preview.state !== "unavailable")
-    facts.push("Thumbnail unavailable");
-  if (thumbnailState === "failed") facts.push("Thumbnail failed");
-  if (deliveryFailed) facts.push("Thumbnail delivery failed");
-  return facts;
-}
-
-/// Everything one rendered cell presents at its position. Two renders with the
-/// same signature leave the cell's button and thumbnail image untouched.
-function gridCellSignature(
-  index: number,
-  photo: GridPhotoViewModel,
-  deliveryFailed: boolean,
-): string {
-  return [
-    String(index),
-    photo.id,
-    photo.originalFilename ?? "",
-    photo.available ? "available" : "unavailable",
-    photo.original.kind,
-    photo.selectionState,
-    String(photo.rating),
-    photo.hasSavedEdits ? "edited" : "unedited",
-    photo.preview.state,
-    photo.preview.thumbnailUrl ?? "",
-    deliveryFailed ? "delivery-failed" : "delivered",
-  ].join("|");
-}
-
-function filmstripCellSignature(
-  cell: FilmstripCellViewModel,
-  total: number,
-  deliveryFailed: boolean,
-): string {
-  const photo = cell.photo;
-  return [
-    String(cell.index),
-    String(total),
-    cell.current ? "current" : "neighbor",
-    photo ? gridCellSignature(cell.index, photo, deliveryFailed) : "loading",
-  ].join("|");
-}
-
 function sourceLabel(source?: ViewPreviewSource): string {
   return source === "jpeg-original"
     ? "JPEG"
     : source === "raw-embedded-jpeg"
       ? "RAW embedded JPEG"
       : "—";
-}
-
-function clamp(value: number, low: number, high: number): number {
-  return Math.max(low, Math.min(high, value));
 }
 
 /// Keys a focused range input handles itself: arrows, Home, End, and Page.
