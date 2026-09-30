@@ -40,6 +40,10 @@ import {
   type SourceGridSource,
   type SourceWindowOperation,
 } from "./model/source-grid-owner.js";
+import {
+  createSourceOpenOwner,
+  type SourceLifecycleOwner,
+} from "./model/source-open-owner.js";
 import { releaseBrowse, type SourceViewOrder } from "./api/source-grid.js";
 import { type RemovalResult, type RestorationResult } from "./api/removal.js";
 import { createRemovalOwner } from "./model/removal-owner.js";
@@ -1124,6 +1128,16 @@ function mountPrivateLibraryBrowser(
     await loadFolderWindow("", 0);
     return authority;
   };
+  const sourceLifecycle: SourceLifecycleOwner = createSourceOpenOwner({
+    sourceGrid,
+    fileLocations,
+    rebindFileLocations,
+    onPublicationConflict: (publication) =>
+      claimPublicationLocationNotice(
+        `publication:${publication}`,
+        "Library changed. Reopen this folder.",
+      ),
+  });
 
   async function applyFileLocationOutcome(
     outcome: FileLocationOutcome,
@@ -1528,10 +1542,6 @@ function mountPrivateLibraryBrowser(
     selection: SelectionFilter = "all",
     establishment: SourceEstablishmentOptions = {},
   ): Promise<SourceEstablishment> {
-    const descriptor: SourceGridSource =
-      requested.kind === "folder" && fileLocations.publication
-        ? { ...requested, publication: fileLocations.publication }
-        : requested;
     pageBusy = true;
     updateControls();
     cancelScheduledGridRender();
@@ -1547,13 +1557,13 @@ function mountPrivateLibraryBrowser(
       ...(order !== "source-default" ? { order } : {}),
       selection,
     };
-    const pendingOpen = sourceGrid.open(descriptor, {
+    const lifecycleOpen = sourceLifecycle.beginOpen(requested, {
       ...(preferredPhotoId ? { preferredPhotoId } : {}),
       order,
       selection,
     });
-    const authority = sourceGrid.authority;
-    const generation = sourceGrid.generation;
+    const authority = lifecycleOpen.authority;
+    const generation = lifecycleOpen.generation;
     const photoAuthority = photoOwner.bindSource({
       sourceAuthority: authority,
       total: sourceGrid.total,
@@ -1578,34 +1588,12 @@ function mountPrivateLibraryBrowser(
     gridMulti.clear();
     renderSortControl();
     try {
-      const opened = await pendingOpen;
-      if (opened.kind === "detached") return SOURCE_SUPERSEDED;
-      if (opened.kind === "publication-conflict") {
-        // Only the current source's handler may reset and reload File
-        // Locations: a superseded open doing the same would discard the
-        // newer recovery and leave the tree unbound.
-        if (!sourceGrid.isCurrent(authority)) return SOURCE_SUPERSEDED;
-        const reboundAuthority = await rebindFileLocations();
-        if (!sourceGrid.isCurrent(authority)) return SOURCE_SUPERSEDED;
-        if (
-          fileLocations.isCurrent(reboundAuthority) &&
-          fileLocations.publication
-        )
-          claimPublicationLocationNotice(
-            `publication:${fileLocations.publication}`,
-            "Library changed. Reopen this folder.",
-          );
-        throw new Error("source open failed");
-      }
-      if (opened.kind === "failed") {
-        // A 404 is the server confirming that the requested Album or Folder
-        // is gone, which is the only answer that licenses an explained
-        // fallback. Every other answer keeps its retryable failure.
-        if (opened.status === 404) return SOURCE_MISSING;
-        throw new Error("source open failed");
-      }
-      const gridPosition = sourceGrid.readGridPosition(authority);
-      if (gridPosition === undefined) return SOURCE_SUPERSEDED;
+      const opened = await lifecycleOpen.outcome;
+      if (!sourceGrid.isCurrent(authority)) return SOURCE_SUPERSEDED;
+      if (opened.kind === "superseded") return SOURCE_SUPERSEDED;
+      if (opened.kind === "missing") return SOURCE_MISSING;
+      if (opened.kind === "failed") throw new Error("source open failed");
+      const gridPosition = opened.position;
       photoOwner.updateSource({
         sourceAuthority: authority,
         total: sourceGrid.total,
@@ -1816,12 +1804,14 @@ function mountPrivateLibraryBrowser(
             publication: boundPublication!,
           }
         : sourceGrid.source;
-    const pendingOpen = sourceGrid.open(descriptor, {
+    const lifecycleOpen = sourceLifecycle.beginOpen(descriptor, {
       mode: "reopen",
       order: sourceGrid.order,
       selection: sourceGrid.selection,
       ...(anchorId ? { preferredPhotoId: anchorId } : {}),
     });
+    const authority = lifecycleOpen.authority;
+    const generation = lifecycleOpen.generation;
     // The reopen detaches the images the Grid had in flight and keeps its
     // retained cells. Binding those thumbnails again right here - from the URL
     // the owner still holds - restores them without a render, so the retained
@@ -1830,8 +1820,8 @@ function mountPrivateLibraryBrowser(
       total: sourceGrid.total,
       photoAt: (index) => sourceGrid.photoAt(index),
     });
-    const authority = sourceGrid.authority;
-    const generation = sourceGrid.generation;
+    // The lifecycle owner establishes the new authority before the request
+    // settles, so Photo and recovery state bind to the same generation.
     const photoAuthority = photoOwner.rebindSource({
       sourceAuthority: authority,
       total: sourceGrid.total,
@@ -1853,28 +1843,12 @@ function mountPrivateLibraryBrowser(
     setGridStatusText(notice);
     view.setPhotoStatus(notice);
     try {
-      const opened = await pendingOpen;
-      if (opened.kind === "detached") return;
-      if (opened.kind === "publication-conflict") {
-        // Generation-gated exactly like openSource: only the current
-        // source's recovery may reset and rebind File Locations.
-        if (sourceGrid.isCurrent(authority)) {
-          const reboundAuthority = await rebindFileLocations();
-          if (
-            sourceGrid.isCurrent(authority) &&
-            fileLocations.isCurrent(reboundAuthority) &&
-            fileLocations.publication
-          )
-            claimPublicationLocationNotice(
-              `publication:${fileLocations.publication}`,
-              "Library changed. Reopen this folder.",
-            );
-        }
+      const opened = await lifecycleOpen.outcome;
+      if (!sourceGrid.isCurrent(authority)) return;
+      if (opened.kind === "superseded") return;
+      if (opened.kind === "failed" || opened.kind === "missing")
         throw new Error("browse reopen failed");
-      }
-      if (opened.kind === "failed") throw new Error("browse reopen failed");
-      const gridPosition = sourceGrid.readGridPosition(authority);
-      if (gridPosition === undefined) return;
+      const gridPosition = opened.position;
       photoOwner.updateSource({
         sourceAuthority: authority,
         total: sourceGrid.total,

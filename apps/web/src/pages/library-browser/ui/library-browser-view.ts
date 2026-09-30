@@ -27,6 +27,7 @@ import { createViewOptions, type ViewOptionsElements } from "./view-options.js";
 import { createRatingControls } from "./rating-controls.js";
 import { createPhotoToolsController } from "./photo-tools.js";
 import { createPhotoZoomController } from "./photo-zoom.js";
+import { createPhotoGestures } from "./photo-gestures.js";
 import { createPhotoEditorSurfaceController } from "./photo-editor-surface.js";
 import type { EditorProxyViewModel } from "./editor-proxy-view-model.js";
 import { createSourceSurfaceController } from "./source-surface.js";
@@ -77,11 +78,6 @@ type ViewPreviewSource = "jpeg-original" | "raw-embedded-jpeg";
 
 /** Full wording behind the compact limited-detail marker in the Preview fact. */
 const LIMITED_PREVIEW_DETAIL = "Limited by camera Preview resolution";
-const SWIPE_PENDING_PIXELS = 24;
-const SWIPE_COMMIT_PIXELS = 72;
-const SWIPE_COMMIT_VELOCITY = 0.5;
-const RATING_WHEEL_HOLD_MS = 450;
-const RATING_WHEEL_MOVE_PIXELS = 12;
 
 type SourceReference =
   | Readonly<{ kind: "library" }>
@@ -1417,25 +1413,6 @@ ${RECOVERY_PANEL_TEMPLATE}
   let currentPhotoId: string | undefined;
   let currentSelection: ViewSelectionState = "undecided";
   let decisionInteractionEnabled = false;
-  let ratingWheelHoldTimer: number | undefined;
-  let pointer:
-    | {
-        id: number;
-        startX: number;
-        startY: number;
-        lastX: number;
-        lastY: number;
-        startedAt: number;
-        vertical: boolean;
-        ratingPending: boolean;
-        ratingWheel: boolean;
-        // The zoom mode the gesture started in; it owns the drag until
-        // release even if Fit returns mid-gesture.
-        pan: boolean;
-        surface: object;
-        photoId: string;
-      }
-    | undefined;
 
   const compactSources = window.matchMedia("(max-width: 760px)");
   const mobileActionHierarchy = window.matchMedia(
@@ -1499,28 +1476,7 @@ ${RECOVERY_PANEL_TEMPLATE}
   const setGridThumbnailSize = (size: "small" | "medium" | "large") =>
     gridPresenter.setSize(size);
 
-  const cancelRatingHold = () => {
-    if (ratingWheelHoldTimer !== undefined) {
-      window.clearTimeout(ratingWheelHoldTimer);
-      ratingWheelHoldTimer = undefined;
-    }
-  };
-  const clearPointer = () => {
-    cancelRatingHold();
-    const id = pointer?.id;
-    pointer = undefined;
-    if (id !== undefined && preview.hasPointerCapture(id))
-      preview.releasePointerCapture(id);
-    stage.style.transform = "";
-    selectFeedback.classList.remove("pending");
-    rejectFeedback.classList.remove("pending");
-  };
-  const resetGestures = () => {
-    cancelRatingHold();
-    ratingControls.closeWheel();
-    zoomController?.resetPointers();
-    clearPointer();
-  };
+  const resetGestures = () => photoGestures?.reset();
   const photoToolsController = createPhotoToolsController({
     elements: {
       photoToolsDialog,
@@ -1654,10 +1610,19 @@ ${RECOVERY_PANEL_TEMPLATE}
     level: zoomLevel,
     isAlive: () => alive,
   });
-  const onPreviewContextMenu = (event: MouseEvent) => {
-    if (pointer?.ratingPending || ratingControls.isWheelOpen())
-      event.preventDefault();
-  };
+  const photoGestures = createPhotoGestures({
+    preview,
+    stage,
+    selectFeedback,
+    rejectFeedback,
+    zoom: zoomController,
+    rating: ratingControls,
+    isAlive: () => alive,
+    currentPhotoId: () => currentPhotoId,
+    currentSurface: () => photoSurface,
+    decisionEnabled: () => decisionInteractionEnabled,
+    send,
+  });
 
   /// The address one source destination resolves to. A source selection
   /// always uses that source's default order and the All filter, so the
@@ -2177,184 +2142,6 @@ ${RECOVERY_PANEL_TEMPLATE}
     status.textContent = text;
   };
 
-  const pointerDown = (event: PointerEvent) => {
-    if (!alive || !currentPhotoId) return;
-    const zoom = zoomController;
-    if (!zoom) return;
-    const pointerCount = zoom.trackPointer(
-      event.pointerId,
-      event.clientX,
-      event.clientY,
-    );
-    if (pointerCount === 2) {
-      event.preventDefault();
-      cancelRatingHold();
-      ratingControls.closeWheel();
-      clearPointer();
-      zoom.beginPinch();
-      return;
-    }
-    if (pointerCount > 2 || zoom.isPinching() || pointer || !event.isPrimary)
-      return;
-    // Fit owns decision swipes; a manual zoom owns bounded panning. Neither
-    // state ever records a decision from a drag.
-    if (!zoom.isManual() && !decisionInteractionEnabled) return;
-    const ratingPending =
-      event.pointerType === "touch" &&
-      !zoom.isManual() &&
-      zoom.hasMeasurableImage() &&
-      decisionInteractionEnabled;
-    pointer = {
-      id: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      lastX: event.clientX,
-      lastY: event.clientY,
-      startedAt: event.timeStamp,
-      vertical: false,
-      ratingPending,
-      ratingWheel: false,
-      pan: zoom.isManual(),
-      surface: photoSurface,
-      photoId: currentPhotoId,
-    };
-    try {
-      preview.setPointerCapture(event.pointerId);
-    } catch {
-      // Synthetic PointerEvents used by browser qualification have no native
-      // active pointer to capture; the gesture state still remains testable.
-    }
-    if (ratingPending) {
-      const id = event.pointerId;
-      const surface = photoSurface;
-      const photoId = currentPhotoId;
-      ratingWheelHoldTimer = window.setTimeout(() => {
-        ratingWheelHoldTimer = undefined;
-        const active = pointer;
-        if (
-          !active ||
-          active.id !== id ||
-          !active.ratingPending ||
-          active.surface !== surface ||
-          active.photoId !== photoId ||
-          active.vertical ||
-          active.pan ||
-          zoom.isManual() ||
-          !decisionInteractionEnabled ||
-          !currentPhotoId
-        )
-          return;
-        active.ratingPending = false;
-        active.ratingWheel = true;
-        stage.style.transform = "";
-        selectFeedback.classList.remove("pending");
-        rejectFeedback.classList.remove("pending");
-        ratingControls.openWheel(active.lastX, active.lastY);
-        ratingControls.updateWheel(active.lastX, active.lastY);
-      }, RATING_WHEEL_HOLD_MS);
-    }
-  };
-  const pointerMove = (event: PointerEvent) => {
-    if (!alive) return;
-    const zoom = zoomController;
-    if (!zoom) return;
-    zoom.updatePointer(event.pointerId, event.clientX, event.clientY);
-    if (zoom.isPinching()) {
-      zoom.updatePinch();
-      return;
-    }
-    if (!pointer || pointer.id !== event.pointerId) return;
-    const dx = event.clientX - pointer.startX;
-    const dy = event.clientY - pointer.startY;
-    const stepX = event.clientX - pointer.lastX;
-    const stepY = event.clientY - pointer.lastY;
-    pointer.lastX = event.clientX;
-    pointer.lastY = event.clientY;
-    if (pointer.ratingWheel) {
-      ratingControls.updateWheel(event.clientX, event.clientY);
-      return;
-    }
-    if (pointer.pan || zoom.isManual()) {
-      zoom.panBy(stepX, stepY);
-      return;
-    }
-    if (
-      pointer.ratingPending &&
-      Math.hypot(dx, dy) > RATING_WHEEL_MOVE_PIXELS
-    ) {
-      pointer.ratingPending = false;
-      cancelRatingHold();
-      // The dominant axis owns the gesture. Equal movement yields to native
-      // vertical scrolling instead of guessing a decision direction.
-      if (Math.abs(dy) >= Math.abs(dx)) pointer.vertical = true;
-    } else if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 12) {
-      pointer.vertical = true;
-    }
-    if (pointer.vertical) return;
-    stage.style.transform = `translateX(${clamp(dx, -140, 140)}px)`;
-    selectFeedback.classList.toggle("pending", dx > SWIPE_PENDING_PIXELS);
-    rejectFeedback.classList.toggle("pending", dx < -SWIPE_PENDING_PIXELS);
-  };
-  const finishPointer = (event: PointerEvent, cancelled = false) => {
-    if (!alive) return;
-    const zoom = zoomController;
-    if (!zoom) return;
-    const remainingPointers = zoom.removePointer(event.pointerId);
-    if (zoom.isPinching()) {
-      // A pinch keeps ownership until fewer than two pointers remain; the
-      // finger that is still down never becomes a decision swipe.
-      if (remainingPointers >= 2) return;
-      zoom.endPinch();
-      return;
-    }
-    if (!pointer || pointer.id !== event.pointerId) return;
-    const active = pointer;
-    const wheelCandidate = active.ratingWheel
-      ? ratingControls.candidate()
-      : undefined;
-    if (active.ratingWheel) ratingControls.closeWheel();
-    clearPointer();
-    if (active.ratingWheel) {
-      if (
-        cancelled ||
-        wheelCandidate === undefined ||
-        !decisionInteractionEnabled ||
-        active.surface !== photoSurface ||
-        active.photoId !== currentPhotoId
-      )
-        return;
-      send({
-        kind: "photo-mutation",
-        field: "rating",
-        value: wheelCandidate,
-        advance: false,
-      });
-      return;
-    }
-    if (
-      active.pan ||
-      zoom.isManual() ||
-      cancelled ||
-      active.vertical ||
-      !decisionInteractionEnabled ||
-      active.surface !== photoSurface ||
-      active.photoId !== currentPhotoId
-    )
-      return;
-    const dx = event.clientX - active.startX;
-    const elapsed = Math.max(1, event.timeStamp - active.startedAt);
-    const velocity = Math.abs(dx) / elapsed;
-    if (
-      Math.abs(dx) >= SWIPE_COMMIT_PIXELS ||
-      (Math.abs(dx) >= 48 && velocity >= SWIPE_COMMIT_VELOCITY)
-    )
-      send({
-        kind: "photo-mutation",
-        field: "selectionState",
-        value: dx > 0 ? "selected" : "rejected",
-        advance: true,
-      });
-  };
   const keydown = (event: KeyboardEvent) => {
     if (!alive) return;
     const target = event.target as HTMLElement | null;
@@ -2532,7 +2319,6 @@ ${RECOVERY_PANEL_TEMPLATE}
       advance: false,
     }),
   );
-  preview.addEventListener("contextmenu", onPreviewContextMenu);
   dockSelect.addEventListener("click", () =>
     send({
       kind: "photo-mutation",
@@ -2590,15 +2376,6 @@ ${RECOVERY_PANEL_TEMPLATE}
         : { kind: "grid-batch-album-remove" },
     );
   });
-  preview.addEventListener("pointerdown", pointerDown);
-  preview.addEventListener("pointermove", pointerMove);
-  preview.addEventListener("pointerup", (event) => finishPointer(event));
-  preview.addEventListener("pointercancel", (event) =>
-    finishPointer(event, true),
-  );
-  preview.addEventListener("lostpointercapture", (event) =>
-    finishPointer(event, true),
-  );
   sourceController.syncLayout();
   syncSecondarySurface();
   // The strip's home is only placed once a Photo can present it: the markup
@@ -2709,13 +2486,7 @@ ${RECOVERY_PANEL_TEMPLATE}
       // when the Grid becomes interactive again.
       gridPresenter.setInteractive(model.gridEnabled);
       decisionInteractionEnabled = model.decisionEnabled;
-      if (
-        !model.decisionEnabled &&
-        (ratingControls.isWheelOpen() ||
-          pointer?.ratingPending ||
-          pointer?.ratingWheel)
-      )
-        resetGestures();
+      if (!model.decisionEnabled) photoGestures?.cancelUnavailableDecision();
       ratingControls.setDecisionEnabled(model.decisionEnabled);
       dockSelect.disabled = !model.decisionEnabled;
       dockReject.disabled = !model.decisionEnabled;
@@ -2967,7 +2738,7 @@ ${RECOVERY_PANEL_TEMPLATE}
       stageObserver.disconnect();
       filmstripPresenter.dispose();
       zoomController?.dispose();
-      preview.removeEventListener("contextmenu", onPreviewContextMenu);
+      photoGestures?.dispose();
       sourceController.dispose();
       gridPresenter.dispose();
       compactSources.removeEventListener("change", onSourceViewportChange);
@@ -3008,10 +2779,6 @@ function sourceLabel(source?: ViewPreviewSource): string {
     : source === "raw-embedded-jpeg"
       ? "RAW embedded JPEG"
       : "—";
-}
-
-function clamp(value: number, low: number, high: number): number {
-  return Math.max(low, Math.min(high, value));
 }
 
 /// Keys a focused range input handles itself: arrows, Home, End, and Page.

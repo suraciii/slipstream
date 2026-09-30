@@ -125,12 +125,17 @@ defined by Web Async Ownership:
   work. It reuses the DOM nodes of Photos that stay visible and restores focus
   to one Tab stop without taking it from another surface. See
   [Library Browsing and Selection](../docs/library-browsing-and-selection.md).
-  It yields Fit-state vertical touch panning to native Photo View
-  scrolling, retains Fit-state horizontal decision gestures, and takes full
-  Preview drag ownership whenever the zoom state is manual. The page UI also
-  owns the transient mobile Quick Action Dock, Photo tools surface, pending
-  Rating Wheel gesture, Wheel candidate, and disclosure focus. These
-  values are presentation state and do not become Photo owner state.
+  The page-local Photo gesture controller owns Preview pointer capture, pending
+  holds, horizontal swipe feedback, and the handoff to zoom panning or pinch.
+  It reads the current Photo surface and decision readiness without owning
+  Photo facts, and emits only semantic mutation intents. Resetting a Photo,
+  leaving its surface, or disposing the view cancels the hold and releases
+  capture; a canceled or stale gesture never writes a decision. Fit-state
+  vertical touch panning remains native Photo View scrolling. Manual zoom
+  owns Preview dragging and never turns it into a decision.
+  Rating controls own the transient Wheel presentation and candidate; the
+  page UI also owns the Quick Action Dock, Photo tools, and disclosure focus.
+  None of these values become Photo owner state.
 - The **page API** owns Library Browser HTTP calls, wire response types, and
   response decoding. It accepts cancellation inputs from the calling owner but
   does not choose which operation supersedes another.
@@ -301,6 +306,22 @@ same module: the anchor's stable Photo identity is confirmed before its index
 hint is trusted, an anchor the Snapshot no longer holds clamps to the captured
 position and restores geometry without naming a focused cell, and a retryable
 lookup keeps the resolved position instead of presenting the Photo as gone.
+
+### Source opening settlement
+
+One page-local model boundary classifies source-open results for both a new
+destination and an expired Snapshot reopen. It binds a Folder request to the
+current File Location publication, captures the source authority established
+by the request, and admits the returned Grid position only for that authority.
+A publication conflict may rebind File Locations only while the source remains
+current; after rebinding, both source and File Location authorities must still
+match before the page receives a publication notice. Only a confirmed `404`
+identifies a missing source. Other failures remain retryable.
+
+The page coordinates Photo rebinding, the first bounded window, Recovery,
+presentation, and history. It checks authority again when consuming an awaited
+result, because another destination may supersede it between continuations.
+The source and Grid owner remains the only owner of Snapshot state and release.
 
 ### Styling
 
