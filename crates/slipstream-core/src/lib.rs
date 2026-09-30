@@ -21,6 +21,7 @@ pub mod persistence;
 pub mod preview;
 pub mod reconcile;
 mod recovery;
+pub mod xmp;
 
 #[cfg(test)]
 mod test_support;
@@ -103,3 +104,4 @@ pub use recovery::{
     count_prefix_scope, digest_bytes, evaluate_relocation, evidence_original_ids,
     parse_location_prefix, plan_manual_relocations, plan_recovery, plan_single_relocation,
 };
+pub use xmp::{XMP_CONTENT_TYPE, XMP_RETENTION_SECONDS, XmpCreateOutcome, XmpExportRecord};

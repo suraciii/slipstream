@@ -1143,6 +1143,11 @@ fn export_inspection_is_validated_against_the_closed_state_machine() {
         target: "development-tiff".to_owned(),
         stage: "develop".to_owned(),
         content_type: "image/tiff".to_owned(),
+        filename: "e1.tiff".to_owned(),
+        orientation: "top-left".to_owned(),
+        sample_format: "float32".to_owned(),
+        color_space: "RGB".to_owned(),
+        icc_embedded: false,
         width: 5542,
         height: 3696,
         profile_identity: "profile".to_owned(),
@@ -1158,6 +1163,8 @@ fn export_inspection_is_validated_against_the_closed_state_machine() {
             target: "development-tiff".to_owned(),
             recipe_version: "recipe-2".to_owned(),
             source_revision: "source-7".to_owned(),
+            created_at: "2026-01-01T12:00:00Z".to_owned(),
+            settled_at: terminal.map(|_| "2026-01-01T12:00:01Z".to_owned()),
             bundle_id: "bundle".to_owned(),
             terminal_outcome: terminal.map(str::to_owned),
             failure_reason: None,
@@ -1194,6 +1201,16 @@ fn export_inspection_is_validated_against_the_closed_state_machine() {
             data.target = "gallery-print".to_owned();
             data
         }),
+        ("invalid creation time", {
+            let mut data = inspect("running", None, None);
+            data.created_at = "yesterday".to_owned();
+            data
+        }),
+        ("invalid settlement time", {
+            let mut data = inspect("failed", Some("failed"), None);
+            data.settled_at = Some("tomorrow".to_owned());
+            data
+        }),
     ] {
         let failure = transport(label.1);
         assert_eq!(failure.payload.code, "transport_failed", "for {}", label.0);
@@ -1217,8 +1234,18 @@ fn export_inspection_is_validated_against_the_closed_state_machine() {
             inspect("succeeded", Some("succeeded"), Some(artifact))
         }),
         ("short digest", {
-            let mut artifact = artifact;
+            let mut artifact = artifact.clone();
             artifact.sha256 = "a".repeat(63);
+            inspect("succeeded", Some("succeeded"), Some(artifact))
+        }),
+        ("missing filename", {
+            let mut artifact = artifact.clone();
+            artifact.filename.clear();
+            inspect("succeeded", Some("succeeded"), Some(artifact))
+        }),
+        ("missing color space", {
+            let mut artifact = artifact.clone();
+            artifact.color_space.clear();
             inspect("succeeded", Some("succeeded"), Some(artifact))
         }),
     ] {
@@ -1233,6 +1260,10 @@ fn export_list_entries_carry_only_closed_states_and_targets() {
         export_id: "e1".to_owned(),
         state: "succeeded".to_owned(),
         target: target.to_owned(),
+        recipe_version: "recipe-2".to_owned(),
+        source_revision: "source-7".to_owned(),
+        created_at: "2026-01-01T12:00:00Z".to_owned(),
+        settled_at: Some("2026-01-01T12:00:01Z".to_owned()),
     };
     assert_eq!(
         export_list_value(

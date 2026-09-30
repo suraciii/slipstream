@@ -475,6 +475,11 @@ pub(crate) struct ExportArtifactWire {
     pub(crate) target: &'static str,
     pub(crate) stage: &'static str,
     pub(crate) content_type: &'static str,
+    pub(crate) filename: String,
+    pub(crate) orientation: &'static str,
+    pub(crate) sample_format: &'static str,
+    pub(crate) color_space: &'static str,
+    pub(crate) icc_embedded: bool,
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) profile_identity: String,
@@ -503,6 +508,10 @@ pub(crate) struct ExportSummaryWire {
     pub(crate) export_id: String,
     pub(crate) state: &'static str,
     pub(crate) target: &'static str,
+    pub(crate) recipe_version: String,
+    pub(crate) source_revision: String,
+    pub(crate) created_at: String,
+    pub(crate) settled_at: Option<String>,
 }
 
 /// Bounded list of one Photo's retained Exports.
@@ -522,6 +531,8 @@ pub(crate) struct ExportInspectWire {
     pub(crate) target: &'static str,
     pub(crate) recipe_version: String,
     pub(crate) source_revision: String,
+    pub(crate) created_at: String,
+    pub(crate) settled_at: Option<String>,
     pub(crate) bundle_id: String,
     pub(crate) terminal_outcome: Option<&'static str>,
     pub(crate) failure_reason: Option<String>,
@@ -586,6 +597,23 @@ pub(crate) fn export_artifact_object(
         target,
         stage,
         content_type,
+        filename: format!(
+            "{}.{}",
+            record.id,
+            if target == "film-jpeg" { "jpg" } else { "tiff" }
+        ),
+        orientation: "top-left",
+        sample_format: if target == "film-jpeg" {
+            "uint8"
+        } else {
+            "float32"
+        },
+        color_space: if target == "film-jpeg" {
+            "sRGB"
+        } else {
+            "scene-linear ProPhoto RGB"
+        },
+        icc_embedded: true,
         width: artifact.width,
         height: artifact.height,
         profile_identity: artifact.profile_identity.clone(),
@@ -617,6 +645,10 @@ pub(crate) fn export_summary(record: &slipstream_core::ExportRecord) -> ExportSu
         export_id: record.id.clone(),
         state: record.state.name(),
         target,
+        recipe_version: record.snapshot.recipe_revision.clone(),
+        source_revision: record.snapshot.source_revision.clone(),
+        created_at: export_time(record.created_at),
+        settled_at: record.settled_at.map(export_time),
     }
 }
 
@@ -629,6 +661,8 @@ pub(crate) fn export_inspect(record: &slipstream_core::ExportRecord) -> ExportIn
         target,
         recipe_version: record.snapshot.recipe_revision.clone(),
         source_revision: record.snapshot.source_revision.clone(),
+        created_at: export_time(record.created_at),
+        settled_at: record.settled_at.map(export_time),
         bundle_id: record.snapshot.bundle_id.clone(),
         terminal_outcome: terminal_outcome(record.state),
         failure_reason: record.outcome.clone(),

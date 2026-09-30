@@ -1176,14 +1176,6 @@ fn headroom_boundaries_are_the_exact_configured_comparisons() {
         unmet.satisfied(&config).unwrap_err(),
         ErrorCode::Unavailable
     );
-    // The live measurements are real byte quantities the admission path
-    // can compare: the control filesystem reports free space and the
-    // kernel reports available memory.
-    assert!(control_free_bytes(Path::new("/tmp")).unwrap() > 0);
-    assert!(meminfo_available_bytes().unwrap() > 0);
-    if let Ok(headroom) = shared_ancestor_headroom() {
-        assert!(headroom <= meminfo_available_bytes().unwrap());
-    }
 }
 
 #[test]

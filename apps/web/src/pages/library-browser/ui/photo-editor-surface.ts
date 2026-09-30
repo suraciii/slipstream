@@ -1,3 +1,4 @@
+import { createWorkspaceOutputSurface } from "./workspace-output-surface.js";
 import type {
   EditorWhiteBalance,
   EditorWhiteBalancePresentation,
@@ -7,31 +8,6 @@ import type {
   EditorViewModel,
   LibraryBrowserIntent,
 } from "./library-browser-view.js";
-
-export type EditorExportViewModel = Readonly<{
-  target: "development-tiff" | "film-jpeg";
-  retainedTarget: "development-tiff" | "film-jpeg" | null;
-  state:
-    | "idle"
-    | "submitting"
-    | "outcome-unknown"
-    | "queued"
-    | "running"
-    | "succeeded"
-    | "failed"
-    | "cancelled";
-  note: string;
-  artifact: Readonly<{
-    byteLength: number;
-    width: number;
-    height: number;
-    expiresAt: string;
-  }> | null;
-  canSubmit: boolean;
-  canCancel: boolean;
-  canRetry: boolean;
-  canDownload: boolean;
-}>;
 
 type EditorIntent = Extract<LibraryBrowserIntent, { kind: `editor-${string}` }>;
 
@@ -212,33 +188,13 @@ export function createPhotoEditorSurfaceController({
     root,
     "[data-photo-editor-discard-draft]",
   );
-  const editorExportState = required<HTMLElement>(
-    root,
-    "[data-photo-editor-export-state]",
-  );
-  const editorExportSubmit = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-export-submit]",
-  );
-  const editorExportCancel = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-export-cancel]",
-  );
-  const editorExportRetry = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-export-retry]",
-  );
-  const editorExportDownload = required<HTMLButtonElement>(
-    root,
-    "[data-photo-editor-export-download]",
-  );
-  const editorExportTarget = required<HTMLElement>(
-    root,
-    "[data-photo-editor-export-target]",
-  );
   const editorStatus = required<HTMLElement>(
     root,
     "[data-photo-editor-status]",
+  );
+  const editorRenderStatus = required<HTMLElement>(
+    root,
+    "[data-photo-editor-render-status]",
   );
   const editorRebind = required<HTMLButtonElement>(
     root,
@@ -259,6 +215,7 @@ export function createPhotoEditorSurfaceController({
   let editorDraft: number | undefined;
   let editorDraftBase: number | undefined;
   const listeners = new AbortController();
+  const outputs = createWorkspaceOutputSurface(root, send, listeners.signal);
 
   const open = (photoId: string): void => {
     if (!alive || !photoId || !isPhotoVisible()) return;
@@ -298,16 +255,41 @@ export function createPhotoEditorSurfaceController({
       comparing: false,
       conflict: null,
       draftNote: "",
-      export: {
-        target: "development-tiff",
-        retainedTarget: null,
-        state: "idle",
-        note: "",
-        artifact: null,
-        canSubmit: false,
-        canCancel: false,
-        canRetry: false,
-        canDownload: false,
+      outputs: {
+        tiff: {
+          target: "development-tiff",
+          state: "idle",
+          note: "Loading outputs…",
+          diagnostic: "",
+          artifact: null,
+          createdAt: null,
+          isStale: false,
+          canSubmit: false,
+          canCancel: false,
+          canRetry: false,
+          canDownload: false,
+        },
+        film: {
+          target: "film-jpeg",
+          state: "idle",
+          note: "Loading outputs…",
+          diagnostic: "",
+          artifact: null,
+          createdAt: null,
+          isStale: false,
+          canSubmit: false,
+          canCancel: false,
+          canRetry: false,
+          canDownload: false,
+        },
+        xmp: {
+          state: "idle",
+          note: "Loading outputs…",
+          artifact: null,
+          isStale: false,
+          canSubmit: false,
+          canDownload: false,
+        },
       },
       status: "Loading edit…",
       statusDetail: "",
@@ -477,23 +459,12 @@ export function createPhotoEditorSurfaceController({
     editorUseSaved.disabled = model.saving;
     editorReapply.disabled = model.saving;
     editorDiscardDraft.disabled = model.saving;
-    const exported = model.export;
-    const exportLabel =
-      exported.target === "film-jpeg" ? "Finished JPEG" : "Development TIFF";
-    editorExportTarget.textContent = exportLabel;
-    editorExportState.textContent = exported.note;
-    editorExportSubmit.textContent = `Export ${exportLabel}`;
-    editorExportSubmit.disabled =
-      model.loading || !model.canEdit || !exported.canSubmit;
-    editorExportCancel.hidden = !exported.canCancel;
-    editorExportRetry.hidden = !exported.canRetry;
-    editorExportRetry.textContent =
-      exported.state === "outcome-unknown" ? "Check result" : "Retry";
-    editorExportDownload.textContent =
-      exported.retainedTarget === "film-jpeg"
-        ? "Download Finished JPEG"
-        : "Download Development TIFF";
-    editorExportDownload.hidden = !exported.canDownload;
+    outputs.render(
+      model.photoId,
+      model.outputs,
+      model.saving || model.dirty || editorDraft !== undefined,
+      model.loading,
+    );
     // The preview note describes the current edit or Film rendition. The
     // Original reference presents the camera preview, which has no note.
     const editPreviewStage = model.stage !== "camera";
@@ -502,6 +473,27 @@ export function createPhotoEditorSurfaceController({
     editorPreviewNote.dataset.tone = model.previewStale ? "stale" : "";
     editorStatus.textContent = model.status;
     editorStatus.dataset.tone = model.status ? "notice" : "";
+    const stage =
+      model.stage === "camera"
+        ? "Camera"
+        : model.stage === "film"
+          ? "Film"
+          : "Develop";
+    const preview =
+      model.stage === "camera"
+        ? "Camera preview"
+        : model.previewing || model.previewState === "pending"
+          ? model.previewStale
+            ? "Showing the previous result; updating preview…"
+            : "Updating preview…"
+          : model.previewState === "ready"
+            ? "Current preview"
+            : model.previewState === "failed"
+              ? "Preview failed; refresh to try again"
+              : model.previewStale
+                ? "Showing the previous result"
+                : "Preview not ready";
+    editorRenderStatus.textContent = `${stage} · ${preview}`;
     editorDetail.textContent = model.statusDetail;
     editorDetail.hidden =
       !model.statusDetail || model.statusDetail === model.status;
@@ -685,38 +677,6 @@ export function createPhotoEditorSurfaceController({
     () => {
       if (editorPhotoId)
         send({ kind: "editor-proxy-remove", photoId: editorPhotoId });
-    },
-    { signal: listeners.signal },
-  );
-  editorExportSubmit.addEventListener(
-    "click",
-    () => {
-      if (editorPhotoId)
-        send({ kind: "editor-export-submit", photoId: editorPhotoId });
-    },
-    { signal: listeners.signal },
-  );
-  editorExportCancel.addEventListener(
-    "click",
-    () => {
-      if (editorPhotoId)
-        send({ kind: "editor-export-cancel", photoId: editorPhotoId });
-    },
-    { signal: listeners.signal },
-  );
-  editorExportRetry.addEventListener(
-    "click",
-    () => {
-      if (editorPhotoId)
-        send({ kind: "editor-export-retry", photoId: editorPhotoId });
-    },
-    { signal: listeners.signal },
-  );
-  editorExportDownload.addEventListener(
-    "click",
-    () => {
-      if (editorPhotoId)
-        send({ kind: "editor-export-download", photoId: editorPhotoId });
     },
     { signal: listeners.signal },
   );

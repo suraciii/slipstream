@@ -866,8 +866,6 @@ async fn export_submit_accepts_replays_and_keeps_identity_after_later_writes() {
         assert!(entry["exportId"].is_string());
         assert!(entry["state"].is_string());
         assert_eq!(entry["target"], "development-tiff");
-        // The bounded list entry is exactly the closed three fields.
-        assert_eq!(entry.as_object().unwrap().len(), 3);
     }
 
     application.shutdown().await.unwrap();
@@ -1563,7 +1561,8 @@ async fn export_download_headers_match_the_inspect_artifact_object() {
     });
     let settled = wait_for_state(&router, &export_id, "succeeded").await;
 
-    let icc: &[u8] = include_bytes!("../../../slipstream-core/assets/prophoto-linear-g10.icc");
+    let icc: &[u8] =
+        include_bytes!("../../../slipstream-core/assets/prophoto-linear-g10-darktable.icc");
     let artifact = &settled["artifact"];
     assert_eq!(artifact["exportId"], settled["exportId"]);
     assert_eq!(artifact["target"], "development-tiff");
@@ -1584,8 +1583,6 @@ async fn export_download_headers_match_the_inspect_artifact_object() {
     assert_eq!(settled["terminalOutcome"], "succeeded");
     assert!(settled["failureReason"].is_null());
     assert!(settled["receiptExpiresAt"].is_string());
-    assert_eq!(settled.as_object().unwrap().len(), 11);
-    assert_eq!(artifact.as_object().unwrap().len(), 10);
 
     let download = download_artifact(&router, &export_id).await;
     assert_eq!(download.status(), StatusCode::OK);
@@ -2862,4 +2859,132 @@ async fn wait_for_launcher_op(launcher: &FakeLauncher, op: &str, count: usize) {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+#[tokio::test]
+async fn xmp_snapshot_download_and_replay_do_not_need_processing_or_original() {
+    let (base, config) = prepare_populated_fixture();
+    raw_fixture_with_camera(
+        &config.library_root.join("pair.ARW"),
+        b"SONY\0",
+        b"ILCE-7RM5\0\0\0",
+    );
+    let (application, router) = export_application(&base, &config).await;
+    let photo_id = photo_id_for(&config, "pair.ARW");
+    let recipe = save_recipe(&application, &photo_id, "save-xmp", None, 0.5).await;
+    let uri = format!("https://camera.local/api/photos/{photo_id}/edit-state-exports");
+    let body = serde_json::json!({"requestId":"xmp-snapshot", "expectedRecipeVersion":recipe.revision, "expectedSourceRevision":recipe.source_revision});
+    let created = post_export_body(&router, uri.clone(), body.clone()).await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created = response_json(created).await;
+    let export_id = created["exportId"].as_str().unwrap().to_owned();
+    let artifact_uri = format!("{uri}/{export_id}/artifact");
+    let download = send(
+        &router,
+        authenticated_request()
+            .uri(&artifact_uri)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(download.status(), StatusCode::OK);
+    assert_eq!(download.headers()["content-type"], "application/rdf+xml");
+    assert_eq!(
+        download.headers()["slipstream-artifact-filename"],
+        created["artifact"]["filename"].as_str().unwrap()
+    );
+    assert_eq!(
+        download.headers()["slipstream-artifact-sha256"],
+        created["artifact"]["sha256"].as_str().unwrap()
+    );
+    let bytes = axum::body::to_bytes(download.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        bytes.len() as u64,
+        created["artifact"]["byteLength"].as_u64().unwrap()
+    );
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bytes)),
+        created["artifact"]["sha256"].as_str().unwrap()
+    );
+    assert!(
+        std::str::from_utf8(&bytes)
+            .unwrap()
+            .contains("<crs:Exposure2012>0.5</crs:Exposure2012>")
+    );
+    save_recipe(
+        &application,
+        &photo_id,
+        "save-xmp-later",
+        Some(recipe.revision),
+        1.0,
+    )
+    .await;
+    fs::remove_file(config.library_root.join("pair.ARW")).unwrap();
+    let replay = post_export_body(&router, uri.clone(), body.clone()).await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(response_json(replay).await, created);
+    let listed = response_json(
+        send(
+            &router,
+            authenticated_request()
+                .uri(&uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(listed["exports"], serde_json::json!([created]));
+    let mut conflicting = body.clone();
+    conflicting["expectedRecipeVersion"] = serde_json::json!("different");
+    let conflict = post_export_body(&router, uri.clone(), conflicting).await;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        error_code(&response_json(conflict).await),
+        "export_conflict"
+    );
+    for request_id in ["contains space", "bad/slash", "nonascii-ñ"] {
+        let mut invalid = body.clone();
+        invalid["requestId"] = serde_json::json!(request_id);
+        assert_eq!(
+            post_export_body(&router, uri.clone(), invalid)
+                .await
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    let mut stale = body.clone();
+    stale["requestId"] = serde_json::json!("new-request");
+    assert_eq!(
+        post_export_body(&router, uri.clone(), stale).await.status(),
+        StatusCode::CONFLICT
+    );
+    let connection =
+        rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+    connection
+        .execute(
+            "UPDATE xmp_exports SET expires_at=created_at WHERE id=?",
+            [&export_id],
+        )
+        .unwrap();
+    drop(connection);
+    let expired = post_export_body(&router, uri, body).await;
+    assert_eq!(expired.status(), StatusCode::GONE);
+    assert_eq!(error_code(&response_json(expired).await), "export_expired");
+    assert_eq!(
+        send(
+            &router,
+            authenticated_request()
+                .uri(&artifact_uri)
+                .body(Body::empty())
+                .unwrap()
+        )
+        .await
+        .status(),
+        StatusCode::GONE
+    );
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
 }

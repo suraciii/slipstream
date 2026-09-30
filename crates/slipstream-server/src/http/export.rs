@@ -18,7 +18,7 @@ fn export_error(status: StatusCode, code: &'static str, message: &'static str) -
 
 /// The `requestId` wire shape: 1 to 128 characters of ASCII letters, digits,
 /// `.`, `_`, or `-`; unique per Photo and chosen by the caller.
-fn valid_export_request_id(request_id: &str) -> bool {
+pub(super) fn valid_export_request_id(request_id: &str) -> bool {
     (1..=128).contains(&request_id.len())
         && request_id
             .bytes()
@@ -32,7 +32,7 @@ const EXPORT_FILM_JPEG_TARGET: &str = "film-jpeg";
 /// Reads one Export request body. Every body failure is a shape violation:
 /// the wire contract refuses unknown fields, wrong types, and oversized or
 /// malformed bodies with 422 `invalid_settings` before any state change.
-async fn read_export_json_body<T: serde::de::DeserializeOwned>(
+pub(super) async fn read_export_json_body<T: serde::de::DeserializeOwned>(
     request: Request<Body>,
 ) -> Result<T, Response<Body>> {
     let bytes = read_body_bytes(request).await.map_err(|_| {
@@ -694,11 +694,6 @@ pub(crate) async fn get_export_artifact(
     // The typed metadata framing for this route is response headers; they are
     // the artifact object field for field, so a client validates the download
     // by comparing every header with `GET /api/exports/{id}`.
-    let extension = if record.snapshot.workload == "film-jpeg" {
-        "jpg"
-    } else {
-        "tiff"
-    };
     let builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, artifact.content_type)
@@ -709,6 +704,14 @@ pub(crate) async fn get_export_artifact(
         .header("slipstream-artifact-target", artifact.target)
         .header("slipstream-artifact-stage", artifact.stage)
         .header("slipstream-artifact-content-type", artifact.content_type)
+        .header("slipstream-artifact-filename", &artifact.filename)
+        .header("slipstream-artifact-orientation", artifact.orientation)
+        .header("slipstream-artifact-sample-format", artifact.sample_format)
+        .header("slipstream-artifact-color-space", artifact.color_space)
+        .header(
+            "slipstream-artifact-icc-embedded",
+            artifact.icc_embedded.to_string(),
+        )
         .header("slipstream-artifact-width", artifact.width.to_string())
         .header("slipstream-artifact-height", artifact.height.to_string())
         .header(
@@ -723,7 +726,7 @@ pub(crate) async fn get_export_artifact(
         .header("slipstream-artifact-expires-at", &artifact.expires_at)
         .header(
             header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{export_id}.{extension}\""),
+            format!("attachment; filename=\"{}\"", artifact.filename),
         );
     builder
         .body(Body::from_stream(ExportFileStream(

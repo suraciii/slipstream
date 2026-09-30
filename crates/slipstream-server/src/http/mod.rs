@@ -7,6 +7,7 @@ mod mutations;
 mod photo;
 mod recovery;
 mod static_web;
+mod xmp;
 
 pub(crate) use cli::{
     CLI_CONTRACT_HEADER, cli_error, invalid_cli, require_cli_contract, require_published,
@@ -247,6 +248,14 @@ pub(crate) fn create_router_with_preview(
         .route(
             "/api/photos/{id}/exports",
             get(export::list_photo_exports).post(export::submit_export),
+        )
+        .route(
+            "/api/photos/{id}/edit-state-exports",
+            get(xmp::list).post(xmp::create),
+        )
+        .route(
+            "/api/photos/{id}/edit-state-exports/{export_id}/artifact",
+            get(xmp::artifact),
         )
         .route("/api/exports/{id}", get(export::get_export))
         .route(

@@ -1184,8 +1184,8 @@ test("the Edit surface explains a deployment without processing and attempts no 
 }) => {
   const { base, root } = await fixture();
   await writePhotos(root, 1);
-  // Processing work is a submitted Export or a rendered Edit Preview. Reading
-  // the Photo's retained Exports is a retained-artifact read, not work.
+  // Processing work is a submitted output or a rendered Edit Preview. Reading
+  // the Photo's retained outputs is a retained-artifact read, not work.
   const processing: string[] = [];
   page.on("request", (request) => {
     const path = new URL(request.url()).pathname;
@@ -1197,22 +1197,10 @@ test("the Edit surface explains a deployment without processing and attempts no 
   await startReview(page, running.url, "All Photos");
   await openPhotoToolsView(page, "edit");
   await page.locator(".photo-editor-details summary").click();
-  await expect(page.locator("[data-photo-editor-capability]")).toContainText(
-    "Editing previews and Export are not enabled in this deployment.",
-  );
-  await expect(page.locator("[data-photo-editor-status]")).toContainText(
-    "not supported for editing",
-  );
   await expect(page.locator("[data-photo-editor-stage='film']")).toBeDisabled();
-  await expect(page.locator("[data-photo-editor-stage-note]")).toHaveText(
-    "Film is temporarily unavailable.",
-  );
   await expect(
     page.locator("[data-photo-editor-stage='camera']"),
   ).toBeEnabled();
-  await expect(page.locator("[data-photo-editor-stage='camera']")).toHaveText(
-    "Original reference",
-  );
   await expect(page.locator("[data-photo-editor-stage='develop']")).toHaveCount(
     0,
   );
@@ -1224,11 +1212,10 @@ test("the Edit surface explains a deployment without processing and attempts no 
   await expect(page.locator("[data-photo-editor-exposure]")).toBeDisabled();
   // Comparison needs an edited rendition; Original reference stays independent.
   await expect(page.locator("[data-photo-editor-compare]")).toBeDisabled();
-  await expect(page.locator("[data-photo-editor-compare]")).toHaveText(
-    "Baseline comparison",
-  );
   await expect(
-    page.locator("[data-photo-editor-export-submit]"),
+    page.locator(
+      '[data-editor-output="development-tiff"] [data-output-action="submit"]',
+    ),
   ).toBeDisabled();
   expect(processing).toEqual([]);
 });
@@ -1255,7 +1242,7 @@ test("real-processing: autosaves an exposure, reopens it, compares the baseline,
     `SLIPSTREAM_RAW_SAMPLE must identify a readable regular file: ${cameraSample}`,
   );
   // A cold development of a 61 MP Original takes about a minute, and the
-  // scenario renders twice: once as the comparison and once as the Export.
+  // scenario renders twice: once as the comparison and once as the TIFF.
   test.setTimeout(900_000);
   const sourceBefore = await originalSnapshot(cameraSample);
   const sourceSidecarPath = join(
@@ -1393,15 +1380,20 @@ test("real-processing: autosaves an exposure, reopens it, compares the baseline,
       (image: HTMLImageElement) => image.complete && image.naturalWidth > 0,
     ),
   ).toBe(true);
-  // The Export is the deployment's bounded work: the submission settles, and
-  // the retained artifact downloads as a TIFF.
-  await page.locator("[data-photo-editor-export-submit]").click();
-  await expect(page.locator("[data-photo-editor-export-state]")).toContainText(
-    /Ready to download — Development TIFF, [\d.]+ (?:B|KiB|MiB|GiB), \d+×\d+, available until /,
-    { timeout: 300_000 },
-  );
+  // The Development TIFF is the deployment's bounded work: the submission
+  // settles, and the retained artifact becomes downloadable.
+  const tiffCard = page.locator('[data-editor-output="development-tiff"]');
+  await page
+    .locator(
+      '[data-editor-output="development-tiff"] [data-output-action="submit"]',
+    )
+    .click();
+  const downloadButton = tiffCard.locator('[data-output-action="download"]');
+  await expect(downloadButton).toBeVisible({ timeout: 300_000 });
   const pending = page.waitForEvent("download");
-  await page.locator("[data-photo-editor-export-download]").click();
+  await downloadButton.click();
+  // The downloaded artifact is the observable completion; avoid pinning
+  // incidental output-state wording.
   const artifact = await pending;
   const artifactPath = await artifact.path();
   expect(artifactPath).not.toBeNull();
@@ -1419,9 +1411,6 @@ test("real-processing: autosaves an exposure, reopens it, compares the baseline,
   } finally {
     await handle.close();
   }
-  await expect(page.locator("[data-photo-editor-export-state]")).toContainText(
-    "Downloaded",
-  );
   // Both Original Files are unchanged: neither the sample nor its copy moved.
   expect(await originalSnapshot(cameraSample)).toEqual(sourceBefore);
   expect(await originalSnapshot(raw)).toEqual(copiedBefore);

@@ -95,6 +95,27 @@ describe("one edit action is one guarded write", () => {
     expect(step.presentation.confirmed.exposureEv).toBe(0.1);
   });
 
+  test("a capability refresh after saving preserves the confirmed edit and its next write guard", () => {
+    const editor = createPhotoEditor({ nextRequestId: () => "req-1" });
+    editor.open(facts());
+    const first = request(editor.commitExposure(0.7));
+    editor.acknowledge(first, {
+      recipeVersion: "recipe-2",
+      sourceRevision: "rev-1",
+    });
+    const current = editor.facts()!;
+    const refreshed = editor.refresh({
+      ...current,
+      controls: { ...current.controls, adjustableWhiteBalance: [] },
+    });
+    expect(refreshed.presentation.settings.exposureEv).toBe(0.7);
+    expect(refreshed.presentation.confirmed.exposureEv).toBe(0.7);
+    expect(refreshed.presentation.dirty).toBe(false);
+    expect(request(editor.commitExposure(0.8)).expectedRecipeVersion).toBe(
+      "recipe-2",
+    );
+  });
+
   test("an admitted value outside the closed control is clamped to the step", () => {
     const editor = createPhotoEditor({ nextRequestId: () => "req-1" });
     editor.open(facts());

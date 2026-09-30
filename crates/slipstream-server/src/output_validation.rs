@@ -111,6 +111,7 @@ pub(crate) fn validate_development_tiff(path: &Path) -> Result<DevelopmentTiffFa
     let mut samples_per_pixel = 0_u16;
     let mut photometric = 0_u16;
     let mut compression = 0_u32;
+    let mut orientation = 1_u16;
     let mut strip_longs: Vec<u32> = Vec::new();
     let mut strip_counts: Vec<u32> = Vec::new();
     let mut icc: Option<(u32, u32)> = None;
@@ -213,6 +214,7 @@ pub(crate) fn validate_development_tiff(path: &Path) -> Result<DevelopmentTiffFa
             }
             259 => compression = value_offset,
             262 => photometric = shorts(value_bytes, 0),
+            274 => orientation = shorts(value_bytes, 0),
             273 | 279 => {
                 let Some(values) =
                     long_array(&mut file, little_endian, count, value_bytes, value_offset)
@@ -238,11 +240,14 @@ pub(crate) fn validate_development_tiff(path: &Path) -> Result<DevelopmentTiffFa
         || sample_format != vec![3, 3, 3]
         || photometric != 2
         || compression != 8
+        || orientation != 1
     {
         return Err(invalid!());
     }
-    // The embedded profile must describe RGB data; the pixels are scene-linear
-    // ProPhoto RGB by the engine contract.
+    // The engine's published artifact is the normalized darktable profile,
+    // not the source profile used to decode the RAW.
+    const OUTPUT_ICC_SHA256: &str =
+        "7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe";
     let Some((offset, size)) = icc else {
         return Err(invalid!());
     };
@@ -290,12 +295,95 @@ pub(crate) fn validate_development_tiff(path: &Path) -> Result<DevelopmentTiffFa
         hasher.update(&buffer[..chunk]);
         remaining -= chunk;
     }
+    if format!("{:x}", hasher.finalize()) != OUTPUT_ICC_SHA256 {
+        return Err(invalid!());
+    }
     Ok(DevelopmentTiffFacts {
         width,
         height,
-        profile_identity: format!("{:x}", hasher.finalize()),
+        profile_identity: OUTPUT_ICC_SHA256.to_owned(),
     })
 }
+
+/// Validate the EXIF APP1 envelope before trusting its orientation claim.
+fn validate_exif_app1(segment: &[u8]) -> Result<(), ()> {
+    if !segment.starts_with(b"Exif\0\0") {
+        return Ok(());
+    }
+    let tiff = &segment[6..];
+    if tiff.len() < 8 {
+        return Err(());
+    }
+    let little = match &tiff[..2] {
+        b"II" => true,
+        b"MM" => false,
+        _ => return Err(()),
+    };
+    let u16_at = |at: usize| -> Option<u16> {
+        let bytes: [u8; 2] = tiff.get(at..at + 2)?.try_into().ok()?;
+        Some(if little {
+            u16::from_le_bytes(bytes)
+        } else {
+            u16::from_be_bytes(bytes)
+        })
+    };
+    let u32_at = |at: usize| -> Option<u32> {
+        let bytes: [u8; 4] = tiff.get(at..at + 4)?.try_into().ok()?;
+        Some(if little {
+            u32::from_le_bytes(bytes)
+        } else {
+            u32::from_be_bytes(bytes)
+        })
+    };
+    if u16_at(2) != Some(42) {
+        return Err(());
+    }
+    let ifd = usize::try_from(u32_at(4).ok_or(())?).map_err(|_| ())?;
+    let count = usize::from(u16_at(ifd).ok_or(())?);
+    let entries_end = ifd
+        .checked_add(2)
+        .and_then(|v| v.checked_add(count.checked_mul(12)?))
+        .ok_or(())?;
+    if entries_end > tiff.len() {
+        return Err(());
+    }
+    for index in 0..count {
+        let at = ifd + 2 + index * 12;
+        let tag = u16_at(at).ok_or(())?;
+        let kind = u16_at(at + 2).ok_or(())?;
+        let number = usize::try_from(u32_at(at + 4).ok_or(())?).map_err(|_| ())?;
+        let type_size = match kind {
+            1 | 2 | 6 | 7 => 1,
+            3 | 8 => 2,
+            4 | 9 | 11 => 4,
+            5 | 10 | 12 => 8,
+            _ => return Err(()),
+        };
+        let total = number.checked_mul(type_size).ok_or(())?;
+        if total > 4 {
+            let offset = usize::try_from(u32_at(at + 8).ok_or(())?).map_err(|_| ())?;
+            if offset
+                .checked_add(total)
+                .filter(|&end| end <= tiff.len())
+                .is_none()
+            {
+                return Err(());
+            }
+        }
+        if tag != 274 {
+            continue;
+        }
+        if kind != 3 || number != 1 {
+            return Err(());
+        }
+        let value = u16_at(at + 8).ok_or(())?;
+        if value != 1 {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
 /// Validates the bounded JPEG envelope emitted by the fixed Film adapter.
 /// The worker performs the complete decode/profile check; this second check
 /// binds the transferred artifact to an image shape and one embedded sRGB ICC
@@ -358,6 +446,9 @@ fn validate_finished_jpeg(path: &Path) -> Result<DevelopmentTiffFacts, ExportErr
             width = u32::from(u16::from_be_bytes([segment[3], segment[4]]));
             channels = segment[5];
         }
+        if marker == 0xe1 {
+            validate_exif_app1(&segment).map_err(|_| invalid())?;
+        }
         if marker == 0xe2 && segment.starts_with(b"ICC_PROFILE\0") {
             if segment.len() < 14 || segment[12] != 1 || segment[13] != 1 {
                 return Err(invalid());
@@ -381,4 +472,33 @@ fn validate_finished_jpeg(path: &Path) -> Result<DevelopmentTiffFacts, ExportErr
         height,
         profile_identity: identity,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_exif_app1;
+
+    fn exif_with_orientation(value: u16) -> Vec<u8> {
+        let mut bytes = b"Exif\0\0II*\0\x08\0\0\0".to_vec();
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&274_u16.to_le_bytes());
+        bytes.extend_from_slice(&3_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.extend_from_slice(&value.to_le_bytes());
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes
+    }
+
+    #[test]
+    fn exif_orientation_must_be_top_left() {
+        assert!(validate_exif_app1(&exif_with_orientation(1)).is_ok());
+        assert!(validate_exif_app1(&exif_with_orientation(6)).is_err());
+    }
+
+    #[test]
+    fn malformed_exif_is_rejected() {
+        assert!(validate_exif_app1(b"Exif\0\0II").is_err());
+        assert!(validate_exif_app1(b"Exif\0\0II*\0\xff\xff\xff\xff").is_err());
+    }
 }

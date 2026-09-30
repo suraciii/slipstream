@@ -61,7 +61,11 @@ import type {
   EditSourceReadiness,
   EditorWhiteBalancePresentation,
 } from "../model/photo-editor.js";
-import type { EditorExportViewModel } from "./photo-editor-surface.js";
+import { WORKSPACE_OUTPUT_TEMPLATE } from "./workspace-output-surface.js";
+import type {
+  OutputTarget,
+  WorkspaceOutputsView,
+} from "../model/workspace-output-controller.js";
 import type { RecoveryApplyMapping } from "../model/recovery-review.js";
 export type {
   GridPhotoPreview,
@@ -135,8 +139,6 @@ export type GridProgressViewModel = Readonly<{
 /// These are presentation states, not stage tabs.
 export type EditorStage = "camera" | "develop" | "film";
 
-export type { EditorExportViewModel } from "./photo-editor-surface.js";
-
 export type EditorViewModel = Readonly<{
   photoId: string;
   loading: boolean;
@@ -184,7 +186,7 @@ export type EditorViewModel = Readonly<{
   comparing: boolean;
   conflict: Readonly<{ message: string }> | null;
   draftNote: string;
-  export: EditorExportViewModel;
+  outputs: WorkspaceOutputsView;
   status: string;
   /// The session's own detailed wording behind the compact status, presented
   /// only under the optional Details affordance.
@@ -221,11 +223,18 @@ export type LibraryBrowserIntent =
         | "editor-discard-draft"
         | "editor-proxy-create"
         | "editor-proxy-remove"
+        | "editor-xmp-submit"
+        | "editor-xmp-download";
+      photoId: string;
+    }>
+  | Readonly<{
+      kind:
         | "editor-export-submit"
         | "editor-export-cancel"
         | "editor-export-retry"
         | "editor-export-download";
       photoId: string;
+      target: OutputTarget;
     }>
   | Readonly<{ kind: "summary-action"; presentationId: number }>
   | Readonly<{ kind: "sign-out" }>
@@ -699,6 +708,7 @@ export function createLibraryBrowserView(
                   <header class="photo-tools-view-header"><h3>Edit</h3><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
                   <div class="photo-editor-controls" aria-label="Photo edit">
                     <p class="photo-editor-status" data-photo-editor-status role="status" aria-live="polite"></p>
+                    <p class="photo-editor-preview-note" data-photo-editor-render-status role="status"></p>
                     <img class="photo-editor-preview-image" data-photo-editor-preview-image alt="Current edit preview" hidden>
                     <p class="photo-editor-preview-note" data-photo-editor-preview-note hidden></p>
                     <div class="photo-editor-view-actions" role="group" aria-label="Edit view"><button type="button" data-photo-editor-stage="film" aria-pressed="false" disabled>Film</button><button type="button" class="quiet" data-photo-editor-stage="camera" aria-pressed="false">Original reference</button></div>
@@ -715,7 +725,7 @@ export function createLibraryBrowserView(
                     <div class="photo-editor-actions"><button type="button" class="quiet" data-photo-editor-undo disabled>Undo</button><button type="button" class="quiet" data-photo-editor-redo disabled>Redo</button><button type="button" class="quiet" data-photo-editor-reset disabled>Reset</button><button type="button" class="quiet" data-photo-editor-compare aria-pressed="false" title="Press to compare the current settings with the unadjusted rendering" disabled>Baseline comparison</button><button type="button" data-photo-editor-preview disabled>Refresh preview</button><button type="button" class="quiet" data-photo-editor-rebind hidden disabled>Keep edit for the current file</button><button type="button" class="quiet" data-photo-editor-refresh>Reload edit</button></div>
                     <p class="photo-editor-draft" data-photo-editor-draft hidden role="status"></p>
                     <div class="photo-editor-conflict" data-photo-editor-conflict hidden><p data-photo-editor-conflict-message role="alert"></p><div class="photo-editor-actions"><button type="button" data-photo-editor-use-saved>Use saved edit</button><button type="button" class="quiet" data-photo-editor-reapply>Reapply my changes</button><button type="button" class="quiet" data-photo-editor-discard-draft>Discard draft</button></div></div>
-                    <div class="photo-editor-export" aria-label="Export"><p class="photo-editor-export-heading">Export <span data-photo-editor-export-target>Development TIFF</span></p><p class="photo-editor-export-state" data-photo-editor-export-state role="status"></p><div class="photo-editor-actions"><button type="button" data-photo-editor-export-submit>Export Development TIFF</button><button type="button" class="quiet" data-photo-editor-export-cancel hidden>Cancel</button><button type="button" class="quiet" data-photo-editor-export-retry hidden>Retry</button><button type="button" class="quiet" data-photo-editor-export-download hidden>Download</button></div></div>
+                    ${WORKSPACE_OUTPUT_TEMPLATE}
                     <details class="photo-editor-details"><summary>Details</summary><p data-photo-editor-provenance></p><p data-photo-editor-detail hidden></p><p data-photo-editor-capability hidden></p><p class="photo-editor-fact"><span>White balance</span><span data-photo-editor-white-balance>As shot</span></p><p class="photo-editor-fact"><span>Edit source</span><span data-photo-editor-support>Checking…</span></p><p class="photo-editor-fact"><span>Development Proxy</span><span data-photo-editor-proxy-state>Checking…</span></p><div class="photo-editor-actions"><button type="button" class="quiet" data-photo-editor-proxy-create disabled>Create Development Proxy</button><button type="button" class="quiet" data-photo-editor-proxy-remove hidden disabled>Remove Development Proxy</button></div><p class="photo-editor-fact"><span>Processing</span><span data-photo-editor-processing>Checking…</span></p><p class="photo-editor-fact"><span>Edit Preview</span><span data-photo-editor-preview-state>Checking…</span></p></details>
                   </div>
                 </div>

@@ -52,10 +52,9 @@ pub(crate) fn expand_library_binding(
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(|_| PersistenceError::Storage)?;
-    // The read-only preflight accepts every schema the writable pass can
-    // migrate or use. In particular, an already current V13 database must
-    // reach startup_schema instead of being rejected here.
-    if validate_canonical_schema(&readonly, SchemaVersion::V13).is_err()
+    // The read-only preflight accepts every schema the writable pass can migrate or use.
+    if validate_canonical_schema(&readonly, SchemaVersion::V14).is_err()
+        && validate_canonical_schema(&readonly, SchemaVersion::V13).is_err()
         && validate_canonical_schema(&readonly, SchemaVersion::V12).is_err()
         && validate_canonical_schema(&readonly, SchemaVersion::V11).is_err()
         && validate_canonical_schema(&readonly, SchemaVersion::V10).is_err()
@@ -129,7 +128,7 @@ pub(crate) fn expand_library_binding(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V13)
+    validate_canonical_schema(&transaction, SchemaVersion::V14)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     if required_root_binding(&transaction)? != stored_root
         || expansion_projection(&transaction)? != preserved
@@ -197,7 +196,7 @@ pub(crate) fn expand_library_binding(
         return Err(PersistenceError::InvalidExpansion);
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V13)
+    validate_canonical_schema(&transaction, SchemaVersion::V14)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }

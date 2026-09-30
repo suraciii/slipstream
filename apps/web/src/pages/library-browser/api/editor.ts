@@ -267,6 +267,10 @@ export const parseEditFacts = (
   return Object.freeze({
     photoId,
     sourceRevision,
+    recipeSourceRevision:
+      isRecord(recipe) && typeof recipe["sourceRevision"] === "string"
+        ? recipe["sourceRevision"]
+        : sourceRevision,
     recipeVersion,
     settings: Object.freeze({ exposureEv, whiteBalance }),
     sourceSupport,

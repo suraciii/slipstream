@@ -3,7 +3,7 @@ use super::scan::{FingerprintCounts, FingerprintTarget, ScanApplication, ScanRec
 use super::{
     DatabaseName, StateDirectory, StateError, StateFileIdentity, admission::StateDatabaseLock,
     albums, decisions, development_proxy, edit_recipe, export, metadata, migrations, mutation,
-    queries, removal, scan,
+    queries, removal, scan, xmp,
 };
 use crate::{
     AlbumBrowseTarget, AlbumCreationResult, AlbumMembershipMutation, AlbumMembershipResult,
@@ -21,6 +21,7 @@ use crate::{
     PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateValue, PreviewSeed,
     PreviewSeedResult, RebindEditRecipe, RecoveryRecord, RecoverySurvey, RemovedPhotoRecord,
     RequestedRelocation, SaveEditRecipe, ScanSnapshot, SelectionState, WhiteBalanceIntent,
+    XmpCreateOutcome, XmpExportRecord,
 };
 
 use rusqlite::{
@@ -538,6 +539,22 @@ pub(super) enum Command {
         payload_digest: String,
         reply: Reply<Option<ExportSubmissionResolution>>,
     },
+    CreateXmp {
+        photo_id: String,
+        request_id: String,
+        expected_recipe: String,
+        expected_source: String,
+        now: i64,
+        reply: Reply<XmpCreateOutcome>,
+    },
+    ReadXmp {
+        export_id: String,
+        reply: Reply<Option<XmpExportRecord>>,
+    },
+    ListPhotoXmp {
+        photo_id: String,
+        reply: Reply<Option<Vec<XmpExportRecord>>>,
+    },
     ClaimExportPublication {
         export_id: String,
         incarnation: String,
@@ -976,8 +993,7 @@ impl Persistence {
         })
     }
 
-    /// Durably claims the publication of one attempt before its artifact is
-    /// renamed into place; `false` means the claim could not be written.
+    /// Claims publication before the staged artifact is renamed into place.
     pub(crate) fn claim_export_publication_receiver(
         &self,
         export_id: &str,
@@ -2135,6 +2151,29 @@ fn owner_main(
                     &payload_digest,
                 )));
             }
+            Command::CreateXmp {
+                photo_id,
+                request_id,
+                expected_recipe,
+                expected_source,
+                now,
+                reply,
+            } => {
+                let _ = reply.send(xmp::create(
+                    &mut connection,
+                    &photo_id,
+                    &request_id,
+                    &expected_recipe,
+                    &expected_source,
+                    now,
+                ));
+            }
+            Command::ReadXmp { export_id, reply } => {
+                let _ = reply.send(xmp::read(&connection, &export_id));
+            }
+            Command::ListPhotoXmp { photo_id, reply } => {
+                let _ = reply.send(xmp::list(&connection, &photo_id));
+            }
             Command::ClaimExportPublication {
                 export_id,
                 incarnation,
@@ -2332,7 +2371,7 @@ pub(super) fn parse_white_balance_intent(
     }
 }
 
-pub(super) fn random_uuid_v4() -> Result<String, PersistenceError> {
+pub(crate) fn random_uuid_v4() -> Result<String, PersistenceError> {
     let mut bytes = [0_u8; 16];
     let mut offset = 0;
     while offset < bytes.len() {

@@ -18,6 +18,7 @@ mod scan;
 mod schema;
 #[cfg(test)]
 mod test_support;
+mod xmp;
 
 pub use crate::domain::{
     AlbumBrowseMember, AlbumBrowseTarget, AlbumCreationResult, AlbumMember,

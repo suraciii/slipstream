@@ -545,7 +545,7 @@ exists.
 Camera Preview (`photos preview`) remains independent of saved editing intent.
 The following commands use the shared Photo Development operations:
 
-```text literal
+````text literal
 slipstream processing capability
 slipstream photos recipe get PHOTO_ID
 slipstream photos recipe save PHOTO_ID --input FILE
@@ -577,7 +577,7 @@ create` takes exactly this JSON object, sent once as the create body:
 
 ```json
 { "expectedSourceRevision": "observed-source-revision" }
-```
+````
 
 Replace the example revision with the value observed by a prior read, copied
 verbatim. A RAW source revision carries NUL separators, so it can only travel
@@ -662,7 +662,8 @@ A Development TIFF contains full-resolution float32 RGB, not 16-bit samples.
 Submission success reports `exportId`, `state`, `target`, `recipeVersion`,
 `sourceRevision`, nullable `receiptExpiresAt`, and nullable `artifactExpiresAt`.
 It confirms admission or replay, not completion. List returns `exports` of
-`exportId`, `state`, and `target`. Status returns the shared
+`exportId`, `state`, `target`, captured `recipeVersion` and `sourceRevision`,
+`createdAt`, and nullable `settledAt`. Status returns the shared
 [Export inspection representation](../design/photo-development.md#wire-contract),
 including captured recipe/source revisions, terminal outcome, failure code and
 retained artifact. Keep the confirmed recipe read beside the Export receipt
@@ -673,7 +674,8 @@ after a later Photo edit, inspect the original Export instead of resubmitting.
 
 `export download` requires a retained completed artifact. Its data contains
 `exportId`, `path`, `target`, `stage`, `contentType`, `width`, `height`,
-`profileIdentity`, `byteLength`, `sha256`, `expiresAt`, and `fileCommitted: true`.
+`profileIdentity`, `filename`, `orientation`, `sampleFormat`, `colorSpace`,
+`iccEmbedded`, `byteLength`, `sha256`, `expiresAt`, and `fileCommitted: true`.
 The SHA-256 is the service receipt digest. Transfer binds all artifact headers
 and length to that receipt and publishes without replacement. Independently hash
 and decode downloaded bytes for acceptance. Receipt/artifact expiry is reported
