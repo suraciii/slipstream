@@ -29,6 +29,14 @@ import { createPhotoToolsController } from "./photo-tools.js";
 import { createPhotoZoomController } from "./photo-zoom.js";
 import { createPhotoGestures } from "./photo-gestures.js";
 import { createPhotoEditorSurfaceController } from "./photo-editor-surface.js";
+import {
+  createPhotoViewPresenter,
+  type PhotoFactsViewModel,
+  type PhotoMetadataViewModel,
+  type PhotoShellViewModel,
+  type ReviewImagePresentation,
+  type ViewPreviewSource,
+} from "./photo-view-presenter.js";
 import type { EditorProxyViewModel } from "./editor-proxy-view-model.js";
 import { createSourceSurfaceController } from "./source-surface.js";
 import { createGridPresenter } from "./grid-presenter.js";
@@ -48,7 +56,6 @@ import {
   addressFor,
   type NavigationGridRestoration,
 } from "../model/browser-navigation.js";
-import { formatCaptureTime } from "./capture-time.js";
 import type {
   EditSourceKind,
   EditSourceReadiness,
@@ -75,11 +82,6 @@ export type {
 } from "./recovery-view-models.js";
 
 export type ViewSelectionState = "undecided" | "selected" | "rejected";
-type ViewPreviewSource = "jpeg-original" | "raw-embedded-jpeg";
-
-/** Full wording behind the compact limited-detail marker in the Preview fact. */
-const LIMITED_PREVIEW_DETAIL = "Limited by camera Preview resolution";
-
 type SourceReference =
   | Readonly<{ kind: "library" }>
   | Readonly<{ kind: "album"; id: string }>
@@ -353,21 +355,6 @@ export type LibraryBrowserIntent =
       items: ReadonlyArray<RecoveryApplyMapping>;
     }>;
 
-interface ReviewImageTarget {
-  readonly connected: boolean;
-  readonly source: string;
-  setHandlers(onLoad: () => void, onError: () => void): void;
-  clearHandlers(): void;
-  setSource(resolvedUrl: string): void;
-  clearSource(): void;
-}
-
-type ReviewImagePresentation = Readonly<{
-  target: ReviewImageTarget;
-  resolvedUrl: string;
-  surface: object;
-}>;
-
 export type FolderViewModel = Readonly<{
   location: string;
   name: string;
@@ -438,32 +425,6 @@ export type GridViewModel = Readonly<{
   }>;
   photoAt(index: number): GridPhotoViewModel | undefined;
 }>;
-
-type PhotoFactsViewModel = Readonly<{
-  index: number;
-  total: number;
-  originalFilename?: string | undefined;
-  selectionState?: ViewSelectionState | undefined;
-  rating?: number | undefined;
-}>;
-
-type PhotoMetadataViewModel = Readonly<{
-  captureTime?: string;
-  aperture?: string;
-  iso?: number;
-  shutterSpeed?: string;
-  focalLength?: string;
-}>;
-
-type PhotoShellViewModel = PhotoFactsViewModel &
-  Readonly<{
-    sourceName: string;
-    photoId?: string | undefined;
-    available?: boolean | undefined;
-    previewSource?: ViewPreviewSource | undefined;
-    limitedDetail?: boolean | undefined;
-    previewUrl?: string | undefined;
-  }>;
 
 type MembershipAlbumViewModel = Readonly<{ id: string; name: string }>;
 
@@ -1093,7 +1054,7 @@ ${RECOVERY_PANEL_TEMPLATE}
   /// label stays the truncated source name.
   const presentSourceTitle = (name: string) => {
     gridTitle.textContent = name;
-    photoTitle.textContent = name;
+    photoPresenter.setSourceTitle(name);
     compactTitle.textContent = name;
     sourceToggle.setAttribute("aria-label", `Sources — ${name}`);
   };
@@ -1152,8 +1113,6 @@ ${RECOVERY_PANEL_TEMPLATE}
     "[data-grid-empty-action]",
   );
   const photoView = required<HTMLElement>(root, "[data-photo-view]");
-  const photoTitle = required<HTMLElement>(root, "[data-photo-title]");
-  const position = required<HTMLElement>(root, "[data-position]");
   const stage = required<HTMLElement>(root, "[data-stage]");
   const preview = required<HTMLElement>(root, "[data-preview]");
   const ratingWheel = required<HTMLElement>(root, "[data-rating-wheel]");
@@ -1176,35 +1135,13 @@ ${RECOVERY_PANEL_TEMPLATE}
   const zoomSlider = required<HTMLInputElement>(root, "[data-zoom-slider]");
   const zoomLevel = required<HTMLElement>(root, "[data-zoom-level]");
   const zoom100 = required<HTMLButtonElement>(root, "[data-zoom-100]");
-  const selection = required<HTMLElement>(root, "[data-selection]");
   const filmstrip = required<HTMLElement>(root, "[data-filmstrip]");
   /// The two homes of the bounded neighbor strip: the wide Photo View shows it
   /// beside the Preview, and a compact layout discloses it inside Photo tools.
   /// One strip node moves between them, so no layout holds a second copy.
   const filmstripHost = required<HTMLElement>(root, "[data-filmstrip-host]");
   const filmstripTools = required<HTMLElement>(root, "[data-filmstrip-tools]");
-  const photoFilename = required<HTMLElement>(root, "[data-photo-filename]");
   const rating = required<HTMLElement>(root, "[data-rating]");
-  const previewSource = required<HTMLElement>(root, "[data-source]");
-  const detailLimit = required<HTMLElement>(root, "[data-detail-limit]");
-  const metadataCaptureTime = required<HTMLElement>(
-    root,
-    "[data-metadata-capture-time]",
-  );
-  const metadataAperture = required<HTMLElement>(
-    root,
-    "[data-metadata-aperture]",
-  );
-  const metadataIso = required<HTMLElement>(root, "[data-metadata-iso]");
-  const metadataShutterSpeed = required<HTMLElement>(
-    root,
-    "[data-metadata-shutter-speed]",
-  );
-  const metadataFocalLength = required<HTMLElement>(
-    root,
-    "[data-metadata-focal-length]",
-  );
-  const status = required<HTMLElement>(root, "[data-status]");
   const retryPhoto = required<HTMLButtonElement>(root, "[data-retry-photo]");
   const back = required<HTMLButtonElement>(root, "[data-back]");
   const dockPrevious = required<HTMLButtonElement>(
@@ -1368,13 +1305,9 @@ ${RECOVERY_PANEL_TEMPLATE}
     gridThumbnailTarget,
   });
 
-  let photoStatusSurface: object = {};
   /// True while the empty-state action belongs to an explained destination
   /// state rather than to an empty source's Library check.
   let gridEmptyExplanation = false;
-  let photoSurface: object = {};
-  let currentPhotoId: string | undefined;
-  let currentSelection: ViewSelectionState = "undecided";
   let decisionInteractionEnabled = false;
 
   const compactSources = window.matchMedia("(max-width: 760px)");
@@ -1471,7 +1404,7 @@ ${RECOVERY_PANEL_TEMPLATE}
     },
     surfaces,
     isPhotoVisible: () => !photoView.hidden,
-    currentPhotoId: () => currentPhotoId,
+    currentPhotoId: () => photoPresenter.currentPhotoId,
     resetGestures,
     syncFilmstripHost: filmstripPresenter.syncHost,
     syncSecondarySurface,
@@ -1626,6 +1559,12 @@ ${RECOVERY_PANEL_TEMPLATE}
     level: zoomLevel,
     isAlive: () => alive,
   });
+  const photoPresenter = createPhotoViewPresenter({
+    root: photoView,
+    zoom: zoomController,
+    renderRating: (value) => ratingControls.render(value),
+    resetGestures: () => photoGestures.reset(),
+  });
   const photoGestures = createPhotoGestures({
     preview,
     stage,
@@ -1634,8 +1573,8 @@ ${RECOVERY_PANEL_TEMPLATE}
     zoom: zoomController,
     rating: ratingControls,
     isAlive: () => alive,
-    currentPhotoId: () => currentPhotoId,
-    currentSurface: () => photoSurface,
+    currentPhotoId: () => photoPresenter.currentPhotoId,
+    currentSurface: () => photoPresenter.photoSurface,
     decisionEnabled: () => decisionInteractionEnabled,
     send,
   });
@@ -1648,120 +1587,6 @@ ${RECOVERY_PANEL_TEMPLATE}
   const renderGrid = (model: GridViewModel, position?: number) => {
     batchPresenter.render(model.multi);
     gridPresenter.render(model, position);
-  };
-
-  const renderPhotoFacts = (model: PhotoFactsViewModel) => {
-    if (!alive) return;
-    position.textContent = `${model.index + 1} / ${model.total}`;
-    photoFilename.textContent = model.originalFilename ?? "—";
-    photoFilename.title = model.originalFilename ?? "";
-    currentSelection = model.selectionState ?? "undecided";
-    selection.textContent = selectionLabel(currentSelection);
-    ratingControls.render(model.rating ?? 0);
-  };
-  const renderPhotoMetadata = (model: PhotoMetadataViewModel = {}) => {
-    if (!alive) return;
-    metadataCaptureTime.textContent =
-      model.captureTime === undefined
-        ? "—"
-        : formatCaptureTime(model.captureTime);
-    metadataAperture.textContent = model.aperture ?? "—";
-    metadataIso.textContent = model.iso === undefined ? "—" : String(model.iso);
-    metadataShutterSpeed.textContent = model.shutterSpeed ?? "—";
-    metadataFocalLength.textContent = model.focalLength ?? "—";
-  };
-  const presentReviewImage = (
-    url: string,
-    index: number,
-    total: number,
-  ): ReviewImagePresentation | undefined => {
-    if (!alive) return undefined;
-    const surface = photoStatusSurface;
-    const image = document.createElement("img");
-    image.alt = `Photo ${index + 1} of ${total}`;
-    image.draggable = false;
-    image.fetchPriority = "high";
-    image.decoding = "async";
-    stage.replaceChildren(image);
-    zoomController?.resetForImage();
-    // Fit depends on the Preview's natural pixels, so the geometry is
-    // applied when the bytes arrive.
-    image.addEventListener("load", () => {
-      if (!alive || !image.isConnected) return;
-      zoomController?.applyZoom();
-    });
-    const target: ReviewImageTarget = {
-      get connected() {
-        return image.isConnected;
-      },
-      get source() {
-        return image.src;
-      },
-      setHandlers(onLoad, onError) {
-        image.onload = onLoad;
-        image.onerror = onError;
-      },
-      clearHandlers() {
-        image.onload = null;
-        image.onerror = null;
-      },
-      setSource(nextUrl) {
-        image.src = nextUrl;
-      },
-      clearSource() {
-        image.removeAttribute("src");
-      },
-    };
-    return {
-      target,
-      resolvedUrl: new URL(url, window.location.href).href,
-      surface,
-    };
-  };
-  const applyPreviewFact = (
-    source: ViewPreviewSource | undefined,
-    isLimited: boolean,
-  ) => {
-    previewSource.textContent = isLimited
-      ? `${sourceLabel(source)} · limited detail`
-      : sourceLabel(source);
-    // The Preview Source fact and the detail-limit explanation are one
-    // statement: a limited derivative names the resolution it came from.
-    detailLimit.hidden = !isLimited;
-    if (isLimited) previewSource.title = LIMITED_PREVIEW_DETAIL;
-    else previewSource.removeAttribute("title");
-  };
-
-  const renderPhotoShell = (model: PhotoShellViewModel) => {
-    if (!alive) return undefined;
-    resetGestures();
-    photoTitle.textContent = model.sourceName;
-    currentPhotoId = model.photoId;
-    photoSurface = {};
-    renderPhotoFacts(model);
-    renderPhotoMetadata();
-    applyPreviewFact(model.previewSource, Boolean(model.limitedDetail));
-    let image: ReviewImagePresentation | undefined;
-    if (model.previewUrl)
-      image = presentReviewImage(model.previewUrl, model.index, model.total);
-    else {
-      stage.replaceChildren(
-        paragraph(model.photoId ? "Loading Preview…" : "Photo unavailable"),
-      );
-      zoomController?.resetForImage();
-    }
-    setPhotoStatus(
-      model.photoId && model.available === false
-        ? "Original File is unavailable. Decisions remain available."
-        : "",
-    );
-    return image;
-  };
-
-  const setPhotoStatus = (text: string) => {
-    if (!alive || status.textContent === text) return;
-    photoStatusSurface = {};
-    status.textContent = text;
   };
 
   const keydown = (event: KeyboardEvent) => {
@@ -1845,7 +1670,7 @@ ${RECOVERY_PANEL_TEMPLATE}
       });
     else if (
       event.key.toLowerCase() === "u" &&
-      currentSelection !== "undecided"
+      photoPresenter.currentSelection !== "undecided"
     )
       send({
         kind: "photo-mutation",
@@ -1946,14 +1771,13 @@ ${RECOVERY_PANEL_TEMPLATE}
 
   return {
     get photoStatusSurface() {
-      return photoStatusSurface;
+      return photoPresenter.photoStatusSurface;
     },
     get photoStatusEmpty() {
-      return status.textContent === "";
+      return photoPresenter.photoStatusEmpty;
     },
-    isPhotoStatusSurfaceCurrent: (surface) =>
-      alive && surface === photoStatusSurface,
-    setPhotoStatus,
+    isPhotoStatusSurfaceCurrent: photoPresenter.isPhotoStatusSurfaceCurrent,
+    setPhotoStatus: photoPresenter.setPhotoStatus,
     presentSummary(text, action, libraryCheckState) {
       if (!alive) return;
       const render = (surface: HTMLElement) => {
@@ -2089,8 +1913,7 @@ ${RECOVERY_PANEL_TEMPLATE}
       gridEmptyMessage.textContent = "";
       gridEmptyAction.hidden = true;
       gridEmptyExplanation = false;
-      currentPhotoId = undefined;
-      photoSurface = {};
+      photoPresenter.resetSourceIdentity();
       gridPresenter.resetKeyboard();
       // A new source starts with no multi-selection: the tray presents nothing
       // until the page model marks Photos again.
@@ -2165,34 +1988,20 @@ ${RECOVERY_PANEL_TEMPLATE}
       presentConnection();
       photoView.focus();
       zoomController?.resetForImage();
-      photoSurface = {};
+      photoPresenter.resetForPhotoEntry();
     },
     renderFilmstrip: filmstripPresenter.render,
-    renderPhotoFacts,
-    renderPhotoMetadata,
-    renderPhotoShell,
+    renderPhotoFacts: photoPresenter.renderPhotoFacts,
+    renderPhotoMetadata: photoPresenter.renderPhotoMetadata,
+    renderPhotoShell: photoPresenter.renderPhotoShell,
     editorVisible: () => editorController.visible(),
     renderEditor: (model) => editorController.render(model),
     presentEditorPreview: (url) => editorController.presentPreview(url),
     clearEditorPreview: () => editorController.clearPreview(),
-    presentReviewImage,
-    reviewImageMatches(url) {
-      if (!alive) return false;
-      const image = stage.querySelector<HTMLImageElement>("img");
-      return Boolean(
-        image && image.src === new URL(url, window.location.href).href,
-      );
-    },
-    showPreviewUnavailable(text) {
-      if (alive && !stage.querySelector("img")) {
-        stage.replaceChildren(paragraph(text));
-        zoomController?.resetForImage();
-      }
-    },
-    setPreviewFacts(value, isLimited) {
-      if (!alive) return;
-      applyPreviewFact(value, isLimited);
-    },
+    presentReviewImage: photoPresenter.presentReviewImage,
+    reviewImageMatches: photoPresenter.reviewImageMatches,
+    showPreviewUnavailable: photoPresenter.showPreviewUnavailable,
+    setPreviewFacts: photoPresenter.setPreviewFacts,
     setAlbumFormMessage(formId, message) {
       if (!alive) return;
       albumFormController.setMessage(formId, message);
@@ -2292,6 +2101,7 @@ ${RECOVERY_PANEL_TEMPLATE}
       photoToolsController.dispose();
       editorController.dispose();
       ratingControls.dispose();
+      photoPresenter.dispose();
       viewOptionsController.dispose();
       stageObserver.disconnect();
       filmstripPresenter.dispose();
@@ -2318,26 +2128,12 @@ function required<T extends Element>(root: ParentNode, selector: string): T {
   return value;
 }
 
-function paragraph(text: string): HTMLParagraphElement {
-  const value = document.createElement("p");
-  value.textContent = text;
-  return value;
-}
-
 function selectionLabel(value?: ViewSelectionState): string {
   return value === "selected"
     ? "Selected"
     : value === "rejected"
       ? "Rejected"
       : "Undecided";
-}
-
-function sourceLabel(source?: ViewPreviewSource): string {
-  return source === "jpeg-original"
-    ? "JPEG"
-    : source === "raw-embedded-jpeg"
-      ? "RAW embedded JPEG"
-      : "—";
 }
 
 /// Keys a focused range input handles itself: arrows, Home, End, and Page.

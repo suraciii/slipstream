@@ -88,6 +88,11 @@ defined by Web Async Ownership:
   metadata, and pending destination identity under
   [Browser Navigation](browser-navigation.md). It owns no source facts, HTTP,
   or mutation state; the controller coordinates its destination intents.
+  The page-local destination controller resolves destinations, missing targets,
+  expired position lookups, restoration and Album Resume through existing source,
+  Photo and navigation operations. Each establishment has its own session identity:
+  a newer destination invalidates an older continuation even when both use the
+  same Browse Snapshot. Completed work remains fenced until superseded or disposed.
 - The **application-lifetime owner** owns Library Overview, publication status,
   scan command settlement, application Recovery claims, and Summary
   presentation state.
@@ -101,6 +106,10 @@ defined by Web Async Ownership:
   notification per bounded window regardless of joined consumers), the
   retained-fact cache bound anchored to the latest visible range, Grid
   position, Thumbnail work, and source-scoped image transfers.
+  A page-local Browse window controller maps awaited outcomes and no-waiter
+  notifications into Recovery and presentation, and replays captured exact-range
+  retries. It owns no Snapshot, Browse token, fact cache or retry records. Awaited
+  work settles through its caller; only unawaited work uses the owner notification.
 - The **Photo owner** owns the current Photo, foreground and adjacent Preview
   work, Photo View navigation, Selection State and Rating writes, browser-local
   undo, and Photo-scoped image transfers.
@@ -125,6 +134,12 @@ defined by Web Async Ownership:
   work. It reuses the DOM nodes of Photos that stay visible and restores focus
   to one Tab stop without taking it from another surface. See
   [Library Browsing and Selection](../docs/library-browsing-and-selection.md).
+  The page-local Photo presenter owns presented Photo and Selection identities,
+  status surface identity, facts and metadata rendering, and Preview image targets.
+  It reads bounded presentation models without holding mutable Photo facts or
+  issuing HTTP. Reset and disposal invalidate its targets and cancel gestures.
+  Modal arbitration, global keyboard routing and responsive placement remain in
+  the page UI composition.
   The page-local Photo gesture controller owns Preview pointer capture, pending
   holds, horizontal swipe feedback, and the handoff to zoom panning or pinch.
   It reads the current Photo surface and decision readiness without owning

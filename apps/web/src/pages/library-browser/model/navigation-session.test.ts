@@ -16,15 +16,17 @@ const folder: NavigationDestination = {
   selection: "all",
 };
 
-test("superseded establishment cleanup cannot admit traversal against a newer pending source", () => {
+test("a newer complete destination invalidates older same-source establishment", () => {
   const session = createNavigationSession({ kind: "invalid" });
-  const previous = session.begin(album);
-  const current = session.begin(folder);
-  session.finish(previous);
-  expect(session.allows(album)).toBe(false);
-  expect(session.allows(folder)).toBe(true);
-  session.finish(current);
-  expect(session.allows(album)).toBe(true);
+  const previous = session.begin({ ...album, photoId: "photo-a" });
+  const current = session.begin({ ...album, photoId: "photo-b" });
+  expect(session.isCurrent(previous)).toBe(false);
+  expect(session.isCurrent(current)).toBe(true);
+  const repeated = session.begin(current.destination);
+  expect(session.isCurrent(current)).toBe(false);
+  expect(session.isCurrent(repeated)).toBe(true);
+  session.dispose();
+  expect(session.isCurrent(repeated)).toBe(false);
 });
 
 test("startup is consumed once and retains stable restoration metadata", () => {
@@ -86,5 +88,5 @@ test("disposal withdraws pending destination and retained navigation metadata", 
   expect(session.takeRetry()).toBeUndefined();
   expect(session.takeCurrentFolder()).toBeUndefined();
   expect(session.gridRestoration).toBeUndefined();
-  expect(session.allows(allPhotosDestination)).toBe(false);
+  expect(session.isCurrent(session.begin(allPhotosDestination))).toBe(false);
 });
