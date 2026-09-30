@@ -62,10 +62,11 @@ before processing admission. It must not silently substitute as-shot WB or
 another mapping. The adjustable-WB product target remains defined by the
 [Product Spec](../docs/photo-development.md#development-controls).
 
-Module ordering, parameter versions, and encoding must be explicit in the
-adapter. Unsupported module versions must fail. The adapter must generate a
-complete bounded internal history and explicitly supply it to darktable.
-Ambient XMP discovery and use of a shared desktop database are forbidden.
+Module ordering, parameter versions, and encoding must be explicit under
+[Native darktable Integration](darktable-integration.md). The native bridge owns
+construction of the complete bounded internal history from the approved baseline
+and requested semantic intent. Unsupported versions must fail. Ambient XMP
+discovery and use of a shared desktop database are forbidden.
 
 The development path must disable filmic, sigmoid, base curve, AgX, and any
 other display/look mapping. Required technical camera processing must be
