@@ -122,6 +122,10 @@ also runs isolated parser-backed invalid and valid graph fixtures, then checks
 the production graph. Browser and source tests outside `app` and `pages` are
 tooling and are not treated as FSD slices.
 
+Mixed imports with a default runtime binding remain runtime edges even when
+all named bindings are type-only. Pure type imports are excluded only from
+runtime-cycle detection, not from layer or public-API checks.
+
 `test:cli` runs the focused command parser, output, and real CLI-to-service tests. It covers `status`, Library checks, Folder, Album, and Photo commands, including Preview downloads, without running the complete repository gate.
 
 `test:cli-package` verifies the source-bound Linux amd64 candidate archive, its checksum and fixed metadata, and no-replace behavior using synthetic inputs. It runs in `test:fast` and `verify`. To build an actual candidate from a clean committed tree, run `python3 scripts/package-cli.py`; see [CLI Candidate Installation](docs/cli-install.md). Packaging does not publish a tag or upload a release.

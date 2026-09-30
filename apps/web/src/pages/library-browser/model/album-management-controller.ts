@@ -21,28 +21,21 @@ export type FolderContext = Readonly<{
   publication: string;
 }>;
 
-export type AlbumFormModel = Readonly<{
+type AlbumFormRecord = Readonly<{
   formId: string;
   kind: AlbumFormReference["kind"];
   albumId?: string;
   initialName: string;
+  authority: AlbumFormAuthority;
 }>;
 
-type AlbumFormRecord = AlbumFormModel &
-  Readonly<{
-    authority: AlbumFormAuthority;
-  }>;
-
-export type AlbumManagementModel = Readonly<{
-  form: AlbumFormModel | undefined;
-  folder: Readonly<{
-    visible: boolean;
-    folderPath: string;
-    albums: ReadonlyArray<Readonly<{ id: string; name: string }>>;
-    selectedAlbumId: string;
-    pending: boolean;
-    status?: string;
-  }>;
+type FolderAlbumModel = Readonly<{
+  visible: boolean;
+  folderPath: string;
+  albums: ReadonlyArray<Readonly<{ id: string; name: string }>>;
+  selectedAlbumId: string;
+  pending: boolean;
+  status?: string;
 }>;
 
 export type AlbumMutationResult = Readonly<{
@@ -57,7 +50,6 @@ export type AlbumMutationResult = Readonly<{
 }>;
 
 export interface AlbumManagementController {
-  readonly model: AlbumManagementModel;
   openForm(form: AlbumFormReference): void;
   closeForm(formId: string): boolean;
   submitForm(formId: string, draft?: string): Promise<void>;
@@ -88,8 +80,7 @@ export type AlbumManagementOptions = Readonly<{
     setFormPending(formId: string, pending: boolean, name?: string): void;
     setFormMessage(formId: string, message: string): void;
     dismissForm(formId: string): void;
-    renderFolder(model: AlbumManagementModel["folder"]): void;
-    renderForm?(form: AlbumFormModel | undefined): void;
+    renderFolder(model: FolderAlbumModel): void;
   }>;
   onCreatedAlbum?: (album: AlbumSummary) => Promise<void>;
   onDeletedAlbum: (albumId: string) => Promise<void>;
@@ -148,49 +139,15 @@ export function createAlbumManagementController(
       }),
     );
   };
-  const publicForm = (
-    record: AlbumFormRecord | undefined,
-  ): AlbumFormModel | undefined =>
-    record
-      ? Object.freeze({
-          formId: record.formId,
-          kind: record.kind,
-          ...(record.albumId ? { albumId: record.albumId } : {}),
-          initialName: record.initialName,
-        })
-      : undefined;
-  const renderForm = () => options.present.renderForm?.(publicForm(form));
   const dismiss = (record: AlbumFormRecord): boolean => {
     if (!options.actions.isFormCurrent(record.authority)) return false;
     options.actions.closeForm(record.authority);
     if (form === record) form = undefined;
     options.present.dismissForm(record.formId);
-    renderForm();
     return true;
   };
 
   return {
-    get model() {
-      const context = currentFolder();
-      const operation =
-        context &&
-        folderOperation?.authority === context.authority &&
-        folderOperation.path === context.path &&
-        folderOperation.publication === context.publication
-          ? folderOperation
-          : undefined;
-      return Object.freeze({
-        form: publicForm(form),
-        folder: Object.freeze({
-          visible: Boolean(context && albumList.length > 0),
-          folderPath: context?.path ?? "",
-          albums: albumList.map(({ id, name }) => ({ id, name })),
-          selectedAlbumId,
-          pending: operation?.pending ?? false,
-          ...(operation?.status ? { status: operation.status } : {}),
-        }),
-      });
-    },
     openForm(reference) {
       if (closed) return;
       form = Object.freeze({
@@ -200,7 +157,6 @@ export function createAlbumManagementController(
         ...(reference.albumId ? { albumId: reference.albumId } : {}),
         initialName: reference.name,
       });
-      renderForm();
     },
     closeForm(formId) {
       if (closed || !form || form.formId !== formId) return false;

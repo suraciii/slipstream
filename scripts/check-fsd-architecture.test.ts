@@ -76,6 +76,23 @@ describe("FSD architecture gate", () => {
     expect(checkFsdArchitecture(root)).toEqual([]);
   });
 
+  test("rejects cycles through a default import with named type bindings", async () => {
+    const root = await fixture({
+      "app/index.ts":
+        'import { mount } from "../pages/library-browser/index"; mount();',
+      "pages/library-browser/index.ts": 'export { mount } from "./page";',
+      "pages/library-browser/page.ts":
+        'import value, { type Other } from "./model/a"; export const mount = (): Other => value;',
+      "pages/library-browser/model/a.ts":
+        'import { mount } from "../page"; export type Other = unknown; export default mount;',
+    });
+    expect(
+      checkFsdArchitecture(root).some((diagnostic) =>
+        diagnostic.message.includes("runtime import cycle"),
+      ),
+    ).toBe(true);
+  });
+
   test("rejects runtime cycles, including dynamic imports and empty named imports", async () => {
     const root = await fixture({
       "app/index.ts":

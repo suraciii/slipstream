@@ -59,7 +59,8 @@ function isTypeOnlyImport(node: ts.Node): boolean {
     return (
       Boolean(node.importClause?.isTypeOnly) ||
       Boolean(
-        node.importClause?.namedBindings &&
+        !node.importClause?.name &&
+          node.importClause?.namedBindings &&
           ts.isNamedImports(node.importClause.namedBindings) &&
           node.importClause.namedBindings.elements.length > 0 &&
           node.importClause.namedBindings.elements.every((e) => e.isTypeOnly),
