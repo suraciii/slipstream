@@ -205,6 +205,44 @@ test("confirmed session loss on return removes the library", async ({
   await expect(sources).toHaveCount(0);
 });
 
+test("restored page keeps private content closed until access is verified", async ({
+  page,
+}) => {
+  await page.goto(server.url);
+  await page.getByLabel("Access Token", { exact: true }).fill(server.token);
+  await page.getByRole("button", { name: "Open library", exact: true }).click();
+  const sources = page.getByRole("navigation", { name: "Sources" });
+  await expect(sources).toBeVisible();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const status: unknown = await (
+    await page.request.get(`${server.url}/api/access/session`)
+  ).json();
+  let started!: () => void;
+  const checked = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  await page.route("**/api/access/session", async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    started();
+    await held;
+    await route.fulfill({ json: status });
+  });
+  await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+  await expect(sources).toBeHidden();
+  await page.evaluate(() =>
+    window.dispatchEvent(
+      new PageTransitionEvent("pageshow", { persisted: true }),
+    ),
+  );
+  await checked;
+  await expect(sources).toBeHidden();
+  release();
+  await expect(sources).toBeVisible();
+});
+
 test("cookie writes reject missing CSRF and revoked session cannot restore private views", async ({
   page,
   context,
