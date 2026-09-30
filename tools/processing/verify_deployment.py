@@ -16,6 +16,7 @@ from pathlib import Path
 import platform
 import stat
 import subprocess
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -467,8 +468,8 @@ class DeploymentSnapshot:
             has_credentials = parsed.username is not None or parsed.password is not None
         except ValueError:
             return [Check("web-capability", False, "web-url-invalid")]
-        if parsed.scheme != "https":
-            return [Check("web-capability", False, "web-url-must-use-https")]
+        if parsed.scheme not in {"http", "https"}:
+            return [Check("web-capability", False, "web-url-must-use-http-or-https")]
         if (
             not has_authority
             or has_credentials
@@ -633,6 +634,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = parse_args(argv)
+    if arguments.web_url and arguments.web_url.startswith("http:"):
+        print("Warning: HTTP is unencrypted; photos and credentials may be observed in transit.", file=sys.stderr)
     snapshot = DeploymentSnapshot(
         instance=arguments.instance,
         policy=arguments.policy,

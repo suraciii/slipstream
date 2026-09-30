@@ -823,7 +823,6 @@ async fn cli_photo_decisions_validate_input_before_any_network_mutation() {
     ));
     fs::create_dir_all(&base).unwrap();
     // Nothing listens here; any network attempt would fail as transport.
-    // The CLI accepts only an HTTPS service origin.
     let dead = "https://127.0.0.1:9";
     let first = missing_photo_id(1);
     let second = missing_photo_id(2);

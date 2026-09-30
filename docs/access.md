@@ -91,11 +91,24 @@ from an operator-selected private file, never from a plaintext command argument,
 and must not expose it in output, links, or diagnostics. Credential-input syntax
 and error mapping belong in [CLI Reference](cli-reference.md).
 
-Public use requires HTTPS and a private backend behind the operator's TLS
-proxy. Missing access configuration must never enable anonymous fallback,
-including on loopback. [Deployment](deployment.md) owns the transport and
-upgrade procedure. [Instance Access Architecture](../design/access.md) owns
-credential storage, session enforcement, and caching.
+TLS is optional. One `SLIPSTREAM_PUBLIC_ORIGIN` selects HTTP or HTTPS; when
+omitted, it defaults to `http://localhost:<port>` with the existing loopback
+listener. Local and explicitly configured network use must not require a
+reverse proxy. HTTPS is recommended for public or untrusted networks; an
+existing deployment may use a proxy to terminate TLS.
+
+HTTP must show an unencrypted connection warning before browser token entry,
+keep it visible during the session, and warn once per CLI invocation. It
+must preserve authentication, CSRF protection, and all ordinary browser Library
+operations, including editing, deletion, and verified downloads. It must not
+enable anonymous access, including on loopback. Clients must not change the
+configured scheme after a connection failure. PWA installation remains subject
+to [Installed Web App](installed-web-app.md).
+Session status and view revalidation must not extend the fixed session lifetime.
+
+[Deployment](deployment.md) owns configuration and upgrade procedures.
+[Instance Access Architecture](../design/access.md) owns credential storage,
+session enforcement, and caching.
 
 ## Acceptance
 

@@ -1614,14 +1614,13 @@ test("environment-file configuration wins over ambient values", async () => {
   }
 });
 
-test("startup requires one literal canonical HTTPS public origin", async () => {
+test("startup rejects malformed and duplicate public origins", async () => {
   const target = await fixture();
   try {
     const layout = await topology(target);
     const invalidOrigins = [
-      [],
       ['SLIPSTREAM_PUBLIC_ORIGIN="https://photos.example.com"'],
-      ["SLIPSTREAM_PUBLIC_ORIGIN=http://photos.example.com"],
+      ["SLIPSTREAM_PUBLIC_ORIGIN=ftp://photos.example.com"],
       ["SLIPSTREAM_PUBLIC_ORIGIN=https://user@photos.example.com"],
       ["SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com/library"],
       ["SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com?query"],
@@ -1686,6 +1685,51 @@ test("startup accepts and passes the documented trailing-slash origin", async ()
     await removeFixture(target);
   }
 });
+
+test.each([
+  undefined,
+  "http://photos.local:8123",
+  "https://photos.example.com",
+])(
+  "startup uses the selected origin or localhost default: %s",
+  async (origin) => {
+    const target = await fixture();
+    try {
+      const layout = await topology(target);
+      await writeEnvironment(target, layout.sources);
+      const lines = (await readFile(target.environmentFile, "utf8"))
+        .split("\n")
+        .filter(
+          (line) =>
+            !line.startsWith("SLIPSTREAM_PUBLIC_ORIGIN=") &&
+            !line.startsWith("SLIPSTREAM_PORT="),
+        );
+      lines.push("SLIPSTREAM_PORT=8123");
+      if (origin) lines.push(`SLIPSTREAM_PUBLIC_ORIGIN=${origin}`);
+      await writeFile(target.environmentFile, lines.join("\n"));
+      const result = await runCompose(target, ["up"], {
+        environment: {
+          FAKE_DOCKER_REAL_CONFIG: "1",
+          SLIPSTREAM_PUBLIC_ORIGIN: "https://ambient.invalid",
+        },
+      });
+      expect(result.exitCode).toBe(0);
+      const configuration: unknown = JSON.parse(result.stdout);
+      expect(configuration).toMatchObject({
+        services: {
+          slipstream: {
+            environment: {
+              SLIPSTREAM_PUBLIC_ORIGIN: origin ?? "http://localhost:8123",
+            },
+            ports: [{ host_ip: "127.0.0.2" }],
+          },
+        },
+      });
+    } finally {
+      await removeFixture(target);
+    }
+  },
+);
 
 test("access creation and rotation require a terminal and run a no-log admin container", async () => {
   const target = await fixture();

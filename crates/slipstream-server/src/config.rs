@@ -111,8 +111,7 @@ impl Config {
             return Err(ConfigError::Invalid("SLIPSTREAM_WEB_ROOT"));
         }
         let public_origin = crate::access::canonical_origin(
-            &get("SLIPSTREAM_PUBLIC_ORIGIN")
-                .ok_or(ConfigError::Missing("SLIPSTREAM_PUBLIC_ORIGIN"))?,
+            &get("SLIPSTREAM_PUBLIC_ORIGIN").unwrap_or_else(|| format!("http://localhost:{port}")),
         )
         .ok_or(ConfigError::Invalid("SLIPSTREAM_PUBLIC_ORIGIN"))?;
         let processing_instance = get("SLIPSTREAM_PROCESSING_INSTANCE");

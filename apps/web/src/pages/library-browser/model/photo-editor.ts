@@ -1,3 +1,5 @@
+import { randomUuid } from "./browser-crypto.js";
+
 //! One Photo's editing session in the browser: the confirmed Edit Recipe, the
 //! local settings a Photographer has not had confirmed yet, session undo/redo,
 //! conflict reconciliation, and the bounded local draft that survives a reload.
@@ -560,7 +562,7 @@ export const createPhotoEditor = (options: {
   const maximumHistory = options.maximumHistory ?? MAXIMUM_HISTORY;
   const nextRequestId =
     options.nextRequestId ??
-    (() => `web-edit-${crypto.randomUUID().replaceAll("-", "").slice(0, 24)}`);
+    (() => `web-edit-${randomUuid().replaceAll("-", "").slice(0, 24)}`);
 
   let facts: EditorFacts | null = null;
   let confirmed: EditorSettings = baselineSettings();

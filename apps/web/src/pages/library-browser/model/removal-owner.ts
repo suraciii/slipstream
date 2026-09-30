@@ -9,6 +9,7 @@ import {
   type RestorationWriteResult,
 } from "../api/removal.js";
 import type { SourceAuthority } from "./source-grid-owner.js";
+import { randomUuid } from "./browser-crypto.js";
 
 export type { RemovalFetch } from "../api/removal.js";
 
@@ -88,7 +89,7 @@ export function createRemovalOwner(
   fetcher: RemovalFetch,
   options: RemovalOwnerOptions = {},
 ): RemovalOwner {
-  const newOperationId = options.newOperationId ?? (() => crypto.randomUUID());
+  const newOperationId = options.newOperationId ?? (() => randomUuid());
   /// One admission key per in-flight write: a control that would send a
   /// second identical request while the first is unanswered is refused here,
   /// not only in the page.

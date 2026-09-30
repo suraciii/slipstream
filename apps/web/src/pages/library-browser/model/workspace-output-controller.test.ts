@@ -310,6 +310,61 @@ describe("retained workspace results", () => {
 });
 
 describe("XMP evidence and reconciliation", () => {
+  test("discards same-size altered bytes with valid artifact headers", async () => {
+    const record = {
+      ...xmpRecord,
+      artifact: {
+        ...xmpRecord.artifact,
+        byteLength: 3,
+        sha256:
+          "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      },
+    };
+    const artifact = parseXmpArtifact(record, "photo")!;
+    const headers = new Headers({ "content-type": artifact.contentType });
+    for (const [key, value] of Object.entries({
+      "export-id": artifact.exportId,
+      target: "edit-state-xmp",
+      filename: artifact.filename,
+      "content-type": artifact.contentType,
+      "byte-length": String(artifact.byteLength),
+      sha256: artifact.sha256,
+      "created-at": artifact.createdAt,
+      "expires-at": artifact.expiresAt,
+    }))
+      headers.set(`slipstream-artifact-${key}`, value);
+    const owner = createWorkspaceOutputController(
+      (path) => {
+        if (typeof path !== "string") throw new Error("Expected endpoint path");
+        if (path.endsWith("/artifact"))
+          return Promise.resolve(new Response("abd", { headers }));
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              exports: path.endsWith("/edit-state-exports") ? [record] : [],
+            }),
+          ),
+        );
+      },
+      {
+        facts: () => facts,
+        owns: () => true,
+        render: () => {},
+        settle: () => Promise.resolve(true),
+      },
+    );
+    try {
+      owner.open("photo");
+      await owner.refresh("photo");
+      await owner.download("photo");
+      expect(owner.view("photo").xmp.note).toBe(
+        "The downloaded file was incomplete or changed and was discarded.",
+      );
+      expect(owner.view("photo").xmp.canDownload).toBe(true);
+    } finally {
+      owner.leave();
+    }
+  });
   test("reopening an expired XMP retains its evidence and offers a new export", async () => {
     const record = { ...xmpRecord, expiresAt: "2020-01-01T00:00:00Z" };
     const fetcher: BrowserFetch = (path) =>

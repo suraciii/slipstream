@@ -315,8 +315,21 @@ fn list_validation_enforces_requested_and_global_page_bounds() {
 }
 
 #[test]
-fn connection_requires_a_clean_origin_and_obeys_precedence() {
+fn connection_accepts_http_and_https_clean_origins_and_obeys_precedence() {
     let explicit = Cli::try_parse_from([
+        "slipstream",
+        "--server",
+        "http://example.test:8080",
+        "status",
+    ])
+    .unwrap();
+    assert_eq!(
+        service_origin(&explicit, Some("https://ignored.test"))
+            .unwrap()
+            .as_str(),
+        "http://example.test:8080/"
+    );
+    let https = Cli::try_parse_from([
         "slipstream",
         "--server",
         "https://example.test:8443",
@@ -324,9 +337,7 @@ fn connection_requires_a_clean_origin_and_obeys_precedence() {
     ])
     .unwrap();
     assert_eq!(
-        service_origin(&explicit, Some("http://ignored.test"))
-            .unwrap()
-            .as_str(),
+        service_origin(&https, None).unwrap().as_str(),
         "https://example.test:8443/"
     );
     let without_server = Cli::try_parse_from(["slipstream", "status"]).unwrap();
@@ -334,9 +345,9 @@ fn connection_requires_a_clean_origin_and_obeys_precedence() {
     assert!(service_origin(&without_server, Some("")).is_err());
     for invalid in [
         "ftp://example.test",
-        "http://127.0.0.1:3000",
         "http://user@example.test",
         "http://@example.test",
+        "http://example.test/path",
         "https://example.test/path",
         "https://example.test/?x=1",
     ] {

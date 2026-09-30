@@ -90,7 +90,7 @@ python3 tools/processing/acceptance.py \
   --expected-bundle-sha256 BUNDLE_SHA256
 ```
 
-`--base-url` must be HTTPS (plain HTTP is accepted only for loopback hosts),
+`--base-url` accepts HTTP or HTTPS; HTTP prints an unencrypted-connection warning.
 `--token-file` holds the bearer token and must not be group- or other-writable,
 and the fixture path is the operator's own copy of the approved-profile RAW
 file; the tool reads it read-only. `--max-download-bytes` is the read bound for

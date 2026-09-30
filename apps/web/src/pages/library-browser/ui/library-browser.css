@@ -1897,7 +1897,7 @@
   .grid-view,
   .photo-view {
     width: 100%;
-    height: 100dvh;
+    height: 100%;
   }
 
   /* One compact header row: the source disclosure, the count or current

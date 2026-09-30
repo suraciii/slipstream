@@ -9,6 +9,9 @@
     "test:unit": "bun test src/pages/library-browser",
     "typecheck": "tsc -p tsconfig.json"
   },
+  "dependencies": {
+    "@noble/hashes": "1.8.0"
+  },
   "devDependencies": {
     "vite": "7.3.5"
   }

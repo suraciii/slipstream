@@ -11,6 +11,7 @@ import {
   type RemovalFetch,
   type RestorationResult,
 } from "../api/removal.js";
+import { randomUuid } from "./browser-crypto.js";
 import {
   boundTrashSelection,
   confirmTrashLabel,
@@ -292,7 +293,7 @@ export function createRemovedListingOwner(
       removedSelectedIds.size === 0
     )
       return;
-    const operationId = crypto.randomUUID();
+    const operationId = randomUuid();
     const selection = [...removedSelectedIds];
     const reviewResult = await reviewTrash(fetcher, operationId, {
       all: false,

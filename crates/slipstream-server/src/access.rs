@@ -15,6 +15,7 @@ use std::{
 use subtle::ConstantTimeEq;
 
 const COOKIE: &str = "__Host-slipstream";
+const HTTP_COOKIE: &str = "slipstream";
 const LIFETIME: u64 = 7 * 24 * 60 * 60;
 const SESSION_PATH: &str = "/api/access/session";
 
@@ -23,7 +24,7 @@ pub(crate) fn canonical_origin(value: &str) -> Option<String> {
         return None;
     }
     let url = url::Url::parse(value).ok()?;
-    (url.scheme() == "https"
+    (matches!(url.scheme(), "http" | "https")
         && url.host_str().is_some()
         && url.username().is_empty()
         && url.password().is_none()
@@ -265,6 +266,7 @@ impl Rate {
 pub(crate) struct Access {
     store: Mutex<Store>,
     origin: String,
+    cookie_name: &'static str,
     rate: Mutex<Rate>,
     exchanges: tokio::sync::Semaphore,
 }
@@ -277,6 +279,11 @@ impl Access {
         })?;
         Ok(Self {
             store: Mutex::new(store),
+            cookie_name: if origin.starts_with("https:") {
+                COOKIE
+            } else {
+                HTTP_COOKIE
+            },
             origin,
             rate: Mutex::new(Rate::default()),
             exchanges: tokio::sync::Semaphore::new(4),
@@ -316,7 +323,7 @@ impl Access {
     pub(crate) fn admit(&self, request: &Request<Body>) -> Result<(), Box<Response<Body>>> {
         let headers = request.headers();
         let bearer = headers.get(header::AUTHORIZATION);
-        let cookie = cookie(request)?;
+        let cookie = cookie(request, self.cookie_name)?;
         if bearer.is_some() && cookie.is_some() {
             return Err(error(400, "invalid_request"));
         }
@@ -382,7 +389,7 @@ impl Access {
         if request.headers().contains_key(header::AUTHORIZATION) {
             return Err(error(400, "invalid_request"));
         }
-        let cookie = cookie(&request)?;
+        let cookie = cookie(&request, self.cookie_name)?;
         if request.method() != "GET" && !self.origin_matches(&request) {
             return Err(error(403, "access_denied"));
         }
@@ -461,7 +468,7 @@ impl Access {
             store
                 .write(&records)
                 .map_err(|_| error(503, "access_unavailable"))?;
-            return Ok(with_cookie(empty(), &value, LIFETIME));
+            return Ok(with_cookie(empty(), &value, LIFETIME, self.cookie_name));
         }
         let mut store = self
             .store
@@ -484,7 +491,7 @@ impl Access {
                     .write(&records)
                     .map_err(|_| error(503, "access_unavailable"))?;
             }
-            return Ok(with_cookie(empty(), "", 0));
+            return Ok(with_cookie(empty(), "", 0, self.cookie_name));
         }
         if let Some(session) = session {
             let expiry = time::OffsetDateTime::from_unix_timestamp(session.expires as i64)
@@ -495,7 +502,7 @@ impl Access {
         } else {
             let response = Json(serde_json::json!({"authenticated": false, "configured": records.credential.is_some()})).into_response();
             Ok(if cookie.is_some() {
-                with_cookie(response, "", 0)
+                with_cookie(response, "", 0, self.cookie_name)
             } else {
                 response
             })
@@ -510,7 +517,10 @@ fn csrf(request: &Request<Body>, session: &Session) -> bool {
         .is_some_and(|v| equal(v, &session.csrf))
         && values.next().is_none()
 }
-fn cookie(request: &Request<Body>) -> Result<Option<String>, Box<Response<Body>>> {
+fn cookie(
+    request: &Request<Body>,
+    cookie_name: &str,
+) -> Result<Option<String>, Box<Response<Body>>> {
     let mut result = None;
     for header in request.headers().get_all(header::COOKIE) {
         for part in header
@@ -519,7 +529,7 @@ fn cookie(request: &Request<Body>) -> Result<Option<String>, Box<Response<Body>>
             .split(';')
         {
             if let Some((name, value)) = part.trim().split_once('=')
-                && name == COOKIE
+                && name == cookie_name
             {
                 if result.is_some() {
                     return Err(error(400, "invalid_request"));
@@ -533,10 +543,11 @@ fn cookie(request: &Request<Body>) -> Result<Option<String>, Box<Response<Body>>
 fn empty() -> Response<Body> {
     StatusCode::NO_CONTENT.into_response()
 }
-fn with_cookie(mut response: Response<Body>, value: &str, age: u64) -> Response<Body> {
+fn with_cookie(mut response: Response<Body>, value: &str, age: u64, name: &str) -> Response<Body> {
+    let secure = if name == COOKIE { "; Secure" } else { "" };
     response.headers_mut().insert(
         header::SET_COOKIE,
-        format!("{COOKIE}={value}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age={age}")
+        format!("{name}={value}{secure}; HttpOnly; SameSite=Lax; Path=/; Max-Age={age}")
             .parse()
             .unwrap(),
     );
@@ -668,7 +679,7 @@ mod tests {
         access
             .endpoint(
                 request("POST", SESSION_PATH)
-                    .header("origin", "https://camera.local")
+                    .header("origin", &access.origin)
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({"token":TEST_TOKEN}).to_string(),
@@ -691,9 +702,9 @@ mod tests {
     }
 
     #[test]
-    fn configured_origin_is_exact_https_origin() {
+    fn configured_origin_is_exact_http_or_https_origin() {
         for input in [
-            "http://camera.local",
+            "ftp://camera.local",
             "https://camera.local/extra",
             "https://a:b@camera.local",
             "https://camera.local?x",
@@ -706,7 +717,98 @@ mod tests {
             canonical_origin("https://CAMERA.local:443/"),
             Some("https://camera.local".into())
         );
+        assert_eq!(
+            canonical_origin("http://CAMERA.local:80/"),
+            Some("http://camera.local".into())
+        );
     }
+    #[tokio::test]
+    async fn http_sessions_preserve_origin_csrf_expiry_and_logout() {
+        let mut fixture = Fixture::new();
+        fixture.config.public_origin = "http://camera.local:3000".into();
+        let access = Access::open(&fixture.config).unwrap();
+        assert_eq!(exchange(&access).await.status(), 503);
+        assert_eq!(
+            access
+                .admit(&request("GET", "/api/status").body(Body::empty()).unwrap())
+                .unwrap_err()
+                .status(),
+            401
+        );
+        access.seed_test_token();
+        let response = exchange(&access).await;
+        assert_eq!(response.status(), 204);
+        let set = response.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(set.starts_with("slipstream="));
+        assert!(!set.contains("Secure") && !set.contains("Domain="));
+        assert!(set.contains("HttpOnly; SameSite=Lax; Path=/; Max-Age=604800"));
+        let cookie = cookie_value(&response);
+        let status_request = || {
+            request("GET", SESSION_PATH)
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let first = json(access.endpoint(status_request()).await).await;
+        assert_eq!(first["authenticated"], true);
+        let second = json(access.endpoint(status_request()).await).await;
+        assert_eq!(first["expiresAt"], second["expiresAt"]);
+        let csrf = first["csrfToken"].as_str().unwrap();
+        for (origin, token, expected) in [
+            ("http://camera.local:3000", csrf, 204),
+            ("https://camera.local:3000", csrf, 403),
+            ("http://camera.local:3001", csrf, 403),
+            ("http://camera.local:3000", "invalid", 403),
+        ] {
+            let result = access.admit(
+                &request("POST", "/api/albums")
+                    .header("cookie", &cookie)
+                    .header("origin", origin)
+                    .header("x-csrf-token", token)
+                    .body(Body::empty())
+                    .unwrap(),
+            );
+            assert_eq!(
+                result.map_or_else(|error| error.status().as_u16(), |_| 204),
+                expected
+            );
+        }
+        let wrong_name = cookie.replacen("slipstream=", "__Host-slipstream=", 1);
+        assert_eq!(
+            access
+                .admit(
+                    &request("GET", "/api/status")
+                        .header("cookie", wrong_name)
+                        .body(Body::empty())
+                        .unwrap()
+                )
+                .unwrap_err()
+                .status(),
+            401
+        );
+        let logout = access
+            .endpoint(
+                request("DELETE", SESSION_PATH)
+                    .header("cookie", &cookie)
+                    .header("origin", &access.origin)
+                    .header("x-csrf-token", csrf)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(logout.status(), 204);
+        assert_eq!(
+            logout.headers()[header::SET_COOKIE],
+            "slipstream=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"
+        );
+        let expired = access.endpoint(status_request()).await;
+        assert_eq!(
+            expired.headers()[header::SET_COOKIE],
+            "slipstream=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"
+        );
+        assert_eq!(json(expired).await["authenticated"], false);
+    }
+
     #[test]
     fn rate_windows_and_peer_storage_are_bounded() {
         let mut rate = Rate::default();

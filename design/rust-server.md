@@ -56,7 +56,7 @@ Blocking SQLite, LibRaw, JPEG, and derivative work must not run on asynchronous 
 The default listener remains loopback. [Instance Access Architecture](access.md)
 owns credential verification, sessions, request-origin checks, private response
 caching, and admission before all private route handlers. [Deployment](../docs/deployment.md)
-owns HTTPS exposure and the private proxy hop. There is no anonymous fallback
+owns optional HTTP/HTTPS exposure. There is no anonymous fallback
 when access configuration is missing. Accounts and identity providers are not
 part of this contract. Minimal health checks retain their fixed readiness body.
 

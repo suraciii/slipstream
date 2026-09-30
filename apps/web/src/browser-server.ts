@@ -22,6 +22,7 @@ type BrowserServerOptions = Readonly<{
   base: string;
   root: string;
   environment?: Readonly<Record<string, string | undefined>>;
+  transport?: "http" | "https";
 }>;
 const startupTimeoutMs = 60_000;
 const maxStartupAttempts = 3;
@@ -30,6 +31,7 @@ export async function startBrowserServer({
   base,
   root,
   environment: environmentOverride,
+  transport = "https",
 }: BrowserServerOptions): Promise<BrowserServer> {
   const webRoot = resolve(process.env.SLIPSTREAM_WEB_ROOT ?? "apps/web/dist");
   const binary = resolve(
@@ -101,11 +103,15 @@ export async function startBrowserServer({
       for (const upstream of upstreams) upstream.destroy();
       await closed;
     };
-    await new Promise<void>((done) => proxy.listen(0, "127.0.0.1", done));
+    if (transport === "https")
+      await new Promise<void>((done) => proxy.listen(0, "127.0.0.1", done));
     const address = proxy.address();
-    if (!address || typeof address === "string")
+    if (transport === "https" && (!address || typeof address === "string"))
       throw new Error("HTTPS proxy address unavailable");
-    const url = `https://127.0.0.1:${address.port}`;
+    const url =
+      transport === "http"
+        ? backendUrl
+        : `https://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
     const childEnvironment: NodeJS.ProcessEnv = {
       ...process.env,
       SLIPSTREAM_PROCESSING_INSTANCE: undefined,
@@ -146,7 +152,7 @@ export async function startBrowserServer({
           closing ??= (async () => {
             fixtureTokens.delete(url);
             try {
-              await closeProxy();
+              if (transport === "https") await closeProxy();
             } finally {
               await stop(child);
             }
@@ -156,7 +162,7 @@ export async function startBrowserServer({
       };
     } catch (error) {
       try {
-        await closeProxy();
+        if (transport === "https") await closeProxy();
       } finally {
         await stop(child);
       }
@@ -241,7 +247,7 @@ export async function fixtureFetch(
     outgoingHeaders[key] = value;
   });
   return new Promise((resolveResponse, reject) => {
-    const request = httpsRequest(
+    const request = (url.protocol === "http:" ? httpRequest : httpsRequest)(
       url,
       {
         method: init.method ?? "GET",

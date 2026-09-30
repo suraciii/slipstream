@@ -52,6 +52,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let public_origin = config.public_origin.clone();
 
     let server = match start_server(config).await {
         Ok(server) => server,
@@ -60,7 +61,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    println!("Slipstream listening at {}", server.url);
+    println!("Slipstream available at {public_origin}");
     wait_for_shutdown_signal().await;
     if let Err(error) = server.close().await {
         eprintln!("Slipstream shutdown failed: {error}");

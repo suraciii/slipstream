@@ -344,7 +344,7 @@ class DeploymentVerifierTests(unittest.TestCase):
                     "stages": {"develop": "ready", "film": "unavailable"},
                 }
 
-            def checks_for(overrides):
+            def checks_for(overrides, origin="https://photos.example.com"):
                 def urlopen(request, timeout):
                     path = request.full_url.split("/", 3)[-1]
                     if path == "healthz":
@@ -361,7 +361,7 @@ class DeploymentVerifierTests(unittest.TestCase):
                     instance=INSTANCE,
                     policy=POLICY,
                     bundle=BUNDLE,
-                    web_url="https://photos.example.com",
+                    web_url=origin,
                     web_token_file=token_file,
                     urlopen=urlopen,
                 )
@@ -369,6 +369,8 @@ class DeploymentVerifierTests(unittest.TestCase):
 
             ready = checks_for({})
             self.assertTrue(all(check.ok for check in ready), ready)
+            http_ready = checks_for({}, "http://photos.example.com")
+            self.assertTrue(all(check.ok for check in http_ready), http_ready)
 
             # Each row overrides one part of the ready answer; the reason and
             # detail are the contract the verifier reports for it.
@@ -423,25 +425,25 @@ class DeploymentVerifierTests(unittest.TestCase):
                 self.assertEqual(checks[0].detail, detail, description)
 
 
-    def test_web_rejects_plain_http_before_sending_bearer(self):
+    def test_web_rejects_non_http_transport_before_sending_bearer(self):
         with tempfile.TemporaryDirectory() as directory:
             token_file = Path(directory) / "token"
             token_file.write_text("synthetic-token\n")
             token_file.chmod(0o600)
 
             def unexpected_urlopen(*_args, **_kwargs):
-                raise AssertionError("bearer must not be sent over HTTP")
+                raise AssertionError("bearer must not be sent over an unsupported transport")
 
             checker = deployment.DeploymentSnapshot(
                 instance=INSTANCE,
                 policy=POLICY,
                 bundle=BUNDLE,
-                web_url="http://photos.example.com",
+                web_url="ftp://photos.example.com",
                 web_token_file=token_file,
                 urlopen=unexpected_urlopen,
             )
             checks = checker._web_checks()
-            self.assertEqual(checks[0].reason, "web-url-must-use-https")
+            self.assertEqual(checks[0].reason, "web-url-must-use-http-or-https")
 
 
 if __name__ == "__main__":

@@ -1162,8 +1162,7 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(
             acceptance.normalize_base_url("http://127.0.0.1:8080/"), "http://127.0.0.1:8080"
         )
-        with self.assertRaises(acceptance.InvocationRefused):
-            acceptance.normalize_base_url("http://photos.example.com")
+        self.assertEqual(acceptance.normalize_base_url("http://photos.example.com"), "http://photos.example.com")
         with self.assertRaises(acceptance.InvocationRefused):
             acceptance.normalize_base_url("https://user:pass@photos.example.com")
         with self.assertRaises(acceptance.InvocationRefused):
