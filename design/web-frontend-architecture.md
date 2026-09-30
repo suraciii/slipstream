@@ -139,6 +139,11 @@ defined by Web Async Ownership:
 - The **page API** owns Library Browser HTTP calls, wire response types, and
   response decoding. It accepts cancellation inputs from the calling owner but
   does not choose which operation supersedes another.
+  Browse, removal/restoration, and Trash share one HTTP/JSON classifier. It
+  distinguishes a failed transfer, an HTTP refusal, and unreadable JSON without
+  trusting the decoded body. Each client retains its own identity, count, and
+  Snapshot validators and maps those classifications into its existing result
+  types. Thumbnail, Preview, and other APIs retain their distinct protocols.
 
 These are responsibility boundaries, not a requirement for one file per bullet.
 An extracted module must hide meaningful state or policy behind a smaller

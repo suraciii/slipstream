@@ -1,6 +1,7 @@
 import { validPhotoSummary } from "./source-grid.js";
 import { hasExactKeys, isRecord, validCount } from "./guards.js";
 import type { PhotoSummary } from "./contracts.js";
+import { fetchJson } from "./json-response.js";
 
 export type RemovalFetch = (
   input: string,
@@ -139,27 +140,21 @@ export async function removeRejectedResult(
     reviewed: number;
   }>,
 ): Promise<RemovalWriteResult> {
-  let response: Response;
-  try {
-    response = await fetcher("/api/photos/remove", {
+  const result = await fetchJson(() =>
+    fetcher("/api/photos/remove", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         token: input.token,
         operationId: input.operationId,
       }),
-    });
-  } catch {
-    return Object.freeze({ kind: "rejected", status: 0 });
-  }
-  if (!response.ok)
-    return Object.freeze({ kind: "rejected", status: response.status });
-  let value: unknown;
-  try {
-    value = await response.json();
-  } catch {
-    return Object.freeze({ kind: "malformed" });
-  }
+    }),
+  );
+  if (result.kind !== "ok")
+    return result.kind === "rejected"
+      ? Object.freeze({ kind: "rejected", status: result.status })
+      : result;
+  const value = result.value;
   if (
     !isRecord(value) ||
     !hasExactKeys(value, [
@@ -237,24 +232,18 @@ async function restorationWrite(
     | Readonly<{ photos: ReadonlyArray<{ id: string; removedAtMs: number }> }>,
   requested: ReadonlyArray<string> | undefined,
 ): Promise<RestorationWriteResult> {
-  let response: Response;
-  try {
-    response = await fetcher("/api/photos/restore", {
+  const result = await fetchJson(() =>
+    fetcher("/api/photos/restore", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    });
-  } catch {
-    return Object.freeze({ kind: "rejected", status: 0 });
-  }
-  if (!response.ok)
-    return Object.freeze({ kind: "rejected", status: response.status });
-  let value: unknown;
-  try {
-    value = await response.json();
-  } catch {
-    return Object.freeze({ kind: "malformed" });
-  }
+    }),
+  );
+  if (result.kind !== "ok")
+    return result.kind === "rejected"
+      ? Object.freeze({ kind: "rejected", status: result.status })
+      : result;
+  const value = result.value;
   if (
     !isRecord(value) ||
     !hasExactKeys(value, [

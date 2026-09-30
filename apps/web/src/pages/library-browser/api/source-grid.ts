@@ -7,6 +7,7 @@ import type {
   SelectionFilter,
 } from "./contracts.js";
 import { isRecord, validOptional } from "./guards.js";
+import { fetchJson } from "./json-response.js";
 
 export type SourceGridFetch = (
   input: RequestInfo | URL,
@@ -100,82 +101,65 @@ const validSelectionCounts = (value: unknown): value is SelectionCounts =>
     (count) => Number.isInteger(count) && Number(count) >= 0,
   );
 
+async function browseJson<T>(
+  request: () => Promise<Response>,
+  validate: (value: unknown) => boolean,
+): Promise<SourceGridApiResult<T>> {
+  const result = await fetchJson(request);
+  if (result.kind === "rejected")
+    return result.transport
+      ? { kind: "failed" }
+      : { kind: "failed", status: result.status };
+  if (result.kind === "malformed" || !validate(result.value))
+    return { kind: "failed", malformed: true };
+  return { kind: "ok", value: result.value as T };
+}
+
 export async function openBrowse(
   fetcher: SourceGridFetch,
   source: BrowseSourceRequest,
   signal: AbortSignal,
 ): Promise<SourceGridApiResult<BrowseOpenResponse>> {
-  let response: Response;
-  const order =
-    source.order && source.order !== "source-default"
-      ? { order: source.order }
-      : {};
-  const selection =
-    source.selection && source.selection !== "all"
-      ? { selection: source.selection }
-      : {};
-  try {
-    response = await fetcher("/api/browse", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(
-        source.kind === "library"
-          ? {
-              source: "library",
-              ...order,
-              ...selection,
-              ...(source.preferredPhotoId
-                ? { photoId: source.preferredPhotoId }
-                : {}),
-            }
-          : source.kind === "folder"
-            ? {
-                source: "folder",
-                folderPath: source.folderPath,
-                publication: source.publication,
-                ...order,
-                ...selection,
-                ...(source.preferredPhotoId
-                  ? { photoId: source.preferredPhotoId }
-                  : {}),
-              }
-            : {
-                source: "album",
-                albumId: source.albumId,
-                ...order,
-                ...selection,
-                ...(source.preferredPhotoId
-                  ? { photoId: source.preferredPhotoId }
-                  : {}),
-              },
-      ),
-      signal,
-      priority: "high",
-    });
-  } catch {
-    return { kind: "failed" };
-  }
-  if (!response.ok) return { kind: "failed", status: response.status };
-  try {
-    const value: unknown = await response.json();
-    if (
-      !isRecord(value) ||
-      typeof value.token !== "string" ||
-      value.token.length === 0 ||
-      !Number.isInteger(value.total) ||
-      Number(value.total) < 0 ||
-      !Number.isInteger(value.position) ||
-      Number(value.position) < 0 ||
-      !validSelectionCounts(value.selectionCounts) ||
+  const sourceFields =
+    source.kind === "folder"
+      ? { folderPath: source.folderPath, publication: source.publication }
+      : source.kind === "album"
+        ? { albumId: source.albumId }
+        : {};
+  return browseJson(
+    () =>
+      fetcher("/api/browse", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source: source.kind,
+          ...sourceFields,
+          ...(source.order && source.order !== "source-default"
+            ? { order: source.order }
+            : {}),
+          ...(source.selection && source.selection !== "all"
+            ? { selection: source.selection }
+            : {}),
+          ...(source.preferredPhotoId
+            ? { photoId: source.preferredPhotoId }
+            : {}),
+        }),
+        signal,
+        priority: "high",
+      }),
+    (value) =>
+      isRecord(value) &&
+      typeof value.token === "string" &&
+      value.token.length > 0 &&
+      Number.isInteger(value.total) &&
+      Number(value.total) >= 0 &&
+      Number.isInteger(value.position) &&
+      Number(value.position) >= 0 &&
+      validSelectionCounts(value.selectionCounts) &&
       (Number(value.total) === 0
-        ? Number(value.position) !== 0
-        : Number(value.position) >= Number(value.total))
-    )
-      return { kind: "failed", malformed: true };
-    return { kind: "ok", value: value as BrowseOpenResponse };
-  } catch {
-    return { kind: "failed", malformed: true };
-  }
+        ? Number(value.position) === 0
+        : Number(value.position) < Number(value.total)),
+  );
 }
 
 export async function fetchBrowseWindow(
@@ -189,33 +173,22 @@ export async function fetchBrowseWindow(
     priority: "high" | "low";
   }>,
 ): Promise<SourceGridApiResult<BrowseWindowResponse>> {
-  let response: Response;
-  try {
-    response = await fetcher(
-      `/api/browse/${encodeURIComponent(input.token)}?start=${input.start}&limit=${input.limit}`,
-      { signal: input.signal, priority: input.priority },
-    );
-  } catch {
-    return { kind: "failed" };
-  }
-  if (!response.ok) return { kind: "failed", status: response.status };
-  try {
-    const value: unknown = await response.json();
-    if (
-      !isRecord(value) ||
-      value.start !== input.start ||
-      value.total !== input.expectedTotal ||
-      !Array.isArray(value.photos) ||
-      value.photos.length !==
-        Math.min(input.limit, input.expectedTotal - input.start) ||
-      input.start + value.photos.length > input.expectedTotal ||
-      !value.photos.every(validPhotoSummary)
-    )
-      return { kind: "failed", malformed: true };
-    return { kind: "ok", value: value as BrowseWindowResponse };
-  } catch {
-    return { kind: "failed", malformed: true };
-  }
+  return browseJson(
+    () =>
+      fetcher(
+        `/api/browse/${encodeURIComponent(input.token)}?start=${input.start}&limit=${input.limit}`,
+        { signal: input.signal, priority: input.priority },
+      ),
+    (value) =>
+      isRecord(value) &&
+      value.start === input.start &&
+      value.total === input.expectedTotal &&
+      Array.isArray(value.photos) &&
+      value.photos.length ===
+        Math.min(input.limit, input.expectedTotal - input.start) &&
+      input.start + value.photos.length <= input.expectedTotal &&
+      value.photos.every(validPhotoSummary),
+  );
 }
 
 export async function fetchBrowsePosition(
@@ -226,33 +199,17 @@ export async function fetchBrowsePosition(
     signal: AbortSignal;
   }>,
 ): Promise<SourceGridApiResult<BrowsePositionResponse>> {
-  let response: Response;
-  try {
-    response = await fetcher(
-      `/api/browse/${encodeURIComponent(input.token)}/position?photoId=${encodeURIComponent(input.photoId)}`,
-      { signal: input.signal, priority: "high" },
-    );
-  } catch {
-    return { kind: "failed" };
-  }
-  if (!response.ok) return { kind: "failed", status: response.status };
-  try {
-    const value: unknown = await response.json();
-    if (
-      !isRecord(value) ||
-      !(
-        value.position === null ||
-        (Number.isInteger(value.position) && Number(value.position) >= 0)
-      )
-    )
-      return { kind: "failed", malformed: true };
-    return {
-      kind: "ok",
-      value: value as BrowsePositionResponse,
-    };
-  } catch {
-    return { kind: "failed", malformed: true };
-  }
+  return browseJson(
+    () =>
+      fetcher(
+        `/api/browse/${encodeURIComponent(input.token)}/position?photoId=${encodeURIComponent(input.photoId)}`,
+        { signal: input.signal, priority: "high" },
+      ),
+    (value) =>
+      isRecord(value) &&
+      (value.position === null ||
+        (Number.isInteger(value.position) && Number(value.position) >= 0)),
+  );
 }
 
 /// The Thumbnail endpoint's answer, classified by what the Grid may claim.
