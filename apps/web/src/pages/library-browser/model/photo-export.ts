@@ -10,15 +10,20 @@
 
 export type ExportArtifact = Readonly<{
   exportId: string;
-  target: string;
-  stage: string;
-  contentType: string;
+  target: "development-tiff" | "film-jpeg";
+  stage: "develop" | "film";
+  contentType: "image/tiff" | "image/jpeg";
   width: number;
   height: number;
   profileIdentity: string;
   byteLength: number;
   sha256: string;
   expiresAt: string;
+  filename: string;
+  orientation: string;
+  sampleFormat: string;
+  colorSpace: string;
+  iccEmbedded: boolean;
 }>;
 
 export type ExportInspection = Readonly<{
@@ -26,7 +31,11 @@ export type ExportInspection = Readonly<{
   target: "development-tiff" | "film-jpeg";
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
   failureReason: string;
+  createdAt?: string | undefined;
+  recipeVersion?: string | undefined;
+  sourceRevision?: string | undefined;
   artifact: ExportArtifact | null;
+  inspectionPending?: boolean;
 }>;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -45,7 +54,7 @@ const readCount = (
   key: string,
 ): number | undefined => {
   const value = source[key];
-  return typeof value === "number" && Number.isFinite(value)
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
     ? value
     : undefined;
 };
@@ -58,8 +67,10 @@ export const parseExportInspection = (
   if (!isRecord(value)) return undefined;
   const exportId = readString(value, "exportId");
   const state = readString(value, "state");
+  const target = readString(value, "target");
   if (
     !exportId ||
+    (target !== "development-tiff" && target !== "film-jpeg") ||
     state === undefined ||
     !["queued", "running", "succeeded", "failed", "cancelled"].includes(state)
   )
@@ -68,7 +79,6 @@ export const parseExportInspection = (
   let artifact: ExportArtifact | null = null;
   if (artifactValue !== null && artifactValue !== undefined) {
     if (!isRecord(artifactValue)) return undefined;
-    const target = readString(artifactValue, "target");
     const stage = readString(artifactValue, "stage");
     const contentType = readString(artifactValue, "contentType");
     const profileIdentity = readString(artifactValue, "profileIdentity");
@@ -77,13 +87,27 @@ export const parseExportInspection = (
     const width = readCount(artifactValue, "width");
     const height = readCount(artifactValue, "height");
     const byteLength = readCount(artifactValue, "byteLength");
+    const filename = readString(artifactValue, "filename");
+    const orientation = readString(artifactValue, "orientation");
+    const sampleFormat = readString(artifactValue, "sampleFormat");
+    const colorSpace = readString(artifactValue, "colorSpace");
+    const iccEmbedded = artifactValue["iccEmbedded"];
     if (
-      !target ||
-      !stage ||
-      !contentType ||
-      !profileIdentity ||
+      artifactValue["exportId"] !== exportId ||
+      artifactValue["target"] !== target ||
+      (target === "development-tiff"
+        ? stage !== "develop" || contentType !== "image/tiff"
+        : stage !== "film" || contentType !== "image/jpeg") ||
+      !profileIdentity?.trim() ||
       !sha256 ||
+      !/^[a-f0-9]{64}$/.test(sha256) ||
       !expiresAt ||
+      !Number.isFinite(Date.parse(expiresAt)) ||
+      !filename?.trim() ||
+      !orientation?.trim() ||
+      !sampleFormat?.trim() ||
+      !colorSpace?.trim() ||
+      typeof iccEmbedded !== "boolean" ||
       width === undefined ||
       height === undefined ||
       byteLength === undefined
@@ -92,26 +116,61 @@ export const parseExportInspection = (
     artifact = Object.freeze({
       exportId,
       target,
-      stage,
-      contentType,
+      stage: stage as ExportArtifact["stage"],
+      contentType: contentType as ExportArtifact["contentType"],
       width,
       height,
       profileIdentity,
       byteLength,
       sha256,
       expiresAt,
+      filename,
+      orientation,
+      sampleFormat,
+      colorSpace,
+      iccEmbedded,
     });
   }
-  const target =
-    readString(value, "target") ?? artifact?.target ?? "development-tiff";
-  if (target !== "development-tiff" && target !== "film-jpeg") return undefined;
   return Object.freeze({
     exportId,
     target,
+    createdAt: readString(value, "createdAt"),
+    recipeVersion: readString(value, "recipeVersion"),
+    sourceRevision: readString(value, "sourceRevision"),
     state: state as ExportInspection["state"],
     failureReason: readString(value, "failureReason") ?? "",
     artifact,
   });
+};
+
+/// Selects the newest attempt and newest retained success independently.
+/// A later queued or failed retry never hides an older downloadable artifact.
+export const selectExportPair = (
+  inspections: readonly ExportInspection[],
+  target: ExportInspection["target"],
+): Readonly<{
+  active: ExportInspection | null;
+  retained: ExportInspection | null;
+}> => {
+  const matching = inspections.filter((entry) => entry.target === target);
+  const newest = (
+    entries: readonly ExportInspection[],
+  ): ExportInspection | null =>
+    entries.reduce<ExportInspection | null>(
+      (best, entry) =>
+        !best || (entry.createdAt ?? "") > (best.createdAt ?? "")
+          ? entry
+          : best,
+      null,
+    );
+  return {
+    active: newest(matching),
+    retained: newest(
+      matching.filter(
+        (entry) => entry.state === "succeeded" && entry.artifact !== null,
+      ),
+    ),
+  };
 };
 
 /// Whether a downloaded artifact is the one the inspection described. Every
@@ -132,7 +191,13 @@ export const artifactMatchesHeaders = (
   headers.get("slipstream-artifact-byte-length") ===
     String(artifact.byteLength) &&
   headers.get("slipstream-artifact-sha256") === artifact.sha256 &&
-  headers.get("slipstream-artifact-expires-at") === artifact.expiresAt;
+  headers.get("slipstream-artifact-expires-at") === artifact.expiresAt &&
+  headers.get("slipstream-artifact-filename") === artifact.filename &&
+  headers.get("slipstream-artifact-orientation") === artifact.orientation &&
+  headers.get("slipstream-artifact-sample-format") === artifact.sampleFormat &&
+  headers.get("slipstream-artifact-color-space") === artifact.colorSpace &&
+  headers.get("slipstream-artifact-icc-embedded") ===
+    String(artifact.iccEmbedded);
 
 /// The disclosed state of one Export in the workspace's words. An Export that
 /// succeeded without a retained artifact, or one whose attempt failed, never

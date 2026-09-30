@@ -265,6 +265,7 @@ async fn capability_condition(state: &HttpState) -> &'static str {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RecipeWire {
     recipe_version: String,
+    source_revision: String,
     exposure_ev: f64,
     white_balance: serde_json::Value,
 }
@@ -273,6 +274,7 @@ impl From<EditRecipe> for RecipeWire {
     fn from(recipe: EditRecipe) -> Self {
         Self {
             recipe_version: recipe.revision,
+            source_revision: recipe.source_revision,
             exposure_ev: recipe.settings.exposure_ev,
             white_balance: white_balance_wire(recipe.settings.white_balance),
         }

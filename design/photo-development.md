@@ -324,6 +324,46 @@ obtain a validated artifact. Web and CLI share these operations. Artifact
 responses must expose identity, type, size, expiry and matching content metadata;
 partial or mismatched downloads must not be reported complete.
 
+### Edit state file snapshots
+
+An edit state file captures a confirmed Edit Recipe in one transaction, with
+its Photo identity, source revision, fixed Film Recipe SHA-256 and procedure.
+Schema v14 owns the XMP export table. The service persists exact document bytes,
+filename, byte length, SHA-256 and creation/expiry times alongside the request
+identity and captured recipe settings. Regenerating a document on read is
+rejected: generator changes would alter previously acknowledged download
+evidence. Restart, later recipe changes and unavailable Originals or processing
+engines must leave the retained document and its evidence unchanged.
+
+The closed request identity uses the same syntax as image Export requests.
+The Photo scopes the identity; a different payload conflicts, the same payload
+replays its captured record, and an expired identity returns `export_expired`
+without starting another snapshot. A new identity with obsolete recipe/source
+expectations returns HTTP 409 `stale_edit`. A known Photo without a confirmed
+recipe is also HTTP 409 `stale_edit`, while an unknown Photo is HTTP 404
+`unknown_photo`. A client receiving `stale_edit` must read the confirmed recipe
+again before choosing a new snapshot identity. Read failures return HTTP 503
+`resource_unavailable`; an unconfirmed create returns HTTP 500 `outcome_unknown`.
+Storage failures must never become missing records.
+
+The XMP uses Camera Raw `Exposure2012` for EV and `WhiteBalance` for As Shot.
+Custom temperature/tint intent stays in the Slipstream namespace. Photo and
+recipe provenance, `FilmRecipeSha256` and `FilmProcedure` also use that
+namespace. The opaque UTF-8 source revision contains NUL separators and is
+encoded losslessly as lowercase hexadecimal with the sibling property
+`SourceRevisionEncoding` set to `hex-utf8`;
+raw revision bytes must never appear as forbidden XML characters.
+
+POST returns root creation and expiry times and artifact filename, content
+type, length and SHA-256. GET list returns at most 64 snapshots, including expired
+metadata, in descending creation time, then descending identity order. The
+periodic output sweep releases expired document bytes while keeping metadata and
+request identities to report expiry after reopening and refuse identity reuse.
+GET artifact serves the captured bytes with matching content and Slipstream
+artifact headers,
+attachment filename and `no-store`. Expired downloads return HTTP 410 with
+`export_expired`. No operation writes a photographer-owned Sidecar or Original.
+
 Wire and CLI syntax outside the Photo Development service surface belong in
 their authoritative references, not a second DSL inside this specification; the
 [wire contract](#wire-contract) of that surface is owned by its Service Surface
@@ -631,7 +671,7 @@ retained artifacts stay usable in every state. It has no error body.
 
 `GET /api/photos/{id}/edit-recipe` returns 200 with `photoId`,
 `sourceRevision`, `recipe` (`null` or an object with `recipeVersion`,
-`exposureEv`, and `whiteBalance`), `sourceSupport` (`supported`,
+`sourceRevision`, `exposureEv`, and `whiteBalance`), `sourceSupport` (`supported`,
 `unavailable`, or `unsupported`), `supportReason` (`null` with `supported`
 and `unsupported`; with `unavailable` exactly one of `original-missing`,
 `original-unreadable`, `read-pending`, or `resource-unavailable`),
@@ -646,9 +686,11 @@ currently published readable source facts: it is never synthesized from
 stale metadata, another Photo, or a scan that has not published. A missing
 or unreadable Original reports `unavailable`, not `supported` or
 `unsupported` with processing unavailable. A client that observes
-`unavailable` must not save, rebind, preview, or export against that Original
-and must reconcile from a later read; a current Development Proxy remains a
-separate preview source while the Original is unavailable. A guarded save or
+`unavailable` must not save, rebind, preview, or create image Exports against
+that Original and must reconcile from a later read; a current Development Proxy
+remains a separate preview source while the Original is unavailable. Exporting
+a confirmed edit state file remains available through its captured recipe and
+source provenance without opening the Original. A guarded save or
 rebind without an available Original or current proxy returns 503
 `resource_unavailable` until source facts can be read, and that refusal's
 error details carry the same closed `supportReason` the read reports.
@@ -658,6 +700,9 @@ complete; neither is evidence that the Original is unreadable. A completed
 Capture fact for the current source revision carries observed camera identity,
 and source support is classified from that committed evidence. The only read
 error is 404 `unknown_photo`.
+The recipe object's `sourceRevision` names its confirmed source binding and
+remains present while the Original is unavailable, so an edit state file can
+capture retained intent independently of current source observation.
 
 The closed reason set separates confirmed source outcomes from retryable
 wait states. `original-missing` is a confirmed absence from the remembered
@@ -667,7 +712,7 @@ explain the read failure. `read-pending` means current source facts have not
 been inspected and published yet; `resource-unavailable` means native-work
 admission, shared capacity, or launcher/attempt reconciliation is currently
 unavailable. Both are retryable without a restart: the client disables
-writes, preview, and export with a retry or refresh action, and the service
+writes, preview, and image Export with a retry or refresh action, and the service
 resolves them through a later admitted scan or freed capacity. A preview
 refusal that follows from the Photo's source state carries the same closed
 `supportReason` in its error details, so read and refusal agree on one
@@ -732,17 +777,22 @@ outside the closed sets, including a target outside the closed target set; 503
 `processing_unavailable` and `retained_output_full`; and 500 `outcome_unknown`.
 
 `GET /api/photos/{id}/exports` returns 200 with `exports`, a bounded array of
-`exportId`, `state`, and `target` in retention order. The only error is 404
-`unknown_photo`.
+`exportId`, `state`, `target`, `recipeVersion`, `sourceRevision`, `createdAt`,
+and nullable `settledAt` in retention order. Summaries let clients restore the
+latest task even when its artifact inspection is temporarily unavailable.
+The only error is 404 `unknown_photo`.
 
 `GET /api/exports/{id}` returns 200 with `exportId`, `photoId`, `state`,
-`target`, `recipeVersion`, `sourceRevision`, `bundleId`, `terminalOutcome`
+`target`, `recipeVersion`, `sourceRevision`, `createdAt`, `settledAt`, `bundleId`, `terminalOutcome`
 (`succeeded`, `failed`, `cancelled`, or `null`), `failureReason` (nullable
 string), `receiptExpiresAt` with the submit response meaning, and `artifact`
 (`null` when no validated artifact is retained, otherwise an object with
 exactly the download metadata: `exportId`, `target`, `stage`, `contentType`,
-`width`, `height`, `profileIdentity`, `byteLength`, `sha256`, and
-`expiresAt`). The artifact object equals the download's response-header
+`filename`, `orientation`, `sampleFormat`, `colorSpace`, `iccEmbedded`, `width`,
+`height`, `profileIdentity`, `byteLength`, `sha256`, and `expiresAt`). Development
+TIFF reports `top-left`, `float32`, `scene-linear ProPhoto RGB` and an embedded
+ICC profile; Film JPEG reports `top-left`, `uint8`, `sRGB` and an embedded ICC
+profile. The artifact object equals the download's response-header
 metadata field for field, so a client validates a download by comparing every
 artifact object field with the headers it received. The only error is 404
 `unknown_export`.
@@ -762,7 +812,8 @@ longer available; 422 `invalid_settings`; 503 `processing_unavailable`,
 
 `GET /api/exports/{id}/artifact` returns 200 as a stream whose response
 headers carry the closed typed metadata `exportId`, `target`, `stage`,
-`contentType`, `width`, `height`, `profileIdentity`, `byteLength`, `sha256`,
+`contentType`, `filename`, `orientation`, `sampleFormat`, `colorSpace`,
+`iccEmbedded`, `width`, `height`, `profileIdentity`, `byteLength`, `sha256`,
 and `expiresAt`; the typed metadata framing for this route is response
 headers, and the stream follows them. A known Export that cannot serve a
 validated artifact returns exactly one refusal per state: 409

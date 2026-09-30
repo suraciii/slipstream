@@ -1239,6 +1239,10 @@ pub(crate) struct ExportSummaryWire {
     pub(crate) export_id: String,
     pub(crate) state: String,
     pub(crate) target: String,
+    pub(crate) recipe_version: String,
+    pub(crate) source_revision: String,
+    pub(crate) created_at: String,
+    pub(crate) settled_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1257,6 +1261,8 @@ pub(crate) struct ExportInspectWire {
     pub(crate) target: String,
     pub(crate) recipe_version: String,
     pub(crate) source_revision: String,
+    pub(crate) created_at: String,
+    pub(crate) settled_at: Option<String>,
     pub(crate) bundle_id: String,
     pub(crate) terminal_outcome: Option<String>,
     pub(crate) failure_reason: Option<String>,
@@ -1273,6 +1279,11 @@ pub(crate) struct ExportArtifactWire {
     pub(crate) target: String,
     pub(crate) stage: String,
     pub(crate) content_type: String,
+    pub(crate) filename: String,
+    pub(crate) orientation: String,
+    pub(crate) sample_format: String,
+    pub(crate) color_space: String,
+    pub(crate) icc_embedded: bool,
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) profile_identity: String,
@@ -1334,6 +1345,10 @@ pub(crate) fn validated_export_artifact(
         && ExportTargetArg::parse(&artifact.target).is_some()
         && artifact.stage == stage
         && artifact.content_type == content_type
+        && !artifact.filename.is_empty()
+        && !artifact.orientation.is_empty()
+        && !artifact.sample_format.is_empty()
+        && !artifact.color_space.is_empty()
         && artifact.width > 0
         && artifact.height > 0
         && !artifact.profile_identity.is_empty()
@@ -1361,6 +1376,11 @@ pub(crate) fn validated_export_inspect(
         || data.recipe_version.is_empty()
         || data.source_revision.is_empty()
         || data.bundle_id.is_empty()
+        || !valid_utc_time(&data.created_at)
+        || data
+            .settled_at
+            .as_deref()
+            .is_some_and(|time| !valid_utc_time(time))
         || data.terminal_outcome.as_deref() != export_terminal_outcome(&data.state)
         || data
             .receipt_expires_at

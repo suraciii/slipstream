@@ -237,10 +237,6 @@ function mountPrivateLibraryBrowser(
     rebind: rebindEditor,
     createProxy: createEditorProxy,
     removeProxy: removeEditorProxy,
-    submitExport: submitEditorExport,
-    cancelExport: cancelEditorExport,
-    retryExport: retryEditorExport,
-    downloadExport: downloadEditorExport,
     leave: leaveEditor,
   } = editor;
   const savedPositions = createSavedPositionOwner(fetcher, {
@@ -2231,16 +2227,22 @@ function mountPrivateLibraryBrowser(
         void rebindEditor(intent.photoId);
         return;
       case "editor-export-submit":
-        void submitEditorExport(intent.photoId);
+        editor.submitExport(intent.photoId, intent.target);
         return;
       case "editor-export-cancel":
-        void cancelEditorExport(intent.photoId);
+        editor.cancelExport(intent.photoId, intent.target);
         return;
       case "editor-export-retry":
-        void retryEditorExport(intent.photoId);
+        editor.retryExport(intent.photoId, intent.target);
         return;
       case "editor-export-download":
-        void downloadEditorExport(intent.photoId);
+        editor.downloadExport(intent.photoId, intent.target);
+        return;
+      case "editor-xmp-submit":
+        editor.submitXmp(intent.photoId);
+        return;
+      case "editor-xmp-download":
+        editor.downloadXmp(intent.photoId);
         return;
       case "summary-action": {
         const outcome = applicationPresentation.activateAction(

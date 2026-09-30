@@ -919,6 +919,55 @@ impl Library {
             .map_err(Into::into)
     }
 
+    pub async fn create_xmp_export(
+        &self,
+        photo_id: &str,
+        request_id: &str,
+        expected_recipe: &str,
+        expected_source: &str,
+        now: i64,
+    ) -> Result<crate::XmpCreateOutcome, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.create_xmp_receiver(
+                photo_id,
+                request_id,
+                expected_recipe,
+                expected_source,
+                now,
+            )
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+    pub async fn xmp_export(
+        &self,
+        export_id: &str,
+    ) -> Result<Option<crate::XmpExportRecord>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.read_xmp_receiver(export_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+    pub async fn photo_xmp_exports(
+        &self,
+        photo_id: &str,
+    ) -> Result<Option<Vec<crate::XmpExportRecord>>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.list_xmp_receiver(photo_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
     /// Durably claims the publication of one export attempt before its
     /// artifact is renamed into place.
     pub async fn claim_export_publication(

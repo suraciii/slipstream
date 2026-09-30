@@ -215,12 +215,13 @@ for (const lostResponse of [
     await page.locator('[data-photo-index="0"]').click();
     await expect(page.locator("[data-review]")).toBeVisible();
     await openEdit(page);
-    const submit = page.locator("[data-photo-editor-export-submit]");
+    const card = page.locator('[data-editor-output="development-tiff"]');
+    const submit = card.locator('[data-output-action="submit"]');
     await expect(submit).toBeEnabled();
     await submit.click();
-    await expect(
-      page.locator("[data-photo-editor-export-state]"),
-    ).toContainText("Check its result before exporting again");
+    const reconcile = card.locator('[data-output-action="retry"]');
+    await expect(reconcile).toBeVisible();
+    await expect(submit).toBeDisabled();
     await navigate(page, "Next");
     await expect(page.getByText("2 / 2")).toBeVisible();
     const exposure = page.locator("[data-photo-editor-exposure]");
@@ -233,17 +234,14 @@ for (const lostResponse of [
     await expect.poll(() => savedExposure.get(second)).toBe(0.5);
     await expect(submit).toBeEnabled();
     await submit.click();
-    await expect(
-      page.locator("[data-photo-editor-export-state]"),
-    ).toContainText("finished but no file was kept");
+    await expect(card.locator('[data-output-action="download"]')).toBeHidden();
+    await expect(submit).toBeEnabled();
     await navigate(page, "Previous");
     await expect(submit).toBeDisabled();
-    const reconcile = page.locator("[data-photo-editor-export-retry]");
-    await expect(reconcile).toHaveText("Check result");
+    await expect(reconcile).toBeVisible();
     await reconcile.click();
-    await expect(
-      page.locator("[data-photo-editor-export-state]"),
-    ).toContainText("finished but no file was kept");
+    await expect(submit).toBeEnabled();
+    await expect(reconcile).toBeHidden();
     expect(submissions.get(first)).toHaveLength(2);
     expect(submissions.get(first)?.[1]).toEqual(submissions.get(first)?.[0]);
     expect(submissions.get(second)).toHaveLength(1);
@@ -253,7 +251,7 @@ for (const lostResponse of [
   });
 }
 
-test("a refused edit does not keep the main status on Saving", async ({
+test("a refused edit exposes its conflict and blocks image export", async ({
   page,
 }) => {
   await page.route("**/api/processing/capability", (route) =>
@@ -314,15 +312,14 @@ test("a refused edit does not keep the main status on Saving", async ({
     element.dispatchEvent(new Event("change", { bubbles: true }));
   });
   await expect(page.locator("[data-photo-editor-conflict]")).toBeVisible();
-  await expect(page.locator("[data-photo-editor-status]")).toContainText(
-    "Could not update",
-  );
   await expect(
-    page.locator("[data-photo-editor-export-submit]"),
+    page.locator(
+      '[data-editor-output="development-tiff"] [data-output-action="submit"]',
+    ),
   ).toBeDisabled();
 });
 
-test("an uncertain edit reports checking instead of Saving", async ({
+test("an uncertain edit blocks image export until reconciled", async ({
   page,
 }) => {
   await page.route("**/api/processing/capability", (route) =>
@@ -377,11 +374,10 @@ test("an uncertain edit reports checking instead of Saving", async ({
     element.dispatchEvent(new Event("input", { bubbles: true }));
     element.dispatchEvent(new Event("change", { bubbles: true }));
   });
-  await expect(page.locator("[data-photo-editor-status]")).toHaveText(
-    "Checking result…",
-  );
   await expect(
-    page.locator("[data-photo-editor-export-submit]"),
+    page.locator(
+      '[data-editor-output="development-tiff"] [data-output-action="submit"]',
+    ),
   ).toBeDisabled();
 });
 
@@ -451,19 +447,15 @@ test("a transport-lost edit offers a retry instead of remaining on Saving", asyn
     element.dispatchEvent(new Event("input", { bubbles: true }));
     element.dispatchEvent(new Event("change", { bubbles: true }));
   });
-  await expect(page.locator("[data-photo-editor-status]")).toHaveText(
-    "Could not update — Retry",
-  );
-  expect(writes).toBe(1);
+  await expect.poll(() => writes).toBe(1);
   await page.locator("[data-photo-editor-refresh]").click();
   await expect.poll(() => writes).toBe(2);
-  await expect(page.locator("[data-photo-editor-detail]")).toHaveText("Saved.");
   await expect(page.locator("[data-photo-editor-exposure-value]")).toHaveText(
     "0.500 EV",
   );
 });
 
-test("a Photo without processing does not offer Film or claim Ready", async ({
+test("a Photo without processing keeps its image actions disabled", async ({
   page,
 }) => {
   await page.route("**/api/processing/capability", (route) =>
@@ -506,14 +498,10 @@ test("a Photo without processing does not offer Film or claim Ready", async ({
   await openEdit(page);
   await expect(page.locator("[data-photo-editor-exposure]")).toBeEnabled();
   await expect(page.locator('[data-photo-editor-stage="film"]')).toBeDisabled();
-  await expect(page.locator("[data-photo-editor-stage-note]")).toContainText(
-    "Film is temporarily unavailable for this Photo.",
-  );
-  await expect(page.locator("[data-photo-editor-status]")).toHaveText(
-    "Processing is not available for this Photo right now.",
-  );
   await expect(
-    page.locator("[data-photo-editor-export-submit]"),
+    page.locator(
+      '[data-editor-output="development-tiff"] [data-output-action="submit"]',
+    ),
   ).toBeDisabled();
 });
 
@@ -682,7 +670,9 @@ test("a Development Proxy supports editing but cannot start a full Export", asyn
   await expect(page.locator("[data-photo-editor-exposure]")).toBeEnabled();
   await expect(page.locator('[data-photo-editor-stage="film"]')).toBeEnabled();
   await expect(
-    page.locator("[data-photo-editor-export-submit]"),
+    page.locator(
+      '[data-editor-output="development-tiff"] [data-output-action="submit"]',
+    ),
   ).toBeDisabled();
   expect(submissions).toBe(0);
 });
@@ -718,15 +708,23 @@ test("a failed Export retains its specific failure reason", async ({
   );
   await page.locator('[data-photo-index="0"]').click();
   await openEdit(page);
-  await expect(page.locator("[data-photo-editor-export-state]")).toContainText(
-    "The processing allowance is insufficient for this output.",
-  );
+  await expect(
+    page.locator(
+      '[data-editor-output="development-tiff"] [data-output-diagnostic]',
+    ),
+  ).toContainText("The processing allowance is insufficient for this output.");
 });
 
-test("a retained Finished JPEG keeps its download identity while Edit shows Development TIFF", async ({
+test("a retained Finished JPEG downloads from its own output card", async ({
   page,
 }) => {
   const artifact = {
+    exportId: "retained-film",
+    filename: "slipstream-film-retained-film.jpg",
+    orientation: "landscape",
+    sampleFormat: "uint8",
+    colorSpace: "sRGB",
+    iccEmbedded: true,
     target: "film-jpeg",
     stage: "film",
     contentType: "image/jpeg",
@@ -734,7 +732,7 @@ test("a retained Finished JPEG keeps its download identity while Edit shows Deve
     height: 12,
     profileIdentity: "fixed-film",
     byteLength: 3,
-    sha256: "a".repeat(64),
+    sha256: createHash("sha256").update("jpg").digest("hex"),
     expiresAt: "2099-01-01T00:00:00Z",
   };
   await page.route("**/api/processing/capability", (route) =>
@@ -803,6 +801,11 @@ test("a retained Finished JPEG keeps its download identity while Edit shows Deve
         "slipstream-artifact-byte-length": String(artifact.byteLength),
         "slipstream-artifact-sha256": artifact.sha256,
         "slipstream-artifact-expires-at": artifact.expiresAt,
+        "slipstream-artifact-filename": artifact.filename,
+        "slipstream-artifact-orientation": artifact.orientation,
+        "slipstream-artifact-sample-format": artifact.sampleFormat,
+        "slipstream-artifact-color-space": artifact.colorSpace,
+        "slipstream-artifact-icc-embedded": String(artifact.iccEmbedded),
       },
       body: "jpg",
     }),
@@ -814,12 +817,15 @@ test("a retained Finished JPEG keeps its download identity while Edit shows Deve
   );
   await page.locator('[data-photo-index="0"]').click();
   await openEdit(page);
-  await expect(page.locator("[data-photo-editor-export-submit]")).toHaveText(
-    "Export Development TIFF",
+  await expect(
+    page.locator(
+      '[data-editor-output="development-tiff"] [data-output-action="submit"]',
+    ),
+  ).toBeEnabled();
+  const downloadButton = page.locator(
+    '[data-editor-output="film-jpeg"] [data-output-action="download"]',
   );
-  const downloadButton = page.locator("[data-photo-editor-export-download]");
-  await expect(downloadButton).toHaveText("Download Finished JPEG");
-  await expect(downloadButton).toBeEnabled();
+  await expect(downloadButton).toBeVisible();
   const download = page.waitForEvent("download");
   await downloadButton.click();
   expect((await download).suggestedFilename()).toBe(

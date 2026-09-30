@@ -908,6 +908,15 @@ pub(super) fn sweep_export_expiry(
                 [now.saturating_sub(EXPORT_LEASE_STALE_SECONDS) as i64],
             )
             .map_err(|_| PersistenceError::Storage)?;
+        // XMP snapshots retain their provenance and request identity after
+        // expiry, but the immutable document bytes are swept.
+        transaction
+            .execute(
+                "UPDATE xmp_exports SET document=NULL
+                 WHERE expires_at <= ?1 AND document IS NOT NULL",
+                [now as i64],
+            )
+            .map_err(|_| PersistenceError::Storage)?;
         let mut result = ExportSweepResult::default();
         let expired_artifacts = transaction
             .prepare(

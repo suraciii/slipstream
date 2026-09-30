@@ -45,10 +45,9 @@ the Film Result. A Finished JPEG must always include the fixed Film Recipe.
 
 Photo View must offer an Edit entry point when development is supported. Edit
 opens one workspace for the selected Photo, showing the current result with
-the development controls. The workspace must not present Camera, Develop, and
-Film as separate stage views or tabs the Photographer must choose between.
-The results remain distinct in provenance, but the Photographer acts on one
-current result:
+the development controls. Camera, Develop, and Film remain distinct in
+provenance within one Photo context. Choosing a reference or result never
+changes settings or the independent output targets:
 
 - The workspace opens on an Edit Preview of the Development Result. This is
   the default editing view.
@@ -68,15 +67,13 @@ successful Film Result. Entering Edit must restore the current Edit Recipe.
 It must not reset settings merely because the Photographer previews Film,
 checks the Original reference, or leaves an Album.
 
-The workspace must present one compact status line in plain language: saving
-or waiting for a matching preview is `Updating preview`, a confirmed current
-result is `Ready`, a recoverable failure is `Could not update` with a retry
-action, and an uncertain outcome is `Checking result` until reconciliation.
-Technical evidence such as recipe revisions, request identities, and
-processing reasons must remain available behind an optional details
-affordance for support and programmatic clients. The primary flow must not
-show recipe revisions, processing bundle identifiers, launcher, queue, or
-memory terminology, or CLI command syntax.
+The workspace must distinguish edit-state saving, saved, conflict, and failure
+from preview updating, current, stale, and failure. It must report saved only
+after confirmation. A stale preview remains visible as the last result while
+the new result is being generated. Technical evidence such as recipe revisions,
+request identities, and processing reasons must remain behind an optional
+details affordance. The primary flow must use editing state, edit state file,
+editing TIFF, and output rather than recipe or artifact terminology.
 
 Edit availability rests on three independent facts: whether the deployment's
 processing engine is usable, whether the Library is still scanning or
@@ -86,10 +83,10 @@ Original. While a Photo's source read is pending or waiting for read
 capacity, the workspace must keep that Photo's settings read-only, say the
 Photo is waiting, and offer to check again; a later read that publishes
 current source facts must resume editing without losing confirmed settings.
-A confirmed missing or unreadable Original must be explained as permanent for
-the current source. Saving, Edit Preview, and Export must stay disabled until
-the Photo's source reads; a refusal caused by the Photo's source state must
-name the same reason the Edit read reports.
+A confirmed missing or unreadable Original must retain saved editing state,
+prior results, and downloadable outputs. New image rendering and exports require
+the Original. Exporting an already confirmed edit state file does not require
+the Original or a processing engine.
 
 The Grid must retain its camera-produced thumbnails and indicate Photos with
 saved edits. Its bounded Photo summaries must report whether a saved Edit
@@ -184,18 +181,22 @@ point samples, scene-linear ProPhoto RGB pixels, and a matching embedded ICC
 profile. It must not include film simulation or a display/look transform.
 
 A Finished JPEG must contain the Film Result at full developed dimensions,
-encoded for sRGB with the pinned destination profile and fixed JPEG quality
-85. Finished TIFF and expert output options are outside this capability.
+encoded for sRGB with the pinned destination profile and fixed JPEG quality 85. Finished TIFF and expert output options are outside this capability.
 
-The workspace must offer one Export action whose visible name states the
-target in plain language: Development TIFF for the edited result, or Finished
-JPEG when Film is available and the Film result is current. It must not
-present an ambiguous TIFF choice that could refer to either an intermediate
-development image or a finished film image. Programmatic clients continue to
-address the processing stage explicitly; the CLI reference owns that syntax.
-Export states must use the same plain language as the workspace status:
-`Exporting` while accepted work is unfinished, `Ready to download` on
-completion, and `This export has expired. Export again` after expiry.
+The workspace must show separate output cards for the edit state file and
+editing TIFF, plus a separate Finished JPEG output when one exists. Viewing
+Film must not retarget the editing TIFF action. Each card must show its task
+state, generation time, filename, size, and download action. TIFF details must
+also show pixel dimensions, orientation, color space, embedded ICC information,
+and sample format. Queued, generating, downloadable, failed, and expired are
+distinct outcomes.
+
+A confirmed change in editing state marks an older output as based on earlier
+settings. This is a warning, not a download refusal. A pending or failed newer
+task must not hide the previous successful output. Reopening the Photo must
+restore these outputs and unfinished task states from the service. Choosing
+Export again captures current confirmed settings under a new task identity;
+it must not overwrite an older file.
 
 Export must capture the control settings when the Photographer invokes it.
 Those settings must be confirmed by the service before the Export is accepted.
@@ -212,6 +213,34 @@ must not create new Photos automatically or overwrite Original Files. Downloads
 must include correct color/orientation information and basic capture metadata;
 GPS and private device identifiers must be omitted. External XMP edit history
 must not be copied into output as a claim of supported editing interchange.
+
+### Edit State File
+
+The Photographer must be able to export the current confirmed editing state
+as an XMP parameter file. Saving or unresolved local settings must block this
+action with an explanation. The file must retain exposure, white-balance
+intent, the fixed Film Recipe, and its Photo/source/state provenance. Standard
+Camera Raw fields may carry only parameters with matching semantics. Unqualified
+temperature/tint mappings and Slipstream effects must remain in the Slipstream
+namespace; the output must disclose that other editors cannot reproduce all
+effects. A file does not establish complete Lightroom interchange.
+
+An edit state file is a service-owned output, not an associated XMP Sidecar.
+It must never write beside an Original or become another source of truth.
+XMP import and bidirectional synchronization remain outside scope. Its
+confirmed snapshot must be downloadable without an available Original or
+processing engine, including after departure and service restart. The existing
+seven-day output retention policy applies.
+
+Repeated download and retry of one confirmed edit state file must return the
+same file and integrity evidence throughout retention, even after a later edit.
+After expiry the service must explain that the file is unavailable and require
+a new export request. An unavailable state store must be reported as a service
+failure rather than as an unknown Photo or missing file.
+
+Before claiming external-editing compatibility, the editing TIFF must be
+opened in at least one named target editor, checking color, pixel dimensions,
+orientation, and sample format. Download success alone does not prove this.
 
 ## Shared Human and Programmatic Use
 

@@ -2226,9 +2226,10 @@ pub(crate) mod development_tiff_decode {
     /// Writes a structurally valid Development TIFF whose single Deflate
     /// strip carries `payload`, so only the decoded content can differ
     /// between a good and a corrupt artifact. The embedded profile is the
-    /// pinned accepted source profile asset.
+    /// pinned accepted engine output profile.
     pub(crate) fn write_development_tiff(path: &Path, payload: &[u8]) {
-        let icc: &[u8] = include_bytes!("../../slipstream-core/assets/prophoto-linear-g10.icc");
+        let icc: &[u8] =
+            include_bytes!("../../slipstream-core/assets/prophoto-linear-g10-darktable.icc");
         let mut bytes = b"II\x2a\x00\x08\x00\x00\x00".to_vec();
         bytes.extend_from_slice(&13_u16.to_le_bytes());
         let mut externals: Vec<u8> = Vec::new();
@@ -2408,7 +2409,8 @@ pub(crate) mod development_tiff_decode {
         let good_facts = validate_development_tiff(&good_path).unwrap();
         assert_eq!(good_facts.width, 2);
         assert_eq!(good_facts.height, 1);
-        let icc: &[u8] = include_bytes!("../../slipstream-core/assets/prophoto-linear-g10.icc");
+        let icc: &[u8] =
+            include_bytes!("../../slipstream-core/assets/prophoto-linear-g10-darktable.icc");
         assert_eq!(
             good_facts.profile_identity,
             format!("{:x}", Sha256::digest(icc))

@@ -80,6 +80,14 @@ pub(super) async fn download(
         || !header_is("slipstream-artifact-target", &artifact.target)
         || !header_is("slipstream-artifact-stage", &artifact.stage)
         || !header_is("slipstream-artifact-content-type", &artifact.content_type)
+        || !header_is("slipstream-artifact-filename", &artifact.filename)
+        || !header_is("slipstream-artifact-orientation", &artifact.orientation)
+        || !header_is("slipstream-artifact-sample-format", &artifact.sample_format)
+        || !header_is("slipstream-artifact-color-space", &artifact.color_space)
+        || !header_is(
+            "slipstream-artifact-icc-embedded",
+            &artifact.icc_embedded.to_string(),
+        )
         || !header_is("slipstream-artifact-width", &artifact.width.to_string())
         || !header_is("slipstream-artifact-height", &artifact.height.to_string())
         || !header_is(
@@ -120,6 +128,11 @@ pub(super) async fn download(
         "target": artifact.target,
         "stage": artifact.stage,
         "contentType": artifact.content_type,
+        "filename": artifact.filename,
+        "orientation": artifact.orientation,
+        "sampleFormat": artifact.sample_format,
+        "colorSpace": artifact.color_space,
+        "iccEmbedded": artifact.icc_embedded,
         "width": artifact.width,
         "height": artifact.height,
         "profileIdentity": artifact.profile_identity,

@@ -112,6 +112,7 @@ export const supportReasonExplanation = (
 export type EditorFacts = Readonly<{
   photoId: string;
   sourceRevision: string | null;
+  recipeSourceRevision?: string | null;
   recipeVersion: string | null;
   settings: EditorSettings;
   sourceSupport: "supported" | "unsupported" | "unavailable";
@@ -953,6 +954,14 @@ export const createPhotoEditor = (options: {
     inFlight = null;
     recipeVersion = committed.recipeVersion;
     sourceRevision = committed.sourceRevision;
+    if (facts)
+      facts = Object.freeze({
+        ...facts,
+        recipeVersion: committed.recipeVersion,
+        sourceRevision: committed.sourceRevision,
+        settings: request.settings,
+        recipeSourceRevision: committed.sourceRevision,
+      });
     confirmed = request.settings;
     if (store && facts)
       clearDraft(store, draftKey(facts.photoId), facts.photoId);

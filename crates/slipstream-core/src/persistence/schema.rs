@@ -15,6 +15,7 @@ const SCHEMA_V10_MANIFEST: &str = include_str!("../../../../compatibility/sqlite
 const SCHEMA_V11_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v11.json");
 const SCHEMA_V12_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v12.json");
 const SCHEMA_V13_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v13.json");
+const SCHEMA_V14_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v14.json");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchemaVersion {
@@ -31,6 +32,7 @@ pub enum SchemaVersion {
     V11,
     V12,
     V13,
+    V14,
 }
 
 impl SchemaVersion {
@@ -49,6 +51,7 @@ impl SchemaVersion {
             Self::V11 => SCHEMA_V11_MANIFEST,
             Self::V12 => SCHEMA_V12_MANIFEST,
             Self::V13 => SCHEMA_V13_MANIFEST,
+            Self::V14 => SCHEMA_V14_MANIFEST,
         }
     }
 }
@@ -157,6 +160,7 @@ mod tests {
     const SCHEMA_V11_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v11.sql");
     const SCHEMA_V12_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v12.sql");
     const SCHEMA_V13_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v13.sql");
+    const SCHEMA_V14_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v14.sql");
 
     fn execute_fixture(sql: &str) -> Connection {
         let connection = Connection::open_in_memory().unwrap();
@@ -165,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_v1_through_v13_manifests_match_shared_contracts() {
+    fn exact_v1_through_v14_manifests_match_shared_contracts() {
         let v1 = execute_fixture(SCHEMA_V1_SQL);
         validate_canonical_schema(&v1, SchemaVersion::V1).unwrap();
         let v2 = execute_fixture(SCHEMA_V2_SQL);
@@ -232,6 +236,8 @@ mod tests {
             expected_manifest(SchemaVersion::V13).unwrap()
         );
         validate_canonical_schema(&v13, SchemaVersion::V13).unwrap();
+        let v14 = execute_fixture(SCHEMA_V14_SQL);
+        validate_canonical_schema(&v14, SchemaVersion::V14).unwrap();
     }
 
     #[test]
