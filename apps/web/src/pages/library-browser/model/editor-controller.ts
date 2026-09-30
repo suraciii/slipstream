@@ -14,15 +14,8 @@ import {
   withProcessingCapability,
   type ProcessingCapability,
 } from "../api/editor.js";
-import {
-  BASELINE_SETTINGS,
-  CURRENT_SETTINGS,
-  comparisonIsCurrent,
-  comparisonRefusal,
-  currentRenditionRefusal,
-  editPreviewUri,
-  type Comparison,
-} from "./edit-preview.js";
+import { BASELINE_SETTINGS, type CurrentRendition } from "./edit-preview.js";
+import { createEditorRenditions } from "./editor-renditions.js";
 import {
   createWorkspaceOutputController,
   type OutputTarget,
@@ -176,43 +169,11 @@ export function createEditorController(
   /// actions the Photographer toggles on and back off.
   let editorStage: EditorStage = "develop";
   let editorComparing = false;
-  let editorPreviewUrl: string | undefined;
-  let editorPreviewNote = "";
-  let editorPreviewOutcome: "pending" | "ready" | "failed" | "unknown" =
-    "pending";
-  let editorPreviewStale = false;
-  let editorPreviewBusy = false;
-  let editorPreviewAbort: AbortController | undefined;
-  let editorPreviewGeneration = 0;
-  /// The identity of the preview request in flight: Photo, stage, source
-  /// revision, recipe snapshot, and edit source. A retry of the same
-  /// identity joins the in-flight request instead of starting duplicate
-  /// physical work.
-  let editorPreviewIdentity: string | undefined;
-  /// True when the last preview outcome was a refusal and no rendition is
-  /// presented, so the Edit Preview axis reports a failure rather than a
-  /// wait.
-  let editorPreviewRefused = false;
-  /// How many follow-up requests one admitted preview has already made.
-  let editorPreviewAttempts = 0;
-  let editorPreviewTimer: number | undefined;
   /// One recipe read per Photo at a time. A Refresh-source action or an
   /// automatic publication refresh joins the read already under way.
   const editorRecipeReads = new Map<string, Promise<void>>();
   const editorRecipeGenerations = new Map<string, number>();
-  /// The retained as-shot/baseline comparison of the chosen stage, the image
-  /// it was served, and its own progress. A comparison is defined by the Photo,
-  /// the stage, and the source revision, so it is retained across saved-settings
-  /// changes and dropped when one of those moves.
-  let editorComparison: Comparison | undefined;
-  let editorComparisonUrl: string | undefined;
-  let editorComparisonNote = "";
-  let editorComparisonBusy = false;
-  let editorComparisonAbort: AbortController | undefined;
-  let editorComparisonGeneration = 0;
-  /// How many follow-up requests one admitted comparison has already made.
-  let editorComparisonAttempts = 0;
-  let editorComparisonTimer: number | undefined;
+
   let editorWriteAbort: AbortController | undefined;
   /// Resolves the writers waiting for this Photo's write stream to settle.
   let editorWriteWaiters: Array<() => void> = [];
@@ -297,39 +258,41 @@ export function createEditorController(
     },
     release: releaseEditorExportBarrier,
   });
-  const clearEditorComparison = (): void => {
-    editorComparisonAbort?.abort();
-    editorComparisonAbort = undefined;
-    editorComparisonGeneration += 1;
-    if (editorComparisonUrl) URL.revokeObjectURL(editorComparisonUrl);
-    editorComparison = undefined;
-    editorComparisonUrl = undefined;
-    editorComparisonNote = "";
-    editorComparisonBusy = false;
-    editorComparisonAttempts = 0;
-    if (editorComparisonTimer !== undefined) {
-      clearTimeout(editorComparisonTimer);
-      editorComparisonTimer = undefined;
-    }
-  };
+  const renditions = createEditorRenditions({
+    fetcher,
+    ownsPhoto: editorOwnsPhoto,
+    capture: (photoId): CurrentRendition | undefined => {
+      const session = editorSessions.get(photoId);
+      const presented = session?.presentation();
+      if (
+        !session ||
+        !presented?.canEdit ||
+        !presented.processingAvailable ||
+        editorStage === "camera"
+      )
+        return undefined;
+      const facts = session.facts();
+      return {
+        photoId,
+        stage: editorStage,
+        sourceRevision: facts?.sourceRevision ?? null,
+        recipeVersion: presented.recipeVersion ?? "",
+        editSource: facts?.editSource ?? "original",
+        editSourceProxyId: facts?.editSourceProxyId ?? null,
+      };
+    },
+    describeRefusal: (response) => describePreviewRefusal(response),
+    changed: () => renderEditor(),
+    present: (settings, url) => {
+      if ((settings === BASELINE_SETTINGS) === editorComparing)
+        view.presentEditorPreview(url);
+    },
+  });
+  const clearEditorComparison = renditions.clearComparison;
+  const requestEditorPreview = renditions.requestCurrent;
+  const requestEditorComparisonPreview = renditions.requestComparison;
   const clearEditorPreview = (): void => {
-    editorPreviewAbort?.abort();
-    editorPreviewAbort = undefined;
-    editorPreviewGeneration += 1;
-    editorPreviewBusy = false;
-    editorPreviewIdentity = undefined;
-    editorPreviewAttempts = 0;
-    if (editorPreviewTimer !== undefined) {
-      clearTimeout(editorPreviewTimer);
-      editorPreviewTimer = undefined;
-    }
-    if (editorPreviewUrl) URL.revokeObjectURL(editorPreviewUrl);
-    editorPreviewUrl = undefined;
-    editorPreviewNote = "";
-    editorPreviewOutcome = "pending";
-    editorPreviewStale = false;
-    editorPreviewRefused = false;
-    clearEditorComparison();
+    renditions.clear();
     view.clearEditorPreview();
   };
   /// The Processing axis. The axis is the deployment's engine capability,
@@ -359,10 +322,11 @@ export function createEditorController(
     | "failed"
     | null => {
     if (editorStage === "camera") return null;
-    if (editorPreviewBusy || editorPreviewTimer !== undefined) return "pending";
-    if (editorPreviewOutcome === "failed") return "failed";
-    if (editorPreviewUrl) return editorPreviewStale ? "stale" : "ready";
-    return editorPreviewRefused ? "failed" : null;
+    if (renditions.current.busy || renditions.current.pending) return "pending";
+    if (renditions.current.outcome === "failed") return "failed";
+    if (renditions.current.url)
+      return renditions.current.stale ? "stale" : "ready";
+    return renditions.current.refused ? "failed" : null;
   };
   /// The Source support fact line. The readiness word names the axis's own
   /// state, the Library's scan phase rides along while the source is being
@@ -552,12 +516,12 @@ export function createEditorController(
       },
       canEdit: presented.canEdit,
       canPreview: presented.canEdit && presented.processingAvailable,
-      previewing: editorPreviewBusy,
-      // While the comparison is pressed, the presented image is the
-      // unadjusted rendering, so its own note and its own freshness describe
-      // what a Photographer sees.
-      previewNote: editorComparing ? editorComparisonNote : editorPreviewNote,
-      previewStale: !editorComparing && editorPreviewStale,
+      previewing: renditions.current.busy,
+      // Comparison progress describes the image actually presented.
+      previewNote: editorComparing
+        ? renditions.comparison.note
+        : renditions.current.note,
+      previewStale: !editorComparing && renditions.current.stale,
       saving: presented.saving,
       dirty: presented.dirty,
       canUndo: presented.canUndo,
@@ -582,19 +546,19 @@ export function createEditorController(
       currentEditor()?.facts()?.editSource === "development-proxy"
         ? " The current edit source is a Development Proxy, so this rendition's detail is the proxy's, not a full-resolution result."
         : "";
-    if (editorComparing && editorComparisonUrl) {
+    if (editorComparing && renditions.comparison.url) {
       // A comparison is only a comparison while both images describe the same
       // development: a current rendition that is absent or older than the
       // current settings is named instead of being compared as if it were
       // current.
-      const current = !editorPreviewUrl
+      const current = !renditions.current.url
         ? " No current preview is shown, so the comparison is shown alone."
-        : editorPreviewStale
+        : renditions.current.stale
           ? " The current preview is older than the current settings."
           : "";
       return `${stageName} comparison: the unadjusted rendering, compared with the current settings.${current}${proxy}`;
     }
-    if (!editorPreviewUrl)
+    if (!renditions.current.url)
       return editorStage === "film"
         ? "Film: the Film preview is not ready yet, so no edited image is shown."
         : "Edit: the preview is not ready yet; the camera preview is shown.";
@@ -709,15 +673,11 @@ export function createEditorController(
     // A comparison is of one development: a source revision that moved makes
     // the retained baseline rendition a comparison of an earlier source, so it
     // is dropped rather than presented as this Photo's.
-    if (
-      editorComparison &&
-      !comparisonIsCurrent(editorComparison, {
-        photoId,
-        stage: editorStage,
-        sourceRevision: session.facts()?.sourceRevision ?? null,
-      })
-    )
-      clearEditorComparison();
+    renditions.retainComparison({
+      photoId,
+      stage: editorStage,
+      sourceRevision: session.facts()?.sourceRevision ?? null,
+    });
     if (currentPhoto()?.id === photoId) renderEditor();
     void placeEditorWrite(photoId, session, step);
     // The surface opens on the stage's rendition, so the Edit Preview is read
@@ -855,9 +815,7 @@ export function createEditorController(
   /// an edit action lands. The matching rendition clears the mark when it
   /// arrives, so the workspace never presents an image as current after the
   /// settings it shows have moved.
-  const markEditorPreviewStale = (): void => {
-    if (editorPreviewUrl) editorPreviewStale = true;
-  };
+  const markEditorPreviewStale = renditions.markStale;
   const commitEditorExposure = (photoId: string, exposureEv: number): void => {
     const session = editorSessions.get(photoId);
     if (!session) return;
@@ -972,299 +930,14 @@ export function createEditorController(
     if (!isCurrentPhoto(photoId) || currentPhoto()?.id !== photoId) return;
     editorComparing = pressed;
     if (pressed) {
-      if (editorComparisonUrl) view.presentEditorPreview(editorComparisonUrl);
-      else if (!editorComparisonBusy) {
-        if (!editorComparison)
-          editorComparisonNote = "Preparing the comparison…";
+      if (renditions.comparison.url)
+        view.presentEditorPreview(renditions.comparison.url);
+      else if (!renditions.comparison.busy) {
         void requestEditorComparisonPreview(photoId);
       }
-    } else if (editorPreviewUrl) view.presentEditorPreview(editorPreviewUrl);
+    } else if (renditions.current.url)
+      view.presentEditorPreview(renditions.current.url);
     else view.clearEditorPreview();
-    renderEditor();
-  };
-  /// A full RAW development can take over a minute. Continue polling an
-  /// admitted comparison for up to five minutes, then offer a fresh request.
-  const scheduleEditorComparisonFollowUp = (photoId: string): void => {
-    if (editorComparisonAttempts >= PREVIEW_POLL_LIMIT) {
-      editorComparisonNote =
-        "The comparison is taking too long. Compare again to check its result.";
-      renderEditor();
-      return;
-    }
-    editorComparisonAttempts += 1;
-    if (editorComparisonTimer !== undefined)
-      clearTimeout(editorComparisonTimer);
-    editorComparisonTimer = window.setTimeout(() => {
-      editorComparisonTimer = undefined;
-      if (!editorOwnsPhoto(photoId)) return;
-      void requestEditorComparisonPreview(photoId, true);
-    }, PREVIEW_POLL_MS);
-  };
-  /// One comparison request for the chosen stage. The comparison is its own
-  /// rendition: it is requested under the closed `baseline` selector, it never
-  /// replaces the current rendition's image or note, and a rendition served for
-  /// another Photo, stage, settings selector, or source revision is refused
-  /// rather than presented as the comparison.
-  const requestEditorComparisonPreview = async (
-    photoId: string,
-    followUp = false,
-  ): Promise<void> => {
-    const session = editorSessions.get(photoId);
-    const presented = session?.presentation();
-    if (
-      !session ||
-      !presented ||
-      !presented.canEdit ||
-      !presented.processingAvailable ||
-      // The camera stage presents the camera Preview: the baseline of a stage
-      // the deployment does not execute is not a comparison it can render.
-      editorStage === "camera" ||
-      !editorOwnsPhoto(photoId)
-    )
-      return;
-    const stage = editorStage;
-    const expected: Comparison = {
-      photoId,
-      stage,
-      sourceRevision: session.facts()?.sourceRevision ?? null,
-    };
-    if (!followUp) editorComparisonAttempts = 0;
-    const generation = ++editorComparisonGeneration;
-    editorComparisonAbort?.abort();
-    const controller = new AbortController();
-    editorComparisonAbort = controller;
-    editorComparisonBusy = true;
-    editorComparisonNote = "Preparing the comparison…";
-    renderEditor();
-    let response: Response;
-    try {
-      response = await fetcher(
-        editPreviewUri(photoId, stage, BASELINE_SETTINGS),
-        {
-          signal: controller.signal,
-          priority: "high",
-        },
-      );
-    } catch {
-      if (generation === editorComparisonGeneration) {
-        editorComparisonBusy = false;
-        editorComparisonNote =
-          "The comparison request did not reach the service.";
-        renderEditor();
-      }
-      return;
-    }
-    if (generation !== editorComparisonGeneration || !editorOwnsPhoto(photoId))
-      return;
-    editorComparisonBusy = false;
-    if (response.status === 202) {
-      const body: unknown = await response.json().catch(() => undefined);
-      const state =
-        isRecord(body) && typeof body["state"] === "string"
-          ? body["state"]
-          : "queued";
-      editorComparisonNote =
-        state === "running"
-          ? "Rendering the comparison…"
-          : "Preparing the comparison…";
-      renderEditor();
-      scheduleEditorComparisonFollowUp(photoId);
-      return;
-    }
-    if (!response.ok) {
-      editorComparisonNote = await describePreviewRefusal(response);
-      renderEditor();
-      return;
-    }
-    let image: Blob;
-    try {
-      image = await response.blob();
-    } catch {
-      editorComparisonNote = "The comparison could not be read. Compare again.";
-      renderEditor();
-      return;
-    }
-    if (generation !== editorComparisonGeneration || !editorOwnsPhoto(photoId))
-      return;
-    const refusal = comparisonRefusal(response.headers, expected);
-    if (refusal) {
-      editorComparisonNote = refusal;
-      renderEditor();
-      return;
-    }
-    if (editorComparisonUrl) URL.revokeObjectURL(editorComparisonUrl);
-    editorComparisonUrl = URL.createObjectURL(image);
-    editorComparison = expected;
-    const width = response.headers.get("slipstream-edit-preview-width") ?? "?";
-    const height =
-      response.headers.get("slipstream-edit-preview-height") ?? "?";
-    editorComparisonNote = `Comparison ${width}×${height}: the unadjusted rendering${stage === "film" ? " with the film look" : ""}. The current settings are unchanged.`;
-    if (editorComparing) view.presentEditorPreview(editorComparisonUrl);
-    renderEditor();
-  };
-  /// Poll admitted work long enough for a full RAW render. Stop after five
-  /// minutes so a lost or stuck operation does not poll indefinitely.
-  const PREVIEW_POLL_MS = 750;
-  const PREVIEW_POLL_LIMIT = 400;
-  const scheduleEditorPreviewFollowUp = (photoId: string): void => {
-    if (editorPreviewAttempts >= PREVIEW_POLL_LIMIT) {
-      editorPreviewNote =
-        "The preview is taking too long. Refresh the preview to check its result.";
-      editorPreviewOutcome = "unknown";
-      renderEditor();
-      return;
-    }
-    editorPreviewAttempts += 1;
-    if (editorPreviewTimer !== undefined) clearTimeout(editorPreviewTimer);
-    editorPreviewTimer = window.setTimeout(() => {
-      editorPreviewTimer = undefined;
-      void requestEditorPreview(photoId, true);
-    }, PREVIEW_POLL_MS);
-  };
-
-  /// One preview request follows each completed edit action and each settled
-  /// save. A retained image stays presented and is marked out of date until
-  /// the matching rendition arrives, and an image for another source, stage,
-  /// settings snapshot, or edit source is refused.
-  const requestEditorPreview = async (
-    photoId: string,
-    followUp = false,
-  ): Promise<void> => {
-    const session = editorSessions.get(photoId);
-    const presented = session?.presentation();
-    if (
-      !session ||
-      !presented ||
-      !presented.canEdit ||
-      !presented.processingAvailable ||
-      // The camera stage presents the camera Preview: it has no rendition of
-      // its own to request, and the closed route admits only Develop and Film.
-      editorStage === "camera" ||
-      !editorOwnsPhoto(photoId)
-    )
-      return;
-    const facts = session.facts();
-    const expectedSource = facts?.sourceRevision ?? null;
-    const expectedRecipe = presented.recipeVersion;
-    const expectedEditSource = facts?.editSource ?? "original";
-    const expectedProxyId = facts?.editSourceProxyId ?? null;
-    const stage = editorStage;
-    const identity = [
-      photoId,
-      stage,
-      expectedSource ?? "",
-      expectedRecipe ?? "",
-      expectedEditSource,
-      expectedProxyId ?? "",
-    ].join("|");
-    // A retry of the identity already in flight joins that request: the
-    // in-flight attempt settles for this owner, and no duplicate physical
-    // render is admitted behind it.
-    if (editorPreviewBusy && editorPreviewIdentity === identity) return;
-    if (!followUp) editorPreviewAttempts = 0;
-    const generation = ++editorPreviewGeneration;
-    editorPreviewAbort?.abort();
-    const controller = new AbortController();
-    editorPreviewAbort = controller;
-    editorPreviewBusy = true;
-    editorPreviewIdentity = identity;
-    editorPreviewRefused = false;
-    editorPreviewOutcome = "pending";
-    if (editorPreviewUrl) {
-      editorPreviewStale = true;
-      editorPreviewNote = "This preview is older than the current settings.";
-    } else {
-      editorPreviewNote = "Updating preview…";
-    }
-    renderEditor();
-    let response: Response;
-    try {
-      response = await fetcher(
-        editPreviewUri(photoId, stage, CURRENT_SETTINGS),
-        { signal: controller.signal, priority: "high" },
-      );
-    } catch {
-      if (generation === editorPreviewGeneration) {
-        editorPreviewBusy = false;
-        editorPreviewNote = "The preview request did not reach the service.";
-        editorPreviewRefused = !editorPreviewUrl;
-        editorPreviewOutcome = "failed";
-        renderEditor();
-      }
-      return;
-    }
-    if (generation !== editorPreviewGeneration || !editorOwnsPhoto(photoId))
-      return;
-    editorPreviewBusy = false;
-    if (response.status === 202) {
-      const body: unknown = await response.json().catch(() => undefined);
-      const state =
-        isRecord(body) && typeof body["state"] === "string"
-          ? body["state"]
-          : "queued";
-      // Queued work is waiting for admission, not computing: the note names
-      // the capacity wait, and a retained image stays presented as older than
-      // the current settings instead of being replaced or hidden.
-      editorPreviewNote =
-        state === "running"
-          ? "Rendering the preview. The image shown is older than the current settings."
-          : "Updating preview…";
-      if (editorPreviewUrl) editorPreviewStale = true;
-      renderEditor();
-      scheduleEditorPreviewFollowUp(photoId);
-      return;
-    }
-    if (!response.ok) {
-      editorPreviewRefused = !editorPreviewUrl;
-      editorPreviewNote = await describePreviewRefusal(response);
-      editorPreviewOutcome = "failed";
-      renderEditor();
-      return;
-    }
-    let image: Blob;
-    try {
-      image = await response.blob();
-    } catch {
-      editorPreviewRefused = !editorPreviewUrl;
-      editorPreviewNote =
-        "The preview could not be read. Refresh the preview to try again.";
-      editorPreviewOutcome = "failed";
-      renderEditor();
-      return;
-    }
-    if (generation !== editorPreviewGeneration || !editorOwnsPhoto(photoId))
-      return;
-    const refusal = currentRenditionRefusal(response.headers, image.size, {
-      photoId,
-      stage,
-      sourceRevision: expectedSource,
-      recipeVersion: expectedRecipe ?? "",
-      editSource: expectedEditSource,
-      editSourceProxyId: expectedProxyId,
-    });
-    if (refusal) {
-      editorPreviewRefused = !editorPreviewUrl;
-      editorPreviewNote = refusal;
-      editorPreviewOutcome = "failed";
-      renderEditor();
-      return;
-    }
-    if (editorPreviewUrl) URL.revokeObjectURL(editorPreviewUrl);
-    editorPreviewUrl = URL.createObjectURL(image);
-    editorPreviewStale = false;
-    editorPreviewRefused = false;
-    editorPreviewOutcome = "ready";
-    const width = response.headers.get("slipstream-edit-preview-width") ?? "?";
-    const height =
-      response.headers.get("slipstream-edit-preview-height") ?? "?";
-    const transform =
-      response.headers.get("slipstream-edit-preview-display-transform") ?? "";
-    const provenance =
-      expectedEditSource === "development-proxy"
-        ? ", from the Development Proxy edit source"
-        : "";
-    editorPreviewNote = `${stage === "film" ? "Film" : "Edit"} preview ${width}×${height} at the current settings${provenance}${transform ? `, display transform ${transform}` : ""}.`;
-    if (!editorComparing) view.presentEditorPreview(editorPreviewUrl);
     renderEditor();
   };
   /// The closed refusal set of a preview in the workspace's words. Internal
@@ -1312,6 +985,7 @@ export function createEditorController(
       ? `The service refused the preview: ${code}${reason ? ` (${reason})` : ""}.`
       : `The preview request failed with HTTP ${response.status}.`;
   };
+
   /// Rebinds the stored recipe to the currently observed source. It is the one
   /// explicit reconciliation the workspace offers when the service reports the
   /// saved recipe is bound to different content.
@@ -1395,11 +1069,6 @@ export function createEditorController(
     if (result.kind === "ok") void loadEditorFacts(photoId, "refresh");
   };
   const leaveEditor = (): void => {
-    editorPreviewAbort?.abort();
-    editorPreviewAbort = undefined;
-    editorPreviewGeneration += 1;
-    editorPreviewBusy = false;
-    editorPreviewIdentity = undefined;
     outputs.leave();
     clearEditorPreview();
     editorComparing = false;

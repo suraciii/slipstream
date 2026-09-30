@@ -88,6 +88,11 @@ defined by Web Async Ownership:
   metadata, and pending destination identity under
   [Browser Navigation](browser-navigation.md). It owns no source facts, HTTP,
   or mutation state; the controller coordinates its destination intents.
+  The page-local destination controller resolves destinations, missing targets,
+  expired position lookups, restoration and Album Resume through existing source,
+  Photo and navigation operations. Each establishment has its own session identity:
+  a newer destination invalidates an older continuation even when both use the
+  same Browse Snapshot. Completed work remains fenced until superseded or disposed.
 - The **application-lifetime owner** owns Library Overview, publication status,
   scan command settlement, application Recovery claims, and Summary
   presentation state.
@@ -101,6 +106,10 @@ defined by Web Async Ownership:
   notification per bounded window regardless of joined consumers), the
   retained-fact cache bound anchored to the latest visible range, Grid
   position, Thumbnail work, and source-scoped image transfers.
+  A page-local Browse window controller maps awaited outcomes and no-waiter
+  notifications into Recovery and presentation, and replays captured exact-range
+  retries. It owns no Snapshot, Browse token, fact cache or retry records. Awaited
+  work settles through its caller; only unawaited work uses the owner notification.
 - The **Photo owner** owns the current Photo, foreground and adjacent Preview
   work, Photo View navigation, Selection State and Rating writes, browser-local
   undo, and Photo-scoped image transfers.
@@ -116,6 +125,15 @@ defined by Web Async Ownership:
   confirmed operation Undo can still restore, and the admission of every
   removal and restoration write. It never restores an operation or a Photo the
   Library no longer holds, and it holds no Photo facts of its own.
+- The **Editor rendition owner** owns independent current and baseline request
+  admission, bounded polling, cancellation, retained images and object-URL
+  lifetime. Both lanes use one transfer lifecycle and the existing rendition
+  validators. The current lane follows recipe and edit-source identity; the
+  baseline is retained across saved-settings changes for the same Photo, stage
+  and source revision. Every asynchronous response/body continuation checks
+  its lane generation and Photo scope before changing presentation or admitting
+  another poll. The Editor controller provides current session identity and
+  chooses the presented lane; save and Export ordering stay in that controller.
 - The **page UI** owns Library Browser markup, DOM bindings, semantic rendering,
   focus, keyboard, pointer, and responsive presentation. It reports user intent
   to the page model; it does not issue HTTP requests or decide async ownership.
@@ -125,6 +143,12 @@ defined by Web Async Ownership:
   work. It reuses the DOM nodes of Photos that stay visible and restores focus
   to one Tab stop without taking it from another surface. See
   [Library Browsing and Selection](../docs/library-browsing-and-selection.md).
+  The page-local Photo presenter owns presented Photo and Selection identities,
+  status surface identity, facts and metadata rendering, and Preview image targets.
+  It reads bounded presentation models without holding mutable Photo facts or
+  issuing HTTP. Reset and disposal invalidate its targets and cancel gestures.
+  Modal arbitration, global keyboard routing and responsive placement remain in
+  the page UI composition.
   The page-local Photo gesture controller owns Preview pointer capture, pending
   holds, horizontal swipe feedback, and the handoff to zoom panning or pinch.
   It reads the current Photo surface and decision readiness without owning
@@ -139,10 +163,21 @@ defined by Web Async Ownership:
 - The **page API** owns Library Browser HTTP calls, wire response types, and
   response decoding. It accepts cancellation inputs from the calling owner but
   does not choose which operation supersedes another.
+  Browse, removal/restoration, and Trash share one HTTP/JSON classifier. It
+  distinguishes a failed transfer, an HTTP refusal, and unreadable JSON without
+  trusting the decoded body. Each client retains its own identity, count, and
+  Snapshot validators and maps those classifications into its existing result
+  types. Thumbnail, Preview, and other APIs retain their distinct protocols.
 
 These are responsibility boundaries, not a requirement for one file per bullet.
 An extracted module must hide meaningful state or policy behind a smaller
 interface. Otherwise the responsibility stays with its nearest existing owner.
+
+Sharing the two rendition lifecycles inside the page model hides their transport
+and image-resource rules without adding a second editing session. Keeping two
+copies in the Editor controller duplicates cancellation and body-settlement
+policy. A general poller spanning rendition, Export and Development Proxy work
+would erase their different effects and settlement contracts and is not used.
 
 ### Async ownership module
 

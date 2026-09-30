@@ -646,8 +646,7 @@ export function mountAccessBoundary(
 
   const onResumeBoundary = (): void => {
     if (!session || !alive || document.visibilityState === "hidden") return;
-    detachPrivateHost();
-    void checkCurrentAccess();
+    void checkCurrentAccess(privateHost?.inert ?? false);
   };
   const onHistoryTraversal = (event: PopStateEvent): void => {
     if (replayingHistoryTraversal) {
@@ -673,13 +672,19 @@ export function mountAccessBoundary(
     );
   };
   const onVisibilityChange = (): void => {
-    if (document.visibilityState === "hidden") {
-      if (session && alive) detachPrivateHost();
-    } else onResumeBoundary();
+    if (document.visibilityState === "visible") onResumeBoundary();
+  };
+  const onPageHide = (): void => {
+    if (session && alive) detachPrivateHost();
+  };
+  const onPageShow = (event: PageTransitionEvent): void => {
+    if (event.persisted) onResumeBoundary();
   };
   window.addEventListener("popstate", onHistoryTraversal);
   window.addEventListener("online", onResumeBoundary);
   document.addEventListener("visibilitychange", onVisibilityChange);
+  window.addEventListener("pagehide", onPageHide);
+  window.addEventListener("pageshow", onPageShow);
 
   renderEntry({ checking: true });
   void checkCurrentAccess();
@@ -690,6 +695,8 @@ export function mountAccessBoundary(
     window.removeEventListener("popstate", onHistoryTraversal);
     window.removeEventListener("online", onResumeBoundary);
     document.removeEventListener("visibilitychange", onVisibilityChange);
+    window.removeEventListener("pagehide", onPageHide);
+    window.removeEventListener("pageshow", onPageShow);
     channel?.removeEventListener("message", onChannelMessage);
     channel?.close();
     channel = undefined;

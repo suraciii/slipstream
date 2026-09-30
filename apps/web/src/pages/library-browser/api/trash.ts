@@ -1,5 +1,6 @@
 import { hasExactKeys, isRecord, validCount } from "./guards.js";
 import type { RemovalFetch } from "./removal.js";
+import { fetchJson } from "./json-response.js";
 
 export type TrashSelection = Readonly<{
   all: boolean;
@@ -178,24 +179,18 @@ async function postJson<T>(
   body: unknown,
   validate: (value: unknown) => value is T,
 ): Promise<TrashWriteResult<T>> {
-  let response: Response;
-  try {
-    response = await fetcher(path, {
+  const result = await fetchJson(() =>
+    fetcher(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    });
-  } catch {
-    return Object.freeze({ kind: "rejected", status: 0 });
-  }
-  if (!response.ok)
-    return Object.freeze({ kind: "rejected", status: response.status });
-  let value: unknown;
-  try {
-    value = await response.json();
-  } catch {
-    return Object.freeze({ kind: "malformed" });
-  }
+    }),
+  );
+  if (result.kind !== "ok")
+    return result.kind === "rejected"
+      ? Object.freeze({ kind: "rejected", status: result.status })
+      : result;
+  const value = result.value;
   return validate(value)
     ? Object.freeze({ kind: "ok", value })
     : Object.freeze({ kind: "malformed" });
@@ -232,22 +227,14 @@ export async function fetchTrashOperation(
   fetcher: RemovalFetch,
   operationId: string,
 ): Promise<TrashWriteResult<TrashOperation>> {
-  let response: Response;
-  try {
-    response = await fetcher(
-      `/api/trash/operations/${encodeURIComponent(operationId)}`,
-    );
-  } catch {
-    return Object.freeze({ kind: "rejected", status: 0 });
-  }
-  if (!response.ok)
-    return Object.freeze({ kind: "rejected", status: response.status });
-  let value: unknown;
-  try {
-    value = await response.json();
-  } catch {
-    return Object.freeze({ kind: "malformed" });
-  }
+  const result = await fetchJson(() =>
+    fetcher(`/api/trash/operations/${encodeURIComponent(operationId)}`),
+  );
+  if (result.kind !== "ok")
+    return result.kind === "rejected"
+      ? Object.freeze({ kind: "rejected", status: result.status })
+      : result;
+  const value = result.value;
   return validOperation(value, operationId)
     ? Object.freeze({ kind: "ok", value })
     : Object.freeze({ kind: "malformed" });

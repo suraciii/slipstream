@@ -35,6 +35,13 @@ concurrency, and artifact publication. Browser state owns pending drafts,
 session undo/redo, and view interaction. Engine-private history and Python
 objects remain behind processing adapters.
 
+The service's Export manager owns one descriptor-bearing Start exchange and
+one Output exchange for its admitted workloads. They construct the fixed Photo
+protocol, retain descriptors through blocking transport, and decode transfer
+results. Callers supply captured workload/source/recipe identity and retain
+validation, task-failure handling, cancellation, discard, and publication order.
+Sharing transport does not merge ephemeral preview and durable Export policy.
+
 ## Application Boundary
 
 The existing Rust modular monolith must own development lifecycle. Native
