@@ -340,47 +340,26 @@ impl ExportManager {
         // Keep the staged descriptor open until Start returns, exactly like
         // the Export path. The launcher copies and hashes the source before
         // releasing its worker.
-        let staged_path = staged.path().to_path_buf();
-        let socket = self.processing.socket_path();
-        let instance = self.processing.instance.clone();
-        let start_attempt_key = attempt_key.clone();
-        let start_incarnation = incarnation.clone();
-        let start_policy = self.processing.policy_sha256.clone();
-        let start_bundle = self.processing.bundle_sha256.clone();
-        let start_source = source.clone();
-        let start_recipe = recipe;
-        let start_manifest = manifest_sha256;
-        let start_workload = workload.to_owned();
-        let start_profile_id = source_profile_id.clone();
-        let start_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-            let file = open_read_only(&staged_path)
-                .map_err(|_| "staged source could not be opened".to_owned())?;
-            let request = Request::Start {
-                mode: PHOTO_MODE.to_owned(),
-                version: PHOTO_PROTOCOL_VERSION,
-                instance,
-                export_id: start_attempt_key,
-                incarnation: start_incarnation,
-                sequence,
-                policy: start_policy,
-                bundle: start_bundle,
-                workload: start_workload,
-                source: Source {
-                    kind: "raw".to_owned(),
-                    profile_id: start_profile_id,
-                    size: start_source.size,
-                    sha256: start_source.sha256,
-                },
-                recipe: Recipe {
-                    exposure_milli_ev: start_recipe.exposure_milli_ev,
-                    white_balance_mode: start_recipe.white_balance_mode.to_owned(),
-                },
-                recipe_digest: start_recipe.digest(),
-                manifest_sha256: start_manifest,
-            };
-            photo::request_with_descriptor(&socket, &request, file.as_raw_fd())
-                .map(|_| ())
-                .map_err(|_| "launcher refused the preview start".to_owned())
+        let recipe_digest = recipe.digest();
+        let start_result = start_photo(StartExchange {
+            path: staged.path().to_path_buf(),
+            socket: self.processing.socket_path(),
+            instance: self.processing.instance.clone(),
+            export_id: attempt_key.clone(),
+            incarnation: incarnation.clone(),
+            sequence,
+            policy: self.processing.policy_sha256.clone(),
+            bundle: self.processing.bundle_sha256.clone(),
+            workload: workload.to_owned(),
+            source_kind: "raw".to_owned(),
+            source_profile_id: source_profile_id.clone(),
+            source,
+            recipe,
+            recipe_digest,
+            manifest_sha256,
+            task_error_prefix: "preview launcher task failed",
+            open_error: "staged source could not be opened",
+            refusal_error: "launcher refused the preview start",
         })
         .await;
         let start_result = match start_result {
@@ -389,7 +368,7 @@ impl ExportManager {
                 self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
                     .await;
                 drop(staged);
-                return Err(format!("preview launcher task failed: {error}"));
+                return Err(error);
             }
         };
         if let Err(error) = start_result {
@@ -440,51 +419,26 @@ impl ExportManager {
                 return Err(format!("preview output could not be opened: {error}"));
             }
         };
-        let socket = self.processing.socket_path();
-        let instance = self.processing.instance.clone();
-        let output_attempt_key = attempt_key.clone();
-        let output_incarnation = incarnation.clone();
-        let output_receipt_result = tokio::task::spawn_blocking(
-            move || -> Result<slipstream_processing::photo::OutputReceipt, String> {
-                let request = Request::Output {
-                    mode: PHOTO_MODE.to_owned(),
-                    version: PHOTO_PROTOCOL_VERSION,
-                    instance,
-                    export_id: output_attempt_key,
-                    incarnation: output_incarnation,
-                    sequence,
-                    target: workload.to_owned(),
-                };
-                let response =
-                    photo::request_with_descriptor(&socket, &request, output_file.as_raw_fd())
-                        .map_err(|_| "launcher could not transfer the preview output".to_owned())?;
-                match response {
-                    slipstream_processing::photo::Response::Result { result, .. } => {
-                        match *result {
-                            ResultBody::Output { receipt } => Ok(receipt),
-                            _ => {
-                                Err("launcher answered the preview output unexpectedly".to_owned())
-                            }
-                        }
-                    }
-                    slipstream_processing::photo::Response::Error { .. } => {
-                        Err("launcher refused the preview output transfer".to_owned())
-                    }
-                }
-            },
-        )
+        let output_receipt_result = output_photo(OutputExchange {
+            socket: self.processing.socket_path(),
+            instance: self.processing.instance.clone(),
+            export_id: attempt_key.clone(),
+            incarnation: incarnation.clone(),
+            sequence,
+            target: workload.to_owned(),
+            output_file,
+            task_error_prefix: "preview output task failed",
+            transfer_error: "launcher could not transfer the preview output",
+            unexpected_error: "launcher answered the preview output unexpectedly",
+            refusal_error: "launcher refused the preview output transfer",
+        })
         .await;
         let output_receipt = match output_receipt_result {
-            Ok(Ok(receipt)) => receipt,
-            Ok(Err(error)) => {
-                self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
-                    .await;
-                return Err(error);
-            }
+            Ok(receipt) => receipt,
             Err(error) => {
                 self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
                     .await;
-                return Err(format!("preview output task failed: {error}"));
+                return Err(error);
             }
         };
         let validation_path = output_path.clone();
@@ -648,49 +602,28 @@ impl ExportManager {
             workload,
             workload,
         );
-        let socket = self.processing.socket_path();
-        let instance = self.processing.instance.clone();
-        let start_path = frame_path.to_path_buf();
-        let start_id = attempt_key.clone();
-        let start_incarnation = incarnation.clone();
-        let start_policy = self.processing.policy_sha256.clone();
-        let start_bundle = self.processing.bundle_sha256.clone();
-        let start_profile = source_profile_id.to_owned();
-        let start_sha = source.sha256.clone();
-        let start_recipe = recipe;
-        let start_manifest = manifest_sha256;
-        let start_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-            let file = open_read_only(&start_path)
-                .map_err(|_| "staged proxy frame could not be opened".to_owned())?;
-            let request = Request::Start {
-                mode: PHOTO_MODE.to_owned(),
-                version: PHOTO_PROTOCOL_VERSION,
-                instance,
-                export_id: start_id,
-                incarnation: start_incarnation,
-                sequence,
-                policy: start_policy,
-                bundle: start_bundle,
-                workload: workload.to_owned(),
-                source: Source {
-                    kind: "development-proxy".to_owned(),
-                    profile_id: start_profile,
-                    size: source.size,
-                    sha256: start_sha,
-                },
-                recipe: Recipe {
-                    exposure_milli_ev: start_recipe.exposure_milli_ev,
-                    white_balance_mode: start_recipe.white_balance_mode.to_owned(),
-                },
-                recipe_digest: start_recipe.digest(),
-                manifest_sha256: start_manifest,
-            };
-            photo::request_with_descriptor(&socket, &request, file.as_raw_fd())
-                .map(|_| ())
-                .map_err(|_| "launcher refused the proxy Film start".to_owned())
+        let recipe_digest = recipe.digest();
+        let start_result = start_photo(StartExchange {
+            path: frame_path.to_path_buf(),
+            socket: self.processing.socket_path(),
+            instance: self.processing.instance.clone(),
+            export_id: attempt_key.clone(),
+            incarnation: incarnation.clone(),
+            sequence,
+            policy: self.processing.policy_sha256.clone(),
+            bundle: self.processing.bundle_sha256.clone(),
+            workload: workload.to_owned(),
+            source_kind: "development-proxy".to_owned(),
+            source_profile_id: source_profile_id.to_owned(),
+            source: source.clone(),
+            recipe,
+            recipe_digest,
+            manifest_sha256,
+            task_error_prefix: "proxy Film launcher task failed",
+            open_error: "staged proxy frame could not be opened",
+            refusal_error: "launcher refused the proxy Film start",
         })
-        .await
-        .map_err(|error| format!("proxy Film launcher task failed: {error}"))?;
+        .await?;
         if let Err(error) = start_result {
             self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
                 .await;
@@ -736,44 +669,26 @@ impl ExportManager {
                 return Err(format!("proxy Film output could not be opened: {error}"));
             }
         };
-        let socket = self.processing.socket_path();
-        let instance = self.processing.instance.clone();
-        let output_id = attempt_key.clone();
-        let output_incarnation = incarnation.clone();
-        let output_receipt_result = tokio::task::spawn_blocking(move || {
-            let request = Request::Output {
-                mode: PHOTO_MODE.to_owned(),
-                version: PHOTO_PROTOCOL_VERSION,
-                instance,
-                export_id: output_id,
-                incarnation: output_incarnation,
-                sequence,
-                target: workload.to_owned(),
-            };
-            match photo::request_with_descriptor(&socket, &request, output_file.as_raw_fd())
-                .map_err(|_| "launcher could not transfer proxy Film output".to_owned())?
-            {
-                slipstream_processing::photo::Response::Result { result, .. } => match *result {
-                    ResultBody::Output { receipt } => Ok(receipt),
-                    _ => Err("launcher answered proxy Film output unexpectedly".to_owned()),
-                },
-                slipstream_processing::photo::Response::Error { .. } => {
-                    Err("launcher refused proxy Film output transfer".to_owned())
-                }
-            }
+        let output_receipt_result = output_photo(OutputExchange {
+            socket: self.processing.socket_path(),
+            instance: self.processing.instance.clone(),
+            export_id: attempt_key.clone(),
+            incarnation: incarnation.clone(),
+            sequence,
+            target: workload.to_owned(),
+            output_file,
+            task_error_prefix: "proxy Film output task failed",
+            transfer_error: "launcher could not transfer proxy Film output",
+            unexpected_error: "launcher answered proxy Film output unexpectedly",
+            refusal_error: "launcher refused proxy Film output transfer",
         })
         .await;
         let output_receipt = match output_receipt_result {
-            Ok(Ok(receipt)) => receipt,
-            Ok(Err(error)) => {
-                self.discard_preview_attempt(&attempt_key, &incarnation, sequence, None)
-                    .await;
-                return Err(error);
-            }
+            Ok(receipt) => receipt,
             Err(error) => {
                 self.discard_preview_attempt(&attempt_key, &incarnation, sequence, None)
                     .await;
-                return Err(format!("proxy Film output task failed: {error}"));
+                return Err(error);
             }
         };
         let validation_path = output_path.clone();
@@ -1532,45 +1447,27 @@ impl ExportManager {
         // LauncherStart carries exactly one read-only source descriptor. The
         // launcher copies and hashes the bytes before releasing a worker, so
         // the descriptor must stay open until Start returns.
-        let staged_path = staged.path().to_path_buf();
-        let socket = self.processing.socket_path();
-        let instance = self.processing.instance.clone();
-        let start_export_id = export_id.clone();
-        let start_incarnation = incarnation.to_owned();
-        let start_snapshot = snapshot.clone();
-        let start_source = source.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), String> {
-            let file = open_read_only(&staged_path)
-                .map_err(|_| "staged source could not be opened".to_owned())?;
-            let request = Request::Start {
-                mode: PHOTO_MODE.to_owned(),
-                version: PHOTO_PROTOCOL_VERSION,
-                instance,
-                export_id: start_export_id,
-                incarnation: start_incarnation,
-                sequence,
-                policy: start_snapshot.policy_id.clone(),
-                bundle: start_snapshot.bundle_id.clone(),
-                workload: start_snapshot.workload.clone(),
-                source: Source {
-                    kind: "raw".to_owned(),
-                    profile_id: start_snapshot.source_profile_id.clone(),
-                    size: start_source.size,
-                    sha256: start_source.sha256.clone(),
-                },
-                recipe: Recipe {
-                    exposure_milli_ev: recipe.exposure_milli_ev,
-                    white_balance_mode: recipe.white_balance_mode.to_owned(),
-                },
-                recipe_digest: start_snapshot.recipe_digest.clone(),
-                manifest_sha256,
-            };
-            photo::request_with_descriptor(&socket, &request, file.as_raw_fd())
-                .map(|_| ())
-                .map_err(|_| "launcher refused the start".to_owned())
+        start_photo(StartExchange {
+            path: staged.path().to_path_buf(),
+            socket: self.processing.socket_path(),
+            instance: self.processing.instance.clone(),
+            export_id: export_id.clone(),
+            incarnation: incarnation.to_owned(),
+            sequence,
+            policy: snapshot.policy_id.clone(),
+            bundle: snapshot.bundle_id.clone(),
+            workload: snapshot.workload.clone(),
+            source_kind: "raw".to_owned(),
+            source_profile_id: snapshot.source_profile_id.clone(),
+            source: source.clone(),
+            recipe,
+            recipe_digest: snapshot.recipe_digest.clone(),
+            manifest_sha256,
+            task_error_prefix: "launcher task failed",
+            open_error: "staged source could not be opened",
+            refusal_error: "launcher refused the start",
         })
-        .await
-        .map_err(|error| format!("launcher task failed: {error}"))??;
+        .await??;
         drop(staged);
 
         // Follow the attempt until the launcher reports terminal settlement.
@@ -1641,42 +1538,20 @@ impl ExportManager {
         let output_path = writer.temporary_path().to_path_buf();
         let output_file = open_writable(&output_path)
             .map_err(|error| format!("output file could not be opened: {error}"))?;
-        let socket = self.processing.socket_path();
-        let instance = self.processing.instance.clone();
-        let export_id_for_output = export_id.clone();
-        let incarnation_for_output = incarnation.to_owned();
-        let output_target = workload.clone();
-        let output_receipt = tokio::task::spawn_blocking(
-            move || -> Result<slipstream_processing::photo::OutputReceipt, String> {
-                let request = Request::Output {
-                    mode: PHOTO_MODE.to_owned(),
-                    version: PHOTO_PROTOCOL_VERSION,
-                    instance,
-                    export_id: export_id_for_output,
-                    incarnation: incarnation_for_output,
-                    sequence,
-                    target: output_target,
-                };
-                let response =
-                    photo::request_with_descriptor(&socket, &request, output_file.as_raw_fd())
-                        .map_err(|_| "launcher could not transfer the output".to_owned())?;
-                match response {
-                    slipstream_processing::photo::Response::Result { result, .. } => {
-                        match *result {
-                            ResultBody::Output { receipt } => Ok(receipt),
-                            _ => {
-                                Err("launcher answered the output request unexpectedly".to_owned())
-                            }
-                        }
-                    }
-                    slipstream_processing::photo::Response::Error { .. } => {
-                        Err("launcher refused the output transfer".to_owned())
-                    }
-                }
-            },
-        )
-        .await
-        .map_err(|error| format!("output task failed: {error}"))??;
+        let output_receipt = output_photo(OutputExchange {
+            socket: self.processing.socket_path(),
+            instance: self.processing.instance.clone(),
+            export_id: export_id.clone(),
+            incarnation: incarnation.to_owned(),
+            sequence,
+            target: workload.clone(),
+            output_file,
+            task_error_prefix: "output task failed",
+            transfer_error: "launcher could not transfer the output",
+            unexpected_error: "launcher answered the output request unexpectedly",
+            refusal_error: "launcher refused the output transfer",
+        })
+        .await?;
 
         // Verify the received bytes against the launcher receipt and the
         // closed Development TIFF contract before any acknowledgement.
@@ -2139,6 +2014,145 @@ fn open_writable(path: &Path) -> io::Result<fs::File> {
         .write(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(path)
+}
+/// The shared descriptor-bearing Start exchange. Workload callers fill in the
+/// facts that are part of their protocol identity; this helper owns the
+/// blocking socket call and keeps the source descriptor alive through Start.
+struct StartExchange {
+    path: PathBuf,
+    socket: PathBuf,
+    instance: String,
+    export_id: String,
+    incarnation: String,
+    sequence: u64,
+    policy: String,
+    bundle: String,
+    workload: String,
+    source_kind: String,
+    source_profile_id: String,
+    source: ExportSourceEvidence,
+    recipe: ExportRecipePayload,
+    recipe_digest: String,
+    manifest_sha256: String,
+    task_error_prefix: &'static str,
+    open_error: &'static str,
+    refusal_error: &'static str,
+}
+
+async fn start_photo(exchange: StartExchange) -> Result<Result<(), String>, String> {
+    let StartExchange {
+        path,
+        socket,
+        instance,
+        export_id,
+        incarnation,
+        sequence,
+        policy,
+        bundle,
+        workload,
+        source_kind,
+        source_profile_id,
+        source,
+        recipe,
+        recipe_digest,
+        manifest_sha256,
+        task_error_prefix,
+        open_error,
+        refusal_error,
+    } = exchange;
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let file = open_read_only(&path).map_err(|_| open_error.to_owned())?;
+        let request = Request::Start {
+            mode: PHOTO_MODE.to_owned(),
+            version: PHOTO_PROTOCOL_VERSION,
+            instance,
+            export_id,
+            incarnation,
+            sequence,
+            policy,
+            bundle,
+            workload,
+            source: Source {
+                kind: source_kind,
+                profile_id: source_profile_id,
+                size: source.size,
+                sha256: source.sha256,
+            },
+            recipe: Recipe {
+                exposure_milli_ev: recipe.exposure_milli_ev,
+                white_balance_mode: recipe.white_balance_mode.to_owned(),
+            },
+            recipe_digest,
+            manifest_sha256,
+        };
+        photo::request_with_descriptor(&socket, &request, file.as_raw_fd())
+            .map(|_| ())
+            .map_err(|_| refusal_error.to_owned())
+    })
+    .await
+    .map_err(|error| format!("{task_error_prefix}: {error}"))
+}
+
+/// The shared descriptor-bearing Output exchange. The caller retains control
+/// of acknowledgement/discard policy; this helper only transfers and decodes
+/// the launcher receipt.
+struct OutputExchange {
+    socket: PathBuf,
+    instance: String,
+    export_id: String,
+    incarnation: String,
+    sequence: u64,
+    target: String,
+    output_file: fs::File,
+    task_error_prefix: &'static str,
+    transfer_error: &'static str,
+    unexpected_error: &'static str,
+    refusal_error: &'static str,
+}
+
+async fn output_photo(
+    exchange: OutputExchange,
+) -> Result<slipstream_processing::photo::OutputReceipt, String> {
+    let OutputExchange {
+        socket,
+        instance,
+        export_id,
+        incarnation,
+        sequence,
+        target,
+        output_file,
+        task_error_prefix,
+        transfer_error,
+        unexpected_error,
+        refusal_error,
+    } = exchange;
+    tokio::task::spawn_blocking(
+        move || -> Result<slipstream_processing::photo::OutputReceipt, String> {
+            let request = Request::Output {
+                mode: PHOTO_MODE.to_owned(),
+                version: PHOTO_PROTOCOL_VERSION,
+                instance,
+                export_id,
+                incarnation,
+                sequence,
+                target,
+            };
+            let response =
+                photo::request_with_descriptor(&socket, &request, output_file.as_raw_fd())
+                    .map_err(|_| transfer_error.to_owned())?;
+            match response {
+                slipstream_processing::photo::Response::Result { result, .. } => match *result {
+                    ResultBody::Output { receipt } => Ok(receipt),
+                    _ => Err(unexpected_error.to_owned()),
+                },
+                slipstream_processing::photo::Response::Error { .. } => {
+                    Err(refusal_error.to_owned())
+                }
+            }
+        },
+    )
+    .await
+    .map_err(|error| format!("{task_error_prefix}: {error}"))?
 }
 
 /// Writes one proxy Film exposure handoff into the prepared temporary path

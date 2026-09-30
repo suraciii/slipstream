@@ -24,6 +24,13 @@ The Rust service is one modular monolith with these boundaries:
 
 The modules exchange domain values and typed failures. HTTP types do not enter Persistence or Native modules. Native error text and filesystem paths do not cross the protocol boundary.
 
+Persistence uses one private typed enqueue path for commands whose replies
+carry `PersistenceError`. That path creates the reply channel and submits
+through the existing bounded owner lifecycle; callers keep validation and
+concrete command construction. Domain-specific mutation and metadata errors
+retain their separate typed paths. Reply sharing does not introduce a second
+queue, dynamic command dispatch or a different shutdown policy.
+
 ## Lifecycle
 
 Startup proceeds in one direction:

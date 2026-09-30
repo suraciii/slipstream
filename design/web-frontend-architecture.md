@@ -125,6 +125,15 @@ defined by Web Async Ownership:
   confirmed operation Undo can still restore, and the admission of every
   removal and restoration write. It never restores an operation or a Photo the
   Library no longer holds, and it holds no Photo facts of its own.
+- The **Editor rendition owner** owns independent current and baseline request
+  admission, bounded polling, cancellation, retained images and object-URL
+  lifetime. Both lanes use one transfer lifecycle and the existing rendition
+  validators. The current lane follows recipe and edit-source identity; the
+  baseline is retained across saved-settings changes for the same Photo, stage
+  and source revision. Every asynchronous response/body continuation checks
+  its lane generation and Photo scope before changing presentation or admitting
+  another poll. The Editor controller provides current session identity and
+  chooses the presented lane; save and Export ordering stay in that controller.
 - The **page UI** owns Library Browser markup, DOM bindings, semantic rendering,
   focus, keyboard, pointer, and responsive presentation. It reports user intent
   to the page model; it does not issue HTTP requests or decide async ownership.
@@ -163,6 +172,12 @@ defined by Web Async Ownership:
 These are responsibility boundaries, not a requirement for one file per bullet.
 An extracted module must hide meaningful state or policy behind a smaller
 interface. Otherwise the responsibility stays with its nearest existing owner.
+
+Sharing the two rendition lifecycles inside the page model hides their transport
+and image-resource rules without adding a second editing session. Keeping two
+copies in the Editor controller duplicates cancellation and body-settlement
+policy. A general poller spanning rendition, Export and Development Proxy work
+would erase their different effects and settlement contracts and is not used.
 
 ### Async ownership module
 
