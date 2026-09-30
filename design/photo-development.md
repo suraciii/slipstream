@@ -38,11 +38,13 @@ objects remain behind processing adapters.
 ## Application Boundary
 
 The existing Rust modular monolith must own development lifecycle. Native
-processing must run in fresh supervised attempt containers: darktable-cli for
-development and a narrow Python entry point calling the Spektrafilm runtime for
-simulation. [Processing Executor](processing-executor.md) owns the private host
-launcher, execution receipts, and retained resource boundary.
-The Python process must not expose an independent public API or start the GUI.
+processing must run in fresh supervised attempt containers. The
+[Native darktable Integration](darktable-integration.md) specification owns
+development execution through a private native MCP child process. Film simulation
+uses a narrow Python entry point calling the Spektrafilm runtime.
+[Processing Executor](processing-executor.md) owns the private host launcher,
+execution receipts, and retained resource boundary. Engine processes must not
+expose an independent public API or start the GUI.
 
 The processing capability must be opt-in and report engine, bundle, input and
 resource availability separately from Library readiness. Missing processing

@@ -25,6 +25,10 @@ editing, arbitrary processing graphs, custom Film Recipes, external editing
 history import, or user-visible virtual copies. It does not change the qualified
 0.1 release boundary.
 
+The [darktable Integration](darktable-integration.md) specification owns the
+product relationship with the engine. Engine discovery must not expand this
+editing scope or grant support to unqualified controls.
+
 ## Development Controls
 
 Exposure must represent compensation in EV against a documented processing
@@ -184,8 +188,7 @@ point samples, scene-linear ProPhoto RGB pixels, and a matching embedded ICC
 profile. It must not include film simulation or a display/look transform.
 
 A Finished JPEG must contain the Film Result at full developed dimensions,
-encoded for sRGB with the pinned destination profile and fixed JPEG quality
-85. Finished TIFF and expert output options are outside this capability.
+encoded for sRGB with the pinned destination profile and fixed JPEG quality 85. Finished TIFF and expert output options are outside this capability.
 
 The workspace must offer one Export action whose visible name states the
 target in plain language: Development TIFF for the edited result, or Finished
