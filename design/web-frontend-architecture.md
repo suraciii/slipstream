@@ -119,12 +119,11 @@ defined by Web Async Ownership:
 - The **page UI** owns Library Browser markup, DOM bindings, semantic rendering,
   focus, keyboard, pointer, and responsive presentation. It reports user intent
   to the page model; it does not issue HTTP requests or decide async ownership.
-  Grid rendering is presentational: it never initiates loading, merges to at
-  most one update per animation frame, and reuses the DOM nodes of Photos that
-  stay visible. Grid keyboard focus is presentation state: one rendered cell
-  holds the Tab stop, arrow keys move cell focus and report the target row's
-  range through the same merged render, and the page UI owns the focus
-  restoration required by
+  The page-local Grid presenter owns thumbnail size, virtualized cells, merged
+  render scheduling, keyboard focus, and captured Grid restoration. It reports
+  visible ranges as intent; the source and Grid owner alone admits Browse
+  work. It reuses the DOM nodes of Photos that stay visible and restores focus
+  to one Tab stop without taking it from another surface. See
   [Library Browsing and Selection](../docs/library-browsing-and-selection.md).
   It yields Fit-state vertical touch panning to native Photo View
   scrolling, retains Fit-state horizontal decision gestures, and takes full

@@ -30,9 +30,10 @@ import { createPhotoZoomController } from "./photo-zoom.js";
 import { createPhotoEditorSurfaceController } from "./photo-editor-surface.js";
 import type { EditorProxyViewModel } from "./editor-proxy-view-model.js";
 import { createSourceSurfaceController } from "./source-surface.js";
-import {
-  createGridCellPresenter,
-  type GridCell,
+import { createGridPresenter } from "./grid-presenter.js";
+import type {
+  GridPhotoViewModel,
+  GridThumbnailBinding,
 } from "./grid-cell-presenter.js";
 import {
   createFilmstripPresenter,
@@ -53,6 +54,11 @@ import type {
 } from "../model/photo-editor.js";
 import type { EditorExportViewModel } from "./photo-editor-surface.js";
 import type { RecoveryApplyMapping } from "../model/recovery-review.js";
+export type {
+  GridPhotoPreview,
+  GridThumbnailBinding,
+  GridThumbnailTarget,
+} from "./grid-cell-presenter.js";
 
 export type {
   RemovedPanelViewModel,
@@ -69,26 +75,6 @@ export type {
 export type ViewSelectionState = "undecided" | "selected" | "rejected";
 type ViewPreviewSource = "jpeg-original" | "raw-embedded-jpeg";
 
-/**
- * Grid thumbnail sizes. Each step is the cell box the CSS renders; the Grid
- * adds the ordinary inter-cell gap to get the column and row pitch of its
- * virtualized layout, so one step drives the CSS cell box and every geometry
- * calculation together.
- */
-type GridThumbnailSize = "small" | "medium" | "large";
-const GRID_CELL_GAP_X = 10;
-const GRID_CELL_GAP_Y = 12;
-const GRID_THUMBNAIL_SIZE_STEPS: Readonly<
-  Record<
-    GridThumbnailSize,
-    Readonly<{ width: number; height: number; label: string }>
-  >
-> = {
-  small: { width: 108, height: 130, label: "Small" },
-  medium: { width: 140, height: 166, label: "Medium" },
-  large: { width: 216, height: 256, label: "Large" },
-};
-const DEFAULT_GRID_THUMBNAIL_SIZE: GridThumbnailSize = "medium";
 /** Full wording behind the compact limited-detail marker in the Preview fact. */
 const LIMITED_PREVIEW_DETAIL = "Limited by camera Preview resolution";
 const SWIPE_PENDING_PIXELS = 24;
@@ -370,26 +356,6 @@ export type LibraryBrowserIntent =
       items: ReadonlyArray<RecoveryApplyMapping>;
     }>;
 
-/// One Thumbnail delivery request: the Photo the page's one image-delivery
-/// path binds, and the Grid, Filmstrip, or Removed Photos row that owns it.
-export type GridThumbnailBinding = Readonly<{
-  photoId: string;
-  preview: GridPhotoPreview;
-  target: GridThumbnailTarget;
-}>;
-
-export interface GridThumbnailTarget {
-  readonly complete: boolean;
-  readonly isConnected: boolean;
-  src: string;
-  onload: GlobalEventHandlers["onload"];
-  onerror: GlobalEventHandlers["onerror"];
-  removeAttribute(name: string): void;
-  setDeliveryFailed(failed: boolean): void;
-  /// Reports a terminal Thumbnail result without changing Review Preview facts.
-  setThumbnailState(state: "unavailable" | "failed"): void;
-}
-
 interface ReviewImageTarget {
   readonly connected: boolean;
   readonly source: string;
@@ -449,25 +415,6 @@ export type FolderAlbumViewModel = Readonly<{
   selectedAlbumId: string;
   pending: boolean;
   status?: string;
-}>;
-
-/// The Thumbnail facts one Photo presents: its Preview delivery state and,
-/// once ready, the URL its Thumbnail loads. The Removed Photos listing
-/// presents the same facts for its rows.
-export type GridPhotoPreview = Readonly<{
-  state: "inspection-pending" | "ready" | "unavailable" | "failed";
-  thumbnailUrl?: string;
-}>;
-
-type GridPhotoViewModel = Readonly<{
-  id: string;
-  available: boolean;
-  original: Readonly<{ kind: "raw" | "jpeg"; available: boolean }>;
-  originalFilename?: string;
-  selectionState: ViewSelectionState;
-  rating: number;
-  hasSavedEdits: boolean;
-  preview: GridPhotoPreview;
 }>;
 
 type GridBatchResultViewModel = Readonly<{
@@ -1426,20 +1373,6 @@ ${RECOVERY_PANEL_TEMPLATE}
 
   let photoStatusSurface: object = {};
   let sourceModel: SourceListViewModel | undefined;
-  let gridKeyboardIndex: number | undefined;
-  let gridTotal = 0;
-  let thumbnailSize: GridThumbnailSize = DEFAULT_GRID_THUMBNAIL_SIZE;
-  // The Photo whose row a pending size change keeps as the first visible row;
-  // the render that applies the new pitch consumes it.
-  let pendingGridAnchor: number | undefined;
-  let renderedColumns = 0;
-  let renderedColumnStride = 0;
-  let renderedViewportHeight = 0;
-  let gridRenderFrame: number | undefined;
-  const renderedCells = new Map<number, GridCell>();
-  // The range the Grid last reported for admission. A render reports a
-  // changed range, or the same range again while part of it has no Photo.
-  let reportedGridRange: Readonly<{ start: number; end: number }> | undefined;
   let folderAlbumSelection = "";
   /// True while the empty-state action belongs to an explained destination
   /// state rather than to an empty source's Library check.
@@ -1454,16 +1387,6 @@ ${RECOVERY_PANEL_TEMPLATE}
   let gridMultiEnabled = false;
   let gridMultiResult: GridBatchResultViewModel | undefined;
   let gridMultiSelected: (index: number) => boolean = () => false;
-  /// The cell an explicit focus request names. `focusGridIndex` moves focus to
-  /// a cell on purpose — Review focuses the Photos it refreshed — so the next
-  /// render focuses it even when another control holds focus. A merged
-  /// re-render without such a request only reclaims focus the Grid owns.
-  let pendingGridCellFocus: number | undefined;
-  /// The Grid's Photo facts for the current render. Restoration asks this for
-  /// the stable identity of the top visible Photo, so the view never keeps
-  /// Photo facts of its own.
-  let gridPhotoLookup: (index: number) => GridPhotoViewModel | undefined = () =>
-    undefined;
   /// Presents the multi-selection the page model has just emptied, or one
   /// whose bound the page model reports. A hidden tray clears the markers too,
   /// so a cell never keeps a marker the tray no longer names, and a hidden Grid
@@ -1493,7 +1416,6 @@ ${RECOVERY_PANEL_TEMPLATE}
   let photoSurface: object = {};
   let currentPhotoId: string | undefined;
   let currentSelection: ViewSelectionState = "undecided";
-  let gridInteractionEnabled = false;
   let decisionInteractionEnabled = false;
   let ratingWheelHoldTimer: number | undefined;
   let pointer:
@@ -1542,22 +1464,25 @@ ${RECOVERY_PANEL_TEMPLATE}
     },
     openPhoto: (index) => send({ kind: "open-photo", index }),
   });
-  const gridCellPresenter = createGridCellPresenter({
-    compact: () => compactSources.matches,
-    rowPitch: () => rowPitch(),
-    interactionEnabled: () => gridInteractionEnabled,
-    multiSelected: (index) => gridMultiSelected(index),
+  const gridPresenter = createGridPresenter({
+    browser,
+    gridView,
+    viewport: gridViewport,
+    canvas: gridCanvas,
+    layer: gridLayer,
+    sizeSelect,
+    gridTools,
+    gridSelection,
+    gridBatch,
+    compact: compactSources,
+    isAlive: () => alive,
     multiMode: () => gridMultiMode,
-    send: (index, event) =>
-      send({
-        kind: "open-photo",
-        index,
-        ...(event.shiftKey ? { range: true } : {}),
-        ...(event.ctrlKey || event.metaKey ? { toggle: true } : {}),
-      }),
+    multiCount: () => gridMultiCount,
+    multiSelected: (index) => gridMultiSelected(index),
+    renderBatch: () => renderBatch(),
+    send,
     bindThumbnail,
     releaseThumbnail,
-    target: gridThumbnailTarget,
   });
   /// Opens the explicit Rating choices. Only this surface or the Rating entry
   /// owns explicit Rating interaction at one time; the Rating Wheel stays the
@@ -1571,49 +1496,8 @@ ${RECOVERY_PANEL_TEMPLATE}
     if (!alive) return;
     ratingControls.closeChoices(restoreFocus);
   };
-  const cellBox = () => GRID_THUMBNAIL_SIZE_STEPS[thumbnailSize];
-  /// The column and row pitch of the virtualized layout: one cell box plus
-  /// the ordinary inter-cell gap. Every geometry calculation derives from
-  /// these, so the CSS cell box and the layout can never disagree.
-  const columnPitch = () => cellBox().width + GRID_CELL_GAP_X;
-  const rowPitch = () => cellBox().height + GRID_CELL_GAP_Y;
-  const applyGridThumbnailSize = () => {
-    const box = cellBox();
-    browser.style.setProperty("--grid-cell-width", `${box.width}px`);
-    browser.style.setProperty("--grid-cell-height", `${box.height}px`);
-  };
-  for (const [size, step] of Object.entries(GRID_THUMBNAIL_SIZE_STEPS)) {
-    const option = document.createElement("option");
-    option.value = size;
-    option.textContent = step.label;
-    sizeSelect.append(option);
-  }
-  sizeSelect.value = thumbnailSize;
-  applyGridThumbnailSize();
-  /// Re-lays out the Grid at another thumbnail size. The size is presentation
-  /// state of the open Grid: it changes cell geometry only, keeps the row the
-  /// Photographer was looking at as the first visible row, and reports the
-  /// new range through the merged render, so window admission follows exactly
-  /// as it does for scrolling.
-  const setGridThumbnailSize = (size: GridThumbnailSize) => {
-    if (!alive || size === thumbnailSize) return;
-    // The anchor is applied by the render that lays the Grid out at the new
-    // pitch: scrolling before that render would clamp against the previous
-    // canvas height.
-    pendingGridAnchor = firstVisibleGridIndex(columns());
-    thumbnailSize = size;
-    applyGridThumbnailSize();
-    scheduleGridRender();
-  };
-  const columns = () =>
-    Math.max(
-      1,
-      Math.floor(Math.max(320, gridViewport.clientWidth) / columnPitch()),
-    );
-  const columnStride = (count = columns()) =>
-    compactSources.matches ? gridViewport.clientWidth / count : columnPitch();
-  const effectiveViewportHeight = () =>
-    Math.max(360, Math.min(gridViewport.clientHeight, window.innerHeight));
+  const setGridThumbnailSize = (size: "small" | "medium" | "large") =>
+    gridPresenter.setSize(size);
 
   const cancelRatingHold = () => {
     if (ratingWheelHoldTimer !== undefined) {
@@ -2051,68 +1935,11 @@ ${RECOVERY_PANEL_TEMPLATE}
     }
   };
 
-  const scheduleGridRender = () => {
-    if (!alive || gridRenderFrame !== undefined) return;
-    gridRenderFrame = requestAnimationFrame(() => {
-      gridRenderFrame = undefined;
-      send({ kind: "grid-render" });
-    });
-  };
-  const cancelGridRender = () => {
-    if (gridRenderFrame === undefined) return;
-    cancelAnimationFrame(gridRenderFrame);
-    gridRenderFrame = undefined;
-  };
-  /// Drops every rendered cell so the next render builds the range from
-  /// scratch. The Grid DOM is cleared here when it is rebuilt from nothing:
-  /// while a source is replaced, and when Photo View hands the surface back
-  /// without the Grid images it detached.
-  const clearGridCells = () => {
-    for (const rendered of renderedCells.values())
-      gridCellPresenter.release(rendered);
-    renderedCells.clear();
-    reportedGridRange = undefined;
-    gridLayer.replaceChildren();
-  };
-  /// Builds the retained cells whose image the owner detached at a Grid
-  /// boundary again, in place. Only an image that had not finished loading
-  /// loses its source there, and binding the cell anew uses the URL the owner
-  /// still holds, so the thumbnails come back without a new request and
-  /// without a render: the range, its other cells, and the reported status
-  /// stay exactly as the boundary found them.
-  const rebindDetachedGridCells = (
-    model: Readonly<{
-      total: number;
-      photoAt(index: number): GridPhotoViewModel | undefined;
-    }>,
-  ) => {
-    if (!alive || gridView.hidden) return;
-    const count = columns();
-    const stride = columnStride(count);
-    for (const [index, rendered] of [...renderedCells]) {
-      const image = rendered.cell.querySelector<HTMLImageElement>("img");
-      if (!rendered.thumbnail || !image || image.getAttribute("src")) continue;
-      const position = rendered.cell.nextSibling;
-      gridCellPresenter.release(rendered);
-      rendered.cell.remove();
-      const rebuilt = gridCellPresenter.build(
-        index,
-        model.photoAt(index),
-        model.total,
-        count,
-        stride,
-      );
-      gridLayer.insertBefore(rebuilt.cell, position);
-      renderedCells.set(index, rebuilt);
-    }
-  };
-  /// Applies the multi-selection to every rendered cell in place. Rebuilding a
-  /// cell would restart its Thumbnail transfer, so the marker is patched onto
-  /// the cell that already presents the Photo.
-  const applyGridMultiSelection = () => {
-    for (const [index, rendered] of renderedCells)
-      gridCellPresenter.applyMulti(rendered.cell, index);
-  };
+  const scheduleGridRender = gridPresenter.schedule;
+  const cancelGridRender = gridPresenter.cancel;
+  const clearGridCells = gridPresenter.clear;
+  const rebindDetachedGridCells = gridPresenter.rebindDetached;
+  const applyGridMultiSelection = gridPresenter.applyMulti;
   const renderBatch = () => {
     if (!alive) return;
     const count = gridMultiCount;
@@ -2226,246 +2053,14 @@ ${RECOVERY_PANEL_TEMPLATE}
         control.focus();
     }
   };
-  /// True while the Grid owns keyboard focus, so Grid keys never act while
-  /// another surface (the Sources surface, the Album form, the Photo View) has
-  /// it.
-  const gridHoldsKeyboard = (): boolean => {
-    const active = document.activeElement;
-    return Boolean(active && gridViewport.contains(active));
-  };
-  const firstVisibleGridIndex = (count: number): number => {
-    if (gridTotal === 0) return 0;
-    const first = Math.floor(gridViewport.scrollTop / rowPitch()) * count;
-    return Math.max(0, Math.min(gridTotal - 1, first));
-  };
-  /// The Photo a Grid key addresses: the cell the keyboard owns while the
-  /// viewport still shows its row, or the first visible Photo after the
-  /// keyboard enters the Grid or a pointer scroll moved away from that row.
-  const gridKeyboardTarget = (count: number): number | undefined => {
-    if (gridTotal === 0) return undefined;
-    const first = firstVisibleGridIndex(count);
-    const index = gridKeyboardIndex;
-    if (index === undefined || index >= gridTotal) return first;
-    const firstRow = Math.floor(gridViewport.scrollTop / rowPitch());
-    const rows = Math.ceil(effectiveViewportHeight() / rowPitch());
-    const row = Math.floor(index / count);
-    return row >= firstRow && row < firstRow + rows ? index : first;
-  };
-  /// Moves the Grid keyboard to one cell. Scrolling reports the new range
-  /// through the merged render, so keyboard movement loads the same bounded
-  /// windows as scrolling.
-  const focusGridCell = (index: number, count: number) => {
-    gridKeyboardIndex = index;
-    const row = Math.floor(index / count) * rowPitch();
-    if (gridViewport.scrollTop !== row) gridViewport.scrollTop = row;
-    scheduleGridRender();
-  };
-  /// Keeps the Grid keyboard's cell focused across merged re-renders and
-  /// window replacement, and keeps exactly one Grid cell in the Tab order.
-  /// Focus is never taken from another surface that owns it.
-  const restoreGridKeyboardFocus = () => {
-    const index = gridKeyboardIndex;
-    for (const [position, rendered] of renderedCells)
-      rendered.cell.tabIndex = position === index ? 0 : -1;
-    const active = document.activeElement;
-    // An explicit focus request names the cell it wants. Otherwise only the
-    // Grid itself owns the keyboard position: focus on the body, on nothing,
-    // or inside the Grid viewport is reclaimable, while the header tools, the
-    // selection header, and the batch tray own their own focus, so a control
-    // the Photographer is using there is never pulled back into a cell while a
-    // batch settles.
-    const requested = pendingGridCellFocus !== undefined;
-    pendingGridCellFocus = undefined;
-    const owns =
-      requested ||
-      active === null ||
-      active === document.body ||
-      (gridViewport.contains(active) &&
-        !gridTools.contains(active) &&
-        !gridSelection.contains(active) &&
-        !gridBatch.contains(active));
-    if (!owns || index === undefined) return;
-    const cell = gridLayer.querySelector<HTMLButtonElement>(
-      `[data-photo-index="${index}"]`,
-    );
-    if (cell && !cell.disabled) {
-      // preventScroll keeps a focus move from scrolling the Grid the restore
-      // has just positioned, so the restored geometry survives it.
-      if (active !== cell) cell.focus({ preventScroll: true });
-      return;
-    }
-    // The bounded window that contains the cell is still loading. The Grid
-    // keeps focus and returns it to the cell once the window renders.
-    if (active !== gridViewport) gridViewport.focus();
-  };
-  /// Applies one Grid View key to the focused cell. Arrow keys move the cell
-  /// focus, and the decision and Rating keys address the focused Photo
-  /// through the page model exactly like the Photo View shortcuts.
-  const applyGridKey = (event: KeyboardEvent): void => {
-    if (event.key === "Escape" && (gridMultiCount > 0 || gridMultiMode)) {
-      // Escape takes the same exit as the tray's Done control: the
-      // multi-selection empties and Select mode ends.
-      event.preventDefault();
-      send({ kind: "grid-multi-clear" });
-      return;
-    }
-    const count = columns();
-    const step =
-      event.key === "ArrowRight"
-        ? 1
-        : event.key === "ArrowLeft"
-          ? -1
-          : event.key === "ArrowDown"
-            ? count
-            : event.key === "ArrowUp"
-              ? -count
-              : 0;
-    if (step !== 0) {
-      // The Grid owns arrow movement even at its edges, so a boundary key
-      // never scrolls the viewport by its native amount.
-      event.preventDefault();
-      const current = gridKeyboardTarget(count);
-      if (current === undefined) return;
-      // The first arrow enters the Grid at its first visible Photo instead of
-      // stepping past it.
-      const next = gridKeyboardIndex === current ? current + step : current;
-      if (next < 0 || next >= gridTotal) return;
-      focusGridCell(next, count);
-      return;
-    }
-    const key = event.key.toLowerCase();
-    const field =
-      key === "p" || key === "x" || key === "u"
-        ? "selectionState"
-        : /^[0-5]$/.test(event.key)
-          ? "rating"
-          : undefined;
-    if (!field) return;
-    const index = gridKeyboardTarget(count);
-    if (index === undefined) return;
-    event.preventDefault();
-    // A decision key also moves the keyboard to its Photo, so the focused
-    // cell always shows where the decision or Rating applies.
-    if (gridKeyboardIndex !== index) focusGridCell(index, count);
-    send({
-      kind: "grid-photo-mutation",
-      index,
-      field,
-      value:
-        field === "rating"
-          ? Number(event.key)
-          : key === "p"
-            ? "selected"
-            : key === "x"
-              ? "rejected"
-              : "undecided",
-    });
-  };
   const renderGrid = (model: GridViewModel, position?: number) => {
-    // Photo View may keep the source Grid state alive while it owns the
-    // visible workflow. Do not let a retained hidden Grid admit window work;
-    // the visible Grid render after showGrid() owns that admission.
-    gridTotal = model.total;
     gridMultiMode = model.multi.mode;
     gridMultiCount = model.multi.count;
     gridMultiLimit = model.multi.limit;
     gridMultiEnabled = model.multi.enabled;
     gridMultiResult = model.multi.result;
     gridMultiSelected = model.multi.selected;
-    gridPhotoLookup = model.photoAt;
-    if (!alive || gridView.hidden) return;
-    renderBatch();
-    const count = columns();
-    const stride = columnStride(count);
-    const pitch = rowPitch();
-    const viewportHeight = effectiveViewportHeight();
-    renderedColumns = count;
-    renderedColumnStride = stride;
-    renderedViewportHeight = viewportHeight;
-    const height = `${Math.ceil(model.total / count) * pitch}px`;
-    gridCanvas.style.height = height;
-    gridLayer.style.height = height;
-    if (pendingGridAnchor !== undefined) {
-      // A size change scrolls the Photo it anchors on into the first row once
-      // the new canvas height can hold it.
-      gridViewport.scrollTop = Math.floor(pendingGridAnchor / count) * pitch;
-      pendingGridAnchor = undefined;
-    }
-    if (position !== undefined)
-      gridViewport.scrollTop = Math.floor(position / count) * pitch;
-    const firstRow = Math.max(
-      0,
-      Math.floor(gridViewport.scrollTop / pitch) - 2,
-    );
-    const visibleRows = Math.ceil(viewportHeight / pitch) + 4;
-    const start = firstRow * count;
-    const end = Math.min(model.total, start + visibleRows * count);
-    // Rendering is presentational: a cell that stays in the range and still
-    // presents the same Photo facts keeps its button and its thumbnail image,
-    // so a merged update never restarts a Thumbnail transfer. Only entering,
-    // leaving, or changed cells touch the DOM.
-    for (const [index, rendered] of renderedCells)
-      if (index < start || index >= end) {
-        rendered.cell.remove();
-        gridCellPresenter.release(rendered);
-        renderedCells.delete(index);
-      }
-    let anchor: ChildNode | null = null;
-    let incomplete = false;
-    for (let index = end - 1; index >= start; index -= 1) {
-      const photo = model.photoAt(index);
-      const existing = renderedCells.get(index);
-      const signature = gridCellPresenter.signature(
-        index,
-        photo,
-        existing?.deliveryFailed ?? false,
-      );
-      if (!photo) incomplete = true;
-      let rendered: GridCell;
-      if (existing && existing.signature === signature) {
-        rendered = existing;
-        gridCellPresenter.position(rendered.cell, index, count, stride);
-      } else {
-        // A rebuilt cell replaces its old node, so a stale placeholder or a
-        // changed rendering never stays in the layer.
-        if (existing) {
-          gridCellPresenter.release(existing);
-          existing.cell.remove();
-        }
-        rendered = gridCellPresenter.build(
-          index,
-          photo,
-          model.total,
-          count,
-          stride,
-        );
-        renderedCells.set(index, rendered);
-      }
-      // Walking down keeps rendered cells in source order with the fewest
-      // moves: a cell already positioned before the next rendered index is
-      // left untouched.
-      if (
-        rendered.cell.parentNode !== gridLayer ||
-        rendered.cell.nextSibling !== anchor
-      )
-        gridLayer.insertBefore(rendered.cell, anchor);
-      anchor = rendered.cell;
-    }
-    restoreGridKeyboardFocus();
-    applyGridMultiSelection();
-    // Report the presented range whenever it changes, and keep reporting it
-    // while part of it still has no Photo: the owner recomputes the windows
-    // it is missing for that range, coalesces them with any request already in
-    // flight, and retries a window that failed while the Grid presents it.
-    if (
-      end > start &&
-      (incomplete ||
-        reportedGridRange?.start !== start ||
-        reportedGridRange.end !== end)
-    ) {
-      reportedGridRange = { start, end };
-      send({ kind: "grid-range", start, end });
-    }
+    gridPresenter.render(model, position);
   };
 
   const renderPhotoFacts = (model: PhotoFactsViewModel) => {
@@ -2794,8 +2389,7 @@ ${RECOVERY_PANEL_TEMPLATE}
         return;
       }
       // Grid View keys act only while the Grid owns keyboard focus.
-      if (!modifier && !event.shiftKey && gridHoldsKeyboard())
-        applyGridKey(event);
+      if (!modifier && !event.shiftKey) gridPresenter.handleKey(event);
       return;
     }
     if (modifier) return;
@@ -2859,25 +2453,6 @@ ${RECOVERY_PANEL_TEMPLATE}
       });
   };
 
-  const onResize = () => {
-    requestAnimationFrame(() => {
-      if (!alive || gridView.hidden) return;
-      if (
-        columns() === renderedColumns &&
-        columnStride() === renderedColumnStride &&
-        effectiveViewportHeight() === renderedViewportHeight
-      )
-        return;
-      send({ kind: "grid-resize" });
-    });
-  };
-  const onScroll = () => {
-    if (!alive || gridView.hidden) return;
-    // Scrolling reports the visible range through the merged render; it never
-    // starts per-cell work.
-    scheduleGridRender();
-  };
-
   const renderFolderAlbum = (model: FolderAlbumViewModel) => {
     if (!alive) return;
     folderAlbumControls.hidden = !model.visible;
@@ -2917,8 +2492,6 @@ ${RECOVERY_PANEL_TEMPLATE}
     send({ kind: "filmstrip-resize" });
   };
   shortViewport.addEventListener("change", onShortViewportChange);
-  gridViewport.addEventListener("scroll", onScroll);
-  window.addEventListener("resize", onResize);
   window.addEventListener("keydown", keydown);
   const stageObserver = new ResizeObserver(() => {
     if (!alive) return;
@@ -3134,22 +2707,7 @@ ${RECOVERY_PANEL_TEMPLATE}
       // position on the viewport instead of losing it to the page while a
       // write settles or a source changes readiness, and takes the cell back
       // when the Grid becomes interactive again.
-      const focused = document.activeElement;
-      const heldCell = Boolean(
-        focused instanceof HTMLElement &&
-          gridLayer.contains(focused) &&
-          focused.matches("[data-photo-index]"),
-      );
-      const becameInteractive = !gridInteractionEnabled && model.gridEnabled;
-      gridInteractionEnabled = model.gridEnabled;
-      for (const cell of Array.from(
-        gridLayer.querySelectorAll<HTMLButtonElement>(
-          ".photo-cell[data-photo-index]",
-        ),
-      ))
-        cell.disabled = !gridInteractionEnabled;
-      if (heldCell && !gridInteractionEnabled) gridViewport.focus();
-      else if (becameInteractive) restoreGridKeyboardFocus();
+      gridPresenter.setInteractive(model.gridEnabled);
       decisionInteractionEnabled = model.decisionEnabled;
       if (
         !model.decisionEnabled &&
@@ -3204,7 +2762,7 @@ ${RECOVERY_PANEL_TEMPLATE}
       gridEmptyExplanation = false;
       currentPhotoId = undefined;
       photoSurface = {};
-      gridKeyboardIndex = undefined;
+      gridPresenter.resetKeyboard();
       // A new source starts with no multi-selection: the tray presents nothing
       // until the page model marks Photos again.
       resetGridMultiSelection();
@@ -3217,62 +2775,13 @@ ${RECOVERY_PANEL_TEMPLATE}
     resetGridMultiSelection,
     gridVisible: () => alive && !gridView.hidden,
     scrollToGridIndex(index) {
-      if (alive)
-        gridViewport.scrollTop = Math.floor(index / columns()) * rowPitch();
+      gridPresenter.scrollTo(index);
     },
     captureGridRestoration() {
-      if (!alive || gridView.hidden || gridTotal === 0) return undefined;
-      const count = columns();
-      const index = firstVisibleGridIndex(count);
-      const photo = gridPhotoLookup(index);
-      if (!photo) return undefined;
-      const offset = gridViewport.scrollTop % rowPitch();
-      const active = document.activeElement;
-      const holdsKeyboard =
-        active === gridViewport ||
-        (active instanceof HTMLElement && gridLayer.contains(active));
-      // The cell the keyboard owns, or the cell a pointer activation focused.
-      const activeCellIndex =
-        active instanceof HTMLElement && active.dataset.photoIndex !== undefined
-          ? Number(active.dataset.photoIndex)
-          : gridKeyboardIndex;
-      const focusedId =
-        activeCellIndex !== undefined &&
-        Number.isInteger(activeCellIndex) &&
-        activeCellIndex >= 0 &&
-        activeCellIndex < gridTotal
-          ? gridPhotoLookup(activeCellIndex)?.id
-          : undefined;
-      return {
-        anchor: { photoId: photo.id, indexHint: index, offset },
-        focus:
-          holdsKeyboard && focusedId
-            ? { kind: "photo", photoId: focusedId }
-            : { kind: "grid" },
-      };
+      return gridPresenter.captureRestoration();
     },
     restoreGridAnchor(model) {
-      if (!alive || gridView.hidden) return;
-      // The Grid itself owns focus when the restoration names no cell, and a
-      // cell that no longer exists leaves the Grid focused. The establishment
-      // path (a reload or a direct entry) has no activation that moved focus
-      // into the Grid, so the viewport takes it here rather than leaving the
-      // document body focused. preventScroll keeps the restored geometry.
-      gridKeyboardIndex =
-        model.focusIndex === undefined
-          ? undefined
-          : Math.max(0, Math.min(gridTotal - 1, model.focusIndex));
-      if (
-        gridKeyboardIndex === undefined &&
-        !gridLayer.contains(document.activeElement)
-      )
-        gridViewport.focus({ preventScroll: true });
-      if (gridTotal === 0) return;
-      const count = columns();
-      const target = Math.max(0, Math.min(gridTotal - 1, model.index));
-      gridViewport.scrollTop =
-        Math.floor(target / count) * rowPitch() + model.offset;
-      scheduleGridRender();
+      gridPresenter.restoreAnchor(model);
     },
     closeTransientSurfaces() {
       if (!alive) return;
@@ -3291,15 +2800,7 @@ ${RECOVERY_PANEL_TEMPLATE}
       surfaces.closeAll();
     },
     focusGridIndex(index) {
-      if (!alive) return;
-      const count = columns();
-      const target = Math.max(0, Math.min(Math.max(gridTotal - 1, 0), index));
-      gridKeyboardIndex = target;
-      // This is a deliberate focus move, so it survives a control that holds
-      // focus now, such as the tray's Review action.
-      pendingGridCellFocus = target;
-      gridViewport.scrollTop = Math.floor(target / count) * rowPitch();
-      scheduleGridRender();
+      gridPresenter.focusIndex(index);
     },
     showGrid(index) {
       if (!alive) return;
@@ -3319,10 +2820,7 @@ ${RECOVERY_PANEL_TEMPLATE}
       gridViewport.focus();
       // Returning from Photo View returns the Grid keyboard to that Photo
       // cell; the merged render focuses it once it is rendered.
-      gridKeyboardIndex = index;
-      if (index !== undefined)
-        gridViewport.scrollTop = Math.floor(index / columns()) * rowPitch();
-      scheduleGridRender();
+      gridPresenter.returnFromPhoto(index);
     },
     enterPhoto() {
       if (!alive) return;
@@ -3471,15 +2969,13 @@ ${RECOVERY_PANEL_TEMPLATE}
       zoomController?.dispose();
       preview.removeEventListener("contextmenu", onPreviewContextMenu);
       sourceController.dispose();
-      cancelGridRender();
+      gridPresenter.dispose();
       compactSources.removeEventListener("change", onSourceViewportChange);
       mobileActionHierarchy.removeEventListener(
         "change",
         onSourceViewportChange,
       );
       shortViewport.removeEventListener("change", onShortViewportChange);
-      gridViewport.removeEventListener("scroll", onScroll);
-      window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", keydown);
       surfaces.dispose();
     },
