@@ -284,6 +284,24 @@ the rebuildable cache and add derivative work for no visible gain. The Preview
 scheduling priority
 in [Scalable Library Browsing](library-browsing.md) is unchanged.
 
+### Destination and restoration policy
+
+One page-local model module answers how a browser address relates to the live
+source. It owns no state and issues no HTTP: it reads the open source's shape,
+the open Snapshot's readiness, and the File Location binding through narrow
+queries, and the page controller remains the only coordinator that commits
+what it answers.
+
+It decides the destination the open Snapshot presents, the wire order an
+address requests (an omitted order and an Album's own order both leave the
+order to the server), whether the open Snapshot can serve a traversal without
+reopening the source, and the display name of a Folder Location whose parent
+window may not be loaded. A captured Grid restoration resolves through the
+same module: the anchor's stable Photo identity is confirmed before its index
+hint is trusted, an anchor the Snapshot no longer holds clamps to the captured
+position and restores geometry without naming a focused cell, and a retryable
+lookup keeps the resolved position instead of presenting the Photo as gone.
+
 ### Styling
 
 Global tokens, reset rules, and the application mount surface belong to `app`.

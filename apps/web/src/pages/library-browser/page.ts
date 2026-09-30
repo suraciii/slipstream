@@ -63,6 +63,14 @@ import {
   type NavigationTraversal,
 } from "./model/browser-navigation.js";
 import {
+  destinationOrder,
+  folderNameFor,
+  liveDestination,
+  resolveRestorationIndex,
+  restorationGeometry,
+  reusableForTraversal,
+} from "./model/destination-policy.js";
+import {
   createLibraryBrowserView,
   type AlbumFormReference,
   type FolderViewModel,
@@ -444,7 +452,7 @@ function mountPrivateLibraryBrowser(
         // Folder silently instead of requiring the explicit confirmation.
         if (established && sourceGrid.kind === "folder" && sourceGrid.token)
           navigation.replaceGrid(
-            liveDestination(),
+            liveDestination(sourceGrid),
             undefined,
             fileLocations.publication,
           );
@@ -1612,7 +1620,12 @@ function mountPrivateLibraryBrowser(
       // row that is loaded.
       const restoration = establishment.restoration;
       const restoreIndex = restoration
-        ? await resolveRestorationIndex(authority, gridPosition, restoration)
+        ? await resolveRestorationIndex(
+            sourceGrid,
+            authority,
+            gridPosition,
+            restoration,
+          )
         : gridPosition;
       if (restoreIndex === undefined) return SOURCE_SUPERSEDED;
       const windowReady = await loadWindow(
@@ -1634,7 +1647,9 @@ function mountPrivateLibraryBrowser(
       // scroll height, so a clamped scroll cannot survive it.
       renderGrid(restoreIndex);
       if (restoration)
-        view.restoreGridAnchor(restorationGeometry(restoreIndex, restoration));
+        view.restoreGridAnchor(
+          restorationGeometry(sourceGrid, restoreIndex, restoration),
+        );
       if (sourceGrid.total) {
         presentRangeStatus();
         // An explained fallback names the confirmed invalid or missing target
@@ -1653,10 +1668,13 @@ function mountPrivateLibraryBrowser(
       // The committed destination is recorded once, so the navigation owner's
       // current entry always names the source the page presents.
       if (establishment.address === "push")
-        navigation.openGrid(liveDestination(), fileLocations.publication);
+        navigation.openGrid(
+          liveDestination(sourceGrid),
+          fileLocations.publication,
+        );
       else if (establishment.address === "replace")
         navigation.replaceGrid(
-          liveDestination(),
+          liveDestination(sourceGrid),
           undefined,
           fileLocations.publication,
         );
@@ -3480,116 +3498,6 @@ function mountPrivateLibraryBrowser(
     updateControls();
   };
 
-  /// The destination the live Snapshot presents, derived from the committed
-  /// source, order, and filter. An address is never derived from a retained
-  /// projection of Photo facts.
-  const liveDestination = (photoId?: string): NavigationDestination => {
-    const source = sourceGrid.source;
-    const order =
-      sourceGrid.order === "source-default" ? undefined : sourceGrid.order;
-    return {
-      source: source.kind,
-      ...(source.kind === "folder"
-        ? { folderPath: source.folder.location }
-        : {}),
-      ...(source.kind === "album" ? { albumId: source.album.id } : {}),
-      ...(photoId ? { photoId } : {}),
-      ...(order ? { order } : {}),
-      selection: sourceGrid.selection,
-    };
-  };
-
-  /// The wire order one address requests. An omitted order and the Album's own
-  /// order both leave the order to the server.
-  const destinationOrder = (
-    destination: NavigationDestination,
-  ): SourceViewOrder =>
-    destination.order === undefined || destination.order === "album-order"
-      ? "source-default"
-      : destination.order;
-
-  /// The display name of a Folder Location. The File Location tree names the
-  /// Folders it has loaded; a Location outside a loaded window falls back to
-  /// its last component, and the server answers authoritatively.
-  const folderNameFor = (location: string): string => {
-    if (location === "") return "Library Folder";
-    const separator = location.lastIndexOf("/");
-    const parent = separator === -1 ? "" : location.slice(0, separator);
-    const known = fileLocations
-      .window(parent)
-      ?.children.find((child) => child.location === location);
-    return known?.name ?? location.slice(separator + 1);
-  };
-
-  /// True when the live Snapshot can serve a destination without reopening the
-  /// source: the same source, order, and filter, and a Folder whose
-  /// publication still matches the entry's provenance.
-  const reusableForTraversal = (
-    destination: NavigationDestination,
-    folderPublication?: string,
-  ): boolean => {
-    if (!sourceGrid.token || !sourceGrid.isReady(sourceGrid.authority))
-      return false;
-    if (!sameSourceView(liveDestination(), destination)) return false;
-    return !(
-      destination.source === "folder" &&
-      folderPublication !== undefined &&
-      folderPublication !== fileLocations.publication
-    );
-  };
-
-  /// Resolves one captured Grid anchor against the established Snapshot. The
-  /// stable identity is confirmed before the index hint is trusted; an absent
-  /// anchor clamps the prior index hint to the current source. Undefined means
-  /// a newer destination superseded this one.
-  const resolveRestorationIndex = async (
-    authority: SourceAuthority,
-    fallbackIndex: number,
-    restoration: NavigationGridRestoration,
-  ): Promise<number | undefined> => {
-    if (!sourceGrid.isCurrent(authority)) return undefined;
-    const anchor = restoration.anchor;
-    const retained = sourceGrid.findPhotoIndex(anchor.photoId);
-    if (
-      retained !== undefined &&
-      sourceGrid.photoAt(retained)?.id === anchor.photoId
-    )
-      return retained;
-    const resolved = await sourceGrid.resolvePhotoPosition(
-      authority,
-      anchor.photoId,
-    );
-    if (!sourceGrid.isCurrent(authority)) return undefined;
-    if (resolved.kind === "resolved") return resolved.position;
-    if (resolved.kind === "missing")
-      return Math.min(anchor.indexHint, Math.max(0, sourceGrid.total - 1));
-    // A failed lookup is retryable, not evidence that the Photo disappeared,
-    // so the bounded position the open already resolved stays usable.
-    return fallbackIndex;
-  };
-
-  /// The geometry one restoration applies at a resolved index: the anchor's
-  /// row and offset, and the cell the focus target names when the Snapshot
-  /// still holds that Photo identity. An anchor the Snapshot no longer holds
-  /// falls back to the clamped position, which restores geometry but leaves
-  /// the Grid itself as the focus target.
-  const restorationGeometry = (
-    index: number,
-    restoration: NavigationGridRestoration,
-  ): Readonly<{ index: number; offset: number; focusIndex?: number }> => {
-    const anchorHeld =
-      sourceGrid.photoAt(index)?.id === restoration.anchor.photoId;
-    const focusIndex =
-      anchorHeld && restoration.focus.kind === "photo"
-        ? sourceGrid.findPhotoIndex(restoration.focus.photoId)
-        : undefined;
-    return {
-      index,
-      offset: restoration.anchor.offset,
-      ...(focusIndex !== undefined ? { focusIndex } : {}),
-    };
-  };
-
   /// An explained fallback: the confirmed invalid or missing target is named,
   /// the current entry is replaced once with All Photos, and no request is
   /// made for the invalid source.
@@ -3739,7 +3647,12 @@ function mountPrivateLibraryBrowser(
     const gridPosition = sourceGrid.readGridPosition(authority);
     if (gridPosition === undefined) return false;
     const restoreIndex = restoration
-      ? await resolveRestorationIndex(authority, gridPosition, restoration)
+      ? await resolveRestorationIndex(
+          sourceGrid,
+          authority,
+          gridPosition,
+          restoration,
+        )
       : gridPosition;
     if (restoreIndex === undefined) return false;
     leavePhotoView();
@@ -3758,7 +3671,9 @@ function mountPrivateLibraryBrowser(
     }
     renderGrid(restoreIndex);
     if (restoration)
-      view.restoreGridAnchor(restorationGeometry(restoreIndex, restoration));
+      view.restoreGridAnchor(
+        restorationGeometry(sourceGrid, restoreIndex, restoration),
+      );
     presentRangeStatus();
     // An explained fallback names the confirmed missing target after the
     // ordinary status has been presented.
@@ -3787,7 +3702,12 @@ function mountPrivateLibraryBrowser(
     const photoId = destination.photoId;
     if (
       !options.reopen &&
-      reusableForTraversal(destination, options.folderPublication)
+      reusableForTraversal(
+        sourceGrid,
+        fileLocations.publication,
+        destination,
+        options.folderPublication,
+      )
     ) {
       if (photoId)
         return Boolean(await openTraversedPhoto(destination, photoId));
@@ -3846,7 +3766,7 @@ function mountPrivateLibraryBrowser(
       kind: "folder",
       folder: {
         location: destination.folderPath ?? "",
-        name: folderNameFor(destination.folderPath ?? ""),
+        name: folderNameFor(fileLocations, destination.folderPath ?? ""),
       },
       preferredPhotoId: photoId,
       order: destinationOrder(destination),
@@ -3907,7 +3827,7 @@ function mountPrivateLibraryBrowser(
     mode: "push" | "replace" | "none",
   ): void => {
     if (mode === "none") return;
-    const destination = liveDestination(photoId);
+    const destination = liveDestination(sourceGrid, photoId);
     if (mode === "replace") {
       navigation.replacePhoto(destination);
       return;
@@ -3961,7 +3881,9 @@ function mountPrivateLibraryBrowser(
   /// Photo replaces its entry with its source Grid instead of risking
   /// navigation to another site.
   const returnToSourceGrid = () => {
-    if (navigation.returnToSourceGrid(liveDestination()) === "traversed")
+    if (
+      navigation.returnToSourceGrid(liveDestination(sourceGrid)) === "traversed"
+    )
       return;
     showGrid();
   };
