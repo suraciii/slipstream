@@ -25,6 +25,7 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 ## Photo Development
 
 - [Photo Development](photo-development.md): RAW correction, autosave, fixed film simulation, stage previews, exports, shared client behavior, and recovery
+- [darktable Integration](darktable-integration.md): engine relationship, admitted controls, saved intent, matching outputs, and upgrade failures
 
 ## Support and Release
 

@@ -229,7 +229,15 @@ SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES=<finite Development TIFF allowance> \
 bun x playwright test --grep real-processing --workers=1
 ```
 
-It carries the sample through one Photo Edit Recipe in the real browser: a committed exposure is autosaved, the reopened Photo presents the saved recipe, a second client conflict is recovered with `Use saved recipe`, the baseline comparison presents its own rendition, and a submitted Development TIFF settles and downloads. It checks the sample, its isolated Library copy, and the exercised same-basename external XMP sidecar for unchanged digests and metadata. Budget the launcher's own render time: one full-resolution development of the sample takes about a minute.
+It carries the sample through one Photo Edit Recipe in the real browser:
+an exposure intent is committed and autosaved, a `development-tiff` Export is
+settled and downloaded before Preview, the Photo is reopened to verify the
+saved intent, and the baseline comparison presents its own rendition. A
+second client conflict is recovered with `Use saved recipe`. It checks the
+sample, its isolated Library copy, and the exercised same-basename external
+XMP sidecar for unchanged digests and metadata. Budget the launcher's own
+render time: one full-resolution development of the sample takes about a
+minute.
 
 The opt-in [development qualification harness](tools/development/README.md)
 exercises pinned darktable and Spektrafilm processes in an isolated CPU container.
@@ -250,6 +258,11 @@ Rust checks include it. Its opt-in kernel verifier requires root and explicit
 local worker/Web image IDs. It uses only a private synthetic Library and is not
 part of the daemon-free `verify` gate. Passing fixture qualification does not
 enable photo editing or qualify an image engine's memory envelope.
+
+For native Photo worker changes, run the native checkout's focused CTest suite,
+build the pinned worker image, and qualify it against an independent RAW reference
+using the complete commands in [the processing build guide](tools/processing/README.md#build).
+Record the reference's exact identity. The qualifier is not a production fallback.
 
 The closed [Film measurement profile](design/processing-film-measurement.md)
 runs the pinned image engine inside that boundary against explicit operator
