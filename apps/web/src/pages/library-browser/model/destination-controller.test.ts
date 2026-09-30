@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { RecoveryGate } from "./async-ownership.js";
-import { createDestinationController } from "./destination-controller.js";
+import {
+  createDestinationController,
+  type SourceReestablishment,
+} from "./destination-controller.js";
 import { createNavigationSession } from "./navigation-session.js";
 import { createSourceGridOwner } from "./source-grid-owner.js";
 import type { NavigationDestination } from "./browser-navigation.js";
@@ -17,7 +20,7 @@ const destination = (photoId: string): NavigationDestination => ({
   photoId,
 });
 
-async function fixture() {
+async function fixture(reopenFailure?: "failed" | "missing" | "superseded") {
   const requests = new Map<string, Deferred<Response>>();
   const requestStarted = new Map<string, Deferred<void>>();
   const source = createSourceGridOwner(
@@ -66,15 +69,20 @@ async function fixture() {
     },
     albums: () => [],
     canResume: () => true,
-    openSource: () => {
-      throw new Error("unexpected source open");
-    },
-    reopen: async () => {
-      reopenStarted.resolve();
-      await reopenContinue.promise;
+    openSource: async ({ kind }) => {
+      if (kind !== "library" || reopenFailure !== "missing")
+        throw new Error("unexpected source open");
       await source.open({ kind: "library" });
       source.establish(source.authority);
-      return source.authority;
+      return { kind: "established" } as const;
+    },
+    reopen: async (): Promise<SourceReestablishment> => {
+      reopenStarted.resolve();
+      await reopenContinue.promise;
+      if (reopenFailure) return { kind: reopenFailure };
+      await source.open({ kind: "library" });
+      source.establish(source.authority);
+      return { kind: "established", authority: source.authority };
     },
     openPhoto: (index) => {
       opened.push(index);
@@ -175,6 +183,48 @@ test("expired position resolves against the reopened authority without invalidat
     f.requests.get("photo-a")!.resolve(Response.json({ position: 11 }));
     expect(await pending.result).toBe(true);
     expect(f.opened).toEqual([11]);
+  } finally {
+    f.close();
+  }
+});
+
+test.each(["failed", "missing", "superseded"] as const)(
+  "expired lookup handles a %s reopen without opening an unrelated Photo",
+  async (kind) => {
+    const f = await fixture(kind);
+    try {
+      const pending = await f.start("photo-a");
+      f.requests.get("photo-a")!.resolve(new Response(null, { status: 404 }));
+      await f.reopenStarted.promise;
+      f.reopenContinue.resolve();
+      expect(await pending.result).toBe(kind === "missing");
+      expect(f.opened).toEqual([]);
+      expect(f.replacements).toEqual(
+        kind === "missing" ? [{ source: "library", selection: "all" }] : [],
+      );
+      expect(f.session.takeRetry()).toEqual(
+        kind === "failed" ? destination("photo-a") : undefined,
+      );
+    } finally {
+      f.close();
+    }
+  },
+);
+
+test("a newer destination suppresses a delayed expired-source failure", async () => {
+  const f = await fixture("failed");
+  try {
+    const old = await f.start("photo-a");
+    f.requests.get("photo-a")!.resolve(new Response(null, { status: 404 }));
+    await f.reopenStarted.promise;
+    const next = await f.start("photo-b");
+    f.requests.get("photo-b")!.resolve(Response.json({ position: 70 }));
+    expect(await next.result).toBe(true);
+    f.reopenContinue.resolve();
+    expect(await old.result).toBe(false);
+    expect(f.opened).toEqual([70]);
+    expect(f.replacements).toEqual([]);
+    expect(f.session.takeRetry()).toBeUndefined();
   } finally {
     f.close();
   }

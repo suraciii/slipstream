@@ -9,8 +9,8 @@ use sha2::{Digest, Sha256};
 use slipstream_processing::{
     photo::ICC_ASSET_SHA256,
     protocol::{
-        Outcome, PHOTO_WORKLOAD, PHOTO_WORKLOAD_FILM, PHOTO_WORKLOAD_PROXY_FILM, is_photo_workload,
-        now,
+        Outcome, PHOTO_WORKLOAD, PHOTO_WORKLOAD_FILM, PHOTO_WORKLOAD_PROXY_FILM, RESULT_BYTES,
+        is_photo_workload, now,
     },
 };
 use std::{
@@ -34,7 +34,6 @@ const FILM_ADAPTER: &str = "/opt/slipstream-photo/film_adapter.py";
 /// The maximum staged Development Proxy size copied into the private work
 /// directory. A larger input is refused before it can fill the attempt.
 const PROXY_SOURCE_BYTES_MAX: u64 = 2 * 1024 * 1024 * 1024;
-const RESULT_BYTES: usize = 4096;
 
 fn bad(message: &str) -> io::Error {
     io::Error::other(message)

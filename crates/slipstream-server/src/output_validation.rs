@@ -9,7 +9,7 @@ use std::{
     path::Path,
 };
 
-fn open_read_only(path: &Path) -> io::Result<fs::File> {
+pub(crate) fn open_read_only(path: &Path) -> io::Result<fs::File> {
     fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)

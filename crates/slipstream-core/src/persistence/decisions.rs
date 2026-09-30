@@ -15,7 +15,7 @@ use crate::{
     PhotoStateBatchMissing, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField,
     PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 pub(super) fn state_value(
     selection: &str,
@@ -31,6 +31,37 @@ pub(super) fn state_value(
             .map(PhotoStateValue::Rating)
             .map_err(|_| MutationError::Persistence),
     }
+}
+
+/// The one effective Selection State/Rating column write shared by the
+/// single-photo compare-and-set path, the bounded batch, and the checked
+/// decision batch. Guards, classification, ordering, and version advancement
+/// stay with their callers; this is only the column write inside an already
+/// open mutation transaction.
+fn set_photo_state(
+    transaction: &Transaction<'_>,
+    value: PhotoStateValue,
+    photo_id: &str,
+) -> Result<(), MutationError> {
+    match value {
+        PhotoStateValue::Selection(value) => {
+            transaction
+                .execute(
+                    "UPDATE photos SET selection_state=? WHERE id=?",
+                    params![selection_state_value(value), photo_id],
+                )
+                .map_err(mutation_error_from_sqlite)?;
+        }
+        PhotoStateValue::Rating(value) => {
+            transaction
+                .execute(
+                    "UPDATE photos SET rating=? WHERE id=?",
+                    params![i64::from(value), photo_id],
+                )
+                .map_err(mutation_error_from_sqlite)?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn mutate_photo_state(
@@ -67,24 +98,7 @@ pub(super) fn mutate_photo_state(
                 .map_err(mutation_error_from_sqlite)?
                 .ok_or(MutationError::NotFound)?;
         }
-        match mutation.value {
-            PhotoStateValue::Selection(value) => {
-                transaction
-                    .execute(
-                        "UPDATE photos SET selection_state=? WHERE id=?",
-                        params![selection_state_value(value), mutation.photo_id],
-                    )
-                    .map_err(mutation_error_from_sqlite)?;
-            }
-            PhotoStateValue::Rating(value) => {
-                transaction
-                    .execute(
-                        "UPDATE photos SET rating=? WHERE id=?",
-                        params![i64::from(value), mutation.photo_id],
-                    )
-                    .map_err(mutation_error_from_sqlite)?;
-            }
-        }
+        set_photo_state(transaction, mutation.value, &mutation.photo_id)?;
         if let Some(album_id) = mutation.album_id.as_deref() {
             transaction
                 .execute(
@@ -143,12 +157,11 @@ pub(super) fn mutate_photo_state_batch(
                 });
                 continue;
             }
-            transaction
-                .execute(
-                    "UPDATE photos SET selection_state=? WHERE id=?",
-                    params![selection_state_value(mutation.value), &item.photo_id],
-                )
-                .map_err(mutation_error_from_sqlite)?;
+            set_photo_state(
+                transaction,
+                PhotoStateValue::Selection(mutation.value),
+                &item.photo_id,
+            )?;
             applied.push(PhotoStateBatchApplied {
                 photo_id: item.photo_id.clone(),
                 prior_value,
@@ -250,24 +263,7 @@ pub(super) fn mutate_photo_decision_checked(
     }
     mutation_transaction(state, database_name, connection, |transaction| {
         for photo_id in &effective {
-            match mutation.value {
-                PhotoStateValue::Selection(value) => {
-                    transaction
-                        .execute(
-                            "UPDATE photos SET selection_state=? WHERE id=?",
-                            params![selection_state_value(value), photo_id],
-                        )
-                        .map_err(mutation_error_from_sqlite)?;
-                }
-                PhotoStateValue::Rating(value) => {
-                    transaction
-                        .execute(
-                            "UPDATE photos SET rating=? WHERE id=?",
-                            params![i64::from(value), photo_id],
-                        )
-                        .map_err(mutation_error_from_sqlite)?;
-                }
-            }
+            set_photo_state(transaction, mutation.value, photo_id)?;
         }
         Ok(())
     })

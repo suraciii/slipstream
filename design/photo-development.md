@@ -42,6 +42,15 @@ results. Callers supply captured workload/source/recipe identity and retain
 validation, task-failure handling, cancellation, discard, and publication order.
 Sharing transport does not merge ephemeral preview and durable Export policy.
 
+The private Preview executor owns ephemeral attempt identity, cancellation,
+abandonment, discard and temporary staging. It uses the Export manager's single
+heavy-work admission and confined workspace through narrow resource operations.
+The Preview registry owns rendition admission, retained render deadlines and
+sweeping; the executor creates no durable Export row or publication claim.
+Export publication, restart adoption and download leases remain with the
+durable manager. Initial and post-derivation Preview identity use one construction
+rule; post-derivation publication still rereads current Library facts.
+
 ## Application Boundary
 
 The existing Rust modular monolith must own development lifecycle. Native
@@ -180,6 +189,13 @@ Export click captures an immutable copy of the visible control settings and
 target. The browser must place an ordering barrier in that Photo's write stream:
 settle prior writes, commit the captured recipe if needed, and submit the Export
 against that exact confirmed revision and source binding before sending later edits.
+
+The browser output controller owns one Photo-scoped admission record containing
+the immutable submission and its write barrier. Uncertain results retain both
+for exact replay; confirmed acceptance or refusal settles only the captured
+record. Response and body continuations recheck that record before changing
+output state, so an older replay cannot release a later submission's barrier.
+The Editor write stream queries this barrier without keeping a second map.
 
 The service must atomically validate the expected current recipe revision and
 source binding, capture source/settings/bundle/target, persist the Export and its idempotency receipt,

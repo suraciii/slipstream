@@ -24,6 +24,7 @@ import { createApplicationPresentationController } from "./model/application-pre
 import {
   createSourceGridOwner,
   type SourceGridSource,
+  type SourceAuthority,
 } from "./model/source-grid-owner.js";
 import {
   createSourceOpenOwner,
@@ -53,6 +54,7 @@ import {
 import {
   createDestinationController,
   type SourceEstablishment,
+  type SourceReestablishment,
   type SourceEstablishmentOptions,
   type OpenSourceOptions,
 } from "./model/destination-controller.js";
@@ -72,10 +74,10 @@ import { formatPhotoCount } from "./ui/photo-count.js";
 import { mountAccessBoundary } from "./ui/access-boundary.js";
 import type { BrowserFetch } from "./model/access-session.js";
 
-const SOURCE_ESTABLISHED: SourceEstablishment = { kind: "established" };
-const SOURCE_SUPERSEDED: SourceEstablishment = { kind: "superseded" };
-const SOURCE_FAILED: SourceEstablishment = { kind: "failed" };
-const SOURCE_MISSING: SourceEstablishment = { kind: "missing" };
+const SOURCE_ESTABLISHED = { kind: "established" } as const;
+const SOURCE_SUPERSEDED = { kind: "superseded" } as const;
+const SOURCE_FAILED = { kind: "failed" } as const;
+const SOURCE_MISSING = { kind: "missing" } as const;
 export function mountLibraryBrowser(
   root: HTMLElement,
   fetcher: BrowserFetch = fetch,
@@ -777,6 +779,69 @@ function mountPrivateLibraryBrowser(
     view.cancelGridRender();
   };
 
+  const requireFolderPublication = async (
+    kind: SourceGridSource["kind"],
+    current: () => boolean,
+  ): Promise<boolean> => {
+    if (kind === "folder" && !fileLocations.publication)
+      await awaitRootBinding();
+    return (
+      current() && (kind !== "folder" || Boolean(fileLocations.publication))
+    );
+  };
+  const establishSourceWindow = async (
+    index: number,
+    authority: SourceAuthority,
+    transition: RecoveryTransition,
+    current: () => boolean,
+  ): Promise<boolean> => {
+    const ready = await loadWindow(
+      index,
+      { kind: "source", authority },
+      false,
+      "high",
+      transition,
+    );
+    return (
+      applicationAlive && sourceGrid.isCurrent(authority) && current() && ready
+    );
+  };
+  const commitSourceReadiness = (
+    authority: SourceAuthority,
+    transition: RecoveryTransition,
+  ): void => {
+    if (sourceGrid.kind === "folder") releasePublicationLocationRecovery();
+    recoveryGate.succeedTransition(transition);
+    sourceGrid.establish(authority);
+    setConnected(true);
+  };
+  const failSourceEstablishment = (
+    kind: "source-open" | "source-reopen",
+    generation: number,
+    message: string,
+    transition?: RecoveryTransition,
+  ): void => {
+    setGridStatusText(message);
+    if (kind === "source-reopen" && transition) view.setPhotoStatus(message);
+    const claim = recoveryGate.issue(kind, String(generation), {
+      owner: { scope: "source", generation: String(generation) },
+      ...(transition ? { transition } : {}),
+    });
+    if (transition)
+      recoveryGate.failTransition(transition, claim, { transportLost: true });
+    else recoveryGate.fail(claim, { transportLost: true });
+    syncConnection();
+  };
+  const presentEmptySource = (): void => {
+    setGridStatusText(formatPhotoCount(0));
+    view.setGridEmpty(
+      sourceGrid.selection === "all"
+        ? emptySourceStatus()
+        : "No Photos match this filter.",
+      sourceGrid.selection === "all" && sourceGrid.kind !== "album",
+    );
+  };
+
   const openSource = async ({
     kind,
     album,
@@ -823,8 +888,9 @@ function mountPrivateLibraryBrowser(
         ...(order !== "source-default" ? { order } : {}),
         selection,
       });
-    if (!navigationSession.isCurrent(destinationEstablishment))
-      return SOURCE_SUPERSEDED;
+    const destinationCurrent = () =>
+      applicationAlive && navigationSession.isCurrent(destinationEstablishment);
+    if (!destinationCurrent()) return SOURCE_SUPERSEDED;
     pageBusy = true;
     updateControls();
     cancelScheduledGridRender();
@@ -862,10 +928,7 @@ function mountPrivateLibraryBrowser(
     renderSortControl();
     try {
       const opened = await lifecycleOpen.outcome;
-      if (
-        !sourceGrid.isCurrent(authority) ||
-        !navigationSession.isCurrent(destinationEstablishment)
-      )
+      if (!sourceGrid.isCurrent(authority) || !destinationCurrent())
         return SOURCE_SUPERSEDED;
       if (opened.kind === "superseded") return SOURCE_SUPERSEDED;
       if (opened.kind === "missing") return SOURCE_MISSING;
@@ -892,28 +955,18 @@ function mountPrivateLibraryBrowser(
             restoration,
           )
         : gridPosition;
+      if (restoreIndex === undefined || !destinationCurrent())
+        return SOURCE_SUPERSEDED;
       if (
-        restoreIndex === undefined ||
-        !navigationSession.isCurrent(destinationEstablishment)
+        !(await establishSourceWindow(
+          restoreIndex,
+          authority,
+          sourceTransition,
+          destinationCurrent,
+        ))
       )
         return SOURCE_SUPERSEDED;
-      const windowReady = await loadWindow(
-        restoreIndex,
-        { kind: "source", authority },
-        false,
-        "high",
-        sourceTransition,
-      );
-      if (
-        !sourceGrid.isCurrent(authority) ||
-        !navigationSession.isCurrent(destinationEstablishment) ||
-        !windowReady
-      )
-        return SOURCE_SUPERSEDED;
-      if (sourceGrid.kind === "folder") releasePublicationLocationRecovery();
-      recoveryGate.succeedTransition(sourceTransition);
-      sourceGrid.establish(authority);
-      setConnected(true);
+      commitSourceReadiness(authority, sourceTransition);
       // A source replacement empties the snapshot while its open is in
       // flight, and any render during that window clamps the Grid to the
       // top. Position the reopened Grid through the render that restores the
@@ -929,15 +982,7 @@ function mountPrivateLibraryBrowser(
         // after the ordinary status has been presented.
         if (establishment.explanation)
           setGridStatusText(establishment.explanation);
-      } else if (sourceGrid.selection === "all") {
-        setGridStatusText(formatPhotoCount(0));
-        view.setGridEmpty(emptySourceStatus(), sourceGrid.kind !== "album");
-      } else {
-        // A filtered view that matches nothing leaves its source intact, so
-        // it must not report an empty source or offer a Library check.
-        setGridStatusText(formatPhotoCount(0));
-        view.setGridEmpty("No Photos match this filter.");
-      }
+      } else presentEmptySource();
       // The committed destination is recorded once, so the navigation owner's
       // current entry always names the source the page presents.
       if (establishment.address === "push")
@@ -953,20 +998,14 @@ function mountPrivateLibraryBrowser(
         );
       return SOURCE_ESTABLISHED;
     } catch {
-      if (
-        !sourceGrid.isCurrent(authority) ||
-        !navigationSession.isCurrent(destinationEstablishment)
-      )
+      if (!sourceGrid.isCurrent(authority) || !destinationCurrent())
         return SOURCE_SUPERSEDED;
-      setGridStatusText("Could not load this source. Retry to continue.");
-      const claim = recoveryGate.issue("source-open", String(generation), {
-        owner: { scope: "source", generation: String(generation) },
-        transition: sourceTransition,
-      });
-      recoveryGate.failTransition(sourceTransition, claim, {
-        transportLost: true,
-      });
-      syncConnection();
+      failSourceEstablishment(
+        "source-open",
+        generation,
+        "Could not load this source. Retry to continue.",
+        sourceTransition,
+      );
       return SOURCE_FAILED;
     } finally {
       if (sourceGrid.isCurrent(authority)) {
@@ -993,16 +1032,16 @@ function mountPrivateLibraryBrowser(
       ...(order !== "source-default" ? { order } : {}),
       selection,
     });
-    // A Folder reopen needs the current File Location binding: without it a
-    // committed change can only send a stale publication and fail as a false
-    // disconnection. Match the refresh/reopen precondition.
-    if (sourceGrid.kind === "folder" && !fileLocations.publication) {
-      const bound = await awaitRootBinding();
-      if (!applicationAlive || !navigationSession.isCurrent(intent) || !bound) {
-        if (applicationAlive)
-          setGridStatusText("Could not load this source. Retry to continue.");
-        return;
-      }
+    const current = () =>
+      applicationAlive && navigationSession.isCurrent(intent);
+    if (
+      sourceGrid.kind === "folder" &&
+      !fileLocations.publication &&
+      !(await requireFolderPublication(sourceGrid.kind, current))
+    ) {
+      if (current())
+        setGridStatusText("Could not load this source. Retry to continue.");
+      return;
     }
     await openSourceDescriptor(
       sourceGrid.source,
@@ -1033,11 +1072,11 @@ function mountPrivateLibraryBrowser(
       settled: "Source reopened using the latest published Library order.",
     },
     intent?: DestinationEstablishment,
-  ) => {
-    if (expectedGeneration !== sourceGrid.generation) return;
+  ): Promise<SourceReestablishment> => {
+    if (expectedGeneration !== sourceGrid.generation) return SOURCE_SUPERSEDED;
     const destinationCurrent = () =>
       applicationAlive && (!intent || navigationSession.isCurrent(intent));
-    if (!destinationCurrent()) return;
+    if (!destinationCurrent()) return SOURCE_SUPERSEDED;
     pageBusy = true;
     // A reopen builds a new Snapshot of the same source, so the
     // multi-selection starts empty here too; the render after the reopen
@@ -1066,40 +1105,30 @@ function mountPrivateLibraryBrowser(
       currentPhoto()?.id;
     cancelScheduledGridRender();
     sourceGrid.clearRenderedThumbnails();
-    let boundPublication = fileLocations.publication;
-    if (sourceGrid.kind === "folder" && !boundPublication) {
-      // A Folder source must never be reopened publicationless; wait for
-      // the root binding and fail truthfully if it cannot be established.
-      boundPublication = (await awaitRootBinding())
-        ? fileLocations.publication
-        : undefined;
+    if (sourceGrid.kind === "folder" && !fileLocations.publication) {
+      const bound = await requireFolderPublication(
+        sourceGrid.kind,
+        () =>
+          expectedGeneration === sourceGrid.generation && destinationCurrent(),
+      );
       if (expectedGeneration !== sourceGrid.generation || !destinationCurrent())
-        return;
-      if (!boundPublication) {
-        // Fail truthfully instead of sending a publicationless request.
-        setGridStatusText("Could not load this source. Retry to continue.");
-        const claim = recoveryGate.issue(
+        return SOURCE_SUPERSEDED;
+      if (!bound) {
+        failSourceEstablishment(
           "source-reopen",
-          String(expectedGeneration),
-          {
-            owner: {
-              scope: "source",
-              generation: String(expectedGeneration),
-            },
-          },
+          expectedGeneration,
+          "Could not load this source. Retry to continue.",
         );
-        recoveryGate.fail(claim, { transportLost: true });
-        syncConnection();
         pageBusy = false;
         updateControls();
-        return;
+        return SOURCE_FAILED;
       }
     }
     const descriptor: SourceGridSource =
       sourceGrid.source.kind === "folder"
         ? {
             ...sourceGrid.source,
-            publication: boundPublication!,
+            publication: fileLocations.publication!,
           }
         : sourceGrid.source;
     const lifecycleOpen = sourceLifecycle.beginOpen(descriptor, {
@@ -1142,10 +1171,19 @@ function mountPrivateLibraryBrowser(
     view.setPhotoStatus(notice);
     try {
       const opened = await lifecycleOpen.outcome;
-      if (!sourceGrid.isCurrent(authority) || !destinationCurrent()) return;
-      if (opened.kind === "superseded") return;
-      if (opened.kind === "failed" || opened.kind === "missing")
-        throw new Error("browse reopen failed");
+      if (!sourceGrid.isCurrent(authority) || !destinationCurrent())
+        return SOURCE_SUPERSEDED;
+      if (opened.kind === "superseded") return SOURCE_SUPERSEDED;
+      if (opened.kind === "missing") {
+        failSourceEstablishment(
+          "source-reopen",
+          generation,
+          "This source is no longer available. Retry to refresh the Library.",
+          sourceTransition,
+        );
+        return SOURCE_MISSING;
+      }
+      if (opened.kind === "failed") throw new Error("browse reopen failed");
       const gridPosition = opened.position;
       photoOwner.updateSource({
         sourceAuthority: authority,
@@ -1154,39 +1192,22 @@ function mountPrivateLibraryBrowser(
         ...(sourceGrid.albumId ? { albumId: sourceGrid.albumId } : {}),
         ...(anchorId ? { preferredPhotoId: anchorId } : {}),
       });
-      const windowReady = await loadWindow(
-        gridPosition,
-        { kind: "source", authority },
-        false,
-        "high",
-        sourceTransition,
-      );
       if (
-        !sourceGrid.isCurrent(authority) ||
-        !destinationCurrent() ||
-        !windowReady
+        !(await establishSourceWindow(
+          gridPosition,
+          authority,
+          sourceTransition,
+          destinationCurrent,
+        ))
       )
-        return;
+        return SOURCE_SUPERSEDED;
       // A hidden Grid keeps its retained cells: the next visible render
       // rebuilds them, and only the visible Grid may touch its DOM.
       if (view.gridVisible()) view.clearGridCells();
       renderGrid(gridPosition);
-      // A reopen that leaves the source empty presents the same explained
-      // state the open path presents. Without it an emptied Grid would be
-      // blank, and a blank Grid cannot be told from a broken one.
-      if (sourceGrid.total === 0) {
-        setGridStatusText(formatPhotoCount(0));
-        view.setGridEmpty(
-          sourceGrid.selection === "all"
-            ? emptySourceStatus()
-            : "No Photos match this filter.",
-          sourceGrid.selection === "all" && sourceGrid.kind !== "album",
-        );
-      } else setGridStatusText(reason.settled);
-      if (sourceGrid.kind === "folder") releasePublicationLocationRecovery();
-      recoveryGate.succeedTransition(sourceTransition);
-      sourceGrid.establish(authority);
-      setConnected(true);
+      if (sourceGrid.total === 0) presentEmptySource();
+      else setGridStatusText(reason.settled);
+      commitSourceReadiness(authority, sourceTransition);
       if (resumePhoto && photoOwner.isCurrent(photoAuthority)) {
         view.enterPhoto();
         renderPhotoShell(photoAuthority);
@@ -1201,21 +1222,17 @@ function mountPrivateLibraryBrowser(
           },
         );
       }
-      return authority;
+      return { kind: "established", authority };
     } catch {
-      if (!sourceGrid.isCurrent(authority) || !destinationCurrent()) return;
-      const failure =
-        "This source expired and could not be reopened. Retry the connection.";
-      setGridStatusText(failure);
-      view.setPhotoStatus(failure);
-      const claim = recoveryGate.issue("source-reopen", String(generation), {
-        owner: { scope: "source", generation: String(generation) },
-        transition: sourceTransition,
-      });
-      recoveryGate.failTransition(sourceTransition, claim, {
-        transportLost: true,
-      });
-      syncConnection();
+      if (!sourceGrid.isCurrent(authority) || !destinationCurrent())
+        return SOURCE_SUPERSEDED;
+      failSourceEstablishment(
+        "source-reopen",
+        generation,
+        "This source expired and could not be reopened. Retry the connection.",
+        sourceTransition,
+      );
+      return SOURCE_FAILED;
     } finally {
       if (sourceGrid.isCurrent(authority)) {
         pageBusy = false;
@@ -1814,15 +1831,16 @@ function mountPrivateLibraryBrowser(
 
   const refreshSource = async (): Promise<void> => {
     const intent = navigationSession.begin(liveDestination(sourceGrid));
-    // A Folder reopen needs the File Location binding: never send a
-    // publicationless browse (it can only fail as expired/invalid).
-    if (sourceGrid.kind === "folder" && !fileLocations.publication) {
-      await awaitRootBinding();
-      if (!navigationSession.isCurrent(intent)) return;
-      if (!fileLocations.publication) {
+    const current = () =>
+      applicationAlive && navigationSession.isCurrent(intent);
+    if (
+      sourceGrid.kind === "folder" &&
+      !fileLocations.publication &&
+      !(await requireFolderPublication(sourceGrid.kind, current))
+    ) {
+      if (current())
         setGridStatusText("Could not load this source. Retry to continue.");
-        return;
-      }
+      return;
     }
     if (sourceGrid.kind === "album") {
       const album = application.albums.find(

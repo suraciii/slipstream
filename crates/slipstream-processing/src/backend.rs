@@ -426,7 +426,11 @@ impl Backend {
             crate::slice::create(record.unit(), &expected, &record.receipt.limits)?;
         record.unit_invocation = Some(invocation);
         record.cgroup_inode = Some(inode);
-        let limits = self.limits_match(&expected, record.receipt.limits.memory_bytes);
+        let limits = limits_match(
+            &expected,
+            &self.config.limits(),
+            record.receipt.limits.memory_bytes,
+        );
         checked_setup_observation(record, &mut persist, limits)?;
         record.manager_pending = None;
         record.receipt.evidence = Some(Evidence {
@@ -613,7 +617,11 @@ impl Backend {
             .replace("0::", "0::/");
         checked_setup_observation(record, &mut persist, Ok(placed))?;
         pidfd_alive(&pidfd)?;
-        let limits = self.limits_match(&scope, record.receipt.limits.memory_bytes);
+        let limits = limits_match(
+            &scope,
+            &self.config.limits(),
+            record.receipt.limits.memory_bytes,
+        );
         checked_setup_observation(record, &mut persist, limits)?;
         let leaf = scope.join("workload");
         fs::create_dir(&leaf).map_err(|_| ErrorCode::Unavailable)?;
@@ -635,7 +643,11 @@ impl Backend {
         ] {
             write(&leaf.join(key), &value)?;
         }
-        let limits = self.limits_match(&leaf, record.receipt.limits.memory_bytes);
+        let limits = limits_match(
+            &leaf,
+            &self.config.limits(),
+            record.receipt.limits.memory_bytes,
+        );
         checked_setup_observation(record, &mut persist, limits)?;
         let placed = read(&leaf.join("memory.oom.group"))? == "1"
             && read(&leaf.join("cgroup.procs"))? == live.pid.to_string()
@@ -672,23 +684,11 @@ impl Backend {
     }
 
     fn read_limits(&self, path: &Path, memory: u64) -> Result<()> {
-        if self.limits_match(path, memory)? {
+        if limits_match(path, &self.config.limits(), memory)? {
             Ok(())
         } else {
             Err(ErrorCode::Unavailable)
         }
-    }
-
-    fn limits_match(&self, path: &Path, memory: u64) -> Result<bool> {
-        Ok(read(&path.join("memory.max"))? == memory.to_string()
-            && read(&path.join("memory.swap.max"))? == "0"
-            && read(&path.join("cpu.max"))?
-                == format!(
-                    "{} {}",
-                    self.config.limits().cpu_quota_us,
-                    self.config.limits().cpu_period_us
-                )
-            && read(&path.join("pids.max"))? == self.config.limits().tasks.to_string())
     }
 
     fn owned_container(&self, record: &Record, id: &str) -> Result<Value> {
@@ -1163,48 +1163,10 @@ impl Backend {
     }
 
     pub fn worker_outcome(&self, record: &Record) -> Result<Option<Outcome>> {
-        let path = self.workspace(record).join("work/result");
-        let file = match OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(ErrorCode::Uncertain),
-        };
-        let metadata = file.metadata().map_err(|_| ErrorCode::Uncertain)?;
-        if !metadata.is_file() || metadata.len() != 4096 {
-            return Err(ErrorCode::Uncertain);
-        }
-        let mut bytes = Vec::new();
-        file.take(4097)
-            .read_to_end(&mut bytes)
-            .map_err(|_| ErrorCode::Uncertain)?;
-        if bytes.len() != 4096 {
-            return Err(ErrorCode::Uncertain);
-        }
-        let end = bytes
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(bytes.len());
-        if bytes[end..].iter().any(|byte| *byte != 0) {
-            return Err(ErrorCode::Uncertain);
-        }
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct ResultFile {
-            launch_id: String,
-            outcome: Outcome,
-        }
-        let value: ResultFile = match serde_json::from_slice(&bytes[..end]) {
-            Ok(value) => value,
-            Err(_) => return Ok(None),
-        };
-        if value.launch_id != record.launch_id {
-            return Err(ErrorCode::Uncertain);
-        }
-        Ok(Some(value.outcome))
+        worker_result(
+            &self.workspace(record).join("work/result"),
+            &record.launch_id,
+        )
     }
 
     pub fn cleanup(
@@ -1348,6 +1310,67 @@ pub(crate) fn read(path: &Path) -> Result<String> {
     String::from_utf8(bytes)
         .map(|text| text.trim().to_owned())
         .map_err(|_| ErrorCode::Unavailable)
+}
+
+/// Read the four workload limit control files of one cgroup and compare
+/// them with the expected values. The expected `memory_bytes` is supplied
+/// by the caller: qualification verifies each record's own receipt memory
+/// while the remaining limits always come from the configured profile.
+pub(crate) fn limits_match(path: &Path, limits: &Limits, memory_bytes: u64) -> Result<bool> {
+    Ok(read(&path.join("memory.max"))? == memory_bytes.to_string()
+        && read(&path.join("memory.swap.max"))? == "0"
+        && read(&path.join("cpu.max"))?
+            == format!("{} {}", limits.cpu_quota_us, limits.cpu_period_us)
+        && read(&path.join("pids.max"))? == limits.tasks.to_string())
+}
+
+/// The launcher-owned worker result: one fixed-size, NUL-padded JSON record
+/// binding the attempt's launch id to its terminal outcome. A missing file
+/// is one unfinished attempt, and an unparseable body is treated the same;
+/// every violation of the sealed shape — wrong size, trailing non-padding,
+/// a foreign launch id — is tamper evidence.
+pub(crate) fn worker_result(path: &Path, launch_id: &str) -> Result<Option<Outcome>> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(ErrorCode::Uncertain),
+    };
+    let metadata = file.metadata().map_err(|_| ErrorCode::Uncertain)?;
+    if !metadata.is_file() || metadata.len() != RESULT_BYTES as u64 {
+        return Err(ErrorCode::Uncertain);
+    }
+    let mut bytes = Vec::new();
+    file.take(RESULT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ErrorCode::Uncertain)?;
+    if bytes.len() != RESULT_BYTES {
+        return Err(ErrorCode::Uncertain);
+    }
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    if bytes[end..].iter().any(|byte| *byte != 0) {
+        return Err(ErrorCode::Uncertain);
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ResultFile {
+        launch_id: String,
+        outcome: Outcome,
+    }
+    let value: ResultFile = match serde_json::from_slice(&bytes[..end]) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    if value.launch_id != launch_id {
+        return Err(ErrorCode::Uncertain);
+    }
+    Ok(Some(value.outcome))
 }
 
 fn write(path: &Path, value: &str) -> Result<()> {
@@ -2365,7 +2388,7 @@ mod tests {
             persisted.push(serde_json::to_vec(record).unwrap());
             Ok(())
         };
-        let absent = backend.limits_match(&root, 8 << 30);
+        let absent = limits_match(&root, &backend.config.limits(), 8 << 30);
         assert!(absent.is_err());
         assert!(checked_setup_observation(&mut record, &mut save, absent).is_err());
         assert_eq!(
@@ -2384,7 +2407,7 @@ mod tests {
         ] {
             fs::write(root.join(key), value).unwrap();
         }
-        let unchanged = backend.limits_match(&root, 8 << 30);
+        let unchanged = limits_match(&root, &backend.config.limits(), 8 << 30);
         assert_eq!(unchanged, Ok(true));
         checked_setup_observation(&mut record, &mut save, unchanged).unwrap();
         assert_eq!(
@@ -2396,7 +2419,7 @@ mod tests {
             Some(true)
         );
         fs::write(root.join("memory.max"), (7u64 << 30).to_string()).unwrap();
-        let drift = backend.limits_match(&root, 8 << 30);
+        let drift = limits_match(&root, &backend.config.limits(), 8 << 30);
         assert_eq!(drift, Ok(false));
         assert_eq!(
             checked_setup_observation(&mut record, &mut save, drift),
@@ -2414,6 +2437,58 @@ mod tests {
             Err(ErrorCode::Uncertain)
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn worker_result_enforces_sealed_shape_and_launch_binding() {
+        let root =
+            std::env::temp_dir().join(format!("slipstream-worker-result-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("result");
+        let launch = "a".repeat(32);
+        let frame = |body: &[u8]| {
+            let mut bytes = body.to_vec();
+            bytes.resize(RESULT_BYTES, 0);
+            fs::write(&path, bytes).unwrap();
+        };
+        // An absent result file is one unfinished attempt.
+        assert_eq!(worker_result(&path, &launch), Ok(None));
+        frame(format!(r#"{{"launch_id":"{launch}","outcome":"completed"}}"#).as_bytes());
+        assert_eq!(worker_result(&path, &launch), Ok(Some(Outcome::Completed)));
+        // An unparseable or over-carried body is still only an absent
+        // outcome; the terminal exit path, not the file, decides it.
+        frame(b"{");
+        assert_eq!(worker_result(&path, &launch), Ok(None));
+        frame(format!(r#"{{"launch_id":"{launch}","outcome":"completed","extra":1}}"#).as_bytes());
+        assert_eq!(worker_result(&path, &launch), Ok(None));
+        // A foreign launch id and every broken seal are tamper evidence.
+        let foreign = format!(
+            r#"{{"launch_id":"{}","outcome":"completed"}}"#,
+            "b".repeat(32)
+        );
+        frame(foreign.as_bytes());
+        assert_eq!(worker_result(&path, &launch), Err(ErrorCode::Uncertain));
+        let mut trailing = Vec::new();
+        trailing.extend_from_slice(
+            format!(r#"{{"launch_id":"{launch}","outcome":"completed"}}"#).as_bytes(),
+        );
+        trailing.push(0);
+        trailing.push(1);
+        trailing.resize(RESULT_BYTES, 0);
+        fs::write(&path, trailing).unwrap();
+        assert_eq!(worker_result(&path, &launch), Err(ErrorCode::Uncertain));
+        for size in [RESULT_BYTES - 1, RESULT_BYTES + 1] {
+            fs::write(&path, vec![0u8; size]).unwrap();
+            assert_eq!(worker_result(&path, &launch), Err(ErrorCode::Uncertain));
+        }
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink("absent-target", &path).unwrap();
+        assert_eq!(worker_result(&path, &launch), Err(ErrorCode::Uncertain));
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert_eq!(worker_result(&path, &launch), Err(ErrorCode::Uncertain));
+        fs::remove_dir(&path).unwrap();
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

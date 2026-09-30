@@ -132,8 +132,6 @@ describe("retained workspace results", () => {
       owns: () => true,
       render: () => {},
       settle: () => Promise.resolve(true),
-      acquire: () => {},
-      release: () => {},
     });
     owner.open("photo");
     await owner.refresh("photo");
@@ -163,8 +161,6 @@ describe("retained workspace results", () => {
       owns: () => true,
       render: () => {},
       settle: () => Promise.resolve(true),
-      acquire: () => {},
-      release: () => {},
     });
     owner.open("photo");
     await owner.refresh("photo");
@@ -207,8 +203,6 @@ describe("retained workspace results", () => {
       owns: () => true,
       render: () => {},
       settle: () => Promise.resolve(true),
-      acquire: () => {},
-      release: () => {},
     });
     try {
       owner.open("photo");
@@ -244,8 +238,6 @@ describe("retained workspace results", () => {
       owns: () => true,
       render: () => {},
       settle: () => Promise.resolve(true),
-      acquire: () => {},
-      release: () => {},
     });
     owner.open("photo");
     await owner.refresh("photo");
@@ -284,8 +276,6 @@ describe("retained workspace results", () => {
       owns: () => true,
       render: () => {},
       settle: () => Promise.resolve(true),
-      acquire: () => {},
-      release: () => {},
     });
     const previousWindow = Object.getOwnPropertyDescriptor(
       globalThis,
@@ -338,8 +328,6 @@ describe("XMP evidence and reconciliation", () => {
       owns: () => true,
       render: () => {},
       settle: () => Promise.resolve(true),
-      acquire: () => {},
-      release: () => {},
     });
     owner.open("photo");
     await owner.refresh("photo");
@@ -382,8 +370,6 @@ describe("XMP evidence and reconciliation", () => {
       owns: () => true,
       render: () => {},
       settle: () => Promise.resolve(true),
-      acquire: () => {},
-      release: () => {},
     });
     expect(owner.view("photo").xmp.canSubmit).toBe(true);
     expect(owner.view("photo").tiff.canSubmit).toBe(false);
@@ -399,7 +385,6 @@ describe("XMP evidence and reconciliation", () => {
   test("lost XMP response retries the same identity and blocks later output until resolved", async () => {
     const bodies: unknown[] = [];
     let attempts = 0;
-    let released = 0;
     const fetcher: BrowserFetch = (_path, init) => {
       if (typeof init?.body !== "string") throw new Error("Expected JSON body");
       bodies.push(JSON.parse(init.body));
@@ -413,18 +398,15 @@ describe("XMP evidence and reconciliation", () => {
       owns: () => true,
       render: () => {},
       settle: () => Promise.resolve(true),
-      acquire: () => {},
-      release: () => {
-        released++;
-      },
     });
     await owner.submit("photo");
     expect(owner.view("photo").xmp.state).toBe("outcome-unknown");
     expect(owner.view("photo").tiff.canSubmit).toBe(false);
+    expect(owner.writeBarrier("photo")).toBeDefined();
     await owner.submit("photo");
     expect(bodies[1]).toEqual(bodies[0]);
     expect(owner.view("photo").xmp.state).toBe("succeeded");
-    expect(released).toBe(1);
+    expect(owner.writeBarrier("photo")).toBeUndefined();
   });
   test.each([
     "processing_unavailable",
@@ -433,7 +415,6 @@ describe("XMP evidence and reconciliation", () => {
   ])(
     "a definitive %s refusal releases the output barrier for another export",
     async (code) => {
-      let released = 0;
       let refuse = true;
       const fetcher: BrowserFetch = () =>
         Promise.resolve(
@@ -449,19 +430,16 @@ describe("XMP evidence and reconciliation", () => {
         owns: () => true,
         render: () => {},
         settle: () => Promise.resolve(true),
-        acquire: () => {},
-        release: () => {
-          released++;
-        },
       });
       await owner.submit("photo", "development-tiff");
       expect(owner.view("photo").tiff.state).toBe("failed");
       expect(owner.pending("photo")).toBe(false);
+      expect(owner.writeBarrier("photo")).toBeUndefined();
       expect(owner.view("photo").xmp.canSubmit).toBe(true);
       refuse = false;
       await owner.submit("photo");
       expect(owner.view("photo").xmp.canDownload).toBe(true);
-      expect(released).toBe(2);
+      expect(owner.writeBarrier("photo")).toBeUndefined();
     },
   );
   test("failed saving never sends a parameter export", async () => {
@@ -475,11 +453,198 @@ describe("XMP evidence and reconciliation", () => {
       owns: () => true,
       render: () => {},
       settle: () => Promise.resolve(false),
-      acquire: () => {},
-      release: () => {},
     });
     await owner.submit("photo");
     expect(sent).toBe(false);
     expect(owner.view("photo").xmp.canSubmit).toBe(false);
   });
+});
+
+describe("Photo-scoped export admission", () => {
+  const acceptedImage = (exportId: string) => ({
+    exportId,
+    target: "development-tiff",
+    state: "queued",
+    recipeVersion: "new",
+    sourceRevision: "source",
+  });
+  const emptyLists = () =>
+    Promise.resolve(new Response(JSON.stringify({ exports: [] })));
+  /// The test runtime has no window; an accepted queued task asks one for its
+  /// poll timer, and the stub never fires it.
+  const withWindow = async (run: () => Promise<void>): Promise<void> => {
+    const previousWindow = Object.getOwnPropertyDescriptor(
+      globalThis,
+      "window",
+    );
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { setTimeout: () => 0, clearTimeout: () => {} },
+    });
+    try {
+      await run();
+    } finally {
+      if (previousWindow)
+        Object.defineProperty(globalThis, "window", previousWindow);
+      else Reflect.deleteProperty(globalThis, "window");
+    }
+  };
+  test("a pending admission survives leaving its Photo and fences only that Photo", async () => {
+    await withWindow(async () => {
+      const posts: Array<{ photo: string; body: unknown }> = [];
+      const held: Array<(response: Response) => void> = [];
+      const order: string[] = [];
+      const fetcher: BrowserFetch = (path, init) => {
+        if (typeof path !== "string") throw new Error("Expected endpoint path");
+        const match = /^\/api\/photos\/([^/]+)\/exports$/.exec(path);
+        if (match && init?.method === "POST") {
+          if (typeof init.body !== "string")
+            throw new Error("Expected JSON body");
+          posts.push({ photo: match[1]!, body: JSON.parse(init.body) });
+          return match[1] === "a"
+            ? new Promise<Response>((resolve) => held.push(resolve))
+            : Promise.resolve(
+                new Response(JSON.stringify(acceptedImage("b1")), {
+                  status: 201,
+                }),
+              );
+        }
+        return emptyLists();
+      };
+      const owner = createWorkspaceOutputController(fetcher, {
+        facts: () => facts,
+        owns: () => true,
+        render: () => {},
+        settle: (photoId) => {
+          order.push(`settle-${photoId}`);
+          return Promise.resolve(true);
+        },
+      });
+      owner.open("a");
+      const submitting = owner.submit("a", "development-tiff");
+      while (owner.writeBarrier("a") === undefined) await Promise.resolve();
+      const barrierOnce = owner.writeBarrier("a");
+      let aResolved = false;
+      void barrierOnce?.then(() => {
+        aResolved = true;
+      });
+      owner.leave();
+      owner.open("b");
+      await owner.submit("b", "development-tiff");
+      expect(posts.map((post) => post.photo)).toEqual(["a", "b"]);
+      expect(owner.writeBarrier("b")).toBeUndefined();
+      expect(owner.writeBarrier("a")).toBe(barrierOnce);
+      held[0]!(
+        new Response(JSON.stringify(acceptedImage("a1")), { status: 201 }),
+      );
+      await submitting;
+      expect(aResolved).toBe(true);
+      expect(owner.writeBarrier("a")).toBeUndefined();
+      expect(order).toEqual(["settle-a", "settle-b"]);
+      owner.leave();
+    });
+  });
+  test("an uncertain image admission replays its exact body and keeps the other Photo free", async () => {
+    await withWindow(async () => {
+      const posts: Array<{ photo: string; body: unknown }> = [];
+      let loseA = true;
+      const fetcher: BrowserFetch = (path, init) => {
+        if (typeof path !== "string") throw new Error("Expected endpoint path");
+        const match = /^\/api\/photos\/([^/]+)\/exports$/.exec(path);
+        if (match && init?.method === "POST") {
+          if (typeof init.body !== "string")
+            throw new Error("Expected JSON body");
+          posts.push({ photo: match[1]!, body: JSON.parse(init.body) });
+          if (match[1] === "a" && loseA)
+            return Promise.reject(new Error("lost response"));
+          return Promise.resolve(
+            new Response(JSON.stringify(acceptedImage(`${match[1]}1`)), {
+              status: 201,
+            }),
+          );
+        }
+        return emptyLists();
+      };
+      const owner = createWorkspaceOutputController(fetcher, {
+        facts: () => facts,
+        owns: () => true,
+        render: () => {},
+        settle: () => Promise.resolve(true),
+      });
+      owner.open("a");
+      await owner.submit("a", "development-tiff");
+      expect(owner.view("a").tiff.state).toBe("outcome-unknown");
+      expect(owner.writeBarrier("a")).toBeDefined();
+      owner.leave();
+      owner.open("b");
+      await owner.submit("b", "development-tiff");
+      expect(owner.view("b").tiff.state).toBe("queued");
+      expect(owner.writeBarrier("b")).toBeUndefined();
+      expect(owner.view("b").tiff.canRetry).toBe(false);
+      owner.open("a");
+      loseA = false;
+      await owner.submit("a", "development-tiff");
+      expect(posts[2]!.body).toEqual(posts[0]!.body);
+      expect(owner.view("a").tiff.state).toBe("queued");
+      expect(owner.writeBarrier("a")).toBeUndefined();
+      owner.leave();
+    });
+  });
+  test.each(["accepted", "refused", "transport"] as const)(
+    "a delayed %s replay cannot settle or poison a newer admission",
+    async (outcome) => {
+      await withWindow(async () => {
+        const delayed = Promise.withResolvers<unknown>();
+        const bodyStarted = Promise.withResolvers<void>();
+        let posts = 0;
+        const fetcher: BrowserFetch = async (_path, init) => {
+          if (init?.method !== "POST") return emptyLists();
+          posts++;
+          if (posts === 1 || posts === 4) throw new Error("lost response");
+          if (posts === 2) {
+            if (outcome === "transport") {
+              bodyStarted.resolve();
+              await delayed.promise;
+              throw new Error("late lost response");
+            }
+            const response = Response.json(
+              outcome === "accepted" ? acceptedImage("old") : {},
+              { status: outcome === "accepted" ? 201 : 409 },
+            );
+            if (outcome === "refused")
+              Object.defineProperty(response, "clone", {
+                value: () => Response.json({}),
+              });
+            Object.defineProperty(response, "json", {
+              value: () => {
+                bodyStarted.resolve();
+                return delayed.promise;
+              },
+            });
+            return response;
+          }
+          return Response.json({}, { status: 409 });
+        };
+        const owner = createWorkspaceOutputController(fetcher, {
+          facts: () => facts,
+          owns: () => true,
+          render: () => {},
+          settle: () => Promise.resolve(true),
+        });
+        await owner.submit("a", "development-tiff");
+        const old = owner.retry("a", "development-tiff");
+        await bodyStarted.promise;
+        await owner.retry("a", "development-tiff");
+        await owner.submit("a", "development-tiff");
+        const nextBarrier = owner.writeBarrier("a");
+        expect(nextBarrier).toBeDefined();
+        const nextView = owner.view("a").tiff;
+        delayed.resolve(outcome === "accepted" ? acceptedImage("old") : {});
+        await old;
+        expect(owner.writeBarrier("a")).toBe(nextBarrier);
+        expect(owner.view("a").tiff).toEqual(nextView);
+        owner.leave();
+      });
+    },
+  );
 });

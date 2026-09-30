@@ -69,6 +69,14 @@ type Submission = Readonly<{
   target?: OutputTarget;
   retryExportId?: string;
 }>;
+/// One admission per Photo: the unresolved submission body and the barrier
+/// that holds only that Photo's later writes until the outcome is settled.
+/// The body is immutable and the barrier is born with it, so a replay reuses
+/// its exact identity and the two can never disagree about what is pending.
+type Admission = Readonly<{
+  body: Submission;
+  barrier: Readonly<{ promise: Promise<void>; resolve: () => void }>;
+}>;
 type ImageSlot = {
   state: OutputState;
   note: string;
@@ -80,7 +88,7 @@ type Session = {
   xmp: XmpArtifact | null;
   xmpState: OutputState;
   xmpNote: string;
-  pending: Submission | undefined;
+  admission: Admission | undefined;
   generation: number;
   submitting: boolean;
 };
@@ -95,7 +103,7 @@ const newSession = (): Session => ({
   xmp: null,
   xmpState: "idle",
   xmpNote: "Not exported yet.",
-  pending: undefined,
+  admission: undefined,
   generation: 0,
   submitting: false,
 });
@@ -292,8 +300,6 @@ export function createWorkspaceOutputController(
     owns(photoId: string): boolean;
     render(): void;
     settle(photoId: string): Promise<boolean>;
-    acquire(photoId: string): void;
-    release(photoId: string): void;
   }>,
 ) {
   const sessions = new Map<string, Session>();
@@ -307,6 +313,18 @@ export function createWorkspaceOutputController(
       sessions.set(id, value);
     }
     return value;
+  };
+  /// The one place an admission begins: its barrier is born with its body.
+  const admit = (value: Session, body: Submission): void => {
+    value.admission = { body, barrier: Promise.withResolvers<void>() };
+  };
+  /// The one place an admission ends: the barrier releases exactly when the
+  /// body it fences is settled, so a resolved outcome frees dependent writes
+  /// and an uncertain one keeps holding them.
+  const settleAdmission = (value: Session, admission: Admission): void => {
+    if (value.admission !== admission) return;
+    value.admission = undefined;
+    admission.barrier.resolve();
   };
   const owns = (id: string, stamp: number) =>
     photo === id && scope === stamp && dependencies.owns(id);
@@ -435,7 +453,7 @@ export function createWorkspaceOutputController(
                 }
               : null;
           if (pair.retained) slot.retained = pair.retained;
-          if (value.pending?.target === target) continue;
+          if (value.admission?.body.target === target) continue;
           if (
             !pair.active &&
             !summaryActive &&
@@ -454,7 +472,7 @@ export function createWorkspaceOutputController(
           .map((entry) => parseXmpArtifact(entry, id))
           .filter((entry): entry is XmpArtifact => entry !== undefined);
         value.xmp = entries[0] ?? null;
-        if (!value.pending || value.pending.target) {
+        if (!value.admission?.body.target) {
           value.xmpState = value.xmp ? "succeeded" : "idle";
           value.xmpNote = value.xmp
             ? expired(value.xmp.expiresAt)
@@ -512,10 +530,12 @@ export function createWorkspaceOutputController(
   };
   const sendPending = async (id: string): Promise<void> => {
     const value = session(id);
-    const body = value.pending;
-    if (!body) return;
+    const admission = value.admission;
+    const body = admission?.body;
+    if (!admission || !body) return;
     const slot = body.target ? value.images[body.target] : undefined;
     const uncertain = () => {
+      if (value.admission !== admission) return;
       if (slot) {
         slot.state = "outcome-unknown";
         slot.note =
@@ -537,12 +557,13 @@ export function createWorkspaceOutputController(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (value.pending !== body) return;
+      if (value.admission !== admission) return;
       if (!response.ok) {
         const error: unknown = await response
           .clone()
           .json()
           .catch(() => undefined);
+        if (value.admission !== admission) return;
         const refused =
           response.status === 503 &&
           isRecord(error) &&
@@ -558,8 +579,8 @@ export function createWorkspaceOutputController(
           return;
         }
         const note = await failureNote(response, "Export");
-        value.pending = undefined;
-        dependencies.release(id);
+        if (value.admission !== admission) return;
+        settleAdmission(value, admission);
         if (slot) {
           slot.active = null;
           slot.state = "failed";
@@ -572,6 +593,7 @@ export function createWorkspaceOutputController(
         return;
       }
       const record: unknown = await response.json().catch(() => undefined);
+      if (value.admission !== admission) return;
       const xmp = body.target ? undefined : parseXmpArtifact(record, id);
       if (body.target) {
         if (
@@ -589,8 +611,7 @@ export function createWorkspaceOutputController(
           uncertain();
           return;
         }
-        value.pending = undefined;
-        dependencies.release(id);
+        settleAdmission(value, admission);
         if (slot) {
           slot.state = record["state"] as OutputState;
           slot.note = "Export accepted.";
@@ -616,8 +637,7 @@ export function createWorkspaceOutputController(
           uncertain();
           return;
         }
-        value.pending = undefined;
-        dependencies.release(id);
+        settleAdmission(value, admission);
         value.xmp = xmp;
         value.xmpState = "succeeded";
         value.xmpNote =
@@ -631,8 +651,8 @@ export function createWorkspaceOutputController(
   const submit = async (id: string, target?: OutputTarget): Promise<void> => {
     const value = session(id);
     if (!dependencies.owns(id) || value.submitting) return;
-    if (value.pending) {
-      if (value.pending.target === target) await sendPending(id);
+    if (value.admission) {
+      if (value.admission.body.target === target) await sendPending(id);
       return;
     }
     const before = dependencies.facts(id);
@@ -690,8 +710,7 @@ export function createWorkspaceOutputController(
         expectedSourceRevision: source,
         ...(target ? { target } : {}),
       };
-      value.pending = body;
-      dependencies.acquire(id);
+      admit(value, body);
       await sendPending(id);
     } finally {
       value.submitting = false;
@@ -722,20 +741,19 @@ export function createWorkspaceOutputController(
   const retry = async (id: string, target: OutputTarget): Promise<void> => {
     const value = session(id);
     if (!dependencies.owns(id)) return;
-    if (value.pending) {
-      if (value.pending.target === target) await sendPending(id);
+    if (value.admission) {
+      if (value.admission.body.target === target) await sendPending(id);
       return;
     }
     const active = value.images[target].active;
     if (!active) return;
-    value.pending = {
+    admit(value, {
       requestId: `web-retry-${crypto.randomUUID()}`,
       expectedRecipeVersion: active.recipeVersion ?? "",
       expectedSourceRevision: active.sourceRevision ?? "",
       target,
       retryExportId: active.exportId,
-    };
-    dependencies.acquire(id);
+    });
     value.generation++;
     value.submitting = true;
     value.images[target].state = "submitting";
@@ -821,7 +839,13 @@ export function createWorkspaceOutputController(
       timer = undefined;
     },
     pending(id: string) {
-      return Boolean(session(id).pending);
+      return Boolean(session(id).admission);
+    },
+    /// The barrier holding this Photo's later writes behind its unresolved
+    /// submission. It exists exactly while the admission does, so the edit
+    /// stream can never wait on a barrier whose body already settled.
+    writeBarrier(id: string): Promise<void> | undefined {
+      return session(id).admission?.barrier.promise;
     },
     view(id: string): WorkspaceOutputsView {
       const value = session(id);
@@ -835,7 +859,7 @@ export function createWorkspaceOutputController(
         canRender: false,
         canRenderFilm: false,
       };
-      const locked = Boolean(value.pending) || value.submitting;
+      const locked = Boolean(value.admission) || value.submitting;
       return {
         tiff: imageOutputView(
           value.images["development-tiff"],

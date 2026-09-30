@@ -15,7 +15,7 @@ const ARTIFACT_SHA256: &str = "abcdef0123456789abcdef0123456789abcdef0123456789a
 
 fn identity<'a>(exposure_milli_ev: i64) -> RetainedDevelopmentIdentity<'a> {
     RetainedDevelopmentIdentity {
-        settings: "current",
+        matches_baseline: false,
         recipe_revision: Some(REVISION),
         exposure_milli_ev,
         source_revision: SOURCE_REVISION,
@@ -242,7 +242,7 @@ fn a_baseline_identity_matches_the_captured_baseline_settings() {
     // a result produced under exactly the baseline settings is the same
     // development whatever revision captured it.
     let baseline = RetainedDevelopmentIdentity {
-        settings: "baseline",
+        matches_baseline: true,
         recipe_revision: None,
         exposure_milli_ev: 0,
         source_revision: SOURCE_REVISION,
@@ -252,7 +252,7 @@ fn a_baseline_identity_matches_the_captured_baseline_settings() {
     // The current selector still matches the captured revision exactly,
     // so a request that names no revision is not current.
     let current = RetainedDevelopmentIdentity {
-        settings: "current",
+        matches_baseline: false,
         exposure_milli_ev: 0,
         ..baseline
     };

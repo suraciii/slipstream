@@ -1,4 +1,4 @@
-use slipstream_processing::protocol::{Outcome, Workload};
+use slipstream_processing::protocol::{Outcome, RESULT_BYTES, Workload};
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -43,7 +43,7 @@ fn main() {
         Ok(result) => result,
         Err(_) => std::process::exit(71),
     };
-    if result.write_all(&[0; 4096]).is_err() {
+    if result.write_all(&[0; RESULT_BYTES]).is_err() {
         std::process::exit(71);
     }
     let outcome = match workload {
@@ -123,7 +123,7 @@ fn main() {
 fn finish(file: &mut File, launch_id: &str, outcome: Outcome) {
     let bytes = serde_json::to_vec(&serde_json::json!({"launch_id":launch_id,"outcome":outcome}))
         .expect("fixed result");
-    let mut block = [0u8; 4096];
+    let mut block = [0u8; RESULT_BYTES];
     block[..bytes.len()].copy_from_slice(&bytes);
     if file
         .seek(SeekFrom::Start(0))

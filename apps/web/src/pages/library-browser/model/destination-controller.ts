@@ -28,6 +28,12 @@ export type SourceEstablishment = Readonly<{
   kind: "established" | "superseded" | "failed" | "missing";
 }>;
 
+export type SourceReestablishment =
+  | Readonly<{ kind: "established"; authority: SourceAuthority }>
+  | Readonly<{ kind: "superseded" }>
+  | Readonly<{ kind: "failed" }>
+  | Readonly<{ kind: "missing" }>;
+
 export type SourceEstablishmentOptions = Readonly<{
   restoration?: NavigationGridRestoration;
   folderPublication?: string;
@@ -90,7 +96,7 @@ type Dependencies = Readonly<{
   reopen: (
     photoId: string,
     intent: DestinationEstablishment,
-  ) => Promise<SourceAuthority | undefined>;
+  ) => Promise<SourceReestablishment>;
   openPhoto: (
     index: number,
     address: "push" | "none",
@@ -187,7 +193,14 @@ export function createDestinationController(deps: Dependencies) {
     if (resolved.kind === "missing") return fallbackGrid(destination, intent);
     if (resolved.kind === "expired" && allowReopen) {
       const reopened = await deps.reopen(photoId, intent);
-      if (!reopened || !ownsSource(intent, reopened)) return false;
+      if (!current(intent) || reopened.kind === "superseded") return false;
+      if (reopened.kind === "missing")
+        return fallbackAll(
+          "This source is no longer available. Showing All Photos.",
+          intent,
+        );
+      if (reopened.kind === "failed") return retryable(destination, intent);
+      if (!ownsSource(intent, reopened.authority)) return false;
       return resolvePhoto(destination, photoId, intent, false);
     }
     return resolved.kind === "failed" || resolved.kind === "expired"

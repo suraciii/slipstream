@@ -33,11 +33,12 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
     ProcessingConfig,
-    export_manager::{ExportManager, PreviewCancellation},
+    export_manager::ExportManager,
     http::{
         self, CLI_CONTRACT_HEADER, HttpState, cli_error, invalid_cli, require_cli_contract,
         require_published, valid_id,
     },
+    preview_render::{PreviewCancellation, PreviewRender, RenderedPreview},
 };
 
 const QUALITY_LIMIT: &str = "2560-long-edge";
@@ -122,6 +123,7 @@ impl BuildFailure {
 pub(crate) struct DevelopmentProxyManager {
     library: Arc<Library>,
     exports: Arc<ExportManager>,
+    render: PreviewRender,
     processing: ProcessingConfig,
     root: PathBuf,
     builds: Arc<AsyncMutex<HashMap<String, BuildClaim>>>,
@@ -204,6 +206,7 @@ impl DevelopmentProxyManager {
         fs::create_dir_all(&root)
             .map_err(|error| format!("Development Proxy storage is unavailable: {error}"))?;
         Ok(Self {
+            render: PreviewRender::new(Arc::clone(&library), Arc::clone(&exports)),
             library,
             exports,
             processing,
@@ -563,8 +566,8 @@ impl DevelopmentProxyManager {
         claim: &BuildClaim,
     ) -> Result<(), BuildFailure> {
         let rendered = self
-            .exports
-            .render_preview(photo_id, "develop", "baseline", claim.cancellation.clone())
+            .render
+            .render(photo_id, "develop", "baseline", claim.cancellation.clone())
             .await
             .map_err(preview_build_failure)?;
         let result = self
@@ -580,7 +583,7 @@ impl DevelopmentProxyManager {
         photo_id: &str,
         expected_revision: &str,
         claim: &BuildClaim,
-        rendered: &crate::export_manager::PreviewRenderResult,
+        rendered: &RenderedPreview,
     ) -> Result<(), BuildFailure> {
         let input_path = rendered.path.clone();
         let frame = tokio::task::spawn_blocking(move || {
@@ -647,7 +650,7 @@ impl DevelopmentProxyManager {
     async fn publish(
         &self,
         claim: &BuildClaim,
-        rendered: &crate::export_manager::PreviewRenderResult,
+        rendered: &RenderedPreview,
         record: DevelopmentProxyRecord,
         temporary: &Path,
     ) -> Result<(), BuildFailure> {
