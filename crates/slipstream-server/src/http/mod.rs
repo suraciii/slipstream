@@ -737,98 +737,66 @@ pub(crate) struct ApiError {
 
 impl From<ServerError> for ApiError {
     fn from(error: ServerError) -> Self {
-        if let ServerError::Library(LibraryError::Mutation(error)) = error {
-            return match error {
-                slipstream_core::MutationError::Invalid => Self {
-                    status: StatusCode::BAD_REQUEST,
-                    message: "Invalid mutation request",
-                },
-                slipstream_core::MutationError::NotFound => Self {
-                    status: StatusCode::NOT_FOUND,
-                    message: "Mutation target not found",
-                },
-                slipstream_core::MutationError::Conflict => Self {
-                    status: StatusCode::CONFLICT,
-                    message: "Mutation conflicts with current state",
-                },
-                slipstream_core::MutationError::Persistence
-                | slipstream_core::MutationError::Saturated
-                | slipstream_core::MutationError::Closed => Self {
-                    status: StatusCode::SERVICE_UNAVAILABLE,
-                    message: "Mutation could not be persisted",
-                },
-            };
-        }
-        match error {
-            ServerError::BrowseNotFound => Self {
-                status: StatusCode::NOT_FOUND,
-                message: "Browse source expired or not found",
+        use slipstream_core::MutationError;
+        let (status, message) = match error {
+            ServerError::Library(LibraryError::Mutation(mutation)) => match mutation {
+                MutationError::Invalid => (StatusCode::BAD_REQUEST, "Invalid mutation request"),
+                MutationError::NotFound => (StatusCode::NOT_FOUND, "Mutation target not found"),
+                MutationError::Conflict => (
+                    StatusCode::CONFLICT,
+                    "Mutation conflicts with current state",
+                ),
+                MutationError::Persistence | MutationError::Saturated | MutationError::Closed => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Mutation could not be persisted",
+                ),
             },
-            ServerError::PhotoNotFound => Self {
-                status: StatusCode::NOT_FOUND,
-                message: "Photo not found",
-            },
-            ServerError::BrowseLimit => Self {
-                status: StatusCode::BAD_REQUEST,
-                message: "Browse window is invalid",
-            },
-            ServerError::BrowseOrder => Self {
-                status: StatusCode::BAD_REQUEST,
-                message: "Invalid browse order",
-            },
-            ServerError::FileLocationsExpired => Self {
-                status: StatusCode::CONFLICT,
-                message: "File Locations expired",
-            },
-            ServerError::FolderInvalid => Self {
-                status: StatusCode::BAD_REQUEST,
-                message: "Invalid Original Folder",
-            },
-            ServerError::RecoveryScope { .. } => Self {
-                status: StatusCode::PAYLOAD_TOO_LARGE,
-                message: "Recovery review scope exceeds the advertised bound; narrow the Folder prefix",
-            },
-            ServerError::FolderNotFound => Self {
-                status: StatusCode::NOT_FOUND,
-                message: "Unknown Original Folder",
-            },
-            ServerError::FileLocationWindow => Self {
-                status: StatusCode::BAD_REQUEST,
-                message: "File Location window is invalid",
-            },
-            ServerError::FolderAlbumLimit => Self {
-                status: StatusCode::PAYLOAD_TOO_LARGE,
-                message: "Original Folder contains too many Photos for one Album operation",
-            },
-            ServerError::QueryCapacity => Self {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                message: "Retained query capacity is unavailable",
-            },
-            ServerError::RemovalFilter => Self {
-                status: StatusCode::BAD_REQUEST,
-                message: "Removal requires a Browse Snapshot filtered to Rejected",
-            },
-            ServerError::RemovedWindow => Self {
-                status: StatusCode::BAD_REQUEST,
-                message: "Removed Photos window is invalid",
-            },
-            ServerError::RestorationInvalid => Self {
-                status: StatusCode::BAD_REQUEST,
-                message: "Restore names exactly one operation or a bounded Photo list",
-            },
-            ServerError::NotPublished => Self {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                message: "Library is initializing; retry after the first scan completes",
-            },
-            ServerError::PreviewUnavailable => Self {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                message: "Preview service unavailable",
-            },
-            _ => Self {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                message: "Request failed",
-            },
-        }
+            ServerError::BrowseNotFound => {
+                (StatusCode::NOT_FOUND, "Browse source expired or not found")
+            }
+            ServerError::PhotoNotFound => (StatusCode::NOT_FOUND, "Photo not found"),
+            ServerError::BrowseLimit => (StatusCode::BAD_REQUEST, "Browse window is invalid"),
+            ServerError::BrowseOrder => (StatusCode::BAD_REQUEST, "Invalid browse order"),
+            ServerError::FileLocationsExpired => (StatusCode::CONFLICT, "File Locations expired"),
+            ServerError::FolderInvalid => (StatusCode::BAD_REQUEST, "Invalid Original Folder"),
+            ServerError::RecoveryScope { .. } => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Recovery review scope exceeds the advertised bound; narrow the Folder prefix",
+            ),
+            ServerError::FolderNotFound => (StatusCode::NOT_FOUND, "Unknown Original Folder"),
+            ServerError::FileLocationWindow => {
+                (StatusCode::BAD_REQUEST, "File Location window is invalid")
+            }
+            ServerError::FolderAlbumLimit => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Original Folder contains too many Photos for one Album operation",
+            ),
+            ServerError::QueryCapacity => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Retained query capacity is unavailable",
+            ),
+            ServerError::RemovalFilter => (
+                StatusCode::BAD_REQUEST,
+                "Removal requires a Browse Snapshot filtered to Rejected",
+            ),
+            ServerError::RemovedWindow => {
+                (StatusCode::BAD_REQUEST, "Removed Photos window is invalid")
+            }
+            ServerError::RestorationInvalid => (
+                StatusCode::BAD_REQUEST,
+                "Restore names exactly one operation or a bounded Photo list",
+            ),
+            ServerError::NotPublished => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Library is initializing; retry after the first scan completes",
+            ),
+            ServerError::PreviewUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Preview service unavailable",
+            ),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, "Request failed"),
+        };
+        Self { status, message }
     }
 }
 
@@ -839,12 +807,5 @@ impl IntoResponse for ApiError {
 }
 
 pub(crate) fn api_error(status: StatusCode, message: &'static str) -> Response<Body> {
-    let body = serde_json::to_vec(&serde_json::json!({ "error": message }))
-        .expect("static JSON serializes");
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::CONTENT_LENGTH, body.len())
-        .body(Body::from(body))
-        .expect("valid API response")
+    json_response(status, &serde_json::json!({ "error": message }))
 }

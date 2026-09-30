@@ -5,7 +5,10 @@
 //! immutable snapshot, the isolated pinned engine attempts of the closed
 //! `development-tiff`, `film-jpeg` and `proxy-film` workloads, output
 //! transfer, validation acknowledgement, and durable reconciliation. It
-//! never resolves Photos, reads the Library, or publishes Exports.
+//! never resolves Photos, reads the Library, or publishes Exports. The
+//! host boundary enforcement lives in `photo_host`, the bounded Start
+//! admission in `photo_admission`, and the durable registry in
+//! `photo_registry`.
 
 use crate::{
     backend, instance_claim,
@@ -32,8 +35,16 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+#[path = "photo_admission.rs"]
+mod photo_admission;
+#[path = "photo_host.rs"]
+mod photo_host;
 #[path = "photo_registry.rs"]
 mod photo_registry;
+use photo_admission::{StartAdmission, begin_start, finalize_start, seal_source};
+#[cfg(test)]
+use photo_host::stop_container;
+use photo_host::{Headroom, inspect_image};
 #[cfg(test)]
 use photo_registry::load;
 use photo_registry::{
@@ -55,20 +66,6 @@ const INODES_PER_ATTEMPT: u64 = 8;
 /// The finite exposure range covered by the executed bundle evidence, in
 /// thousandths of an EV. Values outside this range are refused at admission.
 const EXPOSURE_MILLI_EV_RANGE: std::ops::RangeInclusive<i64> = 0..=1000;
-/// Terminal outcomes a settled receipt may carry.
-const OUTCOMES: [&str; 11] = [
-    "completed",
-    "allocation-failed",
-    "oom",
-    "storage-full",
-    "cancelled",
-    "deadline",
-    "engine-failed",
-    "interrupted",
-    "unknown",
-    "refused-source-mismatch",
-    "refused-output-validation",
-];
 const RESULT_NAME: &str = "result";
 
 /// The launcher-owned result path of one closed workload. The
@@ -272,6 +269,18 @@ fn state_name(state: State) -> &'static str {
     }
 }
 
+/// The cancellation or absolute-deadline reason currently requested for
+/// this attempt, if either applies.
+fn requested_outcome(record: &PhotoRecord) -> Result<Option<Outcome>, ErrorCode> {
+    if record.cancellation_requested {
+        Ok(Some(Outcome::Cancelled))
+    } else if now()? >= record.deadline_unix_ms {
+        Ok(Some(Outcome::Deadline))
+    } else {
+        Ok(None)
+    }
+}
+
 /// The canonical recipe digest: the ordered semantic tuple
 /// `{exposure_milli_ev, white_balance.mode}` over compact canonical JSON.
 pub fn recipe_digest(recipe: &Recipe) -> Result<String, ErrorCode> {
@@ -294,7 +303,7 @@ pub fn manifest_digest(request: &Request) -> Result<String, ErrorCode> {
             recipe,
             workload,
             ..
-        } => manifest_digest_of(source, recipe, policy, bundle, workload),
+        } => manifest_digest_parts(source, recipe, policy, bundle, workload),
         _ => Err(ErrorCode::InvalidRequest),
     }
 }
@@ -321,20 +330,6 @@ fn manifest_digest_parts(
     }))
     .map_err(|_| ErrorCode::InvalidRequest)?;
     Ok(digest(&bytes))
-}
-
-fn recipe_digest_of(recipe: &Recipe) -> Result<String, ErrorCode> {
-    recipe_digest(recipe)
-}
-
-fn manifest_digest_of(
-    source: &Source,
-    recipe: &Recipe,
-    policy: &str,
-    bundle: &str,
-    workload: &str,
-) -> Result<String, ErrorCode> {
-    manifest_digest_parts(source, recipe, policy, bundle, workload)
 }
 
 fn attempt_unit(instance: &str, launch_id: &str) -> String {
@@ -365,15 +360,6 @@ struct Live {
     pid: u32,
     exit_code: Option<u8>,
     oom: bool,
-}
-
-/// The outcome of the bounded admission checks of one Start request.
-#[derive(Debug)]
-enum StartAdmission {
-    /// A durable receipt for this attempt identity already exists.
-    Replay(Box<ResultBody>),
-    /// A fresh executor intent was persisted for the copied descriptor.
-    Intent(Box<PhotoRecord>),
 }
 
 impl PhotoExecutor {
@@ -535,18 +521,6 @@ impl PhotoExecutor {
         self.data.lock().map_err(|_| ErrorCode::Uncertain)
     }
 
-    fn limits(&self) -> Limits {
-        Limits {
-            memory_bytes: self.config.memory_bytes,
-            swap_bytes: 0,
-            cpu_quota_us: self.config.cpu_quota_us,
-            cpu_period_us: 100_000,
-            tasks: u64::from(self.config.tasks),
-            storage_bytes: self.config.staged_storage_bytes_max,
-            storage_inodes: self.config.staged_storage_inodes_max,
-        }
-    }
-
     fn capability(&self, ready: bool) -> Result<ResultBody, ErrorCode> {
         let data = self.lock()?;
         Ok(capability_body(&data.registry, &self.config, ready))
@@ -634,13 +608,7 @@ impl PhotoExecutor {
         // Phase C: finalize the durable intent from the verified copy.
         let body = {
             let mut data = self.lock()?;
-            finalize_start(
-                &mut data.registry,
-                &self.config,
-                Path::new(&root),
-                &request,
-                sealed,
-            )?
+            finalize_start(&mut data.registry, Path::new(&root), &request, sealed)?
         };
         let planned = self
             .lock()?
@@ -663,27 +631,54 @@ impl PhotoExecutor {
         Ok(body)
     }
 
+    /// Expire settled receipts, then bind the attempt identity to the
+    /// durable export identity: a foreign export never receives, mutes, or
+    /// cancels an artifact.
+    fn bound_record<'a>(
+        &self,
+        data: &'a mut Data,
+        incarnation: &str,
+        sequence: u64,
+        export_id: &str,
+    ) -> Result<&'a PhotoRecord, ErrorCode> {
+        expire(
+            &mut data.registry,
+            now()?,
+            self.config.receipt_retention_seconds,
+        )?;
+        let record = record_ref(&data.registry, incarnation, sequence)?;
+        if record.export_id != export_id {
+            return Err(ErrorCode::Conflict);
+        }
+        Ok(record)
+    }
+
+    /// Apply one bounded edit to the durable record under the journal lock.
+    fn edit_record(
+        &self,
+        sequence: u64,
+        edit: impl FnOnce(&mut PhotoRecord),
+    ) -> Result<(), ErrorCode> {
+        let mut data = self.lock()?;
+        let record = data
+            .registry
+            .records
+            .get_mut(&sequence)
+            .ok_or(ErrorCode::Uncertain)?;
+        edit(record);
+        persist(Path::new(&self.config.root), &data.registry)
+    }
+
     fn output(
         &self,
         incarnation: &str,
         export_id: &str,
         sequence: u64,
-        descriptor: Option<File>,
+        mut descriptor: Option<File>,
     ) -> Result<ResultBody, ErrorCode> {
-        let mut descriptor = descriptor;
         let (identity, result_path, mut descriptor, workload) = {
             let mut data = self.lock()?;
-            expire(
-                &mut data.registry,
-                now()?,
-                self.config.receipt_retention_seconds,
-            )?;
-            let record = record_ref(&data.registry, incarnation, sequence)?;
-            // The attempt identity is bound to the durable export identity:
-            // a foreign export never receives, mutes, or cancels an artifact.
-            if record.export_id != export_id {
-                return Err(ErrorCode::Conflict);
-            }
+            let record = self.bound_record(&mut data, incarnation, sequence, export_id)?;
             // The durable claim admits exactly one service artifact; once it
             // is spent, no retry or concurrent request may transfer again.
             if record.output_transferred {
@@ -744,15 +739,7 @@ impl PhotoExecutor {
         accepted: bool,
     ) -> Result<ResultBody, ErrorCode> {
         let mut data = self.lock()?;
-        expire(
-            &mut data.registry,
-            now()?,
-            self.config.receipt_retention_seconds,
-        )?;
-        let record = record_ref(&data.registry, incarnation, sequence)?;
-        if record.export_id != export_id {
-            return Err(ErrorCode::Conflict);
-        }
+        let record = self.bound_record(&mut data, incarnation, sequence, export_id)?;
         if record.terminal() {
             return Ok(record.result_body(incarnation));
         }
@@ -769,13 +756,12 @@ impl PhotoExecutor {
         if output.size != size || output.sha256 != sha256 {
             return Err(ErrorCode::Conflict);
         }
-        let record = {
-            let record = record_ref_mut(&mut data.registry, incarnation, sequence)?;
-            record.validation_ack = Some(accepted);
-            record.clone()
-        };
+        // The acknowledgement is not part of the wire receipt, so the bound
+        // record already carries the body the edit settles to.
+        let body = record.result_body(incarnation);
+        record_ref_mut(&mut data.registry, incarnation, sequence)?.validation_ack = Some(accepted);
         persist(Path::new(&self.config.root), &data.registry)?;
-        Ok(record.result_body(incarnation))
+        Ok(body)
     }
 
     fn inspect(
@@ -785,15 +771,7 @@ impl PhotoExecutor {
         sequence: u64,
     ) -> Result<ResultBody, ErrorCode> {
         let mut data = self.lock()?;
-        expire(
-            &mut data.registry,
-            now()?,
-            self.config.receipt_retention_seconds,
-        )?;
-        let record = record_ref(&data.registry, incarnation, sequence)?;
-        if record.export_id != export_id {
-            return Err(ErrorCode::Conflict);
-        }
+        let record = self.bound_record(&mut data, incarnation, sequence, export_id)?;
         Ok(record.result_body(incarnation))
     }
 
@@ -804,25 +782,16 @@ impl PhotoExecutor {
         sequence: u64,
     ) -> Result<ResultBody, ErrorCode> {
         let mut data = self.lock()?;
-        expire(
-            &mut data.registry,
-            now()?,
-            self.config.receipt_retention_seconds,
-        )?;
-        let record = record_ref(&data.registry, incarnation, sequence)?;
-        if record.export_id != export_id {
-            return Err(ErrorCode::Conflict);
-        }
+        let record = self.bound_record(&mut data, incarnation, sequence, export_id)?;
         if record.terminal() {
             return Ok(record.result_body(incarnation));
         }
-        let record = {
-            let record = record_ref_mut(&mut data.registry, incarnation, sequence)?;
-            record.cancellation_requested = true;
-            record.clone()
-        };
+        // The cancellation flag is not part of the wire receipt, so the
+        // bound record already carries the body the edit settles to.
+        let body = record.result_body(incarnation);
+        record_ref_mut(&mut data.registry, incarnation, sequence)?.cancellation_requested = true;
         persist(Path::new(&self.config.root), &data.registry)?;
-        Ok(record.result_body(incarnation))
+        Ok(body)
     }
 
     fn update(&self, record: &PhotoRecord) -> Result<(), ErrorCode> {
@@ -882,20 +851,9 @@ impl PhotoExecutor {
                 .records
                 .get(&sequence)
                 .ok_or(ErrorCode::Uncertain)?;
-            let cancelled = current.cancellation_requested;
-            let expired = now()? >= current.deadline_unix_ms;
-            if cancelled || expired {
+            if let Some(reason) = requested_outcome(current)? {
                 drop(data);
-                return self
-                    .settle(
-                        sequence,
-                        if cancelled {
-                            Outcome::Cancelled
-                        } else {
-                            Outcome::Deadline
-                        },
-                    )
-                    .map(|_| ());
+                return self.settle(sequence, reason).map(|_| ());
             }
             gate.write_all(format!("{}\n", record.launch_id).as_bytes())
                 .map_err(|_| ErrorCode::Uncertain)?;
@@ -914,11 +872,8 @@ impl PhotoExecutor {
             if !self.live(&current)?.running {
                 break;
             }
-            if current.cancellation_requested {
-                return self.settle(sequence, Outcome::Cancelled).map(|_| ());
-            }
-            if now()? >= current.deadline_unix_ms {
-                return self.settle(sequence, Outcome::Deadline).map(|_| ());
+            if let Some(reason) = requested_outcome(&current)? {
+                return self.settle(sequence, reason).map(|_| ());
             }
             thread::sleep(Duration::from_millis(50));
         }
@@ -927,78 +882,46 @@ impl PhotoExecutor {
 
     fn finish(self: &Arc<Self>, sequence: u64) -> Result<(), ErrorCode> {
         let mut record = self.record(sequence)?;
-        if self.live(&record).is_ok_and(|live| live.running) {
-            self.stop(&mut record)?;
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while self.live(&record)?.running {
-                if Instant::now() >= deadline {
-                    return Err(ErrorCode::Uncertain);
-                }
-                thread::sleep(Duration::from_millis(20));
-            }
-        }
+        self.stop_and_wait(&mut record)?;
         let evidence = self.terminal_evidence(&record)?;
         let worker = self.worker_outcome(&record)?;
-        let requested = if record.cancellation_requested {
-            Some(Outcome::Cancelled)
-        } else if now()? >= record.deadline_unix_ms {
-            Some(Outcome::Deadline)
-        } else {
-            None
-        };
+        let requested = requested_outcome(&record)?;
         let outcome = journal::classify(&evidence, worker, requested);
-        if outcome == Outcome::Completed {
+        // A completed attempt publishes only a validated artifact; a failed
+        // validation settles with the output-validation refusal instead.
+        let output = if outcome == Outcome::Completed {
             let Some(name) = output_name(&record.workload) else {
                 return Err(ErrorCode::Uncertain);
             };
             let output_path = record.workspace(Path::new(&self.config.root));
             let output_path = output_path.join("work").join(name);
-            let identity =
-                validate_output(&record.workload, &output_path, self.config.output_bytes_max);
-            match identity {
-                Ok(identity) => {
-                    let mut data = self.lock()?;
-                    let record = data
-                        .registry
-                        .records
-                        .get_mut(&sequence)
-                        .ok_or(ErrorCode::Uncertain)?;
-                    record.evidence = Some(evidence);
-                    record.output = Some(identity);
-                    record.phase = Phase::OutputReady;
-                    record.state = State::Settling;
-                    persist(Path::new(&self.config.root), &data.registry)?;
-                    drop(data);
-                    return self.wait_settled(sequence);
-                }
-                Err(_) => {
-                    let mut data = self.lock()?;
-                    let record = data
-                        .registry
-                        .records
-                        .get_mut(&sequence)
-                        .ok_or(ErrorCode::Uncertain)?;
-                    if record.outcome.is_none() {
-                        record.outcome = Some("refused-output-validation".into());
-                    }
-                    record.evidence = Some(evidence);
-                    record.state = State::Settling;
-                    persist(Path::new(&self.config.root), &data.registry)?;
-                }
-            }
+            validate_output(&record.workload, &output_path, self.config.output_bytes_max).ok()
         } else {
-            let mut data = self.lock()?;
-            let record = data
-                .registry
-                .records
-                .get_mut(&sequence)
-                .ok_or(ErrorCode::Uncertain)?;
-            if record.outcome.is_none() {
-                record.outcome = Some(outcome_name(outcome).into());
+            None
+        };
+        let published = output.is_some();
+        let outcome_text = if !published && outcome == Outcome::Completed {
+            Some("refused-output-validation")
+        } else if outcome != Outcome::Completed {
+            Some(outcome_name(outcome))
+        } else {
+            None
+        };
+        self.edit_record(sequence, |record| {
+            if record.outcome.is_none()
+                && let Some(text) = outcome_text
+            {
+                record.outcome = Some(text.into());
             }
             record.evidence = Some(evidence);
+            if let Some(identity) = output {
+                record.output = Some(identity);
+                record.phase = Phase::OutputReady;
+            }
             record.state = State::Settling;
-            persist(Path::new(&self.config.root), &data.registry)?;
+        })?;
+        if published {
+            return self.wait_settled(sequence);
         }
         self.settle_tail(sequence)?;
         Ok(())
@@ -1008,13 +931,7 @@ impl PhotoExecutor {
         loop {
             let record = self.record(sequence)?;
             if let Some(accepted) = record.validation_ack {
-                {
-                    let mut data = self.lock()?;
-                    let record = data
-                        .registry
-                        .records
-                        .get_mut(&sequence)
-                        .ok_or(ErrorCode::Uncertain)?;
+                self.edit_record(sequence, |record| {
                     if record.outcome.is_none() {
                         record.outcome = Some(if accepted {
                             "completed".into()
@@ -1023,16 +940,12 @@ impl PhotoExecutor {
                         });
                     }
                     record.state = State::Settling;
-                    persist(Path::new(&self.config.root), &data.registry)?;
-                }
+                })?;
                 self.settle_tail(sequence)?;
                 return Ok(());
             }
-            if record.cancellation_requested {
-                return self.settle(sequence, Outcome::Cancelled).map(|_| ());
-            }
-            if now()? >= record.deadline_unix_ms {
-                return self.settle(sequence, Outcome::Deadline).map(|_| ());
+            if let Some(reason) = requested_outcome(&record)? {
+                return self.settle(sequence, reason).map(|_| ());
             }
             thread::sleep(Duration::from_millis(50));
         }
@@ -1059,39 +972,32 @@ impl PhotoExecutor {
         self.settle_tail(sequence)
     }
 
-    /// Terminal settlement: stop the worker, capture the terminal resource
-    /// evidence, remove the attempt boundary, and settle the receipt durably.
-    fn settle_tail(&self, sequence: u64) -> Result<ResultBody, ErrorCode> {
-        let mut record = self.record(sequence)?;
-        if self.live(&record).is_ok_and(|live| live.running) {
-            self.stop(&mut record)?;
+    /// Stop a still-running worker and wait for its confirmed exit.
+    fn stop_and_wait(&self, record: &mut PhotoRecord) -> Result<(), ErrorCode> {
+        if self.live(record).is_ok_and(|live| live.running) {
+            self.stop(record)?;
             let deadline = Instant::now() + Duration::from_secs(5);
-            while self.live(&record)?.running {
+            while self.live(record)?.running {
                 if Instant::now() >= deadline {
                     return Err(ErrorCode::Uncertain);
                 }
                 thread::sleep(Duration::from_millis(20));
             }
         }
-        if record.unit_invocation.is_some() {
-            let evidence = self.terminal_evidence(&record)?;
-            let mut data = self.lock()?;
-            let record = data
-                .registry
-                .records
-                .get_mut(&sequence)
-                .ok_or(ErrorCode::Uncertain)?;
-            record.evidence = Some(evidence);
-            persist(Path::new(&self.config.root), &data.registry)?;
-            drop(data);
+        Ok(())
+    }
+
+    /// Terminal settlement: stop the worker, capture the terminal resource
+    /// evidence, remove the attempt boundary, and settle the receipt durably.
+    fn settle_tail(&self, sequence: u64) -> Result<ResultBody, ErrorCode> {
+        let mut record = self.record(sequence)?;
+        self.stop_and_wait(&mut record)?;
+        let evidence = if record.unit_invocation.is_some() {
+            Some(self.terminal_evidence(&record)?)
         } else if record.evidence.is_none() {
-            let mut data = self.lock()?;
-            let record = data
-                .registry
-                .records
-                .get_mut(&sequence)
-                .ok_or(ErrorCode::Uncertain)?;
-            record.evidence = Some(Evidence {
+            // An attempt that never reached its attempt boundary still
+            // settles with explicit unpopulated evidence.
+            Some(Evidence {
                 peak_bytes: 0,
                 exit_code: None,
                 docker_oom_killed: None,
@@ -1101,29 +1007,29 @@ impl PhotoExecutor {
                 parent_after: None,
                 populated: Some(false),
                 terminal_snapshot: None,
-            });
-            persist(Path::new(&self.config.root), &data.registry)?;
-            drop(data);
+            })
+        } else {
+            None
+        };
+        if let Some(evidence) = evidence {
+            self.edit_record(sequence, |record| record.evidence = Some(evidence))?;
         }
         self.cleanup(&mut record)?;
         let body = {
             let mut data = self.lock()?;
             let incarnation = data.registry.incarnation.clone();
-            let record = {
-                let record = data
-                    .registry
-                    .records
-                    .get_mut(&sequence)
-                    .ok_or(ErrorCode::Uncertain)?;
-                record.cleanup = Cleanup::Complete;
-                record.state = State::Settled;
-                record.settled_at_unix_ms = Some(now()?);
-                record.clone()
-            };
+            let record = data
+                .registry
+                .records
+                .get_mut(&sequence)
+                .ok_or(ErrorCode::Uncertain)?;
+            record.cleanup = Cleanup::Complete;
+            record.state = State::Settled;
+            record.settled_at_unix_ms = Some(now()?);
+            let body = record.result_body(&incarnation);
             if data.registry.active == Some(sequence) {
                 data.registry.active = None;
             }
-            let body = record.result_body(&incarnation);
             persist(Path::new(&self.config.root), &data.registry)?;
             body
         };
@@ -1161,16 +1067,7 @@ impl PhotoExecutor {
                 waiters.push(record.sequence);
                 continue;
             }
-            if self.live(&record).is_ok_and(|live| live.running) {
-                self.stop(&mut record)?;
-            }
-            let requested = if record.cancellation_requested {
-                Outcome::Cancelled
-            } else if now()? >= record.deadline_unix_ms {
-                Outcome::Deadline
-            } else {
-                Outcome::Interrupted
-            };
+            let requested = requested_outcome(&record)?.unwrap_or(Outcome::Interrupted);
             self.settle(record.sequence, requested)?;
         }
         {
@@ -1214,1311 +1111,6 @@ impl PhotoExecutor {
                 && found.height == identity.height
         })
     }
-}
-
-fn stop_container(
-    record: &mut PhotoRecord,
-    paused: bool,
-    mut update: impl FnMut(&PhotoRecord) -> Result<(), ErrorCode>,
-    mut command: impl FnMut(&[String]) -> Result<String, ErrorCode>,
-) -> Result<(), ErrorCode> {
-    let id = record.container_id.clone().ok_or(ErrorCode::Uncertain)?;
-    if paused {
-        record.manager_pending = Some(ManagerPhase::Unpause);
-        update(record)?;
-        command(&backend::strings(&["unpause", &id]))?;
-        record.manager_pending = None;
-        update(record)?;
-    }
-    command(&backend::strings(&["kill", "--signal", "KILL", &id]))?;
-    Ok(())
-}
-
-// Host boundary --------------------------------------------------------
-
-fn docker(config: &Config, args: &[String]) -> Result<String, ErrorCode> {
-    backend::docker(&config.root, args)
-}
-
-/// Resolve and verify the pinned worker image. The image entrypoint and the
-/// configured bundle label bind the execution identity to the configuration.
-fn inspect_image(config: &Config) -> Result<String, ErrorCode> {
-    let info: Value = serde_json::from_str(&docker(
-        config,
-        &backend::strings(&["info", "--format", "{{json .}}"]),
-    )?)
-    .map_err(|_| ErrorCode::Unavailable)?;
-    if info["CgroupDriver"] != "systemd"
-        || info["CgroupVersion"] != "2"
-        || info["SecurityOptions"].as_array().is_none_or(|options| {
-            options.iter().any(|option| {
-                option
-                    .as_str()
-                    .is_some_and(|text| text.contains("rootless") || text.contains("userns"))
-            })
-        })
-    {
-        return Err(ErrorCode::Unavailable);
-    }
-    let image: Value = serde_json::from_str(&docker(
-        config,
-        &backend::strings(&["image", "inspect", "--format", "{{json .}}", &config.image]),
-    )?)
-    .map_err(|_| ErrorCode::Unavailable)?;
-    let id = image["Id"].as_str().ok_or(ErrorCode::Unavailable)?;
-    if !id.strip_prefix("sha256:").is_some_and(|id| hex(id, 64))
-        || image["Config"]["Entrypoint"] != serde_json::json!([WORKER])
-        || image["Config"]["Labels"]["slipstream.processing.photo.bundle"] != config.bundle
-    {
-        return Err(ErrorCode::Unavailable);
-    }
-    Ok(id.to_owned())
-}
-
-impl PhotoExecutor {
-    fn systemctl(&self, args: &[String]) -> Result<String, ErrorCode> {
-        backend::systemctl(args)
-    }
-
-    fn property(&self, unit: &str, property: &str) -> Result<String, ErrorCode> {
-        self.systemctl(&backend::strings(&[
-            "show",
-            unit,
-            "--property",
-            property,
-            "--value",
-        ]))
-    }
-
-    fn parent_path(&self) -> PathBuf {
-        Path::new(CGROUP).join(parent_unit(&self.config.instance))
-    }
-
-    fn container_name(&self, record: &PhotoRecord) -> String {
-        format!("slipstream-processing-{}", record.launch_id)
-    }
-
-    fn mounts(&self, record: &PhotoRecord) -> Vec<(&'static str, PathBuf, bool)> {
-        let base = record.workspace(Path::new(&self.config.root));
-        vec![
-            ("/control", base.join("control"), false),
-            ("/input", base.join("source"), false),
-            ("/work", base.join("work"), true),
-        ]
-    }
-
-    fn check_caller(&self, pid: u32) -> Result<(), ErrorCode> {
-        let parent = self.parent_path();
-        for pid in [pid, std::process::id()] {
-            let path = backend::process_cgroup(pid)?;
-            if path.starts_with(&parent) {
-                return Err(ErrorCode::Unavailable);
-            }
-            for ancestor in parent.ancestors() {
-                if path.starts_with(ancestor) {
-                    backend::require_unlimited_ancestor(ancestor, ancestor == Path::new(CGROUP))?;
-                }
-                if ancestor == Path::new(CGROUP) {
-                    break;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn verify_parent(&self, identity: Option<&ParentIdentity>) -> Result<(), ErrorCode> {
-        let path = self.parent_path();
-        if let Some(identity) = identity {
-            if fs::metadata(&path).map_err(|_| ErrorCode::Uncertain)?.ino() != identity.inode
-                || self.property(&parent_unit(&self.config.instance), "InvocationID")?
-                    != identity.invocation
-                || !backend::read(&path.join("cgroup.procs"))?.is_empty()
-            {
-                return Err(ErrorCode::Uncertain);
-            }
-            return Ok(());
-        }
-        // Inventory queries do not synthesize a unit and cannot grant ownership.
-        if path.exists()
-            || !self
-                .systemctl(&backend::strings(&[
-                    "list-units",
-                    "--all",
-                    "--plain",
-                    "--no-legend",
-                    "--no-pager",
-                    &parent_unit(&self.config.instance),
-                ]))?
-                .is_empty()
-        {
-            return Err(ErrorCode::Uncertain);
-        }
-        Ok(())
-    }
-
-    fn prepare_parent(
-        &self,
-        previous: Option<&ParentIdentity>,
-    ) -> Result<ParentIdentity, ErrorCode> {
-        self.check_caller(std::process::id())?;
-        self.verify_parent(previous)?;
-        let unit = parent_unit(&self.config.instance);
-        let limits = self.limits();
-        self.systemctl(&backend::strings(&[
-            "set-property",
-            "--runtime",
-            &unit,
-            &format!("MemoryMax={}", self.config.memory_bytes),
-            "MemorySwapMax=0",
-            &format!("TasksMax={}", limits.tasks),
-            &format!("CPUQuota={}%", limits.cpu_quota_us / 1000),
-        ]))?;
-        self.systemctl(&backend::strings(&["start", &unit]))?;
-        if self.property(&unit, "StopWhenUnneeded")? != "no" {
-            return Err(ErrorCode::Unavailable);
-        }
-        if !self.limits_match(&self.parent_path())? {
-            return Err(ErrorCode::Unavailable);
-        }
-        let identity = ParentIdentity {
-            invocation: self.property(&unit, "InvocationID")?,
-            inode: fs::metadata(self.parent_path())
-                .map_err(|_| ErrorCode::Uncertain)?
-                .ino(),
-        };
-        if !hex(&identity.invocation, 32) || previous.is_some_and(|previous| previous != &identity)
-        {
-            return Err(ErrorCode::Uncertain);
-        }
-        self.verify_parent(Some(&identity))?;
-        Ok(identity)
-    }
-
-    fn admission_ready(&self, identity: Option<&ParentIdentity>) -> Result<(), ErrorCode> {
-        // The configured control reserve and shared-ancestor headroom are
-        // part of admission: an unmet or unmeasured boundary keeps the
-        // reported capability blocked, never falsely available.
-        Headroom::measure(&self.config)?.satisfied(&self.config)?;
-        let identity = identity.ok_or(ErrorCode::Unavailable)?;
-        if fs::metadata(self.parent_path())
-            .map_err(|_| ErrorCode::Unavailable)?
-            .ino()
-            != identity.inode
-            || !backend::read(&self.parent_path().join("cgroup.procs"))?.is_empty()
-        {
-            return Err(ErrorCode::Unavailable);
-        }
-        if self.limits_match(&self.parent_path())? {
-            Ok(())
-        } else {
-            Err(ErrorCode::Unavailable)
-        }
-    }
-
-    fn limits_match(&self, path: &Path) -> Result<bool, ErrorCode> {
-        let limits = self.limits();
-        backend::limits_match(path, &limits, limits.memory_bytes)
-    }
-
-    fn scan_unowned(&self, records: &[PhotoRecord]) -> Result<(), ErrorCode> {
-        let unit = |record: &PhotoRecord| attempt_unit(&self.config.instance, &record.launch_id);
-        if self.parent_path().exists() {
-            for entry in fs::read_dir(self.parent_path()).map_err(|_| ErrorCode::Uncertain)? {
-                let entry = entry.map_err(|_| ErrorCode::Uncertain)?;
-                if entry
-                    .file_type()
-                    .map_err(|_| ErrorCode::Uncertain)?
-                    .is_dir()
-                    && !records.iter().any(|record| {
-                        record.state != State::Settled
-                            && entry.file_name() == unit(record).as_str()
-                            && self.verify_unit(record).is_ok()
-                    })
-                {
-                    return Err(ErrorCode::Uncertain);
-                }
-            }
-        }
-        let names = self.systemctl(&backend::strings(&[
-            "list-units",
-            "--all",
-            "--plain",
-            "--no-legend",
-            "--no-pager",
-            &format!("slipstreamprocessing{}-*.slice", self.config.instance),
-        ]))?;
-        for line in names.lines() {
-            let name = line.split_whitespace().next().ok_or(ErrorCode::Uncertain)?;
-            if !records
-                .iter()
-                .any(|record| record.state != State::Settled && unit(record) == name)
-            {
-                return Err(ErrorCode::Uncertain);
-            }
-        }
-        let ids = docker(
-            &self.config,
-            &backend::strings(&[
-                "ps",
-                "--all",
-                "--no-trunc",
-                "--quiet",
-                "--filter",
-                &format!(
-                    "label=slipstream.processing.instance={}",
-                    self.config.instance
-                ),
-            ]),
-        )?;
-        for id in ids.lines() {
-            if !records.iter().any(|record| {
-                record.container_id.as_deref() == Some(id) && record.state != State::Settled
-            }) {
-                return Err(ErrorCode::Uncertain);
-            }
-        }
-        Ok(())
-    }
-
-    fn discover(&self, record: &mut PhotoRecord) -> Result<(), ErrorCode> {
-        if record.manager_pending == Some(ManagerPhase::SliceStop) {
-            // A pending slice stop decides whether the attempt boundary still
-            // exists, and it is cleared only with its confirmed return. A
-            // restart cannot assume its effect, so it stays ambiguous and
-            // requires operator reconciliation.
-            return Err(ErrorCode::Uncertain);
-        }
-        if matches!(
-            record.manager_pending,
-            Some(ManagerPhase::Create | ManagerPhase::CreateReturned)
-        ) && record.container_id.is_none()
-        {
-            let ids = docker(
-                &self.config,
-                &backend::strings(&[
-                    "ps",
-                    "--all",
-                    "--no-trunc",
-                    "--quiet",
-                    "--filter",
-                    &format!("label=slipstream.processing.launch={}", record.launch_id),
-                ]),
-            )?;
-            let ids: Vec<_> = ids.lines().collect();
-            match ids.as_slice() {
-                [id] => {
-                    let candidate = record.container_id.clone();
-                    record.container_id = Some((*id).to_owned());
-                    if self.owned_container(record).is_err() {
-                        record.container_id = candidate;
-                        return Err(ErrorCode::Uncertain);
-                    }
-                }
-                [] => {}
-                _ => return Err(ErrorCode::Uncertain),
-            }
-        }
-        let path = self
-            .parent_path()
-            .join(attempt_unit(&self.config.instance, &record.launch_id));
-        if path.exists() {
-            self.verify_unit(record)?;
-        }
-        let mount =
-            backend::mount_identity(&record.workspace(Path::new(&self.config.root)).join("work"))?;
-        if mount.is_some() && mount != record.mount_id {
-            return Err(ErrorCode::Uncertain);
-        }
-        // The remaining recorded phases mark an effect whose outcome the
-        // observed slice, mount and container identities settle here: the
-        // attempt boundary is exactly what the launcher recorded, and every
-        // later step fails closed on the actual container state instead of on
-        // this marker. Leaving them set would block settlement and cleanup
-        // forever after a worker that failed before its release gate, because
-        // the release-gate pause cannot complete on a worker that already
-        // exited.
-        record.manager_pending = None;
-        Ok(())
-    }
-
-    fn verify_unit(&self, record: &PhotoRecord) -> Result<PathBuf, ErrorCode> {
-        let name = attempt_unit(&self.config.instance, &record.launch_id);
-        let path = self.parent_path().join(&name);
-        backend::verify_slice_phase(
-            record.manager_pending,
-            record.stop_confirmed,
-            || {
-                slice::verify(
-                    &name,
-                    &path,
-                    record
-                        .unit_invocation
-                        .as_deref()
-                        .ok_or(ErrorCode::Uncertain)?,
-                    record.cgroup_inode.ok_or(ErrorCode::Uncertain)?,
-                )
-            },
-            || {
-                slice::wait_absent(
-                    &name,
-                    &path,
-                    record
-                        .unit_invocation
-                        .as_deref()
-                        .ok_or(ErrorCode::Uncertain)?,
-                    record.cgroup_inode.ok_or(ErrorCode::Uncertain)?,
-                )
-            },
-        )?;
-        Ok(path)
-    }
-
-    fn owned_container(&self, record: &PhotoRecord) -> Result<Value, ErrorCode> {
-        let id = record.container_id.as_deref().ok_or(ErrorCode::Uncertain)?;
-        if !hex(id, 64) {
-            return Err(ErrorCode::Uncertain);
-        }
-        let value: Value = serde_json::from_str(&docker(
-            &self.config,
-            &backend::strings(&["inspect", "--format", "{{json .}}", id]),
-        )?)
-        .map_err(|_| ErrorCode::Uncertain)?;
-        if value["Id"] != id
-            || value["Image"] != self.image_id
-            || value["Name"] != format!("/{}", self.container_name(record))
-            || value["Config"]["Labels"]["slipstream.processing.instance"] != self.config.instance
-            || value["Config"]["Labels"]["slipstream.processing.launch"] != record.launch_id
-            || value["Config"]["Labels"]["slipstream.processing.incarnation"] != record.incarnation
-            || value["HostConfig"]["CgroupParent"]
-                != attempt_unit(&self.config.instance, &record.launch_id)
-            || value["Config"]["User"] != "1000:1000"
-            || value["Config"]["Entrypoint"] != serde_json::json!([WORKER])
-            || value["Config"]["Cmd"]
-                != serde_json::json!([
-                    record.workload,
-                    record.launch_id,
-                    record.deadline_unix_ms.to_string()
-                ])
-            || value["HostConfig"]["LogConfig"]["Type"] != "none"
-            || value["HostConfig"]["Privileged"] != false
-            || value["HostConfig"]["ReadonlyRootfs"] != true
-            || value["HostConfig"]["NetworkMode"] != "none"
-            || value["HostConfig"]["PidMode"] != ""
-            || value["HostConfig"]["CgroupnsMode"] != "private"
-            || value["HostConfig"]["CapDrop"] != serde_json::json!(["ALL"])
-            || !value["HostConfig"]["CapAdd"].is_null()
-            || value["HostConfig"]["SecurityOpt"] != serde_json::json!(["no-new-privileges:true"])
-            || value["HostConfig"]["Memory"] != self.config.memory_bytes
-            || value["HostConfig"]["MemorySwap"] != self.config.memory_bytes
-            || value["HostConfig"]["PidsLimit"] != u64::from(self.config.tasks)
-            || value["HostConfig"]["NanoCpus"] != self.config.cpu_quota_us * 10000
-            || value["Config"]["Tty"] != false
-            || value["Config"]["OpenStdin"] != false
-        {
-            return Err(ErrorCode::Uncertain);
-        }
-        let mounts = value["Mounts"].as_array().ok_or(ErrorCode::Uncertain)?;
-        let expected = self.mounts(record);
-        if mounts.len() != expected.len() {
-            return Err(ErrorCode::Uncertain);
-        }
-        for (destination, source, writable) in expected {
-            if mounts
-                .iter()
-                .filter(|mount| {
-                    mount["Type"] == "bind"
-                        && mount["Destination"] == destination
-                        && mount["Source"]
-                            .as_str()
-                            .is_some_and(|value| Path::new(value) == source)
-                        && mount["RW"] == writable
-                        && mount["Propagation"] == "rprivate"
-                })
-                .count()
-                != 1
-            {
-                return Err(ErrorCode::Uncertain);
-            }
-        }
-        Ok(value)
-    }
-
-    fn live(&self, record: &PhotoRecord) -> Result<Live, ErrorCode> {
-        let value = self.owned_container(record)?;
-        Ok(Live {
-            running: value["State"]["Running"]
-                .as_bool()
-                .ok_or(ErrorCode::Uncertain)?,
-            paused: value["State"]["Paused"]
-                .as_bool()
-                .ok_or(ErrorCode::Uncertain)?,
-            pid: value["State"]["Pid"]
-                .as_u64()
-                .and_then(|pid| u32::try_from(pid).ok())
-                .ok_or(ErrorCode::Uncertain)?,
-            exit_code: backend::observed_exit(&value["State"])?,
-            oom: value["State"]["OOMKilled"]
-                .as_bool()
-                .ok_or(ErrorCode::Uncertain)?,
-        })
-    }
-
-    /// Create the fresh retained attempt boundary before worker bootstrap:
-    /// the attempt slice, the bounded private tmpfs, the release gate and the
-    /// pinned paused worker with verified placement and limits.
-    fn provision(&self, record: &mut PhotoRecord) -> Result<File, ErrorCode> {
-        let name = attempt_unit(&self.config.instance, &record.launch_id);
-        let expected = self.parent_path().join(&name);
-        let workspace = record.workspace(Path::new(&self.config.root));
-        record.manager_pending = Some(ManagerPhase::Slice);
-        self.update(record)?;
-        let (invocation, inode) = slice::create(&name, &expected, &self.limits())?;
-        record.unit_invocation = Some(invocation);
-        record.cgroup_inode = Some(inode);
-        if !self.limits_match(&expected)? {
-            return Err(ErrorCode::Unavailable);
-        }
-        record.manager_pending = None;
-        self.update(record)?;
-        backend::create_private_directory(&workspace)?;
-        let control = workspace.join("control");
-        let work = workspace.join("work");
-        backend::create_control_directory(&control)?;
-        fs::create_dir(&work).map_err(|_| ErrorCode::Unavailable)?;
-        record.manager_pending = Some(ManagerPhase::Mount);
-        self.update(record)?;
-        backend::command(
-            "/usr/bin/mount",
-            &backend::strings(&[
-                "-t",
-                "tmpfs",
-                "-o",
-                &format!(
-                    "size={},nr_inodes={},noswap,nodev,nosuid,noexec,uid=1000,gid=1000,mode=0700",
-                    self.limits().storage_bytes,
-                    self.limits().storage_inodes,
-                ),
-                &format!("slipstream-{}", record.launch_id),
-                work.to_str().ok_or(ErrorCode::Unavailable)?,
-            ]),
-        )?;
-        record.mount_id = Some(backend::mount_identity(&work)?.ok_or(ErrorCode::Uncertain)?);
-        record.manager_pending = None;
-        self.update(record)?;
-        let gate = backend::create_native_gate(&control.join("gate"))?;
-        write_grant(record, &control)?;
-        let mut args = backend::strings(&[
-            "create",
-            "--pull",
-            "never",
-            "--name",
-            &self.container_name(record),
-            "--label",
-            &format!("slipstream.processing.instance={}", self.config.instance),
-            "--label",
-            &format!("slipstream.processing.launch={}", record.launch_id),
-            "--label",
-            &format!("slipstream.processing.incarnation={}", record.incarnation),
-            "--cgroup-parent",
-            &name,
-            "--cgroupns",
-            "private",
-            "--network",
-            "none",
-            "--user",
-            "1000:1000",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges:true",
-            "--log-driver",
-            "none",
-            "--memory",
-            &self.config.memory_bytes.to_string(),
-            "--memory-swap",
-            &self.config.memory_bytes.to_string(),
-            "--pids-limit",
-            &self.config.tasks.to_string(),
-            "--cpus",
-            &(self.config.cpu_quota_us / 100_000).to_string(),
-        ]);
-        for (destination, source, writable) in self.mounts(record) {
-            args.extend(backend::strings(&[
-                "--mount",
-                &format!(
-                    "type=bind,source={},target={destination}{}",
-                    source.display(),
-                    if writable { "" } else { ",readonly" }
-                ),
-            ]));
-        }
-        args.extend(backend::strings(&[
-            &self.image_id,
-            &record.workload,
-            &record.launch_id,
-            &record.deadline_unix_ms.to_string(),
-        ]));
-        record.manager_pending = Some(ManagerPhase::Create);
-        self.update(record)?;
-        let id = docker(&self.config, &args)?;
-        if !hex(&id, 64) {
-            return Err(ErrorCode::Uncertain);
-        }
-        record.manager_pending = Some(ManagerPhase::CreateReturned);
-        self.update(record)?;
-        record.container_id = Some(id);
-        record.manager_pending = None;
-        self.update(record)?;
-        record.manager_pending = Some(ManagerPhase::Start);
-        self.update(record)?;
-        docker(
-            &self.config,
-            &backend::strings(&[
-                "start",
-                record.container_id.as_deref().ok_or(ErrorCode::Uncertain)?,
-            ]),
-        )?;
-        record.manager_pending = None;
-        self.update(record)?;
-        record.manager_pending = Some(ManagerPhase::Pause);
-        self.update(record)?;
-        docker(
-            &self.config,
-            &backend::strings(&[
-                "pause",
-                record.container_id.as_deref().ok_or(ErrorCode::Uncertain)?,
-            ]),
-        )?;
-        record.manager_pending = None;
-        self.update(record)?;
-        self.place(record, &expected)?;
-        record.image_id = Some(self.image_id.clone());
-        record.phase = Phase::Provisioned;
-        self.update(record)?;
-        Ok(gate)
-    }
-
-    /// Verify the frozen worker placement: its cgroup scope, the paused
-    /// frozen state, the delegated workload leaf and the enforced limits.
-    fn place(&self, record: &PhotoRecord, expected: &Path) -> Result<(), ErrorCode> {
-        let live = self.live(record)?;
-        if !live.running || live.pid == 0 {
-            return Err(ErrorCode::Unavailable);
-        }
-        let id = record.container_id.as_deref().ok_or(ErrorCode::Uncertain)?;
-        let scope = backend::process_cgroup(live.pid)?;
-        if scope.parent() != Some(expected)
-            || scope.file_name().and_then(|value| value.to_str())
-                != Some(&format!("docker-{id}.scope"))
-        {
-            return Err(ErrorCode::Unavailable);
-        }
-        // The release-gate pause freezes the worker's own cgroup scope; the
-        // attempt slice above it stays unfrozen, so the frozen state is read
-        // from the scope, exactly as the reference placement check does.
-        if !backend::read(&scope.join("cgroup.events"))?
-            .lines()
-            .any(|line| line == "frozen 1")
-            || self.owned_container(record)?["State"]["Paused"] != true
-        {
-            return Err(ErrorCode::Uncertain);
-        }
-        // pidfd and the opened proc directory detect disappearance without
-        // retargeting readback to a reused PID.
-        let process =
-            File::open(format!("/proc/{}", live.pid)).map_err(|_| ErrorCode::Uncertain)?;
-        // SAFETY: pidfd_open accepts this checked positive PID and flags zero.
-        let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, live.pid, 0) };
-        if descriptor < 0 {
-            return Err(ErrorCode::Uncertain);
-        }
-        // SAFETY: successful pidfd_open returns a fresh descriptor owned by this call.
-        let pidfd = unsafe { OwnedFd::from_raw_fd(descriptor as i32) };
-        let proc_path = PathBuf::from(format!("/proc/self/fd/{}", process.as_raw_fd()));
-        let placed = backend::read(&proc_path.join("cgroup"))?
-            == format!(
-                "0::{}",
-                scope
-                    .strip_prefix(CGROUP)
-                    .map_err(|_| ErrorCode::Uncertain)?
-                    .display()
-            )
-            .replace("0::", "0::/");
-        if !placed {
-            return Err(ErrorCode::Unavailable);
-        }
-        pidfd_alive(&pidfd)?;
-        if !self.limits_match(&scope)? {
-            return Err(ErrorCode::Unavailable);
-        }
-        let leaf = scope.join("workload");
-        fs::create_dir(&leaf).map_err(|_| ErrorCode::Unavailable)?;
-        write_cgroup(&leaf.join("cgroup.procs"), &live.pid.to_string())?;
-        backend::delegate_workload_controllers(&scope, &leaf)?;
-        let limits = self.limits();
-        for (key, value) in [
-            ("memory.max", limits.memory_bytes.to_string()),
-            ("memory.swap.max", "0".into()),
-            ("memory.oom.group", "1".into()),
-            (
-                "cpu.max",
-                format!("{} {}", limits.cpu_quota_us, limits.cpu_period_us),
-            ),
-            ("pids.max", limits.tasks.to_string()),
-        ] {
-            write_cgroup(&leaf.join(key), &value)?;
-        }
-        if !self.limits_match(&leaf)? {
-            return Err(ErrorCode::Unavailable);
-        }
-        let placed = backend::read(&leaf.join("memory.oom.group"))? == "1"
-            && backend::read(&leaf.join("cgroup.procs"))? == live.pid.to_string()
-            && backend::process_cgroup(live.pid)? == leaf;
-        if !placed {
-            return Err(ErrorCode::Unavailable);
-        }
-        self.owned_container(record)?;
-        Ok(())
-    }
-
-    fn release(&self, record: &mut PhotoRecord) -> Result<(), ErrorCode> {
-        self.owned_container(record)?;
-        let id = record.container_id.clone().ok_or(ErrorCode::Uncertain)?;
-        record.manager_pending = Some(ManagerPhase::Unpause);
-        self.update(record)?;
-        docker(&self.config, &backend::strings(&["unpause", &id]))?;
-        record.manager_pending = None;
-        record.released = true;
-        self.update(record)
-    }
-    fn stop(&self, record: &mut PhotoRecord) -> Result<(), ErrorCode> {
-        if record.container_id.is_none() {
-            return Ok(());
-        }
-        let live = self.live(record)?;
-        if live.running {
-            self.verify_unit(record)?;
-            stop_container(
-                record,
-                live.paused,
-                |record| self.update(record),
-                |args| docker(&self.config, args),
-            )?;
-        }
-        Ok(())
-    }
-
-    fn terminal_evidence(&self, record: &PhotoRecord) -> Result<Evidence, ErrorCode> {
-        let path = self.verify_unit(record)?;
-        let has_container = record.container_id.is_some();
-        let live = if has_container {
-            Some(self.live(record)?)
-        } else {
-            None
-        };
-        if live.as_ref().is_some_and(|live| live.running) {
-            return Err(ErrorCode::Uncertain);
-        }
-        if !backend::cgroup_unpopulated(&path)? {
-            return Err(ErrorCode::Uncertain);
-        }
-        let peak_bytes = backend::read(&path.join("memory.peak"))?
-            .parse()
-            .map_err(|_| ErrorCode::Uncertain)?;
-        Ok(Evidence {
-            peak_bytes,
-            exit_code: live.as_ref().and_then(|live| live.exit_code),
-            docker_oom_killed: live
-                .as_ref()
-                .and_then(|live| live.exit_code.map(|_| live.oom)),
-            attempt_before: record
-                .evidence
-                .as_ref()
-                .and_then(|evidence| evidence.attempt_before.clone()),
-            attempt_after: Some(backend::events(&path)?),
-            parent_before: record
-                .evidence
-                .as_ref()
-                .and_then(|evidence| evidence.parent_before.clone()),
-            parent_after: Some(backend::events(&self.parent_path())?),
-            populated: Some(false),
-            terminal_snapshot: None,
-        })
-    }
-
-    fn worker_outcome(&self, record: &PhotoRecord) -> Result<Option<Outcome>, ErrorCode> {
-        backend::worker_result(
-            &record
-                .workspace(Path::new(&self.config.root))
-                .join("work")
-                .join(RESULT_NAME),
-            &record.launch_id,
-        )
-    }
-
-    fn cleanup(&self, record: &mut PhotoRecord) -> Result<(), ErrorCode> {
-        if record.manager_pending.is_some() {
-            return Err(ErrorCode::Uncertain);
-        }
-        if let Some(id) = record.container_id.clone() {
-            let ids = docker(
-                &self.config,
-                &backend::strings(&[
-                    "ps",
-                    "--all",
-                    "--no-trunc",
-                    "--quiet",
-                    "--filter",
-                    &format!("id={id}"),
-                ]),
-            )?;
-            if !ids.is_empty() {
-                if self.live(record)?.running {
-                    return Err(ErrorCode::Uncertain);
-                }
-                docker(&self.config, &backend::strings(&["rm", &id]))?;
-            }
-        }
-        let workspace = record.workspace(Path::new(&self.config.root));
-        let work = workspace.join("work");
-        if let Some(current) = backend::mount_identity(&work)? {
-            if Some(current) != record.mount_id {
-                return Err(ErrorCode::Uncertain);
-            }
-            backend::command(
-                "/usr/bin/umount",
-                &backend::strings(&[work.to_str().ok_or(ErrorCode::Uncertain)?]),
-            )?;
-            if backend::mount_identity(&work)?.is_some() {
-                return Err(ErrorCode::Uncertain);
-            }
-        }
-        if workspace.exists() {
-            fs::remove_dir_all(&workspace).map_err(|_| ErrorCode::Uncertain)?;
-        }
-        if record.unit_invocation.is_some() && !record.stop_confirmed {
-            self.verify_unit(record)?;
-            record.manager_pending = Some(ManagerPhase::SliceStop);
-            self.update(record)?;
-            self.systemctl(&backend::strings(&[
-                "stop",
-                &attempt_unit(&self.config.instance, &record.launch_id),
-            ]))?;
-            record.stop_confirmed = true;
-            record.manager_pending = None;
-            self.update(record)?;
-        }
-        let path = self
-            .parent_path()
-            .join(attempt_unit(&self.config.instance, &record.launch_id));
-        if let Some(invocation) = &record.unit_invocation {
-            if !record.stop_confirmed {
-                return Err(ErrorCode::Uncertain);
-            }
-            slice::wait_absent(
-                &attempt_unit(&self.config.instance, &record.launch_id),
-                &path,
-                invocation,
-                record.cgroup_inode.ok_or(ErrorCode::Uncertain)?,
-            )?;
-        } else {
-            slice::never_created_absent(
-                &attempt_unit(&self.config.instance, &record.launch_id),
-                &path,
-            )?;
-        }
-        Ok(())
-    }
-}
-
-/// Write the bounded engine grant into the read-only control mount before
-/// the container exists. The recipe payload reaches the worker only through
-/// this launcher-owned file; the worker verifies its launch binding.
-fn write_grant(record: &PhotoRecord, control: &Path) -> Result<(), ErrorCode> {
-    let grant = serde_json::json!({
-        "version": 1,
-        "kind": "photo-development-grant",
-        "launch_id": record.launch_id,
-        "workload": record.workload,
-        "exposure_milli_ev": record.recipe.exposure_milli_ev,
-        "white_balance_mode": record.recipe.white_balance_mode,
-        "profile_id": record.source.profile_id,
-        "icc_asset_sha256": crate::photo::ICC_ASSET_SHA256,
-    });
-    let bytes = serde_json::to_vec(&grant).map_err(|_| ErrorCode::Uncertain)?;
-    if bytes.len() > 16 * 1024 {
-        return Err(ErrorCode::Uncertain);
-    }
-    let path = control.join("grant.json");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(&path)
-        .map_err(|_| ErrorCode::Unavailable)?;
-    file.write_all(&bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|_| ErrorCode::Unavailable)?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o444))
-        .map_err(|_| ErrorCode::Unavailable)?;
-    File::open(control)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| ErrorCode::Unavailable)
-}
-
-fn pidfd_alive(pidfd: &OwnedFd) -> Result<(), ErrorCode> {
-    let mut descriptor = libc::pollfd {
-        fd: pidfd.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: descriptor is a live pidfd and the single pollfd buffer is valid.
-    if unsafe { libc::poll(&mut descriptor, 1, 0) } != 0 || descriptor.revents != 0 {
-        return Err(ErrorCode::Uncertain);
-    }
-    Ok(())
-}
-
-fn write_cgroup(path: &Path, value: &str) -> Result<(), ErrorCode> {
-    fs::write(path, value).map_err(|_| ErrorCode::Unavailable)
-}
-
-// Admission ------------------------------------------------------------
-
-/// Measured control-path storage and shared-ancestor memory headroom. Both
-/// must cover their configured reserve before an intent is persisted or a
-/// worker is released (`design/processing-photo-protocol.md` admission
-/// ordering step 3).
-#[derive(Clone, Copy, Debug)]
-struct Headroom {
-    control_free_bytes: u64,
-    ancestor_headroom_bytes: u64,
-}
-
-impl Headroom {
-    /// Measure the actual filesystem supply at the control root and the
-    /// memory headroom of the shared ancestor above the processing subtree.
-    fn measure(config: &Config) -> Result<Self, ErrorCode> {
-        Ok(Self {
-            control_free_bytes: control_free_bytes(Path::new(&config.root))?,
-            ancestor_headroom_bytes: shared_ancestor_headroom()?,
-        })
-    }
-
-    /// An unmet or unmeasurable reserve leaves the capability unavailable:
-    /// admission is refused and no start intent is persisted, so no worker
-    /// is ever released onto an unqualified boundary.
-    fn satisfied(&self, config: &Config) -> Result<(), ErrorCode> {
-        if self.control_free_bytes < config.control_reserve_bytes
-            || self.ancestor_headroom_bytes < config.shared_ancestor_headroom_bytes
-        {
-            return Err(ErrorCode::Unavailable);
-        }
-        Ok(())
-    }
-}
-
-/// Bytes currently free on the filesystem that carries the control root.
-fn control_free_bytes(root: &Path) -> Result<u64, ErrorCode> {
-    let file = File::open(root).map_err(|_| ErrorCode::Unavailable)?;
-    // SAFETY: fstatvfs receives the live descriptor and a correctly sized output struct.
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstatvfs(file.as_raw_fd(), &mut stat) } != 0 {
-        return Err(ErrorCode::Unavailable);
-    }
-    let blocks = stat.f_bavail;
-    let frsize = stat.f_frsize;
-    blocks.checked_mul(frsize).ok_or(ErrorCode::Unavailable)
-}
-
-/// The memory headroom of the shared ancestor above the capped processing
-/// subtree. A missing or unlimited ancestor limit defers to the host supply
-/// reported by the kernel; a finite limit leaves `max - current` bytes. An
-/// overcommitted ancestor has no measurable headroom and refuses admission.
-fn shared_ancestor_headroom() -> Result<u64, ErrorCode> {
-    let ancestor = match backend::read(&Path::new(CGROUP).join("memory.max")) {
-        Ok(limit) if limit.trim() != "max" => {
-            let limit: u64 = limit.trim().parse().map_err(|_| ErrorCode::Unavailable)?;
-            let current: u64 = backend::read(&Path::new(CGROUP).join("memory.current"))?
-                .trim()
-                .parse()
-                .map_err(|_| ErrorCode::Unavailable)?;
-            limit.checked_sub(current).ok_or(ErrorCode::Unavailable)?
-        }
-        Ok(_) => u64::MAX,
-        Err(_) => u64::MAX,
-    };
-    Ok(ancestor.min(meminfo_available_bytes()?))
-}
-
-/// The kernel's estimate of memory available for new work without swapping.
-fn meminfo_available_bytes() -> Result<u64, ErrorCode> {
-    let text = std::fs::read_to_string("/proc/meminfo").map_err(|_| ErrorCode::Unavailable)?;
-    for line in text.lines() {
-        if let Some(value) = line.strip_prefix("MemAvailable:") {
-            let kilobytes: u64 = value
-                .trim()
-                .strip_suffix("kB")
-                .ok_or(ErrorCode::Unavailable)?
-                .trim()
-                .parse()
-                .map_err(|_| ErrorCode::Unavailable)?;
-            return kilobytes.checked_mul(1024).ok_or(ErrorCode::Unavailable);
-        }
-    }
-    Err(ErrorCode::Unavailable)
-}
-
-/// Perform every bounded admission check and persist the executor intent.
-/// The descriptor copy runs afterwards, without the journal mutex held.
-#[allow(clippy::too_many_arguments)]
-fn begin_start(
-    registry: &mut Registry,
-    config: &Config,
-    root: &Path,
-    request: &Request,
-    descriptor: Option<&File>,
-    image_id: &str,
-    available: bool,
-    headroom: &Headroom,
-) -> Result<StartAdmission, ErrorCode> {
-    let Request::Start {
-        export_id,
-        incarnation,
-        sequence,
-        policy,
-        bundle,
-        source,
-        recipe,
-        workload,
-        recipe_digest: request_recipe_digest,
-        manifest_sha256,
-        ..
-    } = request
-    else {
-        return Err(ErrorCode::InvalidRequest);
-    };
-    if incarnation != &registry.incarnation {
-        return Err(ErrorCode::StaleIncarnation);
-    }
-    expire(registry, now()?, config.receipt_retention_seconds)?;
-    if let Some(record) = registry.records.get(sequence) {
-        // Replaying the same identity and digest resolves to the same
-        // attempt; any conflicting identity data is a conflict. The
-        // recomputed digest binds the declared source facts, including the
-        // profile, so a replay can never diverge from the durable attempt.
-        if record.export_id != *export_id
-            || record.manifest_sha256 != *manifest_sha256
-            || manifest_digest(request)? != record.manifest_sha256
-        {
-            return Err(ErrorCode::Conflict);
-        }
-        return Ok(StartAdmission::Replay(Box::new(
-            record.result_body(incarnation),
-        )));
-    }
-    if *sequence <= registry.watermark {
-        return Err(ErrorCode::Expired);
-    }
-    if *sequence
-        != registry
-            .watermark
-            .checked_add(1)
-            .ok_or(ErrorCode::Capacity)?
-    {
-        return Err(ErrorCode::UnknownAttempt);
-    }
-    if !available {
-        return Err(ErrorCode::Unavailable);
-    }
-    if registry.records.len() >= ATTEMPTS_MAX {
-        return Err(ErrorCode::Capacity);
-    }
-    if policy != &config.policy {
-        return Err(ErrorCode::IncompatiblePolicy);
-    }
-    if bundle != &config.bundle {
-        return Err(ErrorCode::IncompatibleBundle);
-    }
-    // The closed workload and approved profile set. A source kind, profile,
-    // workload, bundle or policy outside the fixed authority has no admitted
-    // plan.
-    if !crate::protocol::is_photo_workload(workload) {
-        return Err(ErrorCode::InvalidRequest);
-    }
-    // The closed workload/source-kind pairing, plus the one recipe rule it
-    // implies: a `proxy-film` source's staged bytes already carry the
-    // semantic exposure transform, so any nonzero exposure would
-    // double-apply it. The two RAW workloads admit only a RAW source.
-    if !photo::source_kind_admitted(workload, &source.kind)
-        || (workload == protocol::PHOTO_WORKLOAD_PROXY_FILM && recipe.exposure_milli_ev != 0)
-    {
-        return Err(ErrorCode::InvalidRequest);
-    }
-    if !photo_profile::APPROVED_PROFILES
-        .iter()
-        .any(|profile| profile.profile_id == source.profile_id)
-    {
-        return Err(ErrorCode::InvalidRequest);
-    }
-    if !EXPOSURE_MILLI_EV_RANGE.contains(&recipe.exposure_milli_ev) {
-        return Err(ErrorCode::InvalidRequest);
-    }
-    if manifest_digest(request)? != *manifest_sha256 {
-        return Err(ErrorCode::InvalidRequest);
-    }
-    if recipe_digest_of(recipe)? != *request_recipe_digest {
-        return Err(ErrorCode::InvalidRequest);
-    }
-    if source.size > config.source_bytes_max {
-        return Err(ErrorCode::InvalidRequest);
-    }
-    let Some(descriptor) = descriptor else {
-        return Err(ErrorCode::InvalidRequest);
-    };
-    // Bounded metadata only; the copy happens after the intent is durable.
-    photo::validate_descriptor(
-        descriptor.as_raw_fd(),
-        photo::DescriptorRequirement {
-            kind: photo::DescriptorKind::Source,
-            peer_uid: config.peer_uid,
-            declared_size: source.size,
-            max_bytes: config.source_bytes_max,
-        },
-    )
-    .map_err(|_| ErrorCode::InvalidRequest)?;
-    if registry
-        .reserved_bytes()
-        .checked_add(source.size)
-        .is_none_or(|total| total > config.staged_storage_bytes_max)
-    {
-        return Err(ErrorCode::ResourceBudget);
-    }
-    if (u64::try_from(registry.unsettled()).map_err(|_| ErrorCode::Capacity)? + 1)
-        * INODES_PER_ATTEMPT
-        > config.staged_storage_inodes_max
-    {
-        return Err(ErrorCode::ResourceBudget);
-    }
-    // The configured control reserve and shared-ancestor headroom must be
-    // measured and met before the start intent is persisted or copied.
-    headroom.satisfied(config)?;
-    if registry.active.is_some() {
-        return Err(ErrorCode::Busy);
-    }
-    let time = now()?;
-    let launch_id = random_id()?;
-    let record = PhotoRecord {
-        sequence: *sequence,
-        incarnation: incarnation.clone(),
-        export_id: export_id.clone(),
-        policy: policy.clone(),
-        bundle: bundle.clone(),
-        workload: workload.clone(),
-        state: State::Accepted,
-        outcome: None,
-        manifest_sha256: manifest_sha256.clone(),
-        recipe_digest: request_recipe_digest.clone(),
-        source: source.clone(),
-        recipe: recipe.clone(),
-        plan: None,
-        phase: Phase::Intent,
-        launch_id,
-        image_id: Some(image_id.to_owned()),
-        unit_invocation: None,
-        cgroup_inode: None,
-        mount_id: None,
-        container_id: None,
-        released: false,
-        cancellation_requested: false,
-        accepted_at_unix_ms: time,
-        deadline_unix_ms: time
-            .checked_add(ATTEMPT_DEADLINE_MS)
-            .ok_or(ErrorCode::Capacity)?,
-        manager_pending: None,
-        stop_confirmed: false,
-        evidence: None,
-        output: None,
-        output_transferred: false,
-        validation_ack: None,
-        cleanup: Cleanup::Pending,
-        settled_at_unix_ms: None,
-    };
-    registry.active = Some(*sequence);
-    registry.watermark = *sequence;
-    registry.records.insert(*sequence, record.clone());
-    persist(root, registry)?;
-    Ok(StartAdmission::Intent(Box::new(record)))
-}
-
-/// Copy the validated descriptor into the launcher-owned private snapshot,
-/// hash it against the declared identity, and seal it read-only.
-fn seal_source(
-    config: &Config,
-    root: &Path,
-    record: &PhotoRecord,
-    descriptor: &mut File,
-) -> Result<photo::CopiedDescriptor, ErrorCode> {
-    let workspace = record.workspace(root);
-    // The attempt workspace is mode 0700, as is the launcher-owned directory
-    // that holds the attempts. Both are created once and then derived again by
-    // provisioning, so both creations tolerate the other's.
-    let attempts = workspace.parent().ok_or(ErrorCode::Uncertain)?;
-    backend::create_private_directory(attempts)?;
-    backend::create_private_directory(&workspace)?;
-    let source_dir = workspace.join("source");
-    fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&source_dir)
-        .map_err(|_| ErrorCode::Unavailable)?;
-    // The pinned engine selects its decoder from the container extension, so
-    // the snapshot carries the profile's qualified container class. The
-    // original filename is not part of the admitted request.
-    let profile = photo_profile::APPROVED_PROFILES
-        .iter()
-        .find(|profile| profile.profile_id == record.source.profile_id)
-        .ok_or(ErrorCode::InvalidRequest)?;
-    let destination_path = source_dir.join(format!("source.{}", profile.container));
-    let mut destination = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(&destination_path)
-        .map_err(|_| ErrorCode::Unavailable)?;
-    let copied = photo::copy_source(
-        descriptor,
-        &mut destination,
-        config.peer_uid,
-        record.source.size,
-        config.source_bytes_max,
-    )
-    .map_err(map_seal_error)?;
-    // Sync the private snapshot and seal it read-only before continuing.
-    destination.sync_all().map_err(|_| ErrorCode::Unavailable)?;
-    fs::set_permissions(&destination_path, fs::Permissions::from_mode(0o444))
-        .map_err(|_| ErrorCode::Unavailable)?;
-    // The worker runs as an unprivileged uid inside the container and must
-    // traverse the staged directory to reach the sealed snapshot, so the
-    // directory becomes world-traversable while the snapshot itself stays
-    // sealed and nobody but the launcher can write it. Privacy comes from the
-    // 0700 attempt workspace holding both. The mode is set explicitly because
-    // the process umask would otherwise strip the traversal bits.
-    fs::set_permissions(&source_dir, fs::Permissions::from_mode(0o755))
-        .map_err(|_| ErrorCode::Unavailable)?;
-    File::open(&source_dir)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| ErrorCode::Unavailable)?;
-    Ok(copied)
-}
-
-fn map_seal_error(error: io::Error) -> ErrorCode {
-    if matches!(
-        error.kind(),
-        io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
-    ) {
-        ErrorCode::InvalidRequest
-    } else {
-        ErrorCode::Unavailable
-    }
-}
-
-/// Finalize the durable intent from the verified copy: derive the one
-/// admitted stage plan, or settle the owned intent without releasing a worker.
-fn finalize_start(
-    registry: &mut Registry,
-    _config: &Config,
-    root: &Path,
-    request: &Request,
-    sealed: Result<photo::CopiedDescriptor, ErrorCode>,
-) -> Result<ResultBody, ErrorCode> {
-    let Request::Start {
-        incarnation,
-        export_id,
-        manifest_sha256,
-        sequence,
-        ..
-    } = request
-    else {
-        return Err(ErrorCode::InvalidRequest);
-    };
-    let record = {
-        let record = registry
-            .records
-            .get_mut(sequence)
-            .ok_or(ErrorCode::Uncertain)?;
-        if record.phase != Phase::Intent
-            || record.manifest_sha256 != *manifest_sha256
-            || record.export_id != *export_id
-            || record.incarnation != *incarnation
-        {
-            return Err(ErrorCode::Uncertain);
-        }
-        record.clone()
-    };
-    let verified = matches!(&sealed, Ok(copied)
-        if copied.sha256 == record.source.sha256 && copied.size == record.source.size);
-    let refusal = if verified {
-        None
-    } else {
-        match &sealed {
-            Ok(_) | Err(ErrorCode::InvalidRequest) => Some("refused-source-mismatch"),
-            Err(_) => Some("interrupted"),
-        }
-    };
-    if let Some(outcome) = refusal {
-        let workspace = record.workspace(root);
-        let _ = fs::remove_dir_all(workspace);
-        {
-            let record = registry
-                .records
-                .get_mut(sequence)
-                .ok_or(ErrorCode::Uncertain)?;
-            record.outcome = Some(outcome.into());
-            record.state = State::Settled;
-            record.settled_at_unix_ms = Some(now()?);
-            record.cleanup = Cleanup::Complete;
-        }
-        registry.active = None;
-        persist(root, registry)?;
-        let _ = incarnation;
-        return Err(if outcome == "interrupted" {
-            ErrorCode::Unavailable
-        } else {
-            ErrorCode::InvalidRequest
-        });
-    }
-    if record.cancellation_requested {
-        let workspace = record.workspace(root);
-        let _ = fs::remove_dir_all(workspace);
-        let record = {
-            let record = registry
-                .records
-                .get_mut(sequence)
-                .ok_or(ErrorCode::Uncertain)?;
-            record.outcome = Some("cancelled".into());
-            record.state = State::Settled;
-            record.settled_at_unix_ms = Some(now()?);
-            record.cleanup = Cleanup::Complete;
-            record.clone()
-        };
-        registry.active = None;
-        persist(root, registry)?;
-        return Ok(record.result_body(incarnation));
-    }
-    let record = {
-        let record = registry
-            .records
-            .get_mut(sequence)
-            .ok_or(ErrorCode::Uncertain)?;
-        record.plan = Some(Plan::for_workload(&record.workload).ok_or(ErrorCode::InvalidRequest)?);
-        record.phase = Phase::Planned;
-        record.clone()
-    };
-    persist(root, registry)?;
-    Ok(record.result_body(incarnation))
 }
 
 /// Copy the launcher-owned result into the service output descriptor with

@@ -64,8 +64,8 @@ fn manifest_digest_binds_the_declared_workload() {
         white_balance_mode: "as-shot".into(),
     };
     let development =
-        manifest_digest_of(&source, &recipe, "p", "b", crate::protocol::PHOTO_WORKLOAD).unwrap();
-    let film = manifest_digest_of(
+        manifest_digest_parts(&source, &recipe, "p", "b", crate::protocol::PHOTO_WORKLOAD).unwrap();
+    let film = manifest_digest_parts(
         &source,
         &recipe,
         "p",
@@ -76,7 +76,7 @@ fn manifest_digest_binds_the_declared_workload() {
     assert_ne!(development, film);
     assert_eq!(
         film,
-        manifest_digest_of(
+        manifest_digest_parts(
             &source,
             &recipe,
             "p",
@@ -228,15 +228,15 @@ fn start_request(config: &Config, overrides: impl FnOnce(&mut photo::Request)) -
             policy: ref policy_field,
             bundle: ref bundle_field,
             workload: ref workload_field,
-            ref mut recipe_digest,
+            recipe_digest: ref mut recipe_digest_field,
             ref mut manifest_sha256,
             ..
         } = request
         else {
             unreachable!()
         };
-        *recipe_digest = recipe_digest_of(recipe_field).unwrap();
-        *manifest_sha256 = manifest_digest_of(
+        *recipe_digest_field = recipe_digest(recipe_field).unwrap();
+        *manifest_sha256 = manifest_digest_parts(
             source_field,
             recipe_field,
             policy_field,
@@ -257,13 +257,13 @@ fn with_canonical_digests(mut request: photo::Request) -> photo::Request {
         ref policy,
         ref bundle,
         ref workload,
-        ref mut recipe_digest,
+        recipe_digest: ref mut recipe_digest_field,
         ref mut manifest_sha256,
         ..
     } = request
     {
-        *recipe_digest = recipe_digest_of(recipe).unwrap();
-        *manifest_sha256 = manifest_digest_of(source, recipe, policy, bundle, workload).unwrap();
+        *recipe_digest_field = recipe_digest(recipe).unwrap();
+        *manifest_sha256 = manifest_digest_parts(source, recipe, policy, bundle, workload).unwrap();
     }
     request
 }
@@ -292,7 +292,7 @@ fn record_for(sequence: u64, phase: Phase) -> PhotoRecord {
             State::Accepted
         },
         outcome: None,
-        manifest_sha256: manifest_digest_of(
+        manifest_sha256: manifest_digest_parts(
             &source,
             &recipe,
             "3".repeat(64).as_str(),
@@ -300,7 +300,7 @@ fn record_for(sequence: u64, phase: Phase) -> PhotoRecord {
             crate::protocol::PHOTO_WORKLOAD,
         )
         .unwrap(),
-        recipe_digest: recipe_digest_of(&recipe).unwrap(),
+        recipe_digest: recipe_digest(&recipe).unwrap(),
         source,
         recipe,
         plan: (phase != Phase::Intent)
@@ -393,7 +393,7 @@ fn descriptor_size_hash_and_identity_mismatch_settle_the_intent_without_a_worker
     let sealed = seal_source(&config, &root, &record, &mut descriptor);
     let copied = sealed.unwrap();
     assert_ne!(copied.sha256, record.source.sha256);
-    let error = finalize_start(&mut registry, &config, &root, &request, Ok(copied)).unwrap_err();
+    let error = finalize_start(&mut registry, &root, &request, Ok(copied)).unwrap_err();
     assert_eq!(error, ErrorCode::InvalidRequest);
     let settled = &registry.records[&1];
     assert_eq!(settled.state, State::Settled);
@@ -474,7 +474,7 @@ fn verified_source_seals_and_derives_the_one_admitted_plan() {
             & 0o777,
         0o755
     );
-    let body = finalize_start(&mut registry, &config, &root, &request, Ok(copied)).unwrap();
+    let body = finalize_start(&mut registry, &root, &request, Ok(copied)).unwrap();
     let ResultBody::Receipt { receipt } = body else {
         panic!("expected a receipt");
     };
@@ -524,14 +524,14 @@ fn unsupported_profiles_sizes_and_digests_are_refused_before_the_descriptor() {
             ref policy,
             ref bundle,
             ref workload,
-            ref mut recipe_digest,
+            recipe_digest: ref mut recipe_digest_field,
             ref mut manifest_sha256,
             ..
         } = request
         {
-            *recipe_digest = recipe_digest_of(recipe).unwrap();
+            *recipe_digest_field = recipe_digest(recipe).unwrap();
             *manifest_sha256 =
-                manifest_digest_of(source, recipe, policy, bundle, workload).unwrap();
+                manifest_digest_parts(source, recipe, policy, bundle, workload).unwrap();
         }
         request
     };
@@ -658,7 +658,7 @@ fn proxy_film_admission_pairs_source_kind_and_zero_exposure() {
     // The sealed proxy derives the one admitted no-develop plan.
     let mut descriptor = descriptor;
     let copied = seal_source(&config, &root, &record, &mut descriptor).unwrap();
-    finalize_start(&mut registry, &config, &root, &proxy, Ok(copied)).unwrap();
+    finalize_start(&mut registry, &root, &proxy, Ok(copied)).unwrap();
     let planned = &registry.records[&1];
     assert_eq!(planned.phase, Phase::Planned);
     assert_eq!(
