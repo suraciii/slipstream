@@ -133,7 +133,8 @@ defined by Web Async Ownership:
   and source revision. Every asynchronous response/body continuation checks
   its lane generation and Photo scope before changing presentation or admitting
   another poll. The Editor controller provides current session identity and
-  chooses the presented lane; save and Export ordering stay in that controller.
+  chooses the presented lane; its save stream waits on the Photo-scoped output
+  controller's admission barrier before sending dependent writes.
 - The **page UI** owns Library Browser markup, DOM bindings, semantic rendering,
   focus, keyboard, pointer, and responsive presentation. It reports user intent
   to the page model; it does not issue HTTP requests or decide async ownership.
@@ -147,8 +148,11 @@ defined by Web Async Ownership:
   status surface identity, facts and metadata rendering, and Preview image targets.
   It reads bounded presentation models without holding mutable Photo facts or
   issuing HTTP. Reset and disposal invalidate its targets and cancel gestures.
-  Modal arbitration, global keyboard routing and responsive placement remain in
-  the page UI composition.
+  Modal arbitration, keyboard DOM facts and responsive placement remain in
+  the page UI composition. A pure UI-local keyboard policy chooses precedence
+  and semantic actions; native range adjustment and modal cancellation remain
+  with their surfaces, while the Grid presenter owns delegated key geometry
+  and prevent-default handling.
   The page-local Photo gesture controller owns Preview pointer capture, pending
   holds, horizontal swipe feedback, and the handoff to zoom panning or pinch.
   It reads the current Photo surface and decision readiness without owning
@@ -357,6 +361,20 @@ The page coordinates Photo rebinding, the first bounded window, Recovery,
 presentation, and history. It checks authority again when consuming an awaited
 result, because another destination may supersede it between continuations.
 The source and Grid owner remains the only owner of Snapshot state and release.
+
+Source replacement and retained-source reopening keep separate orchestration.
+Replacement binds Photo to the new source before opening and commits readiness
+before rendering. Reopening first detaches Photo from pending work under the
+old source, retains Grid cells, renders the covering window, then commits
+readiness and resumes Photo. Page-local helpers share the Folder publication
+precondition, covering-window fence, readiness commit, failure mapping and
+empty-source presentation without owning another source lifecycle.
+
+Reopening returns established authority, confirmed missing, retryable failure
+or superseded explicitly. Destination resolution retries only the established
+authority, preserves a failed destination for Retry, and explains a missing
+source before falling back. Every awaited continuation and busy release checks
+the captured source and destination; disposed work cannot change presentation.
 
 ### Styling
 

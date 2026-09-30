@@ -36,13 +36,12 @@ use slipstream_core::{
 
 use crate::{
     ProcessingConfig,
-    export_manager::{
-        ExportManager, PreviewCancellation, PreviewRenderResult, RetainedDevelopmentIdentity,
-    },
+    export_manager::{ExportManager, RetainedDevelopmentIdentity},
     http::{
         CLI_CONTRACT_HEADER, HttpState, cli_error, require_cli_contract, require_published,
         valid_id,
     },
+    preview_render::{PreviewCancellation, PreviewRender, RenderedIdentity, RenderedPreview},
     queries::{format_time, hex_encode},
 };
 
@@ -199,6 +198,25 @@ fn milli_ev(exposure_ev: f64) -> i64 {
     (exposure_ev * 1000.0).round() as i64
 }
 
+/// Maps the render-time identity inputs of one Original preview attempt
+/// into this boundary's Preview facts. The rendering executor reports plain
+/// evidence; only this boundary assembles Preview identity.
+fn preview_facts(identity: &RenderedIdentity) -> PreviewFacts {
+    PreviewFacts {
+        stage: identity.stage,
+        settings: identity.settings,
+        long_edge: DEVELOPMENT_PREVIEW_LONG_EDGE,
+        display_transform: DISPLAY_TRANSFORM_VERSION,
+        bundle_sha256: identity.bundle_sha256.clone(),
+        source_revision: identity.source_revision.clone(),
+        recipe_revision: identity.recipe_revision.clone(),
+        exposure_milli_ev: identity.exposure_milli_ev,
+        white_balance: WHITE_BALANCE_AS_SHOT,
+        source: "original",
+        proxy_id: None,
+    }
+}
+
 // ---------------------------------------------------------------- seams
 
 /// One retained Development Result with the identity facts its publication
@@ -283,7 +301,7 @@ impl DevelopmentResultRetention for RetainedExportDevelopmentResults {
     ) -> Pin<Box<dyn Future<Output = Option<RetainedDevelopmentResult>> + Send + 'a>> {
         Box::pin(async move {
             let identity = RetainedDevelopmentIdentity {
-                settings: facts.settings,
+                matches_baseline: facts.settings == SETTINGS_BASELINE,
                 recipe_revision: facts.recipe_revision.as_deref(),
                 exposure_milli_ev: facts.exposure_milli_ev,
                 source_revision: &facts.source_revision,
@@ -435,6 +453,7 @@ struct PreviewRenderEntry {
 }
 
 struct PreviewClassRendersInner {
+    render: Arc<PreviewRender>,
     exports: Arc<ExportManager>,
     retained: RetainedExportDevelopmentResults,
     entries: SyncMutex<HashMap<PreviewRenderKey, PreviewRenderEntry>>,
@@ -451,6 +470,10 @@ pub(crate) struct PreviewClassRenders {
 impl PreviewClassRenders {
     pub(crate) fn new(exports: Arc<ExportManager>) -> Self {
         let inner = Arc::new(PreviewClassRendersInner {
+            render: Arc::new(PreviewRender::new(
+                Arc::clone(exports.library()),
+                Arc::clone(&exports),
+            )),
             retained: RetainedExportDevelopmentResults::new(Arc::clone(&exports)),
             exports,
             entries: SyncMutex::new(HashMap::new()),
@@ -556,7 +579,7 @@ impl PreviewClassRenders {
         stage: &'static str,
         settings: &'static str,
         identity_digest: &str,
-        result: PreviewRenderResult,
+        result: RenderedPreview,
     ) {
         let key = (photo_id.to_owned(), stage, settings);
         let mut entries = inner
@@ -575,7 +598,7 @@ impl PreviewClassRenders {
         }
         let deadline = SystemTime::now() + RENDITION_TTL;
         entry.state = PreviewRenderState::Ready {
-            identity: Box::new(result.facts),
+            identity: Box::new(preview_facts(&result.identity)),
             output_path: result.path,
             attempt_key: result.attempt_key,
             size: result.size,
@@ -664,12 +687,13 @@ impl PreviewRenderGate for PreviewClassRenders {
         let settings = request.settings;
         tokio::spawn(async move {
             let result = inner
-                .exports
-                .render_preview(&photo_id, stage, settings, cancellation)
+                .render
+                .render(&photo_id, stage, settings, cancellation)
                 .await;
             match result {
                 Ok(result)
-                    if PreviewIdentity::build(&result.facts, None).digest() == identity_digest =>
+                    if PreviewIdentity::build(&preview_facts(&result.identity), None).digest()
+                        == identity_digest =>
                 {
                     Self::complete(&inner, &photo_id, stage, settings, &identity_digest, result);
                 }
@@ -1491,23 +1515,41 @@ fn develop_executable(
     Ok(())
 }
 
-/// Serves one Edit Preview: the current rendition, the derivation of a
-/// retained Development Result, or the render admission.
-async fn serve_preview(
+/// One constructed Preview pass: the proxy-aware current facts, the retained
+/// evidence resolved behind them, and the full identity that evidence
+/// builds. The initial serve and the fresh post-derivation read share this
+/// one construction, so the two passes can never disagree about what the
+/// facts mean.
+struct ConstructedPreview {
+    facts: PreviewFacts,
+    proxy_retained: Option<RetainedDevelopmentResult>,
+    retained: Option<RetainedDevelopmentResult>,
+    identity: PreviewIdentity,
+}
+
+/// Builds the proxy-aware facts of one request, resolves the retained
+/// evidence behind them, and assembles the full Preview identity. The
+/// caller owns when the serialized reads happen; this owns what they mean.
+/// A Film request over a proxy never takes retained evidence: its Film
+/// rendition must come from a render over that proxy, not from the
+/// Development TIFF the proxy already retained.
+async fn construct_preview(
     state: &HttpState,
+    owner: &EditPreviewOwner,
     photo_id: &str,
     stage: &'static str,
     settings: &'static str,
     read: &EditRecipeRead,
     proxy: Option<&(slipstream_core::DevelopmentProxyRecord, std::path::PathBuf)>,
-) -> Response<Body> {
-    let owner = &state.edit_preview;
-    let key = (photo_id.to_owned(), stage, settings);
+) -> Result<ConstructedPreview, Response<Body>> {
     let Some(source_revision) = proxy
         .map(|(record, _)| record.source_revision.clone())
         .or_else(|| read.current_source_revision.clone())
     else {
-        return resource_unavailable(stage, crate::edit_recipe::READ_PENDING);
+        return Err(resource_unavailable(
+            stage,
+            crate::edit_recipe::READ_PENDING,
+        ));
     };
     let mut facts = current_facts(state, stage, settings, &source_revision, read);
     if let Some((record, _)) = proxy {
@@ -1543,6 +1585,37 @@ async fn serve_preview(
             retained.as_ref()
         },
     );
+    Ok(ConstructedPreview {
+        facts,
+        proxy_retained,
+        retained,
+        identity,
+    })
+}
+
+/// Serves one Edit Preview: the current rendition, the derivation of a
+/// retained Development Result, or the render admission.
+async fn serve_preview(
+    state: &HttpState,
+    photo_id: &str,
+    stage: &'static str,
+    settings: &'static str,
+    read: &EditRecipeRead,
+    proxy: Option<&(slipstream_core::DevelopmentProxyRecord, std::path::PathBuf)>,
+) -> Response<Body> {
+    let owner = &state.edit_preview;
+    let key = (photo_id.to_owned(), stage, settings);
+    let constructed = construct_preview(state, owner, photo_id, stage, settings, read, proxy).await;
+    let preview = match constructed {
+        Ok(preview) => preview,
+        Err(response) => return response,
+    };
+    let ConstructedPreview {
+        facts,
+        proxy_retained,
+        retained,
+        identity,
+    } = preview;
     if let Some(rendition) = owner.current(&key, &identity).await {
         return rendition_response(photo_id, &rendition);
     }
@@ -1734,8 +1807,14 @@ async fn render_proxy_film_now(
     let Some(exports) = state.application.exports.as_ref() else {
         return processing_unavailable("film", "operator-disabled");
     };
-    let result = match exports
-        .render_proxy_film_preview(facts.clone(), proxy_path, &proxy.profile_id, cancellation)
+    let render = PreviewRender::new(Arc::clone(&state.application.library), Arc::clone(exports));
+    let result = match render
+        .render_proxy_film(
+            facts.exposure_milli_ev,
+            proxy_path,
+            &proxy.profile_id,
+            cancellation,
+        )
         .await
     {
         Ok(result) => result,
@@ -1875,53 +1954,19 @@ async fn fresh_identity(
     if let Some(response) = support_refusal(&photo, &read, stage, proxy.is_some()) {
         return Err(response);
     }
-    let Some(source_revision) = proxy
-        .as_ref()
-        .map(|(record, _)| record.source_revision.clone())
-        .or_else(|| read.current_source_revision.clone())
-    else {
-        return Err(resource_unavailable(
-            stage,
-            crate::edit_recipe::READ_PENDING,
-        ));
-    };
     develop_executable(state, stage, settings, &read, proxy.is_some())
         .map_err(|response| *response)?;
-    let mut facts = current_facts(state, stage, settings, &source_revision, &read);
-    if let Some((record, _)) = proxy.as_ref() {
-        facts.source = "development-proxy";
-        facts.proxy_id = Some(record.identity_digest());
-        facts.bundle_sha256 = record.bundle_sha256.clone();
-    }
-    let proxy_retained = proxy
-        .as_ref()
-        .filter(|_| stage != "film")
-        .map(|(record, path)| RetainedDevelopmentResult {
-            sha256: record.artifact_sha256.clone(),
-            byte_length: record.artifact_bytes,
-            recipe_revision: facts.recipe_revision.clone(),
-            exposure_milli_ev: facts.exposure_milli_ev,
-            white_balance: facts.white_balance,
-            source_revision: record.source_revision.clone(),
-            bundle_sha256: record.bundle_sha256.clone(),
-            path: path.clone(),
-            width: record.width,
-            height: record.height,
-        });
-    let retained = state
-        .edit_preview
-        .retention
-        .resolve(photo_id, &facts)
-        .await
-        .or(proxy_retained);
-    Ok(PreviewIdentity::build(
-        &facts,
-        if proxy.is_some() && stage == "film" {
-            None
-        } else {
-            retained.as_ref()
-        },
-    ))
+    let constructed = construct_preview(
+        state,
+        &state.edit_preview,
+        photo_id,
+        stage,
+        settings,
+        &read,
+        proxy.as_ref(),
+    )
+    .await?;
+    Ok(constructed.identity)
 }
 
 /// Admits one preview-class render when no current rendition or usable

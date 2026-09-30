@@ -5,6 +5,10 @@ use std::{path::Path, time::SystemTime};
 pub const REQUEST_BYTES: usize = 16 * 1024;
 pub const RESPONSE_BYTES: usize = 64 * 1024;
 pub const TERMINAL_SNAPSHOT_BYTES: usize = 4 * 1024;
+/// The sealed worker result frame shared by both fixed workers (the writer)
+/// and the launcher result readback: one fixed-size, NUL-padded JSON record
+/// binding the attempt's launch id to its terminal outcome.
+pub const RESULT_BYTES: usize = 4 * 1024;
 pub const STORAGE_BYTES: u64 = 16 * 1024 * 1024;
 pub const PROFILE: &str = "slipstream-native-qualification-v1";
 

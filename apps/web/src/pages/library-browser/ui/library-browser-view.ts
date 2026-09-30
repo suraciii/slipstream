@@ -52,6 +52,7 @@ import {
 import { createAlbumForm } from "./album-form.js";
 import { createSourceListPresenter } from "./source-list-presenter.js";
 import { createGridBatchPresenter } from "./grid-batch-presenter.js";
+import { resolveKeyIntent } from "./keyboard-policy.js";
 import {
   addressFor,
   type NavigationGridRestoration,
@@ -1599,102 +1600,83 @@ ${RECOVERY_PANEL_TEMPLATE}
     gridPresenter.render(model, position);
   };
 
+  // The keyboard policy resolves one keydown to a semantic intent; this
+  // listener only reads the live facts it names and executes the result.
   const keydown = (event: KeyboardEvent) => {
     if (!alive) return;
     const target = event.target as HTMLElement | null;
-    if (
-      event.isComposing ||
-      target?.isContentEditable ||
-      event.altKey ||
-      target?.matches("textarea, select, [contenteditable=true]") ||
-      (target?.matches("input") &&
-        (target as HTMLInputElement).type !== "range")
-    )
-      return;
-    // A modal surface owns the keyboard: background shortcuts, Grid movement,
-    // and Photo decisions must not act behind it. Escape on such a surface is
-    // the native dialog's own close request, handled by the modal-surface
-    // cancel listener, so no branch here re-implements it.
-    if (surfaces.blocking()) return;
-    const modifier = event.ctrlKey || event.metaKey;
-    if (modifier && !event.shiftKey && event.key.toLowerCase() === "z") {
-      event.preventDefault();
-      send({ kind: "undo" });
-      return;
-    }
-    if (photoView.hidden) {
-      if (
-        event.key === "Escape" &&
-        (batchPresenter.multiCount() > 0 || batchPresenter.multiMode()) &&
-        gridView.contains(target)
-      ) {
-        event.preventDefault();
+    const intent = resolveKeyIntent(
+      {
+        key: event.key,
+        altKey: event.altKey,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        shiftKey: event.shiftKey,
+        isComposing: event.isComposing,
+      },
+      {
+        contentEditable: target?.isContentEditable === true,
+        editableControl: Boolean(
+          target?.matches("textarea, select, [contenteditable=true]"),
+        ),
+        textInput:
+          target?.matches("input") === true &&
+          (target as HTMLInputElement).type !== "range",
+        rangeInput: target?.matches("input[type=range]") === true,
+        withinGridView: gridView.contains(target),
+      },
+      {
+        modalBlocking: surfaces.blocking(),
+        gridViewActive: photoView.hidden,
+        gridMultiActive:
+          batchPresenter.multiCount() > 0 || batchPresenter.multiMode(),
+        zoomPresent: Boolean(zoomController),
+        zoomMeasurableImage: zoomController?.hasMeasurableImage() ?? false,
+        currentSelection: photoPresenter.currentSelection,
+      },
+    );
+    if (intent.kind === "ignore") return;
+    if (intent.preventDefault) event.preventDefault();
+    switch (intent.kind) {
+      case "undo":
+        send({ kind: "undo" });
+        return;
+      case "grid-multi-clear":
         send({ kind: "grid-multi-clear" });
         return;
-      }
-      // Grid View keys act only while the Grid owns keyboard focus.
-      if (!modifier && !event.shiftKey) gridPresenter.handleKey(event);
-      return;
+      case "grid-key":
+        gridPresenter.handleKey(event);
+        return;
+      case "zoom":
+        if (intent.action === "in") zoomController?.zoomIn();
+        else if (intent.action === "out") zoomController?.zoomOut();
+        else if (intent.action === "fit") zoomController?.applyFit();
+        else zoomController?.toggleDetail();
+        return;
+      case "navigate":
+        send(
+          intent.direction === "previous"
+            ? { kind: "previous" }
+            : { kind: "next" },
+        );
+        return;
+      case "select-photo":
+        send({
+          kind: "photo-mutation",
+          field: "selectionState",
+          value: intent.value,
+          advance: intent.advance,
+        });
+        return;
+      case "rate-photo":
+        send({
+          kind: "photo-mutation",
+          field: "rating",
+          value: intent.value,
+          advance: false,
+        });
+        return;
     }
-    if (modifier) return;
-    const zoom = zoomController;
-    if (!zoom) return;
-    if (event.key === "+" || event.key === "=") {
-      if (!zoom.hasMeasurableImage()) return;
-      event.preventDefault();
-      zoom.zoomIn();
-      return;
-    }
-    if (event.key === "-" || event.key === "_") {
-      if (!zoom.hasMeasurableImage()) return;
-      event.preventDefault();
-      zoom.zoomOut();
-      return;
-    }
-    // A focused zoom slider keeps its own key handling; every other Photo
-    // View shortcut stays available while it holds focus.
-    if (target?.matches("input[type=range]") && rangeAdjustmentKey(event.key))
-      return;
-    if (event.shiftKey) return;
-    if (event.key === "ArrowLeft") send({ kind: "previous" });
-    else if (event.key === "ArrowRight") send({ kind: "next" });
-    else if (event.key.toLowerCase() === "f") {
-      event.preventDefault();
-      zoom.applyFit();
-    } else if (event.key.toLowerCase() === "d") {
-      event.preventDefault();
-      zoom.toggleDetail();
-    } else if (event.key.toLowerCase() === "p")
-      send({
-        kind: "photo-mutation",
-        field: "selectionState",
-        value: "selected",
-        advance: true,
-      });
-    else if (event.key.toLowerCase() === "x")
-      send({
-        kind: "photo-mutation",
-        field: "selectionState",
-        value: "rejected",
-        advance: true,
-      });
-    else if (
-      event.key.toLowerCase() === "u" &&
-      photoPresenter.currentSelection !== "undecided"
-    )
-      send({
-        kind: "photo-mutation",
-        field: "selectionState",
-        value: "undecided",
-        advance: false,
-      });
-    else if (/^[0-5]$/.test(event.key))
-      send({
-        kind: "photo-mutation",
-        field: "rating",
-        value: Number(event.key),
-        advance: false,
-      });
   };
 
   compactSources.addEventListener("change", onSourceViewportChange);
@@ -2144,14 +2126,4 @@ function selectionLabel(value?: ViewSelectionState): string {
     : value === "rejected"
       ? "Rejected"
       : "Undecided";
-}
-
-/// Keys a focused range input handles itself: arrows, Home, End, and Page.
-function rangeAdjustmentKey(key: string): boolean {
-  return (
-    key.startsWith("Arrow") ||
-    key.startsWith("Page") ||
-    key === "Home" ||
-    key === "End"
-  );
 }

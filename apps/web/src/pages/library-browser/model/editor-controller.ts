@@ -174,15 +174,8 @@ export function createEditorController(
   const editorRecipeReads = new Map<string, Promise<void>>();
   const editorRecipeGenerations = new Map<string, number>();
 
-  let editorWriteAbort: AbortController | undefined;
   /// Resolves the writers waiting for this Photo's write stream to settle.
   let editorWriteWaiters: Array<() => void> = [];
-  /// Each Photo has its own Export barrier. An uncertain Export keeps only
-  /// that Photo's later writes behind its idempotency reconciliation.
-  const editorExportBarriers = new Map<
-    string,
-    Readonly<{ promise: Promise<void>; resolve: () => void }>
-  >();
   /// The automatic resolution of a save whose outcome is unknown: at most one
   /// identical retry per lost response, so a lost receipt cannot spin.
   let editorUnknownResolution: string | undefined;
@@ -209,12 +202,7 @@ export function createEditorController(
     view.editorVisible() &&
     isCurrentPhoto(photoId) &&
     currentPhoto()?.id === photoId;
-  const releaseEditorExportBarrier = (photoId: string): void => {
-    const barrier = editorExportBarriers.get(photoId);
-    if (!barrier) return;
-    editorExportBarriers.delete(photoId);
-    barrier.resolve();
-  };
+
   const outputs = createWorkspaceOutputController(fetcher, {
     owns: editorOwnsPhoto,
     render: () => renderEditor(),
@@ -253,10 +241,6 @@ export function createEditorController(
         await promise;
       }
     },
-    acquire: (photoId) => {
-      editorExportBarriers.set(photoId, Promise.withResolvers<void>());
-    },
-    release: releaseEditorExportBarrier,
   });
   const renditions = createEditorRenditions({
     fetcher,
@@ -583,7 +567,7 @@ export function createEditorController(
     // The Export ordering barrier: an edit placed while a submission is
     // settling waits behind it, so the accepted Export can never be retargeted
     // by a later write.
-    const barrier = editorExportBarriers.get(photoId)?.promise;
+    const barrier = outputs.writeBarrier(photoId);
     if (barrier) await barrier;
     const request = step.request;
     if (!request) {
@@ -592,9 +576,7 @@ export function createEditorController(
       return;
     }
     const controller = new AbortController();
-    editorWriteAbort = controller;
     const result = await saveEditRecipe(fetcher, request, controller.signal);
-    if (editorWriteAbort === controller) editorWriteAbort = undefined;
     const next =
       result.kind === "saved"
         ? session.acknowledge(request, {

@@ -6,39 +6,31 @@
 //! starts a replacement attempt against a possibly live one and never
 //! publishes an unvalidated artifact.
 
-use crate::{config::ProcessingConfig, edit_preview::PreviewFacts};
+use crate::config::ProcessingConfig;
 use slipstream_core::{
-    DEVELOPMENT_PREVIEW_LONG_EDGE, DISPLAY_TRANSFORM_VERSION, ExportAttempt, ExportExposureRange,
-    ExportRecipePayload, ExportRecord, ExportSettlement, ExportSnapshot, ExportSourceEvidence,
-    ExportState, ExportTarget, ExportWorkspace, Library, LibraryRoot, OriginalCapability,
-    OriginalKind, RelativeOriginalPath, StagedOriginal,
+    ExportAttempt, ExportRecipePayload, ExportRecord, ExportSettlement, ExportSnapshot,
+    ExportSourceEvidence, ExportState, ExportTarget, ExportWorkspace, Library, LibraryRoot,
+    OriginalCapability, OriginalKind, RelativeOriginalPath, StagedOriginal,
 };
 use slipstream_processing::{
     photo::{self, PhotoReceipt, Recipe, Request, ResultBody, Source},
-    photo_profile::{self, APPROVED_EXPOSURE_MILLI_EV_MAX, APPROVED_EXPOSURE_MILLI_EV_MIN},
-    protocol::{
-        Availability, PHOTO_MODE, PHOTO_PROTOCOL_VERSION, PHOTO_WORKLOAD, PHOTO_WORKLOAD_PROXY_FILM,
-    },
+    photo_profile,
+    protocol::{Availability, PHOTO_MODE, PHOTO_PROTOCOL_VERSION, PHOTO_WORKLOAD},
 };
 #[path = "output_validation.rs"]
-mod output_validation;
+pub(crate) mod output_validation;
 pub(crate) use output_validation::DevelopmentTiffFacts;
 #[cfg(test)]
 use output_validation::validate_development_tiff;
-use output_validation::{OUTPUT_VALIDATION_FAILED, validate_output, verify_received_output};
+use output_validation::{
+    OUTPUT_VALIDATION_FAILED, open_read_only, validate_output, verify_received_output,
+};
 use std::{
-    fs,
-    io::{self, Write},
-    os::unix::{
-        fs::{OpenOptionsExt, PermissionsExt},
-        io::AsRawFd,
-    },
+    fs, io,
+    os::unix::{fs::OpenOptionsExt, io::AsRawFd},
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::Arc,
+    time::Duration,
 };
 
 /// Resolves the published Library Location of one Photo. The closure keeps
@@ -46,66 +38,22 @@ use std::{
 pub(crate) type SourceLocationResolver =
     Arc<dyn Fn(&str) -> Option<RelativeOriginalPath> + Send + Sync>;
 
+/// The immutable launcher identity one attempt binds to: the socket, the
+/// instance, the qualified policy, and the bundle. A value naming the
+/// launcher for one attempt's exchanges, never a handle to the manager's
+/// whole configuration.
+pub(crate) struct LauncherBinding {
+    pub(crate) socket_path: PathBuf,
+    pub(crate) instance: String,
+    pub(crate) policy_sha256: String,
+    pub(crate) bundle_sha256: String,
+}
+
 /// Consecutive launcher transport failures tolerated while an attempt is
 /// followed or reconciled before the attempt settles failed with an
 /// actionable reason. A live launcher-owned attempt cannot outlast this
 /// window of silence.
 const LAUNCHER_FAILURE_TOLERANCE: u32 = 120;
-/// How many times one abandoned preview attempt retries a cancel whose answer
-/// was lost. The cancel is idempotent, so a retry is safe and bounded.
-const ABANDON_TOLERANCE: u32 = 3;
-
-/// A cooperative cancellation marker for one preview-class launcher attempt.
-/// The gate flips it when a newer intent supersedes the attempt; the runner
-/// checks it between blocking exchanges and settles the launcher receipt
-/// before discarding any private output.
-#[derive(Clone, Default)]
-pub(crate) struct PreviewCancellation {
-    cancelled: Arc<AtomicBool>,
-}
-
-impl PreviewCancellation {
-    pub(crate) fn from_token(cancelled: Arc<AtomicBool>) -> Self {
-        Self { cancelled }
-    }
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    pub(crate) fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
-    }
-}
-
-pub(crate) struct PreviewRenderResult {
-    pub(crate) attempt_key: String,
-    pub(crate) path: PathBuf,
-    pub(crate) size: u64,
-    pub(crate) sha256: String,
-    pub(crate) facts: crate::edit_preview::PreviewFacts,
-    pub(crate) output_facts: DevelopmentTiffFacts,
-    pub(crate) source_size: u64,
-    pub(crate) source_sha256: String,
-    pub(crate) source_profile_id: String,
-    pub(crate) source_relative_path: String,
-}
-
-/// A service-minted preview attempt identity is opaque to the launcher and
-/// uses only its closed lower-case identifier alphabet.
-static PREVIEW_ATTEMPT_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn preview_attempt_key() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let sequence = PREVIEW_ATTEMPT_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("prev-{}-{nanos}-{sequence}", std::process::id())
-}
 
 /// Server-side launcher identities plus the filesystem seams one attempt owns.
 pub(crate) struct ExportManager {
@@ -206,6 +154,50 @@ impl ExportManager {
     pub(crate) fn delete_preview_output(&self, attempt_key: &str) {
         let _ = self.workspace.delete_preview_artifact(attempt_key);
     }
+
+    /// The single heavy-work admission shared by durable Exports and
+    /// preview-class renders: one serialized launcher slot per instance.
+    /// The caller holds the returned guard for exactly one attempt.
+    pub(crate) async fn acquire_heavy_slot(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.admission.lock().await
+    }
+
+    /// The immutable launcher identity of this deployment: socket, instance,
+    /// qualified policy, and bundle. Startup configuration cannot change
+    /// while the service runs, so one snapshot names the launcher for a
+    /// whole attempt.
+    pub(crate) fn launcher_binding(&self) -> LauncherBinding {
+        LauncherBinding {
+            socket_path: self.processing.socket_path(),
+            instance: self.processing.instance.clone(),
+            policy_sha256: self.processing.policy_sha256.clone(),
+            bundle_sha256: self.processing.bundle_sha256.clone(),
+        }
+    }
+
+    /// Begins one private ephemeral preview output below the workspace's
+    /// preview namespace. The rendering executor owns the temporary bytes
+    /// until it publishes or discards them.
+    pub(crate) fn begin_preview_output(
+        &self,
+        attempt_key: &str,
+        target: ExportTarget,
+    ) -> Result<slipstream_core::ArtifactWriter, slipstream_core::ExportError> {
+        self.workspace.begin_preview_artifact(attempt_key, target)
+    }
+
+    /// The published Library Location of one Photo, or `None` before the
+    /// first publication.
+    pub(crate) fn resolve_source_location(&self, photo_id: &str) -> Option<RelativeOriginalPath> {
+        (self.resolver)(photo_id)
+    }
+
+    /// The shared serialized Library instance this manager was opened
+    /// with. The preview render executor reads render-time facts through
+    /// the same single instance; this is a resource reference, not a copy.
+    pub(crate) fn library(&self) -> &Arc<Library> {
+        &self.library
+    }
     /// The retained Development TIFF of one Photo whose captured snapshot
     /// matches the current Edit identity and whose retention has not expired,
     /// or `None` when no matching artifact is retained.
@@ -224,607 +216,6 @@ impl ExportManager {
         retained_development_tiff_of(&records, identity, unix_seconds(), |export_id| {
             self.artifact_path(export_id)
         })
-    }
-
-    /// Runs one preview-class attempt through the same closed
-    /// `development-tiff` workload as an Export. No persistence row,
-    /// retained-output reservation, or artifact publication is touched.
-    pub(crate) async fn render_preview(
-        &self,
-        photo_id: &str,
-        stage: &'static str,
-        settings: &'static str,
-        cancellation: PreviewCancellation,
-    ) -> Result<PreviewRenderResult, String> {
-        let _slot = self.admission.lock().await;
-        if cancellation.is_cancelled() {
-            return Err("preview render cancelled".to_owned());
-        }
-        self.ensure_admissible().await?;
-        if cancellation.is_cancelled() {
-            return Err("preview render cancelled".to_owned());
-        }
-        let (incarnation, sequence) = self.reconcile_slot().await?;
-        if cancellation.is_cancelled() {
-            return Err("preview render cancelled".to_owned());
-        }
-
-        let photo = self
-            .library
-            .photo(photo_id)
-            .await
-            .map_err(|_| "Photo facts could not be read".to_owned())?
-            .ok_or_else(|| "Photo disappeared before preview admission".to_owned())?;
-        let read = self
-            .library
-            .edit_recipe(photo_id)
-            .await
-            .map_err(|_| "Edit recipe could not be read".to_owned())?
-            .ok_or_else(|| "Edit recipe facts disappeared before preview admission".to_owned())?;
-        if !read.source_available || !photo.original_available {
-            return Err("the Original is unavailable".to_owned());
-        }
-        let Some(source_revision) = read.current_source_revision.clone() else {
-            return Err("source facts are pending publication".to_owned());
-        };
-        // The baseline selector names the processing baseline itself: 0 EV
-        // against the documented baseline and as-shot white balance,
-        // independently of the saved recipe. A Photo without a saved recipe
-        // is that same baseline.
-        let baseline = settings == "baseline";
-        let target = if stage == "film" {
-            ExportTarget::FilmJpeg
-        } else {
-            ExportTarget::DevelopmentTiff
-        };
-        let workload = target.workload();
-        let recipe = match read.recipe.as_ref() {
-            Some(recipe) if !baseline => ExportRecipePayload::capture(
-                &recipe.settings,
-                ExportExposureRange {
-                    minimum_milli_ev: APPROVED_EXPOSURE_MILLI_EV_MIN,
-                    maximum_milli_ev: APPROVED_EXPOSURE_MILLI_EV_MAX,
-                },
-            )
-            .map_err(|_| "captured recipe is not representable by the execution payload")?,
-            _ => ExportRecipePayload {
-                exposure_milli_ev: 0,
-                white_balance_mode: "as-shot",
-            },
-        };
-        let facts = PreviewFacts {
-            stage,
-            settings,
-            long_edge: DEVELOPMENT_PREVIEW_LONG_EDGE,
-            display_transform: DISPLAY_TRANSFORM_VERSION,
-            bundle_sha256: self.processing.bundle_sha256.clone(),
-            source_revision,
-            recipe_revision: match read.recipe.as_ref() {
-                Some(recipe) if !baseline => Some(recipe.revision.clone()),
-                _ => None,
-            },
-            exposure_milli_ev: recipe.exposure_milli_ev,
-            white_balance: "as-shot",
-            source: "original",
-            proxy_id: None,
-        };
-        let (staged, source_profile_id) = self
-            .stage_preview_original(
-                photo_id,
-                &facts.source_revision,
-                photo.original_kind,
-                &photo.filename,
-            )
-            .await?;
-        if cancellation.is_cancelled() {
-            drop(staged);
-            return Err("preview render cancelled".to_owned());
-        }
-        let staged_facts = staged.facts();
-        let source_size = staged_facts.source_facts.size;
-        let source_sha256 = staged_facts.sha256.clone();
-        let source = ExportSourceEvidence {
-            size: source_size,
-            sha256: source_sha256.clone(),
-        };
-        let attempt_key = preview_attempt_key();
-        let manifest_sha256 = manifest_digest_parts(
-            &self.processing.policy_sha256,
-            &self.processing.bundle_sha256,
-            (&source_profile_id, "raw", &source),
-            &recipe,
-            workload,
-            workload,
-        );
-
-        // Keep the staged descriptor open until Start returns, exactly like
-        // the Export path. The launcher copies and hashes the source before
-        // releasing its worker.
-        let recipe_digest = recipe.digest();
-        let start_result = start_photo(StartExchange {
-            path: staged.path().to_path_buf(),
-            socket: self.processing.socket_path(),
-            instance: self.processing.instance.clone(),
-            export_id: attempt_key.clone(),
-            incarnation: incarnation.clone(),
-            sequence,
-            policy: self.processing.policy_sha256.clone(),
-            bundle: self.processing.bundle_sha256.clone(),
-            workload: workload.to_owned(),
-            source_kind: "raw".to_owned(),
-            source_profile_id: source_profile_id.clone(),
-            source,
-            recipe,
-            recipe_digest,
-            manifest_sha256,
-            task_error_prefix: "preview launcher task failed",
-            open_error: "staged source could not be opened",
-            refusal_error: "launcher refused the preview start",
-        })
-        .await;
-        let start_result = match start_result {
-            Ok(result) => result,
-            Err(error) => {
-                self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
-                    .await;
-                drop(staged);
-                return Err(error);
-            }
-        };
-        if let Err(error) = start_result {
-            self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
-                .await;
-            drop(staged);
-            return Err(error);
-        }
-        drop(staged);
-
-        let receipt = match self
-            .follow_preview_attempt(&attempt_key, &incarnation, sequence, &cancellation)
-            .await
-        {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
-                    .await;
-                return Err(error);
-            }
-        };
-        if !is_completed_receipt(&receipt) {
-            return Err(format!(
-                "preview processing attempt did not complete: {}",
-                receipt.outcome.unwrap_or_else(|| "unknown".to_owned())
-            ));
-        }
-        if cancellation.is_cancelled() {
-            self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
-                .await;
-            return Err("preview render cancelled".to_owned());
-        }
-
-        let writer = match self.workspace.begin_preview_artifact(&attempt_key, target) {
-            Ok(writer) => writer,
-            Err(error) => {
-                self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
-                    .await;
-                return Err(format!("preview output staging failed: {error}"));
-            }
-        };
-        let output_path = writer.temporary_path().to_path_buf();
-        let output_file = match open_writable(&output_path) {
-            Ok(file) => file,
-            Err(error) => {
-                self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
-                    .await;
-                return Err(format!("preview output could not be opened: {error}"));
-            }
-        };
-        let output_receipt_result = output_photo(OutputExchange {
-            socket: self.processing.socket_path(),
-            instance: self.processing.instance.clone(),
-            export_id: attempt_key.clone(),
-            incarnation: incarnation.clone(),
-            sequence,
-            target: workload.to_owned(),
-            output_file,
-            task_error_prefix: "preview output task failed",
-            transfer_error: "launcher could not transfer the preview output",
-            unexpected_error: "launcher answered the preview output unexpectedly",
-            refusal_error: "launcher refused the preview output transfer",
-        })
-        .await;
-        let output_receipt = match output_receipt_result {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
-                    .await;
-                return Err(error);
-            }
-        };
-        let validation_path = output_path.clone();
-        let validation_receipt = output_receipt.clone();
-        let validation_result = tokio::task::spawn_blocking(move || {
-            verify_received_output(&validation_path, &validation_receipt, target)
-        })
-        .await;
-        let output_facts = match validation_result {
-            Ok(Ok(facts)) => facts,
-            Ok(Err(_)) => {
-                self.discard_preview_attempt(
-                    &attempt_key,
-                    &incarnation,
-                    sequence,
-                    Some(&output_receipt),
-                )
-                .await;
-                return Err(OUTPUT_VALIDATION_FAILED.to_owned());
-            }
-            Err(error) => {
-                self.discard_preview_attempt(
-                    &attempt_key,
-                    &incarnation,
-                    sequence,
-                    Some(&output_receipt),
-                )
-                .await;
-                return Err(format!("preview validation task failed: {error}"));
-            }
-        };
-        let published = match writer.publish(|path| validate_output(path, target).map(|_| ())) {
-            Ok(published) => published,
-            Err(error) => {
-                self.discard_preview_attempt(
-                    &attempt_key,
-                    &incarnation,
-                    sequence,
-                    Some(&output_receipt),
-                )
-                .await;
-                return Err(format!("preview output publication failed: {error}"));
-            }
-        };
-        if cancellation.is_cancelled() {
-            self.discard_preview_attempt(
-                &attempt_key,
-                &incarnation,
-                sequence,
-                Some(&output_receipt),
-            )
-            .await;
-            return Err("preview render cancelled".to_owned());
-        }
-        if !self
-            .acknowledge_output(
-                &attempt_key,
-                &incarnation,
-                sequence,
-                true,
-                output_receipt.size,
-                &output_receipt.sha256,
-            )
-            .await
-        {
-            self.discard_preview_attempt(
-                &attempt_key,
-                &incarnation,
-                sequence,
-                Some(&output_receipt),
-            )
-            .await;
-            return Err("preview output acknowledgement failed".to_owned());
-        }
-        Ok(PreviewRenderResult {
-            attempt_key,
-            path: published.path,
-            size: published.size,
-            sha256: published.sha256,
-            facts,
-            output_facts,
-            source_size,
-            source_sha256,
-            source_profile_id,
-            source_relative_path: (self.resolver)(photo_id)
-                .map(|path| path.as_str().to_owned())
-                .unwrap_or_default(),
-        })
-    }
-    /// Development Proxy frame. The frame is the only source descriptor the
-    /// launcher sees; the workload's closed plan admits `development-proxy`
-    /// and requires the zero exposure recipe because the transform happened
-    /// before this crossing.
-    pub(crate) async fn render_proxy_film_preview(
-        &self,
-        facts: crate::edit_preview::PreviewFacts,
-        frame_path: &Path,
-        source_profile_id: &str,
-        cancellation: PreviewCancellation,
-    ) -> Result<PreviewRenderResult, String> {
-        let _slot = self.admission.lock().await;
-        if cancellation.is_cancelled() {
-            return Err("preview render cancelled".to_owned());
-        }
-        self.ensure_admissible().await?;
-        let (incarnation, sequence) = self.reconcile_slot().await?;
-        let workload = PHOTO_WORKLOAD_PROXY_FILM;
-        let target = ExportTarget::FilmJpeg;
-        let recipe = ExportRecipePayload {
-            // `proxy-film` deliberately has a zero-EV payload. Apply the
-            // saved exposure to a private scene-linear handoff first.
-            exposure_milli_ev: 0,
-            white_balance_mode: "as-shot",
-        };
-        let attempt_key = preview_attempt_key();
-        let input_writer = self
-            .workspace
-            .begin_preview_artifact(
-                &format!("{attempt_key}-input"),
-                ExportTarget::DevelopmentTiff,
-            )
-            .map_err(|error| format!("proxy Film input staging failed: {error}"))?;
-        let input_path = input_writer.temporary_path().to_path_buf();
-        let input_output_path = input_path.clone();
-        let source_path = frame_path.to_path_buf();
-        let exposure = facts.exposure_milli_ev;
-        let (transformed_size, transformed_sha256) =
-            tokio::task::spawn_blocking(move || -> Result<(u64, String), String> {
-                let file = open_read_only(&source_path)
-                    .map_err(|_| "staged proxy frame could not be opened".to_owned())?;
-                let frame = slipstream_core::decode_development_frame(
-                    file.as_raw_fd(),
-                    DEVELOPMENT_PREVIEW_LONG_EDGE,
-                )
-                .map_err(|_| "staged proxy frame could not be decoded".to_owned())?;
-                let mut frame = frame;
-                slipstream_core::apply_proxy_exposure(&mut frame, exposure)
-                    .map_err(|_| "proxy exposure could not be applied".to_owned())?;
-                let encoded = slipstream_core::encode_development_frame(&frame)
-                    .map_err(|_| "proxy exposure handoff could not be encoded".to_owned())?;
-                let size = encoded.len() as u64;
-                let sha256 = {
-                    use sha2::{Digest, Sha256};
-                    format!("{:x}", Sha256::digest(&encoded))
-                };
-                stage_proxy_film_input(&input_output_path, &encoded)?;
-                Ok((size, sha256))
-            })
-            .await
-            .map_err(|error| format!("proxy Film input task failed: {error}"))??;
-        let frame_path = input_path;
-        let source = ExportSourceEvidence {
-            size: transformed_size,
-            sha256: transformed_sha256,
-        };
-        let manifest_sha256 = manifest_digest_parts(
-            &self.processing.policy_sha256,
-            &self.processing.bundle_sha256,
-            (source_profile_id, "development-proxy", &source),
-            &recipe,
-            workload,
-            workload,
-        );
-        let recipe_digest = recipe.digest();
-        let start_result = start_photo(StartExchange {
-            path: frame_path.to_path_buf(),
-            socket: self.processing.socket_path(),
-            instance: self.processing.instance.clone(),
-            export_id: attempt_key.clone(),
-            incarnation: incarnation.clone(),
-            sequence,
-            policy: self.processing.policy_sha256.clone(),
-            bundle: self.processing.bundle_sha256.clone(),
-            workload: workload.to_owned(),
-            source_kind: "development-proxy".to_owned(),
-            source_profile_id: source_profile_id.to_owned(),
-            source: source.clone(),
-            recipe,
-            recipe_digest,
-            manifest_sha256,
-            task_error_prefix: "proxy Film launcher task failed",
-            open_error: "staged proxy frame could not be opened",
-            refusal_error: "launcher refused the proxy Film start",
-        })
-        .await?;
-        if let Err(error) = start_result {
-            self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
-                .await;
-            return Err(error);
-        }
-        // The launcher copied and hashed the sealed handoff during Start; the
-        // private temporary has no further consumer and is removed now. Every
-        // earlier return dropped the writer the same way.
-        drop(input_writer);
-        let _receipt = match self
-            .follow_preview_attempt(&attempt_key, &incarnation, sequence, &cancellation)
-            .await
-        {
-            Ok(receipt) if is_completed_receipt(&receipt) => receipt,
-            Ok(receipt) => {
-                self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
-                    .await;
-                return Err(format!(
-                    "proxy Film attempt did not complete: {}",
-                    receipt.outcome.unwrap_or_else(|| "unknown".to_owned())
-                ));
-            }
-            Err(error) => {
-                self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
-                    .await;
-                return Err(error);
-            }
-        };
-        let writer = match self.workspace.begin_preview_artifact(&attempt_key, target) {
-            Ok(writer) => writer,
-            Err(error) => {
-                self.discard_preview_attempt(&attempt_key, &incarnation, sequence, None)
-                    .await;
-                return Err(format!("proxy Film output staging failed: {error}"));
-            }
-        };
-        let output_path = writer.temporary_path().to_path_buf();
-        let output_file = match open_writable(&output_path) {
-            Ok(file) => file,
-            Err(error) => {
-                self.discard_preview_attempt(&attempt_key, &incarnation, sequence, None)
-                    .await;
-                return Err(format!("proxy Film output could not be opened: {error}"));
-            }
-        };
-        let output_receipt_result = output_photo(OutputExchange {
-            socket: self.processing.socket_path(),
-            instance: self.processing.instance.clone(),
-            export_id: attempt_key.clone(),
-            incarnation: incarnation.clone(),
-            sequence,
-            target: workload.to_owned(),
-            output_file,
-            task_error_prefix: "proxy Film output task failed",
-            transfer_error: "launcher could not transfer proxy Film output",
-            unexpected_error: "launcher answered proxy Film output unexpectedly",
-            refusal_error: "launcher refused proxy Film output transfer",
-        })
-        .await;
-        let output_receipt = match output_receipt_result {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                self.discard_preview_attempt(&attempt_key, &incarnation, sequence, None)
-                    .await;
-                return Err(error);
-            }
-        };
-        let validation_path = output_path.clone();
-        let validation_receipt = output_receipt.clone();
-        let validation_result = tokio::task::spawn_blocking(move || {
-            verify_received_output(&validation_path, &validation_receipt, target)
-        })
-        .await;
-        let output_facts = match validation_result {
-            Ok(Ok(facts)) => facts,
-            Ok(Err(_)) => {
-                self.discard_preview_attempt(
-                    &attempt_key,
-                    &incarnation,
-                    sequence,
-                    Some(&output_receipt),
-                )
-                .await;
-                return Err(OUTPUT_VALIDATION_FAILED.to_owned());
-            }
-            Err(error) => {
-                self.discard_preview_attempt(
-                    &attempt_key,
-                    &incarnation,
-                    sequence,
-                    Some(&output_receipt),
-                )
-                .await;
-                return Err(format!("proxy Film validation task failed: {error}"));
-            }
-        };
-        let published = match writer.publish(|path| validate_output(path, target).map(|_| ())) {
-            Ok(published) => published,
-            Err(error) => {
-                self.discard_preview_attempt(
-                    &attempt_key,
-                    &incarnation,
-                    sequence,
-                    Some(&output_receipt),
-                )
-                .await;
-                return Err(format!("proxy Film publication failed: {error}"));
-            }
-        };
-        if cancellation.is_cancelled() {
-            self.discard_preview_attempt(
-                &attempt_key,
-                &incarnation,
-                sequence,
-                Some(&output_receipt),
-            )
-            .await;
-            return Err("preview render cancelled".to_owned());
-        }
-        if !self
-            .acknowledge_output(
-                &attempt_key,
-                &incarnation,
-                sequence,
-                true,
-                output_receipt.size,
-                &output_receipt.sha256,
-            )
-            .await
-        {
-            self.discard_preview_attempt(
-                &attempt_key,
-                &incarnation,
-                sequence,
-                Some(&output_receipt),
-            )
-            .await;
-            return Err("proxy Film output acknowledgement failed".to_owned());
-        }
-        Ok(PreviewRenderResult {
-            attempt_key,
-            path: published.path,
-            size: published.size,
-            sha256: published.sha256,
-            facts,
-            output_facts,
-            source_size: source.size,
-            source_sha256: source.sha256.clone(),
-            source_profile_id: source_profile_id.to_owned(),
-            source_relative_path: String::new(),
-        })
-    }
-
-    /// Abandons one launcher attempt the service will never validate. The
-    /// cancel is idempotent, so a lost answer is retried a bounded number of
-    /// times instead of leaving the launcher holding an attempt its owner has
-    /// given up on. An attempt that completed before the cancel arrived is
-    /// left to the launcher's own reconciliation: the service holds no
-    /// collected output to validate or reject, and a rejection without one is
-    /// refused by the launcher anyway.
-    async fn abandon_preview_attempt(&self, export_id: &str, incarnation: &str, sequence: u64) {
-        let attempt = ExportAttempt {
-            incarnation: incarnation.to_owned(),
-            sequence,
-        };
-        for _ in 0..ABANDON_TOLERANCE {
-            if !matches!(
-                self.cancel_attempt(export_id, &attempt).await,
-                AttemptCancel::Uncertain
-            ) {
-                return;
-            }
-        }
-    }
-
-    /// Releases one preview attempt the service will not publish: the
-    /// transferred output is rejected while the launcher still waits for an
-    /// acknowledgement, the private output is deleted, and the attempt is
-    /// abandoned. Ephemeral preview staging never outlives its admission.
-    async fn discard_preview_attempt(
-        &self,
-        attempt_key: &str,
-        incarnation: &str,
-        sequence: u64,
-        receipt: Option<&slipstream_processing::photo::OutputReceipt>,
-    ) {
-        if let Some(receipt) = receipt {
-            let _ = self
-                .acknowledge_output(
-                    attempt_key,
-                    incarnation,
-                    sequence,
-                    false,
-                    receipt.size,
-                    &receipt.sha256,
-                )
-                .await;
-        }
-        self.delete_preview_output(attempt_key);
-        self.abandon_preview_attempt(attempt_key, incarnation, sequence)
-            .await;
     }
 
     /// Verifies one launcher capability against this deployment's configured
@@ -1181,7 +572,7 @@ impl ExportManager {
 }
 
 /// The launcher-side answer to one cancellation request.
-enum AttemptCancel {
+pub(crate) enum AttemptCancel {
     /// The completion raced the cancellation and won; the output can still
     /// be collected and published.
     Completed,
@@ -1205,7 +596,11 @@ pub(crate) enum ExportCancelOutcome {
 
 impl ExportManager {
     /// Drives one launcher Cancel exchange to a terminal receipt.
-    async fn cancel_attempt(&self, export_id: &str, attempt: &ExportAttempt) -> AttemptCancel {
+    pub(crate) async fn cancel_attempt(
+        &self,
+        export_id: &str,
+        attempt: &ExportAttempt,
+    ) -> AttemptCancel {
         let socket = self.processing.socket_path();
         let instance = self.processing.instance.clone();
         let cancel_export_id = export_id.to_owned();
@@ -1310,7 +705,7 @@ impl ExportManager {
         }
     }
 
-    async fn reconcile_slot(&self) -> Result<(String, u64), String> {
+    pub(crate) async fn reconcile_slot(&self) -> Result<(String, u64), String> {
         let mut failures = 0_u32;
         loop {
             match self
@@ -1355,7 +750,7 @@ impl ExportManager {
     /// Stages one preview Original and classifies its approved processing
     /// profile from the same confined bytes. The profile is launcher input,
     /// not part of the Edit identity facts.
-    async fn stage_preview_original(
+    pub(crate) async fn stage_preview_original(
         &self,
         photo_id: &str,
         source_revision: &str,
@@ -1714,49 +1109,6 @@ impl ExportManager {
         Ok(())
     }
 
-    /// Polls one preview attempt while honoring supersession cancellation.
-    /// A cancellation is resolved against the launcher receipt before the
-    /// caller discards the private output.
-    async fn follow_preview_attempt(
-        &self,
-        export_id: &str,
-        incarnation: &str,
-        sequence: u64,
-        cancellation: &PreviewCancellation,
-    ) -> Result<PhotoReceipt, String> {
-        let attempt = ExportAttempt {
-            incarnation: incarnation.to_owned(),
-            sequence,
-        };
-        let mut failures = 0_u32;
-        loop {
-            if cancellation.is_cancelled() {
-                self.abandon_preview_attempt(export_id, incarnation, sequence)
-                    .await;
-                return Err("preview render cancelled".to_owned());
-            }
-            match self.launcher_inspect(export_id, &attempt).await {
-                Ok(receipt) => {
-                    if is_terminal_receipt(&receipt) {
-                        return Ok(receipt);
-                    }
-                    failures = 0;
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-                Err(_) => {
-                    failures += 1;
-                    if failures >= LAUNCHER_FAILURE_TOLERANCE {
-                        return Err(
-                            "processing launcher became unreachable while the preview ran"
-                                .to_owned(),
-                        );
-                    }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }
-        }
-    }
-
     /// Polls the launcher until the attempt reaches terminal settlement.
     async fn follow_attempt(
         &self,
@@ -1794,7 +1146,7 @@ impl ExportManager {
         }
     }
 
-    async fn launcher_inspect(
+    pub(crate) async fn launcher_inspect(
         &self,
         export_id: &str,
         attempt: &ExportAttempt,
@@ -1833,7 +1185,7 @@ impl ExportManager {
         }
     }
 
-    async fn acknowledge_output(
+    pub(crate) async fn acknowledge_output(
         &self,
         export_id: &str,
         incarnation: &str,
@@ -1881,10 +1233,11 @@ const RECONCILE_TOLERANCE: u32 = 5;
 /// produced under to be current for one Edit Preview derivation: the exact
 /// recipe revision and exposure, the source revision, and the bundle.
 pub(crate) struct RetainedDevelopmentIdentity<'a> {
-    /// The settings selector the request asked for: `current` matches the
-    /// captured recipe revision exactly, while `baseline` matches any
-    /// captured snapshot produced under exactly the baseline settings.
-    pub(crate) settings: &'a str,
+    /// Whether the request names the processing baseline rather than one
+    /// saved recipe revision: a baseline request matches any captured
+    /// snapshot produced under exactly the baseline settings, while every
+    /// other request matches the captured revision exactly.
+    pub(crate) matches_baseline: bool,
     pub(crate) recipe_revision: Option<&'a str>,
     pub(crate) exposure_milli_ev: i64,
     pub(crate) source_revision: &'a str,
@@ -1937,12 +1290,11 @@ pub(crate) fn retained_development_tiff(
     // attempt ran under: a snapshot that cannot produce one never ran.
     let payload = record.snapshot.recipe_payload().ok()?;
     let snapshot = &record.snapshot;
-    // A baseline request (`edit_preview`'s closed `settings` selector) names
-    // the processing baseline rather than a saved recipe, so any snapshot
-    // whose captured settings are exactly that baseline is the same
-    // development whatever revision captured them. Every other request
-    // matches the captured revision exactly.
-    let revision_matches = identity.settings == "baseline"
+    // A baseline request names the processing baseline rather than a saved
+    // recipe, so any snapshot whose captured settings are exactly that
+    // baseline is the same development whatever revision captured them.
+    // Every other request matches the captured revision exactly.
+    let revision_matches = identity.matches_baseline
         || Some(snapshot.recipe_revision.as_str()) == identity.recipe_revision;
     let matches = revision_matches
         && payload.exposure_milli_ev == identity.exposure_milli_ev
@@ -1974,12 +1326,12 @@ fn output_awaits_collection(receipt: &PhotoReceipt) -> bool {
     receipt.state == "settling" && receipt.outcome.is_none()
 }
 
-fn is_completed_receipt(receipt: &PhotoReceipt) -> bool {
+pub(crate) fn is_completed_receipt(receipt: &PhotoReceipt) -> bool {
     output_awaits_collection(receipt)
         || (receipt.state == "settled" && receipt.outcome.as_deref() == Some("completed"))
 }
 
-fn is_terminal_receipt(receipt: &PhotoReceipt) -> bool {
+pub(crate) fn is_terminal_receipt(receipt: &PhotoReceipt) -> bool {
     output_awaits_collection(receipt) || matches!(receipt.state.as_str(), "settled" | "blocked")
 }
 
@@ -2002,14 +1354,7 @@ fn unix_seconds() -> u64 {
         .as_secs()
 }
 
-fn open_read_only(path: &Path) -> io::Result<fs::File> {
-    fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(path)
-}
-
-fn open_writable(path: &Path) -> io::Result<fs::File> {
+pub(crate) fn open_writable(path: &Path) -> io::Result<fs::File> {
     fs::OpenOptions::new()
         .write(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
@@ -2018,28 +1363,28 @@ fn open_writable(path: &Path) -> io::Result<fs::File> {
 /// The shared descriptor-bearing Start exchange. Workload callers fill in the
 /// facts that are part of their protocol identity; this helper owns the
 /// blocking socket call and keeps the source descriptor alive through Start.
-struct StartExchange {
-    path: PathBuf,
-    socket: PathBuf,
-    instance: String,
-    export_id: String,
-    incarnation: String,
-    sequence: u64,
-    policy: String,
-    bundle: String,
-    workload: String,
-    source_kind: String,
-    source_profile_id: String,
-    source: ExportSourceEvidence,
-    recipe: ExportRecipePayload,
-    recipe_digest: String,
-    manifest_sha256: String,
-    task_error_prefix: &'static str,
-    open_error: &'static str,
-    refusal_error: &'static str,
+pub(crate) struct StartExchange {
+    pub(crate) path: PathBuf,
+    pub(crate) socket: PathBuf,
+    pub(crate) instance: String,
+    pub(crate) export_id: String,
+    pub(crate) incarnation: String,
+    pub(crate) sequence: u64,
+    pub(crate) policy: String,
+    pub(crate) bundle: String,
+    pub(crate) workload: String,
+    pub(crate) source_kind: String,
+    pub(crate) source_profile_id: String,
+    pub(crate) source: ExportSourceEvidence,
+    pub(crate) recipe: ExportRecipePayload,
+    pub(crate) recipe_digest: String,
+    pub(crate) manifest_sha256: String,
+    pub(crate) task_error_prefix: &'static str,
+    pub(crate) open_error: &'static str,
+    pub(crate) refusal_error: &'static str,
 }
 
-async fn start_photo(exchange: StartExchange) -> Result<Result<(), String>, String> {
+pub(crate) async fn start_photo(exchange: StartExchange) -> Result<Result<(), String>, String> {
     let StartExchange {
         path,
         socket,
@@ -2096,21 +1441,21 @@ async fn start_photo(exchange: StartExchange) -> Result<Result<(), String>, Stri
 /// The shared descriptor-bearing Output exchange. The caller retains control
 /// of acknowledgement/discard policy; this helper only transfers and decodes
 /// the launcher receipt.
-struct OutputExchange {
-    socket: PathBuf,
-    instance: String,
-    export_id: String,
-    incarnation: String,
-    sequence: u64,
-    target: String,
-    output_file: fs::File,
-    task_error_prefix: &'static str,
-    transfer_error: &'static str,
-    unexpected_error: &'static str,
-    refusal_error: &'static str,
+pub(crate) struct OutputExchange {
+    pub(crate) socket: PathBuf,
+    pub(crate) instance: String,
+    pub(crate) export_id: String,
+    pub(crate) incarnation: String,
+    pub(crate) sequence: u64,
+    pub(crate) target: String,
+    pub(crate) output_file: fs::File,
+    pub(crate) task_error_prefix: &'static str,
+    pub(crate) transfer_error: &'static str,
+    pub(crate) unexpected_error: &'static str,
+    pub(crate) refusal_error: &'static str,
 }
 
-async fn output_photo(
+pub(crate) async fn output_photo(
     exchange: OutputExchange,
 ) -> Result<slipstream_processing::photo::OutputReceipt, String> {
     let OutputExchange {
@@ -2155,30 +1500,6 @@ async fn output_photo(
     .map_err(|error| format!("{task_error_prefix}: {error}"))?
 }
 
-/// Writes one proxy Film exposure handoff into the prepared temporary path
-/// and seals it read-only. The launcher admits a source descriptor only when
-/// the file carries no write permission bits, so the writable staging mode
-/// the artifact writer created must be dropped before Start.
-fn stage_proxy_film_input(path: &Path, encoded: &[u8]) -> Result<(), String> {
-    let mut handoff = fs::OpenOptions::new()
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|_| "proxy exposure handoff could not be staged".to_owned())?;
-    handoff
-        .write_all(encoded)
-        .and_then(|()| handoff.sync_all())
-        .map_err(|_| "proxy exposure handoff could not be staged".to_owned())?;
-    let mut permissions = handoff
-        .metadata()
-        .map_err(|_| "proxy exposure handoff could not be sealed".to_owned())?
-        .permissions();
-    permissions.set_mode(0o400);
-    handoff
-        .set_permissions(permissions)
-        .map_err(|_| "proxy exposure handoff could not be sealed".to_owned())
-}
-
 /// The canonical manifest digest of the frozen protocol: compact JSON with
 /// sorted object keys over every field that affects execution, including the
 /// qualified source profile. The launcher recomputes the same digest and
@@ -2198,7 +1519,7 @@ fn manifest_digest(
     )
 }
 
-fn manifest_digest_parts(
+pub(crate) fn manifest_digest_parts(
     policy_id: &str,
     bundle_id: &str,
     input: (&str, &str, &ExportSourceEvidence),
@@ -2444,66 +1765,6 @@ pub(crate) mod development_tiff_decode {
         let short_path = base.join("short.tif");
         write_development_tiff(&short_path, &short);
         assert!(validate_development_tiff(&short_path).is_err());
-
-        let _ = fs::remove_dir_all(base);
-    }
-
-    /// The proxy Film exposure handoff is staged into a writable temporary
-    /// but must satisfy the launcher's source descriptor contract before
-    /// Start: sealed read-only with the exact declared size. The same bytes
-    /// left in the writable staging mode are refused.
-    #[test]
-    fn proxy_film_input_is_sealed_read_only_for_the_launcher() {
-        use slipstream_processing::photo::{
-            DescriptorKind, DescriptorRequirement, validate_descriptor,
-        };
-        let base = std::env::temp_dir().join(format!(
-            "proxy-film-input-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        ));
-        fs::create_dir_all(&base).unwrap();
-        let payload = b"proxy-film-handoff";
-        let requirement = DescriptorRequirement {
-            kind: DescriptorKind::Source,
-            peer_uid: unsafe { libc::getuid() },
-            declared_size: payload.len() as u64,
-            max_bytes: 1 << 20,
-        };
-
-        // Mirror begin_preview_artifact: a fresh private, writable staging
-        // file that the staging helper fills and seals.
-        let sealed = base.join("sealed.tiff");
-        fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .mode(0o600)
-            .open(&sealed)
-            .unwrap();
-        stage_proxy_film_input(&sealed, payload).unwrap();
-        let file = open_read_only(&sealed).unwrap();
-        let metadata = validate_descriptor(file.as_raw_fd(), requirement).unwrap();
-        assert_eq!(metadata.size, payload.len() as u64);
-        assert_eq!(metadata.mode & 0o222, 0);
-        drop(file);
-        assert_eq!(fs::read(&sealed).unwrap(), payload);
-
-        let unsealed = base.join("unsealed.tiff");
-        fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .mode(0o600)
-            .open(&unsealed)
-            .unwrap();
-        fs::write(&unsealed, payload).unwrap();
-        let file = open_read_only(&unsealed).unwrap();
-        assert!(validate_descriptor(file.as_raw_fd(), requirement).is_err());
-        drop(file);
 
         let _ = fs::remove_dir_all(base);
     }

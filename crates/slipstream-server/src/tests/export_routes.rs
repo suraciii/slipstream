@@ -17,6 +17,8 @@ use std::sync::{Arc, Mutex};
 
 use std::time::Duration;
 
+mod admission;
+
 /// One attempt receipt the fake launcher owns, keyed by the launcher's
 /// attempt identity.
 #[derive(Clone)]

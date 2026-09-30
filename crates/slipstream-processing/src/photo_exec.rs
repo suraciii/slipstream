@@ -1417,13 +1417,7 @@ impl PhotoExecutor {
 
     fn limits_match(&self, path: &Path) -> Result<bool, ErrorCode> {
         let limits = self.limits();
-        Ok(
-            backend::read(&path.join("memory.max"))? == limits.memory_bytes.to_string()
-                && backend::read(&path.join("memory.swap.max"))? == "0"
-                && backend::read(&path.join("cpu.max"))?
-                    == format!("{} {}", limits.cpu_quota_us, limits.cpu_period_us)
-                && backend::read(&path.join("pids.max"))? == limits.tasks.to_string(),
-        )
+        backend::limits_match(path, &limits, limits.memory_bytes)
     }
 
     fn scan_unowned(&self, records: &[PhotoRecord]) -> Result<(), ErrorCode> {
@@ -1954,51 +1948,13 @@ impl PhotoExecutor {
     }
 
     fn worker_outcome(&self, record: &PhotoRecord) -> Result<Option<Outcome>, ErrorCode> {
-        let path = record
-            .workspace(Path::new(&self.config.root))
-            .join("work")
-            .join(RESULT_NAME);
-        let file = match OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(ErrorCode::Uncertain),
-        };
-        let metadata = file.metadata().map_err(|_| ErrorCode::Uncertain)?;
-        if !metadata.is_file() || metadata.len() != 4096 {
-            return Err(ErrorCode::Uncertain);
-        }
-        let mut bytes = Vec::new();
-        file.take(4097)
-            .read_to_end(&mut bytes)
-            .map_err(|_| ErrorCode::Uncertain)?;
-        if bytes.len() != 4096 {
-            return Err(ErrorCode::Uncertain);
-        }
-        let end = bytes
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(bytes.len());
-        if bytes[end..].iter().any(|byte| *byte != 0) {
-            return Err(ErrorCode::Uncertain);
-        }
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct ResultFile {
-            launch_id: String,
-            outcome: Outcome,
-        }
-        let value: ResultFile = match serde_json::from_slice(&bytes[..end]) {
-            Ok(value) => value,
-            Err(_) => return Ok(None),
-        };
-        if value.launch_id != record.launch_id {
-            return Err(ErrorCode::Uncertain);
-        }
-        Ok(Some(value.outcome))
+        backend::worker_result(
+            &record
+                .workspace(Path::new(&self.config.root))
+                .join("work")
+                .join(RESULT_NAME),
+            &record.launch_id,
+        )
     }
 
     fn cleanup(&self, record: &mut PhotoRecord) -> Result<(), ErrorCode> {
