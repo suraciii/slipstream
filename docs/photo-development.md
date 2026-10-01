@@ -25,6 +25,10 @@ editing, arbitrary processing graphs, custom Film Recipes, external editing
 history import, or user-visible virtual copies. It does not change the qualified
 0.1 release boundary.
 
+The [darktable Integration](darktable-integration.md) specification owns the
+product relationship with the engine. Engine discovery must not expand this
+editing scope or grant support to unqualified controls.
+
 ## Development Controls
 
 Exposure must represent compensation in EV against a documented processing

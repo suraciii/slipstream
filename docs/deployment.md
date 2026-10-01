@@ -205,23 +205,24 @@ the container would bind empty placeholder storage and the worker could not
 write its result. `verify-deployment.py` checks both effective unit properties
 and the running launcher's mount namespace against PID 1.
 
-Build the worker image in two passes so the image records its own bundle
-identity. The first build produces the engine payload and the derived bundle
-digest in `/opt/slipstream-photo/bundle`. The second build pins that digest as
-the `slipstream.processing.photo.bundle` label:
+Build the worker image with the repository helper. It verifies the retained
+numerical parent image, requires a clean native source checkout at the exact
+commit, performs the engine and Rust builds, discovers the MCP schemas, and
+rebuilds once with the derived bundle identity:
 
 ```sh
-docker build --tag slipstream:processing-photo --file tools/processing/photo/Dockerfile .
-PHOTO_BUNDLE=$(docker run --rm --entrypoint cat slipstream:processing-photo /opt/slipstream-photo/bundle)
-docker build --tag slipstream:processing-photo \
-  --build-arg PHOTO_BUNDLE="$PHOTO_BUNDLE" \
-  --file tools/processing/photo/Dockerfile .
+python3 tools/processing/photo/build.py \
+  --darktable-source /absolute/path/to/darktable-native \
+  --darktable-commit <40-lowercase-hex-commit> \
+  --tag slipstream:processing-photo
 ```
 
-The launcher must refuse to start when the pinned image lacks the label or the
-label differs from the configured bundle. Configure the printed digest as the
-instance `bundle` value and as `SLIPSTREAM_PROCESSING_BUNDLE_SHA256`, and pin
-the image by its `sha256:` identifier, not by tag.
+The helper uses BuildKit's named `darktable` context, so the image does not
+depend on an arbitrary host `.git` path. It prints the image ID, native commit,
+parent identity, and 64-character bundle digest. Inspect the resulting image
+and configure the printed digest as the instance `bundle` value and as
+`SLIPSTREAM_PROCESSING_BUNDLE_SHA256`; pin the launcher image by its `sha256:`
+identifier, not by tag.
 
 The Film runtime in this image comes from the same qualified numerical image
 that owns the fixed Film recipe identity. Image construction checks the actual

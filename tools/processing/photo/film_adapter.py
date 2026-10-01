@@ -1,11 +1,10 @@
 """Pinned film-jpeg adapter (production worker side).
 
-Stage two of the `film-jpeg` workload. The Development TIFF produced by
-`adapter.py` inside the private attempt workspace is validated against the
-pinned handoff contract — IEEE float32 RGB samples, bounded full geometry,
-and the exact embedded linear ProPhoto ICC bytes of the shared Film identity —
-then rendered once through the fixed Film recipe and published as a
-quality-85 sRGB JPEG.
+Stage two of the `film-jpeg` workload. The Development TIFF produced by the
+native darktable MCP worker is validated against the pinned handoff contract —
+IEEE float32 RGB samples, bounded full geometry, and the exact embedded linear
+ProPhoto ICC bytes of the shared Film identity — then rendered once through
+the fixed Film recipe and published as a quality-85 sRGB JPEG.
 
 The fixed recipe, seed behavior and Finished JPEG encoding are reused from
 the qualified development runtime (`film.py`, `finished_jpeg.py`); every

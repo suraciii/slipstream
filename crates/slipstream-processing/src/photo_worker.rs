@@ -1,9 +1,11 @@
-//! Fixed production Photo PID 1. It runs the pinned engine adapters for the
+//! Fixed production Photo PID 1. It runs native development and the pinned Film adapter for the
 //! closed Photo workloads — `development-tiff` (the darktable handoff TIFF),
 //! `film-jpeg` (the fixed Film render over that TIFF), and `proxy-film` (the
 //! same fixed Film render over one staged Development Proxy TIFF) — inside
 //! the isolated attempt boundary and reports one bounded terminal outcome.
 //! It must never run as a host process.
+mod mcp_client;
+mod native_development;
 
 use sha2::{Digest, Sha256};
 use slipstream_processing::{
@@ -25,7 +27,6 @@ use std::{
 /// output contract pins these asset bytes and the exact embedded profile
 /// bytes separately (`design/development-color.md`).
 const ICC_ASSET: &str = "/opt/slipstream-photo/icc/LargeRGB-elle-V2-g10.icc";
-const ADAPTER: &str = "/opt/slipstream-photo/adapter.py";
 /// The fixed Film stage over the darktable handoff TIFF. The interpreter and
 /// source layout come verbatim from the pinned qualification image, so the
 /// numerical bundle the Film identity pins is the one that renders.
@@ -177,7 +178,7 @@ fn grant(launch: &str, workload: &str) -> io::Result<i64> {
 /// TIFF itself; `film-jpeg` develops into the private work directory and
 /// publishes only the fixed Film JPEG rendered from it. `proxy-film` uses the
 /// same paths, but copies its sealed Development Proxy into the handoff path
-/// instead of running the develop adapter. Any other workload has no admitted
+/// instead of running native development. Any other workload has no admitted
 /// engine command and fails closed.
 fn attempt_outputs(workload: &str) -> Option<(&'static str, &'static str)> {
     match workload {
@@ -260,8 +261,7 @@ fn finish(mut file: &File, launch_id: &str, outcome: Outcome) -> io::Result<()> 
 
 /// Copy the sealed staged Development Proxy into the private handoff path
 /// read by the fixed Film stage. The proxy already carries the semantic
-/// exposure transform, so this replaces rather than repeats the develop
-/// adapter. The worker-private copy needs no fsync.
+/// exposure transform, so this replaces native development. The private copy needs no fsync.
 fn stage_proxy_input(source: &Path, destination: &Path) -> io::Result<()> {
     let mut input = File::open(source)?;
     let metadata = input.metadata()?;
@@ -294,9 +294,9 @@ fn stage_proxy_input(source: &Path, destination: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Run one closed workload. The two RAW workloads invoke the pinned develop
-/// adapter; `proxy-film` instead feeds its sealed staged Development Proxy
-/// directly into the unchanged fixed Film stage.
+/// Run one closed workload. The two RAW workloads invoke the private native
+/// engine; `proxy-film` feeds its sealed staged Development Proxy directly
+/// into the fixed Film stage.
 fn run(launch: &str, deadline: u64, workload: &str) -> io::Result<()> {
     gate(launch)?;
     let exposure_milli_ev = grant(launch, workload)?;
@@ -307,42 +307,18 @@ fn run(launch: &str, deadline: u64, workload: &str) -> io::Result<()> {
     };
     ensure_before_deadline(deadline)?;
     if workload == PHOTO_WORKLOAD_PROXY_FILM {
-        // The staged Development Proxy already carries the semantic
-        // exposure transform, so the develop adapter must not run.
+        // The staged Development Proxy already carries the semantic exposure transform.
         stage_proxy_input(Path::new(&format!("/input/{input}")), Path::new(developed))?;
     } else {
-        // One fixed adapter invocation per stage. No shell, no caller-controlled
-        // argv, no engine choice: the pinned bundle owns the exact engine command.
-        let status = Command::new("python3")
-            .arg(ADAPTER)
-            .arg("--input")
-            .arg(format!("/input/{input}"))
-            .arg("--exposure-milli-ev")
-            .arg(exposure_milli_ev.to_string())
-            .arg("--work")
-            .arg("/work")
-            .arg("--output")
-            .arg(developed)
-            .arg("--icc-asset")
-            .arg(ICC_ASSET)
-            .env_clear()
-            .env(
-                "PATH",
-                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            )
-            .env("TMPDIR", "/work/tmp")
-            .env("XDG_CONFIG_HOME", "/work/xdg")
-            .env("XDG_CACHE_HOME", "/work/cache")
-            .env("HOME", "/work/xdg")
-            .stdin(Stdio::null())
-            .status()?;
-        if !status.success() {
-            return Err(bad("pinned engine adapter failed"));
-        }
+        native_development::develop(
+            Path::new(&format!("/input/{input}")),
+            Path::new(developed),
+            exposure_milli_ev,
+        )?;
     }
     let developed_metadata = fs::metadata(developed)?;
     if !developed_metadata.is_file() || developed_metadata.len() == 0 {
-        return Err(bad("adapter produced no output"));
+        return Err(bad("native development produced no output"));
     }
     if workload == PHOTO_WORKLOAD_FILM || workload == PHOTO_WORKLOAD_PROXY_FILM {
         // The fixed Film stage: one deterministic render over the handoff
@@ -377,7 +353,7 @@ fn run(launch: &str, deadline: u64, workload: &str) -> io::Result<()> {
     }
     let output = fs::metadata(published)?;
     if !output.is_file() || output.len() == 0 {
-        return Err(bad("adapter produced no output"));
+        return Err(bad("engine produced no output"));
     }
     ensure_before_deadline(deadline)?;
     Ok(())

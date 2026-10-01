@@ -1347,6 +1347,7 @@ class Runner:
         self.source_revision: str | None = None
         self.observed_recipe: dict | None = None
         self.recipe_version: str | None = None
+        self.saved_recipe: dict | None = None
         self.controls: dict = {}
         self.export_id: str | None = None
         self.export_artifact: dict | None = None
@@ -1626,25 +1627,81 @@ class Runner:
         return facts
 
     def _step_save_exposure(self) -> dict:
-        target = choose_exposure(self.controls, self._baseline_exposure())
+        target = exposure_on_grid(self.controls, 1.0)
+        if target != 1.0:
+            raise AcceptanceFailure("one-ev-not-admitted", {"controls": self.controls})
         facts = self._guarded_save("save", target, self.recipe_version)
+        self.saved_recipe = {
+            "recipeVersion": self.recipe_version,
+            "exposureEv": target,
+            "whiteBalance": {"mode": "as-shot"},
+        }
         self.identities["recipeVersionAfterSave"] = self.recipe_version
+        self.identities["savedExposureEv"] = target
         return {"exposureEv": target, "recipeVersion": facts["recipeVersion"]}
 
     def _step_save_undo(self) -> dict:
-        baseline = self._baseline_exposure()
-        target = exposure_on_grid(self.controls, 0.0 if baseline is None else baseline)
-        facts = self._guarded_save("undo", target, self.recipe_version)
+        reversal_target = exposure_on_grid(self.controls, 0.0)
+        reversal = self._guarded_save("undo", reversal_target, self.recipe_version)
+        self.saved_recipe = {
+            "recipeVersion": self.recipe_version,
+            "exposureEv": reversal_target,
+            "whiteBalance": {"mode": "as-shot"},
+        }
+        self._step_recipe_reopen()
+        target = 1.0
+        facts = self._guarded_save("save", target, reversal["recipeVersion"])
+        self.saved_recipe = {
+            "recipeVersion": self.recipe_version,
+            "exposureEv": target,
+            "whiteBalance": {"mode": "as-shot"},
+        }
         self.identities["recipeVersionAfterUndo"] = self.recipe_version
-        note = (
-            None if baseline is not None
-            else "no recipe existed before the run; the reversal saved the baseline exposure as new editing intent"
-        )
-        detail = {"exposureEv": target, "recipeVersion": facts["recipeVersion"]}
-        if note:
-            detail["note"] = note
-        return detail
+        self.identities["savedExposureEv"] = target
+        return {
+            "reversalExposureEv": reversal_target,
+            "reversalRecipeVersion": reversal["recipeVersion"],
+            "exposureEv": target,
+            "recipeVersion": facts["recipeVersion"],
+        }
 
+    def _step_recipe_reopen(self) -> dict:
+        response, payload = self.client.request_json(
+            "GET", EDIT_RECIPE_PATH.format(id=self.photo_id)
+        )
+        require_success(response, payload, "recipe-reopen")
+        facts, problems = validate_recipe_read(payload, self.photo_id)
+        if problems:
+            raise AcceptanceFailure("recipe-reopen-invalid", {"problems": problems})
+        if facts["sourceSupport"] != "supported":
+            raise AcceptanceFailure(
+                "recipe-reopen-unsupported", {"sourceSupport": facts["sourceSupport"]}
+            )
+        reopened = facts.get("recipe")
+        expected = self.saved_recipe
+        if not isinstance(reopened, dict) or expected is None:
+            raise AcceptanceFailure("recipe-reopen-missing", {})
+        mismatches = [
+            field
+            for field in ("recipeVersion", "exposureEv", "whiteBalance")
+            if reopened.get(field) != expected.get(field)
+        ]
+        if facts["sourceRevision"] != self.source_revision:
+            mismatches.append("sourceRevision-read")
+        if mismatches:
+            raise AcceptanceFailure(
+                "recipe-reopen-changed",
+                {"fields": mismatches, "expected": expected, "observed": reopened},
+            )
+        self.identities["recipeVersionReopened"] = reopened["recipeVersion"]
+        self.identities["sourceRevisionReopened"] = facts["sourceRevision"]
+        return {
+            "recipeVersion": reopened["recipeVersion"],
+            "sourceRevision": facts["sourceRevision"],
+            "exposureEv": reopened["exposureEv"],
+            "whiteBalance": reopened["whiteBalance"],
+            "unchanged": True,
+        }
     def _step_edit_preview(self) -> dict:
         self._require_processing_ready()
         path = EDIT_PREVIEW_PATH.format(id=self.photo_id, stage=DEVELOP_STAGE)
@@ -1706,6 +1763,12 @@ class Runner:
         expiry = parse_timestamp(metadata.get("expiresAt"))
         if expiry is not None and expiry <= datetime.now(timezone.utc):
             problems.append("preview-already-expired")
+        if metadata.get("recipeVersion") != self.identities.get("exportRecipeVersion"):
+            problems.append("preview-export-recipeVersion-mismatch")
+        if metadata.get("sourceRevision") != (
+            self.identities.get("exportSourceRevision") or ""
+        ).encode("utf-8").hex():
+            problems.append("preview-export-sourceRevision-mismatch")
         if problems:
             raise AcceptanceFailure("preview-metadata-invalid", {"problems": problems})
         return {
@@ -1714,6 +1777,12 @@ class Runner:
             "height": body_facts.get("height"),
             "sha256": body_facts.get("sha256"),
             "displayTransform": metadata.get("displayTransform"),
+            "recipeVersion": metadata.get("recipeVersion"),
+            "sourceRevision": metadata.get("sourceRevision"),
+            "capturedIdentity": {
+                "recipeVersion": self.recipe_version,
+                "sourceRevision": self.source_revision,
+            },
             "decode": body_facts.get("decode"),
         }
 
@@ -1745,6 +1814,8 @@ class Runner:
             )
         self.export_id = facts["exportId"]
         self.identities["exportId"] = self.export_id
+        self.identities["exportRecipeVersion"] = self.recipe_version
+        self.identities["exportSourceRevision"] = self.source_revision
         return {"exportId": self.export_id, "state": facts["state"]}
 
     def _step_export_settlement(self) -> dict:
@@ -1980,22 +2051,6 @@ class Runner:
         self._step("save-exposure", self._step_save_exposure, gates=("read-recipe",))
         self._step("save-undo", self._step_save_undo, gates=("save-exposure",))
         self._step(
-            "edit-preview",
-            self._step_edit_preview,
-            gates=(
-                "save-undo",
-                (
-                    "develop-ready",
-                    self._develop_ready,
-                    "develop-stage-not-ready",
-                    {
-                        "capabilityState": self.capability.get("state"),
-                        "developStage": self.capability.get("stages", {}).get(DEVELOP_STAGE),
-                    },
-                ),
-            ),
-        )
-        self._step(
             "submit-export",
             self._step_submit_export,
             gates=(
@@ -2013,6 +2068,23 @@ class Runner:
         )
         self._step("export-settlement", self._step_export_settlement, gates=("submit-export",))
         self._step("download-artifact", self._step_download_artifact, gates=("export-settlement",))
+        self._step("recipe-reopen", self._step_recipe_reopen, gates=("download-artifact",))
+        self._step(
+            "edit-preview",
+            self._step_edit_preview,
+            gates=(
+                "recipe-reopen",
+                (
+                    "develop-ready",
+                    self._develop_ready,
+                    "develop-stage-not-ready",
+                    {
+                        "capabilityState": self.capability.get("state"),
+                        "developStage": self.capability.get("stages", {}).get(DEVELOP_STAGE),
+                    },
+                ),
+            ),
+        )
         self._step("film-stage", self._step_film_stage)
         self._step("original-invariance", self._step_invariance_after)
         return self.report(started)
