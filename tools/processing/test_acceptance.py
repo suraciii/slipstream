@@ -218,6 +218,11 @@ class StubDeployment:
             "target": "development-tiff",
             "stage": "develop",
             "contentType": "image/tiff",
+            "filename": f"{self.artifact_export_id}.tiff",
+            "orientation": "top-left",
+            "sampleFormat": "float32",
+            "colorSpace": "scene-linear ProPhoto RGB",
+            "iccEmbedded": True,
             "width": 4,
             "height": 3,
             "profileIdentity": hashlib.sha256(self.profile_bytes).hexdigest(),
@@ -590,6 +595,11 @@ class StubDeployment:
             ("slipstream-artifact-target", metadata["target"]),
             ("slipstream-artifact-stage", metadata["stage"]),
             ("slipstream-artifact-content-type", metadata["contentType"]),
+            ("slipstream-artifact-filename", metadata["filename"]),
+            ("slipstream-artifact-orientation", metadata["orientation"]),
+            ("slipstream-artifact-sample-format", metadata["sampleFormat"]),
+            ("slipstream-artifact-color-space", metadata["colorSpace"]),
+            ("slipstream-artifact-icc-embedded", "true"),
             ("slipstream-artifact-width", str(metadata["width"])),
             ("slipstream-artifact-height", str(metadata["height"])),
             ("slipstream-artifact-profile-identity", metadata["profileIdentity"]),
@@ -945,6 +955,7 @@ class HelperTests(unittest.TestCase):
             acceptance.ARTIFACT_METADATA_HEADERS[name]: str(index)
             for index, name in enumerate(fields)
         }
+        metadata["slipstream-artifact-icc-embedded"] = "true"
         collected, problems = acceptance.collect_metadata_headers(
             Headers(metadata), fields, acceptance.ARTIFACT_METADATA_HEADERS
         )
@@ -955,6 +966,7 @@ class HelperTests(unittest.TestCase):
         )
         self.assertEqual(len(problems), len(fields))
         artifact = {name: index for index, name in enumerate(fields)}
+        artifact["iccEmbedded"] = True
         self.assertEqual(acceptance.header_object_mismatches(collected, artifact), [])
         artifact["sha256"] = "different"
         problems = acceptance.header_object_mismatches(collected, artifact)
@@ -966,6 +978,11 @@ class HelperTests(unittest.TestCase):
             "target": "development-tiff",
             "stage": "develop",
             "contentType": "image/tiff",
+            "filename": f"{EXPORT_ID}.tiff",
+            "orientation": "top-left",
+            "sampleFormat": "float32",
+            "colorSpace": "scene-linear ProPhoto RGB",
+            "iccEmbedded": True,
             "width": 4,
             "height": 3,
             "profileIdentity": "profile",
@@ -983,6 +1000,17 @@ class HelperTests(unittest.TestCase):
         self.assertIn("artifact-byteLength-exceeds-download-limit", problems)
         _, problems = acceptance.validate_artifact_object(dict(good, byteLength=0))
         self.assertIn("artifact-byteLength-not-positive", problems)
+        for name, value in (
+            ("orientation", "bottom-right"),
+            ("sampleFormat", "uint8"),
+            ("colorSpace", "sRGB"),
+            ("iccEmbedded", False),
+            ("iccEmbedded", 1),
+            ("filename", "../output.tiff"),
+        ):
+            with self.subTest(name=name, value=value):
+                _, problems = acceptance.validate_artifact_object(dict(good, **{name: value}))
+                self.assertIn(f"artifact-{name}-invalid", problems)
 
     def test_download_limit_clamps_declared_size(self):
         limit, problems = acceptance.artifact_download_limit(100)
@@ -1013,6 +1041,11 @@ class HelperTests(unittest.TestCase):
             "target": "development-tiff",
             "stage": "develop",
             "contentType": "image/tiff",
+            "filename": f"{EXPORT_ID}.tiff",
+            "orientation": "top-left",
+            "sampleFormat": "float32",
+            "colorSpace": "scene-linear ProPhoto RGB",
+            "iccEmbedded": True,
             "width": 6376,
             "height": 9568,
             "profileIdentity": "profile",

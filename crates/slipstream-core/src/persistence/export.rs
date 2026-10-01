@@ -762,7 +762,7 @@ pub(super) fn cancel_export(
     })
 }
 
-/// Persists the launcher attempt identity and marks the attempt running. A
+/// Persists the executor attempt identity and marks the attempt running. A
 /// terminal record is returned untouched so a caller that lost a race with
 /// cancellation aborts before any work.
 pub(super) fn begin_export_attempt(
@@ -772,8 +772,7 @@ pub(super) fn begin_export_attempt(
     export_id: &str,
     attempt: ExportAttempt,
 ) -> Result<Option<ExportRecord>, PersistenceError> {
-    // The launcher-owned incarnation is 32 lowercase hex characters, exactly
-    // as the production Photo protocol validates it.
+    // The executor-owned incarnation is 32 lowercase hex characters.
     if attempt.sequence == 0
         || attempt.incarnation.len() != 32
         || !attempt

@@ -1,5 +1,6 @@
-//! Service-side Export orchestration: bounded staging, launcher admission,
-//! validated publication, restart reconciliation, and retention sweeping.
+//! Service-side Export orchestration: bounded staging, local Photo
+//! Development admission, validated publication, restart reconciliation,
+//! and retention sweeping.
 //!
 //! The durable Export record lives in the serialized persistence owner; this
 //! module owns the heavy work between acceptance and settlement. It never
@@ -7,29 +8,31 @@
 //! publishes an unvalidated artifact.
 
 use crate::config::ProcessingConfig;
+use crate::photo_executor::PhotoExecutor;
 use slipstream_core::{
-    ExportAttempt, ExportRecipePayload, ExportRecord, ExportSettlement, ExportSnapshot,
-    ExportSourceEvidence, ExportState, ExportTarget, ExportWorkspace, Library, LibraryRoot,
-    OriginalCapability, OriginalKind, RelativeOriginalPath, StagedOriginal,
+    ExportAttempt, ExportRecord, ExportSettlement, ExportSnapshot, ExportState, ExportTarget,
+    ExportWorkspace, Library, LibraryRoot, OriginalCapability, OriginalKind, RelativeOriginalPath,
+    StagedOriginal,
 };
-use slipstream_processing::{
-    photo::{self, PhotoReceipt, Recipe, Request, ResultBody, Source},
-    photo_profile,
-    protocol::{Availability, PHOTO_MODE, PHOTO_PROTOCOL_VERSION, PHOTO_WORKLOAD},
-};
+use slipstream_processing::local_photo::OutputIdentity;
+use slipstream_processing::photo_profile;
 #[path = "output_validation.rs"]
 pub(crate) mod output_validation;
 pub(crate) use output_validation::DevelopmentTiffFacts;
 #[cfg(test)]
 use output_validation::validate_development_tiff;
 use output_validation::{
-    OUTPUT_VALIDATION_FAILED, open_read_only, validate_output, verify_received_output,
+    OUTPUT_VALIDATION_FAILED, open_read_only, validate_output, verify_developed_output,
 };
 use std::{
-    fs, io,
-    os::unix::{fs::OpenOptionsExt, io::AsRawFd},
+    collections::HashMap,
+    fs,
+    future::Future,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -38,45 +41,68 @@ use std::{
 pub(crate) type SourceLocationResolver =
     Arc<dyn Fn(&str) -> Option<RelativeOriginalPath> + Send + Sync>;
 
-/// The immutable launcher identity one attempt binds to: the socket, the
-/// instance, the qualified policy, and the bundle. A value naming the
-/// launcher for one attempt's exchanges, never a handle to the manager's
-/// whole configuration.
-pub(crate) struct LauncherBinding {
-    pub(crate) socket_path: PathBuf,
-    pub(crate) instance: String,
-    pub(crate) policy_sha256: String,
-    pub(crate) bundle_sha256: String,
-}
+/// The actionable reason an interrupted attempt settles failed with after a
+/// restart that owns no recoverable publication.
+const INTERRUPTED_ATTEMPT: &str = "the attempt was interrupted by a restart";
 
-/// Consecutive launcher transport failures tolerated while an attempt is
-/// followed or reconciled before the attempt settles failed with an
-/// actionable reason. A live launcher-owned attempt cannot outlast this
-/// window of silence.
-const LAUNCHER_FAILURE_TOLERANCE: u32 = 120;
-
-/// Server-side launcher identities plus the filesystem seams one attempt owns.
+/// The shared local executor plus the filesystem seams one attempt owns.
 pub(crate) struct ExportManager {
     library: Arc<Library>,
     library_root: PathBuf,
     resolver: SourceLocationResolver,
     workspace: ExportWorkspace,
-    processing: ProcessingConfig,
+    /// The one local Photo Development executor every heavy attempt runs
+    /// through. It owns the fresh engine child, its private scratch, and
+    /// its cleanup; this manager owns admission and settlement.
+    executor: Arc<PhotoExecutor>,
+    /// The random identity minted at server startup that names every
+    /// attempt this process runs. A restart mints a fresh one, so a
+    /// durable attempt from another process is never mistaken for live
+    /// work of this one.
+    incarnation: String,
+    /// Orders the attempts of this server lifetime.
+    next_sequence: AtomicU64,
+    /// The cancellation tokens of the attempts this process is running,
+    /// keyed by Export identity. HTTP cancellation settles the durable
+    /// record first and then flips the live token so the engine child and
+    /// its scratch are torn down before the slot is released; a queued
+    /// Export owns no token and settles through its terminal state alone.
+    running: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// Finite retained-output allowance configured for this deployment.
     allowance: u64,
     /// The initial scheduler admits at most one heavy processing job at a
-    /// time per instance; the slot also serializes reconciliation output.
+    /// time per instance; the slot also serializes restart reconciliation.
     admission: tokio::sync::Mutex<()>,
+    /// Stops new lifecycle tasks before shutdown drains the existing ones.
+    tasks: Mutex<TaskState>,
+    shutting_down: AtomicBool,
     /// How often a live download stream renews its lease liveness anchor.
+    /// Periodic retention work is cancelled before the Library closes.
+    sweep_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     lease_renewal_interval_millis: std::sync::atomic::AtomicU64,
+}
+
+struct TaskState {
+    closing: bool,
+    handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 /// A live download renews its lease well inside the staleness window.
 const LEASE_RENEWAL_INTERVAL: u64 = 10 * 60 * 1000;
 
+/// The random attempt-incarnation identity of one server lifetime: 32
+/// lowercase hex characters, exactly the width the persistence boundary
+/// validates.
+fn startup_incarnation() -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|error| format!("startup randomness: {error}"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 impl ExportManager {
-    /// Opens the application-owned Export workspace. Blocking filesystem
-    /// work; the caller runs it inside `spawn_blocking` during startup.
+    /// Opens the application-owned Export workspace and the shared local
+    /// Photo Development executor. Blocking filesystem work; the caller
+    /// runs it inside `spawn_blocking` during startup.
     pub(crate) fn open(
         library: Arc<Library>,
         library_root: PathBuf,
@@ -90,18 +116,75 @@ impl ExportManager {
             .map_err(|error| format!("Export workspace is unavailable: {error}"))?;
         let workspace = ExportWorkspace::open(&workspace_root, &library_root)
             .map_err(|error| format!("Export workspace is unavailable: {error}"))?;
+        let executor = Arc::new(PhotoExecutor::open(&processing, state_directory)?);
         Ok(Self {
             library,
             library_root,
             resolver,
             workspace,
-            processing,
+            executor,
+            incarnation: startup_incarnation()?,
+            next_sequence: AtomicU64::new(1),
+            running: Mutex::new(HashMap::new()),
             allowance,
             admission: tokio::sync::Mutex::new(()),
+            tasks: Mutex::new(TaskState {
+                closing: false,
+                handles: Vec::new(),
+            }),
+            shutting_down: AtomicBool::new(false),
             lease_renewal_interval_millis: std::sync::atomic::AtomicU64::new(
                 LEASE_RENEWAL_INTERVAL,
             ),
+            sweep_task: Mutex::new(None),
         })
+    }
+
+    fn spawn_task<F>(&self, future: F) -> bool
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let mut tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner());
+        if tasks.closing {
+            return false;
+        }
+        tasks.handles.retain(|handle| !handle.is_finished());
+        tasks.handles.push(tokio::spawn(future));
+        true
+    }
+
+    /// Closes lifecycle admission synchronously and signals every live engine
+    /// attempt before any asynchronous drain begins.
+    pub(crate) fn begin_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+        self.tasks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .closing = true;
+        for token in self
+            .running
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+        {
+            token.store(true, Ordering::Release);
+        }
+    }
+
+    async fn drain_tasks(&self) {
+        loop {
+            let handles = {
+                let mut tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner());
+                tasks.handles.retain(|handle| !handle.is_finished());
+                std::mem::take(&mut tasks.handles)
+            };
+            if handles.is_empty() {
+                return;
+            }
+            for handle in handles {
+                let _ = handle.await;
+            }
+        }
     }
 
     /// The interval at which a live download stream renews its lease.
@@ -123,6 +206,23 @@ impl ExportManager {
 
     pub(crate) fn allowance(&self) -> u64 {
         self.allowance
+    }
+
+    /// Stops lifecycle admission, cancels periodic retention work and live
+    /// engine attempts, then drains every task before the Library closes.
+    pub(crate) async fn shutdown_processing(&self) {
+        self.begin_shutdown();
+        let task = self
+            .sweep_task
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+        self.executor.shutdown().await;
+        self.drain_tasks().await;
     }
 
     /// The retained artifact file of one Export identity. The path stays
@@ -156,23 +256,10 @@ impl ExportManager {
     }
 
     /// The single heavy-work admission shared by durable Exports and
-    /// preview-class renders: one serialized launcher slot per instance.
+    /// preview-class renders: one serialized processing slot per instance.
     /// The caller holds the returned guard for exactly one attempt.
     pub(crate) async fn acquire_heavy_slot(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.admission.lock().await
-    }
-
-    /// The immutable launcher identity of this deployment: socket, instance,
-    /// qualified policy, and bundle. Startup configuration cannot change
-    /// while the service runs, so one snapshot names the launcher for a
-    /// whole attempt.
-    pub(crate) fn launcher_binding(&self) -> LauncherBinding {
-        LauncherBinding {
-            socket_path: self.processing.socket_path(),
-            instance: self.processing.instance.clone(),
-            policy_sha256: self.processing.policy_sha256.clone(),
-            bundle_sha256: self.processing.bundle_sha256.clone(),
-        }
     }
 
     /// Begins one private ephemeral preview output below the workspace's
@@ -198,6 +285,42 @@ impl ExportManager {
     pub(crate) fn library(&self) -> &Arc<Library> {
         &self.library
     }
+
+    /// The bundle identity every attempt of this deployment executes
+    /// under. Startup configuration cannot change while the service runs.
+    pub(crate) fn bundle_sha256(&self) -> &str {
+        self.executor.bundle_sha256()
+    }
+
+    /// Pre-acceptance admission: the local Photo Development executor must
+    /// be available before an Export is accepted, so an unusable bundle
+    /// never consumes a request identity or a capacity reservation.
+    pub(crate) async fn ensure_admissible(&self) -> Result<(), String> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err("Photo Development is shutting down".to_owned());
+        }
+        if self.executor.available() {
+            Ok(())
+        } else {
+            Err("Photo Development is unavailable".to_owned())
+        }
+    }
+
+    /// Runs one serialized local development through the shared executor.
+    /// The caller owns the staging paths and the validation of the result;
+    /// this is the same engine boundary the durable Export lifecycle uses.
+    pub(crate) async fn develop(
+        &self,
+        input: PathBuf,
+        output: PathBuf,
+        exposure_milli_ev: i64,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<OutputIdentity, String> {
+        self.executor
+            .develop(input, output, exposure_milli_ev, cancellation)
+            .await
+    }
+
     /// The retained Development TIFF of one Photo whose captured snapshot
     /// matches the current Edit identity and whose retention has not expired,
     /// or `None` when no matching artifact is retained.
@@ -218,89 +341,13 @@ impl ExportManager {
         })
     }
 
-    /// Verifies one launcher capability against this deployment's configured
-    /// identity: capability kind, instance, qualified policy and bundle, and
-    /// a well-formed attempt identity. Any mismatch is a fail-closed refusal,
-    /// never an available slot.
-    fn verify_capability(
-        &self,
-        capability: &slipstream_processing::photo::ResultBody,
-    ) -> Result<(String, u64), String> {
-        let slipstream_processing::photo::ResultBody::Capability {
-            capability: kind,
-            instance,
-            incarnation,
-            next_sequence,
-            policy,
-            bundle,
-            availability,
-            active,
-        } = capability
-        else {
-            return Err("processing launcher answered reconciliation unexpectedly".to_owned());
-        };
-        if kind != slipstream_processing::protocol::PHOTO_CAPABILITY {
-            return Err("processing launcher answered with a foreign capability".to_owned());
-        }
-        if instance.as_str() != self.processing.instance {
-            return Err("processing launcher answered with a foreign instance".to_owned());
-        }
-        if policy.as_str() != self.processing.policy_sha256 {
-            return Err("processing launcher qualified a foreign policy".to_owned());
-        }
-        if bundle.as_str() != self.processing.bundle_sha256 {
-            return Err("processing launcher qualified a foreign bundle".to_owned());
-        }
-        let incarnation_valid = incarnation.len() == 32
-            && incarnation
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
-        if !incarnation_valid || *next_sequence == 0 {
-            return Err("processing launcher reported an invalid attempt identity".to_owned());
-        }
-        if *availability != Availability::Available {
-            return Err("processing launcher is configured but blocked".to_owned());
-        }
-        if active.is_some() {
-            return Err("processing launcher already owns an active attempt".to_owned());
-        }
-        Ok((incarnation.clone(), *next_sequence))
-    }
-
-    /// One bounded reconcile exchange with the launcher.
-    async fn reconcile_once(&self) -> Result<slipstream_processing::photo::ResultBody, String> {
-        let socket = self.processing.socket_path();
-        let instance = self.processing.instance.clone();
-        tokio::task::spawn_blocking(move || {
-            photo::reconcile(&socket, instance).map_err(|_| RECONCILE_UNAVAILABLE.to_owned())
-        })
-        .await
-        .map_err(|error| format!("reconcile task failed: {error}"))?
-        .map_err(|_| RECONCILE_UNAVAILABLE.to_owned())
-        .map(|response| match response {
-            slipstream_processing::photo::Response::Result { result, .. } => Ok(*result),
-            slipstream_processing::photo::Response::Error { .. } => {
-                Err("processing launcher refused reconciliation".to_owned())
-            }
-        })?
-    }
-
-    /// Pre-acceptance admission: the launcher must be reachable and its
-    /// capability must match this deployment's configured identity before an
-    /// Export is accepted, so a blocked deployment never consumes a request
-    /// identity or a capacity reservation.
-    pub(crate) async fn ensure_admissible(&self) -> Result<(), String> {
-        let capability = self.reconcile_once().await?;
-        self.verify_capability(&capability).map(|_| ())
-    }
-
     /// Admits one accepted Export: the heavy attempt runs in the background
     /// and survives browser departure. Duplicate identities never reach this
     /// entry because the persistence owner deduplicates first.
     pub(crate) fn start(self: &Arc<Self>, export: ExportRecord) {
         let manager = Arc::clone(self);
-        tokio::spawn(async move {
-            if export.attempt.is_some() {
+        let _ = self.spawn_task(async move {
+            if manager.shutting_down.load(Ordering::Acquire) || export.attempt.is_some() {
                 // A record with a persisted attempt was started before; only
                 // restart reconciliation may resolve it, never a new launch.
                 return;
@@ -310,38 +357,41 @@ impl ExportManager {
     }
 
     /// Resolves unfinished work after a restart. Queued work starts through
-    /// the ordinary admission path; running work is resolved from the durable
-    /// snapshot and the launcher receipt into a validated publication or a
-    /// terminal failure, never a replacement attempt.
+    /// the ordinary admission path; running work is resolved from the
+    /// durable snapshot into a validated publication or a terminal
+    /// failure, never a replacement attempt.
     pub(crate) fn reconcile_after_restart(self: &Arc<Self>) {
         let manager = Arc::clone(self);
-        tokio::spawn(async move {
+        let _ = self.spawn_task(async move {
             let Ok(unfinished) = manager.library.unfinished_exports().await else {
                 return;
             };
             for record in unfinished {
+                if manager.shutting_down.load(Ordering::Acquire) {
+                    break;
+                }
                 if record.attempt.is_some() {
-                    let manager = Arc::clone(&manager);
-                    tokio::spawn(async move {
-                        manager.resolve_interrupted(record).await;
-                    });
+                    manager.clone().resolve_interrupted(record).await;
                 } else {
                     manager.start(record);
                 }
             }
         });
     }
-
     /// Runs the retention sweep periodically for the life of the process.
     pub(crate) fn schedule_expiry_sweep(self: &Arc<Self>) {
         let manager = Arc::clone(self);
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(3600));
             loop {
                 interval.tick().await;
                 manager.sweep_expiry().await;
             }
         });
+        *self
+            .sweep_task
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(task);
     }
 
     /// Removes expired artifacts and orphaned files, then lets the owner
@@ -410,74 +460,100 @@ impl ExportManager {
             .await;
     }
 
-    /// Resolves one running Export after a restart. The launcher receipt is
-    /// the only settlement evidence; an unreachable launcher leaves the
-    /// Export truthfully running and keeps retrying within the tolerance.
+    /// Resolves one running Export after a restart. This process never owns
+    /// the crashed attempt and attaches to no engine process: only a
+    /// validated artifact durably claimed by exactly that attempt is
+    /// recovered from disk; anything else fails as interrupted.
     async fn resolve_interrupted(self: Arc<Self>, record: ExportRecord) {
-        let mut failures = 0_u32;
-        loop {
-            let current = match self.library.export(&record.id).await {
-                Ok(Some(current)) => current,
-                Ok(None) => return,
-                Err(_) => return,
-            };
-            if current.state.is_terminal() {
-                return;
+        let _slot = self.admission.lock().await;
+        let current = match self.library.export(&record.id).await {
+            Ok(Some(current)) if !current.state.is_terminal() => current,
+            _ => return,
+        };
+        let Some(attempt) = current.attempt.clone() else {
+            return;
+        };
+        let Ok(target) = export_target(&current.snapshot.workload) else {
+            self.settle_failed(
+                &current.id,
+                "export snapshot has an unsupported workload".to_owned(),
+            )
+            .await;
+            return;
+        };
+        let claim = self
+            .library
+            .export_publication_claim(&current.id)
+            .await
+            .unwrap_or(None);
+        if claim.as_ref() == Some(&(attempt.incarnation.clone(), attempt.sequence))
+            && let Some(published_path) =
+                self.artifact_path_for_workload(&current.id, &current.snapshot.workload)
+            && tokio::fs::metadata(&published_path).await.is_ok()
+        {
+            // The crashed process durably claimed this attempt's
+            // publication and renamed a validated file into place; the
+            // recovery validates it again before adopting it.
+            if let Err(outcome) = self
+                .settle_from_published_file(&current.id, &published_path, target)
+                .await
+            {
+                self.settle_failed(&current.id, outcome).await;
             }
-            let Some(attempt) = current.attempt.clone() else {
-                return;
-            };
-            match self.launcher_inspect(&current.id, &attempt).await {
-                Ok(receipt) => {
-                    if is_completed_receipt(&receipt) {
-                        let _slot = self.admission.lock().await;
-                        if let Err(outcome) = self
-                            .collect_output_and_publish(
-                                &current,
-                                &attempt.incarnation,
-                                attempt.sequence,
-                            )
-                            .await
-                        {
-                            self.settle_failed(&current.id, outcome).await;
-                        }
-                        return;
-                    }
-                    if is_terminal_receipt(&receipt) {
-                        self.settle_failed(
-                            &current.id,
-                            format!(
-                                "interrupted attempt settled: {}",
-                                receipt.outcome.unwrap_or_else(|| "unknown".to_owned())
-                            ),
-                        )
-                        .await;
-                        return;
-                    }
-                    failures = 0;
-                }
-                Err(_) => {
-                    failures += 1;
-                    if failures >= LAUNCHER_FAILURE_TOLERANCE {
-                        self.settle_failed(
-                            &current.id,
-                            "processing launcher never reconciled the interrupted attempt"
-                                .to_owned(),
-                        )
-                        .await;
-                        return;
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            return;
+        }
+        self.settle_failed(&current.id, INTERRUPTED_ATTEMPT.to_owned())
+            .await;
+    }
+
+    /// Registers the live cancellation token of one running Export attempt,
+    /// superseding any token a zombie attempt of the same identity still
+    /// holds so it can no longer publish.
+    fn begin_running(&self, export_id: &str) -> Arc<AtomicBool> {
+        let token = Arc::new(AtomicBool::new(false));
+        let mut running = self
+            .running
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(superseded) = running.insert(export_id.to_owned(), Arc::clone(&token)) {
+            superseded.store(true, Ordering::Relaxed);
+        }
+        token
+    }
+
+    fn end_running(&self, export_id: &str, token: &Arc<AtomicBool>) {
+        let mut running = self
+            .running
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if running
+            .get(export_id)
+            .is_some_and(|current| Arc::ptr_eq(current, token))
+        {
+            running.remove(export_id);
         }
     }
 
-    /// One bounded heavy attempt: stage, launch, collect, validate, publish.
+    /// The live cancellation token of one running attempt, when this
+    /// process owns it.
+    fn running_token(&self, export_id: &str) -> Option<Arc<AtomicBool>> {
+        self.running
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(export_id)
+            .cloned()
+    }
+
+    /// One bounded heavy attempt: stage, develop, validate, claim, publish.
     async fn execute(self: &Arc<Self>, export: ExportRecord) {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return;
+        }
         let export_id = export.id.clone();
         let _slot = self.admission.lock().await;
-
+        if self.shutting_down.load(Ordering::Acquire) {
+            return;
+        }
         // The record may have settled (cancelled) while queued.
         let record = match self.library.export(&export_id).await {
             Ok(Some(record)) if !record.state.is_terminal() => record,
@@ -490,15 +566,11 @@ impl ExportManager {
         };
         let snapshot = record.snapshot.clone();
 
-        // Reconcile the launcher slot: available with no active receipt, and
-        // the source of the executor attempt identity.
-        let (incarnation, sequence) = match self.reconcile_slot().await {
-            Ok(slot) => slot,
-            Err(error) => return self.settle_failed(&export_id, error).await,
-        };
+        // The attempt identity is minted locally: the incarnation names this
+        // server lifetime and the sequence orders its attempts.
         let attempt = ExportAttempt {
-            incarnation: incarnation.clone(),
-            sequence,
+            incarnation: self.incarnation.clone(),
+            sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
         };
         let record = match self
             .library
@@ -506,8 +578,8 @@ impl ExportManager {
             .await
         {
             Ok(Some(record)) if !record.state.is_terminal() => record,
-            // Settled by cancellation or lost between slot reconciliation and
-            // attempt persistence; the launcher slot stays reconcilable.
+            // Settled by cancellation or lost between admission and attempt
+            // persistence.
             Ok(_) => return,
             Err(_) => {
                 return self
@@ -517,7 +589,7 @@ impl ExportManager {
         };
 
         // Stage the Original through the confined Library boundary and bind
-        // the verified bytes to the record before any launcher contact.
+        // the verified bytes to the record before any engine contact.
         let staged = match self.stage_original(&snapshot).await {
             Ok(staged) => staged,
             Err(error) => return self.settle_failed(&export_id, error).await,
@@ -540,21 +612,23 @@ impl ExportManager {
                     .await;
             }
         };
-        let source = record
-            .source
-            .clone()
-            .ok_or_else(|| "staged source evidence was not recorded".to_owned());
 
-        let source = match source {
-            Ok(source) => source,
-            Err(error) => return self.settle_failed(&export_id, error).await,
-        };
+        // The staged source evidence the attempt runs against must be the
+        // one the persistence boundary recorded.
+        if record.source.is_none() {
+            return self
+                .settle_failed(
+                    &export_id,
+                    "staged source evidence was not recorded".to_owned(),
+                )
+                .await;
+        }
 
         // Once an attempt identity is persisted, its outcome may only settle
         // while it is still the record's current attempt: a retry or
         // cancellation that superseded this task never steals the truth.
         if let Err(error) = self
-            .drive_attempt(&record, &snapshot, &source, staged, &incarnation, sequence)
+            .drive_attempt(&record, &snapshot, staged, &attempt)
             .await
         {
             let still_current = match self.library.export(&export_id).await {
@@ -571,19 +645,6 @@ impl ExportManager {
     }
 }
 
-/// The launcher-side answer to one cancellation request.
-pub(crate) enum AttemptCancel {
-    /// The completion raced the cancellation and won; the output can still
-    /// be collected and published.
-    Completed,
-    /// The launcher settled the attempt as cancelled.
-    Cancelled,
-    /// The launcher settled the attempt with a failed outcome.
-    TerminalFailed(String),
-    /// The launcher's answer was lost or refused; the settlement is unproven.
-    Uncertain,
-}
-
 /// The outcome of one cancellation request against an Export.
 pub(crate) enum ExportCancelOutcome {
     /// The Export identity is unknown.
@@ -595,83 +656,11 @@ pub(crate) enum ExportCancelOutcome {
 }
 
 impl ExportManager {
-    /// Drives one launcher Cancel exchange to a terminal receipt.
-    pub(crate) async fn cancel_attempt(
-        &self,
-        export_id: &str,
-        attempt: &ExportAttempt,
-    ) -> AttemptCancel {
-        let socket = self.processing.socket_path();
-        let instance = self.processing.instance.clone();
-        let cancel_export_id = export_id.to_owned();
-        let incarnation = attempt.incarnation.clone();
-        let sequence = attempt.sequence;
-        let response = tokio::task::spawn_blocking(move || {
-            photo::request_socket(
-                &socket,
-                &Request::Cancel {
-                    mode: PHOTO_MODE.to_owned(),
-                    version: PHOTO_PROTOCOL_VERSION,
-                    instance,
-                    export_id: cancel_export_id,
-                    incarnation,
-                    sequence,
-                },
-            )
-        })
-        .await;
-        let receipt = match response {
-            Ok(Ok(slipstream_processing::photo::Response::Result { result, .. })) => {
-                match *result {
-                    slipstream_processing::photo::ResultBody::Receipt { receipt } => receipt,
-                    _ => return AttemptCancel::Uncertain,
-                }
-            }
-            // The launcher forgot the attempt, so no completion can ever be
-            // reported later; cancellation is the only remaining resolution.
-            Ok(Ok(slipstream_processing::photo::Response::Error { error, .. }))
-                if error.code == slipstream_processing::protocol::ErrorCode::UnknownAttempt =>
-            {
-                return AttemptCancel::Cancelled;
-            }
-            // A refusal or a transport loss leaves the completion unproven.
-            _ => return AttemptCancel::Uncertain,
-        };
-        if is_completed_receipt(&receipt) {
-            return AttemptCancel::Completed;
-        }
-        if is_terminal_receipt(&receipt) {
-            return match receipt.outcome {
-                Some(outcome) if receipt.state == "settled" && outcome == "cancelled" => {
-                    AttemptCancel::Cancelled
-                }
-                _ => AttemptCancel::TerminalFailed(
-                    receipt.outcome.unwrap_or_else(|| "unknown".to_owned()),
-                ),
-            };
-        }
-        // Cancellation was requested but the attempt is still live; follow it
-        // to the terminal receipt so the completion race is never guessed.
-        match self
-            .follow_attempt(export_id, &attempt.incarnation, attempt.sequence)
-            .await
-        {
-            Ok(receipt) if is_completed_receipt(&receipt) => AttemptCancel::Completed,
-            Ok(receipt) if is_terminal_receipt(&receipt) => match receipt.outcome {
-                Some(outcome) if receipt.state == "settled" && outcome == "cancelled" => {
-                    AttemptCancel::Cancelled
-                }
-                _ => AttemptCancel::TerminalFailed(
-                    receipt.outcome.unwrap_or_else(|| "unknown".to_owned()),
-                ),
-            },
-            _ => AttemptCancel::Uncertain,
-        }
-    }
-
-    /// Cancels one Export exactly once against the actual completion state:
-    /// the launcher attempt is cancelled first and a completion that races
-    /// the cancellation is still collected and published.
+    /// Cancels one Export exactly once against the actual completion state.
+    /// The durable exactly-once cancellation settles the record first; a
+    /// completion that raced it and already settled keeps its published
+    /// artifact, and the live engine attempt is signalled afterwards so the
+    /// child and its scratch are torn down before the slot is released.
     pub(crate) async fn cancel(&self, export_id: &str) -> ExportCancelOutcome {
         let record = match self.library.export(export_id).await {
             Ok(Some(record)) => record,
@@ -681,53 +670,20 @@ impl ExportManager {
         if record.state.is_terminal() {
             return ExportCancelOutcome::Settled(Box::new(record));
         }
-        if let Some(attempt) = record.attempt.clone() {
-            match self.cancel_attempt(export_id, &attempt).await {
-                AttemptCancel::Completed => {
-                    if let Err(outcome) = self
-                        .collect_output_and_publish(&record, &attempt.incarnation, attempt.sequence)
-                        .await
-                    {
-                        self.settle_failed(export_id, outcome).await;
-                    }
-                }
-                AttemptCancel::TerminalFailed(outcome) => {
-                    self.settle_failed(export_id, outcome).await;
-                }
-                AttemptCancel::Uncertain => return ExportCancelOutcome::Uncertain,
-                AttemptCancel::Cancelled => {}
-            }
-        }
         match self.library.cancel_export(export_id).await {
-            Ok(Some(record)) => ExportCancelOutcome::Settled(Box::new(record)),
+            Ok(Some(record)) => {
+                if let Some(token) = self.running_token(export_id) {
+                    token.store(true, Ordering::Release);
+                }
+                ExportCancelOutcome::Settled(Box::new(record))
+            }
             Ok(None) => ExportCancelOutcome::Unknown,
             Err(_) => ExportCancelOutcome::Uncertain,
         }
     }
 
-    pub(crate) async fn reconcile_slot(&self) -> Result<(String, u64), String> {
-        let mut failures = 0_u32;
-        loop {
-            match self
-                .reconcile_once()
-                .await
-                .and_then(|capability| self.verify_capability(&capability))
-            {
-                Ok(slot) => return Ok(slot),
-                Err(error) if error == RECONCILE_UNAVAILABLE => {
-                    failures += 1;
-                    if failures >= RECONCILE_TOLERANCE {
-                        return Err(RECONCILE_UNAVAILABLE.to_owned());
-                    }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
     /// Resolves, copies, and verifies the Original. A changed source revision
-    /// refuses the attempt before any launcher contact.
+    /// refuses the attempt before any engine contact.
     async fn stage_original(&self, snapshot: &ExportSnapshot) -> Result<StagedOriginal, String> {
         self.stage_original_for(&snapshot.photo_id, &snapshot.source_revision)
             .await
@@ -748,7 +704,7 @@ impl ExportManager {
     }
 
     /// Stages one preview Original and classifies its approved processing
-    /// profile from the same confined bytes. The profile is launcher input,
+    /// profile from the same confined bytes. The profile is engine input,
     /// not part of the Edit identity facts.
     pub(crate) async fn stage_preview_original(
         &self,
@@ -821,198 +777,117 @@ impl ExportManager {
         .map_err(|error| format!("staging worker failed: {error}"))?
     }
 
-    /// Runs Start, the Inspect loop, Output, validation, acknowledgement, and
-    /// publication for one admitted attempt. `staged` is dropped after the
-    /// launcher acknowledges the source copy, removing the private file.
+    /// Runs the local engine attempt of one admitted Export: develop into a
+    /// private temporary, validate against the closed contract and the
+    /// executor's report, then claim and publish atomically. `staged` is
+    /// dropped once the engine consumed the source copy, removing the
+    /// private file.
     async fn drive_attempt(
         &self,
         record: &ExportRecord,
         snapshot: &ExportSnapshot,
-        source: &ExportSourceEvidence,
         staged: StagedOriginal,
-        incarnation: &str,
-        sequence: u64,
+        attempt: &ExportAttempt,
     ) -> Result<(), String> {
         let export_id = record.id.clone();
         let recipe = snapshot.recipe_payload().map_err(|_| {
             "captured recipe is not representable by the execution payload".to_owned()
         })?;
-        let manifest_sha256 = manifest_digest(snapshot, source, &recipe);
+        let target = export_target(&snapshot.workload)?;
 
-        // LauncherStart carries exactly one read-only source descriptor. The
-        // launcher copies and hashes the bytes before releasing a worker, so
-        // the descriptor must stay open until Start returns.
-        start_photo(StartExchange {
-            path: staged.path().to_path_buf(),
-            socket: self.processing.socket_path(),
-            instance: self.processing.instance.clone(),
-            export_id: export_id.clone(),
-            incarnation: incarnation.to_owned(),
-            sequence,
-            policy: snapshot.policy_id.clone(),
-            bundle: snapshot.bundle_id.clone(),
-            workload: snapshot.workload.clone(),
-            source_kind: "raw".to_owned(),
-            source_profile_id: snapshot.source_profile_id.clone(),
-            source: source.clone(),
-            recipe,
-            recipe_digest: snapshot.recipe_digest.clone(),
-            manifest_sha256,
-            task_error_prefix: "launcher task failed",
-            open_error: "staged source could not be opened",
-            refusal_error: "launcher refused the start",
-        })
-        .await??;
-        drop(staged);
-
-        // Follow the attempt until the launcher reports terminal settlement.
-        let receipt = self
-            .follow_attempt(&export_id, incarnation, sequence)
-            .await?;
-        if !is_completed_receipt(&receipt) {
-            return Err(format!(
-                "processing attempt did not complete: {}",
-                receipt.outcome.unwrap_or_else(|| "unknown".to_owned())
-            ));
-        }
-        self.collect_output_and_publish(record, incarnation, sequence)
-            .await
-    }
-
-    /// Collects a completed launcher result, validates it, acknowledges it,
-    /// and publishes the artifact with one exactly-once settlement. Also the
-    /// recovery path for interrupted work after a restart.
-    async fn collect_output_and_publish(
-        &self,
-        record: &ExportRecord,
-        incarnation: &str,
-        sequence: u64,
-    ) -> Result<(), String> {
-        let export_id = record.id.clone();
-        // A previous process may have claimed this attempt's publication and
-        // crashed around the rename. The durable publication claim ties the
-        // file to the attempt that produced it: only that attempt's restart
-        // may adopt it, a claim without a file means the transfer result was
-        // lost, and anything else is a stale leftover to discard.
-        let claim = self
-            .library
-            .export_publication_claim(&export_id)
-            .await
-            .unwrap_or(None);
-        let target = export_target(&record.snapshot.workload)?;
-        let workload = record.snapshot.workload.clone();
-        let claim_is_current = record.attempt.as_ref().is_some_and(|attempt| {
-            claim.as_ref() == Some(&(attempt.incarnation.clone(), attempt.sequence))
-        });
-        if claim_is_current {
-            let published_path = self
-                .artifact_path_for_workload(&export_id, &workload)
-                .ok_or_else(|| "the publication claim named no artifact directory".to_owned())?;
-            if tokio::fs::metadata(&published_path).await.is_ok() {
-                return self
-                    .settle_from_published_file(&export_id, &published_path, target)
-                    .await;
-            }
-            // The launcher transfer claim is spent; a second Output can
-            // never arrive. The attempt fails, and a retry starts fresh.
-            return Err("the claimed publication never produced its artifact".to_owned());
-        }
-        if let Some(published_path) = self.artifact_path_for_workload(&export_id, &workload)
-            && tokio::fs::metadata(&published_path).await.is_ok()
-        {
-            // A file without a matching claim belongs to a superseded
-            // attempt; it is never this attempt's output.
-            let _ = fs::remove_file(&published_path);
-        }
-        // Collect the output into a private temporary file through the
-        // workspace, then validate before any acknowledgement.
+        // The private output the engine writes; validation gates any
+        // publication, and dropping the writer discards a partial output.
         let writer = self
             .workspace
             .begin_artifact(&export_id, target)
             .map_err(|error| format!("output staging failed: {error}"))?;
         let output_path = writer.temporary_path().to_path_buf();
-        let output_file = open_writable(&output_path)
-            .map_err(|error| format!("output file could not be opened: {error}"))?;
-        let output_receipt = output_photo(OutputExchange {
-            socket: self.processing.socket_path(),
-            instance: self.processing.instance.clone(),
-            export_id: export_id.clone(),
-            incarnation: incarnation.to_owned(),
-            sequence,
-            target: workload.clone(),
-            output_file,
-            task_error_prefix: "output task failed",
-            transfer_error: "launcher could not transfer the output",
-            unexpected_error: "launcher answered the output request unexpectedly",
-            refusal_error: "launcher refused the output transfer",
-        })
-        .await?;
 
-        // Verify the received bytes against the launcher receipt and the
-        // closed Development TIFF contract before any acknowledgement.
+        // The live cancellation token: HTTP cancellation settles the record
+        // and flips it; the executor kills the engine process group and
+        // removes its scratch before the slot is released.
+        let token = self.begin_running(&export_id);
+        let developed = self
+            .executor
+            .develop(
+                staged.path().to_path_buf(),
+                output_path.clone(),
+                recipe.exposure_milli_ev,
+                Arc::clone(&token),
+            )
+            .await;
+        drop(staged);
+        self.end_running(&export_id, &token);
+        let identity = developed?;
+
+        // Verify the developed bytes against the executor's report and the
+        // closed Development TIFF contract before anything is claimed or
+        // renamed into place.
         let validation_path = output_path.clone();
-        let validation_receipt = output_receipt.clone();
-        let validation_target = target;
-        let validation = tokio::task::spawn_blocking(move || {
-            verify_received_output(&validation_path, &validation_receipt, validation_target)
+        let facts = tokio::task::spawn_blocking(move || {
+            verify_developed_output(&validation_path, &identity, target)
         })
         .await
-        .map_err(|error| format!("validation task failed: {error}"))?;
-        if validation.is_err() {
-            // Negative acknowledgement: the launcher retains its result for
-            // reconciliation; the temporary file is discarded with the writer.
-            let _ = self
-                .acknowledge_output(&export_id, incarnation, sequence, false, 1, &"0".repeat(64))
-                .await;
-            return Err(OUTPUT_VALIDATION_FAILED.to_owned());
-        }
+        .map_err(|error| format!("validation task failed: {error}"))?
+        .map_err(|_| OUTPUT_VALIDATION_FAILED.to_owned())?;
 
         // Cancellation must win the race up to this point: a settled record
-        // is never published and the attempt result is discarded.
+        // is never published and the engine result is discarded.
         let current = self
             .library
             .export(&export_id)
             .await
             .map_err(|_| PERSISTENCE_UNAVAILABLE.to_owned())?
             .ok_or("export record disappeared")?;
-        let same_attempt = current.attempt.as_ref().is_some_and(|attempt| {
-            attempt.incarnation == incarnation && attempt.sequence == sequence
-        });
-        if current.state != ExportState::Running || !same_attempt {
+        if current.state != ExportState::Running || current.attempt.as_ref() != Some(attempt) {
             return Err("export was settled by cancellation".to_owned());
         }
 
-        // Publish and commit durable success BEFORE the positive
-        // acknowledgement: the launcher cleans its attempt as settled once
-        // it is accepted, so the only valid result must already be renamed
-        // into place and committed when it is released. A lost or refused
-        // acknowledgement is benign afterwards; the launcher reconciles the
-        // attempt by its own deadline and the Export is already settled.
+        // A publication claim from an earlier process names that process's
+        // attempt, never this one. A claimed file this attempt did not
+        // publish is a stale leftover to discard; only the claim this
+        // attempt is about to take can adopt the rename below.
+        let claim = self
+            .library
+            .export_publication_claim(&export_id)
+            .await
+            .unwrap_or(None);
+        let claim_is_current =
+            claim.as_ref() == Some(&(attempt.incarnation.clone(), attempt.sequence));
+        if claim_is_current {
+            let published_path = self
+                .artifact_path_for_workload(&export_id, &snapshot.workload)
+                .ok_or_else(|| "the publication claim named no artifact directory".to_owned())?;
+            if tokio::fs::metadata(&published_path).await.is_ok() {
+                return self
+                    .settle_from_published_file(&export_id, &published_path, target)
+                    .await;
+            }
+            return Err("the claimed publication never produced its artifact".to_owned());
+        }
+        if let Some(published_path) =
+            self.artifact_path_for_workload(&export_id, &snapshot.workload)
+            && tokio::fs::metadata(&published_path).await.is_ok()
+        {
+            // A file without a matching claim belongs to a superseded
+            // attempt; it is never this attempt's output.
+            let _ = fs::remove_file(&published_path);
+        }
 
         // Claim the publication durably before the rename, so a crash around
         // it leaves recoverable evidence instead of an unattributed file.
         if self
             .library
-            .claim_export_publication(&export_id, incarnation, sequence)
+            .claim_export_publication(&export_id, &attempt.incarnation, attempt.sequence)
             .await
             .is_err()
         {
             return Err("the publication could not be claimed durably".to_owned());
         }
 
-        let facts_slot = std::cell::RefCell::new(None);
-        let facts_ref = &facts_slot;
         let published = writer
-            .publish(move |path| {
-                let facts = validate_output(path, target)?;
-                *facts_ref.borrow_mut() = Some(facts);
-                Ok(())
-            })
+            .publish(|path| validate_output(path, target).map(|_| ()))
             .map_err(|error| format!("artifact publication failed: {error}"))?;
-        let facts = facts_slot
-            .borrow_mut()
-            .take()
-            .ok_or("artifact publication produced no validated facts")?;
         let settled = self
             .library
             .settle_export(
@@ -1034,22 +909,10 @@ impl ExportManager {
             // Cancellation won the exactly-once settlement race; the renamed
             // file belongs to no record and must not leak.
             let _ = fs::remove_file(&published.path);
-            return Ok(());
         }
-        // Best-effort: the Export is durably settled, so an unanswered
-        // acknowledgement never loses the result.
-        let _ = self
-            .acknowledge_output(
-                &export_id,
-                incarnation,
-                sequence,
-                true,
-                output_receipt.size,
-                &output_receipt.sha256,
-            )
-            .await;
         Ok(())
     }
+
     async fn settle_from_published_file(
         &self,
         export_id: &str,
@@ -1108,126 +971,9 @@ impl ExportManager {
         }
         Ok(())
     }
-
-    /// Polls the launcher until the attempt reaches terminal settlement.
-    async fn follow_attempt(
-        &self,
-        export_id: &str,
-        incarnation: &str,
-        sequence: u64,
-    ) -> Result<PhotoReceipt, String> {
-        let attempt = ExportAttempt {
-            incarnation: incarnation.to_owned(),
-            sequence,
-        };
-        let mut failures = 0_u32;
-        loop {
-            match self.launcher_inspect(export_id, &attempt).await {
-                Ok(receipt) => {
-                    if is_terminal_receipt(&receipt) {
-                        return Ok(receipt);
-                    }
-                    failures = 0;
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-                Err(_) => {
-                    // A dropped response is not failure evidence; keep
-                    // following the attempt within the bounded tolerance.
-                    failures += 1;
-                    if failures >= LAUNCHER_FAILURE_TOLERANCE {
-                        return Err(
-                            "processing launcher became unreachable while the attempt ran"
-                                .to_owned(),
-                        );
-                    }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }
-        }
-    }
-
-    pub(crate) async fn launcher_inspect(
-        &self,
-        export_id: &str,
-        attempt: &ExportAttempt,
-    ) -> Result<PhotoReceipt, String> {
-        let socket = self.processing.socket_path();
-        let instance = self.processing.instance.clone();
-        let export_id = export_id.to_owned();
-        let incarnation = attempt.incarnation.clone();
-        let sequence = attempt.sequence;
-        let response = tokio::task::spawn_blocking(move || {
-            photo::request_socket(
-                &socket,
-                &Request::Inspect {
-                    mode: PHOTO_MODE.to_owned(),
-                    version: PHOTO_PROTOCOL_VERSION,
-                    instance,
-                    export_id,
-                    incarnation,
-                    sequence,
-                },
-            )
-            .map_err(|_| "launcher inspect failed".to_owned())
-        })
-        .await
-        .map_err(|error| format!("inspect task failed: {error}"))??;
-        match response {
-            slipstream_processing::photo::Response::Result { result, .. } => {
-                let ResultBody::Receipt { receipt } = *result else {
-                    return Err("launcher answered the inspect unexpectedly".to_owned());
-                };
-                Ok(receipt)
-            }
-            slipstream_processing::photo::Response::Error { .. } => {
-                Err("launcher refused the inspect".to_owned())
-            }
-        }
-    }
-
-    pub(crate) async fn acknowledge_output(
-        &self,
-        export_id: &str,
-        incarnation: &str,
-        sequence: u64,
-        accepted: bool,
-        size: u64,
-        sha256: &str,
-    ) -> bool {
-        let socket = self.processing.socket_path();
-        let instance = self.processing.instance.clone();
-        let export_id = export_id.to_owned();
-        let incarnation = incarnation.to_owned();
-        let sha256 = sha256.to_owned();
-        let outcome = tokio::task::spawn_blocking(move || {
-            photo::request_socket(
-                &socket,
-                &Request::ValidateOutput {
-                    mode: PHOTO_MODE.to_owned(),
-                    version: PHOTO_PROTOCOL_VERSION,
-                    instance,
-                    export_id,
-                    incarnation,
-                    sequence,
-                    target: PHOTO_WORKLOAD.to_owned(),
-                    size,
-                    sha256,
-                    accepted,
-                },
-            )
-            .map(|_| ())
-            .map_err(|_| "validation acknowledgement failed".to_owned())
-        })
-        .await;
-        matches!(outcome, Ok(Ok(())))
-    }
 }
 
 const PERSISTENCE_UNAVAILABLE: &str = "persistence is unavailable";
-const RECONCILE_UNAVAILABLE: &str = "processing launcher is unavailable";
-/// Consecutive reconcile refusals tolerated before an attempt refuses to
-/// start; admission stays fail-closed instead of guessing.
-const RECONCILE_TOLERANCE: u32 = 5;
 
 /// The current Edit identity facts a retained Development TIFF must have been
 /// produced under to be current for one Edit Preview derivation: the exact
@@ -1318,23 +1064,6 @@ pub(crate) fn retained_development_tiff(
     })
 }
 
-/// An attempt whose validated output waits for collection reports `settling`
-/// with no outcome: the launcher records the service's acknowledgement before
-/// it reports a terminal result, so waiting for `settled` here would deadlock
-/// against the acknowledgement this service sends after collecting the output.
-fn output_awaits_collection(receipt: &PhotoReceipt) -> bool {
-    receipt.state == "settling" && receipt.outcome.is_none()
-}
-
-pub(crate) fn is_completed_receipt(receipt: &PhotoReceipt) -> bool {
-    output_awaits_collection(receipt)
-        || (receipt.state == "settled" && receipt.outcome.as_deref() == Some("completed"))
-}
-
-pub(crate) fn is_terminal_receipt(receipt: &PhotoReceipt) -> bool {
-    output_awaits_collection(receipt) || matches!(receipt.state.as_str(), "settled" | "blocked")
-}
-
 fn bounded_outcome(outcome: &str) -> String {
     outcome.chars().take(200).collect()
 }
@@ -1352,197 +1081,6 @@ fn unix_seconds() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-pub(crate) fn open_writable(path: &Path) -> io::Result<fs::File> {
-    fs::OpenOptions::new()
-        .write(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(path)
-}
-/// The shared descriptor-bearing Start exchange. Workload callers fill in the
-/// facts that are part of their protocol identity; this helper owns the
-/// blocking socket call and keeps the source descriptor alive through Start.
-pub(crate) struct StartExchange {
-    pub(crate) path: PathBuf,
-    pub(crate) socket: PathBuf,
-    pub(crate) instance: String,
-    pub(crate) export_id: String,
-    pub(crate) incarnation: String,
-    pub(crate) sequence: u64,
-    pub(crate) policy: String,
-    pub(crate) bundle: String,
-    pub(crate) workload: String,
-    pub(crate) source_kind: String,
-    pub(crate) source_profile_id: String,
-    pub(crate) source: ExportSourceEvidence,
-    pub(crate) recipe: ExportRecipePayload,
-    pub(crate) recipe_digest: String,
-    pub(crate) manifest_sha256: String,
-    pub(crate) task_error_prefix: &'static str,
-    pub(crate) open_error: &'static str,
-    pub(crate) refusal_error: &'static str,
-}
-
-pub(crate) async fn start_photo(exchange: StartExchange) -> Result<Result<(), String>, String> {
-    let StartExchange {
-        path,
-        socket,
-        instance,
-        export_id,
-        incarnation,
-        sequence,
-        policy,
-        bundle,
-        workload,
-        source_kind,
-        source_profile_id,
-        source,
-        recipe,
-        recipe_digest,
-        manifest_sha256,
-        task_error_prefix,
-        open_error,
-        refusal_error,
-    } = exchange;
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let file = open_read_only(&path).map_err(|_| open_error.to_owned())?;
-        let request = Request::Start {
-            mode: PHOTO_MODE.to_owned(),
-            version: PHOTO_PROTOCOL_VERSION,
-            instance,
-            export_id,
-            incarnation,
-            sequence,
-            policy,
-            bundle,
-            workload,
-            source: Source {
-                kind: source_kind,
-                profile_id: source_profile_id,
-                size: source.size,
-                sha256: source.sha256,
-            },
-            recipe: Recipe {
-                exposure_milli_ev: recipe.exposure_milli_ev,
-                white_balance_mode: recipe.white_balance_mode.to_owned(),
-            },
-            recipe_digest,
-            manifest_sha256,
-        };
-        photo::request_with_descriptor(&socket, &request, file.as_raw_fd())
-            .map(|_| ())
-            .map_err(|_| refusal_error.to_owned())
-    })
-    .await
-    .map_err(|error| format!("{task_error_prefix}: {error}"))
-}
-
-/// The shared descriptor-bearing Output exchange. The caller retains control
-/// of acknowledgement/discard policy; this helper only transfers and decodes
-/// the launcher receipt.
-pub(crate) struct OutputExchange {
-    pub(crate) socket: PathBuf,
-    pub(crate) instance: String,
-    pub(crate) export_id: String,
-    pub(crate) incarnation: String,
-    pub(crate) sequence: u64,
-    pub(crate) target: String,
-    pub(crate) output_file: fs::File,
-    pub(crate) task_error_prefix: &'static str,
-    pub(crate) transfer_error: &'static str,
-    pub(crate) unexpected_error: &'static str,
-    pub(crate) refusal_error: &'static str,
-}
-
-pub(crate) async fn output_photo(
-    exchange: OutputExchange,
-) -> Result<slipstream_processing::photo::OutputReceipt, String> {
-    let OutputExchange {
-        socket,
-        instance,
-        export_id,
-        incarnation,
-        sequence,
-        target,
-        output_file,
-        task_error_prefix,
-        transfer_error,
-        unexpected_error,
-        refusal_error,
-    } = exchange;
-    tokio::task::spawn_blocking(
-        move || -> Result<slipstream_processing::photo::OutputReceipt, String> {
-            let request = Request::Output {
-                mode: PHOTO_MODE.to_owned(),
-                version: PHOTO_PROTOCOL_VERSION,
-                instance,
-                export_id,
-                incarnation,
-                sequence,
-                target,
-            };
-            let response =
-                photo::request_with_descriptor(&socket, &request, output_file.as_raw_fd())
-                    .map_err(|_| transfer_error.to_owned())?;
-            match response {
-                slipstream_processing::photo::Response::Result { result, .. } => match *result {
-                    ResultBody::Output { receipt } => Ok(receipt),
-                    _ => Err(unexpected_error.to_owned()),
-                },
-                slipstream_processing::photo::Response::Error { .. } => {
-                    Err(refusal_error.to_owned())
-                }
-            }
-        },
-    )
-    .await
-    .map_err(|error| format!("{task_error_prefix}: {error}"))?
-}
-
-/// The canonical manifest digest of the frozen protocol: compact JSON with
-/// sorted object keys over every field that affects execution, including the
-/// qualified source profile. The launcher recomputes the same digest and
-/// fails closed on any mismatch.
-fn manifest_digest(
-    snapshot: &ExportSnapshot,
-    source: &ExportSourceEvidence,
-    recipe: &ExportRecipePayload,
-) -> String {
-    manifest_digest_parts(
-        &snapshot.policy_id,
-        &snapshot.bundle_id,
-        (&snapshot.source_profile_id, "raw", source),
-        recipe,
-        &snapshot.workload,
-        &snapshot.workload,
-    )
-}
-
-pub(crate) fn manifest_digest_parts(
-    policy_id: &str,
-    bundle_id: &str,
-    input: (&str, &str, &ExportSourceEvidence),
-    recipe: &ExportRecipePayload,
-    target: &str,
-    workload: &str,
-) -> String {
-    let (source_profile_id, source_kind, source) = input;
-    use sha2::{Digest, Sha256};
-    let manifest = format!(
-        "{{\"bundle\":\"{}\",\"policy\":\"{}\",\"recipe\":[{},\"{}\"],\"source\":{{\"kind\":\"{}\",\"profile_id\":\"{}\",\"sha256\":\"{}\",\"size\":{}}},\"target\":\"{}\",\"workload\":\"{}\"}}",
-        bundle_id,
-        policy_id,
-        recipe.exposure_milli_ev,
-        recipe.white_balance_mode,
-        source_kind,
-        source_profile_id,
-        source.sha256,
-        source.size,
-        target,
-        workload,
-    );
-    format!("{:x}", Sha256::digest(manifest.as_bytes()))
 }
 
 fn export_target(workload: &str) -> Result<ExportTarget, String> {
@@ -1566,9 +1104,9 @@ pub(crate) mod development_tiff_decode {
         let icc: &[u8] =
             include_bytes!("../../slipstream-core/assets/prophoto-linear-g10-darktable.icc");
         let mut bytes = b"II\x2a\x00\x08\x00\x00\x00".to_vec();
-        bytes.extend_from_slice(&13_u16.to_le_bytes());
+        bytes.extend_from_slice(&14_u16.to_le_bytes());
         let mut externals: Vec<u8> = Vec::new();
-        let base: usize = 8 + 2 + 13 * 12 + 4;
+        let base: usize = 8 + 2 + 14 * 12 + 4;
         let mut at = base as u32;
         let entry = |tag: u16,
                      kind: u16,
@@ -1612,6 +1150,7 @@ pub(crate) mod development_tiff_decode {
         let strip_patch = bytes.len() + 8;
         entry(273, 4, 1, 0, None, &mut bytes, &mut externals, &mut at);
         entry(277, 3, 1, 3, None, &mut bytes, &mut externals, &mut at);
+        entry(278, 4, 1, 1, None, &mut bytes, &mut externals, &mut at);
         entry(
             279,
             4,

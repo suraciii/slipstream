@@ -17,12 +17,7 @@ async fn offline_proxy_develop_returns_and_reuses_current_jpeg() {
     let (base, mut config) = prepare_fixture();
     let original = config.library_root.join("approved.ARW");
     let original_bytes = approved_raw_fixture(&original);
-    config.processing = Some(ProcessingConfig {
-        instance: "f".repeat(32),
-        policy_sha256: "b".repeat(64),
-        bundle_sha256: "c".repeat(64),
-        socket_override: None,
-    });
+    config.processing = Some(unresolved_processing_config());
     config.export_retained_output_bytes = Some(1024 * 1024 * 1024);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
@@ -134,12 +129,7 @@ async fn proxy_removal_is_admitted_while_other_api_deletes_stay_refused() {
         45,
         [192, 64, 32],
     );
-    config.processing = Some(ProcessingConfig {
-        instance: "f".repeat(32),
-        policy_sha256: "b".repeat(64),
-        bundle_sha256: "c".repeat(64),
-        socket_override: None,
-    });
+    config.processing = Some(unresolved_processing_config());
     config.export_retained_output_bytes = Some(1024 * 1024 * 1024);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
@@ -630,12 +620,7 @@ fn preview_router_bounded(
     let router = crate::http::create_router_with_preview(
         Arc::clone(application),
         crate::http::open_web_root(web_root.into()),
-        Some(ProcessingConfig {
-            instance: "f".repeat(32),
-            policy_sha256: "b".repeat(64),
-            bundle_sha256: "c".repeat(64),
-            socket_override: None,
-        }),
+        Some(unresolved_processing_config()),
         Arc::clone(&owner),
     );
     (router, owner)
@@ -733,12 +718,7 @@ async fn approved_photo_with_recipe_and_result(
     let bootstrap = crate::http::create_router_with_processing(
         Arc::clone(&application),
         crate::http::open_web_root(config.web_root()),
-        Some(ProcessingConfig {
-            instance: "f".repeat(32),
-            policy_sha256: "b".repeat(64),
-            bundle_sha256: "c".repeat(64),
-            socket_override: None,
-        }),
+        Some(unresolved_processing_config()),
     );
     let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
         .await

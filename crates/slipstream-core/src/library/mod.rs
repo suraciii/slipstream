@@ -833,7 +833,7 @@ impl Library {
             .map_err(Into::into)
     }
 
-    /// Persists the launcher attempt identity before any work starts. A
+    /// Persists the executor attempt identity before any work starts. A
     /// terminal record is returned untouched so the caller aborts.
     pub async fn begin_export_attempt(
         &self,

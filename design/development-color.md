@@ -87,6 +87,16 @@ preview. Lossless compression must round-trip through the qualified reader.
 Dimensions must describe the full developed image and its already-applied
 orientation, with no hidden upscale or user crop.
 
+The compressed strip layout must account for the declared full geometry. The
+qualified writer emits each Deflate strip through its own buffer, so a strip
+may extend one byte past its declared count and the artifact may end a few
+bytes past the last declared strip; that bounded padding is not payload. The
+strip layout is the qualified writer's shape, one entry per declared row
+block, so validation bounds the parsed arrays by the qualified geometry
+rather than a fixed small count. Decoding the artifact is what proves the
+compressed strips inflate to the declared geometry. An artifact outside that
+shape fails output validation and is never offered or published.
+
 The qualified path must define treatment of negative, over-range, and
 out-of-gamut values and preserve recoverable highlight information at the
 handoff. Float storage does not recover sensor data that was already clipped.

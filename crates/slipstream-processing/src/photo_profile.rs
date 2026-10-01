@@ -3,9 +3,8 @@
 //! The approved list mirrors the qualified evidence of Issue #329. Only these
 //! camera and container classes have a qualified decoder identity, camera
 //! matrix, crop, black and white levels for the `development-tiff` workload.
-//! The launcher validates the same closed list against its configured bundle;
-//! the service uses this classifier to report per-Photo support and to select
-//! the `profile_id` carried by an Export snapshot.
+//! The service uses this classifier to report per-Photo support and to
+//! select the `profile_id` carried by an Export snapshot.
 
 /// One qualified source class. `make`, `model` and `container` are compared
 /// case-insensitively after trimming surrounding whitespace, because camera
@@ -33,9 +32,9 @@ pub const APPROVED_PROFILES: &[ApprovedProfile] = &[
     },
 ];
 
-/// The qualified exposure range of this workload in thousandths of an EV. The
-/// approved bundle supplies the same finite range to the launcher; a stored
-/// value outside it is readable but not representable by the execution payload.
+/// The qualified exposure range of this workload in thousandths of an EV. A
+/// stored value outside it is readable but not representable by the
+/// execution payload.
 pub const APPROVED_EXPOSURE_MILLI_EV_MIN: i64 = 0;
 pub const APPROVED_EXPOSURE_MILLI_EV_MAX: i64 = 1000;
 

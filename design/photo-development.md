@@ -35,12 +35,12 @@ concurrency, and artifact publication. Browser state owns pending drafts,
 session undo/redo, and view interaction. Engine-private history and Python
 objects remain behind processing adapters.
 
-The service's Export manager owns one descriptor-bearing Start exchange and
-one Output exchange for its admitted workloads. They construct the fixed Photo
-protocol, retain descriptors through blocking transport, and decode transfer
-results. Callers supply captured workload/source/recipe identity and retain
-validation, task-failure handling, cancellation, discard, and publication order.
-Sharing transport does not merge ephemeral preview and durable Export policy.
+The service's Export manager owns admission of its workloads onto the
+shared PhotoExecutor. It supplies the captured workload, source, and recipe
+identity, starts the local engine attempt, and validates the returned artifact
+identity. Callers retain validation, task-failure handling, cancellation,
+discard, and publication order. Sharing the executor does not merge ephemeral
+preview and durable Export policy.
 
 The private Preview executor owns ephemeral attempt identity, cancellation,
 abandonment, discard and temporary staging. It uses the Export manager's single
@@ -53,14 +53,14 @@ rule; post-derivation publication still rereads current Library facts.
 
 ## Application Boundary
 
-The existing Rust modular monolith must own development lifecycle. Native
-processing must run in fresh supervised attempt containers. The
-[Native darktable Integration](darktable-integration.md) specification owns
-development execution through a private native MCP child process. Film simulation
-uses a narrow Python entry point calling the Spektrafilm runtime.
-[Processing Executor](processing-executor.md) owns the private host launcher,
-execution receipts, and retained resource boundary. Engine processes must not
-expose an independent public API or start the GUI.
+The existing Rust modular monolith owns the development lifecycle inside its
+one application container. [Native darktable
+Integration](darktable-integration.md) owns development execution through a
+private native MCP child process started per request by the in-process
+PhotoExecutor. Film simulation uses a narrow Python entry point calling the
+Spektrafilm runtime. [Local Photo Executor](processing-executor.md) owns the
+serialized local execution, scratch lifetime, cleanup, and restart settlement.
+Engine processes must not expose an independent public API or start the GUI.
 
 The processing capability must be opt-in and report engine, bundle, input and
 resource availability separately from Library readiness. Missing processing
@@ -72,10 +72,11 @@ headless processing. Qualification must run without display variables and GPU
 device access. Installation of GUI dependencies is not proof that a display is
 required, nor proof that every native import is headless-safe.
 
-The first execution model uses a fresh container and engine processes per attempt. A persistent worker
-may replace repeated startup only after measured startup/JIT cost justifies it
-and equivalent reset, resource, cancellation and source-safety semantics are
-proven. It must not silently become an additional service-owned Library.
+The first execution model starts a fresh engine child for each serialized
+request, which gives a direct state-lifetime proof. Reusing one long-lived
+engine child is optional follow-up work and requires an executable test
+proving image, history, and module state cannot leak between requests. It must
+not silently become an additional service-owned Library.
 
 ## Original Access
 
@@ -117,11 +118,11 @@ failed replacement therefore leaves the prior valid proxy available. Startup
 reconciliation validates recorded artifacts and removes incomplete rows and
 unclaimed files. Proxy-backed Develop applies the saved numeric exposure and
 display conversion locally to the scene-linear artifact. Proxy-backed Film
-crosses the qualified Film worker using a distinct `proxy-film` workload whose
+crosses the qualified Film stage using a distinct `proxy-film` workload whose
 zero-exposure input cannot double-apply the transform.
 
 The proxy is a preview source only. It must not satisfy an Original-required
-Export or permit an arbitrary filesystem path into the worker. The service
+Export or permit an arbitrary filesystem path into the engine. The service
 reports proxy provenance separately from source support and retains guarded
 recipe revisions against the proxy's recorded source revision while the
 Original is unavailable.
@@ -254,10 +255,9 @@ Export state is queued, running, succeeded, failed, or cancelled. Browser
 disconnection must not cancel admitted work. Cancellation must settle exactly
 once against the actual completion state; it cannot undo an already successful
 publication.
-
 Queued work must survive restart. During startup, reconcile unfinished running
-work and launcher-owned execution receipts. Mark interrupted work failed with an actionable
-reason unless its fully validated published artifact can be recovered. Do not
+work from its durable Export snapshot. Mark interrupted work failed with an
+actionable reason unless its fully validated published artifact can be recovered. Do not
 blindly repeat an expensive interrupted operation or claim success from a
 partial output. Explicit retry creates a new attempt on the captured snapshot
 and validates source/bundle availability again.
@@ -269,7 +269,7 @@ publication and state commit by validating and reconciling the recorded attempt.
 Neither orphan files nor a database flag alone establish success.
 
 Remove an attempt's private workspace only after its workload has settled and
-terminal evidence is durable. [Processing Executor](processing-executor.md)
+terminal evidence is durable. [Local Photo Executor](processing-executor.md)
 owns the settlement and cleanup contract; retained Development TIFFs follow a
 separate lifecycle.
 
@@ -291,17 +291,17 @@ only the Rust scheduler. Limits and overload errors must be documented and
 qualified for the supported deployment. Missing required limits must prevent
 processing admission, not normal Library operation.
 
-[Processing Memory](processing-memory.md) owns the finite processing allocation,
-task-level enforcement, engine workspace plans, buffer lifetimes, and memory
-failure evidence. These are execution policies independent of the Edit Recipe.
-The deployment must qualify that boundary before processing is enabled.
+[Processing Memory](processing-memory.md) owns the shared container
+allocation, serialized enforcement, engine workspace plans, buffer lifetimes,
+and memory failure evidence. These are execution policies independent of the
+Edit Recipe. The deployment must qualify that boundary before processing is
+enabled.
 
-[Production Photo Processing Protocol](processing-photo-protocol.md) defines
-the typed production admission between this service boundary and the host
-launcher. It keeps Photo/source/recipe and Export authority in the service,
-passes a confined staged descriptor rather than a path, and admits only the
-closed `development-tiff` workload until a separate Film capability is
-qualified.
+[Local Photo Executor](processing-executor.md) defines the typed admission
+between this service boundary and the engine child. It keeps
+Photo/source/recipe and Export authority in the service, stages a confined
+copy rather than exposing a path, and admits only the closed
+`development-tiff` workload until a separate Film capability is qualified.
 
 A cache entry's identity includes content evidence, stage settings, exact bundle,
 geometry and stochastic policy. Active inputs, outputs and downloads require
@@ -408,7 +408,7 @@ setting, or an unqualified value.
 
 ### Support state
 
-`GET /api/processing/capability` reports the capability state, the launcher and
+`GET /api/processing/capability` reports the capability state, the engine
 bundle identity it observed, the approved `profile_id` list, the approved
 finite exposure range, and one state per stage. Stage states are closed values:
 `ready`, `unavailable`, or `unsupported`. The first version reports `develop`
@@ -458,7 +458,7 @@ A recipe read derives its source facts from the same Published Library that
 serves Photo and capture-metadata reads, so one response is coherent with
 them: it either reports the published readable source revision with
 `supported`, or a retryable wait state with no source revision. A transient
-native-work, admission, or launcher-reconciliation condition must never
+native-work, admission, or scratch-recovery condition must never
 surface as a confirmed `original-missing` or `original-unreadable` outcome.
 
 A guarded save returns exactly one outcome:
@@ -554,8 +554,8 @@ owner; a superseded request never publishes, and a completed request
 republishes only while its full identity is still current. Every admission
 settles: completion, failure, and cancellation all free the identity, so a
 later request admits a new attempt instead of reporting `running` for work that
-no longer exists, and a launcher attempt the service gives up on is cancelled
-rather than left for the launcher to reap. A display-only change reuses a
+no longer exists, and an engine attempt the service gives up on is cancelled
+rather than left running. A display-only change reuses a
 retained result; an exposure or white-balance change invalidates both stage
 renditions.
 
@@ -597,8 +597,8 @@ acceptance and must not create an Export or a receipt.
   bundle availability again.
 - Cancellation settles exactly once against the actual completion state and
   cannot undo an already published artifact.
-- Restart reconciliation resolves unfinished work from the durable snapshot and
-  the launcher receipt: it publishes a validated complete artifact or records
+- Restart reconciliation resolves unfinished work from the durable snapshot:
+  it publishes a validated complete artifact or records
   the terminal failure. It never starts a replacement attempt against a
   possibly live one.
 - Submission refuses before acceptance when the deployment cannot reserve the
@@ -678,13 +678,10 @@ Shared field shapes:
 `whiteBalanceRanges` is `null` when the source class admits no adjustable
 mode, and otherwise reports, for each admitted adjustable mode within the
 payload bounds, the narrower minimum and maximum that the qualification
-admits for execution against the observed bundle. `state` is closed to the conditions
-[Production Photo Processing
-Protocol](processing-photo-protocol.md#errors-and-capability) requires the
-service to distinguish: `disabled`, `launcher-unavailable`,
-`bundle-unavailable`, `source-unsupported`, `resource-unavailable`, or `ready`.
-Each condition fixes the client-visible recovery behavior: `disabled`,
-`launcher-unavailable`, `bundle-unavailable`, and `source-unsupported` are
+admits for execution against the observed bundle. `state` is closed to
+`disabled`, `bundle-unavailable`, `source-unsupported`, `resource-unavailable`,
+or `ready`. Each condition fixes the client-visible recovery behavior:
+`disabled`, `bundle-unavailable`, and `source-unsupported` are
 deployment defects that only an operator can resolve, so clients present
 development as unavailable and never retry a refused processing operation;
 `resource-unavailable` names the deployment's finite processing allowance as
@@ -735,7 +732,7 @@ Location; `original-unreadable` is a confirmed read or parse failure for the
 current source revision; both are permanent for that source revision and
 explain the read failure. `read-pending` means current source facts have not
 been inspected and published yet; `resource-unavailable` means native-work
-admission, shared capacity, or launcher/attempt reconciliation is currently
+admission or shared capacity is currently
 unavailable. Both are retryable without a restart: the client disables
 writes, preview, and image Export with a retry or refresh action, and the service
 resolves them through a later admitted scan or freed capacity. A preview
@@ -881,10 +878,12 @@ resource refusal is `unavailable` reporting `resource_unavailable`.
 
 ## Options
 
-### Selected: Rust Ownership with Process Isolation
+### Selected: Rust Ownership with In-Process Execution
 
-This extends the existing service while isolating heavy Python/native failures.
-It keeps identity, persistence, scheduling and recovery under one lifecycle.
+This extends the existing service while keeping heavy Python/native failures
+inside disposable engine children. It keeps identity, persistence,
+scheduling and recovery under one lifecycle, matching the single-container
+deployment.
 
 ### Rejected: Embed Python in HTTP Handlers
 

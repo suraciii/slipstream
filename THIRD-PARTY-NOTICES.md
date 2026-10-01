@@ -65,3 +65,16 @@ Ubuntu package copyright files. When a package's terms require corresponding
 source, redistributors must keep that source available for the distributed version.
 
 Canonical publishes the Ubuntu OCI build recipe and release-specific rootfs references in the [ubuntu-base repository](https://code.launchpad.net/~cloud-images-release-managers/cloud-images/+oci/ubuntu-base/+git/ubuntu-base).
+
+## Optional native Photo Development extension
+
+The optional native extension of the application image builds the pinned
+upstream darktable source and ships its GPLv3 license text as
+`/usr/share/doc/slipstream/darktable-LICENSE`. The extension also embeds the
+`LargeRGB-elle-V2-g10.icc` output profile from Elle Stone's well-behaved ICC
+profiles (https://github.com/ellelstone/elles_icc_profiles), licensed CC BY-SA
+3.0 Unported with attribution; the repository copy under
+`tools/processing/photo/icc/` preserves the upstream file name. The extension's
+installed Ubuntu package set is recorded in the image at `/opt/os-packages.txt`,
+and every installed package's copyright material remains under
+`/usr/share/doc/<package>/copyright`.

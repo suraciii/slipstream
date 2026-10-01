@@ -278,16 +278,20 @@ When a valid Development Proxy exists for the last observed source revision,
 Slipstream must expose that fact as `editSource: "development-proxy"` while the
 Original is unavailable. Develop Edit Previews may apply the numeric exposure
 against the proxy's scene-linear baseline and the pinned display transform
-without reopening the Original. Film Edit Previews must use the qualified Film
-worker over the proxy and must report failure when that worker is unavailable.
+without reopening the Original. Film Edit Previews must use the qualified
+Film stage over the proxy and must report failure when that stage is
+unavailable.
 The proxy must never make a full-resolution Export admissible: Development TIFF
 and Finished JPEG exports require the Original.
 
 ## Processing Capacity
 
-The deployment operator must be able to set a finite memory allowance for image
-processing. The allowance must apply across active processing work. It must not
-be an exposure, white-balance, Film Recipe, or per-Photo control.
+Slipstream runs as one application on the Photographer's machine. The Web
+interface and the development engine share that application's finite memory
+and computing allowance, and only one development request runs at a time; a
+second request waits its turn instead of competing for memory. The allowance
+is deployment configuration, not an exposure, white-balance, Film Recipe, or
+per-Photo control.
 
 Slipstream must report resource availability separately from RAW support and
 engine availability. A Photo may support an Edit Preview while its full Export
@@ -301,12 +305,13 @@ Photographer must be able to continue browsing and inspect the failure. A valid
 Development TIFF remains available according to its retention policy even when
 the Film stage fails.
 
-Processing must not silently reduce Export dimensions, disable film effects,
-change numerical quality, raise its allowance, or repeatedly restart the same
+Because the allowance is shared, a severe engine failure can stop the whole
+application; restarting Slipstream recovers it, and saved edits and completed
+outputs survive. Processing must not silently reduce Export dimensions,
+disable film effects, change numerical quality, or repeatedly restart the same
 failed attempt to obtain a result. Explicit retry must keep the captured image
-intent and check current resource availability. If the deployment cannot enforce
-its allowance, processing must be unavailable while normal browsing remains
-usable. Increasing the allowance must not change a successfully rendered look.
+intent and check current resource availability. Increasing the allowance must
+not change a successfully rendered look.
 
 ## Failure and Retention
 

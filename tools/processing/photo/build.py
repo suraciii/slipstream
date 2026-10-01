@@ -1,15 +1,31 @@
-"""Build the photo worker against a locally checked-out native darktable commit."""
+"""Build the application image with the native darktable extension attached.
+
+The normal application runtime from the repository Dockerfile is built (or an
+already-built immutable application image is supplied with ``--app-image``)
+and then extended by ``tools/processing/photo/Dockerfile`` with the pinned
+native engine, its discovered MCP metadata, the ICC output profile, and the
+deterministic bundle manifest. The extended image keeps the Slipstream server
+entrypoint: it is the same application, with the optional Photo Development
+extension installed.
+"""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
 from pathlib import Path
 
-PARENT = "sha256:10aa79ce1148ba8aec83f6f68e6d39ba7edaa88f2369f21fac65d4784f4b495d"
-PARENT_TAG = "slipstream:344-buffer-lifetimes"
+APP_TARGET = "runtime"
+DEFAULT_APP_TAG = "slipstream:app-runtime"
+PHOTO_DOCKERFILE = "tools/processing/photo/Dockerfile"
+PHOTO_ICC = "tools/processing/photo/icc/LargeRGB-elle-V2-g10.icc"
+# The qualified Development output profile (also pinned by qualify.py and the
+# acceptance runner's embedded-profile digests).
+PINNED_ICC_SHA256 = "df7b2c677645f1ca5364b52e62f8db04ca61f80163792942f3e409a84a6b12ed"
+SERVER_ENTRYPOINT = ["/usr/local/bin/slipstream-server"]
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -68,50 +84,118 @@ def git_revision(source: Path) -> str:
     return subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
 
 
-def build(source: Path, commit: str, tag: str, bundle: str) -> None:
+def file_digest(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def repository_revision() -> str:
+    return subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+
+
+def verify_pinned_icc() -> None:
+    path = ROOT / PHOTO_ICC
+    if not path.is_file():
+        raise SystemExit(f"the qualified ICC profile is missing from the repository: {PHOTO_ICC}")
+    observed = file_digest(path)
+    if observed != PINNED_ICC_SHA256:
+        raise SystemExit(
+            f"the vendored ICC profile digest {observed} does not match the qualified profile {PINNED_ICC_SHA256}"
+        )
+
+
+def buildkit_environment() -> dict:
     environment = os.environ.copy()
     environment["DOCKER_BUILDKIT"] = "1"
+    return environment
+
+
+def build_app(tag: str) -> None:
+    subprocess.run(
+        [
+            "docker", "build", "--pull=false", "--progress=plain",
+            "--target", APP_TARGET,
+            "--build-arg", f"SLIPSTREAM_VCS_REF={repository_revision()}",
+            "-f", "Dockerfile", "-t", tag, ".",
+        ], cwd=ROOT, env=buildkit_environment(), check=True,
+    )
+
+
+def build_photo(app_reference: str, source: Path, commit: str, tag: str, bundle: str) -> None:
     subprocess.run(
         [
             "docker", "build", "--pull=false", "--progress=plain",
             "--build-context", f"darktable={source}",
+            "--build-arg", f"APP_IMAGE={app_reference}",
             "--build-arg", f"DARKTABLE_COMMIT={commit}",
             "--build-arg", f"PHOTO_BUNDLE={bundle}",
-            "-f", "tools/processing/photo/Dockerfile", "-t", tag, ".",
-        ], cwd=ROOT, env=environment, check=True,
+            "-f", PHOTO_DOCKERFILE, "-t", tag, ".",
+        ], cwd=ROOT, env=buildkit_environment(), check=True,
     )
+
+
+def read_bundle(tag: str) -> str:
+    bundle = subprocess.check_output(
+        ["docker", "run", "--rm", "--entrypoint", "cat", tag, "/opt/slipstream-photo/bundle"], text=True
+    ).strip()
+    if len(bundle) != 64 or any(c not in "0123456789abcdef" for c in bundle):
+        raise SystemExit("manifest helper produced an invalid bundle digest")
+    return bundle
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--darktable-commit", required=True, help="full 40-character native source revision")
     parser.add_argument("--darktable-source", type=Path, required=True, help="checked-out native darktable source")
-    parser.add_argument("--tag", required=True)
+    parser.add_argument("--tag", required=True, help="tag for the extended application image")
+    parser.add_argument(
+        "--app-image",
+        help="already-built immutable application image reference; skips the application build",
+    )
+    parser.add_argument(
+        "--app-tag",
+        default=DEFAULT_APP_TAG,
+        help=f"tag for the freshly built application runtime (default {DEFAULT_APP_TAG})",
+    )
     args = parser.parse_args()
     source = args.darktable_source.resolve()
-    if args.tag in (PARENT, PARENT_TAG):
-        raise SystemExit("the output tag must not overwrite the numerical parent")
+    if args.app_image and args.app_tag != DEFAULT_APP_TAG:
+        raise SystemExit("pass either --app-image or --app-tag, not both")
+    if args.tag == args.app_tag:
+        raise SystemExit("the output tag must not overwrite the application runtime tag")
     if len(args.darktable_commit) != 40 or any(c not in "0123456789abcdef" for c in args.darktable_commit):
         raise SystemExit("--darktable-commit must be a lowercase full commit hash")
     if git_revision(source) != args.darktable_commit:
         raise SystemExit("native source HEAD does not match --darktable-commit")
-    parent = inspect(PARENT_TAG)
-    if parent["Id"] != PARENT:
-        raise SystemExit("the retained numerical parent image is absent or has changed")
+    verify_pinned_icc()
 
-    build(source, args.darktable_commit, args.tag, "unresolved")
-    bundle = subprocess.check_output(
-        ["docker", "run", "--rm", "--entrypoint", "cat", args.tag, "/opt/slipstream-photo/bundle"], text=True
-    ).strip()
-    if len(bundle) != 64 or any(c not in "0123456789abcdef" for c in bundle):
-        raise SystemExit("manifest helper produced an invalid bundle digest")
-    build(source, args.darktable_commit, args.tag, bundle)
+    app_reference = args.app_image or args.app_tag
+    if not args.app_image:
+        build_app(args.app_tag)
+    app = inspect(app_reference)
+
+    build_photo(app_reference, source, args.darktable_commit, args.tag, "unresolved")
+    bundle = read_bundle(args.tag)
+    build_photo(app_reference, source, args.darktable_commit, args.tag, bundle)
     output = inspect(args.tag)
-    current = inspect(PARENT_TAG)
-    layers = parent["RootFS"]["Layers"]
-    if current["Id"] != PARENT or output["RootFS"]["Layers"][:len(layers)] != layers:
-        raise SystemExit("build did not preserve the qualified numerical parent layers")
-    print(json.dumps({"parent": PARENT, "image": output["Id"], "bundle": bundle, "darktable_commit": args.darktable_commit}, sort_keys=True))
+    current = inspect(app_reference)
+    layers = app["RootFS"]["Layers"]
+    if current["Id"] != app["Id"] or output["RootFS"]["Layers"][:len(layers)] != layers:
+        raise SystemExit("build did not extend the exact application runtime layers")
+    if output["Config"].get("Entrypoint") != SERVER_ENTRYPOINT:
+        raise SystemExit("the extended image must keep the Slipstream server entrypoint")
+    print(json.dumps(
+        {
+            "app": app["Id"],
+            "image": output["Id"],
+            "bundle": bundle,
+            "darktable_commit": args.darktable_commit,
+        },
+        sort_keys=True,
+    ))
 
 
 if __name__ == "__main__":

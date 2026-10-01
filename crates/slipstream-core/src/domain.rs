@@ -1199,8 +1199,8 @@ pub struct ExportExposureRange {
 }
 
 /// The execution payload of the captured recipe: thousandths of an EV and the
-/// closed as-shot white balance. This is the projection sent to the launcher;
-/// it contains no engine-private settings.
+/// closed as-shot white balance. This is the projection sent to the local
+/// development executor; it contains no engine-private settings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExportRecipePayload {
     pub exposure_milli_ev: i64,
@@ -1237,7 +1237,7 @@ impl ExportRecipePayload {
     }
 
     /// The canonical digest of the frozen protocol's execution tuple: compact
-    /// JSON `[exposure_milli_ev, white_balance_mode]`. The launcher recomputes
+    /// JSON `[exposure_milli_ev, white_balance_mode]`. The executor recomputes
     /// the same digest from the two semantic values it receives and fails
     /// closed on any mismatch; the durable snapshot binds the digest so a
     /// replay can never change the recipe.
@@ -1282,7 +1282,7 @@ pub struct ExportSnapshot {
 }
 
 impl ExportSnapshot {
-    /// The launcher-facing execution payload of the captured recipe. The
+    /// The executor-facing execution payload of the captured recipe. The
     /// snapshot was validated at capture, so this conversion cannot fail for
     /// a well-formed row; a corrupt row reports the settings error.
     pub fn recipe_payload(&self) -> Result<ExportRecipePayload, ExportSettingsError> {
@@ -1346,7 +1346,7 @@ impl ExportState {
     }
 }
 
-/// The launcher-owned attempt identity persisted with the Export. A retry
+/// The executor-owned attempt identity persisted with the Export. A retry
 /// after a lost response reuses the pair; an explicit retry allocates a new
 /// sequence against the same retained snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1372,7 +1372,7 @@ pub struct ExportArtifactFacts {
     pub profile_identity: String,
 }
 
-/// The launcher-facing staged-source evidence recorded after the confined
+/// The executor-facing staged-source evidence recorded after the staged
 /// copy was verified. Absent until staging completes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExportSourceEvidence {
@@ -1466,7 +1466,7 @@ pub fn export_submission_payload_digest(
 }
 
 /// The pre-admission resolution of a request identity: recorded identities
-/// replay, expire, or conflict without any launcher contact.
+/// replay, expire, or conflict without contacting the executor.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExportSubmissionResolution {
     /// The identity and payload resolve to the existing Export.

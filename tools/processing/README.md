@@ -1,85 +1,103 @@
-# Processing isolation qualification
+# Processing tooling
 
-This directory qualifies a private Rust processing boundary on Linux. It does
-not enable photo editing or run darktable or Spektrafilm. The
-[executor design](../../design/processing-executor.md) owns the authority and
-lifecycle; the [protocol](../../design/processing-executor-protocol.md) owns
-configuration and wire formats.
+This directory builds and exercises the optional native darktable Photo
+Development capability of the single Slipstream application container. The
+[local executor design](../../design/processing-executor.md) owns the
+execution and failure lifetime; the
+[darktable integration](../../design/darktable-integration.md) and
+[development color](../../design/development-color.md) designs own the
+semantic requests and output contracts.
 
-The host launcher owns only operational receipts, fixed native qualification
-containers, retained accounting slices, and bounded temporary storage. Rust's
-Photo Library service retains its domain state and publication authority. The
-Web container receives no Docker socket, controller-write mount, or privileged
-container settings.
+There is no host processing launcher, processing systemd unit, worker
+container, launcher socket, or processing Compose overlay: Photo Development
+is detected from the application image itself at startup. A deployment
+running an image without the extension keeps every Library operation and
+reports Development unavailable.
 
-## Read-only deployment snapshot
+## Build
 
-`verify-deployment.py` checks the fixed supported-host paths and topology without
-starting, stopping, or reconfiguring a service. It requires the exact instance,
-policy, and bundle identities from the operator configuration. Supply an active
-attempt cgroup and a read-only Web token file when checking a deployed instance:
+Build the application image with the native extension attached. The helper
+first builds (or reuses) the normal application runtime from the repository
+`Dockerfile`, then extends it through `photo/Dockerfile` with the pinned
+native engine, the discovered MCP metadata, the ICC output profile, and the
+deterministic bundle manifest:
 
 ```sh
-sudo python3 tools/processing/verify-deployment.py \
-  --instance 0123456789abcdef0123456789abcdef \
-  --policy POLICY_SHA256 \
-  --bundle BUNDLE_SHA256 \
-  --attempt-cgroup /sys/fs/cgroup/slipstreamprocessing0123456789abcdef0123456789abcdef/ATTEMPT.slice \
-  --web-url https://photos.example.com \
-  --web-token-file /run/secrets/slipstream-cli-token
+python3 tools/processing/photo/build.py \
+  --darktable-source /absolute/path/to/darktable-native \
+  --darktable-commit <40-lowercase-hex-commit> \
+  --tag slipstream:photo-local
 ```
 
-`--web-url` accepts HTTP or HTTPS; an HTTP origin in any letter case prints an
-unencrypted-connection warning before the authenticated Web reads.
+The helper requires a clean native source checkout at the exact commit
+(including initialized submodules), verifies the repository's pinned ICC
+asset, uses BuildKit's named `darktable` context so the image never depends
+on a host `.git` path, and builds twice: the first pass discovers the exact
+MCP tools/modules/schemas and derives the bundle identity, the second pass
+pins that identity in the image label. It refuses an image that does not
+extend the exact application runtime layers or that does not keep the
+Slipstream server entrypoint.
 
-The report is a `read-only-deployment-snapshot` with a status of
-`read-only-checks-passed` or `read-only-checks-failed`. It checks cgroup v2
-controllers, systemd, Docker's systemd cgroup driver, the root-owned launcher
-binary/unit/configuration, the exact runtime socket and owner claim, a running
-launcher unit, finite attempt memory with zero swap, and authenticated Library,
-Album, health, and processing-capability reads. It also runs the installed
-launcher's read-only `--check-production` probe as Web UID 1000, with a
-five-second deadline and discarded output. The probe must reconcile an
-available `photo-processing` capability for the supplied instance, policy and
-bundle. It reports distinct failure
-reasons such as `launcher-installation-missing`, `launcher-socket-missing`,
-`attempt-memory-unlimited`, and `web-capability-unavailable`.
-JSON is printed to standard output; the checker has no report-path option and
-does not write to the host.
+It prints the application image ID, the extended image ID, the 64-character
+bundle digest, and the native commit:
 
-The checker never claims production readiness by itself. A successful snapshot
-still needs the complete launch, failure, recovery, cleanup, source, Export,
-and supported-host evidence required by the deployment and processing specs.
-The probe checks protocol capability identities and exercises the socket as the
-Web UID, but the snapshot does not prove exact deployed launcher/Web/worker image identity,
-retained receipt
-settlement, failure/recovery behavior, or the RAW,
-TIFF, Film, and Export workflow. Those checks remain open in #375 and its
-independent dependencies.
+```json
+{
+  "app": "sha256:…",
+  "bundle": "…",
+  "darktable_commit": "…",
+  "image": "sha256:…"
+}
+```
 
-## Workflow acceptance runner
+Use the extended image's immutable ID as the deployment's `SLIPSTREAM_IMAGE`
+and the bundle digest for acceptance identity checks. Pass
+`--app-image sha256:…` to extend an already-built immutable application image
+instead of rebuilding the runtime, or `--app-tag` to build it under a
+different local tag.
 
-`acceptance.py` drives a deployed instance through the real Photo development
-HTTP surface of the merged wire contract
-(`design/photo-development.md`, Service Surface): capability read, resolution
-of the Photo for an approved-profile RAW fixture, Edit Recipe read, a guarded
-exposure save and its guarded reversal (fresh request identities, expected
-recipe revision and source revision), a submitted `development-tiff` Export
-through terminal settlement, reopening the Photo to verify the saved intent,
-the `develop` Edit Preview from that saved intent, and artifact download. It
-validates the download against the bytes: digest, byte length, geometry,
-content type, the embedded float32 linear ProPhoto RGB framing, pinned
-source-profile identity, and decoded size of every Deflate strip. Decoding
-uses a fixed-size output bound, never retaining the full decompressed image.
-It hashes the fixture Original and any external XMP sidecar before and after
-the run and fails if bytes, size, mode, or modification time changed; it
-never opens them for writing. The only files it creates are downloaded
-artifacts inside the explicit output directory.
+## Deploy
+
+Start the normal Compose deployment with the extended image digest; there is
+no processing-specific command or overlay:
+
+```sh
+SLIPSTREAM_IMAGE=<extended-image-digest> \
+  ./scripts/compose --env-file /srv/slipstream/instance.env up -d
+```
+
+The container carries the documented finite shared allocation for Web plus
+the engine (memory 8 GiB, CPU 4, PID 512, engine OpenMP threads 4); an engine
+over-run fails that container instead of the host. The container never
+receives the Docker socket. `SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES`
+defaults to 8 GiB in `compose.yaml` and may be set in the environment file.
+
+At startup the server verifies the bundle manifest identity and every named
+asset digest under `/opt/slipstream-photo`. Missing or invalid assets leave
+Library operations available and report Development unavailable. The default
+`SLIPSTREAM_PHOTO_DEVELOPMENT=auto` admits the extension exactly when the
+installed assets validate; `disabled` turns it off, and an absolute
+`SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY` points a smoke or development run at a
+bundle root outside the image.
+
+## Operator end-to-end acceptance
+
+`acceptance.py` drives a deployed instance through the real HTTP surface of
+the merged wire contract (`design/photo-development.md`, Service Surface):
+capability read, resolution of the Photo for an approved-profile RAW fixture,
+Edit Recipe read, a guarded exposure save and its guarded reversal, the
+`develop` Edit Preview, a submitted `development-tiff` Export through
+terminal settlement, and artifact download with byte-level validation
+(digest, byte length, geometry, content type, the embedded float32 linear
+ProPhoto RGB framing, pinned source-profile identity, and every Deflate
+strip). It hashes the fixture Original and any external XMP sidecar before
+and after the run and fails if bytes, size, mode, or modification time
+changed; the only files it creates are downloaded artifacts inside the
+explicit output directory.
 
 The runner must never target an operator's live library. It refuses to start
-without an explicit acknowledgement flag, and it is meant for a dedicated
-acceptance deployment (for example the supported Compose deployment brought up
-with `scripts/compose processing-up`, per `docs/deployment.md`):
+without an explicit acknowledgement flag and is meant for a dedicated
+acceptance deployment started with the ordinary Compose command above:
 
 ```sh
 python3 tools/processing/acceptance.py \
@@ -89,376 +107,88 @@ python3 tools/processing/acceptance.py \
   --output-dir /absolute/private/acceptance-downloads \
   --max-download-bytes 4294967296 \
   --i-acknowledge-this-is-an-acceptance-instance \
-  --expected-instance 0123456789abcdef0123456789abcdef \
-  --expected-policy POLICY_SHA256 \
   --expected-bundle-sha256 BUNDLE_SHA256
 ```
 
-`--base-url` accepts HTTP or HTTPS; HTTP prints an unencrypted-connection warning.
-`--token-file` holds the bearer token and must not be group- or other-writable,
-and the fixture path is the operator's own copy of the approved-profile RAW
-file; the tool reads it read-only. `--max-download-bytes` is the read bound for
-artifact downloads and must carry the deployment's own retained-output
-allowance (`SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES`, `docs/deployment.md`):
-the default is smaller than a full-resolution float32 Development TIFF, so a
-default run refuses the qualified artifact's declared size. The option is
-capped at the launcher's hard output maximum
-(`MAX_OUTPUT_BYTES`, `crates/slipstream-processing/src/photo.rs`).
-`--expected-*` identities are recorded in
-the report; the bundle identity is additionally checked against the
-capability report's `bundleId`. A JSON report goes to standard output with a
-per-step pass/fail/skipped record, the exact requests, identities, digests,
-dimensions, counters, and timings; a human-readable summary goes to standard
-error. Exit codes: `0` when every step that ran passed, `1` when any step
-failed, and `2` when the run was blocked because steps could not run, or the
+`--base-url` must be HTTPS (plain HTTP is accepted only for loopback hosts),
+`--token-file` holds the bearer token and must not be group- or
+other-writable, and `--max-download-bytes` must carry the deployment's
+retained-output allowance (`SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES`) so the
+qualified artifact's declared size is admitted; it is capped at the service's
+hard output maximum (`MAX_OUTPUT_BYTES`,
+`crates/slipstream-processing/src/local_photo.rs`). `--expected-bundle-sha256` is
+the bundle digest printed by the image build and is checked against the
+capability report's `bundleId`. Exit codes: `0` when every step that ran
+passed, `1` when any step failed, and `2` when the run was blocked or the
 invocation was refused.
 
-The runner reports honestly what it could not run. The Film (`finished-jpeg`)
-service stage is implemented, but this generic runner keeps native Film
-qualification as a separate deployment gate and records that stage as not
-covered instead of claiming production acceptance. A route of the merged wire
-contract that the deployment does not serve yet (a 404 without the contract's
-structured error code) makes dependent steps skipped with
-`route-not-deployed` instead of failing the workflow. Contract-conformant
-refusals (`processing_unavailable`, `unsupported_photo`, conflicts, and so on)
-are failures with the status and code recorded.
+The runner reports honestly what it could not run. The Film
+(`finished-jpeg`) service stage remains a separate qualification gate and is
+recorded as not covered; a route the deployment does not serve yet makes
+dependent steps skipped with `route-not-deployed` instead of failing. The
+logic is tested without a deployment by `test_acceptance.py`'s in-process
+stub deployment.
 
-The logic is tested without a deployment: `test_acceptance.py` in this
-directory contains an in-process stub deployment implementing the merged wire
-contract and dry-runs the complete workflow, a failed Export, a blocked
-capability, and missing routes through `main()`:
+## Native reference qualification
 
-```sh
-python3 -m unittest discover -s tools/processing -p 'test_*.py' -v
-```
-
-Today the runner covers the capability read, Photo resolution, Edit Recipe
-read and guarded writes, the `develop` Edit Preview, and the
-`development-tiff` Export lifecycle through validated download. The Film
-stage is implemented by the service and worker contract, but native Film
-qualification remains outside this generic runner; the complete RAW -> TIFF ->
-Film -> JPEG deployment acceptance of Issue #334 must not be claimed from this
-workflow alone.
-
-## Build
-
-Build the production Photo worker in two passes with the native source and
-commit supplied explicitly:
-
-```sh
-python3 tools/processing/photo/build.py \
-  --darktable-source /absolute/path/to/darktable-native \
-  --darktable-commit <40-lowercase-hex-commit> \
-  --tag slipstream:processing-photo
-```
-
-The helper requires the retained numerical parent image
-`slipstream:344-buffer-lifetimes` with identity
-`sha256:10aa79ce1148ba8aec83f6f68e6d39ba7edaa88f2369f21fac65d4784f4b495d`.
-It uses a BuildKit named context for the complete native checkout, verifies
-that checkout is clean and at the requested revision, caps native and Rust
-parallelism, and discovers the exact MCP tools/modules/schemas before deriving
-the bundle identity. The second pass pins that identity in the image label.
-The helper prints the immutable image ID and bundle digest; configure both
-identities in the launcher. It does not require a host `.git` path inside the
-BuildKit context.
-
-The production image has a fixed native entrypoint and no Python fallback
-adapter. The Rust worker and native bridge own the processing protocol; the
-Film stage consumes the native worker's Development TIFF and the pinned
-shared Film runtime.
-
-Use the inspected immutable image ID in operator configuration. The launcher
-does not pull images. Build a supported Web image using the repository's
-[deployment procedure](../../docs/deployment.md) for independent survivor checks.
-
-Run ordinary focused coverage without root or Docker:
-
-```sh
-cargo test --locked -p slipstream-processing
-cargo clippy --locked -p slipstream-processing --all-targets -- -D warnings
-```
-
-Native worker qualification is separate from this host-side isolation suite.
-From the native checkout configured with `BUILD_TESTING=ON`, run:
-
-```sh
-cmake --build build --target darktable-mcp test_mcp_paths test_mcp_params
-ctest --test-dir build --output-on-failure -R mcp
-```
-
-After building the worker image, run the RAW reference qualifier from the
-Slipstream checkout:
+`photo/qualify.py` qualifies the built image's engine against an explicit
+independent RAW reference. The reference command must independently produce
+the requested Development TIFF and an adjacent `<output>.json` document
+recording the reference's exact `identity` and initialized `temperature`
+fields; the qualifier substitutes the three named placeholders, compares
+full-resolution zero and +1 EV output, checks generic parameter updates, and
+exercises restart and cancellation. The reference is qualification evidence,
+not a production fallback. Its output directory must not exist before the
+run:
 
 ```sh
 python3 tools/processing/photo/qualify.py \
-  --engine-image slipstream:processing-photo \
+  --engine-image slipstream:photo-local \
   --fixture /absolute/private/fixtures/approved-camera.raw \
   --reference-cli '/absolute/path/reference --input {input} --output {output} --exposure-milli-ev {exposure_milli_ev}' \
   --icc tools/processing/photo/profile-fixtures/linear-prophoto.icc \
   --output /absolute/private/native-qualification
 ```
 
-The reference command must independently produce the requested Development TIFF
-and an adjacent `<output>.json` document. That document records the reference's
-exact `identity` and its initialized `temperature` fields: `red`, `green`, `blue`,
-`various`, and `preset`. The qualifier substitutes the three named placeholders,
-compares full-resolution zero and +1 EV output, checks generic parameter updates,
-and exercises restart and cancellation. The reference is qualification evidence,
-not a production fallback. Its output directory must not exist before the run.
+The qualifier runs the image's `/opt/darktable/bin/darktable-mcp` entry
+directly in a locked-down container (no network, read-only root, dropped
+capabilities), so it exercises the same engine bytes the application will
+run.
 
-## Operator setup
+## Qualification-only toolkits
 
-Qualification needs a host systemd manager, Docker's systemd cgroup driver,
-cgroup v2 with memory/CPU/PID controllers, and tmpfs with `noswap` support. The
-launcher needs host root authority to create its exact owned slices, fixed
-containers, and temporary mounts. Install the built launcher as a root-owned
-executable. Provision separate root-owned canonical state and socket directories
-with stable non-writable ancestors. Keep these disjoint from the Photo Library,
-state, and cache. Never mount real Originals into qualification containers.
+[`../development/`](../development/README.md) holds the engine measurement
+probes (bounded gamut, buffer lifetimes, LUT quality, history) used while
+qualifying native changes; it is independent of the application image.
 
-Use the complete configuration example in the protocol. Set `mode` explicitly
-to `qualification`, choose a fresh random 32-character hexadecimal instance, and
-set `peer_uid` to the intended local control-service UID. Keep the config
-root-owned and not writable by other users. The socket parent needs traversal
-permission for that UID; the launcher grants socket access with a named POSIX
-ACL and also verifies peer credentials. Socket ownership includes a separate
-locked inode/device claim so another instance cannot replace a live endpoint.
-A fixed root-owned claim under `/var/lib/slipstream-processing/instances` binds
-the instance to its journal root and holds a host-wide lifetime lock. The launcher
-never removes this claim on exit. A missing journal for a claimed instance remains
-quarantined even when runtime inventory is empty.
+The Film runtime build kit (`film/`) was removed with the retired worker
+path it packaged. Film remains unadmitted.
 
-The journal root cannot contain whitespace, comma, backslash, or double quote;
-this makes Docker mount arguments and mount identity checks unambiguous.
+The former host-launcher qualification and deployment-verification tools
+(`verify.py`, `verify-film.py`, `verify-qualified-film.py`,
+`verify-deployment.py`) were removed with the launcher path they exercised;
+the single-container boundary they probed (per-attempt cgroups, launcher
+journals, sockets) no longer exists.
 
-Start the host executable outside all processing cgroups:
+## Focused coverage
+
+Run the tooling tests without root or Docker:
 
 ```sh
-sudo /usr/local/sbin/slipstream-processing-launcher --config /absolute/config.json
+python3 -m unittest discover -s tools/processing -p 'test_*.py' -v
 ```
 
-The supported qualifier requires unlimited shared ancestors above the dedicated
-finite processing parent. A finite shared ancestor without a qualified control
-reserve makes processing unavailable. The qualifier does not claim protection
-from unrelated host-wide OOM or interference by another privileged host actor.
-The Web/control process and launcher must both remain outside processing caps.
-
-Each attempt gets a retained systemd slice and a fresh unprivileged container.
-The attempt slice is transient and keeps its accounting until terminal evidence
-is durable. Settlement confirms removal of the loaded unit, cgroup and all exact
-unit configuration without requesting a global systemd reload. The host must
-provide `busctl` from systemd. Unsettled legacy nontransient slices remain blocked
-for operator reconciliation; the launcher does not migrate their configuration.
-The blocked bootstrap is already charged to its capped container and ancestors.
-The host freezes the exact container, verifies its identity and process liveness,
-places its bootstrap in the group-OOM leaf, and reads back limits before release.
-Frozen placement prevents the bootstrap timer and ordinary exit from recycling
-the PID. A pidfd and opened proc directory detect disappearance. Linux does not
-provide atomic PID-based migration against an external privileged actor that
-kills and replaces the frozen process; such interference is outside this
-qualification boundary.
-
-Writable storage is one 16 MiB, 64-inode, `noswap` host tmpfs bound at `/work`,
-`/tmp`, and `/dev/shm`. It remains charged to the retained attempt after exit.
-The slot remains held until the launcher persists evidence and unmounts it.
-The Docker log driver is `none`; only bounded result metadata is retained.
-
-## Actual kernel verification
-
-The verifier runs the actual launcher and pinned worker image, plus a supported
-packaged Web image against an empty synthetic Library. Supply immutable local
-image IDs; the output directory must not exist:
+Engine-side executor behavior is covered by the Rust suite:
 
 ```sh
-sudo python3 tools/processing/verify.py \
-  --launcher /absolute/target/debug/slipstream-processing-launcher \
-  --worker-image sha256:WORKER_IMAGE_ID \
-  --web-image sha256:WEB_IMAGE_ID \
-  --output /absolute/private/qualification-evidence
+cargo test --locked -p slipstream-processing
+cargo clippy --locked -p slipstream-processing --all-targets -- -D warnings
 ```
 
-The verifier creates a fresh private root under
-`/var/lib/slipstream-processing-qualification`, exact-owned containers and slices,
-and small capped tmpfs mounts. It removes its runtime resources and reverse
-checks cleanup. It does not inspect or stop existing Slipstream deployments.
-Its Web fixture seeds a fresh synthetic token digest in that isolated state and
-sends Bearer credentials only to private API probes on the `127.0.0.1`-published
-HTTP backend, without an `Origin` header. The configured
-`https://qualification.invalid` origin is reserved fixture configuration; this
-internal readiness and survivor check is not evidence of public HTTPS, proxy, or
-TLS behavior.
-Evidence includes binary/image identities, receipts, pressure counters, retained
-storage accounting, crash boundaries, permitted UID/socket proof, and repeated
-Web Library reads. A synthetic Album must survive pressure, a rename, and a Web
-container restart.
-
-The suite exercises native and descendant OOM, deliberate leaf and parent
-pressure, non-OOM exit 137, storage and inode exhaustion, replay/cancellation,
-real launcher SIGKILL at the closed operator fault barriers, and retained
-accounting after Docker removes its scope. It also checks fixed protocol bounds,
-concurrent ownership, foreign identity rejection, policy reduction, receipt
-expiry, and successful subsequent attempts. Temporary fixture evidence stays
-outside the repository.
-
-## Film measurement
-
-The separate [Film measurement profile](../../design/processing-film-measurement.md)
-uses the same host launcher with version-2 documents and root-only control IPC.
-Its catalogue selects registered synthetic images or private pre-staged TIFFs.
-It compares complete output with independent references, retains bounded evidence,
-and reclaims all image bytes. It cannot publish an Export or admit ordinary Photo
-requests. Unknown resource terms remain unqualified after a successful run.
-
-Build the fixed Film worker and adapter using the exact numerical parent retained
-locally for qualification. The helper checks the parent's immutable identity
-before and after the build and verifies inherited layers; the image build checks
-the original numerical source/package inventory. A missing or changed parent is
-a build failure, not permission to select another image:
+Native worker qualification is separate. From the native checkout configured
+with `BUILD_TESTING=ON`, run:
 
 ```sh
-python3 tools/processing/film/build.py --target qualification --tag slipstream:film-measurement
-docker image inspect --format '{{.Id}}' slipstream:film-measurement
+cmake --build build --target darktable-mcp test_mcp_paths test_mcp_params
+ctest --test-dir build --output-on-failure -R mcp
 ```
-
-Focused adapter checks use a separate test target with generated inputs:
-
-```sh
-python3 tools/processing/film/build.py --target adapter-checks --tag slipstream:film-adapter-checks
-docker run --rm --network none --memory 4g --memory-swap 4g --cpus 4 \
-  --pids-limit 256 --read-only --tmpfs /work:rw,size=256m \
-  --tmpfs /tmp:rw,size=64m slipstream:film-adapter-checks
-```
-
-Prepare a catalogue and resource model according to the linked schema. TIFF
-fixtures use `<fixture_id>.tif` names in an explicit private directory; do not
-point this directory at Originals or a Photo Library. The verifier copies and
-validates these operator fixtures before measurement. This preparation is
-separate from the attempt's capped source copy, decode, render, and validation.
-No pre-existing source file is modified. The planner reserves source-cache bytes
-regardless of their existing residency.
-
-Run the actual Film image with an explicit experimental budget and fresh evidence
-directory. The example budget is a probe setting, not a recommended minimum:
-
-```sh
-sudo python3 tools/processing/verify-film.py \
-  --launcher /absolute/target/debug/slipstream-processing-launcher \
-  --worker-image sha256:FILM_IMAGE_ID \
-  --web-image sha256:WEB_IMAGE_ID \
-  --catalogue /absolute/private/catalogue.json \
-  --resource-model /absolute/private/resource-model.json \
-  --fixtures /absolute/private/fixtures \
-  --memory-gib 16 \
-  --output /absolute/private/film-evidence
-```
-
-Omit `--fixtures` for a wholly synthetic catalogue. `--fixture ID` selects a
-registered case and may repeat; otherwise every entry runs. A contained-failure
-experiment must explicitly name its expected outcome with `--expect-outcome`.
-The verifier never retries an OOM or increases the budget automatically.
-For an expected failure, `--recovery-fixture ID` explicitly adds a successful
-small fixture after each selected failed case in the same instance. It requires
-explicit `--fixture` selections and a different recovery fixture of at most two
-million pixels.
-`--lifecycle-fixture ID` adds crash recovery before container start, at both
-permits, and after final result capture, cancellation before engine release, and
-a subsequent successful attempt.
-Use a registered fixture of at most two million pixels for these checks. A TIFF
-lifecycle case also verifies detection of a changed private source copy.
-
-`--failure-fixture ID` requires a registered TIFF of at most two million pixels.
-It verifies rejection of a retained snapshot writer, exhaustion of the shared
-tmpfs bytes and inodes, and an injected per-file limit failure, each followed by
-successful work.
-These operator faults affect only the exact owned attempt. The storage probe
-fills its host-only native directory after sealing; those host-charged pages
-are storage-cap evidence and are excluded from memory qualification. The
-file-limit probe freezes the owned container, verifies the fixed Python child,
-and lowers that child's existing 512 MiB file limit to 4096 bytes before resuming.
-It establishes the resource-failure path, not natural exhaustion at 512 MiB or
-a particular choice between the kernel's EFBIG and SIGXFSZ mechanisms.
-
-The verifier checks exact output descriptors, settled cleanup, real retained
-resource evidence, and an independent synthetic Web Library. An Album rename
-must survive a Web container restart. Its worker executes the same fixed adapter
-and fresh-cache procedure used by measurement. Sparse stage timings represent
-only directly observed phases; absent inner-stage or reclaim timings are not
-invented. Whole execution time and aggregate kernel evidence remain separate.
-
-Host-side document and fixture-preparation checks run without Docker or root:
-
-```sh
-bun run test:processing-tools
-```
-
-## Qualified fixture admission
-
-The separate [qualified envelope contract](../../design/processing-film-envelope.md)
-uses a root-provisioned version 3 instance. Supply reviewed envelope bytes bound
-to the exact launcher, worker image, environment and catalogue. This profile
-does not fit a model, accept arbitrary Photos, or reinterpret measurement
-authority as permission to run below the approved requirement.
-
-Run its opt-in verifier with an explicit fixture selection and a new private
-evidence directory. The budget below is only an example probe setting:
-
-```sh
-sudo python3 tools/processing/verify-qualified-film.py \
-  --launcher /absolute/target/debug/slipstream-processing-launcher \
-  --worker-image sha256:FILM_IMAGE_ID \
-  --web-image sha256:WEB_IMAGE_ID \
-  --catalogue /absolute/private/catalogue.json \
-  --envelope /absolute/private/envelope.json \
-  --fixtures /absolute/private/fixtures \
-  --fixture REGISTERED_FIXTURE_ID \
-  --memory-gib 16 \
-  --output /absolute/private/qualified-film-evidence
-```
-
-The same source preparation rules apply. `--expect-error` selects an explicitly
-expected admission refusal. The verifier checks unchanged registry bytes,
-sequence, workspaces and owned manager inventory; it does not relabel a failed
-execution as a refusal. `--expect-qualification-failure` names an expected
-withdrawal from an independently reviewed fault case, while `--expect-outcome`
-keeps the image execution outcome separate. Such deliberately contradictory
-test envelopes cannot serve as supported resource models. A positive
-`--recovery-fixture` proves that an unaffected small case remains usable.
-
-`--alternate-envelope` adds an explicit A/B/A withdrawal check. It requires one
-selected fixture and an expected qualification failure. The alternate document
-must be independently approved for that fixture; the verifier never changes
-E, reserve, identities or evidence automatically. Old accepted requests must
-replay unchanged after restart and envelope replacement. Returning to the first
-document must preserve its withdrawal.
-`--mismatched-envelope` supplies a separate, deliberately incompatible environment
-document. New work must be unavailable while an old accepted request still
-replays its captured receipt. The verifier then restores the original explicit
-document; no host environment or manager configuration is changed by that check.
-
-`--lifecycle-fixture` adds crash/cancellation recovery and an owned-attempt CPU
-quota change before each heavy permit. Drift must interrupt execution without
-inventing a memory qualification failure, then allow a subsequent exact result.
-`--failure-fixture` adds byte/inode exhaustion and per-file-limit failure followed
-by success. Both options require a different registered case of at most two
-million pixels; the failure case must be a TIFF. These faults do not contribute
-to memory fitting. The verifier also checks continued Web operation and Album
-persistence across Web restart. Host checks remain `bun run test:processing-tools`;
-they do not establish actual kernel acceptance.
-
-## Quarantine and recovery
-
-A blocked capability never means that work may run without limits. Inspect the
-root-only journal and exact manager identities. An unresolved create, mount,
-start, or parent provisioning request retains ownership even if one runtime
-lookup is empty: the earlier operation may complete later. Do not erase its
-journal, remove a lock file, or start a replacement under a reused identity.
-
-A normal launcher restart verifies the aggregate binding first, settles the old
-attempt at its captured policy, preserves evidence and cancellation, then applies
-a new operator policy. It never releases an old bootstrap. An unknown, missing,
-or recreated aggregate or child is quarantined rather than adopted or deleted.
-A host reboot invalidating the stored runtime binding also requires operator
-reconciliation. After proving all prior work and manager operations stopped,
-preserve their journal/evidence and provision a fresh instance identity. Receipt
-expiry does not expire an active ownership fence.

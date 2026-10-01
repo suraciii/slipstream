@@ -37,7 +37,7 @@
     "test:raw": "bun run scripts/test-raw.ts",
     "test:raw-contract": "bun test tools/raw-gate-contract.test.ts",
     "test:raw-discovery": "bun run test:raw -- --list",
-    "test:rust": "cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked -- --test-threads=1",
+    "test:rust": "cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo build --locked -p slipstream-processing --bin slipstream-mcp-supervisor && cargo test --workspace --locked -- --test-threads=1",
     "test:fast": "bun run check:album-language && bun run test:fsd && bun run test:file-size && bun run test:license && bun run test:cli-package && bun run test:metadata && bun run test:container-input && bun run test:docker-context && bun run test:compose-storage && bun run test:workflow && bun run test:worktree-preflight && bun run test:raw-contract && bun run test:development-runner && bun run test:processing-tools && bun run test:rust && bun run test:raw-discovery && bun run --cwd apps/web test:unit && bun run lint && bun run typecheck && bun run test:browser",
     "test:license": "bun test tools/license-contract.test.ts",
     "test:workflow": "bun test tools/workflow-contract.test.ts",

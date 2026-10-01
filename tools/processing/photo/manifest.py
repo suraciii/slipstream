@@ -1,4 +1,11 @@
-"""Create the deterministic identity file for the native photo image."""
+"""Create the deterministic identity file for the native photo bundle.
+
+The bundle covers the native engine tree, the discovered engine metadata, the
+ICC output profile, the native source commit, and the installed package list.
+``bundle`` is the SHA-256 of the emitted ``bundle-manifest.json`` bytes, so
+the server can verify the manifest identity and every named asset digest at
+startup without a second format.
+"""
 
 from __future__ import annotations
 
@@ -9,17 +16,16 @@ from pathlib import Path
 
 NATIVE_ROOT = Path("/opt/darktable")
 OUTPUT = Path("/opt/slipstream-photo")
+ENGINE = Path("/opt/darktable/bin/darktable-mcp")
+METADATA = Path("/opt/slipstream-photo/engine-metadata.json")
+ICC = Path("/opt/slipstream-photo/icc/LargeRGB-elle-V2-g10.icc")
+COMMIT = Path("/opt/slipstream-photo/darktable-commit")
+PACKAGES = Path("/opt/os-packages.txt")
 FILES = (
-    Path("/usr/local/bin/slipstream-processing-photo-worker"),
-    Path("/opt/slipstream-photo/engine-metadata.json"),
-    Path("/opt/slipstream-photo/film_adapter.py"),
-    Path("/opt/slipstream-photo/icc/LargeRGB-elle-V2-g10.icc"),
-    Path("/opt/processing-bundle.json"),
-    Path("/opt/probe/bundle.py"),
-    Path("/opt/probe/film_identity.py"),
-    Path("/opt/probe/finished_jpeg.py"),
-    Path("/opt/probe/film.py"),
-    Path("/opt/os-packages.txt"),
+    METADATA,
+    ICC,
+    COMMIT,
+    PACKAGES,
 )
 
 def digest(path: Path) -> str:
@@ -35,7 +41,7 @@ def native_files() -> list[Path]:
 
 
 def main() -> None:
-    files = native_files() + list(FILES)
+    files = native_files() + list(FILES) + [ENGINE]
     missing = [str(path) for path in files if not path.is_file()]
     if missing:
         raise SystemExit(f"bundle inputs missing: {', '.join(missing)}")
@@ -43,11 +49,11 @@ def main() -> None:
     document = {
         "format": 1,
         "darktable_commit": os.environ["DARKTABLE_COMMIT"],
+        "engine": str(ENGINE),
         "native": native,
         "files": {str(path): digest(path) for path in FILES},
-        "metadata": digest(FILES[1]),
-        "icc": digest(FILES[3]),
-        "film_parent_manifest": digest(FILES[4]),
+        "metadata": digest(METADATA),
+        "icc": digest(ICC),
     }
     encoded = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
     bundle = hashlib.sha256(encoded).hexdigest()

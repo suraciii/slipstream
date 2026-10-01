@@ -9,10 +9,9 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 - [Photo Development Architecture](photo-development.md): recipe ownership, headless processing, concurrency, export snapshots, source safety, and recovery
 - [Photo Editor Workspace](photo-editor-workspace.md): browser ownership, stage composition, freshness, conflict, and cross-stage lifecycle
 - [Development Color Pipeline](development-color.md): RAW interpretation, linear TIFF handoff, fixed film simulation, display separation, and reproducibility
-- [Native darktable Integration](darktable-integration.md): private MCP interaction, complete parameter discovery, image initialization, execution isolation, and cutover
-- [Processing Executor](processing-executor.md): private host launcher, restricted execution authority, retained accounting, and restart settlement
-- [Film Resource Measurement](processing-film-measurement.md): closed operator fixtures, sealed inputs, fixed resource terms, exact references, and descriptor-only evidence
-- [Processing Memory](processing-memory.md): task memory isolation, deployment budgets, engine workspace planning, buffer ownership, and resource-failure recovery
+- [Native darktable Integration](darktable-integration.md): private MCP interaction, complete parameter discovery, image initialization, fresh engine children, and cutover
+- [Local Photo Executor](processing-executor.md): one application container, serialized engine children, scratch lifetime, cleanup, and restart settlement
+- [Processing Memory](processing-memory.md): the shared container memory/CPU boundary, serialized execution, engine workspace planning, buffer ownership, and resource-failure recovery
 
 ## Foundations
 
@@ -30,7 +29,6 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 - [Scalable Library Browsing](library-browsing.md): lightweight overview, progressively loaded Grid and Photo views, stable hidden browse snapshots, background scan status, and persistent Preview caching
 - [Removing Rejected Photos from the Library](rejected-photo-cleanup.md): removal as Photo-row state, snapshot-bound admission, one operation per confirmed review, compare-and-set restore, and the bounded recovery listing
 - [Preview Pipeline](preview-pipeline.md): own-file JPEG and embedded-JPEG selection, extraction, normalization, caching, and delivery
-- [Production Photo Processing Protocol](processing-photo-protocol.md): typed Photo admission, descriptor handoff, launcher authority, and the closed Development TIFF workload
 - [Web Async Ownership](web-async-ownership.md): read scopes, write settlement, and commit-ordered convergence in the Web client
 - [Browser Navigation and Responsive Surfaces](browser-navigation.md): URL codec, history entries, bounded restoration, destination lifecycle, and modal ownership
 - [Web Frontend Architecture](web-frontend-architecture.md): incremental Feature-Sliced Design layers, Library Browser ownership, dependency direction, and migration constraints

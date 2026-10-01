@@ -738,13 +738,12 @@ export function createEditorController(
     }
   };
   /// The deployment's capability state in the Photographer's words. Internal
-  /// causes (launcher, bundle, allowance) stay service concepts: the
-  /// workspace says what the Photographer can do and what stays safe.
+  /// causes (bundle, allowance) stay service concepts: the workspace says
+  /// what the Photographer can do and what stays safe.
   const capabilityNote = (state: string): string => {
     switch (state) {
       case "disabled":
         return "Editing previews and Export are not enabled in this deployment. Saved edits and downloads stay available.";
-      case "launcher-unavailable":
       case "bundle-unavailable":
         return "Processing is temporarily unavailable, so previews and Export cannot run. Saved edits and downloads stay available.";
       case "source-unsupported":

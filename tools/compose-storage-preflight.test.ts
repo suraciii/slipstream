@@ -129,158 +129,60 @@ async function dockerComposeConfig(
   }
 }
 
-test("processing Compose overlay exposes only the fixed read-only launcher directory", async () => {
-  const target = await fixture();
-  try {
-    const layout = await topology(target);
-    const instance = "0123456789abcdef0123456789abcdef";
-    await writeEnvironment(target, layout.sources);
-    await appendFile(
-      target.environmentFile,
-      [
-        "",
-        `SLIPSTREAM_PROCESSING_INSTANCE=${instance}`,
-        `SLIPSTREAM_PROCESSING_POLICY_SHA256=${"b".repeat(64)}`,
-        `SLIPSTREAM_PROCESSING_BUNDLE_SHA256=${"c".repeat(64)}`,
-        `SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES=${8589934592}`,
-        "",
-      ].join("\n"),
-    );
-
-    const base = await dockerComposeConfig(target.environmentFile);
-    const processing = await dockerComposeConfig(
-      target.environmentFile,
-      undefined,
-      join(repositoryRoot, "compose.processing.yaml"),
-    );
-    const baseService = (
-      base.services as Record<string, Record<string, unknown>>
-    ).slipstream;
-    const processingService = (
-      processing.services as Record<string, Record<string, unknown>>
-    ).slipstream;
-    const baseVolumes = baseService.volumes as Array<Record<string, unknown>>;
-    const processingVolumes = processingService.volumes as Array<
-      Record<string, unknown>
-    >;
-    const processingMount = processingVolumes.find(
-      (mount) => mount.target === `/run/slipstream-processing/${instance}`,
-    );
-
-    expect(baseService.environment).not.toHaveProperty(
-      "SLIPSTREAM_PROCESSING_SOCKET",
-    );
-    expect(baseVolumes).toHaveLength(3);
-    expect(processingMount).toMatchObject({
-      type: "bind",
-      source: `/run/slipstream-processing/${instance}`,
-      target: `/run/slipstream-processing/${instance}`,
-      read_only: true,
-    });
-    expect(processingVolumes).toHaveLength(4);
-    expect(processingService.environment).toMatchObject({
-      SLIPSTREAM_PROCESSING_INSTANCE: instance,
-      SLIPSTREAM_PROCESSING_POLICY_SHA256: "b".repeat(64),
-      SLIPSTREAM_PROCESSING_BUNDLE_SHA256: "c".repeat(64),
-      SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES: "8589934592",
-    });
-    expect(baseService.environment).not.toHaveProperty(
-      "SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES",
-    );
-  } finally {
-    await removeFixture(target);
-  }
-});
-
-test("processing-up ignores ambient opt-in and requires the instance in its environment file", async () => {
+test("the removed processing opt-in fails closed before Docker", async () => {
   const target = await fixture();
   try {
     const layout = await topology(target);
     await writeEnvironment(target, layout.sources);
-    const result = await runCompose(target, ["processing-up", "-d"], {
-      environment: {
-        SLIPSTREAM_PROCESSING_INSTANCE: "0123456789abcdef0123456789abcdef",
-      },
-    });
-
-    expect(result.exitCode).toBe(2);
-    expect(result.stderr).toContain(
-      "environment file is missing SLIPSTREAM_PROCESSING_INSTANCE",
-    );
-    expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
-  } finally {
-    await removeFixture(target);
-  }
-});
-
-test("processing-up rejects a Web UID operator before host preflight", async () => {
-  const target = await fixture();
-  try {
-    const layout = await topology(target);
-    const instance = randomBytes(16).toString("hex");
-    await writeEnvironment(target, layout.sources);
-    await appendFile(
-      target.environmentFile,
-      [
-        "",
-        `SLIPSTREAM_PROCESSING_INSTANCE=${instance}`,
-        `SLIPSTREAM_PROCESSING_POLICY_SHA256=${"b".repeat(64)}`,
-        `SLIPSTREAM_PROCESSING_BUNDLE_SHA256=${"c".repeat(64)}`,
-        `SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES=${8589934592}`,
-        "",
-      ].join("\n"),
-    );
-    const uid = process.getuid?.() === 0 ? 1000 : undefined;
-    if (uid !== undefined) {
-      await chmod(target.root, 0o755);
-    }
-
-    const result = await runCompose(target, ["processing-up", "-d"], { uid });
-
-    expect(result.exitCode).toBe(2);
-    expect(result.stderr).toContain("processing-up must be run as root");
-    expect(result.stderr).not.toContain("processing runtime path");
-    expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
-    expect(await Bun.file(target.composeArguments).exists()).toBeFalse();
-  } finally {
-    await removeFixture(target);
-  }
-});
-
-test("processing-up requires root or refuses an unavailable launcher before invoking Compose", async () => {
-  const target = await fixture();
-  try {
-    const layout = await topology(target);
-    const instance = randomBytes(16).toString("hex");
     await writeFile(
       join(layout.sources.library, "preserved.ARW"),
       originalBytes,
     );
     const before = await originalEvidence(layout.sources.library);
-    await writeEnvironment(target, layout.sources);
+
+    const removed = await runCompose(target, ["processing-up", "-d"]);
+    expect(removed.exitCode).toBe(2);
+    expect(removed.stderr).toContain("unsupported Compose command");
+    expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+
     await appendFile(
       target.environmentFile,
       [
         "",
-        `SLIPSTREAM_PROCESSING_INSTANCE=${instance}`,
+        `SLIPSTREAM_PROCESSING_INSTANCE=${"0".repeat(32)}`,
         `SLIPSTREAM_PROCESSING_POLICY_SHA256=${"b".repeat(64)}`,
         `SLIPSTREAM_PROCESSING_BUNDLE_SHA256=${"c".repeat(64)}`,
-        `SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES=${8589934592}`,
         "",
       ].join("\n"),
     );
-
-    const result = await runCompose(target, ["processing-up", "-d"]);
-
-    expect(result.exitCode).toBe(2);
-    expect(result.stderr).toContain(
-      process.getuid?.() === 0
-        ? "processing runtime path contains a missing directory or symbolic link"
-        : "processing-up must be run as root",
+    const declared = await runCompose(target, ["up", "-d"]);
+    expect(declared.exitCode).toBe(2);
+    expect(declared.stderr).toContain(
+      "the host processing launcher was removed",
     );
     expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
-    expect(await Bun.file(target.composeArguments).exists()).toBeFalse();
     expect(await originalEvidence(layout.sources.library)).toEqual(before);
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+test("ambient processing identities do not opt a normal start into anything", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    await writeEnvironment(target, layout.sources);
+
+    const result = await runCompose(target, ["up", "-d"], {
+      environment: {
+        SLIPSTREAM_PROCESSING_INSTANCE: "0".repeat(32),
+        SLIPSTREAM_PROCESSING_POLICY_SHA256: "b".repeat(64),
+        SLIPSTREAM_PROCESSING_BUNDLE_SHA256: "c".repeat(64),
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(await Bun.file(target.dockerCalls).exists()).toBeTrue();
   } finally {
     await removeFixture(target);
   }
@@ -2061,6 +1963,82 @@ test("the access-admin profile shares pinned storage but disables container logs
   }
 });
 
+const productionResourceLimits = {
+  mem_limit: "8589934592",
+  cpus: 4,
+  pids_limit: 512,
+} as const;
+
+test("both containers share finite memory, CPU, and thread bounds without a Docker socket", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    await writeEnvironment(target, layout.sources);
+    const configuration = await dockerComposeConfig(
+      target.environmentFile,
+      "access-admin",
+    );
+    const services = configuration.services as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(Object.keys(services).sort()).toEqual([
+      "slipstream",
+      "slipstream-admin",
+    ]);
+
+    const canonicalSources = {
+      library: await realpath(layout.sources.library),
+      state: await realpath(layout.sources.state),
+      cache: await realpath(layout.sources.cache),
+    };
+    for (const name of ["slipstream", "slipstream-admin"] as const) {
+      const service = services[name];
+      expect(String(service.mem_limit)).toBe(
+        productionResourceLimits.mem_limit,
+      );
+      expect(Number(service.cpus)).toBe(productionResourceLimits.cpus);
+      expect(Number(service.pids_limit)).toBe(
+        productionResourceLimits.pids_limit,
+      );
+      const environment = service.environment as Record<string, unknown>;
+      expect(environment.OMP_NUM_THREADS).toBe("4");
+      expect(environment.SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES).toBe(
+        productionResourceLimits.mem_limit,
+      );
+      expect(environment.SLIPSTREAM_PHOTO_DEVELOPMENT).toBe("auto");
+      expect(environment.SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY).toBe(
+        "/opt/slipstream-photo",
+      );
+      const volumes = service.volumes as Array<Record<string, unknown>>;
+      const bindTargets = volumes
+        .filter((mount) => mount.type === "bind")
+        .map((mount) => String(mount.target))
+        .sort();
+      expect(bindTargets).toEqual(Object.values(canonicalSources).sort());
+      expect(
+        volumes.some((mount) => String(mount.target).includes("docker.sock")),
+      ).toBeFalse();
+    }
+
+    await appendFile(
+      target.environmentFile,
+      "\nSLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES=1073741824\n",
+    );
+    const overridden = await dockerComposeConfig(target.environmentFile);
+    const overriddenService = (
+      overridden.services as Record<string, Record<string, unknown>>
+    ).slipstream;
+    expect(
+      (overriddenService.environment as Record<string, unknown>)[
+        "SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES"
+      ],
+    ).toBe("1073741824");
+  } finally {
+    await removeFixture(target);
+  }
+});
+
 const qaComposeFile = join(repositoryRoot, "compose.qa.yaml");
 const qaResourceLimits = {
   mem_limit: "2147483648",
@@ -2232,7 +2210,7 @@ test("QA startup derives fixture storage and applies only the QA override", asyn
   }
 });
 
-test("the QA override limits both containers without changing the ordinary service", async () => {
+test("the QA override limits both containers below the ordinary service allocation", async () => {
   const target = await fixture();
   const id = qaInstanceId();
   const paths = await createQaFixture(id);
@@ -2276,9 +2254,9 @@ test("the QA override limits both containers without changing the ordinary servi
       Record<string, unknown>
     >;
     expect(Object.keys(ordinaryServices)).toEqual(["slipstream"]);
-    expect(ordinaryServices.slipstream.mem_limit).toBeUndefined();
-    expect(ordinaryServices.slipstream.cpus).toBeUndefined();
-    expect(ordinaryServices.slipstream.pids_limit).toBeUndefined();
+    expect(String(ordinaryServices.slipstream.mem_limit)).toBe("8589934592");
+    expect(Number(ordinaryServices.slipstream.cpus)).toBe(4);
+    expect(Number(ordinaryServices.slipstream.pids_limit)).toBe(512);
   } finally {
     await rm(paths.root, { recursive: true, force: true });
     await removeFixture(target);

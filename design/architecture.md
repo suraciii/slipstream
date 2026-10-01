@@ -228,4 +228,4 @@ A camera sample corpus must include the Photographer's actual RAW formats. Unsup
 
 ## Photo Development Extension
 
-[Photo Development Architecture](photo-development.md) extends the Rust service with Edit Recipe ownership, supervised processing, and captured Exports. [Development Color Pipeline](development-color.md) owns scene-linear processing and display separation. The initial selection-only slice and the rejection of a general RAW module editor remain scoped to their stated goals.
+[Photo Development Architecture](photo-development.md) extends the Rust service with Edit Recipe ownership, an in-process executor running serialized native engine children, and captured Exports. [Development Color Pipeline](development-color.md) owns scene-linear processing and display separation. The initial selection-only slice and the rejection of a general RAW module editor remain scoped to their stated goals.

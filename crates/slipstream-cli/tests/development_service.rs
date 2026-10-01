@@ -1,8 +1,8 @@
 //! Executable tests of the Photo Development surface: Edit Recipe guarded
 //! writes and Edit Preview downloads against a compact scripted TLS service,
 //! plus the two deployment facts the real service answers deterministically
-//! without a processing launcher (the disabled capability report and the
-//! unsupported JPEG source class). Every scenario runs the actual CLI
+//! with processing explicitly disabled (the disabled capability report and
+//! the unsupported JPEG source class). Every scenario runs the actual CLI
 //! binary, so the exit codes, envelopes, and local file effects are the
 //! consumer-visible contract.
 
@@ -132,6 +132,8 @@ enum Step {
     ServeWrongDigest,
     /// Announce more body bytes than the transfer sends, then close.
     ServeShortTransfer,
+    /// Answer `GET /api/processing/capability` with the caller's report.
+    CapabilityReport(Value),
 }
 
 #[derive(Clone, Debug)]
@@ -327,6 +329,7 @@ fn answer(stream: &mut impl Write, step: &Step, rendition: &[u8]) {
             rendition.len() + 24,
             &rendition[..rendition.len() / 2],
         ),
+        Step::CapabilityReport(report) => write_json_response(stream, 200, "OK", report),
     }
 }
 
@@ -945,11 +948,18 @@ async fn unverifiable_edit_preview_transfers_publish_nothing() {
     }
 }
 
+// ---------------------------------------------------------------- capability
+
+#[path = "development_service/capability.rs"]
+mod capability;
+
 // ---------------------------------------------------------------- real service
 
 /// The two Originals of the shared fixture: JPEG sources only, with
-/// processing unconfigured, so the deployment answers deterministically
-/// without a launcher.
+/// processing explicitly the operator-disabled configuration, so the
+/// deployment answers deterministically without an engine bundle. The
+/// environment default is `auto`, which reports `bundle-unavailable` when
+/// the bundle is missing — not the `disabled` condition asserted here.
 fn real_service_fixture() -> (PathBuf, Config) {
     let base = temp_base("real-service");
     let originals = base.join("originals");
@@ -997,42 +1007,6 @@ async fn wait_until_idle(server: &str) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("fixture Library did not become idle");
-}
-
-/// Without a processing configuration the service reports the closed
-/// `disabled` condition, and the CLI passes the report through with its
-/// profiles, null identities, and unavailable stages.
-#[tokio::test]
-async fn the_real_service_capability_report_is_disabled_without_processing() {
-    let (base, config) = real_service_fixture();
-    let server = common::start_authenticated_server(config).await;
-    wait_until_idle(&server.url).await;
-    let (exit, report) = command(&server.url, &["processing", "capability"]).await;
-    assert_eq!(exit, 0);
-    let data = &report["data"];
-    assert_eq!(data["state"], "disabled");
-    assert_eq!(data["bundleId"], Value::Null);
-    assert_eq!(data["incarnation"], Value::Null);
-    assert_eq!(data["stages"]["develop"], "unavailable");
-    assert_eq!(data["stages"]["film"], "unavailable");
-    let profiles = data["profiles"].as_array().unwrap();
-    assert!(!profiles.is_empty());
-    for profile in profiles {
-        assert!(!profile["profileId"].as_str().is_some_and(str::is_empty));
-        let modes = profile["whiteBalanceModes"].as_array().unwrap();
-        assert!(!modes.is_empty());
-        assert!(
-            modes
-                .iter()
-                .all(|mode| mode.as_str().is_some_and(|mode| !mode.is_empty()))
-        );
-        assert_eq!(profile["whiteBalanceRanges"], Value::Null);
-    }
-    let exposure = &data["exposure"];
-    assert!(exposure["minimumEv"].as_f64().unwrap() < exposure["maximumEv"].as_f64().unwrap());
-    assert!(exposure["stepEv"].as_f64().unwrap() > 0.0);
-    server.close().await.unwrap();
-    fs::remove_dir_all(base).unwrap();
 }
 
 /// A JPEG source class has no approved development profile: the real

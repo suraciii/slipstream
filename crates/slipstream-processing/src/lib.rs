@@ -1,23 +1,10 @@
-//! Private, qualification-only processing supervision. This crate does not
-//! resolve Originals, edit Photos, or publish Exports.
-mod backend;
-mod environment;
-mod faults;
-mod instance_claim;
-mod journal;
-pub mod photo;
-mod photo_exec;
-mod photo_jpeg;
-pub mod photo_profile;
+//! Local Photo development contracts of the application container: the
+//! native engine execution boundary and the Development TIFF validator.
+//! This crate does not resolve Originals, edit Photos, or publish Exports.
+mod mcp_client;
+mod native_development;
 mod photo_tiff;
-pub mod protocol;
-mod slice;
-mod transport;
 
-pub use journal::Executor;
-pub use transport::{request, serve};
-
-pub mod film;
-pub mod qualified;
-
-pub mod staging;
+pub mod local_photo;
+pub mod photo_profile;
+pub use mcp_client::run_supervisor;

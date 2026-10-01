@@ -1,7 +1,7 @@
-//! Closed validation of launcher-received export artifacts.
+//! Closed validation of locally developed export artifacts.
 
 use slipstream_core::{ExportError, ExportTarget};
-use slipstream_processing::photo::OutputReceipt;
+use slipstream_processing::local_photo::OutputIdentity;
 use std::{
     fs,
     io::{self, Read, Seek, SeekFrom},
@@ -16,10 +16,10 @@ pub(crate) fn open_read_only(path: &Path) -> io::Result<fs::File> {
         .open(path)
 }
 
-/// The one actionable reason every output refusal carries. The launcher
-/// retains its result for reconciliation either way.
+/// The one actionable reason every output refusal carries. The failed
+/// attempt's staging is discarded with its output.
 pub(crate) const OUTPUT_VALIDATION_FAILED: &str =
-    "received output failed closed artifact validation";
+    "developed output failed closed artifact validation";
 
 pub(crate) fn validate_output(
     path: &Path,
@@ -31,26 +31,30 @@ pub(crate) fn validate_output(
     }
 }
 
-/// Verifies the received output against the launcher receipt and target
-/// contract before any acknowledgement or publication.
-pub(crate) fn verify_received_output(
+/// Verifies the locally developed output against the executor's reported
+/// identity and the target contract before any claim or publication.
+pub(crate) fn verify_developed_output(
     path: &Path,
-    receipt: &OutputReceipt,
+    identity: &OutputIdentity,
     target: ExportTarget,
 ) -> Result<DevelopmentTiffFacts, ExportError> {
     use sha2::{Digest, Sha256};
     let file = open_read_only(path).map_err(|_| ExportError::InvalidArtifact)?;
     let metadata = file.metadata().map_err(ExportError::Io)?;
-    if metadata.len() != receipt.size || receipt.size == 0 {
+    if metadata.len() != identity.size || identity.size == 0 {
         return Err(ExportError::InvalidArtifact);
     }
     let mut hasher = Sha256::new();
     let mut file = file;
     io::copy(&mut file, &mut hasher).map_err(ExportError::Io)?;
-    if format!("{:x}", hasher.finalize()) != receipt.sha256 {
+    if format!("{:x}", hasher.finalize()) != identity.sha256 {
         return Err(ExportError::InvalidArtifact);
     }
-    validate_output(path, target)
+    let facts = validate_output(path, target)?;
+    if facts.width != identity.width || facts.height != identity.height {
+        return Err(ExportError::InvalidArtifact);
+    }
+    Ok(facts)
 }
 
 /// Validated Development TIFF facts the wire contract discloses with the
@@ -281,7 +285,7 @@ pub(crate) fn validate_development_tiff(path: &Path) -> Result<DevelopmentTiffFa
     .map_err(|_| invalid!())?;
     drop(derivative);
     // The profile identity is byte identity: the SHA-256 over the embedded
-    // profile bytes, the same discipline the launcher pins at qualification.
+    // profile bytes, the same discipline the development contract pins.
     use sha2::{Digest, Sha256};
     file.seek(SeekFrom::Start(u64::from(offset)))
         .map_err(|_| invalid!())?;

@@ -3,6 +3,16 @@ x-slipstream-container: &slipstream-container
   image: ${SLIPSTREAM_IMAGE:?Set SLIPSTREAM_IMAGE to an immutable image digest}
   user: "1000:1000"
   read_only: true
+  # One finite shared allocation for the Web service and the optional native
+  # Photo engine that runs inside this same application container
+  # (design/processing-executor.md): an engine over-run fails this container
+  # instead of the host. pids_limit and OMP_NUM_THREADS bound engine worker
+  # threads to the same CPU allocation; the service stop_grace_period bounds
+  # engine shutdown timing before the container is killed. No Docker socket is
+  # mounted: the application never starts sibling containers.
+  mem_limit: 8g
+  cpus: 4
+  pids_limit: 512
   tmpfs:
     - /tmp/slipstream:rw,noexec,nosuid,nodev,size=64m,uid=1000,gid=1000
   cap_drop:
@@ -21,6 +31,13 @@ x-slipstream-container: &slipstream-container
     SLIPSTREAM_PORT: 3000
     HOME: /home/slipstream
     TMPDIR: /tmp/slipstream
+    # Finite retained-output allowance for published Development TIFF
+    # artifacts; the default keeps a default local deployment usable without
+    # extra operator configuration.
+    SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES: ${SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES:-8589934592}
+    SLIPSTREAM_PHOTO_DEVELOPMENT: ${SLIPSTREAM_PHOTO_DEVELOPMENT:-auto}
+    SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY: ${SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY:-/opt/slipstream-photo}
+    OMP_NUM_THREADS: "4"
   volumes:
     - type: bind
       source: ${SLIPSTREAM_LIBRARY_ROOT:?Set SLIPSTREAM_LIBRARY_ROOT to the Originals directory}

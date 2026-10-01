@@ -1,4 +1,9 @@
-//! The Photo worker's semantic development request over the private native engine.
+//! The semantic development request over the private native engine.
+//!
+//! [`develop_at`] runs the pinned `development-tiff` protocol over
+//! caller-owned paths for local single-container execution: the engine
+//! binary, bundle metadata, staged output profile, and private work tree
+//! all belong to the calling executor.
 
 use crate::mcp_client::McpClient;
 use serde_json::{Value, json};
@@ -6,12 +11,18 @@ use std::{
     fs::File,
     io::{self, Read},
     path::Path,
+    sync::{Arc, atomic::AtomicBool},
+    time::Instant,
 };
 
-const ENGINE: &str = "/opt/darktable/bin/darktable-mcp";
-const METADATA: &str = "/opt/slipstream-photo/engine-metadata.json";
-const PROFILE: &str = "/work/config/color/out/linear-prophoto.icc";
 const METADATA_BYTES_MAX: u64 = 16 * 1024 * 1024;
+
+/// The external termination authority of one local execution: a cancelled
+/// flag polled together with the absolute deadline by the engine watchdog.
+pub(crate) struct Guard {
+    pub cancellation: Arc<AtomicBool>,
+    pub deadline: Instant,
+}
 
 fn module_list(value: &Value) -> io::Result<&[Value]> {
     match value {
@@ -25,8 +36,32 @@ fn module_list(value: &Value) -> io::Result<&[Value]> {
     }
 }
 
-pub fn develop(input: &Path, output: &Path, exposure_milli_ev: i64) -> io::Result<()> {
-    let metadata = File::open(METADATA)?;
+/// One strict UTF-8 engine path argument: the pinned bundle has no
+/// non-UTF-8 paths, and a caller-supplied one must not become an ambient
+/// encoding surprise.
+fn strict(path: &Path) -> io::Result<&str> {
+    path.to_str()
+        .ok_or_else(|| io::Error::other("engine path is not valid UTF-8"))
+}
+
+/// Parameterized development for local, single-container execution: the
+/// engine binary, the bundle metadata, the staged output profile and the
+/// private work tree are all caller-owned, and every engine-private path
+/// is derived below `work`. The optional guard binds the run to the
+/// caller's cancellation flag and deadline.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn develop_at(
+    engine: &Path,
+    metadata_path: &Path,
+    profile: &Path,
+    work: &Path,
+    input: &Path,
+    output: &Path,
+    exposure_milli_ev: i64,
+    client: &str,
+    guard: Option<Guard>,
+) -> io::Result<()> {
+    let metadata = File::open(metadata_path)?;
     if metadata.metadata()?.len() > METADATA_BYTES_MAX {
         return Err(io::Error::other("engine metadata exceeds the bundle bound"));
     }
@@ -39,17 +74,22 @@ pub fn develop(input: &Path, output: &Path, exposure_milli_ev: i64) -> io::Resul
     }
     let approved: Value = serde_json::from_slice(&bytes)
         .map_err(|_| io::Error::other("engine metadata is invalid"))?;
+    let config = work.join("config");
+    let cache = work.join("cache");
+    let tmp = work.join("tmp");
+    let xdg = work.join("xdg");
+    let library = work.join("library.db");
     let args: Vec<String> = [
         "--core",
         "--disable-opencl",
         "--configdir",
-        "/work/config",
+        strict(&config)?,
         "--cachedir",
-        "/work/cache",
+        strict(&cache)?,
         "--tmpdir",
-        "/work/tmp",
+        strict(&tmp)?,
         "--library",
-        "/work/library.db",
+        strict(&library)?,
         "--conf",
         "plugins/darkroom/workflow=none",
         "--conf",
@@ -71,14 +111,21 @@ pub fn develop(input: &Path, output: &Path, exposure_milli_ev: i64) -> io::Resul
             "PATH".to_string(),
             "/opt/darktable/bin:/usr/local/bin:/usr/bin:/bin".to_string(),
         ),
-        ("HOME".to_string(), "/work/xdg".to_string()),
-        ("XDG_CONFIG_HOME".to_string(), "/work/xdg".to_string()),
-        ("XDG_CACHE_HOME".to_string(), "/work/cache".to_string()),
-        ("TMPDIR".to_string(), "/work/tmp".to_string()),
+        ("HOME".to_string(), strict(&xdg)?.to_string()),
+        ("XDG_CONFIG_HOME".to_string(), strict(&xdg)?.to_string()),
+        ("XDG_CACHE_HOME".to_string(), strict(&cache)?.to_string()),
+        ("TMPDIR".to_string(), strict(&tmp)?.to_string()),
         ("OMP_NUM_THREADS".to_string(), "4".to_string()),
     ];
-    let mut engine = McpClient::spawn(ENGINE, &args, &env)?;
-    engine.initialize("slipstream-photo-worker")?;
+    let program = strict(engine)?;
+    let mut engine = match guard {
+        Some(Guard {
+            cancellation,
+            deadline,
+        }) => McpClient::spawn_guarded(program, &args, &env, cancellation, deadline)?,
+        None => McpClient::spawn(program, &args, &env)?,
+    };
+    engine.initialize(client)?;
     let modules = engine.call("list_modules", json!({}))?;
     if engine.tools_list()? != approved["tools"]
         || module_list(&modules)? != module_list(&approved["modules"])?
@@ -104,7 +151,7 @@ pub fn develop(input: &Path, output: &Path, exposure_milli_ev: i64) -> io::Resul
             "input": {"path": input},
             "out_path": output,
             "format": "scene-linear-tiff",
-            "icc_file": PROFILE,
+            "icc_file": profile,
             "baseline": "raw-development",
             "width": 0,
             "height": 0,

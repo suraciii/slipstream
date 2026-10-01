@@ -3,6 +3,7 @@ use crate::config::{MAX_BROWSE_WINDOW, MAX_REMOVED_WINDOW, NEXT_BROWSE_NAMESPACE
 use crate::http::{is_hex_key, valid_id};
 mod published;
 mod shared_library;
+mod shutdown;
 
 use crate::queries::{CursorSigner, QueryRegistry, RetainedKind};
 use crate::recovery_review::{MAXIMUM_RECOVERY_APPLY, MAXIMUM_RECOVERY_MAPPINGS};
@@ -194,6 +195,13 @@ pub struct Application {
 }
 
 impl Application {
+    pub(crate) fn instance_epoch(&self) -> &str {
+        &self.instance_epoch
+    }
+
+    pub(crate) fn processing_available(&self) -> bool {
+        self.exports.is_some()
+    }
     pub(crate) fn admit_scan_cycle(
         self: &Arc<Self>,
         scan_gate: Option<oneshot::Receiver<()>>,
@@ -423,7 +431,7 @@ impl Application {
         drop(startup);
         // Reconcile unfinished Exports once the published Library is served.
         // Queued work restarts through ordinary admission; interrupted running
-        // work resolves from its launcher receipt without a replacement.
+        // work resolves from its durable attempt identity without a replacement.
         if let Some(manager) = application.exports.as_ref() {
             manager.reconcile_after_restart();
             manager.schedule_expiry_sweep();
@@ -2347,32 +2355,6 @@ impl Application {
                 cli_facts,
             }
         }))
-    }
-
-    fn shutdown_blocking(&self) -> Result<(), ServerError> {
-        let mut closed = self.shutdown.lock().expect("application shutdown poisoned");
-        if *closed {
-            return Ok(());
-        }
-        *closed = true;
-        drop(closed);
-        let preview_result = self
-            .preview
-            .shutdown()
-            .map_err(|error| ServerError::Preview(error.to_string()));
-        let library_result = self.library.shutdown().map_err(ServerError::Library);
-        preview_result.and(library_result)
-    }
-
-    pub async fn shutdown(self: &Arc<Self>) -> Result<(), ServerError> {
-        // Stop new admissions and drain the application-owned leader before
-        // closing the Library, so publication and status accounting complete.
-        self.scan_cycle.close();
-        self.scan_cycle.wait_for_idle().await;
-        let application = Arc::clone(self);
-        tokio::task::spawn_blocking(move || application.shutdown_blocking())
-            .await
-            .map_err(|error| ServerError::Join(error.to_string()))?
     }
 }
 
