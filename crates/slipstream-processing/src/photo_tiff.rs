@@ -1,12 +1,11 @@
 //! Bounded Development TIFF validation for the `development-tiff` output.
 //!
-//! The launcher validates its own engine result before offering it on an
-//! Output request: IEEE float32 RGB samples, Deflate compression, full
+//! The local executor validates its own engine result before reporting it:
+//! IEEE float32 RGB samples, Deflate compression, full
 //! geometry, no orientation surprise, and the exact pinned embedded linear
 //! ProPhoto ICC bytes (`design/development-color.md`). The pinned profile
 //! hash is byte identity; a profile name or appearance is not evidence.
 
-use crate::protocol::ErrorCode;
 use sha2::{Digest, Sha256};
 use std::{
     fs::File,
@@ -14,6 +13,14 @@ use std::{
     os::unix::fs::MetadataExt,
     path::Path,
 };
+
+/// The validator's closed rejection vocabulary: every failure is equally
+/// uncertain, because the artifact is not the qualified Development TIFF
+/// and no finer claim about it would be evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ErrorCode {
+    Uncertain,
+}
 
 /// The pinned darktable-embedded linear ProPhoto RGB profile bytes. These
 /// differ from the bundle's `LargeRGB-elle-V2-g10.icc` asset only in the
@@ -207,7 +214,7 @@ fn long_value(reader: &mut Reader, entry: &Entry) -> Result<u32, ErrorCode> {
     reader.u32(entry.offset)
 }
 
-/// Validate one launcher-owned Development TIFF and return its identity.
+/// Validate one locally produced Development TIFF and return its identity.
 pub(crate) fn validate(path: &Path, output_bytes_max: u64) -> Result<TiffIdentity, ErrorCode> {
     validate_for_icc(path, output_bytes_max, OUTPUT_ICC_SHA256)
 }
@@ -862,7 +869,5 @@ mod tests {
             &body,
         );
         assert!(validate(&path, 1 << 20).is_err());
-
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }

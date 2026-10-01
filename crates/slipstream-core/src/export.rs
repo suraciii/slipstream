@@ -200,12 +200,12 @@ impl ExportWorkspace {
         let staging = create_private_child(&root, "staging")?;
         let artifacts = create_private_child(&root, "artifacts")?;
         let previews = create_private_child(&root, "previews")?;
-        // A freshly opened workspace owns no preview admission, so every
-        // preview output it inherits belongs to a service lifetime that ended
-        // without its owner: ephemeral preview staging never outlives the
-        // admission that produced it.
-        clear_private_child(&previews);
         let work = create_private_child(&root, "work")?;
+        // Staging and work contain only in-flight copies and unpublished
+        // outputs. No durable Export state points at them after a restart.
+        clear_private_child(&staging);
+        clear_private_child(&previews);
+        clear_private_child(&work);
         Ok(Self {
             inner: Arc::new(WorkspaceInner {
                 root,
@@ -730,7 +730,7 @@ mod tests {
     /// produced it: a reopened workspace inherits no preview output, while a
     /// retained Export artifact of the same lifetime stays.
     #[test]
-    fn reopening_the_workspace_removes_inherited_preview_outputs() {
+    fn reopening_the_workspace_removes_inherited_ephemeral_outputs() {
         let (root, library, workspace) = fixture();
         let writer = workspace.begin_preview_tiff("prev-test-2").unwrap();
         fs::write(writer.temporary_path(), b"preview").unwrap();
@@ -738,6 +738,13 @@ mod tests {
         let retained = workspace.begin_development_tiff("request-3").unwrap();
         fs::write(retained.temporary_path(), b"II*\0tiff").unwrap();
         retained.publish(|_| Ok(())).unwrap();
+        fs::create_dir_all(workspace.root().join("staging/stale-attempt")).unwrap();
+        fs::write(
+            workspace.root().join("staging/stale-attempt/input.ARW"),
+            b"stale",
+        )
+        .unwrap();
+        fs::write(workspace.root().join("work/stale.tiff"), b"stale").unwrap();
 
         let reopened =
             ExportWorkspace::open(root.join("exports"), library.canonical_path()).unwrap();
@@ -746,6 +753,24 @@ mod tests {
             reopened
                 .root()
                 .join("previews")
+                .read_dir()
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert!(
+            reopened
+                .root()
+                .join("staging")
+                .read_dir()
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert!(
+            reopened
+                .root()
+                .join("work")
                 .read_dir()
                 .unwrap()
                 .next()

@@ -51,6 +51,7 @@ mod http;
 mod metadata_fields;
 pub mod metadata_service;
 pub mod metadata_wire;
+mod photo_executor;
 mod preview_render;
 mod processing_capability;
 mod queries;

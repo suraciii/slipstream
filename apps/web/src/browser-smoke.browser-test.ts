@@ -31,16 +31,14 @@ import {
 } from "./browser-server.js";
 
 const sample = process.env.SLIPSTREAM_RAW_SAMPLE;
-/// The launcher instance of the deployment under test. The scenario below
-/// needs a host with an admitted launcher socket, so it stays skipped
-/// everywhere else, exactly as the RAW sample does.
-const processingInstance = process.env.SLIPSTREAM_PROCESSING_INSTANCE?.trim();
+/// The optional native Photo bundle used by the local single-container smoke.
+/// The scenario stays skipped unless an operator supplies the bundle directory
+/// built by tools/processing/photo/build.py.
+const photoBundleDirectory =
+  process.env.SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY?.trim();
 const processingEnvironmentOverrides = {
-  SLIPSTREAM_PROCESSING_INSTANCE: processingInstance,
-  SLIPSTREAM_PROCESSING_POLICY_SHA256:
-    process.env.SLIPSTREAM_PROCESSING_POLICY_SHA256?.trim(),
-  SLIPSTREAM_PROCESSING_BUNDLE_SHA256:
-    process.env.SLIPSTREAM_PROCESSING_BUNDLE_SHA256?.trim(),
+  SLIPSTREAM_PHOTO_DEVELOPMENT: photoBundleDirectory ? "enabled" : undefined,
+  SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY: photoBundleDirectory,
   SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES:
     process.env.SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES?.trim(),
 } as const;
@@ -49,15 +47,11 @@ const noProcessingEnvironment = Object.fromEntries(
 );
 const processingEnvironment = [
   ["SLIPSTREAM_RAW_SAMPLE", sample],
-  ["SLIPSTREAM_PROCESSING_INSTANCE", processingInstance],
   [
-    "SLIPSTREAM_PROCESSING_POLICY_SHA256",
-    processingEnvironmentOverrides.SLIPSTREAM_PROCESSING_POLICY_SHA256,
+    "SLIPSTREAM_PHOTO_DEVELOPMENT",
+    processingEnvironmentOverrides.SLIPSTREAM_PHOTO_DEVELOPMENT,
   ],
-  [
-    "SLIPSTREAM_PROCESSING_BUNDLE_SHA256",
-    processingEnvironmentOverrides.SLIPSTREAM_PROCESSING_BUNDLE_SHA256,
-  ],
+  ["SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY", photoBundleDirectory],
   [
     "SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES",
     processingEnvironmentOverrides.SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES,
@@ -1221,7 +1215,7 @@ test("the Edit surface explains a deployment without processing and attempts no 
 });
 
 /// The opt-in counterpart of the refusal above: a deployment with an admitted
-/// launcher carries one RAW Original through a real Photo Edit Recipe. The
+/// local bundle carries one RAW Original through a real Photo Edit Recipe. The
 /// Photographer's own surface proves the saved exposure, the reopened recipe,
 /// the baseline comparison, and the downloaded Development TIFF, and the
 /// Original Files stay untouched.
@@ -1274,7 +1268,7 @@ test("real-processing: autosaves an exposure, reopens it, compares the baseline,
   const running = await server(base, root, processingEnvironmentOverrides);
   await startReview(page, running.url, "All Photos");
   await openPhotoToolsView(page, "edit");
-  // The deployment admits this Photo: the capability is the launcher's, and
+  // The application admits this Photo through its local native bundle, and
   // the RAW Original is a supported source class.
   await expect(page.locator("[data-photo-editor-processing]")).toHaveText(
     "Ready",

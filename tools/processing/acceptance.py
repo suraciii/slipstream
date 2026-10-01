@@ -55,7 +55,7 @@ MAX_JSON_BYTES = 1024 * 1024
 # `--max-download-bytes` (its `SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES`
 # value, see docs/deployment.md).
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
-# The launcher's hard output maximum (`MAX_OUTPUT_BYTES` in
+# The service's hard output maximum (`MAX_OUTPUT_BYTES` in
 # `crates/slipstream-processing/src/photo.rs`): the most any single published
 # artifact can be.  A larger configured bound would only invite reading bytes
 # the deployment cannot legitimately publish.
@@ -64,10 +64,10 @@ DOWNLOAD_SLACK_BYTES = 65536
 
 # The qualified writer writes each compressed strip through its own buffer, so
 # a written strip can extend one byte past its declared `StripByteCounts` entry
-# and the artifact can end a few bytes past the last declared strip
-# (`design/processing-photo-protocol.md#output-and-settlement`). That padding
-# is not payload: every declared strip is inflated and compared to its declared
-# row bytes above, which is what proves the artifact covers its geometry.
+# and the artifact can end a few bytes past the last declared strip. That
+# padding is not payload: every declared strip is inflated and compared to its
+# declared row bytes above, which is what proves the artifact covers its
+# geometry.
 STRIP_PADDING_MAXIMUM = 64
 MAX_TOKEN_BYTES = 4096
 MAX_QUERY_PAGES = 50
@@ -104,7 +104,6 @@ PINNED_SOURCE_PROFILE_DIGESTS = (
 
 CAPABILITY_STATES = (
     "disabled",
-    "launcher-unavailable",
     "bundle-unavailable",
     "source-unsupported",
     "resource-unavailable",
@@ -130,6 +129,11 @@ ARTIFACT_METADATA_FIELDS = (
     "target",
     "stage",
     "contentType",
+    "filename",
+    "orientation",
+    "sampleFormat",
+    "colorSpace",
+    "iccEmbedded",
     "width",
     "height",
     "profileIdentity",
@@ -160,6 +164,11 @@ ARTIFACT_METADATA_HEADERS = {
     "target": "slipstream-artifact-target",
     "stage": "slipstream-artifact-stage",
     "contentType": "Content-Type",
+    "filename": "slipstream-artifact-filename",
+    "orientation": "slipstream-artifact-orientation",
+    "sampleFormat": "slipstream-artifact-sample-format",
+    "colorSpace": "slipstream-artifact-color-space",
+    "iccEmbedded": "slipstream-artifact-icc-embedded",
     "width": "slipstream-artifact-width",
     "height": "slipstream-artifact-height",
     "profileIdentity": "slipstream-artifact-profile-identity",
@@ -289,10 +298,10 @@ def validate_capability(payload: object) -> tuple[dict, list]:
     facts["state"] = payload.get("state")
     if payload.get("state") not in CAPABILITY_STATES:
         problems.append("state-outside-closed-set")
-    # The launcher identities are null when the service observed no launcher
-    # answer; a ready capability always names them, and a present value must
-    # be the exact identity shape (`bundle_id` 64 hex, `incarnation` 32 hex,
-    # `processing_capability.rs`).
+    # The bundle identity is null when the optional Photo extension is not
+    # installed; a ready capability always names it, and a present value must
+    # be the exact identity shape (`bundle_id` 64 hex, `incarnation` 32 hex
+    # server startup identity, `processing_capability.rs`).
     ready = payload.get("state") == "ready"
     facts["bundleId"] = payload.get("bundleId")
     bundle_id = payload.get("bundleId")
@@ -547,6 +556,10 @@ def header_object_mismatches(metadata: dict, artifact: dict) -> list:
             except (TypeError, ValueError):
                 problems.append(f"{name}-header-not-integer")
             continue
+        if name == "iccEmbedded":
+            if header_value != ("true" if object_value is True else "false"):
+                problems.append(f"{name}-header-object-mismatch")
+            continue
         if str(header_value) != str(object_value):
             problems.append(f"{name}-header-object-mismatch")
     return problems
@@ -598,6 +611,19 @@ def validate_artifact_object(artifact: object, maximum: int = MAX_DOWNLOAD_BYTES
         problems.append("artifact-target-not-development-tiff")
     if artifact.get("stage") != DEVELOP_STAGE:
         problems.append("artifact-stage-not-develop")
+    expected = {
+        "contentType": DEVELOPMENT_CONTENT_TYPE,
+        "filename": f"{artifact.get('exportId')}.tiff",
+        "orientation": "top-left",
+        "sampleFormat": "float32",
+        "colorSpace": "scene-linear ProPhoto RGB",
+        "iccEmbedded": True,
+    }
+    for name, value in expected.items():
+        if artifact.get(name) != value or (
+            name == "iccEmbedded" and artifact.get(name) is not True
+        ):
+            problems.append(f"artifact-{name}-invalid")
     return facts, problems
 
 
@@ -927,9 +953,9 @@ def validate_development_tiff(
         problems.append("tiff-bits-per-sample-not-float32-rgb")
     if sample_format != [3, 3, 3]:
         problems.append("tiff-sample-format-not-ieee-float")
-    # design/processing-photo-protocol.md: the closed Development TIFF
-    # contract is IEEE float32 RGB samples with Deflate strip ranges, and the
-    # launcher refuses anything else before it publishes.
+    # The closed Development TIFF contract is IEEE float32 RGB samples with
+    # Deflate strip ranges, and the service refuses anything else before it
+    # publishes.
     if compression != 8:
         problems.append("tiff-compression-not-deflate")
     if photometric != 2:
@@ -2173,7 +2199,7 @@ def download_bound(value: str) -> int:
         raise argparse.ArgumentTypeError("must be a positive byte count")
     if parsed > MAXIMUM_DOWNLOAD_BYTES:
         raise argparse.ArgumentTypeError(
-            f"must not exceed the launcher's hard output maximum of {MAXIMUM_DOWNLOAD_BYTES} bytes"
+            f"must not exceed the service's hard output maximum of {MAXIMUM_DOWNLOAD_BYTES} bytes"
         )
     return parsed
 
@@ -2185,9 +2211,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--fixture", required=True, type=Path, help="Approved-profile RAW fixture path.")
     parser.add_argument("--output-dir", required=True, help="Private directory for downloaded artifacts.")
     parser.add_argument("--i-acknowledge-this-is-an-acceptance-instance", action="store_true")
-    parser.add_argument("--expected-instance")
-    parser.add_argument("--expected-policy")
-    parser.add_argument("--expected-bundle-sha256")
+    parser.add_argument(
+        "--expected-bundle-sha256",
+        help="Bundle digest the capability report must name (the image build's printed bundle identity).",
+    )
     parser.add_argument("--request-timeout", type=float, default=30.0)
     parser.add_argument("--settlement-timeout", type=float, default=900.0)
     parser.add_argument("--preview-timeout", type=float, default=120.0)
@@ -2199,7 +2226,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Read bound for artifact downloads: the deployment's retained-output allowance in bytes "
             "(`SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES`, docs/deployment.md), which must cover a "
-            f"full-resolution Development TIFF. Defaults to {MAX_DOWNLOAD_BYTES}; the launcher's hard "
+            f"full-resolution Development TIFF. Defaults to {MAX_DOWNLOAD_BYTES}; the service's hard "
             f"output maximum is {MAXIMUM_DOWNLOAD_BYTES}."
         ),
     )
@@ -2241,8 +2268,6 @@ def main(argv: list[str] | None = None) -> int:
     expected = {
         key: value
         for key, value in {
-            "instance": arguments.expected_instance,
-            "policy": arguments.expected_policy,
             "bundleSha256": arguments.expected_bundle_sha256,
         }.items()
         if value

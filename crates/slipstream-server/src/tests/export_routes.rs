@@ -3,364 +3,13 @@
 // Export routes
 // ---------------------------------------------------------------------------
 use super::*;
-use crate::config::ProcessingConfig;
+
 use crate::export_manager::development_tiff_decode::{stored_zlib, write_development_tiff};
 use crate::http::create_router_with_processing;
 use sha2::{Digest, Sha256};
-use slipstream_processing::photo::{
-    self, OutputReceipt, PhotoReceipt, Request, Response as PhotoResponse, ResultBody,
-};
-use slipstream_processing::protocol::{Availability, ErrorCode, PHOTO_CAPABILITY, PHOTO_WORKLOAD};
-use std::collections::HashMap;
-use std::os::fd::AsRawFd;
-use std::sync::{Arc, Mutex};
-
 use std::time::Duration;
 
 mod admission;
-
-/// One attempt receipt the fake launcher owns, keyed by the launcher's
-/// attempt identity.
-#[derive(Clone)]
-struct AttemptReceipt {
-    state: &'static str,
-    outcome: Option<String>,
-}
-
-/// Scripted behavior of one fake launcher. The transport is the real
-/// production SOCK_SEQPACKET Photo protocol; Start verifies the canonical
-/// manifest digest exactly as the production executor does, so the
-/// service cannot pass with a divergent manifest or incarnation width.
-struct LauncherScript {
-    instance: String,
-    policy: String,
-    bundle: String,
-    incarnation: String,
-    next_sequence: u64,
-    availability: Availability,
-    attempts: HashMap<(String, u64), AttemptReceipt>,
-    output: Option<Vec<u8>>,
-    /// Refuse ValidateOutput like a lost acknowledgement.
-    refuse_ack: bool,
-    /// Refuse Output like a spent transfer claim.
-    refuse_output: bool,
-    /// Every served operation in arrival order.
-    ops: Vec<String>,
-}
-
-impl LauncherScript {
-    fn new() -> Self {
-        Self {
-            instance: String::new(),
-            policy: String::new(),
-            bundle: String::new(),
-            incarnation: "ab".repeat(16),
-            next_sequence: 1,
-            availability: Availability::Available,
-            attempts: HashMap::new(),
-            output: None,
-            refuse_ack: false,
-            refuse_output: false,
-            ops: Vec::new(),
-        }
-    }
-
-    /// Reports a validated output that waits for the service's collection
-    /// and acknowledgement, the phase the production launcher reports as
-    /// `settling` with no outcome.
-    fn ready_output(&mut self, sequence: u64) {
-        let attempt = self
-            .attempts
-            .entry((self.incarnation.clone(), sequence))
-            .or_insert(AttemptReceipt {
-                state: "running",
-                outcome: None,
-            });
-        attempt.state = "settling";
-        attempt.outcome = None;
-    }
-
-    fn settle_attempt(&mut self, sequence: u64, outcome: &str) {
-        let attempt = self
-            .attempts
-            .entry((self.incarnation.clone(), sequence))
-            .or_insert(AttemptReceipt {
-                state: "running",
-                outcome: None,
-            });
-        attempt.state = "settled";
-        attempt.outcome = Some(outcome.to_owned());
-    }
-}
-
-struct FakeLauncher {
-    socket: PathBuf,
-    script: Arc<Mutex<LauncherScript>>,
-}
-
-impl FakeLauncher {
-    /// Binds the launcher socket and serves the scripted behavior for the
-    /// life of the test process.
-    fn start(processing: &ProcessingConfig, mut script: LauncherScript) -> Self {
-        script.instance = processing.instance.clone();
-        script.policy = processing.policy_sha256.clone();
-        script.bundle = processing.bundle_sha256.clone();
-        let socket = std::env::temp_dir().join(format!(
-            "slipstream-export-launcher-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let listener = photo::bind(&socket).expect("the fake launcher socket binds");
-        let script = Arc::new(Mutex::new(script));
-        let served = Arc::clone(&script);
-        std::thread::spawn(move || {
-            loop {
-                let Ok(connection) = photo::accept(listener.as_raw_fd()) else {
-                    break;
-                };
-                let _ = serve_launcher_connection(connection, &served);
-            }
-        });
-        Self { socket, script }
-    }
-
-    fn with_script<R>(&self, apply: impl FnOnce(&mut LauncherScript) -> R) -> R {
-        with_script(&self.script, apply)
-    }
-
-    /// The processing configuration the service must use to dial this
-    /// launcher.
-    fn processing_config(&self) -> ProcessingConfig {
-        with_script(&self.script, |script| ProcessingConfig {
-            instance: script.instance.clone(),
-            policy_sha256: script.policy.clone(),
-            bundle_sha256: script.bundle.clone(),
-            socket_override: Some(self.socket.clone()),
-        })
-    }
-}
-
-/// Applies one mutation or read to the launcher script; the single lock
-/// accessor keeps every call site free of lock-error handling.
-fn with_script<R>(
-    script: &Arc<std::sync::Mutex<LauncherScript>>,
-    apply: impl FnOnce(&mut LauncherScript) -> R,
-) -> R {
-    apply(&mut script.lock().unwrap_or_else(|error| error.into_inner()))
-}
-
-fn serve_launcher_connection(
-    connection: std::os::fd::OwnedFd,
-    script: &Arc<std::sync::Mutex<LauncherScript>>,
-) -> std::io::Result<()> {
-    let (request, descriptor) = photo::receive_request(connection.as_raw_fd())?;
-    // A scripted lost acknowledgement closes the connection without a
-    // response, exactly like a launcher dying mid-acknowledgement.
-    if matches!(request, Request::ValidateOutput { .. }) && with_script(script, |s| s.refuse_ack) {
-        return Ok(());
-    }
-    let response = with_script(script, |script| {
-        launcher_answer(&request, descriptor, script)
-    });
-    photo::send_response(connection.as_raw_fd(), &response)
-}
-
-fn launcher_receipt(
-    script: &LauncherScript,
-    export_id: &str,
-    incarnation: &str,
-    sequence: u64,
-) -> PhotoReceipt {
-    let attempt = script
-        .attempts
-        .get(&(incarnation.to_owned(), sequence))
-        .cloned()
-        .unwrap_or(AttemptReceipt {
-            state: "running",
-            outcome: None,
-        });
-    PhotoReceipt {
-        export_id: export_id.to_owned(),
-        incarnation: incarnation.to_owned(),
-        sequence,
-        workload: PHOTO_WORKLOAD.to_owned(),
-        policy: script.policy.clone(),
-        bundle: script.bundle.clone(),
-        state: attempt.state.to_owned(),
-        outcome: attempt.outcome,
-    }
-}
-
-fn launcher_answer(
-    request: &Request,
-    descriptor: Option<std::os::fd::OwnedFd>,
-    script: &mut LauncherScript,
-) -> PhotoResponse {
-    script.ops.push(
-        match request {
-            Request::Reconcile { .. } => "reconcile",
-            Request::Start { .. } => "start",
-            Request::Inspect { .. } => "inspect",
-            Request::Cancel { .. } => "cancel",
-            Request::Output { .. } => "output",
-            Request::ValidateOutput { .. } => "validate",
-        }
-        .to_owned(),
-    );
-    match request {
-        Request::Reconcile { instance, .. } => {
-            if instance != &script.instance {
-                return PhotoResponse::error(ErrorCode::WrongInstance);
-            }
-            PhotoResponse::result(ResultBody::Capability {
-                capability: PHOTO_CAPABILITY.to_owned(),
-                instance: script.instance.clone(),
-                incarnation: script.incarnation.clone(),
-                next_sequence: script.next_sequence,
-                policy: script.policy.clone(),
-                bundle: script.bundle.clone(),
-                availability: script.availability,
-                active: None,
-            })
-        }
-        Request::Start {
-            export_id,
-            incarnation,
-            sequence,
-            policy,
-            bundle,
-            source,
-            recipe,
-            manifest_sha256,
-            ..
-        } => {
-            // The production executor recomputes the canonical manifest
-            // digest over every execution-relevant field, the qualified
-            // source profile included, and refuses any mismatch.
-            let manifest = serde_json::to_vec(&serde_json::json!({
-                "bundle": bundle,
-                "policy": policy,
-                "recipe": [recipe.exposure_milli_ev, recipe.white_balance_mode],
-                "source": {
-                    "kind": source.kind,
-                    "profile_id": source.profile_id,
-                    "sha256": source.sha256,
-                    "size": source.size,
-                },
-                "target": PHOTO_WORKLOAD,
-                "workload": PHOTO_WORKLOAD,
-            }))
-            .expect("manifest serializes");
-            if format!("{:x}", Sha256::digest(&manifest)) != *manifest_sha256 {
-                return PhotoResponse::error(ErrorCode::InvalidRequest);
-            }
-            if policy != &script.policy {
-                return PhotoResponse::error(ErrorCode::IncompatiblePolicy);
-            }
-            if bundle != &script.bundle {
-                return PhotoResponse::error(ErrorCode::IncompatibleBundle);
-            }
-            // The receipt is created only if no scripted result already
-            // exists, so a test-settled attempt keeps its outcome.
-            script
-                .attempts
-                .entry((incarnation.clone(), *sequence))
-                .or_insert(AttemptReceipt {
-                    state: "running",
-                    outcome: None,
-                });
-            script.next_sequence = sequence + 1;
-            PhotoResponse::result(ResultBody::Receipt {
-                receipt: launcher_receipt(script, export_id, incarnation, *sequence),
-            })
-        }
-        Request::Inspect {
-            export_id,
-            incarnation,
-            sequence,
-            ..
-        } => {
-            let receipt = launcher_receipt(script, export_id, incarnation, *sequence);
-            PhotoResponse::result(ResultBody::Receipt { receipt })
-        }
-        Request::ValidateOutput {
-            export_id,
-            incarnation,
-            sequence,
-            accepted,
-            ..
-        } => {
-            // The production launcher settles the attempt from the
-            // service's acknowledgement, so the scripted attempt does too.
-            let key = (incarnation.clone(), *sequence);
-            if let Some(attempt) = script.attempts.get_mut(&key)
-                && attempt.state == "settling"
-            {
-                attempt.state = "settled";
-                attempt.outcome = Some(if *accepted {
-                    "completed".to_owned()
-                } else {
-                    "refused-output-validation".to_owned()
-                });
-            }
-            let receipt = launcher_receipt(script, export_id, incarnation, *sequence);
-            PhotoResponse::result(ResultBody::Receipt { receipt })
-        }
-        Request::Cancel {
-            export_id,
-            incarnation,
-            sequence,
-            ..
-        } => {
-            let key = (incarnation.clone(), *sequence);
-            match script.attempts.get_mut(&key) {
-                Some(attempt) if attempt.state != "settled" => {
-                    attempt.state = "settled";
-                    attempt.outcome = Some("cancelled".to_owned());
-                }
-                // An unknown attempt is refused like the production
-                // journal; a settled attempt reports its terminal result.
-                None => return PhotoResponse::error(ErrorCode::UnknownAttempt),
-                _ => {}
-            }
-            PhotoResponse::result(ResultBody::Receipt {
-                receipt: launcher_receipt(script, export_id, incarnation, *sequence),
-            })
-        }
-        Request::Output {
-            export_id,
-            incarnation,
-            sequence,
-            ..
-        } => {
-            if script.refuse_output {
-                return PhotoResponse::error(ErrorCode::Conflict);
-            }
-            let Some(output) = script.output.clone() else {
-                return PhotoResponse::error(ErrorCode::Unavailable);
-            };
-            let Some(descriptor) = descriptor else {
-                return PhotoResponse::error(ErrorCode::InvalidRequest);
-            };
-            use std::io::Write as _;
-            let mut file = std::fs::File::from(descriptor);
-            file.write_all(&output).expect("output bytes write");
-            PhotoResponse::result(ResultBody::Output {
-                receipt: OutputReceipt {
-                    export_id: export_id.clone(),
-                    incarnation: incarnation.clone(),
-                    sequence: *sequence,
-                    target: PHOTO_WORKLOAD.to_owned(),
-                    size: output.len() as u64,
-                    sha256: format!("{:x}", Sha256::digest(&output)),
-                },
-            })
-        }
-    }
-}
 
 fn tiff_bytes(tags: &[(u16, u16, Vec<u8>)]) -> Vec<u8> {
     let data_start = 8 + 2 + tags.len() * 12 + 4;
@@ -397,26 +46,11 @@ fn raw_fixture_with_camera(path: &std::path::Path, make: &[u8], model: &[u8]) {
     fs::write(path, bytes).unwrap();
 }
 
-fn unique_instance() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos();
-    format!("{nanos:08x}{:024x}", std::process::id())
-}
-
-fn export_processing() -> crate::config::ProcessingConfig {
-    crate::config::ProcessingConfig {
-        instance: unique_instance(),
-        policy_sha256: "b".repeat(64),
-        bundle_sha256: "c".repeat(64),
-        socket_override: None,
-    }
-}
-
 /// Builds the shared Export fixture: a RAW Photo carrying an approved
 /// camera identity, a JPEG-only Photo, and a configured processing
-/// deployment with the given retained-output allowance.
+/// deployment with the given retained-output allowance. The scripted
+/// local engine bundle below the fixture base succeeds by default; tests
+/// script it through [`export_engine`].
 fn export_fixture(allowance: Option<u64>) -> (PathBuf, Config) {
     let (base, mut config) = prepare_populated_fixture();
     raw_fixture_with_camera(
@@ -424,9 +58,15 @@ fn export_fixture(allowance: Option<u64>) -> (PathBuf, Config) {
         b"SONY\0",
         b"ILCE-7RM5\0\0\0",
     );
-    config.processing = Some(export_processing());
+    let engine = FakePhotoEngine::install(&base);
+    config.processing = Some(engine.processing_config());
     config.export_retained_output_bytes = allowance;
     (base, config)
+}
+
+/// The scripted engine one export fixture runs against.
+fn export_engine(base: &Path) -> FakePhotoEngine {
+    FakePhotoEngine::at(base)
 }
 
 async fn export_application(_base: &Path, config: &Config) -> (Arc<Application>, Router) {
@@ -572,9 +212,9 @@ async fn save_recipe(
         .await
         .unwrap();
     match outcome {
-        slipstream_core::EditRecipeWriteOutcome::Saved(recipe) => recipe,
-        slipstream_core::EditRecipeWriteOutcome::Unchanged(recipe) => recipe,
-        other => panic!("the recipe save must succeed, got {other:?}"),
+        slipstream_core::EditRecipeWriteOutcome::Saved(recipe)
+        | slipstream_core::EditRecipeWriteOutcome::Unchanged(recipe) => recipe,
+        other => panic!("the recipe must save: {other:?}"),
     }
 }
 
@@ -620,7 +260,7 @@ fn error_code(body: &serde_json::Value) -> &serde_json::Value {
     &body["error"]["code"]
 }
 
-/// One valid Development TIFF the fake launcher hands over as its output.
+/// One valid Development TIFF the fake engine writes as its output.
 fn valid_development_tiff() -> Vec<u8> {
     let path = std::env::temp_dir().join(format!(
         "export-artifact-fixture-{}-{}",
@@ -639,10 +279,6 @@ fn valid_development_tiff() -> Vec<u8> {
 #[tokio::test]
 async fn export_submit_shape_is_refused_before_any_state_change() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
@@ -749,10 +385,6 @@ async fn export_submit_shape_is_refused_before_any_state_change() {
 #[tokio::test]
 async fn export_submit_accepts_replays_and_keeps_identity_after_later_writes() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let first = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
@@ -877,10 +509,6 @@ async fn export_submit_accepts_replays_and_keeps_identity_after_later_writes() {
 #[tokio::test]
 async fn export_submit_reports_every_owner_refusal_code() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let jpeg_id = photo_id_for(&config, "pair.JPG");
@@ -964,10 +592,6 @@ async fn export_submit_reports_every_owner_refusal_code() {
 #[tokio::test]
 async fn export_submit_reports_requires_rebind_for_a_stale_recipe_binding() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
@@ -1002,10 +626,6 @@ async fn export_submit_reports_requires_rebind_for_a_stale_recipe_binding() {
 #[tokio::test]
 async fn export_submit_reports_retained_output_capacity_before_acceptance() {
     let (base, config) = export_fixture(Some(slipstream_core::MAXIMUM_EXPORT_BYTES));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
@@ -1042,23 +662,19 @@ async fn export_submit_reports_retained_output_capacity_before_acceptance() {
 }
 
 /// A fresh Film identity is refused before any state change even while the
-/// launcher is healthy and admits the Development target: the launcher
+/// local engine is healthy and admits the Development target: the engine
 /// qualifies only Development, so a full-resolution Film Export records no
 /// Export and no receipt.
 #[tokio::test]
 async fn unqualified_film_export_refuses_without_a_receipt() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
     let source_revision = current_source_revision(&application, &photo_id).await;
 
-    // The same healthy launcher admits the Development target, so the Film
-    // refusal below is the qualification gate, not launcher availability.
+    // The same healthy engine admits the Development target, so the Film
+    // refusal below is the qualification gate, not availability.
     let developed = submit_export_request(
         &router,
         &photo_id,
@@ -1105,19 +721,20 @@ async fn unqualified_film_export_refuses_without_a_receipt() {
     let _ = fs::remove_dir_all(base);
 }
 
-/// A blocked or identity-mismatched launcher refuses the submission
-/// before acceptance, so no Export, receipt, or capacity reservation is
-/// consumed and the identity stays fresh.
+/// An unusable local bundle refuses the submission before acceptance, so
+/// no Export, receipt, or capacity reservation is consumed and the identity
+/// stays fresh for a deployment whose bundle is available again.
 #[tokio::test]
-async fn export_submission_refuses_before_acceptance_when_admission_fails() {
+async fn export_submission_refuses_before_acceptance_when_the_bundle_is_unavailable() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let mut script = LauncherScript::new();
-    script.availability = Availability::Blocked;
-    let launcher = FakeLauncher::start(&processing, script);
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
-    let (application, router) = export_application(&base, &config).await;
+
+    // The deployment's bundle is invalid, so the application opens with
+    // processing configured but unavailable; the Library stays usable.
+    let mut unavailable = config.clone();
+    let mut processing = unavailable.processing.clone().unwrap();
+    processing.failure = Some("bundle-unavailable");
+    unavailable.processing = Some(processing);
+    let (application, router) = export_application(&base, &unavailable).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
     let source_revision = current_source_revision(&application, &photo_id).await;
@@ -1136,8 +753,7 @@ async fn export_submission_refuses_before_acceptance_when_admission_fails() {
         "processing_unavailable"
     );
 
-    // Nothing was accepted: the listing is empty and the identity is
-    // still fresh once the launcher admits work again.
+    // Nothing was accepted: the listing is empty and no engine ran.
     let listed = response_json(
         send(
             &router,
@@ -1152,7 +768,12 @@ async fn export_submission_refuses_before_acceptance_when_admission_fails() {
     )
     .await;
     assert_eq!(listed["exports"].as_array().unwrap().len(), 0);
-    launcher.with_script(|s| s.availability = Availability::Available);
+    assert_eq!(export_engine(&base).runs(), 0);
+    application.shutdown().await.unwrap();
+
+    // The same state directory under a deployment with a valid bundle
+    // accepts the still-fresh identity as new work.
+    let (application, router) = export_application(&base, &config).await;
     let accepted = submit_export_request(
         &router,
         &photo_id,
@@ -1162,41 +783,6 @@ async fn export_submission_refuses_before_acceptance_when_admission_fails() {
     )
     .await;
     assert_eq!(accepted.status(), StatusCode::CREATED);
-
-    // A foreign qualified bundle is never treated as an available slot.
-    launcher.with_script(|s| s.bundle = "d".repeat(64));
-    let second = submit_export_request(
-        &router,
-        &photo_id,
-        "request-foreign",
-        &recipe.revision,
-        &source_revision,
-    )
-    .await;
-    assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        error_code(&response_json(second).await),
-        "processing_unavailable"
-    );
-
-    // A malformed launcher incarnation is refused by the persistence
-    // boundary and by admission alike.
-    launcher.with_script(|s| {
-        s.bundle = "c".repeat(64);
-        s.incarnation = "A".repeat(32);
-    });
-    let invalid_incarnation = submit_export_request(
-        &router,
-        &photo_id,
-        "request-incarnation",
-        &recipe.revision,
-        &source_revision,
-    )
-    .await;
-    assert_eq!(
-        invalid_incarnation.status(),
-        StatusCode::SERVICE_UNAVAILABLE
-    );
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
@@ -1239,7 +825,7 @@ async fn export_routes_report_processing_unavailable_without_configuration() {
         b"SONY\0",
         b"ILCE-7RM5\0\0\0",
     );
-    config.processing = Some(export_processing());
+    config.processing = Some(unresolved_processing_config());
     let (application, router) = export_application(&base, &config).await;
     let body = serde_json::json!({
         "requestId": "r",
@@ -1288,10 +874,11 @@ async fn export_unknown_identity_is_reported_on_every_route() {
 #[tokio::test]
 async fn export_cancel_settles_once_and_retry_rearms_within_retention() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
+    let engine = export_engine(&base);
+    // The first engine run holds a live attempt open until released; the
+    // retry's second run fails with an actionable engine error.
+    engine.hang_attempt(1);
+    engine.fail_attempt(2, "engine-failed");
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
@@ -1308,13 +895,12 @@ async fn export_cancel_settles_once_and_retry_rearms_within_retention() {
     let created = response_json(created).await;
     let export_id = created["exportId"].as_str().unwrap().to_owned();
 
-    // The launcher-owned incarnation reaches the persistence boundary and
-    // the attempt really runs against the production protocol.
+    // The attempt really runs against the local engine.
     let running = wait_for_state(&router, &export_id, "running").await;
     assert_eq!(running["terminalOutcome"], serde_json::Value::Null);
 
-    // Cancellation cancels the live launcher attempt and settles exactly
-    // once against the actual completion state.
+    // Cancellation settles exactly once against the actual completion
+    // state and tears the live engine attempt down.
     let cancelled = cancel_export(&router, &export_id).await;
     assert_eq!(cancelled.status(), StatusCode::OK);
     let cancelled_record = response_json(cancelled).await;
@@ -1359,9 +945,8 @@ async fn export_cancel_settles_once_and_retry_rearms_within_retention() {
     assert_eq!(replayed_retry.status(), StatusCode::ACCEPTED);
     assert_eq!(response_json(replayed_retry).await["state"], "queued");
 
-    // Without a completable launcher result the re-armed attempt fails
+    // Without a completable engine result the re-armed attempt fails
     // with an actionable reason and stays retriable.
-    launcher.with_script(|s| s.settle_attempt(2, "engine-failed"));
     let failed = wait_for_state(&router, &export_id, "failed").await;
     let failure_reason = failed["failureReason"].as_str().unwrap().to_owned();
     assert!(failure_reason.contains("engine-failed"), "{failure_reason}");
@@ -1395,8 +980,8 @@ async fn export_cancel_settles_once_and_retry_rearms_within_retention() {
         .unwrap()
         .to_owned();
     // The second Export cannot start while the first attempt owns the
-    // launcher slot, so cancel it before retrying with the shared
-    // identity.
+    // serialized engine slot, so cancel it before retrying with the
+    // shared identity.
     assert_eq!(
         cancel_export(&router, &second_id).await.status(),
         StatusCode::OK
@@ -1410,12 +995,10 @@ async fn export_cancel_settles_once_and_retry_rearms_within_retention() {
 }
 
 #[tokio::test]
-async fn export_cancellation_reconciles_a_completion_that_raced_it() {
+async fn export_cancellation_settles_a_completion_that_finished_before_it() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
+    let engine = export_engine(&base);
+    engine.hang_attempt(1);
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
@@ -1434,13 +1017,11 @@ async fn export_cancellation_reconciles_a_completion_that_raced_it() {
         .to_owned();
     wait_for_state(&router, &export_id, "running").await;
 
-    // The launcher completed the attempt before the cancellation landed:
-    // cancellation must settle to the actual terminal result and the
-    // validated artifact is published, never undone.
-    launcher.with_script(|s| {
-        s.output = Some(valid_development_tiff());
-        s.settle_attempt(1, "completed");
-    });
+    // The engine completed and the attempt settled before the
+    // cancellation landed: cancellation must return the actual terminal
+    // result, and the validated artifact stays published, never undone.
+    engine.release();
+    wait_for_state(&router, &export_id, "succeeded").await;
     let cancelled = cancel_export(&router, &export_id).await;
     assert_eq!(cancelled.status(), StatusCode::OK);
     let settled = response_json(cancelled).await;
@@ -1458,10 +1039,6 @@ async fn export_cancellation_reconciles_a_completion_that_raced_it() {
 #[tokio::test]
 async fn export_expiry_reports_expired_identities_and_reclaims_records() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
@@ -1527,11 +1104,9 @@ async fn export_expiry_reports_expired_identities_and_reclaims_records() {
 #[tokio::test]
 async fn export_download_headers_match_the_inspect_artifact_object() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
     let (application, router) = export_application(&base, &config).await;
+    let engine = export_engine(&base);
+    engine.hang_attempt(1);
     let photo_id = photo_id_for(&config, "pair.ARW");
     let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
     let source_revision = current_source_revision(&application, &photo_id).await;
@@ -1553,14 +1128,11 @@ async fn export_download_headers_match_the_inspect_artifact_object() {
     let live = download_artifact(&router, &export_id).await;
     assert_eq!(live.status(), StatusCode::CONFLICT);
     assert_eq!(error_code(&response_json(live).await), "export_conflict");
+    engine.release();
 
-    // The launcher completes with a genuinely valid Development TIFF; the
-    // service validates, publishes, and settles exactly once.
+    // The engine writes a genuinely valid Development TIFF; the service
+    // validates, publishes, and settles exactly once.
     let artifact_bytes = valid_development_tiff();
-    launcher.with_script(|s| {
-        s.output = Some(artifact_bytes.clone());
-        s.settle_attempt(1, "completed");
-    });
     let settled = wait_for_state(&router, &export_id, "succeeded").await;
 
     let icc: &[u8] =
@@ -1661,10 +1233,8 @@ async fn export_download_headers_match_the_inspect_artifact_object() {
 #[tokio::test]
 async fn export_without_a_retained_artifact_refuses_its_download() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
+    let engine = export_engine(&base);
+    engine.fail_attempt(1, "engine-failed");
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
@@ -1682,10 +1252,8 @@ async fn export_without_a_retained_artifact_refuses_its_download() {
         .unwrap()
         .to_owned();
 
-    // The attempt fails without an output; the download refuses with the
-    // one terminal no-artifact code.
-    wait_for_state(&router, &export_id, "running").await;
-    launcher.with_script(|s| s.settle_attempt(1, "engine-failed"));
+    // The attempt fails without a valid output; the download refuses with
+    // the one terminal no-artifact code.
     let failed = wait_for_state(&router, &export_id, "failed").await;
     assert_eq!(failed["artifact"], serde_json::Value::Null);
     let missing = download_artifact(&router, &export_id).await;
@@ -1718,16 +1286,14 @@ async fn export_without_a_retained_artifact_refuses_its_download() {
     let _ = fs::remove_dir_all(base);
 }
 
-/// P1-1: the durable publication and Export commit happen before the
-/// launcher acknowledgement, so a lost or refused acknowledgement can
-/// never release the only valid result unpublished.
+/// An engine that writes its output and then dies before completing the
+/// protocol fails the attempt: a partial or unacknowledged result is never
+/// published, and no artifact leaks from the failed attempt.
 #[tokio::test]
-async fn export_publication_commits_before_the_launcher_acknowledgement() {
+async fn export_engine_death_after_writing_output_publishes_nothing() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
+    let engine = export_engine(&base);
+    engine.die_after_writing();
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
@@ -1744,84 +1310,33 @@ async fn export_publication_commits_before_the_launcher_acknowledgement() {
         .as_str()
         .unwrap()
         .to_owned();
-    wait_for_state(&router, &export_id, "running").await;
 
-    // The result is valid but the acknowledgement is lost (the launcher
-    // dies before answering): the Export must still settle succeeded with
-    // a downloadable artifact, because publication committed first.
-    launcher.with_script(|s| {
-        s.output = Some(valid_development_tiff());
-        s.settle_attempt(1, "completed");
-        s.refuse_ack = true;
-    });
-    let settled = wait_for_state(&router, &export_id, "succeeded").await;
-    assert_eq!(settled["terminalOutcome"], "succeeded");
+    let failed = wait_for_state(&router, &export_id, "failed").await;
+    assert_eq!(failed["artifact"], serde_json::Value::Null);
     let download = download_artifact(&router, &export_id).await;
-    assert_eq!(download.status(), StatusCode::OK);
+    assert_eq!(download.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        error_code(&response_json(download).await),
+        "output_unavailable"
+    );
+    // The written bytes never survived as a published artifact file.
+    let manager = Arc::clone(application.exports.as_ref().unwrap());
+    assert!(manager.artifact_path(&export_id).is_none_or(|path| {
+        !path.exists() || fs::read(&path).unwrap() != valid_development_tiff()
+    }));
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
 
-/// The production handshake: the launcher validates its engine artifact,
-/// reports an output that waits for collection, and settles the attempt
-/// from the service's acknowledgement. A service that waited for the
-/// settled receipt before collecting would deadlock against it.
-#[tokio::test]
-async fn export_collects_the_output_the_launcher_waits_to_acknowledge() {
-    let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
-    let (application, router) = export_application(&base, &config).await;
-    let photo_id = photo_id_for(&config, "pair.ARW");
-    let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
-    let source_revision = current_source_revision(&application, &photo_id).await;
-    let created = submit_export_request(
-        &router,
-        &photo_id,
-        "request-1",
-        &recipe.revision,
-        &source_revision,
-    )
-    .await;
-    let export_id = response_json(created).await["exportId"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    wait_for_state(&router, &export_id, "running").await;
-
-    launcher.with_script(|s| {
-        s.output = Some(valid_development_tiff());
-        s.ready_output(1);
-    });
-    let settled = wait_for_state(&router, &export_id, "succeeded").await;
-    assert_eq!(settled["terminalOutcome"], "succeeded");
-    let download = download_artifact(&router, &export_id).await;
-    assert_eq!(download.status(), StatusCode::OK);
-    // The acknowledgement settled the attempt, not a poll deadline.
-    let outcome = launcher.with_script(|s| {
-        s.attempts
-            .get(&(s.incarnation.clone(), 1))
-            .and_then(|attempt| attempt.outcome.clone())
-    });
-    assert_eq!(outcome.as_deref(), Some("completed"));
-
-    application.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(base);
-}
-
-/// P1-2: restart reconciliation validates an already-published artifact
-/// from disk instead of requesting a second, impossible launcher
-/// transfer, and resolves the Export from it.
+/// Restart reconciliation validates an already-published artifact from
+/// disk instead of running a second engine attempt, and resolves the
+/// Export from it.
 #[tokio::test]
 async fn export_restart_recovers_an_already_published_artifact() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
+    let engine = export_engine(&base);
+    engine.hang_attempt(1);
     let (application, router) = export_application(&base, &config).await;
     let manager = Arc::clone(application.exports.as_ref().unwrap());
     let photo_id = photo_id_for(&config, "pair.ARW");
@@ -1840,22 +1355,15 @@ async fn export_restart_recovers_an_already_published_artifact() {
         .unwrap()
         .to_owned();
     wait_for_state(&router, &export_id, "running").await;
-    let ops_after_run = launcher.with_script(|s| s.ops.clone());
 
     // The previous process renamed the validated file into place and
     // crashed before committing: the record still looks running with its
-    // attempt, the launcher receipt says completed, and the transfer
-    // claim is spent.
+    // attempt, and the durable publication claim is spent.
     let artifact_bytes = valid_development_tiff();
     let path = manager.artifact_path(&export_id).unwrap();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, &artifact_bytes).unwrap();
-    let incarnation = launcher.with_script(|s| s.incarnation.clone());
-    launcher.with_script(|s| {
-        s.output = Some(artifact_bytes.clone());
-        s.settle_attempt(1, "completed");
-        s.refuse_output = true;
-    });
+    let incarnation = "a".repeat(32);
     let connection =
         rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
     connection
@@ -1873,9 +1381,26 @@ async fn export_restart_recovers_an_already_published_artifact() {
         .claim_export_publication(&export_id, &incarnation, 1)
         .await
         .unwrap();
-
+    // The crashed process's reconciliation runs now; it serializes behind
+    // the live attempt of this process, which observes its superseded
+    // record once the engine is released and aborts without publishing.
     manager.reconcile_after_restart();
-    let settled = wait_for_state(&router, &export_id, "succeeded").await;
+    engine.release();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let settled = get_export(&router, &export_id).await;
+        if settled["state"] == "succeeded" {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "reconciliation must resolve the record: {settled}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // The recovery adopted exactly the published bytes.
+    let settled = get_export(&router, &export_id).await;
     assert_eq!(
         settled["artifact"]["byteLength"],
         artifact_bytes.len() as u64
@@ -1884,12 +1409,8 @@ async fn export_restart_recovers_an_already_published_artifact() {
         settled["artifact"]["sha256"],
         format!("{:x}", Sha256::digest(&artifact_bytes))
     );
-    // The recovery must not have asked the launcher for another transfer.
-    let ops = launcher.with_script(|s| s.ops.clone());
-    assert!(
-        !ops[ops_after_run.len()..].contains(&"output".to_owned()),
-        "recovery must not request a second transfer: {ops:?}"
-    );
+    // The recovery must not have asked the engine for a second attempt.
+    assert_eq!(engine.runs(), 1, "recovery must not run a second attempt");
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
@@ -1897,15 +1418,11 @@ async fn export_restart_recovers_an_already_published_artifact() {
 
 /// A previously accepted Film identity must remain inspectable after Film is
 /// withdrawn, even though a new Film submission can no longer be admitted.
-/// The launcher is healthy, so the replay proves receipt resolution precedes
+/// The engine is healthy, so the replay proves receipt resolution precedes
 /// the qualification gate.
 #[tokio::test]
 async fn unqualified_film_still_replays_an_existing_receipt() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let source_revision = current_source_revision(&application, &photo_id).await;
@@ -1938,7 +1455,7 @@ async fn unqualified_film_still_replays_an_existing_receipt() {
                    recipe_digest,policy_id,bundle_id,workload,created_at,outcome,retain_until)
              VALUES(?1,?2,'film-jpeg','failed',?3,0.5,'as-shot',?4,
                     'sony-ilce-7rm5-arw','raw',?5,?6,?7,'film-jpeg',?8,
-                    'processing launcher became unreachable while the attempt ran',?9)",
+                    'the attempt was interrupted by a restart',?9)",
             rusqlite::params![
                 export_id,
                 photo_id,
@@ -1981,16 +1498,12 @@ async fn unqualified_film_still_replays_an_existing_receipt() {
     let _ = fs::remove_dir_all(base);
 }
 
-/// P1-3: a recorded submission replays with 200 even while the launcher
-/// cannot admit work or after its source has become unreadable; a
-/// different payload under the recorded identity still conflicts.
+/// A recorded submission replays with 200 even while the local bundle is
+/// unavailable or after its source has become unreadable; a different
+/// payload under the recorded identity still conflicts.
 #[tokio::test]
-async fn export_replay_resolves_without_launcher_availability() {
+async fn export_replay_resolves_without_development_availability() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
@@ -2005,8 +1518,16 @@ async fn export_replay_resolves_without_launcher_availability() {
     .await;
     assert_eq!(created.status(), StatusCode::CREATED);
     let export_id = response_json(created).await["exportId"].clone();
+    application.shutdown().await.unwrap();
 
-    launcher.with_script(|s| s.availability = Availability::Blocked);
+    // The same state directory under a deployment whose bundle is
+    // unavailable still resolves the recorded identity: receipt
+    // resolution precedes any admission.
+    let mut unavailable = config.clone();
+    let mut processing = unavailable.processing.clone().unwrap();
+    processing.failure = Some("bundle-unavailable");
+    unavailable.processing = Some(processing);
+    let (application, router) = export_application(&base, &unavailable).await;
     let replayed = submit_export_request(
         &router,
         &photo_id,
@@ -2061,15 +1582,12 @@ async fn export_replay_resolves_without_launcher_availability() {
 /// otherwise-valid identity on another Photo starts its own Export.
 #[tokio::test]
 async fn export_request_identities_are_scoped_per_photo() {
-    let (base, mut config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+    let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
     raw_fixture_with_camera(
         &config.library_root.join("second.ARW"),
         b"SONY\0",
         b"ILCE-7RM5\0\0\0",
     );
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    config.processing = Some(launcher.processing_config());
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let second_id = photo_id_for(&config, "second.ARW");
@@ -2111,10 +1629,6 @@ async fn export_request_identities_are_scoped_per_photo() {
 #[tokio::test]
 async fn export_replay_survives_a_deployment_bundle_change() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
@@ -2130,9 +1644,9 @@ async fn export_replay_survives_a_deployment_bundle_change() {
     assert_eq!(created.status(), StatusCode::CREATED);
     let export_id = response_json(created).await["exportId"].clone();
 
-    // A redeploy swaps the processing bundle; the socket and policy stay
-    // as they were.
-    let mut redeployed = launcher.processing_config();
+    // A redeploy swaps the processing bundle identity; the policy stays
+    // as it was.
+    let mut redeployed = unresolved_processing_config();
     redeployed.bundle_sha256 = "d".repeat(64);
     let router_after = create_router_with_processing(
         Arc::clone(&application),
@@ -2165,10 +1679,8 @@ async fn export_replay_survives_a_deployment_bundle_change() {
 #[tokio::test]
 async fn export_recovery_ignores_a_file_from_a_superseded_attempt() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
+    let engine = export_engine(&base);
+    engine.hang_attempt(1);
     let (application, router) = export_application(&base, &config).await;
     let manager = Arc::clone(application.exports.as_ref().unwrap());
     let photo_id = photo_id_for(&config, "pair.ARW");
@@ -2190,32 +1702,37 @@ async fn export_recovery_ignores_a_file_from_a_superseded_attempt() {
     cancel_export(&router, &export_id).await;
     wait_for_state(&router, &export_id, "cancelled").await;
 
-    // A stale file survives from the cancelled attempt, while the retry
-    // runs with a spent transfer claim: the launcher refuses any new
-    // Output. Only the stale file could make this Export succeed.
+    // A stale file survives from the cancelled attempt, and the record is
+    // left looking like an interrupted retry of a previous process. Only
+    // the stale file could make this Export succeed.
     let stale_bytes = valid_development_tiff();
     let stale_digest = format!("{:x}", Sha256::digest(&stale_bytes));
     let path = manager.artifact_path(&export_id).unwrap();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, &stale_bytes).unwrap();
-    let incarnation = launcher.with_script(|s| s.incarnation.clone());
-    launcher.with_script(|s| {
-        s.settle_attempt(2, "completed");
-        s.refuse_output = true;
-    });
     let connection =
         rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
     connection
         .execute(
             "UPDATE exports SET state='running', attempt_incarnation=?1,
                    attempt_sequence=2 WHERE id=?2",
-            rusqlite::params![incarnation, export_id],
+            rusqlite::params!["a".repeat(32), export_id],
         )
         .unwrap();
     drop(connection);
 
     manager.reconcile_after_restart();
-    let settled = wait_for_state(&router, &export_id, "failed").await;
+    let settled = loop {
+        let settled = get_export(&router, &export_id).await;
+        if settled["state"] == "failed" {
+            break settled;
+        }
+        assert_ne!(
+            settled["state"], "succeeded",
+            "reconciliation must not adopt the superseded artifact: {settled}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
     let recorded_sha = settled["artifact"]["sha256"].as_str().unwrap_or("absent");
     assert_ne!(
         recorded_sha, stale_digest,
@@ -2399,10 +1916,7 @@ async fn edit_preview_settings_request(
 #[tokio::test]
 async fn edit_preview_derives_from_the_retained_development_tiff_of_an_export() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
+    let engine = export_engine(&base);
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
@@ -2419,11 +1933,6 @@ async fn edit_preview_derives_from_the_retained_development_tiff_of_an_export() 
         .as_str()
         .unwrap()
         .to_owned();
-    let artifact_bytes = valid_development_tiff();
-    launcher.with_script(|s| {
-        s.output = Some(artifact_bytes.clone());
-        s.settle_attempt(1, "completed");
-    });
     wait_for_state(&router, &export_id, "succeeded").await;
 
     // The published Development TIFF is the retained Development Result of
@@ -2469,12 +1978,6 @@ async fn edit_preview_derives_from_the_retained_development_tiff_of_an_export() 
     )
     .await;
     assert_ne!(second.revision, recipe.revision);
-    // Make the background attempt settle promptly after the route has
-    // observed its admission; the wire response is independent of the
-    // eventual launcher outcome.
-    launcher.with_script(|s| {
-        s.output = Some(valid_development_tiff());
-    });
     let admitted = edit_preview_request(&router, &photo_id).await;
     assert_eq!(admitted.status(), StatusCode::ACCEPTED);
     let payload = response_json(admitted).await;
@@ -2487,7 +1990,6 @@ async fn edit_preview_derives_from_the_retained_development_tiff_of_an_export() 
     assert_eq!(repeated.status(), StatusCode::ACCEPTED);
     let repeated_payload = response_json(repeated).await;
     assert_eq!(repeated_payload["state"], "running");
-    launcher.with_script(|s| s.settle_attempt(2, "completed"));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let response = edit_preview_request(&router, &photo_id).await;
@@ -2501,13 +2003,9 @@ async fn edit_preview_derives_from_the_retained_development_tiff_of_an_export() 
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let starts = launcher.with_script(|s| {
-        s.ops
-            .iter()
-            .filter(|operation| operation.as_str() == "start")
-            .count()
-    });
-    assert_eq!(starts, 2, "one Export and one coalesced preview attempt");
+    // One durable and one coalesced preview attempt reached the engine.
+    engine.wait_for_runs(2).await;
+    assert_eq!(engine.runs(), 2, "one Export and one coalesced render");
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
@@ -2520,10 +2018,6 @@ async fn edit_preview_derives_from_the_retained_development_tiff_of_an_export() 
 #[tokio::test]
 async fn edit_preview_serves_the_baseline_comparison_independently_of_the_recipe() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     // The saved recipe is the processing baseline itself: 0 EV, as-shot.
@@ -2541,11 +2035,6 @@ async fn edit_preview_serves_the_baseline_comparison_independently_of_the_recipe
         .as_str()
         .unwrap()
         .to_owned();
-    let artifact_bytes = valid_development_tiff();
-    launcher.with_script(|s| {
-        s.output = Some(artifact_bytes.clone());
-        s.settle_attempt(1, "completed");
-    });
     wait_for_state(&router, &export_id, "succeeded").await;
 
     let current = edit_preview_request(&router, &photo_id).await;
@@ -2595,9 +2084,6 @@ async fn edit_preview_serves_the_baseline_comparison_independently_of_the_recipe
     )
     .await;
     assert_ne!(second.revision, recipe.revision);
-    launcher.with_script(|s| {
-        s.output = Some(valid_development_tiff());
-    });
     let baseline = edit_preview_settings_request(&router, &photo_id, "baseline").await;
     assert_eq!(baseline.status(), StatusCode::OK);
     assert_eq!(
@@ -2624,10 +2110,7 @@ async fn edit_preview_serves_the_baseline_comparison_independently_of_the_recipe
 #[tokio::test]
 async fn edit_preview_refuses_a_recipe_the_closed_payload_cannot_execute() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
+    let engine = export_engine(&base);
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let source_revision = current_source_revision(&application, &photo_id).await;
@@ -2666,13 +2149,11 @@ async fn edit_preview_refuses_a_recipe_the_closed_payload_cannot_execute() {
         payload["error"]["details"]["reason"],
         "recipe-not-representable"
     );
-    let starts = launcher.with_script(|s| {
-        s.ops
-            .iter()
-            .filter(|operation| operation.as_str() == "start")
-            .count()
-    });
-    assert_eq!(starts, 0, "a refused identity starts no processing attempt");
+    assert_eq!(
+        engine.runs(),
+        0,
+        "a refused identity starts no processing attempt"
+    );
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
@@ -2685,15 +2166,11 @@ async fn edit_preview_refuses_a_recipe_the_closed_payload_cannot_execute() {
 #[tokio::test]
 async fn edit_preview_re_admits_after_a_failed_render() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
+    let engine = export_engine(&base);
+    engine.fail_attempt(1, "engine-failed");
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     save_recipe(&application, &photo_id, "save-1", None, 0.4).await;
-    // The launcher settles the attempt as failed and transfers no output.
-    launcher.with_script(|s| s.settle_attempt(1, "failed"));
 
     let admitted = edit_preview_request(&router, &photo_id).await;
     assert_eq!(admitted.status(), StatusCode::ACCEPTED);
@@ -2714,55 +2191,37 @@ async fn edit_preview_re_admits_after_a_failed_render() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let starts = launcher.with_script(|s| {
-        s.ops
-            .iter()
-            .filter(|operation| operation.as_str() == "start")
-            .count()
-    });
-    // The new attempt's Start reaches the launcher from a background task,
-    // so the count is observed rather than assumed.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let mut starts = starts;
-    while starts < 2 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the re-admitted attempt must reach the launcher"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        starts = launcher.with_script(|s| {
-            s.ops
-                .iter()
-                .filter(|operation| operation.as_str() == "start")
-                .count()
-        });
-    }
-    assert_eq!(starts, 2, "the failed attempt is re-admitted as new work");
+    // The new attempt reaches the engine from a background task, so the
+    // count is observed rather than assumed.
+    engine.wait_for_runs(2).await;
+    assert_eq!(
+        engine.runs(),
+        2,
+        "the failed attempt is re-admitted as new work"
+    );
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
 
-/// A newer intent supersedes a live render: the launcher attempt is
+/// A newer intent supersedes a live render: the engine attempt is
 /// cancelled, so the stale attempt neither occupies the serialized
 /// processing slot nor publishes, and the new identity is admitted as
-/// its own launcher attempt.
+/// its own engine attempt.
 #[tokio::test]
 async fn edit_preview_supersedes_a_live_render_with_the_newer_intent() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
+    let engine = export_engine(&base);
+    engine.hang_attempt(1);
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let first = save_recipe(&application, &photo_id, "save-1", None, 0.2).await;
     let admitted = edit_preview_request(&router, &photo_id).await;
     assert_eq!(admitted.status(), StatusCode::ACCEPTED);
 
-    // The first attempt is live on the launcher before the newer intent
+    // The first attempt is live on the engine before the newer intent
     // arrives, so the newer intent has to release it.
-    wait_for_launcher_op(&launcher, "start", 1).await;
+    engine.wait_for_runs(1).await;
 
     let second = save_recipe(
         &application,
@@ -2777,90 +2236,31 @@ async fn edit_preview_supersedes_a_live_render_with_the_newer_intent() {
     assert_eq!(superseded.status(), StatusCode::ACCEPTED);
     assert_eq!(response_json(superseded).await["state"], "queued");
 
-    // The superseded attempt is cancelled, and the freed slot admits the
-    // newer identity as a second launcher attempt.
-    wait_for_launcher_op(&launcher, "cancel", 1).await;
-    wait_for_launcher_op(&launcher, "start", 2).await;
-
-    application.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(base);
-}
-
-/// A preview whose validation acknowledgement is lost fails the render
-/// and abandons the launcher attempt: the launcher must not keep an
-/// attempt its owner has already given up on.
-#[tokio::test]
-async fn edit_preview_abandons_the_attempt_when_the_acknowledgement_is_lost() {
-    let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
-    let (application, router) = export_application(&base, &config).await;
-    let photo_id = photo_id_for(&config, "pair.ARW");
-    save_recipe(&application, &photo_id, "save-1", None, 0.2).await;
-    launcher.with_script(|s| {
-        s.output = Some(valid_development_tiff());
-        s.settle_attempt(1, "completed");
-        s.refuse_ack = true;
-    });
-    let admitted = edit_preview_request(&router, &photo_id).await;
-    assert_eq!(admitted.status(), StatusCode::ACCEPTED);
-
-    wait_for_launcher_op(&launcher, "cancel", 1).await;
-
-    application.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(base);
-}
-
-/// An attempt that completed before its cancellation is released without a
-/// fabricated rejection: the service holds no collected output, and the
-/// launcher refuses an acknowledgement that names none.
-#[tokio::test]
-async fn edit_preview_releases_a_completed_attempt_it_cannot_collect() {
-    let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-    let processing = config.processing.clone().unwrap();
-    let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-    let mut config = config;
-    config.processing = Some(launcher.processing_config());
-    let (application, router) = export_application(&base, &config).await;
-    let photo_id = photo_id_for(&config, "pair.ARW");
-    save_recipe(&application, &photo_id, "save-1", None, 0.2).await;
-    launcher.with_script(|s| {
-        s.output = Some(valid_development_tiff());
-        s.settle_attempt(1, "completed");
-        s.refuse_output = true;
-    });
-    let admitted = edit_preview_request(&router, &photo_id).await;
-    assert_eq!(admitted.status(), StatusCode::ACCEPTED);
-
-    wait_for_launcher_op(&launcher, "cancel", 1).await;
-    let ops = launcher.with_script(|s| s.ops.clone());
-    assert!(
-        !ops.contains(&"validate".to_owned()),
-        "a preview without a collected output must not acknowledge one: {ops:?}"
-    );
-
-    application.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(base);
-}
-
-/// Waits until the launcher recorded `count` operations named `op`.
-async fn wait_for_launcher_op(launcher: &FakeLauncher, op: &str, count: usize) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    // The superseded attempt is cancelled — its held engine run is torn
+    // down — and the freed slot admits the newer identity as a second
+    // engine attempt, which then serves its rendition.
+    engine.release();
+    engine.wait_for_runs(2).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let observed =
-            launcher.with_script(|s| s.ops.iter().filter(|entry| entry.as_str() == op).count());
-        if observed >= count {
-            return;
+        let response = edit_preview_request(&router, &photo_id).await;
+        if response.status() == StatusCode::OK {
+            assert_eq!(
+                response.headers()["slipstream-edit-preview-recipe-version"],
+                second.revision
+            );
+            break;
         }
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the launcher must record {count} {op} operations: {:?}",
-            launcher.with_script(|s| s.ops.clone())
+            "the newer intent must become the served rendition"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
 }
 
 #[tokio::test]
@@ -2981,7 +2381,7 @@ async fn xmp_snapshot_download_and_replay_do_not_need_processing_or_original() {
             authenticated_request()
                 .uri(&artifact_uri)
                 .body(Body::empty())
-                .unwrap()
+                .unwrap(),
         )
         .await
         .status(),

@@ -22,11 +22,11 @@ recipe contains semantic exposure and white-balance intent and the fixed Film
 Recipe reference, not a darktable history, parameter blob, catalog image ID,
 or module ordering value. The existing recipe model remains unchanged.
 
-The Photo worker owns one generic native MCP client and the mapping of admitted
-semantic controls to engine operations. That mapping may name operations and
-fields, but must not reconstruct C layouts, write XMP, or edit darktable SQLite
-history. Complete automatic engine discovery does not imply automatic mapping
-of every module to a product control.
+The server's PhotoExecutor owns one generic native MCP client and the mapping
+of admitted semantic controls to engine operations. That mapping may name
+operations and fields, but must not reconstruct C layouts, write XMP, or edit
+darktable SQLite history. Complete automatic engine discovery does not imply
+automatic mapping of every module to a product control.
 
 The native darktable bridge owns parameter reflection, image-context
 initialization, parameter application, module instances, version checking,
@@ -34,50 +34,52 @@ history construction, and pixelpipe execution. The engine owns the native
 algorithms and legal module ordering. A baseline policy selects technical
 processing and suppresses unrequested artistic defaults under the color spec.
 
-The processing bundle binds the exact engine source commit and worker image,
-MCP contract, parameter schemas, semantic mappings, baseline policy, and color
-assets. A discovered schema is engine metadata, not permission to execute it.
+The processing bundle binds the exact engine source commit, the MCP contract,
+parameter schemas, semantic mappings, baseline policy, and color assets. A
+discovered schema is engine metadata, not permission to execute it.
 A deployed capability admits only qualified combinations. Discovery does not
-loosen the closed [Photo processing protocol](processing-photo-protocol.md).
+loosen the closed Photo admission boundary of the [Photo Development service
+surface](photo-development.md).
 
 This engine cutover must preserve the closed execution payload's qualified
 exposure range and as-shot white balance. Stored temperature/tint intent remains
-readable but processing-unavailable under that protocol. The product's adjustable
-white-balance target does not grant execution authority: admission requires its
-independent camera mapping qualification and an explicit update of the governing
-Photo processing protocol and operator checks. Native image initialization must
-support inspecting actual defaults without granting an unqualified custom mode.
+readable but processing-unavailable under that boundary. The product's
+adjustable white-balance target does not grant execution authority: admission
+requires its independent camera mapping qualification and an explicit update
+of the governing service surface and operator checks. Native image
+initialization must support inspecting actual defaults without granting an
+unqualified custom mode.
 
 ## Interaction
 
 ```mermaid
 sequenceDiagram
     participant S as Slipstream service
-    participant W as Isolated Photo worker
+    participant E as PhotoExecutor engine child
     participant D as Native darktable-mcp
-    Note over W,D: Bundle construction and qualification
-    W->>D: Discover modules, parameter schemas, and capabilities
-    D-->>W: Complete versioned engine metadata
+    Note over E,D: Bundle construction and qualification
+    E->>D: Discover modules, parameter schemas, and capabilities
+    D-->>E: Complete versioned engine metadata
     Note over S: Admit qualified semantic controls for the bundle
-    Note over S,D: One processing attempt
-    S->>W: Captured semantic intent and staged source via existing executor
-    W->>D: Initialize staged image under the pinned baseline
-    D-->>W: Image-context values and available module instances
-    W->>D: Apply complete captured intent and request an output
-    D-->>W: Artifact or explicit failure
-    W-->>S: Validated worker outcome through existing executor
+    Note over S,D: One serialized processing attempt
+    S->>E: Captured semantic intent and staged source
+    E->>D: Initialize staged image under the pinned baseline
+    D-->>E: Image-context values and available module instances
+    E->>D: Apply complete captured intent and request an output
+    D-->>E: Artifact or explicit failure
+    E-->>S: Validated attempt outcome
     Note over S: Apply source and freshness guards, then publish
 ```
 
-The worker starts darktable-mcp as a private child process and exchanges MCP
-messages over stdio. It must use a deterministic typed client, not an LLM. The
-native MCP interface is not an HTTP endpoint, a service exposed to clients, or a
-replacement for the host launcher's private socket. Tool availability and tool
+The executor starts one fresh darktable-mcp child per serialized request and
+exchanges MCP messages with it over private stdio. It must use a
+deterministic typed client, not an LLM. The native MCP interface is not an
+HTTP endpoint or a service exposed to clients. Tool availability and tool
 metadata must be checked against the pinned contract before execution.
 
-Only the worker may pass its attempt-local paths to darktable. The browser and
-CLI address Photos through Slipstream; the service and launcher retain the
-source-descriptor authority defined by the existing processing protocol.
+Only the executor may pass its attempt-local paths to darktable. The browser
+and CLI address Photos through Slipstream; the service retains the
+staged-source authority defined by the Photo Development service surface.
 
 ## Discovery and Parameter Contract
 
@@ -88,7 +90,7 @@ service without launching an engine for every UI read. Each attempt must query
 tool metadata and the schemas used by that request after starting its private
 MCP child, and compare them with the bundle's approved metadata before applying
 intent. A mismatch fails the attempt as an engine incompatibility; no output is
-published. It does not add a launcher readiness exchange or grant broader
+published. It does not add a separate readiness exchange or grant broader
 capabilities. The existing capability read owns how the operation's availability
 is reported, and a corrected engine requires a newly qualified bundle.
 
@@ -101,7 +103,7 @@ parameter kinds must be explicit and must not disappear from a seemingly
 complete schema. Schema, decode, and apply must use the same representation.
 
 An image-context read must provide actual initialized values, reset defaults,
-module instance identities, and ordering information needed by the worker.
+module instance identities, and ordering information needed by the executor.
 Static introspection defaults must not stand in for camera initialization.
 Omitted fields in a partial parameter update must preserve the initialized or
 current values. Inspection must not change service-owned editing intent.
@@ -109,7 +111,7 @@ current values. Inspection must not change service-owned editing intent.
 All input must be validated before mutation: correct JSON types, finite and
 representable numbers, exact integers, enum membership, string limits, array
 shape, known fields, and valid stack structure. The bridge must reject invalid
-input rather than coerce, truncate, clamp, or ignore it. The worker must not
+input rather than coerce, truncate, clamp, or ignore it. The executor must not
 reimplement a second parameter validator based on C layouts.
 
 Binary parameters, when used privately, must carry an explicit source parameter
@@ -120,14 +122,14 @@ part of this contract, so automatic legacy-blob migration is not required.
 
 ## Execution and State Lifetime
 
-Each attempt must use fresh engine configuration and an attempt-private catalog
-in the existing supervised container. The engine receives only the staged
+Each attempt must use fresh engine configuration and an attempt-private
+catalog in the application-owned scratch workspace. The engine receives only the staged
 source and bundle assets, never the Library Folder or the service state store.
 Configuration must suppress ambient XMP loading, sidecar writing, desktop
 presets, and display dependencies. Local catalog/cache writes are allowed;
 Original File writes are not. `--read-only` alone is not the containment proof.
 
-The worker must map the captured semantic intent against the qualified baseline,
+The executor must map the captured semantic intent against the qualified baseline,
 not against history left by a previous request. As-shot white balance and other
 camera-dependent initialization must be obtained from the staged Photo.
 [Development Color Pipeline](development-color.md#raw-development) determines
@@ -150,7 +152,7 @@ unchanged, including auto-initialized history and module instances; no successfu
 artifact may be reported for partially applied intent. A failed attempt must
 not be reused for another Photo or request.
 
-After a successful output, the worker returns through the existing executor
+After a successful output, the attempt returns through the local executor
 contract. The service remains the only publisher and must apply the existing
 source, recipe, and attempt guards. Cancellation must terminate the engine child
 with the attempt; process exit or EOF before a complete result is a failure, not
@@ -174,7 +176,7 @@ for local exposure and proxy-backed Film. No darktable invocation or new module
 capability may be implied by that local transform. A future admitted control
 must specify whether a proxy can represent it before processing that control.
 
-At production cutover, the worker must remove manual binary parameter packing,
+At production cutover, the adapter must remove manual binary parameter packing,
 XMP-history construction, and post-import SQLite validation from its development
 path. Every production caller must use the native boundary. An engine failure
 must not fall back to the retired adapter. Engine qualification references may
@@ -187,13 +189,14 @@ bundle; unsupported saved semantic intent remains readable but not executable.
 
 ## Options
 
-### Selected: Native MCP Inside the Existing Photo Worker
+### Selected: Native MCP Inside the Local Photo Executor
 
 A thin fork of darktable's native MCP exposes engine-owned introspection and
 execution through one generic client. It concentrates layout and lifecycle
-knowledge beside the engine while preserving existing process and deployment
-boundaries. Native bridge fixes and a pinned source build are the maintenance
-cost. The service owns a small semantic mapping, not per-module codecs.
+knowledge beside the engine while keeping the engine inside the application's
+serialized execution boundary. Native bridge fixes and a pinned source build
+are the maintenance cost. The service owns a small semantic mapping, not
+per-module codecs.
 
 ### Rejected: CLI With a Generic XMP Generator
 
@@ -230,5 +233,5 @@ float32 TIFF, exact ICC identity, orientation, negative/over-range preservation,
 and Film handoff under the color spec. Success, invalid input, engine failure,
 cancellation, and restart must prove unchanged Original and external XMP bytes,
 no partial recipe saves, no stale publication, and settled executor outcomes.
-The deployed host's operator verification must exercise the new worker bundle.
+The local deployment smoke must exercise the bundled engine extension.
 Synthetic TIFFs, discovery success, and a compilation pass alone are insufficient.

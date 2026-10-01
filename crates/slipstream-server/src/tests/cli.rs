@@ -1567,12 +1567,7 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
     let configured_router = crate::http::create_router_with_processing(
         Arc::clone(&application),
         open_web_root(config.web_root()),
-        Some(ProcessingConfig {
-            instance: "f".repeat(32),
-            policy_sha256: "b".repeat(64),
-            bundle_sha256: "c".repeat(64),
-            socket_override: None,
-        }),
+        Some(unresolved_processing_config()),
     );
     let opted_in = response_json(
         send(
@@ -1588,8 +1583,8 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
     assert_eq!(
         opted_in,
         serde_json::json!({
-            "state": "launcher-unavailable",
             "bundleId": null,
+            "state": "bundle-unavailable",
             "incarnation": null,
             "exposure": {"minimumEv": 0.0, "maximumEv": 1.0, "stepEv": 0.001},
             "profiles": [

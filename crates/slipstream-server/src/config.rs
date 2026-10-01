@@ -1,4 +1,6 @@
 use super::*;
+use sha2::{Digest, Sha256};
+
 pub const HEALTH_PATH: &str = "/healthz";
 
 pub(crate) const MAXIMUM_HEADER_BYTES: usize = 16 * 1024;
@@ -6,6 +8,7 @@ pub(crate) const MAXIMUM_MUTATION_BODY_BYTES: usize = 64 * 1024;
 const DEFAULT_DATABASE_BASENAME: &str = "library.sqlite";
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 3000;
+const DEFAULT_RETAINED_OUTPUT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Typed values accepted by the existing `SLIPSTREAM_*` startup contract.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,7 +23,8 @@ pub struct Config {
     /// Tests and packaged deployments may provide a built Web directory. When
     /// absent, the binary uses the repository's conventional `apps/web/dist`.
     pub web_root: Option<PathBuf>,
-    /// Exact launcher identities for the opt-in processing deployment.
+    /// Optional local Photo Development capability. The absence of a valid
+    /// bundle does not prevent the Library from opening.
     pub processing: Option<ProcessingConfig>,
     /// Finite retained-output allowance for Development TIFF artifacts. The
     /// service refuses a new Export before acceptance when the complete
@@ -33,26 +37,10 @@ pub struct Config {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessingConfig {
-    pub(crate) instance: String,
     pub(crate) policy_sha256: String,
     pub(crate) bundle_sha256: String,
-    /// Test-only launcher socket override; production always derives the
-    /// launcher socket from the instance identity.
-    #[cfg(test)]
-    pub(crate) socket_override: Option<std::path::PathBuf>,
-}
-
-impl ProcessingConfig {
-    pub(crate) fn socket_path(&self) -> PathBuf {
-        #[cfg(test)]
-        if let Some(path) = &self.socket_override {
-            return path.clone();
-        }
-        PathBuf::from(format!(
-            "/run/slipstream-processing/{}/launcher.sock",
-            self.instance
-        ))
-    }
+    pub(crate) bundle_root: PathBuf,
+    pub(crate) failure: Option<&'static str>,
 }
 
 pub type StartupConfig = Config;
@@ -114,38 +102,29 @@ impl Config {
             &get("SLIPSTREAM_PUBLIC_ORIGIN").unwrap_or_else(|| format!("http://localhost:{port}")),
         )
         .ok_or(ConfigError::Invalid("SLIPSTREAM_PUBLIC_ORIGIN"))?;
-        let processing_instance = get("SLIPSTREAM_PROCESSING_INSTANCE");
-        let processing_policy = get("SLIPSTREAM_PROCESSING_POLICY_SHA256");
-        let processing_bundle = get("SLIPSTREAM_PROCESSING_BUNDLE_SHA256");
-        let processing = match (processing_instance, processing_policy, processing_bundle) {
-            (None, None, None) => None,
-            (instance, policy, bundle) => {
-                let instance =
-                    instance.ok_or(ConfigError::Missing("SLIPSTREAM_PROCESSING_INSTANCE"))?;
-                let policy =
-                    policy.ok_or(ConfigError::Missing("SLIPSTREAM_PROCESSING_POLICY_SHA256"))?;
-                let bundle =
-                    bundle.ok_or(ConfigError::Missing("SLIPSTREAM_PROCESSING_BUNDLE_SHA256"))?;
-                if !is_lower_hex(&instance, 32) {
-                    return Err(ConfigError::Invalid("SLIPSTREAM_PROCESSING_INSTANCE"));
+        let photo_development =
+            get("SLIPSTREAM_PHOTO_DEVELOPMENT").unwrap_or_else(|| "auto".to_owned());
+        let processing = match photo_development.as_str() {
+            "disabled" => None,
+            "auto" | "enabled" => {
+                let bundle_root = get("SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("/opt/slipstream-photo"));
+                if !bundle_root.is_absolute() {
+                    return Err(ConfigError::Invalid("SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY"));
                 }
-                if !is_lower_hex(&policy, 64) {
-                    return Err(ConfigError::Invalid("SLIPSTREAM_PROCESSING_POLICY_SHA256"));
-                }
-                if !is_lower_hex(&bundle, 64) {
-                    return Err(ConfigError::Invalid("SLIPSTREAM_PROCESSING_BUNDLE_SHA256"));
-                }
+                let (bundle_sha256, failure) = local_bundle_identity(&bundle_root);
                 Some(ProcessingConfig {
-                    instance,
-                    policy_sha256: policy,
-                    bundle_sha256: bundle,
-                    #[cfg(test)]
-                    socket_override: None,
+                    policy_sha256: LOCAL_PHOTO_POLICY_SHA256.to_owned(),
+                    bundle_sha256,
+                    bundle_root,
+                    failure,
                 })
             }
+            _ => return Err(ConfigError::Invalid("SLIPSTREAM_PHOTO_DEVELOPMENT")),
         };
         let export_retained_output_bytes = match get("SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES") {
-            None => None,
+            None => Some(DEFAULT_RETAINED_OUTPUT_BYTES),
             Some(value) => {
                 let Ok(bytes) = value.parse::<u64>() else {
                     return Err(ConfigError::Invalid(
@@ -190,6 +169,143 @@ impl Config {
             .clone()
             .unwrap_or_else(|| PathBuf::from("apps/web/dist"))
     }
+}
+
+const LOCAL_PHOTO_POLICY_SHA256: &str =
+    "f349c72c07b6ff4a77563a9170892639e75a46578ea3d947d322ca3b9ba66ad2";
+const ENGINE_METADATA_BYTES_MAX: u64 = 16 * 1024 * 1024;
+
+fn local_bundle_identity(root: &Path) -> (String, Option<&'static str>) {
+    let bundle = read_bounded_text(&root.join("bundle"), 128)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| is_lower_hex(value, 64));
+    let valid = bundle
+        .as_ref()
+        .is_some_and(|bundle| verify_local_bundle(root, bundle).is_some());
+    (
+        bundle.unwrap_or_default(),
+        (!valid).then_some("bundle-unavailable"),
+    )
+}
+
+fn read_bounded_text(path: &Path, maximum: u64) -> Option<String> {
+    use std::io::Read;
+
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .ok()?
+        .take(maximum + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= maximum)
+        .then(|| String::from_utf8(bytes).ok())
+        .flatten()
+}
+
+fn verify_local_bundle(root: &Path, bundle: &str) -> Option<()> {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+    let mut bytes = Vec::new();
+    fs::File::open(root.join("bundle-manifest.json"))
+        .ok()?
+        .take(4 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > 4 * 1024 * 1024 || format!("{:x}", Sha256::digest(&bytes)) != bundle {
+        return None;
+    }
+    let manifest: Value = serde_json::from_slice(&bytes).ok()?;
+    if manifest["format"].as_u64()? != 1
+        || manifest["engine"].as_str()? != "/opt/darktable/bin/darktable-mcp"
+        || !is_lower_hex(manifest["darktable_commit"].as_str()?, 40)
+    {
+        return None;
+    }
+    let native = manifest["native"].as_object()?;
+    native.get("bin/darktable-mcp")?;
+    for (name, digest) in native {
+        let path = Path::new(name);
+        if path
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+            || path.as_os_str().is_empty()
+        {
+            return None;
+        }
+        verify_bundle_file(&root.join("darktable").join(path), digest.as_str()?)?;
+    }
+    let files = manifest["files"].as_object()?;
+    let required = [
+        (
+            "/opt/slipstream-photo/engine-metadata.json",
+            "engine-metadata.json",
+        ),
+        (
+            "/opt/slipstream-photo/icc/LargeRGB-elle-V2-g10.icc",
+            "icc/LargeRGB-elle-V2-g10.icc",
+        ),
+        ("/opt/slipstream-photo/darktable-commit", "darktable-commit"),
+        ("/opt/os-packages.txt", "os-packages.txt"),
+    ];
+    if files.len() != required.len() {
+        return None;
+    }
+    for (name, relative) in required {
+        verify_bundle_file(&root.join(relative), files.get(name)?.as_str()?)?;
+    }
+    let icc = files
+        .get("/opt/slipstream-photo/icc/LargeRGB-elle-V2-g10.icc")?
+        .as_str()?;
+    if manifest["icc"].as_str()? != icc
+        || icc != slipstream_processing::local_photo::ICC_ASSET_SHA256
+        || manifest["metadata"].as_str()?
+            != files
+                .get("/opt/slipstream-photo/engine-metadata.json")?
+                .as_str()?
+        || read_bounded_text(&root.join("darktable-commit"), 41)?.trim()
+            != manifest["darktable_commit"].as_str()?
+    {
+        return None;
+    }
+    let engine = fs::metadata(root.join("darktable/bin/darktable-mcp")).ok()?;
+    if engine.permissions().mode() & 0o111 == 0 {
+        return None;
+    }
+    let metadata_path = root.join("engine-metadata.json");
+    let metadata_file = fs::metadata(&metadata_path).ok()?;
+    if !metadata_file.is_file() || metadata_file.len() > ENGINE_METADATA_BYTES_MAX {
+        return None;
+    }
+    let mut metadata_bytes = Vec::new();
+    fs::File::open(&metadata_path)
+        .ok()?
+        .take(ENGINE_METADATA_BYTES_MAX + 1)
+        .read_to_end(&mut metadata_bytes)
+        .ok()?;
+    if metadata_bytes.len() as u64 > ENGINE_METADATA_BYTES_MAX {
+        return None;
+    }
+    let metadata: Value = serde_json::from_slice(&metadata_bytes).ok()?;
+    if !metadata["tools"].is_array()
+        || !(metadata["modules"].is_array() || metadata["modules"]["modules"].is_array())
+        || !metadata["schemas"].is_object()
+    {
+        return None;
+    }
+    Some(())
+}
+
+fn verify_bundle_file(path: &Path, digest: &str) -> Option<()> {
+    if !is_lower_hex(digest, 64) {
+        return None;
+    }
+    let mut file = fs::File::open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    io::copy(&mut file, &mut hasher).ok()?;
+    (format!("{:x}", hasher.finalize()) == digest).then_some(())
 }
 
 fn is_lower_hex(value: &str, length: usize) -> bool {

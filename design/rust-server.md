@@ -144,4 +144,4 @@ The checked-in compatibility suite covers representative v0/v1/v2 state migratio
 
 ## Photo Development Processes
 
-The Rust service retains all Photo, persistence, protocol, and lifecycle ownership when it invokes native development tools or a Python simulation adapter. [Photo Development Architecture](photo-development.md) defines that subordinate process boundary. Python must not become a second HTTP or Library owner.
+The Rust service retains all Photo, persistence, protocol, and lifecycle ownership when its in-process PhotoExecutor starts native development children or a Python simulation adapter. [Photo Development Architecture](photo-development.md) defines that subordinate process boundary inside the one application container. Python must not become a second HTTP or Library owner.

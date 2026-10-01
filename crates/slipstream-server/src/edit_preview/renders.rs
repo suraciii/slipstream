@@ -269,7 +269,7 @@ struct PreviewClassRendersInner {
 
 /// Production preview-class admission and ephemeral Development TIFF
 /// retention. One registry entry exists per Photo and stage, and all heavy
-/// attempts run through the ExportManager's serialized launcher slot.
+/// attempts run through the ExportManager's serialized processing slot.
 pub(crate) struct PreviewClassRenders {
     inner: Arc<PreviewClassRendersInner>,
 }

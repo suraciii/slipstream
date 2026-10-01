@@ -1,9 +1,11 @@
 //! Durable Development Proxy lifecycle and its CLI-shaped HTTP surface.
 //!
 //! A proxy build reuses the closed baseline `development-tiff` preview-class
-//! launcher path, then decodes/downscales that scene-linear TIFF into an
+//! local executor path, then decodes/downscales that scene-linear TIFF into an
 //! immutable service-owned float32 ProPhoto TIFF. The database row is written
 //! only after the artifact has been atomically installed.
+
+mod lifecycle;
 
 use axum::{
     body::Body,
@@ -23,13 +25,12 @@ use std::{
     io::{Read, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Mutex as AsyncMutex;
+
+use lifecycle::{BuildClaim, ProxyTasks};
 
 use crate::{
     ProcessingConfig,
@@ -38,28 +39,13 @@ use crate::{
         self, CLI_CONTRACT_HEADER, HttpState, cli_error, invalid_cli, require_cli_contract,
         require_published, valid_id,
     },
-    preview_render::{PreviewCancellation, PreviewRender, RenderedPreview},
+    preview_render::{PreviewRender, RenderedPreview},
 };
 
 const QUALITY_LIMIT: &str = "2560-long-edge";
 const MAX_FAILURE_REASON: usize = 120;
 const MAX_FAILURES: usize = 1024;
 const MAX_PENDING_BUILDS: usize = 64;
-
-#[derive(Clone)]
-struct BuildClaim {
-    identity: String,
-    generation: u64,
-    cancellation: PreviewCancellation,
-}
-
-impl PartialEq for BuildClaim {
-    fn eq(&self, other: &Self) -> bool {
-        self.identity == other.identity && self.generation == other.generation
-    }
-}
-
-impl Eq for BuildClaim {}
 
 fn preview_build_failure(error: String) -> BuildFailure {
     if error == "source class has no approved profile"
@@ -127,9 +113,9 @@ pub(crate) struct DevelopmentProxyManager {
     processing: ProcessingConfig,
     root: PathBuf,
     builds: Arc<AsyncMutex<HashMap<String, BuildClaim>>>,
-    next_generation: Arc<AtomicU64>,
     lifecycle: Arc<AsyncMutex<()>>,
     failures: Arc<Mutex<HashMap<String, ProxyFailure>>>,
+    tasks: ProxyTasks,
 }
 
 #[derive(Clone, Debug)]
@@ -212,10 +198,18 @@ impl DevelopmentProxyManager {
             processing,
             root,
             builds: Arc::new(AsyncMutex::new(HashMap::new())),
-            next_generation: Arc::new(AtomicU64::new(0)),
             lifecycle: Arc::new(AsyncMutex::new(())),
             failures: Arc::new(Mutex::new(HashMap::new())),
+            tasks: ProxyTasks::new(),
         })
+    }
+
+    pub(crate) fn begin_shutdown(&self) {
+        self.tasks.begin_shutdown();
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.tasks.shutdown(&self.builds).await;
     }
 
     fn artifact_path(&self, record: &DevelopmentProxyRecord) -> PathBuf {
@@ -436,6 +430,9 @@ impl DevelopmentProxyManager {
         photo_id: String,
         expected_revision: String,
     ) -> Result<bool, ProxyError> {
+        if self.tasks.is_closing() {
+            return Err(ProxyError::Capacity);
+        }
         let (photo, read) = self
             .read_facts(&photo_id)
             .await
@@ -495,11 +492,7 @@ impl DevelopmentProxyManager {
             if builds.len() >= MAX_PENDING_BUILDS {
                 return Err(ProxyError::Capacity);
             }
-            let claim = BuildClaim {
-                identity,
-                generation: self.next_generation.fetch_add(1, Ordering::Relaxed),
-                cancellation: PreviewCancellation::new(),
-            };
+            let claim = self.tasks.claim(identity);
             builds.insert(photo_id.clone(), claim.clone());
             claim
         };
@@ -508,9 +501,11 @@ impl DevelopmentProxyManager {
             .unwrap_or_else(|error| error.into_inner())
             .remove(&photo_id);
         let manager = Arc::clone(self);
-        tokio::spawn(async move {
+        if !self.tasks.spawn(async move {
             manager.build(photo_id, expected_revision, claim).await;
-        });
+        }) {
+            return Err(ProxyError::Capacity);
+        }
         Ok(true)
     }
 
@@ -761,7 +756,7 @@ impl DevelopmentProxyManager {
 
     pub(crate) fn reconcile_after_restart(self: &Arc<Self>) {
         let manager = Arc::clone(self);
-        tokio::spawn(async move {
+        let _ = self.tasks.spawn(async move {
             let _lifecycle = manager.lifecycle.lock().await;
             let Ok(records) = manager.library.all_development_proxies().await else {
                 return;
@@ -808,7 +803,7 @@ impl DevelopmentProxyManager {
     }
 
     async fn remove(&self, photo_id: &str) -> Result<bool, ()> {
-        // Signal the launcher before waiting for publication's lifecycle lock.
+        // Signal the local executor before waiting for publication's lifecycle lock.
         if let Some(claim) = self.builds.lock().await.get(photo_id) {
             claim.cancellation.cancel();
         }

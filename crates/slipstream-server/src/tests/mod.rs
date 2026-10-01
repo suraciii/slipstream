@@ -375,13 +375,253 @@ fn configured_router(application: &Arc<Application>, web_root: impl Into<PathBuf
     crate::http::create_router_with_processing(
         Arc::clone(application),
         crate::http::open_web_root(web_root.into()),
-        Some(ProcessingConfig {
-            instance: "f".repeat(32),
+        Some(unresolved_processing_config()),
+    )
+}
+
+/// A processing configuration whose bundle directory never exists: no
+/// engine work can run through it, so tests of non-processing surfaces
+/// stay independent of a runnable engine while the deployment stays
+/// configured and reports the bundle unavailable.
+fn unresolved_processing_config() -> ProcessingConfig {
+    ProcessingConfig {
+        policy_sha256: "b".repeat(64),
+        bundle_sha256: "c".repeat(64),
+        bundle_root: PathBuf::from("/nonexistent-slipstream-photo-bundle"),
+        failure: Some("bundle-unavailable"),
+    }
+}
+
+// ---------------------------------------- Local Photo Development engine
+
+/// The scripted engine program [`FakePhotoEngine`] installs. It speaks the
+/// pinned MCP 2025-06-18 stdio contract the production client implements:
+/// one JSON-RPC 2.0 object per line. The spawned environment is cleared, so
+/// marker files inside the bundle are the only control channel; the run
+/// counter the program maintains orders per-attempt scripting.
+const FAKE_PHOTO_ENGINE: &str = r#"#!/usr/bin/env python3
+import json, os, shutil, sys, time
+
+BUNDLE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+OUTPUT = os.path.join(BUNDLE, "fixture-output.tif")
+RUNS = os.path.join(BUNDLE, "engine-runs")
+FAIL = os.path.join(BUNDLE, "script-fail")
+HANG = os.path.join(BUNDLE, "script-hang")
+CORRUPT = os.path.join(BUNDLE, "script-corrupt")
+DIE = os.path.join(BUNDLE, "script-die")
+
+def read_count():
+    try:
+        with open(RUNS) as handle:
+            return int(handle.read().strip())
+    except OSError:
+        return 0
+
+def respond(request_id, result):
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result}) + "\n")
+    sys.stdout.flush()
+
+def respond_error(request_id, message):
+    frame = {"jsonrpc": "2.0", "id": request_id,
+             "error": {"code": 1, "message": message}}
+    sys.stdout.write(json.dumps(frame) + "\n")
+    sys.stdout.flush()
+
+def marker_run(path):
+    try:
+        with open(path) as handle:
+            return int(handle.read().split("\0")[0].strip())
+    except (OSError, ValueError):
+        return None
+
+run = read_count() + 1
+with open(RUNS, "w") as handle:
+    handle.write(str(run))
+
+for line in sys.stdin:
+    try:
+        message = json.loads(line)
+    except ValueError:
+        continue
+    if "id" not in message:
+        continue
+    request_id = message["id"]
+    method = message.get("method")
+    if method == "initialize":
+        respond(request_id, {"protocolVersion": "2025-06-18", "capabilities": {},
+                             "serverInfo": {"name": "fake", "version": "0"}})
+    elif method == "tools/list":
+        respond(request_id, {"tools": []})
+    elif method == "shutdown":
+        respond(request_id, "ok")
+    elif method == "tools/call":
+        name = message["params"]["name"]
+        arguments = message["params"].get("arguments", {})
+        if name == "list_modules":
+            respond(request_id, {"content": [{"type": "text", "text": "[]"}],
+                                 "isError": False})
+        elif name == "module_schema":
+            respond(request_id, {"content": [{"type": "text", "text": "{}"}],
+                                 "isError": False})
+        elif name != "export_images":
+            respond_error(request_id, "unsupported tool")
+        else:
+            hang = marker_run(HANG)
+            if hang is not None and hang in (0, run):
+                while os.path.exists(HANG):
+                    time.sleep(0.05)
+            fail = marker_run(FAIL)
+            if fail is not None and fail in (0, run):
+                with open(FAIL) as handle:
+                    reason = handle.read().split("\0")[1]
+                respond_error(request_id, reason)
+                continue
+            out = arguments["out_path"]
+            if os.path.exists(DIE):
+                with open(out, "wb") as handle:
+                    handle.write(open(OUTPUT, "rb").read())
+                sys.exit(1)
+            if os.path.exists(CORRUPT):
+                with open(out, "wb") as handle:
+                    handle.write(b"not a development tiff")
+            else:
+                shutil.copyfile(OUTPUT, out)
+            payload = {"paths": [out], "skipped": 0, "exported": 1, "ok": True}
+            respond(request_id, {"content": [{"type": "text",
+                                              "text": json.dumps(payload)}],
+                                 "isError": False})
+sys.exit(0)
+"#;
+
+/// A scripted local Photo Development bundle one test runs against: the
+/// engine program, its metadata inventory, and the bundle ICC output
+/// profile, all below `base`. A generated Development TIFF is the
+/// successful output; marker files script per-attempt behavior.
+pub(super) struct FakePhotoEngine {
+    bundle_root: PathBuf,
+}
+
+impl FakePhotoEngine {
+    pub(super) fn install(base: &Path) -> Self {
+        let bundle_root = base.join("photo-bundle");
+        let engine_directory = bundle_root.join("darktable/bin");
+        fs::create_dir_all(&engine_directory).unwrap();
+        let program = engine_directory.join("darktable-mcp");
+        fs::write(&program, FAKE_PHOTO_ENGINE).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+            bundle_root.join("engine-metadata.json"),
+            r#"{"tools":[],"modules":[],"schemas":{}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(bundle_root.join("icc")).unwrap();
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../slipstream-core/assets/prophoto-linear-g10.icc"),
+            bundle_root.join("icc/LargeRGB-elle-V2-g10.icc"),
+        )
+        .unwrap();
+        let engine = Self { bundle_root };
+        engine.set_output(&valid_development_tiff_fixture());
+        engine
+    }
+
+    /// The engine bundle a previous [`install`](Self::install) placed at
+    /// this base.
+    pub(super) fn at(base: &Path) -> Self {
+        Self {
+            bundle_root: base.join("photo-bundle"),
+        }
+    }
+
+    pub(super) fn processing_config(&self) -> ProcessingConfig {
+        ProcessingConfig {
             policy_sha256: "b".repeat(64),
             bundle_sha256: "c".repeat(64),
-            socket_override: None,
-        }),
-    )
+            bundle_root: self.bundle_root.clone(),
+            failure: None,
+        }
+    }
+
+    /// The bytes the next successful engine run writes as its output.
+    pub(super) fn set_output(&self, bytes: &[u8]) {
+        fs::write(self.bundle_root.join("fixture-output.tif"), bytes).unwrap();
+    }
+
+    /// Scripts one engine run (1-based; 0 means every run) to refuse the
+    /// development with an engine error naming `reason`.
+    pub(super) fn fail_attempt(&self, run: u64, reason: &str) {
+        fs::write(
+            self.bundle_root.join("script-fail"),
+            format!("{run}\0{reason}"),
+        )
+        .unwrap();
+    }
+
+    /// Scripts one engine run (1-based; 0 means every run) to hold the
+    /// attempt open until [`release`](Self::release) removes the marker.
+    pub(super) fn hang_attempt(&self, run: u64) {
+        fs::write(self.bundle_root.join("script-hang"), run.to_string()).unwrap();
+    }
+
+    /// Scripts every run to write the output and then die before completing
+    /// the protocol.
+    pub(super) fn die_after_writing(&self) {
+        fs::write(self.bundle_root.join("script-die"), b"1").unwrap();
+    }
+
+    /// Releases a hung attempt and clears every scripted failure mode.
+    pub(super) fn release(&self) {
+        for marker in ["script-hang", "script-fail", "script-corrupt", "script-die"] {
+            let _ = fs::remove_file(self.bundle_root.join(marker));
+        }
+    }
+
+    /// How many engine processes this bundle has run: one per local
+    /// development attempt.
+    pub(super) fn runs(&self) -> u64 {
+        fs::read_to_string(self.bundle_root.join("engine-runs"))
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Waits until the bundle has run `count` engine processes.
+    pub(super) async fn wait_for_runs(&self, count: u64) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let observed = self.runs();
+            if observed >= count {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the engine must run {count} attempts, observed {observed}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+/// One valid Development TIFF the fake engine writes as its successful
+/// output: 2x1 float32 RGB with the pinned embedded output profile.
+fn valid_development_tiff_fixture() -> Vec<u8> {
+    let path = std::env::temp_dir().join(format!(
+        "development-tiff-fixture-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    crate::export_manager::development_tiff_decode::write_development_tiff(
+        &path,
+        &crate::export_manager::development_tiff_decode::stored_zlib(&[0_u8; 2 * 3 * 4]),
+    );
+    let bytes = fs::read(&path).unwrap();
+    let _ = fs::remove_file(&path);
+    bytes
 }
 
 fn edit_recipe_uri(photo_id: &str) -> String {

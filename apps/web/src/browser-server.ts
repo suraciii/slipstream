@@ -115,8 +115,11 @@ export async function startBrowserServer({
     const childEnvironment: NodeJS.ProcessEnv = {
       ...process.env,
       SLIPSTREAM_PROCESSING_INSTANCE: undefined,
+      SLIPSTREAM_PROCESSING_SOCKET: undefined,
       SLIPSTREAM_PROCESSING_POLICY_SHA256: undefined,
       SLIPSTREAM_PROCESSING_BUNDLE_SHA256: undefined,
+      SLIPSTREAM_PHOTO_DEVELOPMENT: undefined,
+      SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY: undefined,
       SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES: undefined,
       ...environmentOverride,
       SLIPSTREAM_LIBRARY_ROOT: root,

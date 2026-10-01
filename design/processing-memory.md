@@ -1,21 +1,23 @@
 # Processing Memory
 
-Photo development loads large native image buffers. A limit on the complete
-server can terminate browsing together with a render. A limit checked only by
-Python cannot contain allocations in numerical libraries or child processes.
-Slipstream needs an enforced task boundary and an engine that uses that boundary
-efficiently without changing the photograph.
+Photo development loads large native image buffers. Slipstream is a personal,
+single-machine application: one container hosts the Web service and the
+development engine together, and they share that container's finite memory and
+CPU. This specification states what that shared boundary guarantees, what it
+deliberately does not, and how the engine stays within it without changing the
+photograph.
 
 ## Design Drivers
 
 - Preserve browsing, saved Edit Recipes, Originals, and completed Exports when
-  processing exhausts its allocation.
-- Bound the complete processing workload, including native allocations and
-  descendants, before expensive work starts.
+  processing exhausts the shared container allocation.
 - Keep full developed dimensions, numerical precision, and the qualified Film
   Recipe independent of deployment memory policy.
-- Keep the Rust service responsible for scheduling and publication. Engines
-  remain private, supervised processes, not another Library service.
+- Keep the Rust service responsible for scheduling and publication. The engine
+  remains a private child process inside the application, not another Library
+  service.
+- Serialize heavy work: at most one development attempt runs at a time inside
+  the one application container.
 
 [Photo Development Architecture](photo-development.md) owns the job lifecycle,
 queue fairness, source safety, and publication contracts. This specification
@@ -23,108 +25,95 @@ owns memory policy, enforcement, and engine workspace behavior.
 
 ## Model and Ownership
 
-The deployment operator owns one finite **processing memory budget** per
-Slipstream instance. It is the aggregate hard limit for admitted computation,
-not a limit on each thread, a JPEG size limit, or an Edit Recipe setting.
-Enabling processing requires an explicit positive byte quantity within a
-qualified deployment envelope. Zero, an unlimited value, and an inferred share
-of all host RAM are not supported policies. Public rendering requests cannot
-override this budget. Configuration syntax belongs in the deployment reference.
+The deployment's one **application container** owns a finite memory and CPU
+allocation shared by the Rust service, Web delivery, SQLite, and the
+development engine. This shared limit is the documented resource boundary of
+the personal single-machine product: there is no separate per-attempt
+processing budget, and public rendering requests cannot change it. Sizing the
+container belongs to [Deployment](../docs/deployment.md).
 
-The deployment also reserves memory for the **control service**: Rust HTTP and
-CLI operations, SQLite, normal Library work, and bounded supervision. This
-reserve is established by deployment qualification, not subtracted from the
-processing allocation while an attempt is running. For a finite shared ancestor
-limit, the processing budget plus the qualified control allowance and deployment
-overhead must fit below that ancestor limit. Host capacity planning must also
-account for other services; a free-memory snapshot is not a reservation.
+Inside that boundary the service keeps its **control allowance**: Rust HTTP and
+CLI operations, SQLite, normal Library work, and bounded supervision must
+continue to fit beside one running development attempt. Serialization is what
+makes this plannable. The scheduler admits at most one heavy attempt at a
+time, so the engine's measured peak is the dominant term and Library work
+competes only with bounded supervision, staging copies, and validation.
 
-An **attempt** owns a private process subtree, workspace, captured settings and
-source binding, enforcement identity, and terminal resource evidence. One heavy
-attempt runs at a time under the scheduler contract. All of its development,
-simulation, validation, and encoding stages share the processing allocation;
-these stages run sequentially. Queued work retains bounded metadata rather than
-decoded images or preloaded runtimes. Dispatch must not overlap a new attempt
-with descendants left by an earlier one.
+An **attempt** owns a fresh engine child, a private scratch workspace, captured
+settings and source binding, and its terminal outcome. All of its development,
+simulation, validation, and encoding stages run sequentially in the container.
+Queued work retains bounded metadata rather than decoded images or preloaded
+runtimes. Dispatch must not overlap a new attempt with an engine child left by
+an earlier one; the processing lock is released only after termination and
+scratch cleanup are confirmed.
 
 An engine's **workspace plan** describes required live buffers, temporary
-workspace, batch geometry, and qualified runtime headroom for one input geometry,
-stage, and exact processing bundle. It is computed from the attempt budget and
-the bundle's measured resource model. It is not a hard-limit mechanism and must
-not claim that every image can fit every configured budget.
+workspace, batch geometry, and qualified runtime headroom for one input
+geometry, stage, and exact processing bundle. It is computed from the container
+allocation and the bundle's measured resource model. It is not a hard-limit
+mechanism and must not claim that every image can fit every deployment.
 
-The memory policy and plan belong to the attempt record, not the Edit Recipe.
-Changing policy affects subsequent attempts. A running attempt keeps its captured
-policy; lowering the deployment allocation requires draining or cancelling it
-and confirming that its processes have stopped. Queued work is checked against
-the current policy when dispatched, without changing its captured image intent.
+The workspace plan belongs to the attempt record, not the Edit Recipe. Changing
+the container allocation affects subsequent attempts; a running attempt keeps
+the environment it started in, and queued work is checked against the current
+allocation when dispatched, without changing its captured image intent.
 
 ## Enforcement Boundary
 
-The supported Linux implementation uses cgroup v2 memory control through the
-operator-owned host launcher defined in [Processing Executor](processing-executor.md).
-The Rust control service and launcher remain outside the entire finite
-processing subtree. A fresh retained attempt slice accounts for the complete
-container, including bootstrap charges, while a protected workload leaf groups
-engine descendants for OOM termination. The executor contract owns manager
-boundaries, placement, private transport, and retained terminal accounting.
-Every shared finite ancestor must include qualified control-service and
-deployment headroom.
+The supported Linux implementation is the one application container's finite
+memory and CPU limit, as sized by [Deployment](../docs/deployment.md). The
+engine runs as an ordinary child process of the Rust service inside that
+container. The container limit bounds the Web service, SQLite, the engine, and
+every native allocation the engine's libraries make, including descendant
+processes. There is no per-attempt cgroup, no processing subtree, and no
+swap policy to tune inside the product: that per-attempt machinery was the
+retained trade of the local model, accepted for a single-user product.
 
-Before a processing executable can allocate image data, its attempt must have:
+The consequence an operator must understand is that the boundary is shared,
+not isolated. A runaway engine allocation can exhaust the container and
+terminate browsing together with the render, and an engine OOM can stop the
+whole application. Serialized execution is the mitigation: at most one heavy
+attempt runs, so the failure surface is one request at a time, and the
+recovery path is the ordinary application restart with its startup scratch
+cleanup. The engine must not be able to grow beyond the plan above: staged
+inputs are bounded, stated dimensions are checked against decoded geometry
+and pixel limits before large allocation, and a deadline bounds total engine
+time.
 
-- `memory.max` set to the captured processing limit;
-- `memory.swap.max` set to zero;
-- `memory.oom.group` enabled for the attempt workload;
-- the qualified CPU, task/thread, time, and temporary-storage limits; and
-- confirmed membership for the initial child, with descendants inheriting the
-  same containment boundary.
+Supervisor-side work — staging, metadata inspection, artifact validation, and
+file encoding — shares the same container allocation and must use bounded
+buffers so it cannot crowd out Library work by itself. Process RSS figures
+are diagnostics, not enforcement evidence. An unusably small container limit
+is a deployment defect to report through the capability contract, not a reason
+to fall back to unrestricted host execution.
 
-Use launch-time placement or a blocked bootstrap that joins the cgroup before
-exec. Starting an unrestricted engine and moving it after allocation is not an
-acceptable ordering. Processing children must not be able to write controller
-settings, raise limits, or escape into the control-service group.
-
-The budget applies to memory charged by the kernel to the subtree, including
-anonymous native buffers, charged file cache, and tmpfs. Process RSS is useful
-diagnostic information but is not aggregate enforcement evidence. Staging,
-metadata inspection, artifact validation, and file encoding must not move large
-allocations outside this boundary. A staging helper may receive a validated
-read-only Original descriptor under the source-safety contract; engines receive
-only staged input. Supervisor-side IO must use bounded buffers, with its cache
-and memory costs covered by the control-service qualification.
-
-`memory.max` is the kernel containment mechanism, not a promise of a perfectly
-flat instantaneous peak: the kernel permits temporary excess in some cases.
-The workspace plan must leave measured headroom below it. A sampled RSS guard
-or `memory.high` reclaim threshold must not be represented as the hard limit.
-The initial policy does not use swap or reclaim throttling as a way to make an
-otherwise unsupported image fit.
-
-Per-task containment does not guarantee survival under unrelated host-wide OOM,
-administrator termination, or a misconfigured ancestor limit. Capability and
-deployment checks must distinguish these conditions from a task's own limit.
+Per-attempt containment is not claimed. Unrelated host-wide OOM, administrator
+termination, or a sibling workload on the same host can still stop the
+application. Capability and deployment checks must distinguish those
+conditions from a development failure.
 
 ## Deployment Contract
 
-The selected execution mechanism is an operator-owned host launcher and a fresh
-pinned processing container per attempt, as defined by
-[Processing Executor](processing-executor.md). Supported Linux packaging uses
-systemd slices and Docker's systemd cgroup driver. The Web receives only the
-private bounded launcher socket, not Docker credentials, root privilege, or
-controller-write access. The worker receives none of those capabilities.
+The selected execution mechanism is the in-process PhotoExecutor defined by
+[Local Photo Executor](processing-executor.md): one application image contains
+the server, the optional bundled engine extension, and the qualified runtime.
+A normal start requires no host launcher, processing systemd unit, worker
+container provisioning, processing socket, or processing Compose overlay.
 
-Startup must verify effective ancestor limits and permission to create, place,
-observe, terminate, and remove an owned test workload. Operator tooling must
-exercise the same container UID, namespace, retained accounting, finite storage,
-and controller boundaries used by real processing. Successfully writing a
-configuration value or opening a socket is insufficient.
+Startup discovers the optional extension, verifies its manifest identity and
+every named asset digest, and reports development available only when those
+checks pass. Missing or invalid assets leave Library operations available and
+development reported `bundle-unavailable`. Operator control is the documented
+startup environment — `SLIPSTREAM_PHOTO_DEVELOPMENT` to force the capability
+on or off, and `SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY` to select a locally built
+bundle for development or smoke runs — never a request field.
 
-A deployment without this verified boundary must report processing unavailable
-and keep ordinary Library operations available. It must not fall back to an
-unrestricted subprocess or advertise a whole-server container limit as task
-isolation. The supported operator tooling must exercise the same boundary used
-by real processing before enabling the capability.
+The operator's resource obligation is to size the one container's memory and
+CPU for the Web service plus one serialized development attempt, using the
+bundle's measured resource model, and to keep that sizing with the deployment
+record. Local verification and the real-camera smoke must exercise a complete
+development, cancellation, deadline, engine failure, and restart inside those
+limits before a deployment is treated as processing-enabled.
 
 ## Workspace Planning and Admission
 
@@ -155,11 +144,10 @@ still requires supervised failure settlement; preflight is not a guarantee of
 success. Do not automatically retry an OOM with the same settings or raise the
 budget. Explicit retry creates a new attempt using current policy.
 
-[Qualified Film Memory Envelope](processing-film-envelope.md) defines the
-separate operator-only admission authority over exact registered fixtures. It
-combines source-backed known reservations with a reviewed whole-attempt empirical
-ceiling while retaining unknown component diagnostics. Its fixture gate does not
-grant ordinary Photo/Export admission or a broader photographic class.
+Film remains unadmitted. When a Film capability is independently qualified,
+its admission authority and resource evidence must be specified before Film
+work consumes this shared boundary; this specification grants no such
+admission.
 
 ## Engine Memory Efficiency
 
@@ -271,30 +259,32 @@ algorithm/resource decisions and require their own quality and storage evidence.
 The supervisor must distinguish these semantic outcomes before mapping them to
 the shared Web/CLI error contract:
 
-- enforcement unavailable or invalid deployment policy;
+- capability or deployment policy unavailable;
 - input or stage outside the qualified resource envelope;
-- workspace plan exceeds the captured budget;
-- runtime allocation failure or confirmed attempt OOM;
-- deadline, cancellation, engine error, and interrupted supervisor ownership; and
-- failed cleanup or unconfirmed process termination.
+- workspace plan exceeds the container allocation;
+- runtime allocation failure or a confirmed engine termination; and
+- deadline, cancellation, engine error, failed cleanup, or unconfirmed child
+  termination.
 
-Exit 137 alone is not proof of OOM. Classify a confirmed limit failure using
-attempt-local kernel events and terminal process/container evidence. Preserve
-uncertainty when evidence is missing. An allocation failure caught before the
-kernel intervenes remains a resource failure, with its distinct evidence.
+Exit 137 alone is not proof of OOM. Classify a confirmed limit failure from
+the engine child's termination evidence and the container's observed events,
+and preserve uncertainty when evidence is missing. An allocation failure
+caught before the kernel intervenes remains a resource failure, with its
+distinct evidence.
 
-On failure or cancellation, settle the complete attempt subtree, collect terminal
-evidence, and withhold publication of incomplete artifacts. Do not release its
-scheduler slot until the owned subtree is empty. If termination is unconfirmed,
-quarantine the attempt and stop new heavy work while keeping browsing available.
-Existing validated Development Results follow the architecture's retention rule.
+On failure or cancellation, terminate the engine child's complete process
+group, reap the direct child, remove the private scratch workspace, and
+withhold publication of incomplete artifacts. Do not release the processing
+lock until termination and cleanup are confirmed. If termination is
+unconfirmed, keep heavy work stopped while browsing remains available.
+Existing validated Development Results follow the architecture's retention
+rule.
 
-After supervisor restart, reconcile persisted attempt ownership with the actual
-owned cgroups before admitting new processing. Kernel policy remains effective
-while the supervisor is absent. Orphaned work must not publish independently.
-Settle or recover it through the existing guarded artifact-publication contract;
-never kill an unrelated process based only on a recycled PID. Confirm process
-exit and preserve evidence before removing cgroups or temporary work.
+After an application restart there are no owned cgroups or journals to
+reconcile: startup never attaches to an engine process from the previous
+lifetime. It removes abandoned scratch under its exclusive lock, resolves
+unfinished work from the durable Export snapshot, and admits new work through
+ordinary serialization. Orphaned work must not publish independently.
 
 The existing single terminal-result and cancellation/publication race rules
 remain authoritative. Changing the resource policy cannot rewrite an already
@@ -302,10 +292,10 @@ successful Export or its captured settings.
 
 ## Evidence and Qualification
 
-Record the attempt and instance identity, bundle/patch identity, geometry, stage,
-captured limit and workspace plan, effective enforcement settings, stage timings,
-aggregate memory peak and events, process outcome, and cleanup outcome. Retain
-bounded diagnostics outside the dying workload before releasing ownership.
+Record the attempt identity, bundle identity, geometry, stage, the container
+allocation and workspace plan, stage timings, observed process outcome, and
+cleanup outcome. Retain bounded diagnostics outside the attempt before
+releasing the lock.
 Private source paths and image contents must not enter public logs or Issues.
 Administrative diagnostics may expose detailed resource facts; Photographer
 errors must explain the affected operation, saved-state preservation, and next
@@ -313,13 +303,14 @@ action without exposing kernel or Python internals.
 
 Qualification must separately prove:
 
-- synthetic native and descendant allocation is contained at both attempt and
-  aggregate-parent limits, with no control-service termination, and the next
-  valid attempt can run after cleanup;
-- invalid/missing delegation, restrictive ancestors, and attempted child escape
-  fail without unrestricted execution;
-- queue, cancellation, OOM/complete races, supervisor restart, and failed cleanup
-  preserve one terminal result, source safety, and publication integrity;
+- one serialized engine attempt stays inside the sized container allocation
+  while Library reads stay responsive, and the next valid attempt can run
+  after cleanup;
+- engine failure and cancellation terminate the child process group, scratch
+  is removed, and no partial artifact is published;
+- queue, cancellation, OOM/complete races, application restart, and failed
+  cleanup preserve one terminal result, source safety, and publication
+  integrity;
 - batch-boundary, odd-aspect, negative, over-range, saturated, and neutral inputs
   match the reference, including full seeded small-image pipelines;
 - topology lifetimes preserve injection, collection, shared views, and branching,
@@ -330,48 +321,43 @@ Qualification must separately prove:
   contention against the same idle baseline and declared acceptance thresholds;
 - low budgets fail predictably, supported budgets succeed, and successful budget
   changes leave pre-encoding pixel identity unchanged; and
-- the exact packaged deployment proves the same isolation and recovery contract.
+- the exact packaged deployment proves the same resource and recovery contract.
 
-Kernel/cgroup evidence is separate from simulated unit tests, ordinary repository
-gates, and camera qualification. A successful small image, one full-size export,
-or a finite container setting cannot establish the supported deployment envelope.
+Real-camera smoke evidence is separate from simulated unit tests and ordinary
+repository gates. A successful small image or one full-size export cannot
+establish the supported deployment envelope. The retired kernel-containment
+evidence and its operator harness were removed with the launcher path.
 
 ## Options
 
-### Selected: Task Cgroups with Engine Workspace Planning
+### Selected: One Container with Serialized Local Execution
 
-The kernel contains native and descendant allocations; Rust owns admission and
-settlement; the engine minimizes live data within that budget. This extends the
-existing process-per-job architecture and avoids a second public job service.
+The application container's finite memory and CPU limit is the resource
+boundary, and the single processing lock serializes engine work. It matches
+the personal single-machine deployment: no privileged host components and no
+second operational lifecycle. Its documented cost is the shared failure
+domain — an engine OOM can stop the whole application — accepted because at
+most one request runs at a time and the ordinary application restart recovers.
+Engine workspace planning still minimizes live data so the sized container
+stays sufficient.
 
-### Rejected: Whole-Server Container Limit as Task Isolation
+### Rejected: Per-Attempt Task Cgroups with a Host Launcher
 
-It bounds deployment consumption but shares the failure boundary with HTTP,
-SQLite, and browsing. It remains an outer deployment constraint, not the task
-memory contract.
+Kernel containment per attempt would isolate an engine OOM from the Web
+service, but it required a privileged host launcher, Docker authority, cgroup
+management, and a durable journal — operational weight with no single-user
+product value. Issue #490 removed it from the production path together with
+its harness and operator workflows.
 
 ### Rejected: Python Checks or Address-Space Limits Alone
 
-Cooperative checks cannot stop opaque native allocations. A process address-space
-limit measures a different resource and does not aggregate independent child
-processes. Neither replaces the selected workload boundary.
-
-### Selected: Restricted Host Launcher and Fresh Containers
-
-The host launcher enforces and observes each attempt outside its OOM boundary.
-Its operational journal does not own the Library or Export lifecycle. Retained
-systemd accounting closes the terminal-evidence gap when Docker removes a scope.
-[Processing Executor](processing-executor.md) defines the authority and lifecycle.
-
-### Rejected: Writable Delegation Inside the Web Container
-
-Safe in-container delegation would require additional migration authority,
-controller ownership, and engine identity separation. The supported Web image
-remains unprivileged and has no writable controller mount. An unavailable
-launcher cannot silently fall back to this different execution mechanism.
+Cooperative checks cannot stop opaque native allocations. A process
+address-space limit measures a different resource and does not aggregate
+independent child processes. Neither replaces the container limit plus
+serialization.
 
 ## References
 
-- [Linux cgroup v2 memory interfaces](https://docs.kernel.org/admin-guide/cgroup-v2.html#memory-interface-files)
-- [systemd cgroup delegation and controller ownership](https://systemd.io/CGROUP_DELEGATION/)
+- [Local Photo Executor](processing-executor.md)
+- [Deployment](../docs/deployment.md) for the container resource contract
 - [Docker memory and swap constraints](https://docs.docker.com/engine/containers/resource_constraints/)

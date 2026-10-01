@@ -218,13 +218,14 @@ SLIPSTREAM_ILCE7CM2_SAMPLE=/absolute/path/to/_DSC1891.ARW \
 This test checks the configured sample digest, derived JPEG dimensions, and
 unchanged Original bytes and filesystem metadata. It does not ship the photo.
 
-The opt-in processing smoke needs the sample and all four pinned launcher/export inputs, so it runs outside `test:raw` and skips with the missing-variable reason wherever the host has an incomplete configuration:
+The opt-in processing smoke needs the sample and the shared local Photo
+Development inputs, so it runs outside `test:raw` and skips with the
+missing-variable reason wherever the host has an incomplete configuration:
 
 ```sh
 SLIPSTREAM_RAW_SAMPLE=/absolute/path/to/sample.ARW \
-SLIPSTREAM_PROCESSING_INSTANCE=<launcher instance> \
-SLIPSTREAM_PROCESSING_POLICY_SHA256=<approved policy digest> \
-SLIPSTREAM_PROCESSING_BUNDLE_SHA256=<approved bundle digest> \
+SLIPSTREAM_PHOTO_DEVELOPMENT=enabled \
+SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY=/absolute/path/to/photo-bundle \
 SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES=<finite Development TIFF allowance> \
 bun x playwright test --grep real-processing --workers=1
 ```
@@ -235,9 +236,9 @@ settled and downloaded before Preview, the Photo is reopened to verify the
 saved intent, and the baseline comparison presents its own rendition. A
 second client conflict is recovered with `Use saved recipe`. It checks the
 sample, its isolated Library copy, and the exercised same-basename external
-XMP sidecar for unchanged digests and metadata. Budget the launcher's own
-render time: one full-resolution development of the sample takes about a
-minute.
+XMP sidecar for unchanged digests and metadata. Budget the engine child's
+startup and render time: one full-resolution development of the sample takes
+about a minute.
 
 The opt-in [development qualification harness](tools/development/README.md)
 exercises pinned darktable and Spektrafilm processes in an isolated CPU container.
@@ -250,26 +251,23 @@ change. Its host-side failure and cancellation regressions run with
 Successful probes do not establish processing support beyond their recorded
 checks; the governing qualification Issues own acceptance.
 
-The independent [processing isolation qualifier](tools/processing/README.md)
-exercises the actual host Rust launcher, pinned native fixture container,
-systemd/cgroup limits, bounded storage, and durable recovery. Run its focused
-non-root coverage with `cargo test --locked -p slipstream-processing`; workspace
-Rust checks include it. Its opt-in kernel verifier requires root and explicit
-local worker/Web image IDs. It uses only a private synthetic Library and is not
-part of the daemon-free `verify` gate. Passing fixture qualification does not
-enable photo editing or qualify an image engine's memory envelope.
+The former host-launcher isolation harness and its kernel verifiers were
+removed together with the launcher production path; the single-container
+boundary they probed no longer exists. The `slipstream-processing` crate now
+carries the local executor and its engine contracts. Run its focused coverage
+with `cargo test --locked -p slipstream-processing`; workspace Rust checks
+include it.
 
-For native Photo worker changes, run the native checkout's focused CTest suite,
-build the pinned worker image, and qualify it against an independent RAW reference
+For native engine changes, run the native checkout's focused CTest suite,
+build the engine bundle with `tools/processing/photo/build.py`, and qualify it
+against an independent RAW reference
 using the complete commands in [the processing build guide](tools/processing/README.md#build).
 Record the reference's exact identity. The qualifier is not a production fallback.
 
-The closed [Film measurement profile](design/processing-film-measurement.md)
-runs the pinned image engine inside that boundary against explicit operator
-fixtures and independent output references. Its opt-in verifier returns resource
-and image-identity evidence, not Exports or accepted production budgets. Host
-fixture-preparation checks run with `bun run test:processing-tools` and are part
-of `test:fast` and `verify`; actual engine and kernel qualification remain separate.
+Film remains unadmitted; its retired worker runtime and build kit were
+removed with the worker execution path. Host-side tooling checks run with
+`bun run test:processing-tools` and are part of `test:fast` and `verify`;
+engine qualification remains separate.
 
 ## Server startup
 

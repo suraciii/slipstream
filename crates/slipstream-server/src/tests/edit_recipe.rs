@@ -28,8 +28,8 @@ async fn edit_recipe_read_reports_recipe_absence_support_and_controls() {
     // serialize as null.
     assert_eq!(read["editSource"], "original");
     assert!(read.get("editSourceProxyId").is_none());
-    // The deployment is configured but this test harness has no launcher
-    // socket, so the reconciled condition is launcher-unavailable and
+    // The deployment is configured but no engine bundle resolves for this
+    // test harness, so the reconciled condition is bundle-unavailable and
     // processing is not available for the Photo.
     assert_eq!(read["processingAvailable"], false);
     assert_eq!(
@@ -699,12 +699,7 @@ async fn offline_proxy_admits_guarded_save_and_refuses_stale_bindings() {
     let original_bytes = approved_raw_fixture(&original);
     let stale_original = config.library_root.join("stale.ARW");
     approved_raw_fixture(&stale_original);
-    config.processing = Some(ProcessingConfig {
-        instance: "f".repeat(32),
-        policy_sha256: "b".repeat(64),
-        bundle_sha256: "c".repeat(64),
-        socket_override: None,
-    });
+    config.processing = Some(unresolved_processing_config());
     config.export_retained_output_bytes = Some(1024 * 1024 * 1024);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;

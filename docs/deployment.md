@@ -143,215 +143,106 @@ units alone does not qualify the environment. Lightroom interoperability must
 not be claimed without exercising Lightroom. The default Compose deployment
 remains read-only; this profile does not silently make it writable.
 
-## Optional Photo Processing
+## Optional Photo Development
 
-Photo processing requires a separate digest-pinned engine image and an
-operator-owned host launcher. The supported host must provide cgroup v2,
-systemd, and a local Docker daemon using the systemd cgroup driver. The host
-must make the memory, CPU, task and I/O controllers available to the delegated
-processing scope. Missing delegation must prevent processing from starting;
-ordinary Library operations must remain available. The launcher
-is a privileged component trusted by the operator. The Web container receives
-only its private Unix socket; it must not receive the Docker socket, host root
-privilege, or a writable cgroup mount.
+Photo Development is an optional capability inside the same application image.
+The image may carry the bundled engine extension: the pinned native
+darktable-mcp runtime, its native assets and module/tool metadata, the
+processing manifest, and the ICC profile. A normal start runs one application
+container. There is no host processing launcher, processing systemd unit,
+worker container, processing control socket, or processing Compose overlay to
+install or enable.
 
-The operator must configure an explicit finite processing allocation, a
-qualified control-service allowance, bounded private workspace storage, and
-finite receipt retention. The launcher and Library service must remain outside
-the entire processing allocation. The launcher must retain accounting until
-attempt settlement and reconcile unfinished ownership on restart.
+The server detects the extension at startup. It verifies the manifest identity
+and every named asset digest, including the manifest's own SHA-256 recorded in
+the bundle. A deployment without the extension, or one whose assets are
+missing or invalid, keeps every Library operation available and reports
+development unavailable. Startup configuration cannot be changed by an HTTP
+request.
 
-Enabling this capability requires operator tooling to exercise the same launch,
-limit, OOM, cancellation, restart, storage-exhaustion, and cleanup path used by
-real processing. Verify Library operations during a contained processing failure
-and a successful subsequent attempt. A healthy engine image or an open launcher
-socket alone does not establish readiness. Missing or unqualified processing
-must leave ordinary Library operations available. Processing capability and
-source/bundle availability must be reported separately from `/healthz`.
+The capability is controlled by one startup environment variable:
 
-[Processing Executor](../design/processing-executor.md) defines the private
-execution contract. The
-[qualification protocol reference](../design/processing-executor-protocol.md)
-defines the explicit fixture-only launcher configuration and command. This mode
-must report photo processing unavailable. A fixture qualification run, installed
-launcher binary, systemd-active unit or reachable socket is not production
-readiness.
+- `SLIPSTREAM_PHOTO_DEVELOPMENT=enabled` forces the capability on; startup
+  still requires a valid bundle and reports the bundle unavailable when the
+  assets do not verify.
+- `SLIPSTREAM_PHOTO_DEVELOPMENT=disabled` forces the capability off.
+- `SLIPSTREAM_PHOTO_DEVELOPMENT=auto`, also the default when the variable is
+  absent, enables the capability exactly when the installed bundle verifies.
 
-The processing wrapper must be run as root. It uses GNU `stat` to verify the
-complete private runtime directory, then util-linux `setpriv` to make the
-readiness request as UID 1000. The ordinary Compose commands do not require
-these processing tools.
+`SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY` optionally selects an absolute bundle root
+for development and smoke runs, such as a locally built bundle outside an
+image. Production images carry the bundle at its fixed installed location
+(`/opt/slipstream-photo`); the variable is not a production processing
+endpoint. `SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES` keeps its existing
+meaning: the finite retained-output allowance in bytes that bounds published
+Development TIFF artifacts, so exhausting it refuses export admission with
+`resource_unavailable` instead of filling the state volume; the repository
+Compose file defaults it to 8589934592 and the environment file may override
+it. The Compose file fixes the documented shared container bounds — 8 GiB
+memory, 4 CPUs, 512 PIDs, and 4 engine OpenMP threads — and mounts no Docker
+socket.
 
-Install the production launcher as a root-owned systemd service with a
-root-owned host configuration and persistent journal. The repository supplies
-[`slipstream-processing-launcher@.service`](../systemd/slipstream-processing-launcher%40.service);
-install it as `/etc/systemd/system/slipstream-processing-launcher@.service` and
-install the exact candidate's launcher binary at
-`/usr/local/libexec/slipstream-processing-launcher`. Configure each instance at
-`/etc/slipstream-processing/INSTANCE/config.json`, with its socket at
-`/run/slipstream-processing/INSTANCE/launcher.sock` and its persistent root at
-`/var/lib/slipstream-processing/INSTANCE`. Replace `INSTANCE` with the same 32
-lowercase hexadecimal identifier in the service name and configuration.
+The one container's finite memory and CPU allocation is shared by the Web
+service and the engine. Development requests are serialized: at most one runs
+at a time, and a second request queues behind it. There is no per-attempt
+isolation domain; an engine failure can therefore stop the whole application,
+and the ordinary restart path recovers. This trade-off fits the personal
+single-machine deployment and is not
+a multi-user service boundary.
+[Processing Memory](../design/processing-memory.md) owns the details. Legacy
+`SLIPSTREAM_PROCESSING_INSTANCE`, `SLIPSTREAM_PROCESSING_SOCKET`,
+`SLIPSTREAM_PROCESSING_POLICY_SHA256`, and `SLIPSTREAM_PROCESSING_BUNDLE_SHA256`
+declarations are rejected by the Compose entry point; the retired launcher
+endpoint they named no longer exists.
 
-Keep the installed unit's mount behavior. The launcher's attempt storage must
-resolve for the engine container's bind sources, which resolve in the host mount
-namespace ([processing-executor.md](../design/processing-executor.md#restricted-launch-authority)).
-The launcher must share PID 1's mount namespace. Do not enable filesystem
-namespacing, including `PrivateTmp`, `PrivateDevices`, `ProtectHome`,
-`ProtectProc`, `ProtectSystem`, `ProtectKernelTunables`,
-`ProtectKernelModules`, `ProtectKernelLogs`, `ReadWritePaths`,
-`NoExecPaths`, `ExecPaths`, `PrivateMounts`, or explicit bind/temporary paths:
-the container would bind empty placeholder storage and the worker could not
-write its result. `verify-deployment.py` checks both effective unit properties
-and the running launcher's mount namespace against PID 1.
+### Building the engine bundle
 
-Build the worker image with the repository helper. It verifies the retained
-numerical parent image, requires a clean native source checkout at the exact
-commit, performs the engine and Rust builds, discovers the MCP schemas, and
-rebuilds once with the derived bundle identity:
+Build the optional engine bundle with the repository helper. It verifies a
+clean native source checkout at the exact commit, performs the engine build,
+discovers the MCP tools, modules, and schemas, and derives the bundle manifest
+and identity:
 
 ```sh
 python3 tools/processing/photo/build.py \
   --darktable-source /absolute/path/to/darktable-native \
   --darktable-commit <40-lowercase-hex-commit> \
-  --tag slipstream:processing-photo
+  --tag slipstream:photo-local
 ```
 
-The helper uses BuildKit's named `darktable` context, so the image does not
-depend on an arbitrary host `.git` path. It prints the image ID, native commit,
-parent identity, and 64-character bundle digest. Inspect the resulting image
-and configure the printed digest as the instance `bundle` value and as
-`SLIPSTREAM_PROCESSING_BUNDLE_SHA256`; pin the launcher image by its `sha256:`
-identifier, not by tag.
+The helper builds (or reuses) the normal application runtime and extends it
+with the pinned native engine, the discovered MCP metadata, the vendored ICC
+output profile, and the deterministic bundle manifest. Pass `--app-image` to
+extend an already-built immutable application image instead of rebuilding the
+runtime, or `--app-tag` to build it under a different local tag. It prints the
+application image ID, the extended image ID, the 64-character bundle digest,
+and the native commit as one JSON object. Use the extended image's immutable
+ID as the deployment's `SLIPSTREAM_IMAGE` with the ordinary Compose start;
+there is no processing-specific command or overlay. The
+manifest records the pinned native module map and asset digests; it names no
+worker image and no launcher configuration. The RAW reference qualification
+and the acceptance runner are documented in
+[tools/processing](../tools/processing/README.md).
 
-The Film runtime in this image comes from the same qualified numerical image
-that owns the fixed Film recipe identity. Image construction checks the actual
-runtime recipe against that identity; a different qualification image can have
-a different processing-bundle manifest despite matching engine source files.
-Do not bypass that check or change the copied numerical image independently.
+### Verification
 
-A refused start must not consume the instance. The launcher claims the
-instance identity before it verifies the image and host, and it makes the
-instance journal durable before any check that can refuse the start. A Photo
-start that is refused after claiming removes the claim it created, so a later
-start with a corrected configuration starts normally. The qualification,
-film, and qualified executors keep the claim of a refused start and preserve
-today's refusal behavior.
+`GET /api/processing/capability` reports the closed capability condition
+following the merged Photo Development service surface
+(`design/photo-development.md`): `disabled` when the operator has disabled the
+capability, `bundle-unavailable` when an enabled path has missing or invalid
+engine assets, `source-unsupported`, `resource-unavailable`, and `ready` only
+when the bundled engine verifies at startup. It never reports a qualification
+harness profile as product capability. `/healthz` remains a Library readiness
+check and reports no processing state.
 
-Two failure points can still leave a claim without a journal: a failure
-inside claim creation before the claim is exclusively held, and a crash
-between claiming and the durable journal. Both leave the start refused
-instead of adopting a claim without a journal, so the instance stays
-unavailable and the state stays readable as evidence. The documented recovery
-for that state is to confirm no launcher is running, remove the stale claim,
-and start again; the next start initializes the instance root. Deleting the
-claim of a running launcher is never part of recovery.
-
-After an approved production configuration and its exact policy/bundle
-identities are installed, load the unit and start the instance:
-
-```sh
-systemctl daemon-reload
-systemctl enable --now slipstream-processing-launcher@INSTANCE.service
-```
-
-When replacing the unit on an existing instance, stop the processing-enabled
-Web deployment from accepting new work and allow accepted attempts to settle.
-After installing the unit and running `systemctl daemon-reload`, explicitly
-restart `slipstream-processing-launcher@INSTANCE.service`; `enable --now`
-does not restart an already active service. Wait for launcher reconciliation
-and confirm that its running PID shares PID 1's mount namespace before
-restarting processing-enabled Web. Run the full deployment verifier once Web
-is running again.
-
-The service must reconcile
-its durable attempt and manager identities before accepting new work. Its
-private socket may be reachable during reconciliation, but admission must stay
-unavailable until recovery succeeds; socket reachability is not readiness. A
-restart must not erase blocked ownership or reset an admission
-watermark. A policy or immutable image change requires the processing-enabled
-Web service to stop first. Keep the launcher running until all accepted
-attempts have settled and cleanup is confirmed, then stop the launcher before
-atomically replacing its host configuration. Restart it and reconcile the
-existing journal under the new policy before allowing admission or restarting
-the processing-enabled Web service.
-If reconciliation or any host, image, policy, headroom or resource check fails,
-processing remains unavailable and the Library service remains usable.
-
-The supported opt-in is the dedicated wrapper command:
-
-```sh
-sudo ./scripts/compose --env-file /srv/slipstream/instance.env processing-up -d
-```
-
-For this command, the environment file must contain exactly one literal value
-for each of `SLIPSTREAM_PROCESSING_INSTANCE` (32 lowercase hexadecimal
-characters), `SLIPSTREAM_PROCESSING_POLICY_SHA256` and
-`SLIPSTREAM_PROCESSING_BUNDLE_SHA256` (64 lowercase hexadecimal characters
-each). These values pin the approved deployment identities. The environment
-file must also carry one literal `SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES`
-value: the finite retained-output allowance in bytes that bounds published
-Development TIFF artifacts, so that exhausting it refuses export admission with
-`resource_unavailable` instead of filling the state volume. The processing
-overlay passes these values to Web; they are identity data, not secrets or
-launcher configuration. The wrapper ignores ambient processing values and
-checks the fixed runtime path, root ownership, symlink-free ancestors,
-directory contents, and root-only owner claim before
-asking the launcher to reconcile as Web UID 1000. It proceeds only for the
-version-1 `photo-processing` capability with matching instance, policy and
-bundle, a valid incarnation, a positive admission sequence, and `available`
-admission. A qualification or Film measurement socket always fails this
-check, even when its own profile is available.
-
-This command selects a repository-owned, fixed processing Compose overlay from
-inside the wrapper. The operator cannot supply a Compose file, override, extra
-mount or entrypoint. Ordinary `up` uses only the base Compose file and never
-mounts a launcher endpoint, even if a processing socket path is present in the
-operator environment. `processing-up` validates the configured endpoint identity
-and mounts only the whole dedicated runtime directory read-only at its fixed
-container path. The overlay grants no Web access to the systemd or Docker socket.
-The directory may
-contain only the fixed bounded Unix socket and its root-only persistent owner
-claim; it exposes no launcher configuration, journal, Docker socket, systemd
-control socket, host root or writable cgroup mount. The directory and its
-ancestors must be canonical, symlink-free, root-owned and not writable by the
-Web UID. That UID may search the directory and connect to the socket through a
-named ACL, but cannot list the directory or read the claim. The whole-directory
-mount makes a replacement socket pathname visible after launcher restart;
-mounting only one socket inode would not. The launcher also checks peer
-credentials and the exact instance, policy and bundle on every request.
-Neither this command nor any environment value enables work outside launcher
-admission.
-
-If the launcher endpoint or policy is unavailable, `processing-up` must fail
-closed without weakening Web isolation or changing an already-running Library
-service. The ordinary `up` command remains the recovery path for Library
-browsing. `/healthz` continues to report only Library service health.
-`GET /api/processing/capability` follows the merged Photo Development service
-surface (`design/photo-development.md`): it reports the closed capability
-condition — `disabled` when the operator has not opted in, the named
-deployment defect when an opted-in path cannot be proven
-(`launcher-unavailable`, `bundle-unavailable`, `source-unsupported`,
-`resource-unavailable`), and `ready` only when the exact deployed launcher,
-policy, bundle, resource boundary and source qualification all check out. It
-never advertises the qualification profile as production capability, and the
-profile report stays empty only while the launcher itself exposes no
-photo-processing capability.
-
-Production acceptance tooling must exercise the packaged launcher and supported
-Compose path on the target host. It checks exact Web, launcher, worker, bundle
-and policy identities; socket and owner-claim ownership, parent mode/ACL,
-symlink-free path, read-only whole-directory mount, replacement socket inode
-after restart and peer UID; systemd/cgroup-v2/Docker
-topology; that the launcher and control service remain outside the processing
-subtree; and that complete attempts stay within their qualified finite memory,
-zero-swap, CPU, task and storage limits. It retains and checks allocation,
-OOM, cancellation, restart and cleanup evidence. It must also keep Library and
-Album reads responsive during a contained processing failure, then complete an
-exact subsequent successful attempt. A healthy endpoint, open socket, synthetic
-fixture qualification or ordinary repository gate is not a substitute for
-these deployment checks. Do not claim the RAW-to-TIFF-to-Film-to-JPEG workflow
-until its separate product acceptance Issues pass.
+Accept the deployment for processing only after the local smoke path exercises
+a real qualified RAW development end to end through this one-container path:
+Export before Preview, download validation, cancellation, deadline, engine
+failure, restart, scratch cleanup, and unchanged Original and external-XMP
+digests. The workflow acceptance runner and the real-camera smoke commands
+are documented in [tools/processing](../tools/processing/README.md) and
+[CONTRIBUTING.md](../CONTRIBUTING.md). Do not claim the
+RAW-to-TIFF-to-Film-to-JPEG workflow until its separate product acceptance
+Issues pass; Film remains unavailable.
 
 ## Configuration
 

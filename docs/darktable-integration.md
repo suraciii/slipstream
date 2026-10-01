@@ -25,6 +25,19 @@ The Web and CLI must use the same service-owned settings and capability
 boundaries. Neither client may bypass Slipstream by connecting directly to the
 engine. This specification does not add a public MCP interface or new CLI syntax.
 
+## Local Availability
+
+Slipstream is a personal, single-machine application. Photo Development must be
+an optional capability inside the same application installation, not a separately
+operated engine service. A normal local start must not require a host processing
+launcher, processing systemd unit, worker container, or processing control socket.
+
+Missing or invalid engine assets must leave the Library usable and report
+Development unavailable. The application must serialize development requests.
+Cancellation and timeout must finish engine cleanup before the next request runs.
+Film must remain unavailable unless separately qualified and admitted.
+
+
 ## Available Controls
 
 An engine module being installed or discoverable must not make it a supported

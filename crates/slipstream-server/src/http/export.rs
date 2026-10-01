@@ -181,11 +181,11 @@ pub(crate) async fn submit_export(
         }
     }
     // The Film qualification gate follows receipt resolution: a recorded
-    // Film identity still replays, expires, or conflicts from its receipt
-    // alone, but no fresh Film identity is admitted. The photo-processing
-    // launcher qualifies only the Development workload, so a full-resolution
-    // Film Export has no qualified stage to run; the refusal is a closed
-    // `processing_unavailable` and records neither an Export nor a receipt.
+    // request may replay alone, but no fresh Film identity is admitted. The
+    // local Photo processing boundary qualifies only the Development
+    // workload, so a full-resolution Film Export has no qualified stage to
+    // run; the refusal is a closed `processing_unavailable` and records
+    // neither an Export nor a receipt.
     if body.target == EXPORT_FILM_JPEG_TARGET {
         return export_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -292,7 +292,7 @@ pub(crate) async fn submit_export(
         return export_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "processing_unavailable",
-            "The processing launcher is not admitting export work",
+            "The local Photo processing boundary is not admitting export work",
         );
     }
     match state.application.library.submit_export(submission).await {

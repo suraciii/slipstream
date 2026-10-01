@@ -414,12 +414,7 @@ fn validated_capability_report(report: CapabilityReportWire) -> Result<Value, Co
     let invalid = || CommandFailure::transport(CAPABILITY_OPERATION);
     let state_valid = matches!(
         report.state.as_str(),
-        "disabled"
-            | "launcher-unavailable"
-            | "bundle-unavailable"
-            | "source-unsupported"
-            | "resource-unavailable"
-            | "ready"
+        "disabled" | "bundle-unavailable" | "source-unsupported" | "resource-unavailable" | "ready"
     );
     let stages_valid = matches!(
         report.stages.develop.as_str(),
@@ -439,11 +434,14 @@ fn validated_capability_report(report: CapabilityReportWire) -> Result<Value, Co
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     };
+    // The observed bundle and incarnation travel exactly with the ready
+    // condition: every other condition has verified no engine bundle, so it
+    // reports null identities rather than unverified ones.
     let identities_valid = match (&report.bundle_id, &report.incarnation) {
         (Some(bundle), Some(incarnation)) => {
-            report.state != "disabled" && lower_hex(bundle, 64) && lower_hex(incarnation, 32)
+            report.state == "ready" && lower_hex(bundle, 64) && lower_hex(incarnation, 32)
         }
-        (None, None) => matches!(report.state.as_str(), "disabled" | "launcher-unavailable"),
+        (None, None) => report.state != "ready",
         _ => false,
     };
     let state_shape_valid = match report.state.as_str() {
@@ -698,10 +696,6 @@ mod tests {
     }
 
     fn read_wire(document: Value) -> RecipeReadWire {
-        serde_json::from_value(document).expect("fixture decodes")
-    }
-
-    fn capability_wire(document: Value) -> CapabilityReportWire {
         serde_json::from_value(document).expect("fixture decodes")
     }
 
@@ -1303,106 +1297,7 @@ mod tests {
 
     // ------------------------------------------------------------ capability
 
-    fn ready_capability() -> Value {
-        json!({
-            "state": "ready",
-            "bundleId": "c".repeat(64),
-            "incarnation": "a".repeat(32),
-            "exposure": {"minimumEv": -4.0, "maximumEv": 4.0, "stepEv": 0.001},
-            "profiles": [
-                {
-                    "profileId": "sony-a7iv",
-                    "whiteBalanceModes": ["as-shot"],
-                    "whiteBalanceRanges": Value::Null,
-                },
-            ],
-            "stages": {"develop": "ready", "film": "ready"},
-        })
-    }
-
-    #[test]
-    fn capability_preserves_the_reported_profiles_and_ranges() {
-        let value =
-            validated_capability_report(capability_wire(ready_capability())).expect("ready report");
-        assert_eq!(value, ready_capability());
-        // The disabled condition carries no observed launcher identities.
-        let mut disabled = ready_capability();
-        disabled["state"] = json!("disabled");
-        disabled["bundleId"] = Value::Null;
-        disabled["incarnation"] = Value::Null;
-        disabled["stages"] = json!({"develop": "unavailable", "film": "unavailable"});
-        validated_capability_report(capability_wire(disabled)).expect("disabled report");
-        // A source-unsupported deployment reports an empty profile list.
-        let mut unsupported = ready_capability();
-        unsupported["state"] = json!("source-unsupported");
-        unsupported["profiles"] = json!([]);
-        unsupported["stages"] = json!({"develop": "unsupported", "film": "unsupported"});
-        let value = validated_capability_report(capability_wire(unsupported))
-            .expect("source-unsupported report");
-        assert_eq!(value["profiles"], json!([]));
-    }
-
-    #[test]
-    fn capability_refuses_reports_outside_the_closed_contract() {
-        let invalid = |document: Value| {
-            let failure = validated_capability_report(capability_wire(document)).unwrap_err();
-            assert_eq!(failure.exit_code, 6, "for {failure:?}");
-            assert_eq!(failure.payload.code, "transport_failed");
-            assert_eq!(
-                failure.payload.details["operation"],
-                "processing-capability"
-            );
-        };
-        let mut document = ready_capability();
-        document["state"] = json!("offline");
-        invalid(document);
-        let mut document = ready_capability();
-        document["stages"]["film"] = json!("queued");
-        invalid(document);
-        let mut document = ready_capability();
-        document["exposure"]["stepEv"] = json!(0.0);
-        invalid(document);
-        let mut document = ready_capability();
-        document["exposure"] = json!({"minimumEv": 4.0, "maximumEv": -4.0, "stepEv": 0.001});
-        invalid(document);
-        let mut document = ready_capability();
-        document["bundleId"] = json!("");
-        invalid(document);
-        let mut document = ready_capability();
-        document["profiles"][0]["profileId"] = json!("");
-        invalid(document);
-        let mut document = ready_capability();
-        document["profiles"][0]["whiteBalanceModes"] = json!([]);
-        invalid(document);
-        let mut document = ready_capability();
-        document["profiles"][0]["whiteBalanceModes"] = json!([""]);
-        invalid(document);
-        let mut document = ready_capability();
-        document["bundleId"] = Value::Null;
-        invalid(document);
-        let mut document = ready_capability();
-        document["stages"]["develop"] = json!("unsupported");
-        invalid(document);
-        let mut document = ready_capability();
-        document["profiles"][0]["whiteBalanceRanges"] = json!(42);
-        invalid(document);
-        for state in [
-            "disabled",
-            "launcher-unavailable",
-            "bundle-unavailable",
-            "resource-unavailable",
-        ] {
-            let mut document = ready_capability();
-            document["state"] = json!(state);
-            document["stages"] = json!({"develop": "unavailable", "film": "unavailable"});
-            document["profiles"] = json!([]);
-            if state == "disabled" {
-                document["bundleId"] = Value::Null;
-                document["incarnation"] = Value::Null;
-            }
-            invalid(document);
-        }
-    }
+    mod capability;
 
     #[test]
     fn missing_nullable_facts_and_null_white_balance_fields_are_refused() {

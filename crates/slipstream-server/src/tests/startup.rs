@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 fn environment(values: &[(&str, &str)]) -> HashMap<String, String> {
     values
@@ -41,68 +42,130 @@ fn optional_origin_defaults_to_local_http_without_changing_listener() {
 }
 
 #[test]
-fn processing_startup_requires_complete_canonical_identity_pins() {
+fn photo_development_startup_resolves_the_local_bundle_identity() {
     let base = vec![
-        ("SLIPSTREAM_LIBRARY_ROOT".to_owned(), "/photos".to_owned()),
-        ("SLIPSTREAM_STATE_DIRECTORY".to_owned(), "/state".to_owned()),
-        ("SLIPSTREAM_CACHE_DIRECTORY".to_owned(), "/cache".to_owned()),
-        (
-            "SLIPSTREAM_PUBLIC_ORIGIN".to_owned(),
-            "https://camera.local".to_owned(),
-        ),
+        ("SLIPSTREAM_LIBRARY_ROOT", "/photos"),
+        ("SLIPSTREAM_STATE_DIRECTORY", "/state"),
+        ("SLIPSTREAM_CACHE_DIRECTORY", "/cache"),
+        ("SLIPSTREAM_PUBLIC_ORIGIN", "https://camera.local"),
     ];
+
+    // An unknown enablement value is refused before anything resolves.
     let mut values = base.clone();
-    values.extend([
-        (
-            "SLIPSTREAM_PROCESSING_INSTANCE".to_owned(),
-            "0123456789abcdef0123456789abcdef".to_owned(),
-        ),
-        (
-            "SLIPSTREAM_PROCESSING_POLICY_SHA256".to_owned(),
-            "b b".to_owned(),
-        ),
-        (
-            "SLIPSTREAM_PROCESSING_BUNDLE_SHA256".to_owned(),
-            "c".to_owned(),
-        ),
-    ]);
+    values.push(("SLIPSTREAM_PHOTO_DEVELOPMENT", "on"));
     assert_eq!(
-        Config::from_env(values),
-        Err(ConfigError::Invalid("SLIPSTREAM_PROCESSING_POLICY_SHA256"))
+        Config::from_env(environment(&values)),
+        Err(ConfigError::Invalid("SLIPSTREAM_PHOTO_DEVELOPMENT"))
     );
 
+    // A bundle directory override must be absolute.
     let mut values = base.clone();
-    values.push((
-        "SLIPSTREAM_PROCESSING_INSTANCE".to_owned(),
-        "0123456789abcdef0123456789abcdef".to_owned(),
+    values.push(("SLIPSTREAM_PHOTO_DEVELOPMENT", "enabled"));
+    values.push(("SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY", "relative/photo"));
+    assert_eq!(
+        Config::from_env(environment(&values)),
+        Err(ConfigError::Invalid("SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY"))
+    );
+
+    // An explicit opt-out configures no processing deployment.
+    let mut values = base.clone();
+    values.push(("SLIPSTREAM_PHOTO_DEVELOPMENT", "disabled"));
+    assert_eq!(
+        Config::from_env(environment(&values)).unwrap().processing,
+        None
+    );
+
+    let defaults = Config::from_env(environment(&[
+        ("SLIPSTREAM_LIBRARY_ROOT", "/photos"),
+        ("SLIPSTREAM_STATE_DIRECTORY", "/state"),
+        ("SLIPSTREAM_CACHE_DIRECTORY", "/cache"),
+        ("SLIPSTREAM_PUBLIC_ORIGIN", "https://camera.local"),
+    ]))
+    .unwrap();
+    assert_eq!(
+        defaults.export_retained_output_bytes,
+        Some(8 * 1024 * 1024 * 1024)
+    );
+
+    // An override that names no installed bundle resolves the default
+    // bundle location with the bundle unavailable.
+    let mut values = base.clone();
+    values.push(("SLIPSTREAM_PHOTO_DEVELOPMENT", "enabled"));
+    let missing = std::env::temp_dir().join(format!(
+        "slipstream-missing-photo-bundle-{}",
+        std::process::id()
     ));
-    assert_eq!(
-        Config::from_env(values),
-        Err(ConfigError::Missing("SLIPSTREAM_PROCESSING_POLICY_SHA256"))
-    );
-
-    let mut values = base;
-    values.extend([
-        (
-            "SLIPSTREAM_PROCESSING_INSTANCE".to_owned(),
-            "0123456789abcdef0123456789abcdef".to_owned(),
-        ),
-        (
-            "SLIPSTREAM_PROCESSING_POLICY_SHA256".to_owned(),
-            "b".repeat(64),
-        ),
-        (
-            "SLIPSTREAM_PROCESSING_BUNDLE_SHA256".to_owned(),
-            "c".repeat(64),
-        ),
-    ]);
-    let config = Config::from_env(values).unwrap();
+    values.push((
+        "SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY",
+        missing.to_str().unwrap(),
+    ));
+    let config = Config::from_env(environment(&values)).unwrap();
     let processing = config.processing.unwrap();
-    assert_eq!(processing.instance, "0123456789abcdef0123456789abcdef");
+    assert_eq!(processing.bundle_root, missing);
+    assert_eq!(processing.failure, Some("bundle-unavailable"));
+    assert_eq!(processing.bundle_sha256, "");
+
+    // A complete local bundle whose manifest and named asset digests match.
+    let installed =
+        std::env::temp_dir().join(format!("slipstream-photo-bundle-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&installed);
+    fs::create_dir_all(installed.join("darktable/bin")).unwrap();
+    fs::create_dir_all(installed.join("icc")).unwrap();
+    let engine = installed.join("darktable/bin/darktable-mcp");
+    fs::write(&engine, b"engine").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+    let metadata_path = installed.join("engine-metadata.json");
+    fs::write(&metadata_path, br#"{"tools":[],"modules":[],"schemas":{}}"#).unwrap();
+    let icc_path = installed.join("icc/LargeRGB-elle-V2-g10.icc");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../slipstream-core/assets/prophoto-linear-g10.icc"),
+        &icc_path,
+    )
+    .unwrap();
+    let commit_path = installed.join("darktable-commit");
+    fs::write(&commit_path, format!("{}\n", "a".repeat(40))).unwrap();
+    let packages_path = installed.join("os-packages.txt");
+    fs::write(&packages_path, b"test-package\n").unwrap();
+    let digest = |path: &Path| format!("{:x}", Sha256::digest(fs::read(path).unwrap()));
+    let manifest = serde_json::json!({
+        "format": 1,
+        "darktable_commit": "a".repeat(40),
+        "engine": "/opt/darktable/bin/darktable-mcp",
+        "native": {"bin/darktable-mcp": digest(&engine)},
+        "files": {
+            "/opt/slipstream-photo/engine-metadata.json": digest(&metadata_path),
+            "/opt/slipstream-photo/icc/LargeRGB-elle-V2-g10.icc": digest(&icc_path),
+            "/opt/slipstream-photo/darktable-commit": digest(&commit_path),
+            "/opt/os-packages.txt": digest(&packages_path),
+        },
+        "metadata": digest(&metadata_path),
+        "icc": slipstream_processing::local_photo::ICC_ASSET_SHA256,
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    fs::write(installed.join("bundle-manifest.json"), &manifest_bytes).unwrap();
+    fs::write(
+        installed.join("bundle"),
+        format!("{:x}\n", Sha256::digest(&manifest_bytes)),
+    )
+    .unwrap();
+    let mut values = base;
+    values.push(("SLIPSTREAM_PHOTO_DEVELOPMENT", "auto"));
+    values.push((
+        "SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY",
+        installed.to_str().unwrap(),
+    ));
+    let config = Config::from_env(environment(&values)).unwrap();
+    let processing = config.processing.unwrap();
+    assert_eq!(processing.bundle_root, installed);
+    assert_eq!(processing.failure, None);
     assert_eq!(
-        processing.socket_path(),
-        PathBuf::from("/run/slipstream-processing/0123456789abcdef0123456789abcdef/launcher.sock")
+        processing.bundle_sha256,
+        format!("{:x}", Sha256::digest(&manifest_bytes))
     );
+    assert_eq!(processing.policy_sha256.len(), 64);
+    let _ = fs::remove_dir_all(installed);
 }
 
 #[test]
@@ -150,9 +213,15 @@ fn checked_in_startup_vectors_parse_through_the_typed_config() {
             config.port,
             vector["expected"]["port"].as_u64().unwrap() as u16
         );
-        // No checked-in vector pins a processing identity, so the typed
-        // config leaves the processing policy unset.
-        assert_eq!(config.processing, None);
+        // No checked-in vector pins a photo bundle directory, so the typed
+        // config resolves the default bundle location for every vector.
+        assert_eq!(
+            config
+                .processing
+                .as_ref()
+                .map(|processing| processing.bundle_root.clone()),
+            Some(PathBuf::from("/opt/slipstream-photo"))
+        );
     }
 }
 
