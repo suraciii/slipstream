@@ -1486,7 +1486,7 @@ pub(super) fn seed_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::removal::{PermanentDeletionStoredItem, reviewed_facts};
+    use crate::persistence::permanent_deletion::{PermanentDeletionStoredItem, reviewed_facts};
     use crate::persistence::test_support::*;
     use crate::persistence::{Persistence, PersistenceError};
     use crate::{
