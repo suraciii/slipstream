@@ -715,123 +715,132 @@ test("a failed Export retains its specific failure reason", async ({
   ).toContainText("The processing allowance is insufficient for this output.");
 });
 
-test("a retained Finished JPEG downloads from its own output card", async ({
-  page,
-}) => {
-  const artifact = {
-    exportId: "retained-film",
-    filename: "slipstream-film-retained-film.jpg",
-    orientation: "landscape",
-    sampleFormat: "uint8",
-    colorSpace: "sRGB",
-    iccEmbedded: true,
-    target: "film-jpeg",
-    stage: "film",
-    contentType: "image/jpeg",
-    width: 16,
-    height: 12,
-    profileIdentity: "fixed-film",
-    byteLength: 3,
-    sha256: createHash("sha256").update("jpg").digest("hex"),
-    expiresAt: "2099-01-01T00:00:00Z",
-  };
-  await page.route("**/api/processing/capability", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        state: "ready",
-        stages: { develop: "ready", film: "unavailable" },
-        profiles: [],
-      }),
-    }),
-  );
-  await page.route("**/api/photos/*/edit-recipe", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        sourceSupport: "supported",
-        supportReason: null,
-        sourceRevision: "source-1",
-        recipe: {
-          recipeVersion: "recipe-1",
-          exposureEv: 0,
-          whiteBalance: { mode: "as-shot" },
-        },
-        processingAvailable: true,
-        controls: {
-          exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
-          whiteBalanceModes: ["as-shot"],
-        },
-      }),
-    }),
-  );
-  await page.route("**/api/photos/*/exports", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ exports: [{ exportId: "retained-film" }] }),
-    }),
-  );
-  await page.route("**/api/exports/retained-film", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        exportId: "retained-film",
-        target: "film-jpeg",
-        state: "succeeded",
-        artifact,
-      }),
-    }),
-  );
-  await page.route("**/api/exports/retained-film/artifact", (route) =>
-    route.fulfill({
-      status: 200,
+for (const digestPath of ["native", "worker"] as const) {
+  test(`a retained Finished JPEG validates and downloads using ${digestPath} hashing`, async ({
+    page,
+  }) => {
+    if (digestPath === "worker")
+      await page.addInitScript(() =>
+        Object.defineProperty(crypto, "subtle", { value: undefined }),
+      );
+    const bytes = Buffer.alloc(1024 * 1024 + 67);
+    for (let index = 0; index < bytes.length; index++)
+      bytes[index] = index % 251;
+    const artifact = {
+      exportId: "retained-film",
+      filename: "slipstream-film-retained-film.jpg",
+      orientation: "landscape",
+      sampleFormat: "uint8",
+      colorSpace: "sRGB",
+      iccEmbedded: true,
+      target: "film-jpeg",
+      stage: "film",
       contentType: "image/jpeg",
-      headers: {
-        "slipstream-artifact-export-id": "retained-film",
-        "slipstream-artifact-target": artifact.target,
-        "slipstream-artifact-stage": artifact.stage,
-        "slipstream-artifact-content-type": artifact.contentType,
-        "slipstream-artifact-width": String(artifact.width),
-        "slipstream-artifact-height": String(artifact.height),
-        "slipstream-artifact-profile-identity": artifact.profileIdentity,
-        "slipstream-artifact-byte-length": String(artifact.byteLength),
-        "slipstream-artifact-sha256": artifact.sha256,
-        "slipstream-artifact-expires-at": artifact.expiresAt,
-        "slipstream-artifact-filename": artifact.filename,
-        "slipstream-artifact-orientation": artifact.orientation,
-        "slipstream-artifact-sample-format": artifact.sampleFormat,
-        "slipstream-artifact-color-space": artifact.colorSpace,
-        "slipstream-artifact-icc-embedded": String(artifact.iccEmbedded),
-      },
-      body: "jpg",
-    }),
-  );
+      width: 16,
+      height: 12,
+      profileIdentity: "fixed-film",
+      byteLength: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      expiresAt: "2099-01-01T00:00:00Z",
+    };
+    await page.route("**/api/processing/capability", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "ready",
+          stages: { develop: "ready", film: "unavailable" },
+          profiles: [],
+        }),
+      }),
+    );
+    await page.route("**/api/photos/*/edit-recipe", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          sourceSupport: "supported",
+          supportReason: null,
+          sourceRevision: "source-1",
+          recipe: {
+            recipeVersion: "recipe-1",
+            exposureEv: 0,
+            whiteBalance: { mode: "as-shot" },
+          },
+          processingAvailable: true,
+          controls: {
+            exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
+            whiteBalanceModes: ["as-shot"],
+          },
+        }),
+      }),
+    );
+    await page.route("**/api/photos/*/exports", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ exports: [{ exportId: "retained-film" }] }),
+      }),
+    );
+    await page.route("**/api/exports/retained-film", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          exportId: "retained-film",
+          target: "film-jpeg",
+          state: "succeeded",
+          artifact,
+        }),
+      }),
+    );
+    await page.route("**/api/exports/retained-film/artifact", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "image/jpeg",
+        headers: {
+          "slipstream-artifact-export-id": "retained-film",
+          "slipstream-artifact-target": artifact.target,
+          "slipstream-artifact-stage": artifact.stage,
+          "slipstream-artifact-content-type": artifact.contentType,
+          "slipstream-artifact-width": String(artifact.width),
+          "slipstream-artifact-height": String(artifact.height),
+          "slipstream-artifact-profile-identity": artifact.profileIdentity,
+          "slipstream-artifact-byte-length": String(artifact.byteLength),
+          "slipstream-artifact-sha256": artifact.sha256,
+          "slipstream-artifact-expires-at": artifact.expiresAt,
+          "slipstream-artifact-filename": artifact.filename,
+          "slipstream-artifact-orientation": artifact.orientation,
+          "slipstream-artifact-sample-format": artifact.sampleFormat,
+          "slipstream-artifact-color-space": artifact.colorSpace,
+          "slipstream-artifact-icc-embedded": String(artifact.iccEmbedded),
+        },
+        body: bytes,
+      }),
+    );
 
-  await page.goto(running.url);
-  await expect(page.locator("[data-grid-status]")).toContainText(
-    "Ready · 2 Photos",
-  );
-  await page.locator('[data-photo-index="0"]').click();
-  await openEdit(page);
-  await expect(
-    page.locator(
-      '[data-editor-output="development-tiff"] [data-output-action="submit"]',
-    ),
-  ).toBeEnabled();
-  const downloadButton = page.locator(
-    '[data-editor-output="film-jpeg"] [data-output-action="download"]',
-  );
-  await expect(downloadButton).toBeVisible();
-  const download = page.waitForEvent("download");
-  await downloadButton.click();
-  expect((await download).suggestedFilename()).toBe(
-    "slipstream-film-retained-film.jpg",
-  );
-});
+    await page.goto(running.url);
+    await expect(page.locator("[data-grid-status]")).toContainText(
+      "Ready · 2 Photos",
+    );
+    await page.locator('[data-photo-index="0"]').click();
+    await openEdit(page);
+    await expect(
+      page.locator(
+        '[data-editor-output="development-tiff"] [data-output-action="submit"]',
+      ),
+    ).toBeEnabled();
+    const downloadButton = page.locator(
+      '[data-editor-output="film-jpeg"] [data-output-action="download"]',
+    );
+    await expect(downloadButton).toBeVisible();
+    const download = page.waitForEvent("download");
+    await downloadButton.click();
+    const file = await download;
+    expect(file.suggestedFilename()).toBe("slipstream-film-retained-film.jpg");
+    expect(await readFile(await file.path())).toEqual(bytes);
+  });
+}
 
 test("an admitted Edit Preview remains observable after the old 15-second polling limit", async ({
   page,

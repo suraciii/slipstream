@@ -207,6 +207,9 @@ The Photographer must be able to inspect Export state, cancel unfinished work,
 and download a completed artifact. Accepted work must survive browser departure.
 Downloads must identify their type, size, and expiry when available. Output
 filenames must distinguish the two targets and avoid collisions.
+The browser must verify the complete artifact length and SHA-256 before offering
+the file. Large-file integrity checks must leave the interface responsive on
+both HTTP and HTTPS.
 
 Exports and intermediate files must remain outside the Library Folder. They
 must not create new Photos automatically or overwrite Original Files. Downloads

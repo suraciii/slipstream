@@ -29,6 +29,9 @@ sudo python3 tools/processing/verify-deployment.py \
   --web-token-file /run/secrets/slipstream-cli-token
 ```
 
+`--web-url` accepts HTTP or HTTPS; an HTTP origin in any letter case prints an
+unencrypted-connection warning before the authenticated Web reads.
+
 The report is a `read-only-deployment-snapshot` with a status of
 `read-only-checks-passed` or `read-only-checks-failed`. It checks cgroup v2
 controllers, systemd, Docker's systemd cgroup driver, the root-owned launcher

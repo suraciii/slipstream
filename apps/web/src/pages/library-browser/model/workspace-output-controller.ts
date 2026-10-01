@@ -1,6 +1,6 @@
 import type { BrowserFetch } from "./access-session.js";
 import { isRecord } from "../api/editor.js";
-import { randomUuid, sha256Hex } from "./browser-crypto.js";
+import { randomUuid, blobSha256Hex } from "./browser-crypto.js";
 import {
   artifactMatchesHeaders,
   parseExportInspection,
@@ -257,7 +257,7 @@ async function blobMatches(
   expected: { byteLength: number; sha256: string },
 ): Promise<boolean> {
   if (blob.size !== expected.byteLength) return false;
-  const digest = sha256Hex(new Uint8Array(await blob.arrayBuffer()));
+  const digest = await blobSha256Hex(blob);
   return digest === expected.sha256;
 }
 function xmpHeadersMatch(

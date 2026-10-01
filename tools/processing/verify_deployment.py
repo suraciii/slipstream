@@ -621,6 +621,18 @@ def _regular_root_file(name: str, path: Path, *, executable: bool = False, root_
     return Check(name, True)
 
 
+def _plaintext_http(url: str) -> bool:
+    """Report whether url has an http scheme, in any letter case.
+
+    A URL that fails to parse is not a plaintext request target; the web
+    checks report it as an invalid URL instead.
+    """
+    try:
+        return urllib.parse.urlsplit(url).scheme == "http"
+    except ValueError:
+        return False
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--instance", required=True)
@@ -634,7 +646,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = parse_args(argv)
-    if arguments.web_url and arguments.web_url.startswith("http:"):
+    if arguments.web_url and _plaintext_http(arguments.web_url):
         print("Warning: HTTP is unencrypted; photos and credentials may be observed in transit.", file=sys.stderr)
     snapshot = DeploymentSnapshot(
         instance=arguments.instance,
