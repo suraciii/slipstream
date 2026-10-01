@@ -16,17 +16,17 @@ await runFileSizeCheck({
     {
       root: "crates",
       extensions: extensions(".rs"),
-      maxLines: 3000,
+      maxLines: 1000,
     },
     {
       root: "apps/web/src",
       extensions: extensions(".ts", ".tsx"),
-      maxLines: 3000,
+      maxLines: 1000,
     },
     {
       root: "scripts",
       extensions: extensions(".mjs", ".ts"),
-      maxLines: 3000,
+      maxLines: 1000,
     },
     // `compatibility/` is contract data, not implementation: its JSON and SQL
     // vectors are already governed by the compatibility inventory test and the
