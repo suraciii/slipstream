@@ -12,12 +12,14 @@ mod migrations;
 mod mutation;
 mod owner;
 mod owner_recovery;
+mod permanent_deletion;
 mod queries;
 mod removal;
 mod scan;
 mod schema;
 #[cfg(test)]
 mod test_support;
+mod trash;
 mod xmp;
 
 pub use crate::domain::{
