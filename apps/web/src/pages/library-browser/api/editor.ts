@@ -1,4 +1,5 @@
 import type { BrowserFetch } from "../model/access-session.js";
+import { randomUuid } from "../model/browser-crypto.js";
 import {
   asEditorSupportReason,
   type AdmittedWhiteBalance,
@@ -496,7 +497,7 @@ export const rebindEditRecipe = async (
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          requestId: `web-rebind-${crypto.randomUUID().replaceAll("-", "").slice(0, 24)}`,
+          requestId: `web-rebind-${randomUuid().replaceAll("-", "").slice(0, 24)}`,
           expectedRecipeVersion,
           newSourceRevision,
         }),

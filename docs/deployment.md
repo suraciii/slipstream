@@ -355,12 +355,12 @@ until its separate product acceptance Issues pass.
 
 ## Configuration
 
-For application installation, serve the Web application and its API on the
-same trusted HTTPS origin through an operator-managed reverse proxy. Keep
-the listener within the trusted-network boundary described below; TLS does
-not add authentication. An HTTP LAN address is not a localhost development
-exception. See [Installed Web Application](installed-web-app.md) for launch
-and online-use behavior.
+Serve the Web application and API on the same HTTP or HTTPS origin. Local use
+defaults to `http://localhost:3000` and needs no certificate, domain, or reverse
+proxy. Direct HTTP on an explicitly configured network interface is also
+supported; the browser and CLI warn that network observers can read photos and
+credentials. HTTPS is recommended for public or untrusted networks. Installation
+has the secure-context requirements in [Installed Web Application](installed-web-app.md).
 
 Create an environment file outside the repository:
 
@@ -371,21 +371,24 @@ SLIPSTREAM_STATE_DIRECTORY=/srv/slipstream/state
 SLIPSTREAM_CACHE_DIRECTORY=/srv/slipstream/cache
 SLIPSTREAM_BIND_ADDRESS=127.0.0.1
 SLIPSTREAM_PORT=3000
-SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com
+# Optional: SLIPSTREAM_PUBLIC_ORIGIN=http://photos.local:3000
 ```
 
-`SLIPSTREAM_BIND_ADDRESS` controls the host-side published interface and
-must remain private behind the HTTPS reverse proxy. The Rust process listens
-on the container network; Docker publication and network policy must prevent
-public clients from bypassing the proxy.
+`SLIPSTREAM_BIND_ADDRESS` controls the host-side published interface and defaults
+to loopback. Setting an origin never changes it. To use direct HTTP from a trusted
+network, explicitly set the bind address and an HTTP origin reachable from those
+devices. The Rust process listens on the container network; Docker controls host
+publication. An omitted origin uses `http://localhost:<published port>`.
 
 [Instance Access](access.md) defines token provisioning and access behavior.
 [Instance Access Architecture](../design/access.md) owns credential enforcement,
-canonical-origin validation, and private response caching. The operator must
-configure a canonical HTTPS origin and provision a token before exposing the
-Library. An absent token never enables anonymous access, including on loopback.
-Forwarded headers do not establish identity. The proxy must disable caching for
-private responses and expose only the intended origin with trusted TLS.
+canonical-origin validation, and private response caching. Provision a token before
+opening the Library. An absent token never enables anonymous access, including on
+loopback. Forwarded headers do not establish identity.
+
+For an existing HTTPS deployment, set `SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com`
+and retain the TLS proxy. Keep its backend private and disable proxy caching for
+private responses. Slipstream does not manage certificates or listen with TLS itself.
 
 For upgrade, the operator must keep public ingress closed, back up application
 state, provision authentication through local administration with the server
@@ -398,11 +401,11 @@ Operator acceptance tooling must use the credential for private API probes;
 
 ## Access Administration
 
-`SLIPSTREAM_PUBLIC_ORIGIN` must contain the canonical HTTPS origin with no
-userinfo, query, fragment, or path other than `/`. It is required at server
-startup, including setup-required operation. It must be carried from the
-operator environment file into the container. Trailing `/` is canonicalized;
-matching uses parsed scheme, host, and effective port. It contains no secret.
+When supplied, `SLIPSTREAM_PUBLIC_ORIGIN` must contain a canonical HTTP or HTTPS
+origin with no userinfo, query, fragment, or path other than `/`. It contains no
+secret. When omitted, it uses `http://localhost:<port>`; Compose uses the published
+host port. The environment file selects the origin. Trailing `/` is canonicalized;
+matching uses parsed scheme, host, and effective port.
 
 The supported Compose entry point adds `access-create`, `access-rotate`, and
 `access-revoke`. Each accepts the same single environment file and immutable
@@ -437,10 +440,9 @@ Underlying `slipstream-server access-create|access-rotate|access-revoke` uses
 the same existing storage environment and exit 0 for confirmed success, 1 for
 failure. No operation may modify Originals or clear Library state.
 
-The web/CLI HTTPS origin must remain usable from the operator host; authenticated
-CLI access has no plaintext loopback exception. [CLI Reference](cli-reference.md)
-owns credential-file selection. Retain the minimal unauthenticated `/healthz`
-probe on the private hop for container readiness.
+The configured Web/CLI origin must remain reachable from the operator host.
+[CLI Reference](cli-reference.md) owns credential-file selection. Retain the minimal
+unauthenticated `/healthz` probe for container readiness.
 
 ## Storage Rules
 
@@ -525,8 +527,8 @@ wins over ambient `SLIPSTREAM_IMAGE`, `SLIPSTREAM_BIND_ADDRESS`,
 `SLIPSTREAM_PORT`, `SLIPSTREAM_PUBLIC_ORIGIN`, and `SLIPSTREAM_DATABASE_BASENAME` values. It also clears ambient
 `SLIPSTREAM_LIBRARY_ROOT`, `SLIPSTREAM_STATE_DIRECTORY`, and
 `SLIPSTREAM_CACHE_DIRECTORY` before startup exports its checked canonical
-values. An absent or malformed `SLIPSTREAM_PUBLIC_ORIGIN` in the environment
-file must not fall back to an ambient origin for startup. Access administration
+values. An absent `SLIPSTREAM_PUBLIC_ORIGIN` selects the localhost HTTP default;
+a malformed value must fail rather than use an ambient origin for startup. Access administration
 must likewise clear ambient origin values; its offline state operation does not
 require a public origin. These commands use the same image/storage preflight
 and precedence, with interactive and logging behavior from Access Administration.
@@ -587,7 +589,7 @@ Docker, so a QA path cannot be an alias into production storage. The operator
 must never copy production state or Originals into a QA fixture.
 
 For QA `up` and `up -d`, the environment file must satisfy the ordinary
-immutable-image and canonical HTTPS-origin grammar. The launcher checks an
+immutable-image and optional HTTP/HTTPS-origin grammar. The launcher checks an
 explicit `SLIPSTREAM_BIND_ADDRESS=127.0.0.1` and an explicit decimal
 `SLIPSTREAM_PORT` from 1024 through 65535 before Docker. The port must differ
 from the ordinary instance's published port; Docker refuses an occupied port
@@ -603,8 +605,8 @@ rejection of `COMPOSE_*`/`DOCKER_*` declarations. It uses the same stop-only
 sentinels and the fixed QA Compose files, without checking unavailable fixture
 paths, image, or origin. It targets only the named QA project and never removes
 host directories. Access creation and rotation retain the interactive, no-log
-token-delivery contract. Qualification needs a private HTTPS proxy and a
-separately trusted client; loopback HTTP alone is not a CLI endpoint.
+token-delivery contract. Qualification may use direct loopback HTTP or a private
+HTTPS proxy with a trusted client, exercising the selected transport.
 Containers share the local Docker daemon and host capacity: this mode does not
 turn an untrusted workload into an isolated security domain.
 

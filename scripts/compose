@@ -147,8 +147,8 @@ literal_public_origin() {
   local value=$1 authority host port label
   local -a labels=()
   valid_utf8 "$value" || return 1
-  [[ ${#value} -le 2048 && "$value" == https://* ]] || return 1
-  authority=${value#https://}
+  [[ ${#value} -le 2048 && ( "$value" == https://* || "$value" == http://* ) ]] || return 1
+  authority=${value#*://}
   authority=${authority%/}
   [[ "$authority" =~ ^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(:([0-9]+))?$ ]] || return 1
   host=${BASH_REMATCH[1]}
@@ -185,7 +185,7 @@ parse_public_origin() {
       fail "environment file has invalid $public_origin_key"
     fi
   done < "$environment_file"
-  [[ "$declared" == true ]] || fail "environment file is missing $public_origin_key"
+  return 0
 }
 
 parse_processing_configuration() {

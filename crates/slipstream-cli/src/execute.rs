@@ -32,6 +32,11 @@ pub(crate) async fn execute(
         _ => None,
     };
     let origin = service_origin(cli, environment)?;
+    if origin.scheme() == "http" {
+        eprintln!(
+            "Warning: the HTTP service origin is unencrypted; requests and credentials may be observed in transit."
+        );
+    }
     let token_path = access_token_path(cli)?;
     let token = read_access_token(token_path).await?;
     // The complete membership and decision documents validate before any

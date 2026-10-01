@@ -283,14 +283,13 @@ SLIPSTREAM_CACHE_DIRECTORY=/var/cache/slipstream \
 SLIPSTREAM_WEB_ROOT="$PWD/apps/web/dist" \
 SLIPSTREAM_HOST=127.0.0.1 \
 SLIPSTREAM_PORT=3000 \
-SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com \
 cargo run --locked -p slipstream-server
 ```
 
 `SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults
-to loopback; set `SLIPSTREAM_HOST` to the private listener address. Configure
-the canonical HTTPS origin and provision an Access Token with the stopped-server
-[access administration procedure](docs/deployment.md#access-administration).
+to loopback. Open `http://localhost:3000`; optionally set `SLIPSTREAM_PUBLIC_ORIGIN`
+to an HTTP or HTTPS origin and `SLIPSTREAM_HOST` to an explicit network listener.
+Provision an Access Token with the stopped-server [access administration procedure](docs/deployment.md#access-administration).
 Without a token, only the public shell, access status, and health check are
 available. `GET /api/status` requires valid access and reports Library
 initialization, scan, and publication state.
@@ -322,4 +321,4 @@ fixed container inputs without building an image. The explicit Linux amd64
 digest-only Compose operation are defined by
 [`docs/deployment.md`](docs/deployment.md).
 
-The bind address exposed on the host is configured with `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. The backend must remain private behind the configured HTTPS proxy. Supported Compose operations use [`scripts/compose`](scripts/compose); their input grammar and Linux-local Docker deployment contract are defined by [`docs/deployment.md`](docs/deployment.md).
+The host bind address uses `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. Direct HTTP needs no proxy; existing HTTPS deployments retain their private proxy backend. Supported Compose operations use [`scripts/compose`](scripts/compose); their input grammar and Linux-local Docker deployment contract are defined by [`docs/deployment.md`](docs/deployment.md).

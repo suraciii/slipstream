@@ -33,8 +33,13 @@ arguments. Protect authentication state under the admitted state directory.
 
 Each Browser Session must use a separate 32-byte CSPRNG secret. Persist only its
 digest, credential generation, creation time, and absolute expiry, plus a session-bound random 32-byte CSRF secret. The browser
-receives it in a `__Host-slipstream` cookie with Secure, HttpOnly, SameSite=Lax,
-Path=/, and no Domain. Its maximum age must not exceed server expiry. CSRF material is not an authentication credential; keep it in protected session storage and expose it only to the authenticated browser through status. Rotate it when a new session is created. Restart
+receives it in a host-only cookie with HttpOnly, SameSite=Lax, Path=/, and no
+Domain. HTTPS uses `__Host-slipstream` with Secure; HTTP uses `slipstream` without
+Secure. The configured origin selects the cookie for issuance, admission, and
+expiration; forwarded headers must not select or weaken it. Its maximum age
+must not exceed server expiry. CSRF material is not an authentication credential;
+keep it in protected session storage and expose it only to the authenticated
+browser through status. Rotate it when a new session is created. Restart
 must preserve valid sessions; expiration and generation checks are server-owned.
 Never store the Access Token in this cookie or persist either secret in
 localStorage, sessionStorage, IndexedDB, or Cache Storage.
@@ -56,8 +61,8 @@ binary without access enforcement must remain isolated from public traffic.
 
 ## Browser and Machine Admission
 
-The browser sends the Access Token once in an HTTPS POST body to establish a
-session. That route must enforce the configured origin, bounded body size,
+The browser sends the Access Token once in a POST body to establish a session
+over the configured HTTP or HTTPS origin. That route must enforce the origin, bounded body size,
 rate limiting, and logging redaction. Issue a fresh session identifier on each
 successful exchange. Session status must reveal only current access state and
 expiry, not Library details. Logout must be a protected state-changing request
@@ -190,13 +195,26 @@ to a protected image. Purge operator-controlled public caches before exposure.
 Changing response headers cannot recall bytes already cached or downloaded.
 Keep static asset caching separate from private response policy.
 
-The operator configures one canonical HTTPS origin. The proxy terminates TLS,
-forwards requests to a private backend, and must not cache private responses.
-Plain HTTP within that private hop is not an authentication bypass. Only fixed,
-trusted proxy topology can carry transport information; arbitrary forwarded
-headers never grant access. The client must verify TLS and must refuse to send
-a credential over HTTP. There is no anonymous loopback or development fallback
-in the production contract.
+The operator configures one canonical HTTP or HTTPS origin, containing no
+credentials, non-root path, query, or fragment. An omitted origin resolves to
+`http://localhost:<port>`; it never changes the listener's loopback default.
+An explicit listener setting is required for network exposure. Existing HTTPS
+deployments may terminate TLS at a proxy. Arbitrary forwarded headers never
+grant access or select cookie attributes. Clients verify HTTPS certificates,
+warn once per CLI invocation or visibly in the Web UI for HTTP, and never
+follow redirects with credentials or silently change scheme.
+
+Request identifiers use `crypto.getRandomValues` CSPRNG bytes available over
+HTTP, with UUID version and variant bits. If CSPRNG is unavailable, fail rather
+than substitute weak randomness. Download SHA-256 verification uses an
+established library and rejects altered bytes even when secure-context Web
+Crypto is unavailable. Ordinary HTTP browser use preserves all Library
+operations; installation requires a browser secure context.
+
+Selected: adapt the existing origin and session contract to the transport.
+Separate access modes or pairing would add configuration and lifecycle state
+without changing authentication requirements. Built-in TLS and certificate
+management are outside this change.
 
 ## Options
 

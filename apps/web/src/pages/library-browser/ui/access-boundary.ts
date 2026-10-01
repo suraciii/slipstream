@@ -44,6 +44,13 @@ function formatDelay(totalSeconds: number): string {
   }
   return parts.join(" ");
 }
+const isUnencryptedHttp = (): boolean =>
+  typeof window !== "undefined" && window.location.protocol === "http:";
+
+const transportNotice = (): string =>
+  isUnencryptedHttp()
+    ? "Unencrypted HTTP: people on this network may read your photos and credentials, including your Access Token during login."
+    : "Secure HTTPS connection.";
 
 export function mountAccessBoundary(
   root: HTMLElement,
@@ -129,6 +136,7 @@ export function mountAccessBoundary(
         <section class="access-panel" aria-labelledby="access-title">
           <h1 id="access-title">Slipstream</h1>
           <p class="access-subtitle">Open your photo library</p>
+          <p class="access-transport ${isUnencryptedHttp() ? "access-transport-warning" : "access-transport-secure"}" role="status">${escapeText(transportNotice())}</p>
           <p class="access-message" data-access-message role="alert" aria-live="polite" ${options.message ? "" : "hidden"}>${escapeText(options.message ?? "")}</p>
           <form data-access-form>
             <label for="access-token">Access Token</label>
@@ -274,6 +282,13 @@ export function mountAccessBoundary(
         () => {},
       ),
     );
+    const transport = document.createElement("p");
+    transport.className = `private-transport ${isUnencryptedHttp() ? "access-transport-warning" : "access-transport-secure"}`;
+    transport.setAttribute("role", "status");
+    transport.textContent = isUnencryptedHttp()
+      ? "Unencrypted HTTP · Photos and credentials are visible to network observers."
+      : "Secure HTTPS connection.";
+    host.prepend(transport);
   };
 
   const broadcastInvalidAccess = (): void => {

@@ -46,6 +46,41 @@
   font-size: 0.9rem;
   line-height: 1.45;
 }
+.access-transport {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.access-transport-warning {
+  color: var(--warning);
+}
+
+.access-transport-secure {
+  color: var(--muted);
+}
+
+.private-library {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100vh;
+  height: 100dvh;
+}
+
+.private-library .app-shell {
+  min-height: 0;
+  height: 100%;
+}
+
+.private-transport {
+  margin: 0;
+  padding: 0.35rem max(0.75rem, env(safe-area-inset-right)) 0.35rem
+    max(0.75rem, env(safe-area-inset-left));
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
 
 .access-panel form {
   display: grid;

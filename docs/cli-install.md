@@ -33,8 +33,8 @@ runtime. Other systems are not qualified by this candidate.
 
 Install the extracted `slipstream` executable on the client machine in a
 directory on `PATH`. Keep the Access Token in a separate private regular file
-owned by that user with no group or other permissions. Configure the HTTPS
-service origin and token path on the client machine:
+owned by that user with no group or other permissions. Configure the HTTP or
+HTTPS service origin and token path on the client machine:
 
 ```sh
 export SLIPSTREAM_SERVER_URL=https://photos.example.test
@@ -42,14 +42,15 @@ export SLIPSTREAM_ACCESS_TOKEN_FILE=/private/path/to/access-token
 slipstream status
 ```
 
-The operator supplies a trusted HTTPS certificate for the selected origin.
-There is no insecure TLS switch. The client does not mount Originals, the
-service database, or the service's native image libraries. Before upgrading a
-candidate, verify the new checksum, read its reference, and run `status` against
-the intended service. An incompatible service is rejected before any write;
-keep the previous client candidate until the new one passes that check. An
-uncertain write still requires a fresh object read and human or Agent judgment,
-not an automatic retry.
+HTTPS uses normal certificate validation; there is no certificate-verification
+bypass. An HTTP invocation prints one unencrypted-connection warning to stderr.
+The client does not mount Originals, the service database, or the service's
+native image libraries. Before upgrading a candidate, verify the new checksum,
+read its reference, and run `status` against the intended service. An
+incompatible service is rejected before any write; keep the previous client
+candidate until the new one passes that check. An uncertain write still
+requires a fresh object read and human or Agent judgment, not an automatic
+retry.
 
 Use a client and service built from the same candidate source revision. A
 contract-1 response can still be incomplete: `incompatible_server` preserves

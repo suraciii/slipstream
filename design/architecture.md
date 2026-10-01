@@ -41,7 +41,7 @@ joins the worker.
 
 Importing a module must not scan files, create storage, or bind a port.
 
-The default listener remains loopback. [Instance Access Architecture](access.md) owns authentication at the HTTP boundary. [Deployment](../docs/deployment.md) owns HTTPS proxy topology and public exposure. Authentication does not introduce user accounts or change Photo Library ownership.
+The default listener remains loopback. [Instance Access Architecture](access.md) owns authentication at the HTTP boundary. [Deployment](../docs/deployment.md) owns optional HTTP/HTTPS transport and network exposure. Authentication does not introduce user accounts or change Photo Library ownership.
 
 ### Photo Library Scope
 

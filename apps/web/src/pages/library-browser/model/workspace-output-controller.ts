@@ -1,5 +1,6 @@
 import type { BrowserFetch } from "./access-session.js";
 import { isRecord } from "../api/editor.js";
+import { randomUuid, blobSha256Hex } from "./browser-crypto.js";
 import {
   artifactMatchesHeaders,
   parseExportInspection,
@@ -256,12 +257,8 @@ async function blobMatches(
   expected: { byteLength: number; sha256: string },
 ): Promise<boolean> {
   if (blob.size !== expected.byteLength) return false;
-  const bytes = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
-  return (
-    Array.from(new Uint8Array(bytes), (byte) =>
-      byte.toString(16).padStart(2, "0"),
-    ).join("") === expected.sha256
-  );
+  const digest = await blobSha256Hex(blob);
+  return digest === expected.sha256;
 }
 function xmpHeadersMatch(
   artifact: XmpArtifact,
@@ -705,7 +702,7 @@ export function createWorkspaceOutputController(
         return;
       }
       const body: Submission = {
-        requestId: `web-${target ?? "xmp"}-${crypto.randomUUID()}`,
+        requestId: `web-${target ?? "xmp"}-${randomUuid()}`,
         expectedRecipeVersion: facts.recipeVersion,
         expectedSourceRevision: source,
         ...(target ? { target } : {}),
@@ -748,7 +745,7 @@ export function createWorkspaceOutputController(
     const active = value.images[target].active;
     if (!active) return;
     admit(value, {
-      requestId: `web-retry-${crypto.randomUUID()}`,
+      requestId: `web-retry-${randomUuid()}`,
       expectedRecipeVersion: active.recipeVersion ?? "",
       expectedSourceRevision: active.sourceRevision ?? "",
       target,

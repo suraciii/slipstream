@@ -16,6 +16,7 @@ from pathlib import Path
 import platform
 import stat
 import subprocess
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -467,8 +468,8 @@ class DeploymentSnapshot:
             has_credentials = parsed.username is not None or parsed.password is not None
         except ValueError:
             return [Check("web-capability", False, "web-url-invalid")]
-        if parsed.scheme != "https":
-            return [Check("web-capability", False, "web-url-must-use-https")]
+        if parsed.scheme not in {"http", "https"}:
+            return [Check("web-capability", False, "web-url-must-use-http-or-https")]
         if (
             not has_authority
             or has_credentials
@@ -620,6 +621,18 @@ def _regular_root_file(name: str, path: Path, *, executable: bool = False, root_
     return Check(name, True)
 
 
+def _plaintext_http(url: str) -> bool:
+    """Report whether url has an http scheme, in any letter case.
+
+    A URL that fails to parse is not a plaintext request target; the web
+    checks report it as an invalid URL instead.
+    """
+    try:
+        return urllib.parse.urlsplit(url).scheme == "http"
+    except ValueError:
+        return False
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--instance", required=True)
@@ -633,6 +646,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = parse_args(argv)
+    if arguments.web_url and _plaintext_http(arguments.web_url):
+        print("Warning: HTTP is unencrypted; photos and credentials may be observed in transit.", file=sys.stderr)
     snapshot = DeploymentSnapshot(
         instance=arguments.instance,
         policy=arguments.policy,

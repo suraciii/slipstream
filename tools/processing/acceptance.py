@@ -199,7 +199,6 @@ _EXPORT_STATES = ("queued", "running", "succeeded", "failed", "cancelled")
 _LOWER_HEX_64 = re.compile(r"\A[0-9a-f]{64}\Z")
 _LOWER_HEX_32 = re.compile(r"\A[0-9a-f]{32}\Z")
 _REQUEST_IDENTITY = re.compile(r"\A[A-Za-z0-9._-]{1,128}\Z")
-_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
 class AcceptanceFailure(Exception):
@@ -1098,8 +1097,6 @@ def normalize_base_url(raw: str) -> str:
         raise InvocationRefused("base-url-host-missing")
     if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
         raise InvocationRefused("base-url-must-not-carry-path-query-or-fragment")
-    if parsed.scheme == "http" and parsed.hostname.lower() not in _LOOPBACK_HOSTS:
-        raise InvocationRefused("base-url-http-requires-loopback-host")
     port = f":{parsed.port}" if parsed.port else ""
     return f"{parsed.scheme}://{parsed.hostname}{port}"
 
@@ -2183,7 +2180,7 @@ def download_bound(value: str) -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--base-url", required=True, help="Deployment base URL (https, or http on loopback).")
+    parser.add_argument("--base-url", required=True, help="Deployment base URL (HTTP or HTTPS; HTTP prints an unencrypted-connection warning).")
     parser.add_argument("--token-file", required=True, type=Path, help="File holding the bearer token.")
     parser.add_argument("--fixture", required=True, type=Path, help="Approved-profile RAW fixture path.")
     parser.add_argument("--output-dir", required=True, help="Private directory for downloaded artifacts.")
@@ -2230,6 +2227,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         base_url = normalize_base_url(arguments.base_url)
+        if base_url.startswith("http:"):
+            print("Warning: HTTP is unencrypted; photos and credentials may be observed in transit.", file=sys.stderr)
         token = read_token_file(arguments.token_file)
         fixture = arguments.fixture
         if not fixture.is_file():

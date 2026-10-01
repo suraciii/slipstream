@@ -8,7 +8,7 @@ use super::*;
     infer_long_args = false
 )]
 pub struct Cli {
-    /// HTTPS Slipstream service origin. Overrides SLIPSTREAM_SERVER_URL.
+    /// HTTP or HTTPS Slipstream service origin. Overrides SLIPSTREAM_SERVER_URL.
     #[arg(long, value_name = "URL")]
     pub server: Option<String>,
 

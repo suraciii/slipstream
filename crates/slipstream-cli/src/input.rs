@@ -4,7 +4,7 @@ pub(crate) fn service_origin(cli: &Cli, environment: Option<&str>) -> Result<Url
     let value = cli.server.as_deref().or(environment).ok_or_else(|| {
         CommandFailure::invalid(
             "server",
-            "Set --server or SLIPSTREAM_SERVER_URL to an HTTPS service origin.",
+            "Set --server or SLIPSTREAM_SERVER_URL to an HTTP or HTTPS service origin.",
         )
     })?;
     if value.is_empty() {
@@ -14,7 +14,7 @@ pub(crate) fn service_origin(cli: &Cli, environment: Option<&str>) -> Result<Url
         ));
     }
     let url = Url::parse(value).map_err(|_| {
-        CommandFailure::invalid("server", "The service URL must be an HTTPS origin.")
+        CommandFailure::invalid("server", "The service URL must be an HTTP or HTTPS origin.")
     })?;
     let has_userinfo = value
         .split_once("://")
@@ -25,7 +25,7 @@ pub(crate) fn service_origin(cli: &Cli, environment: Option<&str>) -> Result<Url
                 .contains('@')
         })
         .unwrap_or(false);
-    let valid = url.scheme() == "https"
+    let valid = matches!(url.scheme(), "http" | "https")
         && url.host_str().is_some()
         && !has_userinfo
         && url.username().is_empty()
@@ -36,7 +36,7 @@ pub(crate) fn service_origin(cli: &Cli, environment: Option<&str>) -> Result<Url
     if !valid {
         return Err(CommandFailure::invalid(
             "server",
-            "The service URL must be an HTTPS origin without credentials, path, query, or fragment.",
+            "The service URL must be an HTTP or HTTPS origin without credentials, path, query, or fragment.",
         ));
     }
     Ok(url)

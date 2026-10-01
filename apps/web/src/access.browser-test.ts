@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, copyFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createConnection } from "node:net";
@@ -125,6 +126,73 @@ for (const viewport of [
   });
 }
 
+test("direct HTTP keeps access, cookie lifecycle and CLI authentication", async ({
+  page,
+  context,
+}) => {
+  await server.close();
+  await rm(join(base, "state"), { recursive: true, force: true });
+  server = await startBrowserServer({
+    base,
+    root: join(base, "originals"),
+    transport: "http",
+  });
+  await page.goto(server.url);
+  await expect(page.getByLabel("Access Token", { exact: true })).toBeVisible();
+  await expect(page.locator(".access-transport-warning")).toBeVisible();
+  expect((await context.request.get(`${server.url}/api/status`)).status()).toBe(
+    401,
+  );
+  await page.getByLabel("Access Token", { exact: true }).fill(server.token);
+  await page.getByLabel("Access Token", { exact: true }).press("Enter");
+  await expect(
+    page.getByRole("navigation", { name: "Sources", includeHidden: true }),
+  ).toBeAttached();
+  await expect(page.locator(".private-transport")).toContainText(
+    "Unencrypted HTTP",
+  );
+  const cookie = (await context.cookies()).find(
+    (cookie) => cookie.name === "slipstream",
+  );
+  expect(cookie?.secure).toBe(false);
+  expect(cookie?.httpOnly).toBe(true);
+  expect(cookie?.sameSite).toBe("Lax");
+  const first: unknown = await (
+    await context.request.get(`${server.url}/api/access/session`)
+  ).json();
+  await page.reload();
+  await expect(
+    page.getByRole("navigation", { name: "Sources", includeHidden: true }),
+  ).toBeAttached();
+  const second: unknown = await (
+    await context.request.get(`${server.url}/api/access/session`)
+  ).json();
+  expect(second).toEqual(first);
+  const denied = await context.request.post(`${server.url}/api/albums`, {
+    headers: { Origin: server.url },
+    data: { name: "Denied" },
+  });
+  expect(denied.status()).toBe(403);
+  const cli = spawnSync(
+    "target/debug/slipstream",
+    ["--server", server.url, "--token-file", server.tokenFile, "status"],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  );
+  expect(cli.status).toBe(0);
+  const result: unknown = JSON.parse(cli.stdout);
+  expect(result).toMatchObject({ status: "ok", error: null });
+  expect(cli.stderr.match(/Warning:/g)).toHaveLength(1);
+  expect(cli.stderr).not.toContain(server.token);
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await expect(page.getByLabel("Access Token", { exact: true })).toBeVisible();
+  expect(
+    (await context.cookies()).find((cookie) => cookie.name === "slipstream"),
+  ).toBeUndefined();
+  expect((await context.request.get(`${server.url}/api/status`)).status()).toBe(
+    401,
+  );
+});
+
 test("returning to the library keeps it visible while access is checked", async ({
   page,
 }) => {
@@ -241,6 +309,36 @@ test("restored page keeps private content closed until access is verified", asyn
   await expect(sources).toBeHidden();
   release();
   await expect(sources).toBeVisible();
+});
+
+test("failed history check can retry and reopen the Library", async ({
+  page,
+}) => {
+  await page.goto(server.url);
+  await page.getByLabel("Access Token", { exact: true }).fill(server.token);
+  await page.getByRole("button", { name: "Open library", exact: true }).click();
+  const sources = page.getByRole("navigation", { name: "Sources" });
+  await expect(sources).toBeVisible();
+  await page.route("**/api/access/session", (route) => route.abort());
+  await page.evaluate(() =>
+    window.dispatchEvent(new PopStateEvent("popstate")),
+  );
+  await expect(sources).toBeHidden();
+  const retry = page.getByRole("button", {
+    name: "Check access again",
+    exact: true,
+  });
+  await expect(retry).toBeVisible();
+  await page.unroute("**/api/access/session");
+  await retry.click();
+  await expect(sources).toBeVisible();
+  await expect(page.getByText("Checking access…", { exact: true })).toHaveCount(
+    0,
+  );
+  await page.getByRole("button", { name: "New Album", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Create Album", exact: true }),
+  ).toBeVisible();
 });
 
 test("cookie writes reject missing CSRF and revoked session cannot restore private views", async ({

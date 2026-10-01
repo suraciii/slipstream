@@ -1,5 +1,16 @@
 import "./styles/global.css";
 import { mountLibraryBrowser } from "../pages/library-browser/index.js";
+const isPwaInstallAllowed = (): boolean => {
+  if (window.isSecureContext) return true;
+  const host = window.location.hostname;
+  return (
+    window.location.protocol === "http:" &&
+    (host === "localhost" || host === "127.0.0.1" || host === "[::1]")
+  );
+};
+
+if (!isPwaInstallAllowed())
+  document.querySelector<HTMLLinkElement>('link[rel="manifest"]')?.remove();
 
 const root = document.querySelector<HTMLElement>("#app");
 if (root) {

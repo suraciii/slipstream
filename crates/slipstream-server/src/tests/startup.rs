@@ -8,6 +8,39 @@ fn environment(values: &[(&str, &str)]) -> HashMap<String, String> {
 }
 
 #[test]
+fn optional_origin_defaults_to_local_http_without_changing_listener() {
+    let base = environment(&[
+        ("SLIPSTREAM_LIBRARY_ROOT", "/photos"),
+        ("SLIPSTREAM_STATE_DIRECTORY", "/state"),
+        ("SLIPSTREAM_CACHE_DIRECTORY", "/cache"),
+        ("SLIPSTREAM_PORT", "8123"),
+    ]);
+    let config = Config::from_env(base.clone()).unwrap();
+    assert_eq!(config.public_origin, "http://localhost:8123");
+    assert_eq!(config.host, "127.0.0.1");
+    for origin in ["http://camera.local:8123", "https://camera.local"] {
+        let mut values = base.clone();
+        values.insert("SLIPSTREAM_PUBLIC_ORIGIN".into(), origin.into());
+        let config = Config::from_env(values).unwrap();
+        assert_eq!(config.public_origin, origin);
+        assert_eq!(config.host, "127.0.0.1");
+    }
+    for origin in [
+        "",
+        "ftp://camera.local",
+        "http://user@camera.local",
+        "http://camera.local/path",
+    ] {
+        let mut values = base.clone();
+        values.insert("SLIPSTREAM_PUBLIC_ORIGIN".into(), origin.into());
+        assert_eq!(
+            Config::from_env(values),
+            Err(ConfigError::Invalid("SLIPSTREAM_PUBLIC_ORIGIN"))
+        );
+    }
+}
+
+#[test]
 fn processing_startup_requires_complete_canonical_identity_pins() {
     let base = vec![
         ("SLIPSTREAM_LIBRARY_ROOT".to_owned(), "/photos".to_owned()),

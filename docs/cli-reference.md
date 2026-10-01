@@ -21,10 +21,12 @@ and invalid combinations are errors. Flags must not accept abbreviations.
 
 The service URL resolves from `--server`, then `SLIPSTREAM_SERVER_URL`, then
 an error for network commands when neither is supplied. A supplied empty or
-invalid value is an error, not a fallback. A URL must be an HTTPS origin with no credentials, path other
-than `/`, query, or fragment. HTTPS uses normal certificate validation. There
-is no insecure-TLS flag, profile file, automatic discovery, or login command.
-The CLI must not follow HTTP redirects.
+invalid value is an error, not a fallback. A URL must be an HTTP or HTTPS origin
+with no credentials, path other than `/`, query, or fragment. HTTPS uses normal
+certificate validation; there is no certificate-verification bypass. An HTTP
+origin prints one unencrypted-connection warning to stderr before any request.
+The CLI must not follow HTTP redirects. There is no profile file, automatic
+discovery, or login command.
 
 `--timeout` is an integer from 1 through 300 seconds and defaults to 30. It
 bounds the whole command after argument parsing, including preview transfer.
@@ -40,13 +42,13 @@ CLI must not split it automatically. Local input-file failures perform no write.
 
 ## Instance Credentials
 
-[Instance Access](access.md) requires the client to load a generated Access Token
-from a private file and send it only in the Authorization header to the selected
-HTTPS origin. The file must contain exactly one base64url token, optionally
-followed by one line ending. The client must reject missing, unreadable, empty,
-or malformed credentials before network mutation and must never echo file
-contents. Help and version require no credential. Credentials must not be
-accepted as plaintext command arguments, URL components, or mutation input.
+A generated Access Token is loaded from a private file and sent only in the
+Authorization header to the selected HTTP or HTTPS origin. The file must
+contain exactly one base64url token, optionally followed by one line ending.
+The CLI must reject missing, unreadable, empty, or malformed credentials before
+network mutation and must never echo file contents. Help and version require no
+credential. Credentials must not be accepted as plaintext command arguments,
+URL components, or mutation input.
 No request redirect may forward the credential.
 
 A confirmed authentication rejection means the request was not admitted; the
@@ -69,8 +71,8 @@ Both new error codes have
 `details: { "operation": OPERATION }`, exit 6, and effect `none` when rejection
 is confirmed before admission. An unexpected or invalid response to a possibly
 admitted write must retain `outcome_unknown`. A token does not bypass contract
-version negotiation. HTTP server origins are `invalid_input`, including loopback;
-operators must use their configured HTTPS origin.
+version negotiation. HTTP and HTTPS origins use the same authentication and
+result mappings.
 
 ## Service and Discovery
 

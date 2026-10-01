@@ -1,3 +1,4 @@
+from contextlib import redirect_stderr, redirect_stdout
 import json
 from pathlib import Path
 import subprocess
@@ -46,6 +47,40 @@ def fake_command(arguments):
     if arguments[:4] == ("systemctl", "--system", "show", "--property=MainPID"):
         return deployment.CommandResult(0, "4242\n", "")
     return deployment.CommandResult(1, "", "unknown command")
+
+
+class RecordingStream:
+    """Capture writes into one ordered event log to assert output ordering."""
+
+    def __init__(self, events, tag):
+        self.events = events
+        self.tag = tag
+
+    def write(self, text):
+        self.events.append((self.tag, text))
+        return len(text)
+
+    def flush(self):
+        return None
+
+
+def capture_main(argv):
+    """Run main() for real while recording every output write in order.
+
+    Host commands are refused so the run stays hermetic; the web checks stop
+    before any request when no token file or an invalid URL is supplied.
+    """
+    events = []
+
+    def refused_command(arguments, **_kwargs):
+        return subprocess.CompletedProcess(arguments, 1, stdout="", stderr="")
+
+    with patch.object(deployment.subprocess, "run", refused_command):
+        with redirect_stdout(RecordingStream(events, "stdout")), redirect_stderr(
+            RecordingStream(events, "stderr")
+        ):
+            exit_code = deployment.main(argv)
+    return exit_code, events
 
 
 class DeploymentVerifierTests(unittest.TestCase):
@@ -344,7 +379,7 @@ class DeploymentVerifierTests(unittest.TestCase):
                     "stages": {"develop": "ready", "film": "unavailable"},
                 }
 
-            def checks_for(overrides):
+            def checks_for(overrides, origin="https://photos.example.com"):
                 def urlopen(request, timeout):
                     path = request.full_url.split("/", 3)[-1]
                     if path == "healthz":
@@ -361,7 +396,7 @@ class DeploymentVerifierTests(unittest.TestCase):
                     instance=INSTANCE,
                     policy=POLICY,
                     bundle=BUNDLE,
-                    web_url="https://photos.example.com",
+                    web_url=origin,
                     web_token_file=token_file,
                     urlopen=urlopen,
                 )
@@ -369,6 +404,8 @@ class DeploymentVerifierTests(unittest.TestCase):
 
             ready = checks_for({})
             self.assertTrue(all(check.ok for check in ready), ready)
+            http_ready = checks_for({}, "http://photos.example.com")
+            self.assertTrue(all(check.ok for check in http_ready), http_ready)
 
             # Each row overrides one part of the ready answer; the reason and
             # detail are the contract the verifier reports for it.
@@ -423,25 +460,107 @@ class DeploymentVerifierTests(unittest.TestCase):
                 self.assertEqual(checks[0].detail, detail, description)
 
 
-    def test_web_rejects_plain_http_before_sending_bearer(self):
+    def test_web_rejects_non_http_transport_before_sending_bearer(self):
         with tempfile.TemporaryDirectory() as directory:
             token_file = Path(directory) / "token"
             token_file.write_text("synthetic-token\n")
             token_file.chmod(0o600)
 
             def unexpected_urlopen(*_args, **_kwargs):
-                raise AssertionError("bearer must not be sent over HTTP")
+                raise AssertionError("bearer must not be sent over an unsupported transport")
 
             checker = deployment.DeploymentSnapshot(
                 instance=INSTANCE,
                 policy=POLICY,
                 bundle=BUNDLE,
-                web_url="http://photos.example.com",
+                web_url="ftp://photos.example.com",
                 web_token_file=token_file,
                 urlopen=unexpected_urlopen,
             )
             checks = checker._web_checks()
-            self.assertEqual(checks[0].reason, "web-url-must-use-https")
+            self.assertEqual(checks[0].reason, "web-url-must-use-http-or-https")
+
+    def test_main_warns_once_for_http_in_any_letter_case_before_checks(self):
+        warning = (
+            "Warning: HTTP is unencrypted; photos and credentials may be observed in transit."
+        )
+        for origin in (
+            "http://photos.example.com",
+            "HTTP://photos.example.com",
+            "hTtP://photos.example.com",
+        ):
+            with self.subTest(origin=origin):
+                # Without a token file the web checks stop at
+                # web-token-required, so no request leaves the process.
+                exit_code, events = capture_main(
+                    [
+                        "--instance", INSTANCE,
+                        "--policy", POLICY,
+                        "--bundle", BUNDLE,
+                        "--web-url", origin,
+                    ]
+                )
+                self.assertEqual(exit_code, 1)
+                self.assertEqual(
+                    "".join(text for tag, text in events if tag == "stderr"),
+                    warning + "\n",
+                )
+                warning_writes = [
+                    index
+                    for index, (tag, text) in enumerate(events)
+                    if tag == "stderr" and text.strip()
+                ]
+                report_writes = [
+                    index
+                    for index, (tag, text) in enumerate(events)
+                    if tag == "stdout" and text
+                ]
+                self.assertEqual(len(warning_writes), 1)
+                self.assertTrue(report_writes)
+                self.assertLess(
+                    warning_writes[0],
+                    report_writes[0],
+                    "the plaintext warning must precede the check report",
+                )
+
+    def test_main_does_not_warn_for_https_in_any_letter_case(self):
+        for origin in ("https://photos.example.com", "HTTPS://photos.example.com"):
+            with self.subTest(origin=origin):
+                exit_code, events = capture_main(
+                    [
+                        "--instance", INSTANCE,
+                        "--policy", POLICY,
+                        "--bundle", BUNDLE,
+                        "--web-url", origin,
+                    ]
+                )
+                self.assertEqual(exit_code, 1)
+                self.assertEqual([text for tag, text in events if tag == "stderr"], [])
+                self.assertTrue(any(tag == "stdout" and text for tag, text in events))
+
+    def test_main_keeps_an_invalid_web_url_as_a_failed_check_without_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            token_file = Path(directory) / "token"
+            token_file.write_text("synthetic-token\n")
+            token_file.chmod(0o600)
+            exit_code, events = capture_main(
+                [
+                    "--instance", INSTANCE,
+                    "--policy", POLICY,
+                    "--bundle", BUNDLE,
+                    "--web-url", "http://[::1",
+                    "--web-token-file", str(token_file),
+                ]
+            )
+            self.assertEqual(exit_code, 1)
+            self.assertEqual([text for tag, text in events if tag == "stderr"], [])
+            report = json.loads("".join(text for tag, text in events if tag == "stdout"))
+            self.assertEqual(report["status"], "read-only-checks-failed")
+            web = next(
+                check for check in report["checks"] if check["name"] == "web-capability"
+            )
+            self.assertIs(web["ok"], False)
+            self.assertEqual(web["reason"], "web-url-invalid")
 
 
 if __name__ == "__main__":
