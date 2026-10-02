@@ -17,10 +17,11 @@ The dependency is one-way: Slipstream calls darktable. darktable does not call t
 service to resolve Photos, save recipes, or publish results. It is an executor,
 not a separate bounded context that owns product state.
 
-The Rust service owns the Edit Recipe and captured processing snapshots. A
-recipe contains semantic exposure and white-balance intent and the fixed Film
-Recipe reference, not a darktable history, parameter blob, catalog image ID,
-or module ordering value. The existing recipe model remains unchanged.
+The Rust service owns the Edit Recipe and captured processing snapshots under
+[Processing Modules](processing-modules.md). A darktable step preserves its
+admitted, complete parameter snapshot and explicit operation instances; it does
+not contain a desktop catalog image ID or ambient editing history. The native
+bridge derives private engine history from that captured intent.
 
 The server's PhotoExecutor owns one generic native MCP client and the mapping
 of admitted semantic controls to engine operations. That mapping may name
@@ -37,13 +38,13 @@ processing and suppresses unrequested artistic defaults under the color spec.
 The processing bundle binds the exact engine source commit, the MCP contract,
 parameter schemas, semantic mappings, baseline policy, and color assets. A
 discovered schema is engine metadata, not permission to execute it.
-A deployed capability admits only qualified combinations. Discovery does not
-loosen the closed Photo admission boundary of the [Photo Development service
-surface](photo-development.md).
+A deployed module admits only qualified combinations. Discovery does not
+loosen the module-specific input, parameter, and output admission boundary in
+[Processing Modules](processing-modules.md).
 
-This engine cutover must preserve the closed execution payload's qualified
-exposure range and as-shot white balance. Stored temperature/tint intent remains
-readable but processing-unavailable under that boundary. The product's
+The native engine cutover preserves the qualified exposure range and as-shot
+white balance. Stored temperature/tint intent remains readable but
+processing-unavailable under that boundary. The product's
 adjustable white-balance target does not grant execution authority: admission
 requires its independent camera mapping qualification and an explicit update
 of the governing service surface and operator checks. Native image
@@ -168,8 +169,8 @@ uses the existing preview-class `development-tiff` admission with zero exposure,
 as-shot white balance, and an opaque preview attempt identity. It does not create
 a user Export. The service derives the bounded proxy from the validated
 scene-linear output, applies the existing source guards, and releases the attempt
-artifact. A missing Original cannot build a new proxy. The fixed Film stage
-consumes the validated scene-linear result under the color contract.
+artifact. A missing Original cannot build a new proxy. Standalone SpektraFilm
+consumes only an explicitly selected retained artifact under its color contract.
 
 [Development Proxy](photo-development.md#development-proxy) remains authoritative
 for local exposure and proxy-backed Film. No darktable invocation or new module

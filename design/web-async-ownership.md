@@ -442,23 +442,26 @@ Library, and Photo axes separate — capability note, scan status, and source
 reason each name their own condition — and native-work saturation never
 downgrades a supported Photo's presentation.
 
-### Edit Preview requests
+An Edit Preview request is owned by the Photo and selected Processing Step
+scope with key `(requestGeneration, photoId, step, identity)`. The identity
+includes the exact staged/input byte digest and size, the input artifact or
+guarded source binding, selected module and adapter/schema version, complete
+parameter snapshot or digest, bounded Preview geometry, processing bundle, and
+display conversion. An Original's guarded source revision remains a separate
+source guard; it does not replace the exact byte evidence in the identity.
+Requests with the same full identity coalesce.
+A changed identity supersedes the older request locally without claiming to
+cancel admitted server work, and displays the last image as stale while the
+replacement is pending. A superseded result never publishes, including one
+whose source revision is unchanged but whose selected module, parameter digest,
+artifact input, or proxy digest changed.
 
-An Edit Preview request is owned by the Photo scope with key
-`(requestGeneration, photoId, stage, identity)`. The identity includes the
-Photo, stage, source revision, recipe version, edit-source kind, and (when the
-source is `development-proxy`) the proxy's content digest. Requests with the
-same full identity coalesce. A changed identity supersedes the older request
-locally without claiming to cancel admitted server work, and displays the last
-image as stale while the replacement is pending. A superseded result never
-publishes, including a result whose source revision is unchanged but whose
-proxy digest is newer or older than the current proxy identity.
-
-The rendered image retains explicit provenance: original-backed and
-development-proxy-backed results are distinct facts, and a proxy-backed
-result is labelled as such rather than presented as full-resolution Original
-evidence. A refusal names the unavailable stage and reason on the Develop
-surface. Preview failure never changes Originals or the committed recipe.
+The rendered image retains explicit provenance: Original-backed,
+Processing-Artifact-backed, and development-proxy-backed results are distinct
+facts. A proxy-backed result is labelled as such rather than presented as
+full-resolution Original evidence. A refusal names the selected module, input
+compatibility, and reason. Preview failure never changes Originals, committed
+recipe intent, or a published artifact.
 
 ### Export submission and lifecycle
 

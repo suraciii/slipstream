@@ -29,6 +29,18 @@ pub(crate) async fn execute(
             preview_download::DestinationKind::EditPreview,
             &args.file,
         )?),
+        Command::Photos {
+            command: PhotoCommand::ProcessingPreview { file, .. },
+        } => Some(preview_download::Destination::preflight(
+            preview_download::DestinationKind::ProcessingPreview,
+            file,
+        )?),
+        Command::Processing {
+            command: ProcessingCommand::ArtifactDownload { file, .. },
+        } => Some(preview_download::Destination::preflight(
+            preview_download::DestinationKind::Artifact,
+            file,
+        )?),
         _ => None,
     };
     let origin = service_origin(cli, environment)?;
@@ -117,6 +129,18 @@ pub(crate) async fn execute(
         } => development::prepare(command).await?,
         _ => None,
     };
+    let pending_processing_recipe = match &cli.command {
+        Command::Photos {
+            command: PhotoCommand::ProcessingRecipe { command },
+        } => development::prepare_processing(command).await?,
+        _ => None,
+    };
+    let pending_processing_export = match &cli.command {
+        Command::Photos {
+            command: PhotoCommand::ProcessingExport(args),
+        } => Some(development::prepare_processing_export(&args.input).await?),
+        _ => None,
+    };
     let pending_recovery_apply = match &cli.command {
         Command::Recovery {
             command: RecoveryCommand::Apply(args),
@@ -134,10 +158,77 @@ pub(crate) async fn execute(
 
     let result = async {
         match &cli.command {
-            Command::Processing { .. } => development::capability(&client).await,
+            Command::Processing { command } => match command {
+                ProcessingCommand::Capability => development::capability(&client).await,
+                ProcessingCommand::Modules => development::modules(&client).await,
+                ProcessingCommand::Artifact { artifact_id } => {
+                    development::processing_artifact(&client, artifact_id).await
+                }
+                ProcessingCommand::ArtifactDownload { artifact_id, .. } => {
+                    // The staged destination was preflighted so an existing
+                    // file is never replaced; a refusal or an
+                    // unidentifiable transfer publishes nothing.
+                    processing_artifact_download::download(
+                        &client,
+                        artifact_id,
+                        preview_destination.expect("Processing Artifact destination was checked"),
+                        publication,
+                    )
+                    .await
+                }
+            },
             Command::Photos {
                 command: PhotoCommand::Recipe { command },
             } => development::execute(&client, admission, command, pending_recipe).await,
+            Command::Photos {
+                command: PhotoCommand::ProcessingRecipe { command },
+            } => {
+                development::execute_processing(
+                    &client,
+                    admission,
+                    command,
+                    pending_processing_recipe,
+                )
+                .await
+            }
+            Command::Photos {
+                command: PhotoCommand::ProcessingPreview { photo_id, step, .. },
+            } => {
+                // The staged destination was preflighted so an existing
+                // file is never replaced; a refusal or an unidentifiable
+                // response publishes nothing.
+                processing_preview_download::download(
+                    &client,
+                    photo_id,
+                    step,
+                    preview_destination.expect("Processing Preview destination was checked"),
+                    publication,
+                )
+                .await
+            }
+            Command::Photos {
+                command: PhotoCommand::ProcessingExport(args),
+            } => {
+                let body = pending_processing_export.ok_or_else(development::unusable_input)?;
+                development::execute_processing_export(&client, admission, args, body).await
+            }
+            Command::Photos {
+                command:
+                    PhotoCommand::ProcessingExportStatus {
+                        photo_id,
+                        request_id,
+                    },
+            } => development::processing_export_status(&client, photo_id, request_id).await,
+            Command::Photos {
+                command:
+                    PhotoCommand::ProcessingExportCancel {
+                        photo_id,
+                        request_id,
+                    },
+            } => {
+                development::processing_export_cancel(&client, admission, photo_id, request_id)
+                    .await
+            }
             Command::Photos {
                 command: PhotoCommand::EditPreview(args),
             } => {
@@ -1115,6 +1206,19 @@ pub(crate) fn validate_command(command: &Command) -> Result<(), CommandFailure> 
         }
         Command::Photos {
             command:
+                PhotoCommand::ProcessingExportStatus { request_id, .. }
+                | PhotoCommand::ProcessingExportCancel { request_id, .. },
+        } => {
+            if !valid_request_identity(request_id) {
+                return Err(CommandFailure::invalid(
+                    "request-id",
+                    "The request identity must be 1 through 128 characters of ASCII letters, digits, '.', '_', or '-'.",
+                ));
+            }
+            Ok(())
+        }
+        Command::Photos {
+            command:
                 PhotoCommand::Export {
                     command: PhotoExportCommand::Submit(args),
                 },
@@ -1326,137 +1430,7 @@ pub(crate) fn canonical_access_token(token: &[u8]) -> bool {
                 | b'8'
         )
 }
-
-pub(crate) fn deadline_failure(
-    operation: Operation,
-    publication: &PublicationState,
-    admission: &AdmissionState,
-) -> CommandFailure {
-    if let Some(data) = publication.committed() {
-        CommandFailure::published_file(data, false, publication.committed_noun())
-    } else if let Some(identity) = admission.admitted() {
-        CommandFailure::unknown(&identity)
-    } else if matches!(operation, Operation::LibraryCheck) {
-        CommandFailure::library_check_deadline()
-    } else {
-        CommandFailure::transport(operation)
-    }
-}
-
-pub async fn invoke(cli: Cli, environment: Option<&str>) -> InvocationResult {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(cli.timeout);
-    invoke_until(cli, environment, deadline).await
-}
-
-pub async fn invoke_until(
-    cli: Cli,
-    environment: Option<&str>,
-    deadline: tokio::time::Instant,
-) -> InvocationResult {
-    let output = cli.output;
-    let operation = command_operation(&cli.command);
-    let admission = AdmissionState::default();
-    let publication = PublicationState::default();
-    let command = tokio::time::timeout_at(
-        deadline,
-        execute(&cli, environment, &admission, &publication),
-    );
-    tokio::pin!(command);
-    let (exit_code, envelope) = tokio::select! {
-        result = &mut command => match result {
-            Ok(Ok(data)) => (0, Envelope::success(data)),
-            Ok(Err(failure)) => {
-                let envelope = match failure.data {
-                    Some(data) if failure.payload.effect == "partial" => {
-                        Envelope::partial(*data, failure.payload)
-                    }
-                    Some(data) => Envelope::error_with_data(*data, failure.payload),
-                    None => Envelope::error(failure.payload),
-                };
-                (failure.exit_code, envelope)
-            }
-            Err(_) => {
-                let failure = deadline_failure(operation, &publication, &admission);
-                let envelope = match failure.data {
-                    Some(data) => Envelope::partial(*data, failure.payload),
-                    None => Envelope::error(failure.payload),
-                };
-                (failure.exit_code, envelope)
-            }
-        },
-        _ = tokio::signal::ctrl_c() => {
-            if let Some(data) = publication.committed() {
-                let failure =
-                    CommandFailure::published_file(data, true, publication.committed_noun());
-                (130, Envelope::partial(*failure.data.unwrap(), failure.payload))
-            } else {
-                let failure = match admission.admitted() {
-                Some(identity) => CommandFailure::interrupted_unknown(&identity),
-                None => {
-                    let mut failure = CommandFailure::transport(operation);
-                    failure.payload.message = "The command was interrupted. Inspect status before continuing.".to_owned();
-                    failure
-                }
-            };
-            // A handled interruption exits 130 whether or not a request may
-            // have been admitted; only the envelope distinguishes the cases.
-            (130, Envelope::error(failure.payload))
-            }
-        }
-    };
-    render_invocation(
-        output,
-        exit_code,
-        &envelope,
-        publication
-            .committed()
-            .and_then(|value| value["path"].as_str().map(str::to_owned)),
-    )
-}
-
-pub fn invalid_invocation(output: OutputFormat, reason: impl Into<String>) -> InvocationResult {
-    let failure = CommandFailure::invalid("arguments", reason);
-    render_invocation(
-        output,
-        failure.exit_code,
-        &Envelope::error(failure.payload),
-        None,
-    )
-}
-
-pub(crate) fn render_invocation(
-    output: OutputFormat,
-    exit_code: u8,
-    envelope: &Envelope,
-    committed_preview_path: Option<String>,
-) -> InvocationResult {
-    let stdout = match output {
-        OutputFormat::Json => format!(
-            "{}\n",
-            serde_json::to_string(envelope).expect("envelope serialization is infallible")
-        ),
-        OutputFormat::Text => render_text(envelope),
-    };
-    InvocationResult {
-        exit_code,
-        stdout,
-        committed_preview_path,
-    }
-}
-
-pub(crate) fn render_text(envelope: &Envelope) -> String {
-    match (&envelope.data, &envelope.error) {
-        (Some(data), None) => format!(
-            "Success\n{}\n",
-            serde_json::to_string_pretty(data).expect("result serialization is infallible")
-        ),
-        (_, Some(error)) => format!(
-            "Error: {}\n{}\n{}\n",
-            error.code,
-            error.message,
-            serde_json::to_string_pretty(&error.details)
-                .expect("error serialization is infallible")
-        ),
-        _ => "Error: invalid result\n".to_owned(),
-    }
-}
+mod invocation;
+#[cfg(test)]
+pub(crate) use invocation::{deadline_failure, render_text};
+pub use invocation::{invalid_invocation, invoke, invoke_until};

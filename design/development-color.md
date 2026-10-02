@@ -1,36 +1,39 @@
 # Development Color Pipeline
 
-The browser needs a viewable image, while Spektrafilm needs scene-referred
-input. Using one encoded image for both purposes would bake display choices
-into the film simulation and make exposure and white balance unpredictable.
+A module may require scene-referred input while the browser needs a viewable
+image. Using one encoded image for both purposes would bake display choices
+into a scene-referred module invocation and make exposure and white balance
+unpredictable. This specification owns the qualified image contracts between
+Original input, concrete module results, and their display derivatives.
 
-[Photo Development](../docs/photo-development.md) owns user-visible controls
-and output targets. This specification owns the processing contract between
-Original input, the Development Result, the Film Result, and display derivatives.
+The [Photo Development](../docs/photo-development.md) specification owns
+user-visible controls and composition. [Processing Modules](processing-modules.md)
+owns the single-module parameter and artifact boundary.
 
 ## Model
 
-A processing bundle identifies an exact darktable build, adapter schema,
-Spektrafilm commit, camera/film/paper profiles, ICC assets, and fixed processing
-settings. The bundle is part of result identity, not an interchangeable tool
-installation.
+A processing bundle identifies the exact engine builds, adapter schemas,
+camera/film/paper profiles, ICC assets, and fixed processing settings for each
+admitted module configuration. The bundle is part of result identity, not an
+interchangeable tool installation.
 
-An Edit Recipe contains semantic exposure and white-balance intent plus the
-fixed Film Recipe reference. Engine module parameters are private derived data.
-The domain model must not contain darktable history blobs or Python objects.
+An Edit Recipe contains semantic controls and the selected Processing Step
+parameters. A concrete Film Recipe may be one admitted standalone SpektraFilm
+parameter snapshot, but it is not a required suffix of every recipe. Engine
+representations remain behind the module adapter; the domain model must not
+contain darktable history blobs or Python objects.
 
-The initial Development TIFF uses the `LargeRGB-elle-V2-g10.icc` profile asset
-with SHA-256
-`df7b2c677645f1ca5364b52e62f8db04ca61f80163792942f3e409a84a6b12ed`. The
-profile's primaries, D50 white point, and linear transfer curves are part of
-that identity; a profile name alone is insufficient.
+Module-owned parameters determine each output's format, precision, color
+space, transfer function, geometry, and encoding. The concrete contracts
+this specification pins are qualified module outputs, not global product
+output concepts; a module that does not admit a contract must refuse it
+rather than reinterpret it.
 
-The pinned darktable run embedded an ICC profile with SHA-256
-`7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe`. Its bytes
-differ from the profile asset above only in legacy description-tag
-normalization. The processing bundle must identify the asset bytes and the
-exact embedded profile bytes separately; matching a name or appearance is
-not enough.
+The currently qualified darktable configuration's embedded ICC profile has
+SHA-256
+`7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe`. The
+processing bundle must identify the profile asset bytes and exact embedded
+profile bytes separately; matching a name or appearance is not enough.
 
 ## RAW Development
 
@@ -62,11 +65,13 @@ before processing admission. It must not silently substitute as-shot WB or
 another mapping. The adjustable-WB product target remains defined by the
 [Product Spec](../docs/photo-development.md#development-controls).
 
-Module ordering, parameter versions, and encoding must be explicit under
-[Native darktable Integration](darktable-integration.md). The native bridge owns
-construction of the complete bounded internal history from the approved baseline
-and requested semantic intent. Unsupported versions must fail. Ambient XMP
-discovery and use of a shared desktop database are forbidden.
+Module ordering, parameter versions, and encoding must be explicit in each
+adapter under [Processing Modules](processing-modules.md#concrete-module-shapes).
+[Native darktable Integration](darktable-integration.md) owns construction of
+the complete bounded darktable history from its approved baseline and requested
+intent. Standalone SpektraFilm preserves its grouped parameter tree. Each adapter
+supplies a complete bounded request to its own engine and refuses unsupported
+versions. Ambient XMP discovery and use of a shared desktop database are forbidden.
 
 The development path must disable filmic, sigmoid, base curve, AgX, and any
 other display/look mapping. Required technical camera processing must be
@@ -74,12 +79,12 @@ explicitly distinguished from optional artistic processing. The adapter must
 not silently add sharpening, denoising, lens effects, or contrast presets merely
 because a desktop default contains them.
 
-## Development Result
+## Qualified Scene-Referred Module Output
 
-The handoff must use the Development TIFF contract in the Product Spec. Its
-ICC profile must describe both the actual ProPhoto primaries/white point and a
-linear transfer function. A profile name or TIFF extension alone is insufficient
-evidence.
+The currently qualified darktable configuration has one concrete
+scene-referred output contract. Its ICC profile must describe both the actual
+ProPhoto primaries/white point and a linear transfer function. A profile name
+or TIFF extension alone is insufficient evidence.
 
 TIFF output must use IEEE float32 RGB samples. The writer must not quantize to
 integers, clamp values to the display interval, or convert through an 8-bit
@@ -103,19 +108,20 @@ handoff. Float storage does not recover sensor data that was already clipped.
 Validation must distinguish source clipping, development transformations,
 film behavior, and display clipping.
 
-## Film Simulation
+## Qualified Standalone SpektraFilm Output
 
 The initial Film Recipe combines Kodak Portra 400 and Kodak Portra Endura.
 Its fixed settings must identify the complete negative, print, and scan
-configuration, including grain, halation, print normalization, scanner settings,
-profile versions, and the stochastic policy. Profile names alone must not define
-a saved look.
+configuration, including grain, halation, print normalization, scanner
+settings, profile versions, and the stochastic policy. Profile names alone
+must not define a saved look.
 
-The adapter must explicitly select ProPhoto RGB input and disable input
-transfer-function decoding for the already-linear Development Result. It must
-disable Spektrafilm camera auto exposure and keep the additional camera exposure
-offset at zero. Print/reference normalization must be fixed in the bundle and
-must not be inferred from changing upstream defaults.
+For the initial qualified configuration, the adapter must explicitly select
+ProPhoto RGB input and disable input transfer-function decoding for an
+already-linear scene-referred input artifact admitted by that module. It must
+disable SpektraFilm camera auto exposure and keep the additional camera
+exposure offset at zero. Print/reference normalization must be fixed in the
+bundle and must not be inferred from changing upstream defaults.
 
 The adapter must invoke the core simulation API and explicitly set output
 space and encoding. An output already encoded for display must not receive the
@@ -146,15 +152,15 @@ runtime.
 
 ## Display and Comparison
 
-Development display must operate on a copy of the Development Result through
-a fixed, versioned conversion from linear ProPhoto RGB to sRGB. Convert to
-linear sRGB using the pinned profile primaries, white points, and chromatic
-adaptation. Clip each linear sRGB channel independently to the interval from
-zero to one, then apply the sRGB transfer function. This clipping is the
-defined display behavior for negative, over-range, and out-of-gamut values; it
-may change their hue or brightness in the view. It must not alter the
-Development Result. This display branch must never enter the Development TIFF
-or Film input.
+The display derivative for the qualified scene-referred module output must
+operate on a copy through a fixed, versioned conversion from linear ProPhoto
+RGB to sRGB. Convert to linear sRGB using the pinned profile primaries, white
+points, and chromatic adaptation. Clip each linear sRGB channel independently
+to the interval from zero to one, then apply the sRGB transfer function. This
+clipping is the defined display behavior for negative, over-range, and
+out-of-gamut values; it may change their hue or brightness in the view. It
+must not alter the module output. This display branch must never enter a
+scene-referred module output or another module's input.
 
 The destination must use standard sRGB colorimetry defined by IEC 61966-2-1
 with a D65 white point. This identifies the target colorimetry, not the profile
@@ -227,12 +233,13 @@ never upscales a target beyond the source geometry, and encodes 8-bit JPEG at
 quality 85 with the destination profile embedded; the processing bundle must
 record its implementation and version alongside the profile bytes.
 
-Film display must use the Film Result's defined output encoding and a matching
-ICC profile. The initial Finished JPEG is full developed dimensions, encoded
-as sRGB at fixed JPEG quality 85 with the pinned encoder configuration and
-embedded destination profile.
-Comparison must keep the stage, geometry, bundle, and display conversion fixed
-while changing only the compared development settings.
+The standalone SpektraFilm display must use that module result's defined
+output encoding and a matching ICC profile. The initial qualified SpektraFilm
+output is a JPEG at full developed dimensions, encoded as sRGB at fixed JPEG
+quality 85 with the pinned encoder configuration and embedded destination
+profile.
+Comparison must keep the selected module, geometry, bundle, and display
+conversion fixed while changing only the compared step settings.
 
 A reduced-resolution simulation must carry its own geometry and cache identity.
 Grain, halation, and physical scale must follow the qualified engine behavior.
@@ -242,11 +249,12 @@ a separate crop/tile implementation requires its own spatial-context contract.
 
 ## Options
 
-### Selected: Scene-Linear TIFF Handoff
+### Selected: Module-Owned Image Contracts
 
-A concrete interoperable file follows the author's workflow, can be inspected
-independently, and permits Development TIFF delivery before integrated simulation.
-Its disk and memory costs are explicit bounded processing resources.
+Each admitted module owns its input and output image contracts. A concrete
+artifact can be inspected independently and can be selected explicitly by a
+later compatible step. Disk and memory costs remain explicit bounded
+processing resources.
 
 ### Rejected: Browser Preview as Simulation Input
 
@@ -258,17 +266,20 @@ It cannot establish the linear development contract even if it looks plausible.
 One narrow adapter owns module versions and semantic parameter mapping. It
 keeps engine representation out of Web, CLI, and persistence contracts.
 
-### Rejected: Arbitrary XMP or Python Parameters
+### Rejected: Arbitrary Engine Parameters
 
-Exposing engine internals would make clients responsible for module ordering,
-color defaults, compatibility, and unsafe input. The current workflow needs only
-exposure, white balance, and a fixed Film Recipe.
+The module contract preserves dynamic, module-owned parameter trees, but
+discovery does not grant every engine control to the product. Exposing
+unqualified darktable history or Python objects would make clients responsible
+for module ordering, color defaults, compatibility, and unsafe input. Each
+adapter admits only the qualified subset for its bundle.
 
 ### Selected: Fixed Display-Only sRGB Conversion
 
 The editor needs a deterministic view for a scene-linear ProPhoto image.
 Clipping after conversion to linear sRGB defines predictable handling of
-display-boundary values without changing the TIFF handoff or Film input.
+display-boundary values without changing the scene-referred handoff or
+another module's input.
 
 ### Rejected: Perceptual Gamut Mapping in the Development Handoff
 
@@ -276,11 +287,11 @@ A perceptual mapper would introduce another look into the scene-referred
 pipeline. The Development view is for inspection; its bounded conversion must
 remain isolated from saved image data and downstream processing.
 
-### Rejected: Reuse the Display Rendition as TIFF or Film Input
+### Rejected: Reuse the Display Rendition as Module Input
 
 The sRGB conversion clips scene-linear values and adds a display transfer
-function. Reusing it would discard information and violate the Development TIFF
-and Film input contracts.
+function. Reusing it would discard information and violate the
+scene-referred handoff and module input contracts.
 
 ### Selected: Bundle-Pinned ICC Transform
 

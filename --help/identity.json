@@ -1,0 +1,10 @@
+{
+  "helper_sha256": "b561cf5fb9e32f19334deea16825b32bc8098bedcd82d1f2b30c830f3b49f62d",
+  "environment_sha256": "84f86af399e75bd11ffe5c910632991ca721fa1f800c04d6175f919e816e2dbc",
+  "sources": {
+    "cpuinfo.txt": "745378cfd1aa02ee3323c3bdeff85c0e2258f9e7f4a6cc2b7f29f7f0896e089b",
+    "docker-server.json": "1c57d72def8aa8272b1c769419e2f7968f3960852ee01709f98698f95be34e66",
+    "docker-runtimes.json": "013f404fa74ac7def8fa8a92ba232cfdfc41c65feb8e51ceaccde5f9abfd3157"
+  },
+  "authority": "preparation only; actual launcher independently recomputes this environment before admitting or releasing work"
+}

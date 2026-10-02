@@ -1,5 +1,4 @@
 use super::*;
-use crate::folders::MAXIMUM_FILE_LOCATION_WINDOW;
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
@@ -18,6 +17,9 @@ mod export_routes;
 mod lifecycle;
 mod metadata;
 mod preview;
+mod processing_export;
+mod processing_preview;
+mod processing_recipe;
 mod protocol;
 mod recovery;
 mod removal;
@@ -388,6 +390,7 @@ fn unresolved_processing_config() -> ProcessingConfig {
         policy_sha256: "b".repeat(64),
         bundle_sha256: "c".repeat(64),
         bundle_root: PathBuf::from("/nonexistent-slipstream-photo-bundle"),
+        film: None,
         failure: Some("bundle-unavailable"),
     }
 }
@@ -400,7 +403,7 @@ fn unresolved_processing_config() -> ProcessingConfig {
 /// marker files inside the bundle are the only control channel; the run
 /// counter the program maintains orders per-attempt scripting.
 const FAKE_PHOTO_ENGINE: &str = r#"#!/usr/bin/env python3
-import json, os, shutil, sys, time
+import base64, json, os, shutil, sys, time
 
 BUNDLE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 OUTPUT = os.path.join(BUNDLE, "fixture-output.tif")
@@ -462,6 +465,13 @@ for line in sys.stdin:
                                  "isError": False})
         elif name == "module_schema":
             respond(request_id, {"content": [{"type": "text", "text": "{}"}],
+                                 "isError": False})
+        elif name == "render":
+            png = (b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") +
+                   b"IHDR" + (1224).to_bytes(4, "big") +
+                   (1224).to_bytes(4, "big") + b"\x08\x02\x00\x00\x00")
+            respond(request_id, {"content": [{"type": "image", "mimeType": "image/png",
+                                              "data": base64.b64encode(png).decode("ascii")}],
                                  "isError": False})
         elif name != "export_images":
             respond_error(request_id, "unsupported tool")
@@ -540,6 +550,7 @@ impl FakePhotoEngine {
             policy_sha256: "b".repeat(64),
             bundle_sha256: "c".repeat(64),
             bundle_root: self.bundle_root.clone(),
+            film: None,
             failure: None,
         }
     }

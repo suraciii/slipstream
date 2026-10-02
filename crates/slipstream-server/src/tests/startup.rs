@@ -67,12 +67,29 @@ fn photo_development_startup_resolves_the_local_bundle_identity() {
         Err(ConfigError::Invalid("SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY"))
     );
 
-    // An explicit opt-out configures no processing deployment.
+    // An explicit opt-out of both runtimes configures no processing
+    // deployment; the darktable opt-out alone still opens the extension
+    // for an independently configured film runtime (auto by default,
+    // truthfully reporting a missing runtime here).
     let mut values = base.clone();
     values.push(("SLIPSTREAM_PHOTO_DEVELOPMENT", "disabled"));
+    values.push(("SLIPSTREAM_FILM_MODULE", "disabled"));
     assert_eq!(
         Config::from_env(environment(&values)).unwrap().processing,
         None
+    );
+
+    // The darktable opt-out preserves independently configured Film.
+    let mut values = base.clone();
+    values.push(("SLIPSTREAM_PHOTO_DEVELOPMENT", "disabled"));
+    let processing = Config::from_env(environment(&values))
+        .unwrap()
+        .processing
+        .expect("film auto opens the extension");
+    assert_eq!(processing.failure, Some("darktable-disabled"));
+    assert_eq!(
+        processing.film.as_ref().unwrap().failure,
+        Some("film-runtime-missing")
     );
 
     let defaults = Config::from_env(environment(&[

@@ -10,6 +10,7 @@ import {
 } from "./model/browse-range-recovery-owner.js";
 import type { SelectionFilter, SelectionState } from "./api/contracts.js";
 import { createEditorController } from "./model/editor-controller.js";
+import { routeEditorIntent } from "./model/editor-intent-router.js";
 import { createPhotoDetailsOwner } from "./model/photo-details-owner.js";
 import { createMetadataPanel } from "./ui/external-metadata-panel.js";
 import { createRecoveryReviewOwner } from "./model/recovery-review-owner.js";
@@ -198,23 +199,7 @@ function mountPrivateLibraryBrowser(
     currentPhoto: () => photoOwner.current,
     libraryPhase: () => applicationPresentation.scanPhase,
   });
-  const {
-    open: openEditor,
-    refresh: refreshEditor,
-    commitExposure: commitEditorExposure,
-    commitWhiteBalance: commitEditorWhiteBalance,
-    stepHistory: stepEditorHistory,
-    requestPreview: requestEditorPreview,
-    applyStage: applyEditorStage,
-    setComparison: setEditorComparison,
-    useSaved: useSavedRecipe,
-    reapplyLocal: reapplyLocalSettings,
-    discardDraft: discardEditorDraft,
-    rebind: rebindEditor,
-    createProxy: createEditorProxy,
-    removeProxy: removeEditorProxy,
-    leave: leaveEditor,
-  } = editor;
+  const { refresh: refreshEditor, leave: leaveEditor } = editor;
   const savedPositions = createSavedPositionOwner(fetcher, {
     isSourceCurrent: (authority, albumId) =>
       sourceGrid.isCurrent(authority) &&
@@ -2004,97 +1989,8 @@ function mountPrivateLibraryBrowser(
 
   function handleViewIntent(intent: LibraryBrowserIntent): void {
     if (!applicationAlive) return;
+    if (routeEditorIntent(editor, intent)) return;
     switch (intent.kind) {
-      // The Edit workspace owns one Photo at a time. Every editor intent
-      // re-checks the owner, so a gesture or response for a Photo the
-      // Photographer already left can never write or publish for it.
-      case "editor-open":
-        openEditor(intent.photoId);
-        return;
-      case "editor-refresh":
-        refreshEditor(intent.photoId);
-        return;
-      case "editor-exposure":
-        commitEditorExposure(intent.photoId, intent.exposureEv);
-        return;
-      case "editor-white-balance-mode":
-        commitEditorWhiteBalance(intent.photoId, {
-          kind: "mode",
-          mode: intent.mode,
-        });
-        return;
-      case "editor-temperature":
-        commitEditorWhiteBalance(intent.photoId, {
-          kind: "temperature",
-          temperatureKelvin: intent.temperatureKelvin,
-        });
-        return;
-      case "editor-tint":
-        commitEditorWhiteBalance(intent.photoId, {
-          kind: "tint",
-          tintMilli: intent.tintMilli,
-        });
-        return;
-      case "editor-undo":
-        stepEditorHistory(intent.photoId, "undo");
-        return;
-      case "editor-redo":
-        stepEditorHistory(intent.photoId, "redo");
-        return;
-      case "editor-reset":
-        stepEditorHistory(intent.photoId, "reset");
-        return;
-      case "editor-reset-exposure":
-        stepEditorHistory(intent.photoId, "resetExposure");
-        return;
-      case "editor-reset-white-balance":
-        stepEditorHistory(intent.photoId, "resetWhiteBalance");
-        return;
-      case "editor-preview":
-        void requestEditorPreview(intent.photoId);
-        return;
-      case "editor-stage":
-        applyEditorStage(intent.photoId, intent.stage);
-        return;
-      case "editor-compare":
-        setEditorComparison(intent.photoId, intent.pressed);
-        return;
-      case "editor-use-saved":
-        void useSavedRecipe(intent.photoId);
-        return;
-      case "editor-reapply":
-        reapplyLocalSettings(intent.photoId);
-        return;
-      case "editor-discard-draft":
-        discardEditorDraft(intent.photoId);
-        return;
-      case "editor-proxy-create":
-        createEditorProxy(intent.photoId);
-        return;
-      case "editor-proxy-remove":
-        removeEditorProxy(intent.photoId);
-        return;
-      case "editor-rebind":
-        void rebindEditor(intent.photoId);
-        return;
-      case "editor-export-submit":
-        editor.submitExport(intent.photoId, intent.target);
-        return;
-      case "editor-export-cancel":
-        editor.cancelExport(intent.photoId, intent.target);
-        return;
-      case "editor-export-retry":
-        editor.retryExport(intent.photoId, intent.target);
-        return;
-      case "editor-export-download":
-        editor.downloadExport(intent.photoId, intent.target);
-        return;
-      case "editor-xmp-submit":
-        editor.submitXmp(intent.photoId);
-        return;
-      case "editor-xmp-download":
-        editor.downloadXmp(intent.photoId);
-        return;
       case "summary-action": {
         const outcome = applicationPresentation.activateAction(
           intent.presentationId,
@@ -2493,6 +2389,7 @@ function mountPrivateLibraryBrowser(
   return () => {
     if (!applicationAlive) return;
     applicationAlive = false;
+    leaveEditor();
     photoDetails.dispose();
     metadataPanel.dispose();
     removedListing.dispose();

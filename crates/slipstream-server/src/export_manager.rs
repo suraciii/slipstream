@@ -15,6 +15,9 @@ use slipstream_core::{
     StagedOriginal,
 };
 use slipstream_processing::local_photo::OutputIdentity;
+#[path = "export_manager_composable.rs"]
+mod composable;
+pub(crate) use composable::{ProcessingExportExecution, ProcessingPreviewExecution};
 use slipstream_processing::photo_profile;
 #[path = "output_validation.rs"]
 pub(crate) mod output_validation;
@@ -72,7 +75,9 @@ pub(crate) struct ExportManager {
     allowance: u64,
     /// The initial scheduler admits at most one heavy processing job at a
     /// time per instance; the slot also serializes restart reconciliation.
-    admission: tokio::sync::Mutex<()>,
+    admission: Arc<tokio::sync::Mutex<()>>,
+    /// Publications not yet confirmed by the serialized Library owner.
+    publications: Arc<Mutex<HashMap<String, ProcessingPublicationOwner>>>,
     /// Stops new lifecycle tasks before shutdown drains the existing ones.
     tasks: Mutex<TaskState>,
     shutting_down: AtomicBool,
@@ -85,6 +90,46 @@ pub(crate) struct ExportManager {
 struct TaskState {
     closing: bool,
     handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+struct ProcessingPublicationOwner {
+    request_id: String,
+    active: bool,
+}
+
+/// Dropping an unsettled execution retains its claim until owner reads can
+/// establish a durable artifact or a terminal decision without publication.
+pub(crate) struct ProcessingPublication {
+    artifact_id: String,
+    publications: Arc<Mutex<HashMap<String, ProcessingPublicationOwner>>>,
+    admission: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl ProcessingPublication {
+    pub(crate) async fn release(self) {
+        let _slot = self.admission.lock().await;
+        self.clear();
+    }
+
+    fn clear(&self) {
+        self.publications
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.artifact_id);
+    }
+}
+
+impl Drop for ProcessingPublication {
+    fn drop(&mut self) {
+        if let Some(owner) = self
+            .publications
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_mut(&self.artifact_id)
+        {
+            owner.active = false;
+        }
+    }
 }
 
 /// A live download renews its lease well inside the staleness window.
@@ -127,7 +172,8 @@ impl ExportManager {
             next_sequence: AtomicU64::new(1),
             running: Mutex::new(HashMap::new()),
             allowance,
-            admission: tokio::sync::Mutex::new(()),
+            admission: Arc::new(tokio::sync::Mutex::new(())),
+            publications: Arc::new(Mutex::new(HashMap::new())),
             tasks: Mutex::new(TaskState {
                 closing: false,
                 handles: Vec::new(),
@@ -140,7 +186,7 @@ impl ExportManager {
         })
     }
 
-    fn spawn_task<F>(&self, future: F) -> bool
+    pub(crate) fn spawn_task<F>(&self, future: F) -> bool
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -417,12 +463,37 @@ impl ExportManager {
                 }
             }
         }
+        // Composable artifacts share this namespace but are retired by their
+        // own persistence owner. Remove bytes only after that owner has
+        // durably expired the corresponding records and leases.
+        if let Ok(processing) = self.library.sweep_processing_export_expiry(now).await {
+            for artifact_id in processing {
+                if let Some(stem) = valid_artifact_stem(&artifact_id) {
+                    // A composable artifact's module owns its extension;
+                    // removing both is idempotent for the one that does
+                    // not exist.
+                    for extension in ["tiff", "jpg"] {
+                        let _ = fs::remove_file(
+                            self.workspace
+                                .root()
+                                .join("artifacts")
+                                .join(format!("{stem}.{extension}")),
+                        );
+                    }
+                }
+            }
+        }
         self.remove_orphan_artifacts().await;
     }
 
-    /// Deletes artifact files that no succeeded Export record claims. A crash
-    /// between file publication and state commit can leave one behind.
+    /// Deletes artifact files that no succeeded legacy Export or composable
+    /// ProcessingArtifact record claims. A crash between file publication and
+    /// state commit can leave one behind; uncertain commits are retained until
+    /// persistence proves the record expired.
     async fn remove_orphan_artifacts(&self) {
+        // Serialize orphan reads/deletion with publication and claim release,
+        // so a read made before settlement cannot delete a newly claimed file.
+        let _slot = self.admission.lock().await;
         let artifacts = self.workspace.root().join("artifacts");
         let Ok(entries) = fs::read_dir(artifacts) else {
             return;
@@ -433,14 +504,49 @@ impl ExportManager {
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .unwrap_or_default();
-            let claimed = valid_artifact_stem(stem).is_some()
-                && matches!(
-                    self.library.export(stem).await,
-                    Ok(Some(ExportRecord {
-                        artifact: Some(_),
-                        ..
-                    }))
-                );
+            let publication = self
+                .publications
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(stem)
+                .map(|owner| (owner.request_id.clone(), owner.active));
+            if matches!(publication, Some((_, true))) {
+                continue;
+            }
+            let terminal = if let Some((request_id, _)) = &publication {
+                match self.library.processing_export_work(request_id).await {
+                    Ok(Some(work)) if work.admission.request_id == *request_id => {
+                        use slipstream_core::ProcessingExportWorkState;
+                        matches!(
+                            work.state,
+                            ProcessingExportWorkState::Failed
+                                | ProcessingExportWorkState::Cancelled
+                        ) || (work.state == ProcessingExportWorkState::Succeeded
+                            && work.artifact_id.as_ref().map(|id| id.as_str()) != Some(stem))
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+            let (Ok(legacy), Ok(processing)) = (
+                self.library.export(stem).await,
+                self.library.processing_artifact(stem).await,
+            ) else {
+                // An unavailable owner cannot prove a file unclaimed.
+                continue;
+            };
+            let claimed =
+                legacy.is_some_and(|record| record.artifact.is_some()) || processing.is_some();
+            if publication.is_some() {
+                if !claimed && !terminal {
+                    continue;
+                }
+                self.publications
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .remove(stem);
+            }
             if !claimed {
                 let _ = fs::remove_file(entry_path);
             }
@@ -544,6 +650,12 @@ impl ExportManager {
             .cloned()
     }
 
+    /// Signals one live composable Export after its durable cancel decision.
+    pub(crate) fn cancel_running(&self, export_id: &str) {
+        if let Some(token) = self.running_token(export_id) {
+            token.store(true, Ordering::Release);
+        }
+    }
     /// One bounded heavy attempt: stage, develop, validate, claim, publish.
     async fn execute(self: &Arc<Self>, export: ExportRecord) {
         if self.shutting_down.load(Ordering::Acquire) {
@@ -1092,219 +1204,5 @@ fn export_target(workload: &str) -> Result<ExportTarget, String> {
 }
 
 #[cfg(test)]
-pub(crate) mod development_tiff_decode {
-    use super::*;
-    use sha2::{Digest, Sha256};
-
-    /// Writes a structurally valid Development TIFF whose single Deflate
-    /// strip carries `payload`, so only the decoded content can differ
-    /// between a good and a corrupt artifact. The embedded profile is the
-    /// pinned accepted engine output profile.
-    pub(crate) fn write_development_tiff(path: &Path, payload: &[u8]) {
-        let icc: &[u8] =
-            include_bytes!("../../slipstream-core/assets/prophoto-linear-g10-darktable.icc");
-        let mut bytes = b"II\x2a\x00\x08\x00\x00\x00".to_vec();
-        bytes.extend_from_slice(&14_u16.to_le_bytes());
-        let mut externals: Vec<u8> = Vec::new();
-        let base: usize = 8 + 2 + 14 * 12 + 4;
-        let mut at = base as u32;
-        let entry = |tag: u16,
-                     kind: u16,
-                     count: u32,
-                     value: u32,
-                     extra: Option<&[u8]>,
-                     out: &mut Vec<u8>,
-                     externals: &mut Vec<u8>,
-                     at: &mut u32| {
-            out.extend_from_slice(&tag.to_le_bytes());
-            out.extend_from_slice(&kind.to_le_bytes());
-            out.extend_from_slice(&count.to_le_bytes());
-            match extra {
-                Some(blob) => {
-                    out.extend_from_slice(&at.to_le_bytes());
-                    externals.extend_from_slice(blob);
-                    if blob.len() % 2 == 1 {
-                        externals.push(0);
-                    }
-                    *at += u32::try_from(blob.len() + blob.len() % 2).unwrap();
-                }
-                None => out.extend_from_slice(&value.to_le_bytes()),
-            }
-        };
-        let three_shorts =
-            |a: u16, b: u16, c: u16| [a.to_le_bytes(), b.to_le_bytes(), c.to_le_bytes()].concat();
-        entry(256, 4, 1, 2, None, &mut bytes, &mut externals, &mut at);
-        entry(257, 4, 1, 1, None, &mut bytes, &mut externals, &mut at);
-        entry(
-            258,
-            3,
-            3,
-            0,
-            Some(&three_shorts(32, 32, 32)),
-            &mut bytes,
-            &mut externals,
-            &mut at,
-        );
-        entry(259, 4, 1, 8, None, &mut bytes, &mut externals, &mut at);
-        entry(262, 3, 1, 2, None, &mut bytes, &mut externals, &mut at);
-        let strip_patch = bytes.len() + 8;
-        entry(273, 4, 1, 0, None, &mut bytes, &mut externals, &mut at);
-        entry(277, 3, 1, 3, None, &mut bytes, &mut externals, &mut at);
-        entry(278, 4, 1, 1, None, &mut bytes, &mut externals, &mut at);
-        entry(
-            279,
-            4,
-            1,
-            u32::try_from(payload.len()).unwrap(),
-            None,
-            &mut bytes,
-            &mut externals,
-            &mut at,
-        );
-        entry(284, 3, 1, 1, None, &mut bytes, &mut externals, &mut at);
-        entry(
-            339,
-            3,
-            3,
-            0,
-            Some(&three_shorts(3, 3, 3)),
-            &mut bytes,
-            &mut externals,
-            &mut at,
-        );
-        // Resolution entries are RATIONAL, a type this walk does not read but
-        // a real engine artifact always carries. A walk that refuses an unread
-        // type refuses every development artifact.
-        let resolution = [0x2c_u8, 0x01, 0, 0, 1, 0, 0, 0];
-        entry(
-            282,
-            5,
-            1,
-            0,
-            Some(&resolution),
-            &mut bytes,
-            &mut externals,
-            &mut at,
-        );
-        entry(
-            283,
-            5,
-            1,
-            0,
-            Some(&resolution),
-            &mut bytes,
-            &mut externals,
-            &mut at,
-        );
-        entry(
-            34675,
-            7,
-            u32::try_from(icc.len()).unwrap(),
-            0,
-            Some(icc),
-            &mut bytes,
-            &mut externals,
-            &mut at,
-        );
-        bytes.extend_from_slice(&[0, 0, 0, 0]);
-        bytes.extend_from_slice(&externals);
-        let strip_offset: u32 = bytes.len() as u32;
-        let patch_end = strip_patch + 4;
-        bytes[strip_patch..patch_end].copy_from_slice(&strip_offset.to_le_bytes());
-        bytes.extend_from_slice(payload);
-        fs::write(path, bytes).unwrap();
-    }
-
-    /// One zlib stream made of stored deflate blocks, so the test does not
-    /// need a compressor to produce a payload that must decode cleanly.
-    pub(crate) fn stored_zlib(content: &[u8]) -> Vec<u8> {
-        let mut stream = vec![0x78, 0x01];
-        for chunk in content.chunks(65_535) {
-            let length = chunk.len() as u16;
-            stream.push(if chunk.len() == content.len() { 1 } else { 0 });
-            stream.extend_from_slice(&length.to_le_bytes());
-            stream.extend_from_slice(&(!length).to_le_bytes());
-            stream.extend_from_slice(chunk);
-        }
-        let mut a: u32 = 1;
-        let mut b: u32 = 0;
-        for &byte in content {
-            a = (a + u32::from(byte)) % 65_521;
-            b = (b + a) % 65_521;
-        }
-        stream.extend_from_slice(&((b << 16) | a).to_be_bytes());
-        stream
-    }
-
-    #[test]
-    fn publication_requires_a_developed_payload_that_really_inflates() {
-        let base = std::env::temp_dir().join(format!(
-            "export-decode-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        ));
-        fs::create_dir_all(&base).unwrap();
-
-        // A structurally valid TIFF whose strip does not inflate: refused by
-        // the real Development TIFF reader.
-        // A stream whose stored-block header claims more bytes than follow.
-        let mut corrupt = vec![0x78_u8, 0x01, 1];
-        corrupt.extend_from_slice(&24_u16.to_le_bytes());
-        corrupt.extend_from_slice(&(!24_u16).to_le_bytes());
-        corrupt.extend_from_slice(&[0_u8; 6]);
-        let corrupt_path = base.join("corrupt.tif");
-        write_development_tiff(&corrupt_path, &corrupt);
-        assert!(validate_development_tiff(&corrupt_path).is_err());
-
-        // The publication path refuses before any artifact is published.
-        let originals = base.join("originals");
-        fs::create_dir_all(&originals).unwrap();
-        fs::create_dir_all(base.join("exports")).unwrap();
-        let workspace = ExportWorkspace::open(base.join("exports"), &originals).unwrap();
-        let writer = workspace.begin_development_tiff("exp-corrupt").unwrap();
-        fs::copy(&corrupt_path, writer.temporary_path()).unwrap();
-        assert!(
-            writer
-                .publish(|path| validate_development_tiff(path).map(|_| ()))
-                .is_err()
-        );
-        let artifacts = base.join("exports/artifacts");
-        assert_eq!(fs::read_dir(&artifacts).unwrap().count(), 0);
-
-        // A well-formed stored-block payload with the exact float32 RGB
-        // geometry decodes through the reader and publishes; the validation
-        // yields the disclosed geometry and the embedded-profile identity.
-        let pixels = vec![0_u8; 2 * 3 * 4];
-        let good_path = base.join("good.tif");
-        write_development_tiff(&good_path, &stored_zlib(&pixels));
-        let good_facts = validate_development_tiff(&good_path).unwrap();
-        assert_eq!(good_facts.width, 2);
-        assert_eq!(good_facts.height, 1);
-        let icc: &[u8] =
-            include_bytes!("../../slipstream-core/assets/prophoto-linear-g10-darktable.icc");
-        assert_eq!(
-            good_facts.profile_identity,
-            format!("{:x}", Sha256::digest(icc))
-        );
-        let writer = workspace.begin_development_tiff("exp-good").unwrap();
-        fs::copy(&good_path, writer.temporary_path()).unwrap();
-        let published = writer
-            .publish(|path| validate_development_tiff(path).map(|_| ()))
-            .unwrap();
-        assert_eq!(
-            fs::read(&published.path).unwrap(),
-            fs::read(&good_path).unwrap()
-        );
-
-        // A truncated stream that decodes to fewer samples is also refused.
-        let short = stored_zlib(&pixels[..12]);
-        let short_path = base.join("short.tif");
-        write_development_tiff(&short_path, &short);
-        assert!(validate_development_tiff(&short_path).is_err());
-
-        let _ = fs::remove_dir_all(base);
-    }
-}
+#[path = "export_manager_development_tiff_tests.rs"]
+pub(crate) mod development_tiff_decode;

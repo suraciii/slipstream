@@ -1334,20 +1334,27 @@ fn development_surface_refusals_map_onto_the_closed_exit_codes() {
             .unwrap_or_else(|| panic!("{code} must map to a confirmed failure"))
     };
     assert_eq!(mapped("invalid_settings").exit_code, 2);
+    assert_eq!(mapped("invalid_recipe").exit_code, 2);
+    assert_eq!(mapped("incompatible_input").exit_code, 2);
     assert_eq!(mapped("unsupported_photo").exit_code, 2);
     assert_eq!(mapped("unknown_photo").exit_code, 3);
     assert_eq!(mapped("unknown_export").exit_code, 3);
     assert_eq!(mapped("missing_recipe").exit_code, 3);
+    assert_eq!(mapped("unknown_step").exit_code, 3);
+    assert_eq!(mapped("unknown_module").exit_code, 3);
     assert_eq!(mapped("recipe_conflict").exit_code, 4);
     assert_eq!(mapped("source_changed").exit_code, 4);
     assert_eq!(mapped("requires_rebind").exit_code, 4);
     assert_eq!(mapped("request_conflict").exit_code, 4);
+    assert_eq!(mapped("step_not_current").exit_code, 4);
     assert_eq!(mapped("export_conflict").exit_code, 4);
     assert_eq!(mapped("output_unavailable").exit_code, 4);
     assert_eq!(mapped("export_expired").exit_code, 6);
     assert_eq!(mapped("receipt_expired").exit_code, 6);
     assert_eq!(mapped("artifact_expired").exit_code, 6);
     assert_eq!(mapped("processing_unavailable").exit_code, 6);
+    assert_eq!(mapped("module_parameters_unavailable").exit_code, 6);
+    assert_eq!(mapped("source_unavailable").exit_code, 6);
     assert_eq!(mapped("resource_unavailable").exit_code, 6);
     assert_eq!(mapped("retained_output_full").exit_code, 6);
     // A possibly admitted write keeps its unknown outcome; the mapped
@@ -1365,6 +1372,7 @@ fn development_surface_refusals_map_onto_the_closed_exit_codes() {
     assert_eq!(confirmed.payload.details, json!({}));
 }
 
+mod processing;
 #[test]
 fn recovery_commands_parse_their_closed_forms() {
     for arguments in [
@@ -2149,34 +2157,4 @@ fn source_refusals_carry_the_closed_support_reason() {
     );
 }
 
-#[test]
-fn development_proxy_commands_parse_their_closed_forms() {
-    for arguments in [
-        vec!["photos", "proxy", "get", "photo-1"],
-        vec![
-            "photos",
-            "proxy",
-            "create",
-            "photo-1",
-            "--input",
-            "create.json",
-        ],
-        vec!["photos", "proxy", "remove", "photo-1"],
-    ] {
-        assert!(
-            Cli::try_parse_from(std::iter::once("slipstream").chain(arguments.iter().copied()))
-                .is_ok()
-        );
-    }
-    for arguments in [
-        vec!["photos", "proxy", "get", ""],
-        vec!["photos", "proxy", "create", "photo-1"],
-        vec!["photos", "proxy", "remove", ""],
-        vec!["photos", "proxy", "inspect", "photo-1"],
-    ] {
-        assert!(
-            Cli::try_parse_from(std::iter::once("slipstream").chain(arguments.iter().copied()))
-                .is_err()
-        );
-    }
-}
+mod development_proxy;

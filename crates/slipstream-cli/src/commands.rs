@@ -104,6 +104,25 @@ pub enum Command {
 pub enum ProcessingCommand {
     /// Read the service's current processing capability report.
     Capability,
+    /// Discover peer processing modules, schemas, limits, and availability.
+    Modules,
+    /// Read one published immutable Processing Artifact's provenance.
+    Artifact {
+        /// One Processing Artifact ID.
+        #[arg(value_name = "ARTIFACT_ID", value_parser = nonempty)]
+        artifact_id: String,
+    },
+    /// Download one published immutable Processing Artifact's validated
+    /// bytes to a new local TIFF file.
+    ArtifactDownload {
+        /// One Processing Artifact ID.
+        #[arg(value_name = "ARTIFACT_ID", value_parser = nonempty)]
+        artifact_id: String,
+        /// New local TIFF path; an existing file or symbolic link is never
+        /// replaced.
+        #[arg(long, value_name = "PATH", required = true)]
+        file: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -345,6 +364,47 @@ pub enum PhotoCommand {
     Recipe {
         #[command(subcommand)]
         command: development::RecipeCommand,
+    },
+    /// Read or save one Photo's composable Processing Recipe of zero or
+    /// more module-owned Processing Steps.
+    ProcessingRecipe {
+        #[command(subcommand)]
+        command: development::ProcessingRecipeCommand,
+    },
+    /// Request the Preview of the recipe's selected current Processing
+    /// Step; a refusal never falls back and no rendition is downloaded.
+    ProcessingPreview {
+        #[arg(value_parser = nonempty)]
+        photo_id: String,
+        /// The recipe's selected current Processing Step ID.
+        #[arg(long, value_name = "STEP_ID", value_parser = nonempty)]
+        step: String,
+        /// New local image path; an existing file or symbolic link is never
+        /// replaced.
+        #[arg(long, value_name = "PATH", required = true)]
+        file: PathBuf,
+    },
+    /// Submit the recipe's selected current Processing Step for an explicit
+    /// Export. The complete guarded body travels in one `--input` document.
+    ProcessingExport(development::ProcessingExportArgs),
+    /// Read the durable work record of one submitted Processing Export.
+    ProcessingExportStatus {
+        #[arg(value_name = "PHOTO_ID", value_parser = nonempty)]
+        photo_id: String,
+        /// The caller-generated request identity the Export was submitted
+        /// under.
+        #[arg(value_name = "REQUEST_ID", value_parser = nonempty)]
+        request_id: String,
+    },
+    /// Cancel one live submitted Processing Export; the first terminal
+    /// decision wins.
+    ProcessingExportCancel {
+        #[arg(value_name = "PHOTO_ID", value_parser = nonempty)]
+        photo_id: String,
+        /// The caller-generated request identity the Export was submitted
+        /// under.
+        #[arg(value_name = "REQUEST_ID", value_parser = nonempty)]
+        request_id: String,
     },
     /// Request an Edit Preview for the selected stage or download its ready rendition.
     EditPreview(edit_preview_download::EditPreviewArgs),

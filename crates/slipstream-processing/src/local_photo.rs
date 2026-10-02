@@ -6,7 +6,7 @@
 //! worker PID 1, transport socket, or Library/HTTP dependency. The caller
 //! owns a clean private work directory and serializes admission; every
 //! engine-private path is derived below that directory, so concurrent callers
-//! never share ambient state. The fixed Film stage remains unavailable locally.
+//! never share ambient state. Standalone Film execution belongs to `local_film`.
 //!
 //! One run is bounded by the caller's cancellation flag and timeout: the
 //! supervisor and engine run in their own process group, a per-call watchdog
@@ -163,4 +163,176 @@ pub fn develop(
         width: identity.width,
         height: identity.height,
     })
+}
+
+/// Execute one local `development-tiff` run of a selected composable step's
+/// complete module-owned parameter snapshot and return the validated
+/// identity of the written output.
+///
+/// The pinned engine child, the staged output profile, and the private work
+/// tree are owned exactly like [`develop`]; the only difference is the
+/// execution stack, which is the selected step's validated `stack`
+/// forwarded verbatim — never reinterpreted, reordered, or extended. The
+/// output is the same pinned Development TIFF handoff and is validated by
+/// the same closed contract before its identity is returned.
+#[allow(clippy::too_many_arguments)]
+pub fn develop_selected_step(
+    engine: &Path,
+    metadata: &Path,
+    profile: &Path,
+    work: &Path,
+    input: &Path,
+    output: &Path,
+    parameters: &crate::modules::Parameters,
+    cancellation: Arc<AtomicBool>,
+    timeout: Duration,
+) -> io::Result<OutputIdentity> {
+    if timeout.is_zero() {
+        return Err(io::Error::other("local development requires a timeout"));
+    }
+    if cancellation.load(Ordering::Relaxed) {
+        return Err(cancelled());
+    }
+    // Refuse anything but the admitted module envelope before the engine
+    // starts; the extracted stack is the engine's own argument shape.
+    let stack = crate::local_preview::selected_step_stack(parameters)?;
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::other("local development deadline overflow"))?;
+    let staged_profile = prepare(work, profile)?;
+    if cancellation.load(Ordering::Relaxed) {
+        return Err(cancelled());
+    }
+    develop_stack_at(
+        engine,
+        metadata,
+        &staged_profile,
+        work,
+        input,
+        output,
+        &stack,
+        cancellation.clone(),
+        deadline,
+    )
+    .map_err(|error| terminated(error, &cancellation, deadline))?;
+    let identity = photo_tiff::validate(output, MAX_OUTPUT_BYTES)
+        .map_err(|code| io::Error::other(format!("development artifact rejected: {code:?}")))?;
+    Ok(OutputIdentity {
+        size: identity.size,
+        sha256: identity.sha256,
+        width: identity.width,
+        height: identity.height,
+    })
+}
+
+/// The stack-driven form of the pinned local development sequence: the
+/// engine arguments, environment, and contract pinning are exactly the
+/// baseline run's, and `stack` replaces the fixed exposure-only stack.
+#[allow(clippy::too_many_arguments)]
+fn develop_stack_at(
+    engine: &Path,
+    metadata_path: &Path,
+    profile: &Path,
+    work: &Path,
+    input: &Path,
+    output: &Path,
+    stack: &[serde_json::Value],
+    cancellation: Arc<AtomicBool>,
+    deadline: Instant,
+) -> io::Result<()> {
+    use serde_json::json;
+
+    let approved = native_development::approved_metadata(metadata_path)?;
+    let config = work.join("config");
+    let cache = work.join("cache");
+    let tmp = work.join("tmp");
+    let xdg = work.join("xdg");
+    let library = work.join("library.db");
+    let args: Vec<String> = [
+        "--core",
+        "--disable-opencl",
+        "--configdir",
+        native_development::strict(&config)?,
+        "--cachedir",
+        native_development::strict(&cache)?,
+        "--tmpdir",
+        native_development::strict(&tmp)?,
+        "--library",
+        native_development::strict(&library)?,
+        "--conf",
+        "plugins/darkroom/workflow=none",
+        "--conf",
+        "write_sidecar_files=never",
+        "--conf",
+        "run_crawler_on_start=FALSE",
+        "--conf",
+        "plugins/imageio/format/tiff/bpp=32",
+        "--conf",
+        "plugins/imageio/format/tiff/compress=1",
+        "--conf",
+        "plugins/imageio/format/tiff/compresslevel=6",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    let env = [
+        (
+            "PATH".to_string(),
+            "/opt/darktable/bin:/usr/local/bin:/usr/bin:/bin".to_string(),
+        ),
+        (
+            "HOME".to_string(),
+            native_development::strict(&xdg)?.to_string(),
+        ),
+        (
+            "XDG_CONFIG_HOME".to_string(),
+            native_development::strict(&xdg)?.to_string(),
+        ),
+        (
+            "XDG_CACHE_HOME".to_string(),
+            native_development::strict(&cache)?.to_string(),
+        ),
+        (
+            "TMPDIR".to_string(),
+            native_development::strict(&tmp)?.to_string(),
+        ),
+        ("OMP_NUM_THREADS".to_string(), "4".to_string()),
+    ];
+    let mut engine = crate::mcp_client::McpClient::spawn_guarded(
+        native_development::strict(engine)?,
+        &args,
+        &env,
+        cancellation,
+        deadline,
+    )?;
+    engine.initialize(CLIENT)?;
+    native_development::verify_engine_contract(&mut engine, &approved)?;
+    let engine_stack = crate::local_preview::engine_stack(stack);
+    let result = engine.call(
+        "export_images",
+        json!({
+            "input": {"path": input},
+            "out_path": output,
+            "format": "scene-linear-tiff",
+            "icc_file": profile,
+            "baseline": "raw-development",
+            "width": 0,
+            "height": 0,
+            "upscale": false,
+            "high_quality": true,
+            "stack": engine_stack,
+        }),
+    )?;
+    if result["paths"]
+        .as_array()
+        .is_none_or(|paths| paths.as_slice() != [json!(output)])
+        || result["skipped"].as_u64() != Some(0)
+        || result["exported"].as_u64() != Some(1)
+        || result["ok"].as_bool() != Some(true)
+    {
+        return Err(io::Error::other(
+            "engine did not write the requested artifact",
+        ));
+    }
+    engine.shutdown()
 }

@@ -26,7 +26,9 @@ const OPERATION: Operation = Operation::PhotosPreview;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DestinationKind {
     Preview,
+    Artifact,
     EditPreview,
+    ProcessingPreview,
     Export,
 }
 
@@ -34,7 +36,9 @@ impl DestinationKind {
     fn noun(self) -> &'static str {
         match self {
             Self::Preview => "Preview",
+            Self::Artifact => "Processing Artifact",
             Self::EditPreview => "Edit Preview",
+            Self::ProcessingPreview => "Processing Preview",
             Self::Export => "Export",
         }
     }
@@ -43,8 +47,8 @@ impl DestinationKind {
     /// The post-publication reporting failure always reports `write-output`.
     fn write_operation(self) -> &'static str {
         match self {
-            Self::Preview | Self::EditPreview => "write-preview",
-            Self::Export => "write-output",
+            Self::Preview | Self::EditPreview | Self::ProcessingPreview => "write-preview",
+            Self::Artifact | Self::Export => "write-output",
         }
     }
 }
@@ -441,6 +445,52 @@ pub(super) fn complete_jpeg(bytes: &[u8], width: u32, height: u32) -> bool {
                 saw_scan |= in_scan;
             }
         }
+    }
+}
+
+/// A complete PNG whose IHDR declares exactly the geometry the receipt
+/// named: the signature, the leading IHDR, and the trailing IEND, with
+/// every chunk length inside the bytes. This does not decode the image
+/// data; it establishes the medium and the declared frame.
+pub(super) fn complete_png(bytes: &[u8], width: u32, height: u32) -> bool {
+    const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    if !bytes.starts_with(&SIGNATURE) || bytes.len() < SIGNATURE.len() + 12 + 12 {
+        return false;
+    }
+    let chunk = |offset: usize| -> Option<(u32, [u8; 4], usize)> {
+        let length = u32::from_be_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?);
+        let kind: [u8; 4] = bytes.get(offset + 4..offset + 8)?.try_into().ok()?;
+        let end = offset
+            .checked_add(12)?
+            .checked_add(usize::try_from(length).ok()?)?;
+        (end <= bytes.len()).then_some((length, kind, end))
+    };
+    // The first chunk is IHDR with the declared geometry in its fixed
+    // leading fields: width and height, big endian.
+    let Some((_, kind, header_end)) = chunk(SIGNATURE.len()) else {
+        return false;
+    };
+    if kind != *b"IHDR" {
+        return false;
+    }
+    let Some(fields) = bytes.get(SIGNATURE.len() + 8..SIGNATURE.len() + 8 + 8) else {
+        return false;
+    };
+    if u32::from_be_bytes(fields[0..4].try_into().unwrap()) != width
+        || u32::from_be_bytes(fields[4..8].try_into().unwrap()) != height
+    {
+        return false;
+    }
+    // Walk the remaining chunks; the stream must end exactly at IEND.
+    let mut offset = header_end;
+    loop {
+        let Some((_, kind, end)) = chunk(offset) else {
+            return false;
+        };
+        if kind == *b"IEND" {
+            return end == bytes.len();
+        }
+        offset = end;
     }
 }
 

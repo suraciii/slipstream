@@ -1,0 +1,7 @@
+{
+  "cpu_sha256": "5f7ea696e7d18d2a3c94a58a4852a0fdc415a0bc1e2f793531567764d56e9aa2",
+  "kernel_release": "7.0.0-27-generic",
+  "machine": "x86_64",
+  "manager_sha256": "14bf65b8041fe377f475ee4ffc4c43fb71d7d24288d1acee97c1e8c573caaba2",
+  "page_bytes": 4096
+}

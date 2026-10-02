@@ -121,6 +121,9 @@ enum Step {
     LoseAfterRead,
     /// Answer the save with the service's `recipe_conflict` facts.
     RecipeConflict,
+    /// Answer the composable save with the service's `recipe_conflict`
+    /// facts.
+    ComposableRecipeConflict,
     /// Answer the Edit Preview read with the pending admission.
     AdmitPreview,
     IndeterminatePreview,
@@ -289,6 +292,9 @@ fn answer(stream: &mut impl Write, step: &Step, rendition: &[u8]) {
         // The request was read; dropping the stream loses the response.
         Step::LoseAfterRead => {}
         Step::RecipeConflict => write_json_response(stream, 409, "Conflict", &conflict_body()),
+        Step::ComposableRecipeConflict => {
+            write_json_response(stream, 409, "Conflict", &composable_conflict_body())
+        }
         Step::AdmitPreview => write_json_response(
             stream,
             202,
@@ -405,6 +411,58 @@ fn conflict_body() -> Value {
             "currentSourceRevision": SOURCE_REVISION,
             "currentRecipeVersion": CURRENT_RECIPE_VERSION
         }
+    }})
+}
+
+/// The composable save document: one darktable step bound to the guarded
+/// Original, with a module-owned parameter tree the CLI must neither
+/// flatten nor rewrite.
+fn composable_save_document() -> Value {
+    json!({
+        "requestId": "composable-001",
+        "expectedRecipeRevision": Value::Null,
+        "expectedSourceRevision": SOURCE_REVISION,
+        "currentStepId": "develop-1",
+        "steps": [{
+            "stepId": "develop-1",
+            "module": "darktable",
+            "input": {
+                "kind": "original",
+                "photoId": PHOTO_ID,
+                "sourceRevision": SOURCE_REVISION,
+            },
+            "parameters": {
+                "schemaVersion": "darktable-params-1",
+                "tree": {"stack": [], "output": {
+                    "format": "tiff",
+                    "precisionBits": 32,
+                    "colorSpace": "prophoto-rgb",
+                    "transferFunction": "linear"
+                }},
+            },
+        }],
+    })
+}
+
+/// The service's composable `recipe_conflict` refusal carrying the retained
+/// recipe the caller needs to recover without a second read.
+fn composable_conflict_body() -> Value {
+    json!({"error": {
+        "code": "recipe_conflict",
+        "message": "The expected composable recipe revision is no longer current.",
+        "effect": "none",
+        "details": {
+            "photoId": PHOTO_ID,
+            "revision": CURRENT_RECIPE_VERSION,
+            "sourceRevision": SOURCE_REVISION,
+            "currentStepId": "develop-1",
+            "steps": [{
+                "stepId": "develop-1",
+                "module": "darktable",
+                "input": {"kind": "original", "photoId": PHOTO_ID, "sourceRevision": SOURCE_REVISION},
+                "parameters": {"schemaVersion": "darktable-params-1", "tree": {"stack": []}},
+            }],
+        },
     }})
 }
 
@@ -708,6 +766,8 @@ async fn a_lost_recipe_save_response_is_an_unknown_outcome_without_retry() {
     fs::remove_dir_all(base).unwrap();
 }
 
+#[path = "development_service/composable.rs"]
+mod composable;
 // ---------------------------------------------------------------- previews
 
 /// An accepted render intent is a successful pending report: no file, no
@@ -953,92 +1013,5 @@ async fn unverifiable_edit_preview_transfers_publish_nothing() {
 #[path = "development_service/capability.rs"]
 mod capability;
 
-// ---------------------------------------------------------------- real service
-
-/// The two Originals of the shared fixture: JPEG sources only, with
-/// processing explicitly the operator-disabled configuration, so the
-/// deployment answers deterministically without an engine bundle. The
-/// environment default is `auto`, which reports `bundle-unavailable` when
-/// the bundle is missing — not the `disabled` condition asserted here.
-fn real_service_fixture() -> (PathBuf, Config) {
-    let base = temp_base("real-service");
-    let originals = base.join("originals");
-    let web = base.join("web");
-    fs::create_dir(&originals).unwrap();
-    fs::create_dir(originals.join("trip")).unwrap();
-    fs::create_dir(&web).unwrap();
-    fs::write(web.join("index.html"), b"<main>fixture</main>").unwrap();
-    for name in ["one.JPG", "two.JPG"] {
-        fs::write(originals.join("trip").join(name), jpeg_bytes()).unwrap();
-    }
-    let config = Config {
-        library_root: originals,
-        state_directory: base.join("state"),
-        cache_directory: base.join("cache"),
-        database_basename: "library.sqlite".to_owned(),
-        host: "127.0.0.1".to_owned(),
-        public_origin: "https://localhost".to_owned(),
-        port: 0,
-        web_root: Some(web),
-        processing: None,
-        export_retained_output_bytes: None,
-        metadata_supervisor: None,
-    };
-    (base, config)
-}
-
-async fn wait_until_idle(server: &str) {
-    let client = reqwest::Client::builder()
-        .add_root_certificate(common::test_certificate())
-        .build()
-        .unwrap();
-    for _ in 0..400 {
-        let response = client
-            .get(format!("{server}/api/status"))
-            .header("Slipstream-CLI-Contract", "1")
-            .bearer_auth(common::ACCESS_TOKEN)
-            .send()
-            .await
-            .unwrap();
-        let result: Value = response.json().await.unwrap();
-        if result["scan"]["state"] == "idle" {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("fixture Library did not become idle");
-}
-
-/// A JPEG source class has no approved development profile: the real
-/// service refuses the Edit Preview read and the CLI maps the confirmed
-/// refusal onto exit 2 without creating the destination.
-#[tokio::test]
-async fn the_real_service_refuses_an_edit_preview_of_a_jpeg_source() {
-    let (base, config) = real_service_fixture();
-    let server = common::start_authenticated_server(config).await;
-    wait_until_idle(&server.url).await;
-    let (exit, page) = command(&server.url, &["photos", "list", "--limit", "60"]).await;
-    assert_eq!(exit, 0);
-    let photo_id = page["data"]["items"][0]["id"].as_str().unwrap().to_owned();
-    let destination = base.join("refused.jpg");
-    let (exit, refusal) = command(
-        &server.url,
-        &[
-            "photos",
-            "edit-preview",
-            &photo_id,
-            "--file",
-            destination.to_str().unwrap(),
-            "--stage",
-            "develop",
-        ],
-    )
-    .await;
-    assert_eq!(exit, 2, "{refusal}");
-    assert_eq!(refusal["error"]["code"], "unsupported_photo");
-    assert_eq!(refusal["error"]["effect"], "none");
-    assert_eq!(refusal["error"]["details"]["photoId"], photo_id);
-    assert!(!destination.exists());
-    server.close().await.unwrap();
-    fs::remove_dir_all(base).unwrap();
-}
+#[path = "development_service/real_service.rs"]
+mod real_service;

@@ -19,6 +19,8 @@ mod development_proxy;
 mod edit_preview_download;
 mod export_download;
 mod preview_download;
+mod processing_artifact_download;
+mod processing_preview_download;
 
 const CLI_CONTRACT_VERSION: u16 = 1;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;

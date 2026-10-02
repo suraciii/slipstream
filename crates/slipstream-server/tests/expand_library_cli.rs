@@ -100,6 +100,8 @@ fn expand_library_command_updates_binding_and_location_then_scans() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
+        // Schema v12 publishes camera identity; v13 adds Development Proxies;
+        // v14 adds durable XMP snapshot exports.
         14
     );
     assert_eq!(

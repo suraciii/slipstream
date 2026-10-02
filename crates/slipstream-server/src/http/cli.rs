@@ -78,7 +78,7 @@ pub(crate) fn require_cli_contract(request: &Request<Body>) -> CliBoundaryResult
 pub(crate) fn cli_error(
     status: StatusCode,
     code: &'static str,
-    message: &'static str,
+    message: impl Into<String>,
     details: Value,
 ) -> Response<Body> {
     json_response(
@@ -86,7 +86,7 @@ pub(crate) fn cli_error(
         &serde_json::json!({
             "error": {
                 "code": code,
-                "message": message,
+                "message": message.into(),
                 "effect": "none",
                 "details": details
             }

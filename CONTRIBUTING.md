@@ -159,6 +159,10 @@ PLAYWRIGHT_CHROMIUM_EXECUTABLE=/absolute/path/to/chrome bun run test:browser
 
 The Rust workspace contains the production Library/Preview core and HTTP server in `crates/slipstream-server`. The production-language contract is in [`design/rust-server.md`](design/rust-server.md). Shared JSON and SQL vectors live in [`compatibility/`](compatibility/); Rust compatibility tests consume them.
 
+The composable Export route tests cover submission disconnection: accepted
+work must finish validation and publication under service ownership, remain
+downloadable by artifact identity, and replay without another engine run.
+
 **Fixture coverage boundary.** The shared validation protocol vectors run against an empty fixture Library and pin validation, error, and contract-envelope shapes. The Browse vectors use a generated RAW/JPEG pair and Album to pin non-empty windows, ordering, Preview and Thumbnail hydration, metadata, status, membership, Browse position, and Album mutations. The cache vectors seed one Photo and one web asset and pin derivative and web-asset response headers, ETag identity, and revalidation. Every file under `compatibility/` must have an executing consumer; the compatibility inventory test enforces this rule.
 
 ### Continuous integration
@@ -264,10 +268,12 @@ against an independent RAW reference
 using the complete commands in [the processing build guide](tools/processing/README.md#build).
 Record the reference's exact identity. The qualifier is not a production fallback.
 
-Film remains unadmitted; its retired worker runtime and build kit were
-removed with the worker execution path. Host-side tooling checks run with
-`bun run test:processing-tools` and are part of `test:fast` and `verify`;
-engine qualification remains separate.
+The standalone SpektraFilm extension packages its pinned runtime independently
+of darktable; build and module admission instructions are in the
+[processing guide](tools/processing/README.md#film-extension). Host-side tooling
+checks run with `bun run test:processing-tools` in `test:fast` and `verify`.
+Engine qualification remains scoped to its recorded bundle, input, parameters,
+and geometry.
 
 ## Server startup
 

@@ -2,6 +2,7 @@
 
 mod admission;
 mod albums;
+mod composable_recipe;
 mod decisions;
 mod development_proxy;
 mod edit_recipe;
@@ -13,6 +14,7 @@ mod mutation;
 mod owner;
 mod owner_recovery;
 mod permanent_deletion;
+mod processing_export;
 mod queries;
 mod removal;
 mod scan;

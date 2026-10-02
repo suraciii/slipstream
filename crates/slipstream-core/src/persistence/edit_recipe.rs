@@ -1,9 +1,10 @@
 use super::{
     DatabaseName, PersistenceError, StateDirectory,
     owner::{
-        parse_white_balance_intent, photo_processing_source, random_uuid_v4,
-        white_balance_intent_name, white_balance_intent_values, write_transaction,
+        parse_white_balance_intent, random_uuid_v4, white_balance_intent_name,
+        white_balance_intent_values, write_transaction,
     },
+    processing_export::photo_processing_source,
     scan::{parse_camera_identity, parse_capture_fact, parse_error_category, parse_kind},
 };
 use crate::{
@@ -13,7 +14,6 @@ use crate::{
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-
 // Save receipts stay durable at this internal boundary. Before Web or CLI
 // exposes request identities, the protocol must add an explicit age, expiry,
 // and expired-identity outcome; deleting keys without that contract could

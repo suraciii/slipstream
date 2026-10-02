@@ -196,6 +196,10 @@ pub(crate) fn create_router_with_preview(
             "/api/processing/capability",
             get(crate::processing_capability::get_processing_capability),
         )
+        .route(
+            "/api/processing/modules",
+            get(crate::processing_modules::get_processing_modules),
+        )
         .route("/api/album-summaries", get(cli::get_album_summaries))
         .route("/api/albums/{id}", get(cli::get_album_summary))
         .route("/api/albums/{id}/changes", post(mutations::change_album))
@@ -220,8 +224,48 @@ pub(crate) fn create_router_with_preview(
             get(crate::edit_recipe::get_edit_recipe).post(crate::edit_recipe::post_edit_recipe),
         )
         .route(
+            "/api/photos/{id}/processing-recipe",
+            get(crate::processing_recipe::get_composable_edit_recipe)
+                .post(crate::processing_recipe::post_composable_edit_recipe),
+        )
+        .route(
             "/api/photos/{id}/edit-recipe/rebind",
             get(browse::method_not_allowed).post(crate::edit_recipe::post_edit_recipe_rebind),
+        )
+        .route(
+            "/api/photos/{id}/edit-state-exports",
+            get(xmp::list).post(xmp::create),
+        )
+        .route(
+            "/api/photos/{id}/edit-state-exports/{export_id}/artifact",
+            get(xmp::artifact),
+        )
+        .route(
+            "/api/photos/{id}/processing-preview/{step_id}",
+            get(crate::processing_preview::get_processing_preview),
+        )
+        .route(
+            "/api/photos/{id}/processing-exports",
+            get(browse::method_not_allowed)
+                .post(crate::processing_export::submit_processing_export),
+        )
+        .route(
+            "/api/photos/{id}/processing-exports/{requestId}",
+            get(crate::processing_export::get_processing_export_status)
+                .delete(crate::processing_export::cancel_processing_export),
+        )
+        .route(
+            "/api/photos/{id}/processing-exports/{requestId}/cancel",
+            get(browse::method_not_allowed)
+                .post(crate::processing_export::cancel_processing_export),
+        )
+        .route(
+            "/api/processing-artifacts/{id}",
+            get(crate::processing_export::get_processing_artifact),
+        )
+        .route(
+            "/api/processing-artifacts/{id}/bytes",
+            get(crate::processing_export::get_processing_artifact_bytes),
         )
         .route(
             "/api/photos/{id}/edit-preview/{stage}",
@@ -248,14 +292,6 @@ pub(crate) fn create_router_with_preview(
         .route(
             "/api/photos/{id}/exports",
             get(export::list_photo_exports).post(export::submit_export),
-        )
-        .route(
-            "/api/photos/{id}/edit-state-exports",
-            get(xmp::list).post(xmp::create),
-        )
-        .route(
-            "/api/photos/{id}/edit-state-exports/{export_id}/artifact",
-            get(xmp::artifact),
         )
         .route("/api/exports/{id}", get(export::get_export))
         .route(
@@ -710,11 +746,31 @@ pub(crate) async fn request_policy(
 }
 
 /// DELETE is admitted only on the routes that declare it: the browsing session
-/// release and the Development Proxy removal. Every other DELETE is refused
-/// before routing, so a retired or renamed path can never be reached by a
-/// method the API does not publish.
+/// release, the Development Proxy removal, and the composable Processing
+/// Export cancellation. Every other DELETE is refused before routing, so a
+/// retired or renamed path can never be reached by a method the API does
+/// not publish.
 fn delete_is_admitted(path: &str) -> bool {
-    path.starts_with("/api/browse/") || is_development_proxy_route(path)
+    path.starts_with("/api/browse/")
+        || is_development_proxy_route(path)
+        || is_processing_export_request_route(path)
+}
+
+/// One `/api/photos/{id}/processing-exports/{requestId}` path: exactly one
+/// nonempty Photo ID and one nonempty request identity segment below the
+/// fixed prefix, and no deeper path — the `/cancel` POST route is not a
+/// DELETE surface.
+fn is_processing_export_request_route(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/photos/") else {
+        return false;
+    };
+    let Some((photo_id, request_id)) = rest.split_once("/processing-exports/") else {
+        return false;
+    };
+    !photo_id.is_empty()
+        && !photo_id.contains('/')
+        && !request_id.is_empty()
+        && !request_id.contains('/')
 }
 
 /// One `/api/photos/{id}/development-proxy` path: exactly one nonempty Photo ID

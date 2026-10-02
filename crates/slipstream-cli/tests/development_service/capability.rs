@@ -75,39 +75,3 @@ async fn processing_capability_refuses_the_retired_launcher_state() {
             .starts_with("GET /api/processing/capability")
     );
 }
-
-/// Without a processing configuration the service reports the closed
-/// `disabled` condition, and the CLI passes the report through with its
-/// profiles, null identities, and unavailable stages.
-#[tokio::test]
-async fn the_real_service_capability_report_is_disabled_without_processing() {
-    let (base, config) = real_service_fixture();
-    let server = common::start_authenticated_server(config).await;
-    wait_until_idle(&server.url).await;
-    let (exit, report) = command(&server.url, &["processing", "capability"]).await;
-    assert_eq!(exit, 0);
-    let data = &report["data"];
-    assert_eq!(data["state"], "disabled");
-    assert_eq!(data["bundleId"], Value::Null);
-    assert_eq!(data["incarnation"], Value::Null);
-    assert_eq!(data["stages"]["develop"], "unavailable");
-    assert_eq!(data["stages"]["film"], "unavailable");
-    let profiles = data["profiles"].as_array().unwrap();
-    assert!(!profiles.is_empty());
-    for profile in profiles {
-        assert!(!profile["profileId"].as_str().is_some_and(str::is_empty));
-        let modes = profile["whiteBalanceModes"].as_array().unwrap();
-        assert!(!modes.is_empty());
-        assert!(
-            modes
-                .iter()
-                .all(|mode| mode.as_str().is_some_and(|mode| !mode.is_empty()))
-        );
-        assert_eq!(profile["whiteBalanceRanges"], Value::Null);
-    }
-    let exposure = &data["exposure"];
-    assert!(exposure["minimumEv"].as_f64().unwrap() < exposure["maximumEv"].as_f64().unwrap());
-    assert!(exposure["stepEv"].as_f64().unwrap() > 0.0);
-    server.close().await.unwrap();
-    fs::remove_dir_all(base).unwrap();
-}

@@ -1,0 +1,107 @@
+.photo-editor-composable {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.5rem;
+}
+
+.photo-editor-composable-state {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.photo-editor-composable-body {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.photo-editor-composable-steps,
+.photo-editor-composable-artifact-list {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.photo-editor-composable-step,
+.photo-editor-composable-artifact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.photo-editor-composable-step-name {
+  flex: 1 1 12rem;
+  min-width: 0;
+  text-align: left;
+}
+
+.photo-editor-composable-step-name[aria-pressed="true"] {
+  border-color: var(--accent, var(--border-strong));
+  background: var(--panel-strong, var(--panel));
+}
+
+.photo-editor-composable-empty {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.photo-editor-composable-editor {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+}
+
+.photo-editor-composable-editing {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.photo-editor-composable-input {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+}
+
+.photo-editor-composable-input label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+}
+
+.photo-editor-composable textarea,
+.photo-editor-composable select,
+.photo-editor-composable input[type="text"] {
+  width: 100%;
+  min-width: 0;
+}
+
+.photo-editor-composable textarea {
+  resize: vertical;
+  font-family: var(--mono, monospace);
+  font-size: 0.8rem;
+}
+
+.photo-editor-composable-artifacts {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.photo-editor-composable-artifact-note {
+  flex: 1 1 12rem;
+  min-width: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}

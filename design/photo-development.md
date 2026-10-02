@@ -6,29 +6,48 @@ coordinate these operations without giving image engines ownership of Original
 Files, Photo identity, or client state.
 
 [Photo Development](../docs/photo-development.md) owns product behavior.
-[Development Color Pipeline](development-color.md) owns image and engine
-semantics. Existing Library confinement, camera Preview, and selection contracts
+[Processing Modules](processing-modules.md) owns single-module invocation,
+discovery, composition, and Preview/Export identity.
+[Development Color Pipeline](development-color.md) owns the qualified
+concrete image contracts of module outputs and their display derivatives.
+Existing Library confinement, camera Preview, and selection contracts
 remain authoritative for their boundaries.
 
 ## Model and Ownership
 
-The Photo owns zero or one current Edit Recipe. No saved recipe means the
-processing baseline and as-shot white balance. Saving settings creates editing
-intent even when they match that baseline; resetting a saved recipe does not
-delete it. Its opaque revision is independent of Rating and Selection State
-revisions. Custom white-balance intent remains semantic temperature and tint;
-its accepted ranges and engine mapping must be qualified before that mode is
-exposed.
+The Photo owns one current Edit Recipe containing zero or more Processing Step
+records. Each record has a stable opaque `step_id`, one selected module, one
+identified input binding, and one complete parameter snapshot under the
+[module contract](processing-modules.md#model-and-ownership). A repeated module
+uses a different step identity. No saved steps means no saved editing intent;
+opening an admitted RAW development step uses the processing baseline and
+as-shot white balance. Saving baseline settings still creates intent, and reset
+does not delete a step. Recipe revisions remain independent of Rating and
+Selection State. The active browser step is a selection over this collection,
+not a hidden pipeline position.
 
-A Development Result is the scene-linear derivative after darktable. A Film
-Result is the fixed recipe's simulated output. An Edit Preview identifies a
-specific stage result and display rendition; it must not change existing camera
-Preview Source values.
+A step's input binding is one of three guarded kinds: the Photo's Original
+File under its guarded source revision, one retained immutable Processing
+Artifact under its captured image contract, or — as a bounded preview
+source only — the Photo's [Development Proxy](#development-proxy). The
+kind fixes admission: an Original-backed Export requires the Original; an
+artifact-backed step continues while the Original is unavailable, within
+that artifact's lease, expiry, and module compatibility; a proxy never
+admits an Export. Upstream edits never retarget an artifact or proxy input.
 
-An Export records an immutable settings/source/bundle snapshot, target, request
-identity, state, and artifact reference. Retaining that snapshot is not a
-user-visible edit-history feature. Only snapshots required by current recipes,
-retained exports, and active work must remain in durable storage.
+Exposure and white balance are semantic controls of the admitted darktable
+configuration. Custom temperature and tint ranges and engine mapping must be
+qualified before execution. A Film Recipe is one concrete standalone
+SpektraFilm configuration, not a mandatory suffix of every Edit Recipe.
+Development Result and Film Result name module-specific concrete results; an
+Edit Preview names the current step's bounded result, not an implicit pair of
+stages.
+
+An Export records an immutable input/module/parameter/bundle snapshot, output
+contract, request identity, state, and artifact reference. Retaining that snapshot
+is not a user-visible edit-history feature. Only current recipes, retained
+artifacts, and active work require snapshots. Selecting an Export artifact as a
+later step's input is explicit; changing upstream intent does not retarget it.
 
 Rust and SQLite own recipes, source bindings, Export state, queue admission,
 concurrency, and artifact publication. Browser state owns pending drafts,
@@ -53,18 +72,19 @@ rule; post-derivation publication still rereads current Library facts.
 
 ## Application Boundary
 
-The existing Rust modular monolith owns the development lifecycle inside its
-one application container. [Native darktable
-Integration](darktable-integration.md) owns development execution through a
-private native MCP child process started per request by the in-process
-PhotoExecutor. Film simulation uses a narrow Python entry point calling the
-Spektrafilm runtime. [Local Photo Executor](processing-executor.md) owns the
-serialized local execution, scratch lifetime, cleanup, and restart settlement.
-Engine processes must not expose an independent public API or start the GUI.
+The existing Rust modular monolith owns development lifecycle inside its
+one application container. Each selected module runs through the in-process
+PhotoExecutor under [Local Photo Executor](processing-executor.md). [Native
+darktable Integration](darktable-integration.md) owns execution through a
+fresh private MCP child. Standalone SpektraFilm uses a narrow Python entry point
+calling its pinned runtime. Neither peer invokes another module or publishes a
+Processing Artifact. Engines must not expose an independent public API or start
+the GUI.
 
-The processing capability must be opt-in and report engine, bundle, input and
-resource availability separately from Library readiness. Missing processing
-capability must not prevent normal browsing or access to saved editing facts.
+Processing remains opt-in. Discovery reports availability and refusal reasons
+per module, separately from input support, resource admission, and Library
+readiness. Missing module availability must not prevent browsing, inspection of
+saved intent, or work with another independently available module.
 
 The runtime must pin Python, engine builds, adapter schemas, profiles and native
 IO dependencies. Importing the package must not be equated with successful
@@ -116,10 +136,13 @@ The proxy row is committed after its complete artifact is durably installed.
 Replacement publishes a new identity before removing the prior artifact; a
 failed replacement therefore leaves the prior valid proxy available. Startup
 reconciliation validates recorded artifacts and removes incomplete rows and
-unclaimed files. Proxy-backed Develop applies the saved numeric exposure and
-display conversion locally to the scene-linear artifact. Proxy-backed Film
-crosses the qualified Film stage using a distinct `proxy-film` workload whose
-zero-exposure input cannot double-apply the transform.
+unclaimed files. Proxy-backed editing derives the current step's bounded
+Preview from the scene-linear artifact by applying the saved numeric
+exposure and display conversion locally. A module step that must re-execute
+its engine against the proxy uses a qualified proxy workload whose
+zero-exposure input cannot double-apply the captured parameters, and a
+module that cannot produce its Preview from the proxy refuses rather than
+fall back to another input or module.
 
 The proxy is a preview source only. It must not satisfy an Original-required
 Export or permit an arbitrary filesystem path into the engine. The service
@@ -169,6 +192,12 @@ Reading matching settings alone must not authorize an unrelated overwrite.
 CLI commands retain explicit mutation and uncertainty semantics; autosave is
 browser orchestration of the same service operation.
 
+Stored intent is never rewritten to match execution availability. A saved
+setting the current module qualification does not admit stays readable as
+retained intent and reports processing unavailable for that Photo; the
+service must not rewrite it or silently substitute baseline execution. A
+save carrying such a setting is committed like any other save.
+
 Save receipts are public and bounded. A request identity is 1 to 128 characters
 of ASCII letters, digits, `.`, `_`, and `-`; the caller chooses it, its
 uniqueness scope is the Photo, and a retry never regenerates it. The service
@@ -178,9 +207,8 @@ for accepted Export receipts. Within that period, an identical retry with the
 same request identity and payload resolves to the recorded outcome and
 committed revision and starts no new work. The same identity with a different
 payload is refused with `request_conflict`. After that period, a replay of the
-identity returns the explicit outcome `receipt_expired` with HTTP status 410
-and code `receipt_expired`, and expiry never frees the identity for new work;
-a new save requires a new identity.
+identity returns the explicit `receipt_expired` outcome, and expiry never frees
+the identity for new work; a new save requires a new identity.
 
 Undo/redo must submit a new guarded recipe write. A whole pointer drag is one
 history entry. External changes invalidate assumptions behind local history;
@@ -189,7 +217,7 @@ the browser must reconcile before using that history to write over newer state.
 ## Export Submission and Ordering
 
 Export click captures an immutable copy of the visible control settings and
-target. The browser must place an ordering barrier in that Photo's write stream:
+selected output contract. The browser must place an ordering barrier in that Photo's write stream:
 settle prior writes, commit the captured recipe if needed, and submit the Export
 against that exact confirmed revision and source binding before sending later edits.
 
@@ -201,9 +229,12 @@ output state, so an older replay cannot release a later submission's barrier.
 The Editor write stream queries this barrier without keeping a second map.
 
 The service must atomically validate the expected current recipe revision and
-source binding, capture source/settings/bundle/target, persist the Export and its idempotency receipt,
-and admit its work. A concurrent client can cause a conflict between save and
-submission; the service must not substitute a newer or older recipe. The browser
+source binding, capture input/settings/bundle/output contract, persist the
+Export and its idempotency receipt, and admit its work. An output contract
+outside the selected module's admitted set is refused before acceptance and
+must not create an Export or a receipt. A concurrent client can cause a
+conflict between save and submission; the service must not substitute a
+newer or older recipe. The browser
 must preserve the captured intent and resolve the conflict explicitly.
 
 After Export acceptance, subsequent edits may advance the Photo's recipe. They
@@ -229,25 +260,32 @@ interpreted as new work.
 
 ## Preview Scheduling
 
-Preview work is ephemeral and latest-intent-wins within its Photo/stage owner.
-Its identity includes source content, complete settings, bundle, stage, geometry
-and the display-transform identity owned by
-[Development Color Pipeline](development-color.md#display-and-comparison).
-Pending requests may be coalesced. Completion must recheck the current owner
-and full identity before publication.
+[Processing Modules](processing-modules.md#preview-and-export) owns bounded
+current-step execution and explicit Export materialization.
+Preview work is ephemeral and latest-intent-wins within its Photo/step owner.
+Pending requests with the same complete identity may coalesce. Completion must
+recheck the current owner and full identity before delivery.
 
 Cancelling computation and ignoring obsolete output are distinct operations.
 Even a process that cannot stop immediately must not publish its stale result.
-Temporary comparison requests must not overwrite the main current preview or
-change the saved recipe. A comparison is therefore its own owner: its identity
-carries the settings selector it names beside the stage, so its admission,
-supersession, retention and publication are separate from the current
-rendition of that stage.
+Temporary comparison requests own their admission, supersession, and delivery
+separately from the main preview and do not change saved intent.
 
-Changing development settings invalidates both stages. A Film Result must use
-a matching Development Result. Display-only changes must not rerun RAW
-interpretation when the required stage result is retained. No cache hit may be
-claimed from just a filename, modification time, or visible image similarity.
+A comparison may request the module's baseline rendition — the processing
+baseline of 0 EV and as-shot white balance derived from the input rather
+than from the saved recipe — so the compared view stays on the same
+development while the saved recipe moves. Every Preview admission settles:
+completion, failure, and cancellation free its identity, a later request
+cannot report work that no longer exists as still running, and an attempt
+the service abandons is cancelled rather than left for deadline cleanup.
+Each response is a current rendition, a queued/running admission result, or
+a refusal naming the selected module or incompatible input and reason.
+
+Changing a step's input or parameters makes its preview stale. A downstream step
+bound to an immutable Export artifact remains bound to that artifact, not to the
+new upstream intent. Display-only changes may reuse a matching bounded result.
+No cache hit may be claimed from a filename, modification time, or visible
+similarity alone.
 
 ## Export Execution and Recovery
 
@@ -268,14 +306,20 @@ atomically publish. Database/artifact recovery must handle a crash between file
 publication and state commit by validating and reconciling the recorded attempt.
 Neither orphan files nor a database flag alone establish success.
 
+The attempt owns a validated published file until durable settlement records its
+artifact claim. Retention and orphan cleanup must not delete the file during
+that interval. An unconfirmed state commit keeps the file protected until the
+persistence owner establishes whether the artifact was committed or the attempt
+ended without publication.
+
 Remove an attempt's private workspace only after its workload has settled and
 terminal evidence is durable. [Local Photo Executor](processing-executor.md)
-owns the settlement and cleanup contract; retained Development TIFFs follow a
-separate lifecycle.
+owns settlement and cleanup; retained Processing Artifacts follow the retention
+rules below.
 
-Failed film work may retain a valid Development Result. It must not mark the
-Film Result or Finished JPEG successful. A previously completed Export remains
-bound to its captured source even if the current Original later changes.
+Failed module work must not mark its requested artifact successful or discard an
+earlier completed artifact. A previously completed Export remains bound to its
+captured input even if the Original or upstream editing intent later changes.
 
 ## Resources and Retention
 
@@ -297,30 +341,32 @@ and memory failure evidence. These are execution policies independent of the
 Edit Recipe. The deployment must qualify that boundary before processing is
 enabled.
 
-[Local Photo Executor](processing-executor.md) defines the typed admission
-between this service boundary and the engine child. It keeps
-Photo/source/recipe and Export authority in the service, stages a confined
-copy rather than exposing a path, and admits only the closed
-`development-tiff` workload until a separate Film capability is qualified.
+[Local Photo Executor](processing-executor.md) defines admission between this
+service boundary and the engine child. It keeps Photo/source/recipe and Export
+authority in the service and stages a confined copy rather than exposing a
+Library path. [Processing Modules](processing-modules.md#interface-and-discovery)
+owns each adapter's complete parameter tree and input/output contracts.
+Discoverability cannot qualify a new module/input/parameter/output combination.
 
-A cache entry's identity includes content evidence, stage settings, exact bundle,
+A cache entry's identity includes content evidence, step settings, exact bundle,
 geometry and stochastic policy. Active inputs, outputs and downloads require
 leases so eviction cannot remove them mid-operation. Disk exhaustion must leave
 saved intent and published artifacts coherent.
 
 The [Product Spec](../docs/photo-development.md#failure-and-retention) owns
-retention periods. A successful Development TIFF and its captured snapshot
+retention periods. A successful Processing Artifact and its captured snapshot
 remain one retention unit through that disclosed period. An active download
 lease delays their removal until its response stream settles. The accepted
 Export receipt follows the Product Spec's terminal-reconciliation period for
-every target and outcome, including failed, cancelled, and interrupted work.
-Before accepting a new Development TIFF Export, reserve capacity for the
+every output contract and outcome, including failed, cancelled, and
+interrupted work. Before accepting a new Export, reserve capacity for the
 complete artifact within the deployment's finite retained-output allowance.
 If that reservation fails, refuse the new Export without evicting an
 unexpired or leased artifact. After expiry and release of all leases, the
 artifact and snapshot may be removed; regeneration must validate the captured
-source and bundle and fail explicitly when either is unavailable. Other Export
-targets must use their own disclosed bounded artifact-retention period.
+source and bundle and fail explicitly when either is unavailable. Each
+module output contract carries its own disclosed bounded artifact-retention
+period.
 
 Edit Recipe state belongs in backup. Rebuildable derivatives need not. A saved
 recipe must retain its processing bundle identity; an engine update must either
@@ -343,11 +389,11 @@ true even when saved settings match the baseline or the Original is unavailable.
 Saved editing intent and retained Export references must prevent automatic
 retirement as an unreferenced record in Retire and Bind.
 
-The service must offer bounded operations to discover support, read/change an
-Edit Recipe, request a stage preview, submit/list/inspect/cancel Exports, and
-obtain a validated artifact. Web and CLI share these operations. Artifact
-responses must expose identity, type, size, expiry and matching content metadata;
-partial or mismatched downloads must not be reported complete.
+The service must offer bounded operations to discover admitted module support,
+read/change Edit Recipe intent, request the current step's Preview,
+submit/list/inspect/cancel Exports, and obtain a validated artifact. Web and CLI
+share identity and guards. Artifact responses expose identity, type, size, expiry,
+and matching content metadata; partial downloads must not be reported complete.
 
 ### Edit state file snapshots
 
@@ -398,68 +444,58 @@ engine-private blobs, arbitrary filesystem paths, or a general task engine.
 
 ## Service Surface
 
-Web and programmatic clients share these operations.
-[Command Line](command-line.md#photo-development-surface) lists the routes; this
-section owns their states, outcomes, and the closed wire contract that defines
-every request field, response field, HTTP status mapping, and outcome/error
-code for these routes. Every response distinguishes an admitted command
-from observed state, and no response exposes a host path, an engine-private
-setting, or an unqualified value.
+This section owns the availability, outcome, and refusal semantics every
+client surface — Web, CLI, or programmatic — preserves for the operations
+above. It defines no HTTP routes, request fields, response fields, or
+universal parameter schemas: the dynamic module interface belongs to
+[Processing Modules](processing-modules.md#interface-and-discovery), and
+wire and CLI syntax belong to their authoritative references under
+[Wire contract](#wire-contract) below.
 
-### Support state
+### Availability and diagnostics
 
-`GET /api/processing/capability` reports the capability state, the engine
-bundle identity it observed, the approved `profile_id` list, the approved
-finite exposure range, and one state per stage. Stage states are closed values:
-`ready`, `unavailable`, or `unsupported`. The first version reports `develop`
-from the RAW qualification of the configured bundle and `film` as unavailable
-until that stage is qualified. A Photo read reports the support state of its own
-source class against the same bundle; a Photo whose source class is not approved
-is `unsupported` and its edit controls are read-only.
+Availability composes three independent axes. The module axis is each
+Processing Module's own discovery report: availability and refusal reasons
+per module, separately from input support and resource admission. The
+Library axis is the scan and recovery phase of the Published Library
+([Scalable Library Browsing](library-browsing.md#loading-status)). The
+Photo axis is one Photo's source-read state. A ready module does not imply
+that the Library scan is idle or that any Photo source is readable, and a
+recovering Library does not change the module axis. While a scan or
+recovery runs, the last Published Library remains the authority for
+existing Photos: a Photo whose publication holds current readable source
+facts stays `supported` with that source revision, and a Photo without
+current source facts reports a retryable wait state, never a confirmed read
+failure. Editing is offered only when the selected module reports itself
+ready and admits the step's input; an artifact-backed step substitutes its
+own retained-input and module-compatibility checks for the Photo axis.
 
-Capability is one of three axes a client observes independently. The engine
-axis is this capability report; the Library axis is the scan and recovery
-phase of the Published Library ([Scalable Library
-Browsing](library-browsing.md#loading-status)); the Photo axis is one Photo's
-source-read state. `ready` means the engine and bundle are available; it does
-not imply that the Library scan is idle or that any Photo source is readable,
-and a recovering Library does not change the engine axis. While a scan or
-recovery runs, the last Published Library remains the authority for existing
-Photos: a Photo whose publication holds current readable source facts stays
-`supported` with that source revision, and a Photo without current source
-facts reports a retryable wait state, never a confirmed read failure.
-`processingAvailable` is `true` only when the engine axis is `ready` and the
-Photo axis is `supported`.
+The Photo axis reports one closed reason set. `original-missing` is a
+confirmed absence from the remembered Location; `original-unreadable` is a
+confirmed read or parse failure for the current source revision; both are
+permanent for that source revision. `read-pending` means current source
+facts have not been inspected and published yet; `resource-unavailable`
+means bounded observation, native-work admission, or attempt
+reconciliation could not complete; both are retryable without a restart. A
+transient condition must never surface as a confirmed read failure. Recipe
+reads derive their source facts from the same Published Library that serves
+Photo reads, so one response is coherent with them; classification comes
+from committed inspection evidence for the current source revision, never
+synthesized from stale metadata, another Photo, or a scan that has not
+published. A refusal that follows from the Photo's source state carries the
+same closed reason the read reports, so one reason maps to one Web/CLI
+behavior.
 
-For each approved source class, the report names the white-balance modes, and
-the temperature and tint ranges, that the capability admits for that class
-against the observed bundle. This report is the only source of truth for which
-modes and ranges an editor may enable; a mode or range outside it is never
-executed and never substituted with another mode.
+The selected module's discovery report names the control modes and ranges
+its qualification admits for the Photo's source class against the observed
+bundle. That report is the only source of truth an editor may enable; a
+mode or range outside it is never executed and never substituted with
+another mode. Bounded diagnostics compose exactly these axes — the module
+report, the Loading Status, and the Photo's recipe read together name the
+reason an edit is disabled — and expose no host path, secret, or
+engine-private setting.
 
-Bounded diagnostics compose exactly these axes: the capability report, the
-Loading Status, and the Photo's recipe read together name the reason an edit
-is disabled — engine condition, Library phase, or Photo source-read state
-with its closed reason — and expose no host path, secret, or engine-private
-setting.
-
-### Edit Recipe
-
-A recipe read returns the current recipe or the absence of one, the observed
-source revision, and the approved control ranges for that source class. Exposure
-is reported in EV with the bundle's finite range and step. White balance reports
-the stored mode whenever the service can read it, including a mode the
-capability does not admit. A stored recipe that is not representable by the
-enabled execution payload remains readable and reports processing as unavailable
-for that Photo rather than being rewritten or silently substituted with as-shot
-execution.
-
-A recipe read derives its source facts from the same Published Library that
-serves Photo and capture-metadata reads, so one response is coherent with
-them: it either reports the published readable source revision with
-`supported`, or a retryable wait state with no source revision. A transient
-native-work, admission, or scratch-recovery condition must never
-surface as a confirmed `original-missing` or `original-unreadable` outcome.
+### Guarded save outcomes
 
 A guarded save returns exactly one outcome:
 
@@ -474,407 +510,62 @@ A guarded save returns exactly one outcome:
 | `requires_rebind`  | The stored binding is stale and no ordinary save may adopt the new source.                          |
 | `request_conflict` | The request identity was already used with a different payload.                                     |
 | `missing_recipe`   | A write requiring an existing recipe found none.                                                    |
-| `unsupported`      | The Photo's source class has no approved profile.                                                   |
-| `invalid_settings` | The settings are outside the approved range or shape.                                               |
+| `unsupported`      | The Photo's source class is not admitted by the selected module's qualification.                    |
+| `invalid_settings` | The settings are outside the admitted range or shape.                                               |
 | `unavailable`      | Current source facts cannot be read — confirmed or still pending — so no guarded write is possible. |
 
-A save that carries a white-balance mode the service can read but the
-capability does not admit is accepted as editing intent, committed like any
-other save, and reported processing-unavailable with `processing_unavailable`
-for an unqualified source class or mode. Adjustable temperature and tint is
-part of this pipeline's product target
-([Product Spec](../docs/photo-development.md#development-controls)). The
-qualified mapping, its ranges and direction, and the independent reference
-required by
-[Development Color Pipeline](development-color.md#raw-development) are
-therefore a required qualification item for enabling RAW processing, not an
-optional later stage. Enabling RAW processing without them leaves the target's
-white-balance control only partially executable, and the Product Spec is not
-met until the capability report records that qualification.
-
-A guarded save evaluates its guards in one closed order: request-identity
+The service evaluates these guards in one closed order: request-identity
 replay, then the stored source binding, then the expected source revision,
 then the expected recipe revision. A stale stored binding produces
-`requires_rebind` even when the expected recipe revision is also stale, because
-a rebind invalidates the recipe's source-dependent meaning; the service never
-applies a payload captured against the old binding. Every conflict outcome
-carries the current source revision and the current recipe revision, or `null`
-when no recipe exists, so one response lets the client reconcile both: the
-current source revision is what a fresh save must expect or a rebind must name
-as the newly observed revision, and the current recipe revision is what the
-next save must expect and what a rebind must name as the previously observed
-revision.
+`requires_rebind` even when the expected recipe revision is also stale,
+because a rebind invalidates the recipe's source-dependent meaning; the
+service never applies a payload captured against the old binding. Every
+conflict outcome carries the current source revision and the current recipe
+revision, or `null` when no recipe exists, so one response lets the client
+reconcile both: the current source revision is what a fresh save must
+expect or a rebind must name as the newly observed revision, and the
+current recipe revision is what the next save must expect and what a rebind
+must name as the previously observed revision.
 
-Rebinding validates both the previously observed recipe revision and the newly
-observed source revision and returns a new recipe revision. Ordinary saves and
-processing never rebind. An `unknown` outcome reports a lost response or an
-unconfirmed commit with the code `outcome_unknown`; the client retains its
-draft and reconciles through the same request identity or current state,
-treating it as neither refusal nor success. No Export may start from an
-unconfirmed save: the client reconciles it before submitting, and submission
-validates committed revisions only.
+An `unknown` outcome reports a lost response or an unconfirmed commit; the
+client retains its draft and reconciles through the same request identity
+or current state, treating it as neither refusal nor success. No Export may
+start from an unconfirmed save: the client reconciles it before
+submitting, and submission validates committed revisions only.
 
-### Edit Preview
+### Failures and refusals
 
-An Edit Preview is a display rendition of one stage result. Its identity
-comprises the source content evidence, the recipe revision and complete recipe
-content, the bundle, the stage, the geometry, and the display-transform
-identity pinned by
-[Development Color Pipeline](development-color.md#display-and-comparison).
-A retained rendition generated under a different display transform, or without
-content evidence for its source, is not current and must not be served. The
-first version derives the `develop`
-rendition from the retained Development Result of the current identity. The
-retained Development Result is the published Development TIFF of a succeeded
-Development TIFF Export whose captured snapshot is that identity and whose
-artifact retention has not expired; an artifact of any other identity is not
-retained for the derivation, and the derivation never publishes an Export.
-When that result is not retained, the service admits one render through the
-same closed production workload as an Export, marked as preview-class work. A
-preview-class attempt runs the same workload, policy, and bundle as an Export
-and shares the service's serialized heavy-work admission with Export attempts:
-the two queue behind one another instead of preempting each other, a
-preview-class attempt never cancels or supersedes Export work, and an Export
-submission never cancels an admitted render. At most one render is admitted per
-Photo and stage.
-
-A preview-class attempt is not an Export: it creates no Export record, holds no
-downloadable artifact, and its attempt identity is not an Export identity. Its
-Development TIFF is ephemeral service-private staging: it is never published as
-an artifact, never counted against the retained-output allowance, and is
-deleted when the attempt fails or is cancelled, when a newer intent supersedes
-it, when its ephemeral retention window elapses, or when the service lifetime
-that produced it ends: staging never outlives its owner. While that window is
-live it serves re-derivation of the same identity, so a request after a
-rendition's own expiry rebuilds the rendition instead of repeating the full
-render.
-
-Preview work is ephemeral and latest-intent-wins within its Photo and stage
-owner; a superseded request never publishes, and a completed request
-republishes only while its full identity is still current. Every admission
-settles: completion, failure, and cancellation all free the identity, so a
-later request admits a new attempt instead of reporting `running` for work that
-no longer exists, and an engine attempt the service gives up on is cancelled
-rather than left running. A display-only change reuses a
-retained result; an exposure or white-balance change invalidates both stage
-renditions.
-
-The rendition response is either the current rendition, an admission result
-identifying queued or running work, or a refusal naming the unavailable stage
-and reason. Preview results are not artifacts: they are rebuildable and are not
-retained as Exports.
-
-### Export lifecycle
-
-An Export is immutable once accepted. Its durable snapshot captures the Photo
-identity, recipe revision and settings, source revision, source profile, target,
-policy and bundle identity. States are closed values: `queued`, `running`,
-`succeeded`, `failed`, `cancelled`. A successful Development TIFF or Finished
-JPEG publication records the artifact identity, byte length, content digest and
-expiry.
-
-The closed Export target set is `development-tiff` and `film-jpeg`. The
-Development TIFF target is the full scene-linear ProPhoto handoff after
-darktable development; the Finished JPEG target runs the fixed Film Recipe
-after that handoff and publishes full developed dimensions as sRGB quality 85.
-Each target names its own stage, output extension, media type, and validator.
-Unknown targets are refused with status 422 and code `invalid_settings` before
-acceptance and must not create an Export or a receipt.
-
-- Submission validates the expected recipe revision and source binding
-  atomically, then captures the snapshot. A concurrent save conflict is
-  reported and never substituted with a newer or older recipe. Submission
-  validates committed revisions only; a save whose outcome is `unknown` is not
-  a committed revision, so no Export starts from an unconfirmed save.
-- Repeating an accepted request identity with the same payload returns the
-  existing Export and starts no work; a different payload under that identity
-  is refused.
-- An identity may be replayed only until its receipt expiry, which is the
-  Product Spec's terminal reconciliation period. After expiry the same identity
-  returns an explicit `export_expired` outcome and cannot start work.
-- An explicit retry creates a new attempt and request identity against the
-  retained snapshot while that snapshot is retained; it validates source and
-  bundle availability again.
-- Cancellation settles exactly once against the actual completion state and
-  cannot undo an already published artifact.
-- Restart reconciliation resolves unfinished work from the durable snapshot:
-  it publishes a validated complete artifact or records
-  the terminal failure. It never starts a replacement attempt against a
-  possibly live one.
-- Submission refuses before acceptance when the deployment cannot reserve the
-  complete artifact within its finite retained-output allowance.
-
-### Artifact download
-
-An artifact response identifies the Export, target, stage, content type, width
-and height, the pinned profile identity, byte length, content digest and
-expiry, and streams only a fully validated artifact. A client may reject a
-download whose metadata does not match the requested target and stage. The
-geometry and profile rules of the Development TIFF are owned by the
-[Product Spec](../docs/photo-development.md#export-targets) and are not
-restated here. An active download
-holds a lease that prevents expiry cleanup until the stream settles. A download
-after expiry reports `artifact_expired`. Partial or mismatched transfers are
-never reported as complete. The service may delete an expired artifact and
-snapshot only after all leases are released.
-
-### Error codes
-
-These routes return structured codes: `unknown_photo`, `unknown_export`,
-`missing_recipe`, `recipe_conflict`, `source_changed`, `requires_rebind`,
-`request_conflict`, `unsupported_photo`, `invalid_settings`,
-`processing_unavailable`, `resource_unavailable`, `retained_output_full`,
-`export_conflict`, `export_expired`, `artifact_expired`, `receipt_expired`,
-`outcome_unknown`, and `output_unavailable`.
-A code is authoritative; clients must not parse messages. The HTTP status for
-each code is closed: 404 for `unknown_photo`, `unknown_export`, and
-`missing_recipe`; 409 for `recipe_conflict`, `source_changed`,
-`requires_rebind`, `request_conflict`, `export_conflict`, and
-`output_unavailable`; 410 for `receipt_expired`, `export_expired`, and
-`artifact_expired`; 422 for `unsupported_photo` and `invalid_settings`; 500 for
-`outcome_unknown`; and 503 for `processing_unavailable`,
-`resource_unavailable`, and `retained_output_full`.
-Existing transport-uncertainty conventions apply unchanged.
+Every refusal carries one structured code, and a code is authoritative;
+clients must not parse messages. Three refusal families are distinct. A
+processing refusal names the selected module or an admitted input,
+parameter, or output combination that cannot execute. A resource refusal
+names missing facts, capacity, or admission resources — including exhausted
+retained-output capacity — not capability. A permanent `unsupported`
+refusal names a source class the selected module's qualification does not
+admit. Guarded saves and rebinds admit no engine work, so they never report
+a processing refusal; their resource refusal is `unavailable`. A retryable
+source-read reason is therefore always a resource refusal, never a
+processing failure and never a confirmed read outcome; the retry becomes
+meaningful when the named condition clears, not when a module changes.
 
 ### Wire contract
 
-[Command Line](command-line.md#photo-development-surface) lists these routes;
-this subsection is their closed wire contract. Every body is one UTF-8 JSON
-object. Every non-success response body carries exactly one `code` from
-[Error codes](#error-codes) and a human-readable `message` that clients must
-not parse. Unknown request fields, wrong types, and values outside the closed
-sets are refused with 422 and `invalid_settings` before any state change. A
-`whiteBalance` value inside the payload bounds below is wire-valid even when
-its mode is not admitted for execution; only values outside those bounds,
-unknown modes, and wrong types are `invalid_settings`.
-
-Shared field shapes:
-
-- `requestId`: 1 to 128 characters of ASCII letters, digits, `.`, `_`, or `-`;
-  unique per Photo, chosen by the caller, and never regenerated for a retry.
-- `recipeVersion`, `sourceRevision`: opaque nonempty strings; a read response
-  reports `sourceRevision` as `null` when no current source facts are
-  readable.
-- `exportId`: opaque nonempty string following the `requestId` character set.
-- `exposureEv`: finite number within the capability report's approved range and
-  step for the source class.
-- `whiteBalance`: exactly `mode` plus the fields that mode requires. `as-shot`
-  requires no other field. `temperature-tint` requires `temperatureKelvin`, an
-  integer from 1,000 through 40,000 in Kelvin, and `tintMilli`, a signed
-  integer from -150,000 through 150,000 in thousandths of the green–magenta
-  tint unit whose zero, scale, and direction the qualified mapping pins.
-  These payload bounds are closed and published independent of admission, so a
-  conforming client can always construct a valid request.
-  [Development Color Pipeline](development-color.md#raw-development) owns the
-  qualification that admits a mode for execution.
-- `stage`: the closed value `develop`.
-- `target`: the closed value `development-tiff`.
-
-`GET /api/processing/capability` returns 200 with `state`, `bundleId`,
-`incarnation`, `exposure` (`minimumEv`, `maximumEv`, `stepEv`), `profiles`
-(one object per approved source class, each with `profileId`,
-`whiteBalanceModes`, and `whiteBalanceRanges`), and `stages` (the keys
-`develop` and `film`, each `ready`, `unavailable`, or `unsupported`).
-`whiteBalanceRanges` is `null` when the source class admits no adjustable
-mode, and otherwise reports, for each admitted adjustable mode within the
-payload bounds, the narrower minimum and maximum that the qualification
-admits for execution against the observed bundle. `state` is closed to
-`disabled`, `bundle-unavailable`, `source-unsupported`, `resource-unavailable`,
-or `ready`. Each condition fixes the client-visible recovery behavior:
-`disabled`, `bundle-unavailable`, and `source-unsupported` are
-deployment defects that only an operator can resolve, so clients present
-development as unavailable and never retry a refused processing operation;
-`resource-unavailable` names the deployment's finite processing allowance as
-the lever, so clients present the allowance failure and may retry after an
-operator changes it; and `ready` admits the closed `development-tiff`
-workload. When `state` is `source-unsupported`, `profiles` is empty and every
-Photo read reports `unsupported`. Browsing, saved recipes, and downloads of
-retained artifacts stay usable in every state. It has no error body.
-
-`GET /api/photos/{id}/edit-recipe` returns 200 with `photoId`,
-`sourceRevision`, `recipe` (`null` or an object with `recipeVersion`,
-`sourceRevision`, `exposureEv`, and `whiteBalance`), `sourceSupport` (`supported`,
-`unavailable`, or `unsupported`), `supportReason` (`null` with `supported`
-and `unsupported`; with `unavailable` exactly one of `original-missing`,
-`original-unreadable`, `read-pending`, or `resource-unavailable`),
-`processingAvailable` (boolean), and `controls` (`exposure` with `minimumEv`,
-`maximumEv`, `stepEv`, and `whiteBalanceModes`). A stored `whiteBalance` whose
-mode is absent from `controls.whiteBalanceModes` is not currently admitted:
-the client renders it read-only as retained intent, and the service reports
-the Photo processing-unavailable with `processing_unavailable` until the
-capability report admits the mode again. `sourceRevision` is `null`
-exactly when `sourceSupport` is `unavailable`, and it names only the
-currently published readable source facts: it is never synthesized from
-stale metadata, another Photo, or a scan that has not published. A missing
-or unreadable Original reports `unavailable`, not `supported` or
-`unsupported` with processing unavailable. A client that observes
-`unavailable` must not save, rebind, preview, or create image Exports against
-that Original and must reconcile from a later read; a current Development Proxy
-remains a separate preview source while the Original is unavailable. Exporting
-a confirmed edit state file remains available through its captured recipe and
-source provenance without opening the Original. A guarded save or
-rebind without an available Original or current proxy returns 503
-`resource_unavailable` until source facts can be read, and that refusal's
-error details carry the same closed `supportReason` the read reports.
-`read-pending` means the published inspection is absent or belongs to another
-source revision. `resource-unavailable` means a bounded observation could not
-complete; neither is evidence that the Original is unreadable. A completed
-Capture fact for the current source revision carries observed camera identity,
-and source support is classified from that committed evidence. The only read
-error is 404 `unknown_photo`.
-The recipe object's `sourceRevision` names its confirmed source binding and
-remains present while the Original is unavailable, so an edit state file can
-capture retained intent independently of current source observation.
-
-The closed reason set separates confirmed source outcomes from retryable
-wait states. `original-missing` is a confirmed absence from the remembered
-Location; `original-unreadable` is a confirmed read or parse failure for the
-current source revision; both are permanent for that source revision and
-explain the read failure. `read-pending` means current source facts have not
-been inspected and published yet; `resource-unavailable` means native-work
-admission or shared capacity is currently
-unavailable. Both are retryable without a restart: the client disables
-writes, preview, and image Export with a retry or refresh action, and the service
-resolves them through a later admitted scan or freed capacity. A preview
-refusal that follows from the Photo's source state carries the same closed
-`supportReason` in its error details, so read and refusal agree on one
-reason-to-behavior mapping across Web and CLI.
-
-`POST /api/photos/{id}/edit-recipe` takes `requestId`,
-`expectedRecipeVersion` (string or `null`), `expectedSourceRevision`, and
-`settings` (`exposureEv` and `whiteBalance`). It returns exactly one guarded
-outcome with the status, code, and reason category of the outcome table below.
-A success body carries `outcome`, `recipeVersion`, and `sourceRevision`; a
-conflict body additionally carries `currentSourceRevision` and
-`currentRecipeVersion`.
-
-`POST /api/photos/{id}/edit-recipe/rebind` takes `requestId`,
-`expectedRecipeVersion`, and `newSourceRevision`. Success is outcome `saved`
-with the new `recipeVersion` and `sourceRevision`; its refusal set is
-`recipe_conflict`, `source_changed`, `request_conflict`, `missing_recipe`,
-`unsupported`, `invalid_settings`, `unavailable`, `unknown`, and
-`receipt_expired`.
-
-`GET /api/photos/{id}/edit-preview/{stage}` returns 200 as a stream whose
-response headers carry the closed typed metadata `photoId`, `stage`,
-`settings`, `contentType`, `width`, `height`, `byteLength`, `sha256`,
-`sourceRevision`, `recipeVersion`, `displayTransform`, and `expiresAt`;
-`displayTransform` is the qualified transform identity of
-[Development Color Pipeline](development-color.md#display-and-comparison).
-The typed metadata framing for this route is response headers, and the stream
-follows them. The route also returns 202 with `state` (`queued` or `running`)
-and `stage` for admitted work, or a refusal. Refusals are 404 `unknown_photo`,
-422 `invalid_settings` for a stage or settings selector outside its closed
-set, 422 `unsupported_photo`, 503 `processing_unavailable`, 503
-`resource_unavailable`, and 500 `outcome_unknown`.
-
-The route takes one optional closed query selector `settings`, whose values are
-`current` (the default when absent) and `baseline`. `current` is the saved Edit
-Recipe's settings. `baseline` is the comparison rendition the
-[Product Spec](../docs/photo-development.md#preview-behavior) requires: the
-as-shot/baseline development settings — the processing baseline of 0 EV and
-as-shot white balance — derived from the Photo rather than from the saved
-recipe, so it stays the same development while the saved recipe moves. A
-baseline rendition reports the empty `recipeVersion`, because no saved recipe
-produced it, and a baseline request never changes the saved recipe. A Photo
-whose saved recipe already is that baseline resolves to the same development
-under either selector.
-
-`POST /api/photos/{id}/exports` takes `requestId`, `expectedRecipeVersion`,
-`expectedSourceRevision`, and `target`. Acceptance returns 201 with `exportId`,
-`state`, `target`, `recipeVersion`, `sourceRevision`, `receiptExpiresAt`, and
-`artifactExpiresAt`. `receiptExpiresAt` is when the Export receipt and
-captured snapshot stop being retained: `null` while the Export is `queued` or
-`running`, because that retention runs through the active operation, and
-terminal settlement plus seven days for every terminal state.
-`artifactExpiresAt` is when a published artifact stops being downloadable:
-`null` unless the Export is `succeeded` with a retained artifact, and
-publication plus seven days otherwise. Repeating the same identity and payload
-returns 200 with the same fields for the existing Export and starts no work.
-Refusals are 404 `unknown_photo`; 409 `recipe_conflict`, `source_changed`,
-`requires_rebind`, and `export_conflict` for a reused identity with a different
-payload; 410 `export_expired`; 422 `unsupported_photo` for a source class
-without an approved profile and 422 `invalid_settings` for any request value
-outside the closed sets, including a target outside the closed target set; 503
-`processing_unavailable` and `retained_output_full`; and 500 `outcome_unknown`.
-
-`GET /api/photos/{id}/exports` returns 200 with `exports`, a bounded array of
-`exportId`, `state`, `target`, `recipeVersion`, `sourceRevision`, `createdAt`,
-and nullable `settledAt` in retention order. Summaries let clients restore the
-latest task even when its artifact inspection is temporarily unavailable.
-The only error is 404 `unknown_photo`.
-
-`GET /api/exports/{id}` returns 200 with `exportId`, `photoId`, `state`,
-`target`, `recipeVersion`, `sourceRevision`, `createdAt`, `settledAt`, `bundleId`, `terminalOutcome`
-(`succeeded`, `failed`, `cancelled`, or `null`), `failureReason` (nullable
-string), `receiptExpiresAt` with the submit response meaning, and `artifact`
-(`null` when no validated artifact is retained, otherwise an object with
-exactly the download metadata: `exportId`, `target`, `stage`, `contentType`,
-`filename`, `orientation`, `sampleFormat`, `colorSpace`, `iccEmbedded`, `width`,
-`height`, `profileIdentity`, `byteLength`, `sha256`, and `expiresAt`). Development
-TIFF reports `top-left`, `float32`, `scene-linear ProPhoto RGB` and an embedded
-ICC profile; Film JPEG reports `top-left`, `uint8`, `sRGB` and an embedded ICC
-profile. The artifact object equals the download's response-header
-metadata field for field, so a client validates a download by comparing every
-artifact object field with the headers it received. The only error is 404
-`unknown_export`.
-
-`POST /api/exports/{id}/cancel` carries no request fields and returns 200 with
-`exportId`, `state`, and `terminalOutcome` of the settled Export. Errors are
-404 `unknown_export` and 500 `outcome_unknown`.
-
-`POST /api/exports/{id}/retry` takes `requestId`, a new request identity
-against the retained snapshot. Acceptance returns 202 with `exportId` and
-`state`. Refusals are 404 `unknown_export` for an identity the service never
-recorded and 410 `export_expired` for an identity whose retained snapshot has
-expired; 409 `request_conflict`, `export_conflict` for an attempt still
-active, and `output_unavailable` for a captured source or bundle that is no
-longer available; 422 `invalid_settings`; 503 `processing_unavailable`,
-`resource_unavailable`, and `retained_output_full`; and 500 `outcome_unknown`.
-
-`GET /api/exports/{id}/artifact` returns 200 as a stream whose response
-headers carry the closed typed metadata `exportId`, `target`, `stage`,
-`contentType`, `filename`, `orientation`, `sampleFormat`, `colorSpace`,
-`iccEmbedded`, `width`, `height`, `profileIdentity`, `byteLength`, `sha256`,
-and `expiresAt`; the typed metadata framing for this route is response
-headers, and the stream follows them. A known Export that cannot serve a
-validated artifact returns exactly one refusal per state: 409
-`export_conflict` while the Export is `queued` or `running`; 409
-`output_unavailable` when the Export is `failed` or `cancelled`, or
-`succeeded` without a valid retained artifact; and 410 `artifact_expired`
-after the disclosed expiry. An unknown Export identity returns 404
-`unknown_export`.
-
-| Outcome            | Status | Code                   | Reason category                                       |
-| ------------------ | ------ | ---------------------- | ----------------------------------------------------- |
-| `saved`            | 200    | —                      | the write committed as a new recipe revision          |
-| `unchanged`        | 200    | —                      | an identical retry of an already committed identity   |
-| `unknown`          | 500    | `outcome_unknown`      | a lost response or an unconfirmed commit              |
-| `receipt_expired`  | 410    | `receipt_expired`      | the identity's receipt retention has expired          |
-| `recipe_conflict`  | 409    | `recipe_conflict`      | the expected recipe revision is no longer current     |
-| `source_changed`   | 409    | `source_changed`       | the expected source revision is not the published one |
-| `requires_rebind`  | 409    | `requires_rebind`      | the stored source binding is stale                    |
-| `request_conflict` | 409    | `request_conflict`     | the identity was reused with a different payload      |
-| `missing_recipe`   | 404    | `missing_recipe`       | a write requiring an existing recipe found none       |
-| `unsupported`      | 422    | `unsupported_photo`    | the source class has no approved profile              |
-| `invalid_settings` | 422    | `invalid_settings`     | a request field is outside the closed shape or values |
-| `unavailable`      | 503    | `resource_unavailable` | current source facts cannot be read                   |
-
-A processing failure and a resource refusal are distinct. A processing failure
-reports `processing_unavailable` with 503: the stage or the qualified mode for
-this Photo cannot execute, including an unqualified source class or mode
-reported by a read. A resource refusal reports `resource_unavailable` with 503,
-or `retained_output_full` with 503 for exhausted retained-output capacity: the
-service lacks facts, capacity, or admission resources, not the capability. A
-retryable `supportReason` (`read-pending` or `resource-unavailable`) is
-therefore always a resource refusal, never a processing failure and never a
-confirmed `original-unreadable` outcome; the retry becomes meaningful when
-the named condition clears, not when the engine changes.
-
-The save outcome `unsupported` is a permanent source-class refusal and reports
-`unsupported_photo` with 422, distinct from both. Guarded saves and rebinds
-never report a processing failure because they admit no engine work; their
-resource refusal is `unavailable` reporting `resource_unavailable`.
+Wire and CLI syntax belong to their authoritative references, not to a
+second DSL. [Command Line](command-line.md#photo-development-surface) owns
+the current deployment's closed HTTP facade and its request/response
+fixtures; the [CLI Reference](../docs/cli-reference.md#photo-development)
+owns the public command grammar and normalized results. A deployment
+facade's selector values name concrete Processing Module configurations:
+they must not be reinterpreted as product pipeline stages, universal output
+targets, or a composition language, and changing a facade's HTTP contract
+requires its own caller and deployment verification. The general module
+contract does not silently reinterpret a deployment facade, and a facade
+does not expand merely because an adapter describes more controls: the
+dynamic module interface is owned by [Processing
+Modules](processing-modules.md#interface-and-discovery). Every surface must
+preserve the outcome, error, and transport-uncertainty conventions above,
+and no surface accepts executable expressions, arbitrary filesystem paths,
+or a general task engine.
 
 ## Options
 
@@ -900,13 +591,13 @@ intent. It needs neither user-visible versions nor an event-sourced history.
 Queue delay would change output after the Photographer submitted it. That makes
 retry, CLI composition and visual inspection unreliable.
 
-### Selected: Bounded Development TIFF Retention with Admission Reservation
+### Selected: Bounded Artifact Retention with Admission Reservation
 
-The Product Spec's fixed retention window keeps the handoff and exact request
-intent available for retries and later download while bounding retained
-growth. Capacity is reserved before accepting new work. An active download
-lease protects a valid artifact from expiry cleanup until that transfer
-settles.
+The Product Spec's fixed retention window keeps the published artifact and
+exact request intent available for retries and later download while
+bounding retained growth. Capacity is reserved before accepting new work.
+An active download lease protects a valid artifact from expiry cleanup
+until that transfer settles.
 
 ### Rejected: Unbounded Retention or Pressure-Driven Early Eviction
 

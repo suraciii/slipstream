@@ -118,6 +118,32 @@ pub(crate) async fn submit_export(
             "The submission carries a value outside the closed wire shape",
         );
     }
+    // A selected composable step owns its own Export contract. The legacy
+    // target route must refuse rather than silently exporting the fixed edit
+    // recipe as if it were that step; a qualified composable Export endpoint
+    // will be the only producer for that identity.
+    match state
+        .application
+        .library
+        .composable_edit_recipe(&photo_id)
+        .await
+    {
+        Ok(Some(recipe)) if recipe.current_step_id.is_some() => {
+            return export_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "module_parameters_unavailable",
+                "The selected Processing Step has no qualified Export adapter in this deployment",
+            );
+        }
+        Ok(_) => {}
+        Err(_) => {
+            return export_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "outcome_unknown",
+                "The Processing Recipe could not be read before Export admission",
+            );
+        }
+    }
     // One serialized owner read: the Photo facts, the capture identity, and
     // the recipe source availability below all come from a single published
     // state, so a scan publication cannot change them mid-submission.

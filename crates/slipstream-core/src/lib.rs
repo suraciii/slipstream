@@ -3,6 +3,8 @@
 //! This crate owns domain values, Linux read-only Original File confinement,
 //! Library scanning and SQLite persistence, plus bounded capture inspection,
 //! native Preview extraction, derivative processing, and cache publication.
+//! It also carries the durable vocabulary of composable photo-processing
+//! modules, which is not yet wired into the admitted production surfaces.
 //! Application configuration, startup and shutdown, HTTP protocol mapping, and
 //! Web delivery live in `slipstream-server`.
 
@@ -19,6 +21,7 @@ mod native;
 pub mod native_work;
 pub mod persistence;
 pub mod preview;
+pub mod processing;
 pub mod reconcile;
 mod recovery;
 pub mod xmp;
@@ -96,6 +99,25 @@ pub use preview::{
     PreviewFacts, PreviewFailure, PreviewFailureKind, PreviewReady, PreviewRequestResult,
     PreviewService, PreviewServiceError, PreviewServiceOptions, PreviewUnavailable,
     PreviewUnavailableReason,
+};
+pub use processing::{
+    ComposableEditRecipe, ComposableEditRecipeWriteOutcome, ComposableRecipeRequestError,
+    DIGEST_HEX_BYTES, MAXIMUM_ARTIFACT_ID_BYTES, MAXIMUM_CONTRACT_NAME_BYTES,
+    MAXIMUM_EXPORT_REQUEST_ID_BYTES, MAXIMUM_GEOMETRY_EDGE, MAXIMUM_LIVE_PROCESSING_EXPORTS,
+    MAXIMUM_MODULE_ID_BYTES, MAXIMUM_PARAMETER_SNAPSHOT_BYTES, MAXIMUM_PARAMETER_SNAPSHOT_DEPTH,
+    MAXIMUM_PHOTO_ID_BYTES, MAXIMUM_RECIPE_STEPS, MAXIMUM_REVISION_BYTES, MAXIMUM_STEP_ID_BYTES,
+    PROCESSING_ARTIFACT_RETENTION_SECONDS, PROCESSING_EXPORT_RECEIPT_RETENTION_SECONDS,
+    ProcessingArtifact, ProcessingArtifactId, ProcessingArtifactLeaseOutcome,
+    ProcessingArtifactPublication, ProcessingContractError, ProcessingExportAdapterDecision,
+    ProcessingExportAdmission, ProcessingExportAttempt, ProcessingExportAttemptOutcome,
+    ProcessingExportCancelOutcome, ProcessingExportFailureOutcome, ProcessingExportIdentity,
+    ProcessingExportRefusal, ProcessingExportRequestError, ProcessingExportSettlement,
+    ProcessingExportSubmitOutcome, ProcessingExportWork, ProcessingExportWorkState,
+    ProcessingGeometry, ProcessingImageContract, ProcessingInput, ProcessingInputEvidence,
+    ProcessingInputHandoffError, ProcessingModuleId, ProcessingParameterSnapshot,
+    ProcessingPreviewIdentity, ProcessingStep, ProcessingStepId, SaveComposableEditRecipe,
+    SubmitProcessingExport, validate_bounded_name, validate_digest, validate_parameter_tree,
+    validate_revision,
 };
 pub use reconcile::{ReconciledPhoto, preview_should_preserve, reconcile, selected_source};
 pub use recovery::{
