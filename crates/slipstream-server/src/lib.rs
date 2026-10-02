@@ -46,6 +46,7 @@ mod development_proxy;
 mod edit_preview;
 mod edit_recipe;
 mod export_manager;
+mod film_resources;
 pub(crate) mod folders;
 mod http;
 mod metadata_fields;
@@ -54,13 +55,15 @@ pub mod metadata_wire;
 mod photo_executor;
 mod preview_render;
 mod processing_capability;
+mod processing_export;
+mod processing_modules;
+mod processing_preview;
+mod processing_recipe;
 mod queries;
 mod recovery_review;
 mod wire;
 
 pub use app::Application;
-#[cfg(test)]
-pub(crate) use config::BROWSE_SNAPSHOT_IDLE;
 pub use config::{
     Config, ConfigError, ExpansionConfig, HEALTH_PATH, ProcessingConfig, ServerConfig, ServerError,
     StartupConfig,

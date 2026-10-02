@@ -1,6 +1,5 @@
 """Check exact LUT/direct repeatability across fresh processes and A/B/A."""
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,16 +15,10 @@ assert _CACHE_DIR.is_dir() and not any(_CACHE_DIR.iterdir()), (
     "Fresh-process repeatability requires an empty private parent cache"
 )
 
-from film_identity import FILM_RECIPE_SHA256
+from film_identity import FILM_RECIPE_SHA256, recipe_digest
 
 
 SEQUENCE = ("lut", "direct", "lut", "direct")
-
-
-def _manifest_digest(recipe):
-    return hashlib.sha256(
-        json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
 
 
 def _effects(recipe):
@@ -73,7 +66,7 @@ def _child(mode):
             })
         print(json.dumps({
             "mode": mode,
-            "manifest_sha256": _manifest_digest(recipe),
+            "manifest_sha256": recipe_digest(recipe),
             "in_process_repeatable": True,
             "in_process_a_b_a": True,
             "effects": _effects(recipe),
@@ -97,7 +90,7 @@ def _child(mode):
 
     print(json.dumps({
         "mode": mode,
-        "manifest_sha256": _manifest_digest(recipe),
+        "manifest_sha256": recipe_digest(recipe),
         "in_process_repeatable": True,
         "in_process_a_b_a": False,
         "effects": _effects(recipe) if mode == "lut" else None,

@@ -1,29 +1,75 @@
 # Photo Development
 
-A Photographer needs to correct a selected RAW Photo and carry the result into
-film simulation without repeatedly moving between desktop applications.
-Slipstream provides a fixed development path while preserving Original Files
-and the camera-produced Preview used for selection.
+A Photographer needs to process a selected RAW Photo or a compatible
+Processing Artifact with an admitted Processing Module without repeatedly
+moving between desktop applications. Slipstream exposes peer modules that the
+Photographer composes explicitly. It preserves Original Files and the
+camera-produced Preview used for selection.
 
 ## Scope
 
-The supported path is RAW development with darktable, followed by Spektrafilm
-negative, print, and scan simulation. The first Film Recipe uses Kodak Portra
-400 and Kodak Portra Endura.
+The capability provides Processing Modules as peers: darktable performs RAW
+development, and standalone SpektraFilm performs negative, print, and scan
+simulation. The SpektraFilm integration inside darktable is not a module of
+this capability. Slipstream must not define a fixed order between modules,
+chain them automatically, or treat one as a stage of the other. The first Film
+Recipe uses Kodak Portra 400 and Kodak Portra Endura.
 
-Slipstream must expose exposure and white-balance controls. It must not require
-the Photographer to operate either engine's desktop interface. Development
-must support the qualified headless CPU environment; a GPU must not be required.
+Slipstream must expose exposure and white-balance controls as darktable's
+qualified editing surface. It must not require the Photographer to operate a
+module's desktop interface. Processing must support the qualified headless
+CPU environment; a GPU must not be required.
 
-The capability applies to supported RAW Photos. JPEG Photos retain their own
-browsing and selection behavior. Their pixels must not substitute for a RAW
-Photo's development input. Supported RAW development must be reported separately
-from availability of an embedded camera Preview.
+RAW development applies to supported RAW Photos admitted by the darktable
+module. JPEG Photos retain their own browsing and selection behavior. Their
+pixels must not substitute for a RAW Photo's development input. Each module
+must report its own input support separately from availability of an embedded
+camera Preview.
 
 This capability must not introduce crop or retouching controls, masks, batch
-editing, arbitrary processing graphs, custom Film Recipes, external editing
-history import, or user-visible virtual copies. It does not change the qualified
-0.1 release boundary.
+editing, a workflow graph editor or automatic step planning, custom Film
+Recipes, external editing history import, or user-visible virtual copies. A
+module's discovery must not admit engine controls beyond its qualified
+product surface. It does not change the qualified 0.1 release boundary.
+
+## Processing Steps and Composition
+
+The object of editing is one selected Processing Step: one Processing Module,
+one identified input, and one captured parameter snapshot. The input is the
+Photo's Original File or a published Processing Artifact the caller chose
+explicitly.
+
+A caller may compose zero, one, or many steps, repeat a module, or select a
+different module at any time. Slipstream must not impose a step order, invoke
+a module automatically, or insert a conversion between steps. Choosing a
+published artifact as the next input is the only coupling between steps:
+
+```text diagram
+Original
+  -> selected module Edit Preview
+  -> selected module Export -> immutable artifact a1
+  -> another selected module Edit Preview over a1
+  -> another selected module Export -> immutable artifact a2
+```
+
+This is one example, not the required path. A caller may stop after any
+Preview, use one module only, or repeat a module.
+
+Module compatibility is decided at the module boundary. A shared file
+extension or format name must not imply compatible color space, transfer
+function, precision, or geometry. A module must refuse an input, parameter,
+or output combination it does not support. Slipstream must not convert
+between module formats implicitly or answer a refused step with another
+module.
+
+Each module must report its own availability, refusal reasons, compatible
+inputs and outputs, editing parameters, and limits through the read-only
+module discovery operation defined in
+[Processing Modules](../design/processing-modules.md#interface-and-discovery).
+There is no separate Film capability state, and one module's availability must
+not be reported as another's. Discovery describes what a module can do; it must
+not by itself expose new controls or admit engine-private parameters into the
+product.
 
 The [darktable Integration](darktable-integration.md) specification owns the
 product relationship with the engine. Engine discovery must not expand this
@@ -31,45 +77,54 @@ editing scope or grant support to unqualified controls.
 
 ## Development Controls
 
-Exposure must represent compensation in EV against a documented processing
-baseline. White balance must offer as-shot settings, temperature, and tint.
-Controls must expose current values, valid ranges, and individual reset actions.
-As-shot must use the Photo's own camera information. An unavailable value must
-not be presented as a known camera setting.
+The darktable module's qualified editing surface is exposure and white
+balance. Exposure must represent compensation in EV against a documented
+processing baseline. White balance must offer as-shot settings, temperature,
+and tint. Controls must expose current values, valid ranges, and individual
+reset actions. As-shot must use the Photo's own camera information. An
+unavailable value must not be presented as a known camera setting.
 
 Reset exposure must restore the processing baseline. Reset white balance must
-restore as-shot settings. Reset all must restore both. Resets must be undoable.
-The Original's orientation must be respected without requiring a rotation tool.
+restore as-shot settings. Reset all must restore both. Resets must be
+undoable. The Original's orientation must be respected without requiring a
+rotation tool.
 
-The Film Recipe must remain fixed. Viewing the Development Result bypasses the
-film stage for inspection; it must not change the saved Edit Recipe or redefine
-the Film Result. A Finished JPEG must always include the fixed Film Recipe.
+Parameters belong to their module and stay captured in each Processing Step.
+Inspecting another module's result must not change the saved Edit Recipe or
+redefine another step's result. A Film Recipe remains fixed only when the
+standalone SpektraFilm module is selected; it is not a global output concept.
 
 ## Editing Workspace
 
-Photo View must offer an Edit entry point when development is supported. Edit
-opens one workspace for the selected Photo, showing the current result with
-the development controls. Camera, Develop, and Film remain distinct in
-provenance within one Photo context. Choosing a reference or result never
-changes settings or the independent output targets:
+Photo View must offer an Edit entry point when a Processing Module admits the
+Photo. Edit opens one workspace for the selected Photo, showing the current
+Processing Step's result with that module's editing controls. The workspace
+must not present separate stage, module, or result views or tabs the
+Photographer must choose between. The results remain distinct in provenance,
+but the Photographer acts on one current step:
 
-- The workspace opens on an Edit Preview of the Development Result. This is
-  the default editing view.
-- A Film control previews the fixed Film Result. It must be available only
-  when the service reports the film capability ready and the current Photo is
-  admitted; while Film is unavailable, the control must be hidden or disabled
-  with a short plain-language explanation, and it must not appear enabled
-  before Film is qualified. If Film becomes unavailable after the workspace
-  opens, the workspace must keep editing and Development TIFF export
-  available and replace the Film control with the unavailable explanation.
+- The workspace opens on the selected current step's Edit Preview. With no
+  selected step, it waits for the caller to choose a module and compatible input.
+- Selecting a saved step restores that step's captured module, input, and
+  parameters. Creating another step may repeat the same module with a different
+  input or parameter snapshot. A module choice must be
+  available only when that module reports itself ready and admits the current
+  Photo and input; while a module is unavailable, its choice must be hidden
+  or disabled with a short plain-language explanation, and it must not appear
+  enabled before the module is qualified. If a module becomes unavailable
+  after the workspace opens, the workspace must keep editing and Export
+  available for the remaining modules and replace the unavailable module's
+  choice with the unavailable explanation.
 - An Original reference action shows the existing camera-produced Preview. It
   is a distinct action, not an editing view.
 
-A Film Preview or Finished JPEG must never fall back to the camera Preview or
-the Development Result, and Slipstream must not label either of them as a
-successful Film Result. Entering Edit must restore the current Edit Recipe.
-It must not reset settings merely because the Photographer previews Film,
-checks the Original reference, or leaves an Album.
+The workspace must identify the current step's module and input in plain
+language. An Edit Preview or Export must never fall back to the camera
+Preview, another module's result, or a display-only derivative, and
+Slipstream must not label any of them as a successful result of the requested
+step. Entering Edit must restore the current Edit Recipe. It must not reset
+settings merely because the Photographer selects another module, checks the
+Original reference, or leaves an Album.
 
 The workspace must distinguish edit-state saving, saved, conflict, and failure
 from preview updating, current, stale, and failure. It must report saved only
@@ -79,18 +134,29 @@ request identities, and processing reasons must remain behind an optional
 details affordance. The primary flow must use editing state, edit state file,
 editing TIFF, and output rather than recipe or artifact terminology.
 
-Edit availability rests on three independent facts: whether the deployment's
-processing engine is usable, whether the Library is still scanning or
-recovering, and whether this Photo's Original File currently reads. A
-recovering Library or a busy engine must not be presented as an unreadable
-Original. While a Photo's source read is pending or waiting for read
-capacity, the workspace must keep that Photo's settings read-only, say the
-Photo is waiting, and offer to check again; a later read that publishes
-current source facts must resume editing without losing confirmed settings.
-A confirmed missing or unreadable Original must retain saved editing state,
-prior results, and downloadable outputs. New image rendering and exports require
-the Original. Exporting an already confirmed edit state file does not require
-the Original or a processing engine.
+Edit availability rests on three independent facts: whether the selected
+Processing Module is usable for the selected input, whether the Library is
+still scanning or recovering, and whether the Photo's Original File currently
+reads. A recovering Library or a busy module must not be presented as an
+unreadable Original. While an Original-backed step's source read is pending or
+waiting for read capacity, the workspace must keep that Photo's settings
+read-only, say the Photo is waiting, and offer to check again; a later read
+that publishes current source facts must resume editing without losing
+confirmed settings.
+
+A step whose input is a retained, compatible Processing Artifact may continue
+while its Original is unavailable, subject to that artifact's lease, expiry,
+module availability, and compatibility checks. It must not reopen or restage
+the missing Original. A confirmed missing or unreadable Original disables
+Original-backed Preview and Export for the current source and must be explained
+as permanent. Artifact-backed Preview and Export use only the retained artifact
+and its captured image contract; they fail explicitly when that artifact or the
+selected module is unavailable. A refusal caused by the Photo's source state
+must name the same reason the Edit read reports.
+Confirmed missing or unreadable Originals must retain saved editing intent,
+prior results, and downloadable outputs. Exporting an already confirmed edit
+state file requires neither the Original nor a processing engine.
+
 
 The Grid must retain its camera-produced thumbnails and indicate Photos with
 saved edits. Its bounded Photo summaries must report whether a saved Edit
@@ -118,7 +184,8 @@ retain ownership of a pending save without a confirmation dialog.
 
 Pending settings must have bounded recovery in the current browser. Recovered
 settings must be identified as a local draft until the service confirms them.
-A local draft must not override newer server settings silently. If browser recovery storage is unavailable, the workspace must keep the draft
+A local draft must not override newer server settings silently. If browser
+recovery storage is unavailable, the workspace must keep the draft
 for the current session, disclose the lack of reload recovery, and continue
 guarded online saving. It must not claim that such a draft will survive browser
 closure or evict another unconfirmed draft to make room.
@@ -144,73 +211,91 @@ while a new one is pending and visibly identify that it is out of date.
 Saved settings and completed previews are separate facts. Rendering failure
 must not discard a saved recipe or a recoverable draft. Late, cancelled, or
 obsolete results must not replace the current view. A successful image for a
-different source, stage, or settings snapshot is not the requested preview.
+different source, module, or settings snapshot is not the requested preview.
 
-The workspace must continue checking an admitted Preview long enough for a
-full RAW development. If the bounded wait ends before settlement, it must say
-the result is still unknown and offer a fresh check. It must not keep showing
-"rendering" as though it is still following the request.
+An Edit Preview is a bounded execution of the current Processing Step. It must
+use that step's input and parameter snapshot and a bounded rendition geometry.
+It must not create a full-resolution handoff artifact. A preview identity must
+cover the input identity, selected module, parameter snapshot, rendition
+geometry, processing bundle, and display conversion. If the bounded wait ends
+before settlement, the workspace must say the result is still unknown and
+offer a fresh check. It must not keep showing "rendering" as though it is
+still following the request.
 
 Comparison must hold the displayed result and its display conversion constant
-while comparing the current settings with the as-shot/baseline development
+while comparing the current settings with the module's as-shot or baseline
 settings. The Original reference must remain a separately labeled action and
 must not serve as a comparison image. If either comparison image is pending,
 the workspace must say so rather than compare unrelated images.
-The Development Result display uses the fixed conversion and clipping
-behavior in the
+An Edit Preview display uses the fixed conversion and clipping behavior in the
 [Development Color Pipeline](../design/development-color.md#display-and-comparison).
-That display rendition must not feed the Development TIFF or Film stage.
+That display rendition must not feed an Export or another Processing Step.
 
-An Edit Preview must identify its actual dimensions. Reduced-resolution film
-simulation is suitable for overall color and tone; it must not be presented as
+An Edit Preview must identify its actual dimensions. A reduced-resolution
+rendition is suitable for overall color and tone; it must not be presented as
 proof of full-resolution grain or halation detail. Full-detail inspection must
-use a qualified full-resolution result and identify its settings. Slipstream
-must not silently disable effects to make a preview appear faster.
+use a qualified full-resolution Processing Artifact and identify its settings.
+Slipstream must not silently disable effects to make a preview appear faster.
 
-The initial Film Preview responsiveness target is a warm inclusive-render
-95th-percentile latency of at most 4.0 seconds for both approximately 1 MP
-orientations (1225 × 816 and 816 × 1225). The measurement includes the
-simulation wrapper after initialization, uses the qualified thread policy, and
-must retain the complete Film effects. Queueing, admission, process startup,
-and image transfer are measured separately as complete request latency and
-disclosed to the Photographer; they must not be hidden by the simulation
-target. Cold startup and full-resolution Export distributions remain separate
-qualification evidence.
+The SpektraFilm module's initial Edit Preview responsiveness target is a warm
+inclusive-render 95th-percentile latency of at most 4.0 seconds for both
+approximately 1 MP orientations (1225 × 816 and 816 × 1225). The measurement
+includes the simulation wrapper after initialization, uses the qualified
+thread policy, and must retain the complete Film effects. Queueing, admission,
+process startup, and image transfer are measured separately as complete
+request latency and disclosed to the Photographer; they must not be hidden by
+the simulation target. Cold startup and full-resolution Export distributions
+remain separate qualification evidence.
 
-## Export Targets
+## Export
 
-A Development TIFF is the independent handoff after exposure and white balance.
-It must contain full developed dimensions, RGB channels with 32-bit floating
-point samples, scene-linear ProPhoto RGB pixels, and a matching embedded ICC
-profile. It must not include film simulation or a display/look transform.
+An Export is a separate explicit execution of one Processing Step. It must
+capture the confirmed input identity, module, parameters, processing bundle,
+and output contract, and it must validate and publish an immutable Processing
+Artifact before that artifact can become the input of a later step. Output
+format and its precision, color, transfer, geometry, and encoding options are
+ordinary parameters of the selected module. The product has no universal image
+target or fixed module pair.
 
-A Finished JPEG must contain the Film Result at full developed dimensions,
-encoded for sRGB with the pinned destination profile and fixed JPEG quality 85. Finished TIFF and expert output options are outside this capability.
+The selected module owns the output label and contract shown to the
+Photographer. A module must state whether its output is full-resolution,
+scene-referred, display-encoded, or otherwise bounded; the service must
+validate the actual geometry, samples, color contract, transfer function,
+profile, metadata, and encoding before publication. An output contract is not
+implied by a file extension or a module name. Output options outside the
+qualified module surface are refused.
 
-The workspace must show separate output cards for the edit state file and
-editing TIFF, plus a separate Finished JPEG output when one exists. Viewing
-Film must not retarget the editing TIFF action. Each card must show its task
-state, generation time, filename, size, and download action. TIFF details must
-also show pixel dimensions, orientation, color space, embedded ICC information,
-and sample format. Queued, generating, downloadable, failed, and expired are
-distinct outcomes.
+The workspace must offer one Export action for the current step and identify
+the selected module and output contract in plain language. It must not present
+an ambiguous universal format choice or silently invoke another module.
+Programmatic clients address the Processing Step explicitly; the module
+discovery and direct-call contract owns those parameters.
 
-A confirmed change in editing state marks an older output as based on earlier
-settings. This is a warning, not a download refusal. A pending or failed newer
-task must not hide the previous successful output. Reopening the Photo must
-restore these outputs and unfinished task states from the service. Choosing
-Export again captures current confirmed settings under a new task identity;
-it must not overwrite an older file.
+Export states must use the same plain language as the workspace status:
+`Exporting` while accepted work is unfinished, `Ready to download` on
+completion, and `This export has expired. Export again` after expiry.
+Retained output cards identify their module and concrete output contract, task
+state, generation time, filename, size, and download action. TIFF details also
+show dimensions, orientation, color space, embedded ICC information, and sample
+format. Queued, generating, downloadable, failed, and expired are distinct states.
+A confirmed edit marks an older output as based on earlier settings without
+refusing its download. Pending or failed newer work must not hide earlier output.
+Reopening the Photo restores retained outputs and unfinished work from the
+service. Exporting current confirmed settings creates a new task and file.
 
-Export must capture the control settings when the Photographer invokes it.
-Those settings must be confirmed by the service before the Export is accepted.
-A save failure or conflict must not cause older settings to be exported silently.
-Later adjustments must not retarget an accepted Export.
+
+Export must capture the step's input, module, and control settings when the
+Photographer invokes it. Those settings must be confirmed by the service
+before the Export is accepted. A save failure or conflict must not cause older
+settings to be exported silently. Later adjustments must not retarget an
+accepted Export. A published Processing Artifact must stay bound to the input,
+module, parameters, bundle, and image contract it was produced from, and a
+later change to an upstream step must not retarget it.
 
 The Photographer must be able to inspect Export state, cancel unfinished work,
 and download a completed artifact. Accepted work must survive browser departure.
 Downloads must identify their type, size, and expiry when available. Output
-filenames must distinguish the two targets and avoid collisions.
+filenames must distinguish the outputs and avoid collisions.
 The browser must verify the complete artifact length and SHA-256 before offering
 the file. Large-file integrity checks must leave the interface responsive on
 both HTTP and HTTPS.
@@ -252,10 +337,14 @@ orientation, and sample format. Download success alone does not prove this.
 ## Shared Human and Programmatic Use
 
 Web and programmatic clients must use the same Photo identity, Edit Recipe,
-revision checks, Export state, and error semantics. Clients must be able to
-discover development support, inspect settings, change supported controls,
-request a stage preview, submit an Export, inspect or cancel it, and download
-its completed result.
+Processing Step, revision checks, Export state, and error semantics. The
+processing service must be able to discover each module's availability and its
+supported inputs, outputs, parameters, and limits through the read-only module
+discovery operation. Clients receive only the controls and combinations the
+product surface admits; the closed CLI and HTTP profile is not a workflow DSL
+or a general engine-discovery command. Clients can inspect settings, change
+supported controls, request an Edit Preview for a Processing Step, submit an
+Export, inspect or cancel it, and download its completed result.
 
 Programmatic changes must be visible when the Photographer opens the Photo in
 the Web. A client must not need the service's filesystem paths, SQLite database,
@@ -276,13 +365,14 @@ editing state as though it were an unused scan record.
 
 When a valid Development Proxy exists for the last observed source revision,
 Slipstream must expose that fact as `editSource: "development-proxy"` while the
-Original is unavailable. Develop Edit Previews may apply the numeric exposure
-against the proxy's scene-linear baseline and the pinned display transform
-without reopening the Original. Film Edit Previews must use the qualified
-Film stage over the proxy and must report failure when that stage is
-unavailable.
-The proxy must never make a full-resolution Export admissible: Development TIFF
-and Finished JPEG exports require the Original.
+Original is unavailable. An Edit Preview may use the proxy only within the
+current step's module boundary: a qualified module may apply its admitted
+parameters against the proxy's compatible image contract without reopening the
+Original. A module that cannot produce its Preview from the proxy must report
+failure; it must not fall back to another input or module. The proxy must never
+make a full-resolution Export admissible. An Original-backed Export requires
+the Original; an artifact-backed Export uses only its retained compatible
+artifact and its captured image contract.
 
 ## Processing Capacity
 
@@ -294,16 +384,16 @@ is deployment configuration, not an exposure, white-balance, Film Recipe, or
 per-Photo control.
 
 Slipstream must report resource availability separately from RAW support and
-engine availability. A Photo may support an Edit Preview while its full Export
+module availability. A Photo may support an Edit Preview while its full Export
 cannot fit the configured allowance. Queued work must be identified as waiting;
 the workspace must not imply that image computation has started.
 
-When an operation cannot fit, Slipstream must identify the affected stage or
+When an operation cannot fit, Slipstream must identify the affected module or
 output and explain that the processing allowance is insufficient. A runtime
 memory failure must preserve saved edits and previously completed outputs. The
-Photographer must be able to continue browsing and inspect the failure. A valid
-Development TIFF remains available according to its retention policy even when
-the Film stage fails.
+Photographer must be able to continue browsing and inspect the failure. A
+previously completed Processing Artifact remains available according to its
+retention policy even when a later step fails.
 
 Because the allowance is shared, a severe engine failure can stop the whole
 application; restarting Slipstream recovers it, and saved edits and completed
@@ -315,8 +405,8 @@ not change a successfully rendered look.
 
 ## Failure and Retention
 
-An unavailable engine must leave selection and browsing usable and explain
-which editing capability is unavailable. Unsupported input, resource rejection,
+An unavailable module must leave selection and browsing usable and explain
+which Processing Module is unavailable. Unsupported input, resource rejection,
 render interruption, insufficient storage, and missing processing assets must
 produce actionable failures without changing Originals or losing recipes.
 
@@ -345,22 +435,21 @@ must not create an Export. Expiry must not make the old identity available for
 new work. A new Export after expiry requires a new request identity and
 confirmation of the current source and settings.
 
-A successful Development TIFF, its captured Export snapshot, and its request
+A successful Processing Artifact, its captured Export snapshot, and its request
 receipt must remain available for seven days after publication. The interface
 must disclose the expiry. An active download must hold a lease that keeps the
 artifact, snapshot, and receipt available until the response stream settles.
 
 The deployment must enforce a finite retained-output allowance. If the service
-cannot reserve enough space for a complete new Development TIFF within that
+cannot reserve enough space for a complete selected-module output within that
 allowance, it must refuse the Export before accepting the work. It must not
-evict a Development TIFF before its disclosed expiry or while a download lease
+evict a retained artifact before its disclosed expiry or while a download lease
 is active. A storage refusal must leave saved settings and completed Exports
 available and explain that retained-output capacity is insufficient.
 
-Other Export targets must also have a bounded, disclosed retention period.
-After expiration, regeneration must identify missing source or engine
-requirements rather than silently change the result. Engine upgrades must not
-silently change saved looks.
+After expiry, regeneration must identify missing input or module requirements
+rather than silently change the result. Module upgrades must not silently
+change saved looks.
 
 ## Examples
 
@@ -373,14 +462,23 @@ silently change saved looks.
 - A CLI changes white balance while a browser has pending exposure changes.
   The browser must retain its draft and report a conflict instead of overwriting
   the CLI's recipe.
-- The Film engine fails after a Development TIFF has completed. That TIFF may
-  remain downloadable. The Film Result must remain failed, not successful.
-- A Film Edit Preview succeeds but the full Finished JPEG exceeds the configured
-  processing allowance. The Export must fail with a resource explanation while
-  the Edit Recipe and successful preview remain available. A retry after the
-  operator changes capacity must use the Export's captured settings.
+- A Photographer previews one selected module only and closes the Photo. No
+  artifact must be created, and another module must not be invoked.
+- A Photographer Exports one module's result and explicitly selects the
+  published artifact as the next module's input. If the next module fails, the
+  first artifact remains downloadable and the second result remains failed.
+- After an artifact is published, the Photographer changes an upstream step.
+  The artifact remains bound to its captured input, parameters, bundle, and
+  image contract; the change does not retarget it.
+- A module Preview succeeds but its full selected output exceeds the configured
+  processing allowance. The Export must fail with a resource explanation
+  while the Edit Recipe and successful Preview remain available. A retry after
+  the operator changes capacity must use the Export's captured settings.
 
 [Photo Development Architecture](../design/photo-development.md) owns execution,
-concurrency, and storage contracts. [Development Color Pipeline](../design/development-color.md)
+concurrency, and storage contracts.
+[Processing Modules](../design/processing-modules.md) owns module identity,
+the execution boundary, and interface compatibility.
+[Development Color Pipeline](../design/development-color.md)
 owns the engine and color boundary. [Photo Previews](previews.md) continues to
 own camera Preview behavior.

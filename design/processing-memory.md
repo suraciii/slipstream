@@ -144,10 +144,11 @@ still requires supervised failure settlement; preflight is not a guarantee of
 success. Do not automatically retry an OOM with the same settings or raise the
 budget. Explicit retry creates a new attempt using current policy.
 
-Film remains unadmitted. When a Film capability is independently qualified,
-its admission authority and resource evidence must be specified before Film
-work consumes this shared boundary; this specification grants no such
-admission.
+Each Processing Module requires independently qualified resource evidence before
+admission to this shared boundary. [Processing Modules](processing-modules.md#explicit-materialization)
+owns the standalone Film Export lower-bound refusal. Passing that check is not
+complete-attempt qualification; bounded Preview and full-resolution Export require
+separate evidence for the exact bundle, input, parameters, and geometry.
 
 ## Engine Memory Efficiency
 

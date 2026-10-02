@@ -2,7 +2,6 @@
 
 from copy import deepcopy
 from dataclasses import asdict
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,7 +18,7 @@ assert _CACHE_DIR.is_dir() and not any(_CACHE_DIR.iterdir()), (
 import colour
 import numpy as np
 
-from film_identity import FILM_RECIPE_SHA256
+from film_identity import FILM_RECIPE_SHA256, recipe_digest
 from spektrafilm import Simulator, digest_params, init_params
 from spektrafilm.utils.bounded_gamut import MAX_WORKSPACE_BYTES
 
@@ -66,11 +65,6 @@ def make_direct_simulator(*, gamut_workspace_bytes=MAX_WORKSPACE_BYTES):
     manifest["processing_bundle"] = load_bundle()
     manifest["gamut_workspace_allowance_bytes"] = gamut_workspace_bytes
     return Simulator(params, output_gamut_workspace_bytes=gamut_workspace_bytes), manifest
-
-
-def recipe_digest(recipe):
-    encoded = json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def ciede2000_summary(reference, candidate):

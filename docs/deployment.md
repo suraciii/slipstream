@@ -240,9 +240,11 @@ Export before Preview, download validation, cancellation, deadline, engine
 failure, restart, scratch cleanup, and unchanged Original and external-XMP
 digests. The workflow acceptance runner and the real-camera smoke commands
 are documented in [tools/processing](../tools/processing/README.md) and
-[CONTRIBUTING.md](../CONTRIBUTING.md). Do not claim the
-RAW-to-TIFF-to-Film-to-JPEG workflow until its separate product acceptance
-Issues pass; Film remains unavailable.
+[CONTRIBUTING.md](../CONTRIBUTING.md). Standalone SpektraFilm is installed and
+verified independently through the [Film extension](../tools/processing/README.md#film-extension).
+Accept its bounded Preview and full-resolution Export separately for the tested
+bundle, parameters, input contract, geometry, and finite memory allowance; readiness
+alone does not qualify an arbitrary invocation.
 
 ## Configuration
 

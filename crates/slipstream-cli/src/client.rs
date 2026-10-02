@@ -301,7 +301,8 @@ pub(crate) fn validated_route_failure(
             .filter(|value| !value.is_empty())
     };
     let required_keys = |expected: &[&str]| expected.iter().all(|key| details.contains_key(*key));
-    let valid = match error.code.as_str() {
+    let code = error.code.as_str();
+    let valid = match code {
         "invalid_input" => {
             required_keys(&["argument", "reason"])
                 && string("argument").is_some()
@@ -414,12 +415,36 @@ pub(crate) fn validated_route_failure(
         }
         // Development routes carry structured recovery facts. A missing or
         // malformed conflict guard is not evidence of a confirmed refusal.
+        // The composable surfaces carry the retained recipe itself.
         "recipe_conflict" | "source_changed" | "requires_rebind" => {
             details.is_empty()
+                || (matches!(
+                    operation,
+                    Operation::PhotosProcessingRecipeSave | Operation::PhotosProcessingExport
+                ) && composable_recipe_details(details))
                 || (string("currentSourceRevision").is_some()
                     && details.get("currentRecipeVersion").is_some_and(|value| {
                         value.is_null() || value.as_str().is_some_and(|value| !value.is_empty())
                     }))
+        }
+        // The composable Processing Step surface: each refusal is a
+        // confirmed refusal that changed nothing. The composable Export's
+        // adapter refusal carries the durable, replayable refusal record,
+        // and its incompatible artifact input names its closed reason.
+        "invalid_recipe"
+        | "unknown_module"
+        | "unknown_step"
+        | "step_not_current"
+        | "source_unavailable"
+        | "module_parameters_unavailable" => {
+            details.is_empty()
+                || (operation == Operation::PhotosProcessingExport
+                    && processing_export_refusal_details(code, details))
+        }
+        "incompatible_input" => {
+            details.is_empty()
+                || (operation == Operation::PhotosProcessingExport
+                    && processing_export_refusal_details(code, details))
         }
         "invalid_settings" => {
             details.is_empty() || (string("argument").is_some() && string("reason").is_some())
@@ -427,6 +452,18 @@ pub(crate) fn validated_route_failure(
         "unknown_photo" => {
             details.is_empty()
                 || (string("resource") == Some("photo") && string("reference").is_some())
+        }
+        // The composable Export's own closed per-state refusals: an unknown
+        // or expired work record is a confirmed empty refusal, and a request
+        // that already reached a terminal decision carries that committed
+        // record as its receipt.
+        "unknown_request" | "unknown_artifact" => details.is_empty(),
+        "export_terminal" => {
+            matches!(details.get("replayed"), None | Some(Value::Bool(_)))
+                && details.len() <= 2
+                && details
+                    .get("receipt")
+                    .is_some_and(|receipt| development::processing_work_valid(receipt, "", None))
         }
         "unsupported_photo" | "missing_recipe" | "request_conflict" => {
             details.is_empty() || string("photoId").is_some()
@@ -470,13 +507,75 @@ pub(crate) fn validated_route_failure(
         "invalid_input"
         | "limit_exceeded"
         | "invalid_settings"
+        | "invalid_recipe"
+        | "incompatible_input"
         | "unsupported_photo"
         | "recovery_scope_exceeded" => 2,
-        "not_found" | "unknown_photo" | "unknown_export" | "missing_recipe" => 3,
+        "not_found" | "unknown_photo" | "unknown_export" | "unknown_artifact"
+        | "missing_recipe" | "unknown_step" | "unknown_module" | "unknown_request" => 3,
         "conflict" | "name_conflict" | "recipe_conflict" | "source_changed" | "requires_rebind"
         | "request_conflict" | "export_conflict" | "output_unavailable" | "recovery_conflict"
-        | "original_required" => 4,
+        | "original_required" | "step_not_current" | "export_terminal" => 4,
         _ => 6,
     };
     Some(CommandFailure::from_payload(exit_code, error))
+}
+
+/// The retained composable recipe a `recipe_conflict` or `source_changed`
+/// refusal carries: the top-level recipe facts with a nonempty revision and
+/// source revision, a step array whose identities the selected current step
+/// is one of, and a current step that is null only for the zero-step
+/// recipe. The module-owned trees stay opaque facts the caller re-reads
+/// anyway, so only the recovery-relevant shape is checked.
+fn composable_recipe_details(details: &serde_json::Map<String, Value>) -> bool {
+    let string = |name: &str| details.get(name).and_then(Value::as_str);
+    let Some(steps) = details.get("steps").and_then(Value::as_array) else {
+        return false;
+    };
+    let step_ids: Vec<&str> = steps
+        .iter()
+        .filter_map(|step| step.get("stepId").and_then(Value::as_str))
+        .collect();
+    string("photoId").is_some_and(|value| !value.is_empty())
+        && string("revision").is_some_and(|value| !value.is_empty())
+        && string("sourceRevision").is_some_and(|value| !value.is_empty())
+        && step_ids.len() == steps.len()
+        && step_ids.iter().all(|id| !id.is_empty())
+        && match details.get("currentStepId") {
+            Some(Value::Null) => steps.is_empty(),
+            Some(value) => value
+                .as_str()
+                .is_some_and(|current| step_ids.contains(&current)),
+            None => false,
+        }
+}
+
+/// The structured details a composable Export refusal carries: the durable,
+/// replayable adapter-refusal record, or the closed reason an incompatible
+/// artifact input was refused. Both are confirmed refusals that changed
+/// nothing and published no artifact.
+fn processing_export_refusal_details(code: &str, details: &serde_json::Map<String, Value>) -> bool {
+    if code == "incompatible_input" {
+        return matches!(
+            details.get("reason").and_then(Value::as_str),
+            Some("artifact_missing") | Some("artifact_contract_mismatch")
+        ) && details.len() == 1;
+    }
+    let Some(refusal) = details.get("refusal").and_then(Value::as_object) else {
+        return false;
+    };
+    let string = |name: &str| refusal.get(name).and_then(Value::as_str);
+    string("photoId").is_some_and(|value| !value.is_empty())
+        && string("requestId").is_some_and(|value| !value.is_empty())
+        && string("stepId").is_some_and(|value| !value.is_empty())
+        && string("recipeRevision").is_some_and(|value| !value.is_empty())
+        && string("sourceRevision").is_some_and(|value| !value.is_empty())
+        && string("module").is_some_and(|value| !value.is_empty())
+        && string("parameterSchemaVersion").is_some_and(|value| !value.is_empty())
+        && string("parameterDigest").is_some_and(|value| !value.is_empty())
+        && string("reasonCode").is_some_and(|value| !value.is_empty())
+        && string("bundleId").is_some_and(|value| !value.is_empty())
+        && refusal.get("input").is_some_and(Value::is_object)
+        && details.get("replayed").and_then(Value::as_bool).is_some()
+        && details.len() == 2
 }

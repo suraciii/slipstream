@@ -1,0 +1,170 @@
+{
+  "camera": {
+    "auto_exposure": false,
+    "auto_exposure_method": "center_weighted",
+    "diffusion_filter": {
+      "active": false,
+      "bloom_intensity": 1.0,
+      "bloom_size": 1.0,
+      "core_intensity": 1.0,
+      "core_size": 1.0,
+      "filter_family": "black_pro_mist",
+      "halo_intensity": 1.0,
+      "halo_size": 1.0,
+      "halo_warmth": 0.0,
+      "spatial_scale": 1.0,
+      "strength": 0.5
+    },
+    "exposure_compensation_ev": 0.0,
+    "film_format_mm": 35.0,
+    "filter_ir": [0.0, 675.0, 15.0],
+    "filter_uv": [0.0, 410.0, 8.0],
+    "lens_blur_um": 0.0
+  },
+  "debug": {
+    "deactivate_spatial_effects": false,
+    "deactivate_stochastic_effects": false,
+    "lut_mode": false,
+    "print_timings": false
+  },
+  "enlarger": {
+    "c_filter_neutral": 0.0,
+    "diffusion_filter": {
+      "active": false,
+      "bloom_intensity": 1.0,
+      "bloom_size": 1.0,
+      "core_intensity": 1.0,
+      "core_size": 1.0,
+      "filter_family": "black_pro_mist",
+      "halo_intensity": 1.0,
+      "halo_size": 1.0,
+      "halo_warmth": 0.0,
+      "spatial_scale": 1.0,
+      "strength": 0.5
+    },
+    "illuminant": "TH-KG3",
+    "lens_blur": 0.0,
+    "m_filter_neutral": 51.56801468495496,
+    "m_filter_shift": 0.0,
+    "normalize_print_exposure": true,
+    "preflash_exposure": 0.0,
+    "preflash_m_filter_shift": 0.0,
+    "preflash_y_filter_shift": 0.0,
+    "print_exposure": 1.0,
+    "print_exposure_compensation": true,
+    "y_filter_neutral": 52.53400422349596,
+    "y_filter_shift": 0.0
+  },
+  "filmRender": {
+    "density_curve_gamma": 1.0,
+    "dir_couplers": {
+      "active": true,
+      "amount": 1.0,
+      "diffusion_size_um": 20.0,
+      "diffusion_tail_um": 200.0,
+      "diffusion_tail_weight": 0.06,
+      "gamma_interlayer_b_to_rg": [0.168, 0.226],
+      "gamma_interlayer_g_to_rb": [0.154, 0.353],
+      "gamma_interlayer_r_to_gb": [0.353, 0.302],
+      "gamma_samelayer_rgb": [0.336, 0.319, 0.273],
+      "inhibition_interlayer": 1.0,
+      "inhibition_samelayer": 1.0
+    },
+    "glare": { "active": true, "blur": 0.5, "percent": 0.03, "roughness": 0.7 },
+    "grain": {
+      "active": true,
+      "blur": 0.65,
+      "blur_dye_clouds_um": 1.0,
+      "density_min": [0.03, 0.03, 0.03],
+      "micro_structure": [0.2, 30],
+      "n_sub_layers": 1,
+      "particle_area_um2": 0.2,
+      "particle_scale": [1.6, 1.6, 3.2],
+      "particle_scale_layers": [2.0, 1.0, 0.5],
+      "sublayers_active": true,
+      "uniformity": [0.97, 0.99, 0.97]
+    },
+    "halation": {
+      "active": true,
+      "boost_ev": 0.0,
+      "boost_range": 0.3,
+      "halation_amount": 1.0,
+      "halation_bounce_decay": 0.5,
+      "halation_first_sigma_um": [65.0, 65.0, 65.0],
+      "halation_n_bounces": 3,
+      "halation_renormalize": true,
+      "halation_spatial_scale": 1.0,
+      "halation_strength": [0.015, 0.005, 0.0],
+      "protect_ev": 4.0,
+      "scatter_amount": 1.0,
+      "scatter_core_um": [2.2, 2.0, 1.6],
+      "scatter_spatial_scale": 1.0,
+      "scatter_tail_um": [9.3, 9.7, 9.1],
+      "scatter_tail_weight": [0.78, 0.65, 0.67]
+    }
+  },
+  "io": {
+    "crop": false,
+    "crop_center": [0.5, 0.5],
+    "crop_size": [0.1, 0.1],
+    "input_cctf_decoding": false,
+    "input_color_space": "ProPhoto RGB",
+    "input_gamut_compress": {
+      "active": true,
+      "algorithm": "xy",
+      "knee": [0.0, 1.0, 6.0]
+    },
+    "output_cctf_encoding": true,
+    "output_color_space": "sRGB",
+    "output_gamut_compress": {
+      "algorithm": "cam16ucs",
+      "knee": [0.0, 1.0, 6.0],
+      "lightness_compression": [0.7, 1.0, 2.2]
+    },
+    "scan_film": false,
+    "upscale_factor": 1.0
+  },
+  "output": {
+    "colorSpace": "srgb",
+    "encoding": "quality-85-baseline",
+    "format": "jpeg",
+    "geometry": "input-preserving",
+    "precisionBits": 8,
+    "transferFunction": "srgb"
+  },
+  "printRender": {
+    "density_curves_morph": {
+      "active": false,
+      "developer_exhaustion": 0.0,
+      "gamma_factor": 1.0,
+      "gamma_factor_blue": 1.0,
+      "gamma_factor_fast": 1.0,
+      "gamma_factor_green": 1.0,
+      "gamma_factor_red": 1.0,
+      "gamma_factor_slow": 1.0
+    },
+    "glare": { "active": true, "blur": 0.5, "percent": 0.03, "roughness": 0.7 }
+  },
+  "scanner": {
+    "black_correction": false,
+    "black_level": 0.01,
+    "lens_blur": 0.0,
+    "unsharp_mask": [0.7, 0.7],
+    "white_correction": false,
+    "white_level": 0.98
+  },
+  "settings": {
+    "apply_hanatos2025_adaptation_surface": false,
+    "apply_hanatos2025_adaptation_window": true,
+    "lut_resolution": 33,
+    "neutral_print_filters_from_database": true,
+    "preview_max_size": 640,
+    "preview_mode": false,
+    "rgb_to_raw_method": "hanatos2025",
+    "spectral_gaussian_blur": 0.0,
+    "use_enlarger_lut": true,
+    "use_fast_stats": false,
+    "use_scanner_lut": true
+  },
+  "taps": { "collect": null, "inject": null }
+}

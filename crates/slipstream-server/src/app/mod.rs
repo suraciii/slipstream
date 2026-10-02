@@ -193,7 +193,6 @@ pub struct Application {
     pub(crate) cursor_signer: CursorSigner,
     pub(crate) shutdown: Mutex<bool>,
 }
-
 impl Application {
     pub(crate) fn instance_epoch(&self) -> &str {
         &self.instance_epoch
@@ -435,6 +434,7 @@ impl Application {
         if let Some(manager) = application.exports.as_ref() {
             manager.reconcile_after_restart();
             manager.schedule_expiry_sweep();
+            crate::processing_export::reconcile_processing_exports(&application);
         }
         if let Some(manager) = application.proxies.as_ref() {
             manager.reconcile_after_restart();

@@ -39,11 +39,53 @@ fn module_list(value: &Value) -> io::Result<&[Value]> {
 /// One strict UTF-8 engine path argument: the pinned bundle has no
 /// non-UTF-8 paths, and a caller-supplied one must not become an ambient
 /// encoding surprise.
-fn strict(path: &Path) -> io::Result<&str> {
+pub(crate) fn strict(path: &Path) -> io::Result<&str> {
     path.to_str()
         .ok_or_else(|| io::Error::other("engine path is not valid UTF-8"))
 }
 
+/// Read and bound-check the bundle engine-metadata contract.
+pub(crate) fn approved_metadata(metadata_path: &Path) -> io::Result<Value> {
+    let metadata = File::open(metadata_path)?;
+    if metadata.metadata()?.len() > METADATA_BYTES_MAX {
+        return Err(io::Error::other("engine metadata exceeds the bundle bound"));
+    }
+    let mut bytes = Vec::new();
+    metadata
+        .take(METADATA_BYTES_MAX + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > METADATA_BYTES_MAX {
+        return Err(io::Error::other("engine metadata exceeds the bundle bound"));
+    }
+    serde_json::from_slice(&bytes).map_err(|_| io::Error::other("engine metadata is invalid"))
+}
+
+/// Pin one running engine to the bundle contract before any payload work:
+/// the tool inventory, the module list, and every recorded module schema
+/// must match the approved metadata exactly. Discovery here grants
+/// nothing; a differing engine is refused.
+pub(crate) fn verify_engine_contract(engine: &mut McpClient, approved: &Value) -> io::Result<()> {
+    let modules = engine.call("list_modules", json!({}))?;
+    if engine.tools_list()? != approved["tools"]
+        || module_list(&modules)? != module_list(&approved["modules"])?
+    {
+        return Err(io::Error::other(
+            "engine tools or module identities differ from the bundle",
+        ));
+    }
+    let schemas = approved["schemas"]
+        .as_object()
+        .ok_or_else(|| io::Error::other("engine schema inventory is missing"))?;
+    // One generic metadata contract; no C parameter layouts or module encoders here.
+    for (operation, schema) in schemas {
+        if engine.call("module_schema", json!({"operation": operation}))? != *schema {
+            return Err(io::Error::other(format!(
+                "engine schema differs for {operation}"
+            )));
+        }
+    }
+    Ok(())
+}
 /// Parameterized development for local, single-container execution: the
 /// engine binary, the bundle metadata, the staged output profile and the
 /// private work tree are all caller-owned, and every engine-private path
@@ -61,19 +103,7 @@ pub(crate) fn develop_at(
     client: &str,
     guard: Option<Guard>,
 ) -> io::Result<()> {
-    let metadata = File::open(metadata_path)?;
-    if metadata.metadata()?.len() > METADATA_BYTES_MAX {
-        return Err(io::Error::other("engine metadata exceeds the bundle bound"));
-    }
-    let mut bytes = Vec::new();
-    metadata
-        .take(METADATA_BYTES_MAX + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > METADATA_BYTES_MAX {
-        return Err(io::Error::other("engine metadata exceeds the bundle bound"));
-    }
-    let approved: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| io::Error::other("engine metadata is invalid"))?;
+    let approved = approved_metadata(metadata_path)?;
     let config = work.join("config");
     let cache = work.join("cache");
     let tmp = work.join("tmp");
@@ -126,25 +156,7 @@ pub(crate) fn develop_at(
         None => McpClient::spawn(program, &args, &env)?,
     };
     engine.initialize(client)?;
-    let modules = engine.call("list_modules", json!({}))?;
-    if engine.tools_list()? != approved["tools"]
-        || module_list(&modules)? != module_list(&approved["modules"])?
-    {
-        return Err(io::Error::other(
-            "engine tools or module identities differ from the bundle",
-        ));
-    }
-    let schemas = approved["schemas"]
-        .as_object()
-        .ok_or_else(|| io::Error::other("engine schema inventory is missing"))?;
-    // One generic metadata contract; no C parameter layouts or module encoders here.
-    for (operation, schema) in schemas {
-        if engine.call("module_schema", json!({"operation": operation}))? != *schema {
-            return Err(io::Error::other(format!(
-                "engine schema differs for {operation}"
-            )));
-        }
-    }
+    verify_engine_contract(&mut engine, &approved)?;
     let result = engine.call(
         "export_images",
         json!({

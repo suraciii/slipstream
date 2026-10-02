@@ -16,22 +16,22 @@ application-owned scratch directory outside the Library. Preview, Development
 Proxy builds, and Export share this resource. At most one engine request runs.
 Queued requests recheck cancellation and captured source facts after admission.
 
-The optional bundled extension contains the pinned darktable-mcp executable,
-native assets, module/tool metadata, manifest, and ICC profile. Startup verifies
-manifest identity and all named asset digests. Missing or invalid assets leave the
-Library usable and Development unavailable. Startup configuration cannot be
-changed by an HTTP request. Film remains unavailable; engine discovery does not
-admit new controls or source classes.
+Optional bundled extensions contain each module's pinned executable or runtime,
+native assets, parameter metadata, manifest, and output profiles. Startup verifies
+each manifest identity and its named asset digests independently. Missing or
+invalid assets leave the Library and other available modules usable. Startup
+configuration cannot be changed by an HTTP request. Engine discovery does not
+admit new controls, source classes, or output contracts.
 
 ## Execution
 
-Each request uses a fresh darktable child supervised in the application process's
-private process group, a private catalog/config/cache, and unique temporary output
-identity. The engine receives only a copied and hashed Original, never the Library
-directory, state database, desktop catalog, or external XMP. Ambient presets,
-sidecars, and crawler initialization are disabled.
-The closed semantic intent remains exposure 0 through +1 EV and as-shot white
-balance for qualified source profiles.
+Each request uses a fresh selected-engine child supervised in the application's
+private process group, private engine state, and unique temporary output identity.
+darktable uses a private catalog/config/cache. Engines receive only confined,
+copied and hashed inputs, never the Library directory, state database, desktop
+catalog, or external XMP. Ambient presets, sidecars, and crawler initialization
+are disabled. Each module admits only its qualified parameter combinations under
+[Processing Modules](processing-modules.md).
 
 The processing lock remains held through engine termination and scratch cleanup.
 Private stdio carries bounded MCP JSON-RPC values; malformed, oversized,
@@ -42,11 +42,11 @@ scratch before releasing the lock. The supervisor receives the kernel parent-dea
 signal and kills the group if the application exits unexpectedly. Normal shutdown
 cancels active processing before closing the Library.
 
-Results are validated for bytes, geometry, scene-linear float32 samples, ICC
-identity, and orientation before publication. Preview checks current intent and
-source identity before serving. Export retains its captured intent; a changed
-source or superseded attempt cannot publish. Engine failure never substitutes a
-camera Preview or an uncorrected result.
+Results are validated against the selected module's concrete output contract
+before publication. Preview checks current intent and input identity before
+serving. Export retains its captured intent; a changed input or superseded attempt
+cannot publish. Engine failure never substitutes a camera Preview, another
+module, or an uncorrected result.
 
 ## Restart
 

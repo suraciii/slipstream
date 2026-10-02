@@ -1,13 +1,5 @@
-import type { PhotoSummary } from "../api/contracts.js";
-import {
-  createDevelopmentProxy,
-  fetchDevelopmentProxy,
-  removeDevelopmentProxy,
-  type DevelopmentProxyStatus,
-} from "../api/development-proxy.js";
 import {
   fetchEditRecipe,
-  isRecord,
   parseProcessingCapability,
   rebindEditRecipe,
   saveEditRecipe,
@@ -16,17 +8,9 @@ import {
 } from "../api/editor.js";
 import { BASELINE_SETTINGS, type CurrentRendition } from "./edit-preview.js";
 import { createEditorRenditions } from "./editor-renditions.js";
+import { createWorkspaceOutputController } from "./workspace-output-controller.js";
 import {
-  createWorkspaceOutputController,
-  type OutputTarget,
-} from "./workspace-output-controller.js";
-import {
-  asEditorSupportReason,
   createPhotoEditor,
-  type EditSourceKind,
-  type EditSourceReadiness,
-  isRetryableSupportReason,
-  supportReasonExplanation,
   type EditorFacts,
   type EditorStep,
   type PhotoEditor,
@@ -37,100 +21,27 @@ import type {
   LibraryBrowserView,
 } from "../ui/library-browser-view.js";
 
-const browserDraftStore = () => {
-  try {
-    window.sessionStorage.setItem("slipstream.draft.probe", "1");
-    window.sessionStorage.removeItem("slipstream.draft.probe");
-  } catch {
-    return undefined;
-  }
-  return {
-    read: (key: string) => {
-      try {
-        return window.sessionStorage.getItem(key);
-      } catch {
-        return null;
-      }
-    },
-    write: (key: string, value: string) => {
-      try {
-        window.sessionStorage.setItem(key, value);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    remove: (key: string) => {
-      try {
-        window.sessionStorage.removeItem(key);
-      } catch {
-        /* the store is blocked; the in-memory draft still governs this session */
-      }
-    },
-  };
-};
-
+import { browserDraftStore } from "./editor-draft-store.js";
+import {
+  sourceFactNote,
+  plainConflictMessage,
+  plainWhiteBalanceNote,
+  compactEditorStatus,
+} from "./editor-presentation.js";
+import {
+  describePreviewRefusal,
+  describeEditRefusal,
+} from "./editor-refusals.js";
+import { createEditorComposableRecipe } from "./editor-composable-recipe.js";
+import { createEditorComposablePreview } from "./editor-composable-preview.js";
+import { createEditorProxyController } from "./editor-proxy-controller.js";
+import { createEditorProcessingExport } from "./editor-processing-export.js";
+import type {
+  EditorController,
+  EditorControllerDependencies,
+} from "./editor-controller-contract.js";
+export type { EditorController } from "./editor-controller-contract.js";
 const MAXIMUM_EDITOR_SESSIONS = 4;
-
-const formatByteCount = (bytes: number): string => {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  const units = ["B", "KiB", "MiB", "GiB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
-};
-
-type EditorControllerDependencies = Readonly<{
-  isAlive: () => boolean;
-  isCurrentPhoto: (photoId: string) => boolean;
-  currentPhoto: () => PhotoSummary | undefined;
-  /// The Library's current scan phase in the summary's words, or "" while
-  /// no scan is running. A `Checking source…` wait names it so the
-  /// Photographer can see what the Library is doing.
-  libraryPhase?: () => string;
-}>;
-
-export type EditorController = Readonly<{
-  open: (photoId: string) => void;
-  refresh: (photoId: string) => void;
-  commitExposure: (photoId: string, exposureEv: number) => void;
-  commitWhiteBalance: (
-    photoId: string,
-    action:
-      | Readonly<{ kind: "mode"; mode: string }>
-      | Readonly<{ kind: "temperature"; temperatureKelvin: number }>
-      | Readonly<{ kind: "tint"; tintMilli: number }>,
-  ) => void;
-  stepHistory: (
-    photoId: string,
-    operation:
-      | "undo"
-      | "redo"
-      | "reset"
-      | "resetExposure"
-      | "resetWhiteBalance",
-  ) => void;
-  requestPreview: (photoId: string) => void;
-  applyStage: (photoId: string, stage: EditorStage) => void;
-  setComparison: (photoId: string, pressed: boolean) => void;
-  useSaved: (photoId: string) => void;
-  reapplyLocal: (photoId: string) => void;
-  discardDraft: (photoId: string) => void;
-  rebind: (photoId: string) => void;
-  createProxy: (photoId: string) => void;
-  removeProxy: (photoId: string) => void;
-  submitXmp: (photoId: string) => void;
-  downloadXmp: (photoId: string) => void;
-  submitExport: (photoId: string, target: OutputTarget) => void;
-  cancelExport: (photoId: string, target: OutputTarget) => void;
-  retryExport: (photoId: string, target: OutputTarget) => void;
-  downloadExport: (photoId: string, target: OutputTarget) => void;
-  leave: () => void;
-}>;
 
 export function createEditorController(
   fetcher: BrowserFetch,
@@ -183,15 +94,6 @@ export function createEditorController(
   /// The deployment's processing capability report, once one Edit session has
   /// read it. It is the only source of the admitted adjustable controls.
   let processingCapability: ProcessingCapability | undefined;
-  let editorProxy: DevelopmentProxyStatus = {
-    photoId: "",
-    state: "absent",
-    proxy: null,
-    failure: null,
-  };
-  let editorProxyFailure = "";
-  let editorProxyTimer: number | undefined;
-  let editorProxyGeneration = 0;
   const settleEditorWriters = (): void => {
     const waiters = editorWriteWaiters;
     editorWriteWaiters = [];
@@ -203,6 +105,15 @@ export function createEditorController(
     isCurrentPhoto(photoId) &&
     currentPhoto()?.id === photoId;
 
+  const proxy = createEditorProxyController(fetcher, {
+    session: (photoId) => editorSessions.get(photoId),
+    editorOwnsPhoto,
+    renderEditor: () => renderEditor(),
+    refreshSource: (photoId) => {
+      void loadEditorFacts(photoId, "refresh");
+      void composable.loadComposableRecipe(photoId);
+    },
+  });
   const outputs = createWorkspaceOutputController(fetcher, {
     owns: editorOwnsPhoto,
     render: () => renderEditor(),
@@ -220,10 +131,12 @@ export function createEditorController(
         dirty: presented.dirty,
         conflict: Boolean(presented.conflict),
         canRender:
+          !composable.mode() &&
           presented.canEdit &&
           presented.processingAvailable &&
           presented.editSourceKind === "original",
         canRenderFilm:
+          !composable.mode() &&
           presented.canEdit &&
           presented.processingAvailable &&
           presented.editSourceKind === "original" &&
@@ -272,11 +185,62 @@ export function createEditorController(
         view.presentEditorPreview(url);
     },
   });
+  const composable = createEditorComposableRecipe(fetcher, {
+    ...dependencies,
+    editorOwnsPhoto,
+    renderEditor: () => renderEditor(),
+    stage: () => editorStage,
+    previewSelection: (): string | null | undefined =>
+      composable.target().kind === "legacy"
+        ? renditions.current.url ||
+          renditions.current.busy ||
+          renditions.current.pending
+          ? null
+          : undefined
+        : composablePreview.selection,
+    clearEditorPreview: () => clearEditorPreview(),
+    requestEditorPreview: (photoId): Promise<void> =>
+      requestEditorPreview(photoId),
+    markEditorPreviewStale: () => markEditorPreviewStale(),
+    describeEditRefusal: (response, subject) =>
+      describeEditRefusal(response, subject),
+  });
+  const composablePreview = createEditorComposablePreview(fetcher, {
+    session: (photoId) => editorSessions.get(photoId),
+    stage: () => editorStage,
+    read: () => composable.read,
+    isDirty: composable.dirty,
+    editorOwnsPhoto,
+    renderEditor: () => renderEditor(),
+    present: (url) => {
+      if (!editorComparing) view.presentEditorPreview(url);
+    },
+    clearPresented: () => view.clearEditorPreview(),
+    describePreviewRefusal: (response) => describePreviewRefusal(response),
+  });
+  const processingExport = createEditorProcessingExport(fetcher, composable, {
+    editorOwnsPhoto,
+    renderEditor: () => renderEditor(),
+    processingAvailable: () =>
+      currentEditor()?.presentation().processingAvailable ?? false,
+    describeEditRefusal: (response, subject) =>
+      describeEditRefusal(response, subject),
+  });
+  const currentPreview = () =>
+    composable.target().kind === "legacy"
+      ? renditions.current
+      : composablePreview.current;
   const clearEditorComparison = renditions.clearComparison;
-  const requestEditorPreview = renditions.requestCurrent;
   const requestEditorComparisonPreview = renditions.requestComparison;
+  const requestEditorPreview = async (photoId: string): Promise<void> => {
+    if (composable.readPending) return;
+    if (composable.target().kind === "legacy")
+      await renditions.requestCurrent(photoId);
+    else await composablePreview.requestCurrent(photoId);
+  };
   const clearEditorPreview = (): void => {
     renditions.clear();
+    composablePreview.clear();
     view.clearEditorPreview();
   };
   /// The Processing axis. The axis is the deployment's engine capability,
@@ -306,127 +270,10 @@ export function createEditorController(
     | "failed"
     | null => {
     if (editorStage === "camera") return null;
-    if (renditions.current.busy || renditions.current.pending) return "pending";
-    if (renditions.current.outcome === "failed") return "failed";
-    if (renditions.current.url)
-      return renditions.current.stale ? "stale" : "ready";
-    return renditions.current.refused ? "failed" : null;
-  };
-  /// The Source support fact line. The readiness word names the axis's own
-  /// state, the Library's scan phase rides along while the source is being
-  /// checked, and a proxy edit source is named as provenance.
-  const sourceFactNote = (
-    readiness: EditSourceReadiness,
-    editSource: EditSourceKind,
-  ): string => {
-    const word =
-      readiness === "checking"
-        ? "Checking source…"
-        : readiness === "ready"
-          ? "Ready"
-          : readiness === "missing"
-            ? "Original missing"
-            : readiness === "unreadable"
-              ? "Original unreadable"
-              : "Unsupported source class";
-    const phase = readiness === "checking" ? (libraryPhase?.() ?? "") : "";
-    const provenance =
-      editSource === "development-proxy"
-        ? " (Development Proxy edit source)"
-        : "";
-    return phase ? `${word} — ${phase}${provenance}` : `${word}${provenance}`;
-  };
-  /// The session's internal wording in the workspace's plain language. The
-  /// compact status line never names recipes, revisions, or deployments;
-  /// the original wording stays available under the Details affordance.
-  const plainEditorMessage = (message: string): string =>
-    message
-      .replace(
-        "This Photo's source class has no approved profile in this deployment",
-        "This Photo is not supported for editing",
-      )
-      .replace(
-        "Reading this Photo's Original File failed for its current source revision",
-        "Reading this Photo's Original File failed",
-      )
-      .replace(
-        "Reload the recipe to check for current source facts.",
-        "Reload to check again.",
-      )
-      .replace(
-        "Reload the recipe to retry once the current Library work settles.",
-        "Reload to retry.",
-      )
-      .replaceAll("the saved recipe", "the saved edit")
-      .replaceAll("The saved recipe", "The saved edit");
-  /// The conflict resolutions are preserved exactly; only their wording moves
-  /// from service concepts to the Photographer's edit.
-  const plainConflictMessage = (message: string): string => {
-    if (
-      message ===
-      "A local draft from an earlier revision was recovered. Use the saved recipe or reapply the draft."
-    )
-      return "A local draft from an earlier version of this Photo was recovered. Use the saved edit or reapply the draft.";
-    if (
-      message ===
-      "The saved recipe is bound to a different source. Rebind it or use the saved recipe."
-    )
-      return "The saved edit belongs to a different file. Keep the edit for the current file, or use the saved edit.";
-    if (
-      message ===
-      "The Original File changed elsewhere. Autosave stopped; use the saved recipe or reapply the local settings."
-    )
-      return "The Original File changed elsewhere. Autosave stopped; use the saved edit or reapply your changes.";
-    if (
-      message ===
-      "The saved recipe changed elsewhere. Autosave stopped; use the saved recipe or reapply the local settings."
-    )
-      return "The saved edit changed elsewhere. Autosave stopped; use the saved edit or reapply your changes.";
-    return plainEditorMessage(message);
-  };
-  const plainWhiteBalanceNote = (note: string): string =>
-    note.startsWith("This deployment admits temperature and tint")
-      ? "Temperature and tint are not available for this Photo right now, so the controls stay read-only."
-      : "Only as-shot white balance is available for this Photo.";
-  /// The one compact status line. Uncertain effects read as checking, never
-  /// as failure; a refused save offers its retry; everything else the session
-  /// reports is either transient progress or a read-only explanation.
-  const compactEditorStatus = (
-    presented: Readonly<{
-      photoId: string;
-      saving: boolean;
-      dirty: boolean;
-      canEdit: boolean;
-      processingAvailable: boolean;
-      conflict: unknown;
-      status: string;
-      recipeVersion: string | null;
-    }>,
-  ): string => {
-    if (presented.photoId === "") return "Loading edit…";
-    if (presented.conflict)
-      return "Could not update — choose how to resolve it below.";
-    const status = presented.status;
-    if (status.startsWith("The save outcome is unknown"))
-      return "Checking result…";
-    if (
-      status.startsWith("The save was refused") ||
-      (presented.dirty && !presented.saving)
-    )
-      return "Could not update — Retry";
-    if (presented.saving) return "Saving…";
-    if (status.startsWith("This deployment does not admit the white-balance"))
-      return "This white-balance mode is not available for this Photo.";
-    if (status.startsWith("This deployment does not admit temperature"))
-      return "Temperature and tint are not available for this Photo.";
-
-    if (
-      status === "" ||
-      status === "Saved." ||
-      status === "Using the saved recipe."
-    )
-      return presented.recipeVersion ? "Edit state saved" : "No saved edit yet";
-    return plainEditorMessage(status);
+    if (currentPreview().busy || currentPreview().pending) return "pending";
+    if (currentPreview().outcome === "failed") return "failed";
+    if (currentPreview().url) return currentPreview().stale ? "stale" : "ready";
+    return currentPreview().refused ? "failed" : null;
   };
   const renderEditor = (): void => {
     const photoId = currentPhoto()?.id;
@@ -451,6 +298,7 @@ export function createEditorController(
       sourceFactNote: sourceFactNote(
         presented.editSourceReadiness,
         presented.editSourceKind,
+        libraryPhase,
       ),
       processingReadiness: processingReadiness(),
       previewState: previewReadiness(),
@@ -470,44 +318,15 @@ export function createEditorController(
             note: plainWhiteBalanceNote(presented.whiteBalance.note),
           }
         : presented.whiteBalance,
-      proxy: {
-        state: editorProxy.state,
-        note:
-          editorProxyFailure ||
-          (editorProxy.state === "building"
-            ? "Building Development Proxy…"
-            : editorProxy.state === "current"
-              ? `Current proxy ${editorProxy.proxy?.width ?? "?"}×${editorProxy.proxy?.height ?? "?"}, ${formatByteCount(editorProxy.proxy?.byteLength ?? 0)}.`
-              : editorProxy.state === "stale"
-                ? "Stale Development Proxy; rebuild it for this Original."
-                : "No Development Proxy."),
-        proxy: editorProxy.proxy
-          ? {
-              width: editorProxy.proxy.width,
-              height: editorProxy.proxy.height,
-              longEdge: editorProxy.proxy.longEdge,
-              qualityLimit: editorProxy.proxy.qualityLimit,
-              byteLength: editorProxy.proxy.byteLength,
-              sourceRevision: editorProxy.proxy.sourceRevision,
-              sourceProfileId: editorProxy.proxy.sourceProfileId,
-              pipelineVersion: editorProxy.proxy.pipelineVersion,
-            }
-          : null,
-        canCreate:
-          presented.editSourceReadiness === "ready" &&
-          Boolean(session.facts()?.sourceRevision) &&
-          editorProxy.state !== "building" &&
-          presented.editSourceKind !== "development-proxy",
-        canRemove: editorProxy.state === "current",
-      },
+      proxy: proxy.view(photoId),
       canEdit: presented.canEdit,
       canPreview: presented.canEdit && presented.processingAvailable,
-      previewing: renditions.current.busy,
+      previewing: currentPreview().busy,
       // Comparison progress describes the image actually presented.
       previewNote: editorComparing
         ? renditions.comparison.note
-        : renditions.current.note,
-      previewStale: !editorComparing && renditions.current.stale,
+        : currentPreview().note,
+      previewStale: !editorComparing && currentPreview().stale,
       saving: presented.saving,
       dirty: presented.dirty,
       canUndo: presented.canUndo,
@@ -518,6 +337,11 @@ export function createEditorController(
         : null,
       draftNote: presented.draft.note,
       outputs: outputs.view(photoId),
+      export: processingExport.view(),
+      composable: composable.view(),
+      controlsReadonlyNote: composable.mode()
+        ? "The two-control edit is read-only while a Processing Recipe owns this Photo's processing. Its steps are edited below."
+        : "",
       status: compactEditorStatus(presented),
       statusDetail: presented.status,
     });
@@ -537,14 +361,40 @@ export function createEditorController(
       // development: a current rendition that is absent or older than the
       // current settings is named instead of being compared as if it were
       // current.
-      const current = !renditions.current.url
+      const current = !currentPreview().url
         ? " No current preview is shown, so the comparison is shown alone."
-        : renditions.current.stale
+        : currentPreview().stale
           ? " The current preview is older than the current settings."
           : "";
       return `${stageName} comparison: the unadjusted rendering, compared with the current settings.${current}${proxy}`;
     }
-    if (!renditions.current.url)
+    const target = composable.target();
+    if (target.kind === "unreadable")
+      return "The Processing Recipe could not be read, so no processing result is shown. Reload to check again.";
+    if (target.kind === "none")
+      return "The Processing Recipe selects no Processing Step, so no processing result is shown.";
+    if (target.kind === "step") {
+      const composableStep = target.step;
+      if (composable.dirty())
+        return `Save the Processing Recipe to update the Preview of the selected Processing Step ${composableStep.stepId} (${composableStep.module}).`;
+      // The selected current step is this Photo's own composable processing:
+      // its Preview is presented for what it is, and the fixed two-control
+      // editor is never presented as this step's module parameters.
+      const module = composable.modules.find(
+        (description) => description.id.name === composableStep.module,
+      );
+      const availability = module
+        ? ` The module reports ${module.availability.state}${
+            module.availability.refusalReasons.length
+              ? ` (${module.availability.refusalReasons.join(", ")}).`
+              : "."
+          }`
+        : "";
+      return currentPreview().url
+        ? `The Preview of the selected Processing Step ${composableStep.stepId} (${composableStep.module}).${availability}`
+        : `The Preview of the selected Processing Step ${composableStep.stepId} (${composableStep.module}) is not shown yet.${availability}`;
+    }
+    if (!currentPreview().url)
       return editorStage === "film"
         ? "Film: the Film preview is not ready yet, so no edited image is shown."
         : "Edit: the preview is not ready yet; the camera preview is shown.";
@@ -776,13 +626,19 @@ export function createEditorController(
   };
   const openEditor = (photoId: string): void => {
     if (!photoId) return;
+    clearEditorPreview();
+    editorComparing = false;
+    composable.reset();
+    processingExport.reset();
     // The Edit workspace always opens on the current edit; Film is an
     // explicit optional action, never the default view.
     editorStage = "develop";
     editorSession(photoId);
     renderEditor();
+    void composable.loadComposableRecipe(photoId);
+    void composable.loadProcessingModules(photoId);
     void loadEditorFacts(photoId, "open");
-    void readProxy(photoId);
+    void proxy.read(photoId);
     void loadProcessingCapability(photoId);
     outputs.open(photoId);
   };
@@ -792,13 +648,17 @@ export function createEditorController(
       (editorRecipeGenerations.get(photoId) ?? 0) + 1,
     );
     void loadEditorFacts(photoId, "refresh");
+    void composable.loadComposableRecipe(photoId);
     void outputs.refresh(photoId);
   };
   /// The presented rendition is older than the settings in force as soon as
   /// an edit action lands. The matching rendition clears the mark when it
   /// arrives, so the workspace never presents an image as current after the
   /// settings it shows have moved.
-  const markEditorPreviewStale = renditions.markStale;
+  const markEditorPreviewStale = (): void => {
+    renditions.markStale();
+    composablePreview.markStale();
+  };
   const commitEditorExposure = (photoId: string, exposureEv: number): void => {
     const session = editorSessions.get(photoId);
     if (!session) return;
@@ -861,6 +721,7 @@ export function createEditorController(
     const session = editorSessions.get(photoId);
     if (!session) return;
     await loadEditorFacts(photoId, "refresh");
+    await composable.loadComposableRecipe(photoId);
     const current = editorSessions.get(photoId);
     if (!current) return;
     const step = current.useSavedRecipe();
@@ -918,57 +779,13 @@ export function createEditorController(
       else if (!renditions.comparison.busy) {
         void requestEditorComparisonPreview(photoId);
       }
-    } else if (renditions.current.url)
-      view.presentEditorPreview(renditions.current.url);
-    else view.clearEditorPreview();
+    } else {
+      const url = currentPreview().url;
+      if (url) view.presentEditorPreview(url);
+      else view.clearEditorPreview();
+    }
     renderEditor();
   };
-  /// The closed refusal set of a preview in the workspace's words. Internal
-  /// causes stay service concepts; a code this client does not know is
-  /// disclosed as the service's own rather than explained away.
-  const describePreviewRefusal = async (
-    response: Response,
-  ): Promise<string> => {
-    const body: unknown = await response.json().catch(() => undefined);
-    const error = isRecord(body) ? body["error"] : undefined;
-    const code =
-      isRecord(error) && typeof error["code"] === "string" ? error["code"] : "";
-    const reason =
-      isRecord(error) &&
-      isRecord(error["details"]) &&
-      typeof error["details"]["reason"] === "string"
-        ? error["details"]["reason"]
-        : "";
-    if (code === "processing_unavailable") {
-      if (reason === "preview-render-admission-unavailable")
-        return "Previews are not available yet in this deployment, so no preview is shown. Editing, Export, and download still work.";
-      return "Processing is not available for this Photo right now, so no preview is shown.";
-    }
-    if (code === "resource_unavailable") {
-      // A refusal that follows from the Photo's source state carries the
-      // same closed reason the edit read reports, so the preview surface
-      // agrees with the read: a retryable wait names its retry, a confirmed
-      // outcome explains the permanent read failure.
-      const sourceReason = asEditorSupportReason(reason);
-      if (sourceReason !== "") {
-        const note = `${plainEditorMessage(
-          supportReasonExplanation(sourceReason),
-        )}, so no preview is shown.`;
-        return isRetryableSupportReason(sourceReason)
-          ? `${note} Refresh the preview once the current Library work settles.`
-          : note;
-      }
-      return "Could not create the preview right now. Refresh the preview to try again.";
-    }
-    if (code === "unsupported_photo")
-      return "This Photo is not supported for editing, so no preview is shown.";
-    if (code === "unknown_photo")
-      return "This Photo is no longer in the Library, so no preview is shown.";
-    return code
-      ? `The service refused the preview: ${code}${reason ? ` (${reason})` : ""}.`
-      : `The preview request failed with HTTP ${response.status}.`;
-  };
-
   /// Rebinds the stored recipe to the currently observed source. It is the one
   /// explicit reconciliation the workspace offers when the service reports the
   /// saved recipe is bound to different content.
@@ -998,61 +815,13 @@ export function createEditorController(
       return;
     }
     await loadEditorFacts(photoId, "refresh");
-  };
-  /// Leaving Photo View releases the presented image but keeps each Photo's
-  /// session: a pending save still settles under its own identity, and the
-  /// local draft remains for a later visit.
-  const readProxy = async (photoId: string): Promise<void> => {
-    const generation = ++editorProxyGeneration;
-    const result = await fetchDevelopmentProxy(fetcher, photoId);
-    if (generation !== editorProxyGeneration || !editorOwnsPhoto(photoId))
-      return;
-    if (result.kind === "failed") {
-      editorProxyFailure = result.message;
-      renderEditor();
-      return;
-    }
-    editorProxyFailure = "";
-    editorProxy = result.status;
-    renderEditor();
-    if (result.status.state === "building") {
-      if (editorProxyTimer !== undefined) clearTimeout(editorProxyTimer);
-      editorProxyTimer = window.setTimeout(() => {
-        editorProxyTimer = undefined;
-        void readProxy(photoId);
-      }, 500);
-    } else if (result.status.state === "current") {
-      void loadEditorFacts(photoId, "refresh");
-    }
-  };
-  const createProxy = async (photoId: string): Promise<void> => {
-    const session = editorSessions.get(photoId);
-    const sourceRevision = session?.facts()?.sourceRevision;
-    if (!session || !sourceRevision) return;
-    editorProxyFailure = "";
-    editorProxy = { photoId, state: "building", proxy: null, failure: null };
-    renderEditor();
-    const result = await createDevelopmentProxy(
-      fetcher,
-      photoId,
-      sourceRevision,
-    );
-    if (!editorOwnsPhoto(photoId)) return;
-    if (result.kind === "failed") editorProxyFailure = result.message;
-    else editorProxy = result.status;
-    renderEditor();
-    void readProxy(photoId);
-  };
-  const removeProxy = async (photoId: string): Promise<void> => {
-    const result = await removeDevelopmentProxy(fetcher, photoId);
-    if (!editorOwnsPhoto(photoId)) return;
-    if (result.kind === "failed") editorProxyFailure = result.message;
-    else editorProxy = result.status;
-    renderEditor();
-    if (result.kind === "ok") void loadEditorFacts(photoId, "refresh");
+    await composable.loadComposableRecipe(photoId);
   };
   const leaveEditor = (): void => {
     outputs.leave();
+    proxy.leave();
+    composable.reset();
+    processingExport.reset();
     clearEditorPreview();
     editorComparing = false;
     editorStage = "develop";
@@ -1078,11 +847,33 @@ export function createEditorController(
       void rebindEditor(photoId);
     },
     createProxy: (photoId) => {
-      void createProxy(photoId);
+      void proxy.create(photoId);
     },
     removeProxy: (photoId) => {
-      void removeProxy(photoId);
+      void proxy.remove(photoId);
     },
+    compose: composable.composeEditorSteps,
+    composableAddStep: composable.addEditorComposableStep,
+    composableRemoveStep: composable.removeEditorComposableStep,
+    composableSelectStep: composable.selectEditorComposableStep,
+    composableEditStep: composable.editEditorComposableStep,
+    composableParameters: composable.editEditorComposableParameters,
+    composableSchema: composable.editEditorComposableSchema,
+    composableInput: composable.editEditorComposableInput,
+    composableArtifactFetch: (photoId, artifactId) => {
+      void composable.fetchEditorArtifact(photoId, artifactId);
+    },
+    composableSave: (photoId) => {
+      void composable.saveEditorComposable(photoId);
+    },
+    composableDiscard: composable.discardEditorComposable,
+    checkProcessingExport: (photoId) => {
+      void processingExport.check(photoId);
+    },
+    downloadArtifact: (photoId, artifactId) => {
+      void processingExport.downloadArtifact(photoId, artifactId);
+    },
+    useArtifactInput: composable.useEditorArtifactInput,
     submitXmp: (photoId) => {
       void outputs.submit(photoId);
     },
@@ -1090,16 +881,20 @@ export function createEditorController(
       void outputs.download(photoId);
     },
     submitExport: (photoId, target) => {
-      void outputs.submit(photoId, target);
+      if (target === undefined) void processingExport.submit(photoId);
+      else void outputs.submit(photoId, target);
     },
     cancelExport: (photoId, target) => {
-      void outputs.cancel(photoId, target);
+      if (target === undefined) void processingExport.cancel(photoId);
+      else void outputs.cancel(photoId, target);
     },
     retryExport: (photoId, target) => {
-      void outputs.retry(photoId, target);
+      if (target === undefined) void processingExport.retry(photoId);
+      else void outputs.retry(photoId, target);
     },
     downloadExport: (photoId, target) => {
-      void outputs.download(photoId, target);
+      if (target === undefined) void processingExport.download(photoId);
+      else void outputs.download(photoId, target);
     },
     leave: leaveEditor,
   };

@@ -82,19 +82,50 @@ routes as retired; do not revive the unbounded `GET /api/albums` representation.
 
 ### Photo Development Surface
 
-These routes expose the first development pipeline through the same shared
-operations as Web. They obey the existing method, header-size, body-size, and
-shutdown admission rules:
+These routes expose Photo Development through the same shared operations as
+Web. They obey the existing method, header-size, body-size, and shutdown
+admission rules:
 
 - `GET /api/photos/{id}/edit-recipe`: the current recipe or the absence of one,
-  the observed source revision, the source/profile support state, and the
-  approved control ranges for that source;
+  the observed source revision, the source support state, and the admitted
+  edit controls for that source;
 - `POST /api/photos/{id}/edit-recipe`: one guarded save carrying a stable
   request identity and both expected revisions;
 - `POST /api/photos/{id}/edit-recipe/rebind`: explicit rebinding of saved
   intent to a newly observed source revision;
-- `GET /api/photos/{id}/edit-preview/{stage}`: the current Edit Preview
-  rendition for one stage, or an admission or refusal result;
+- `GET /api/photos/{id}/edit-preview/{stage}`: the bounded current-step Edit
+  Preview rendition, or an admission or refusal result;
+- `GET /api/photos/{id}/processing-recipe`: the composable Processing Recipe
+  or the absence of one, with the observed source revision;
+- `POST /api/photos/{id}/processing-recipe`: one guarded save of the complete
+  composable recipe — request identity, expected recipe and source
+  revisions, the selected current step, and zero or more module-owned steps
+  with explicit Original or Artifact inputs;
+- `GET /api/photos/{id}/processing-preview/{step_id}`: the bounded Preview of
+  the recipe's selected current step, or an explicit refusal. The deployment
+  must compute the selected module at the admitted Preview geometry; it must
+  not create a full-resolution handoff and downsample it. The qualified
+  darktable adapter currently has no such bounded-geometry Preview path, so
+  a darktable request returns `module_parameters_unavailable` without
+  executing or publishing a rendition;
+- `POST /api/photos/{id}/processing-exports`: submit the recipe's selected
+  current Processing Step for an explicit Export — one guarded admission
+  that captures the stored step's exact identity (module, parameter-schema
+  version and canonical digest, input binding, processing bundle) and
+  validates the concrete input handoff. A qualified adapter executes
+  through the confined development workload, validates the actual output,
+  and settles the immutable Processing Artifact and the request's
+  acceptance receipt in one serialized transaction, so the same request
+  identity replays the committed artifact; an unqualified pairing records
+  and returns a durable, replayable, structured refusal before any
+  artifact is published;
+- `GET /api/processing-artifacts/{id}`: one published immutable Processing
+  Artifact's provenance — Photo, step, module with its pinned
+  adapter/schema version, the complete captured parameter snapshot, the
+  input binding with its verified byte evidence, the validated output
+  contract, the bundle, and the published bytes' identity. Publication
+  itself is insert-only through the serialized Library owner after a
+  qualified, validated execution; no HTTP route can mint an artifact.
 - `POST /api/photos/{id}/exports`: capture an immutable Export snapshot and
   admit its work;
 - `GET /api/photos/{id}/exports`: bounded list of that Photo's retained Exports
@@ -108,17 +139,32 @@ shutdown admission rules:
 - `GET /api/exports/{id}/artifact`: the validated artifact of one Export,
   leased for the response stream.
 
-`stage` is the closed value `develop` or `film`, subject to the deployment's
-capability report and the Photo's approved source profile. The Photo facts
-returned by `GET /api/photos/{id}` and the bounded Photo summaries in Browse
-windows and Photo queries carry the saved-edit fact. Artifact downloads and Edit
-Preview renditions reuse the existing private derivative transfer rules.
+The Edit Preview and Export operations execute one caller-selected Processing
+Step: its module, its input binding, and its complete parameter snapshot.
+Output format, color handling, sample precision, geometry, and encoding are
+ordinary parameters of that step's module tree; there is no product stage,
+target, or Film capability above the modules. The `stage` path value of the
+Edit Preview route and the `target` value of an Export request are closed
+transport identifiers of the currently installed surface: they are not
+product projections or module identities, they prescribe no order or number
+of module invocations, and they do not own module admission. The module
+boundary, discovery, bounded current-step Preview, explicit Export, and
+immutable Processing Artifact handoff are owned by
+[Processing Modules](processing-modules.md). The CLI defines no workflow DSL
+or planner and performs no implicit conversion or chaining: a command
+executes at most the selected step, a refusal never invokes another module or
+the Camera Preview, and composing modules remains a caller-controlled
+sequence of explicit invocations and published Processing Artifacts. The
+Photo facts returned by `GET /api/photos/{id}` and the bounded Photo
+summaries in Browse windows and Photo queries carry the saved-edit fact.
+Artifact downloads and Edit Preview renditions reuse the existing private
+derivative transfer rules.
 Structured error codes are authoritative for these routes; no client parses
-messages. States, outcomes, snapshot identity, receipt expiry, disclosure
-rules, and the closed wire contract with every request field, response field,
-HTTP status mapping, and outcome/error code are owned by
-[Photo Development Architecture](photo-development.md#service-surface).
-The [CLI Reference](../docs/cli-reference.md#photo-development) owns the public
+messages. Service states, outcomes, snapshot identity, receipt expiry, and
+disclosure rules are owned by
+[Photo Development Architecture](photo-development.md#service-surface). This
+design owns the routes' wire contract, and the
+[CLI Reference](../docs/cli-reference.md#photo-development) owns the public
 command grammar and normalized results. Recipe writes use complete JSON input
 with caller-observed guards. Implicitly reading fresh guards during save would
 overwrite a concurrent edit the caller has not observed. Explicit input also
@@ -150,9 +196,11 @@ legacy response cannot distinguish necessary cases, add structured fields for
 CLI requests rather than parse English messages or silently change Web shapes.
 
 The request/response fixtures for these routes must be derived from the wire
-contract in [Photo Development Architecture](photo-development.md#service-surface),
-added with their implementation, and executed before any CLI release. No route addition may
-bypass the existing method, header-size, body-size, or shutdown admission rules.
+contract in this design and the service semantics in
+[Photo Development Architecture](photo-development.md#service-surface),
+added with their implementation, and executed before any CLI release. No route
+addition may bypass the existing method, header-size, body-size, or shutdown
+admission rules.
 No existing route or wire value is retired by this design, except the earlier
 unbounded Web-only recovery shapes that the reviewed protocol replaces.
 
@@ -400,6 +448,17 @@ advance decision or Album versions. A scan or recovery action that retires
 membership is an effective Album writer and must advance the Album version. Lost
 responses, malformed responses, interruption, and failed stdout must not produce
 false success or automatic retries.
+
+Development command tests must qualify the installed development commands
+end to end: capability negotiation before operational requests, guarded
+recipe saves and rebinding, a bounded current-step Edit Preview, immutable
+Export submission and replay, download validation against the receipt
+digest, and refusal of selector or settings values outside each installed
+command's admitted set, without treating those selectors as product
+admission. The same tests must prove that a refused or unavailable step
+never falls back to the Camera Preview or another module, that no command
+converts or chains module inputs implicitly, and that a later edit or source
+change makes prior renditions stale without retargeting an accepted Export.
 
 Preview tests must cover actual readable JPEG output, revision consistency,
 existing-file/symlink races, bounded bytes, cancellation cleanup, shared queue

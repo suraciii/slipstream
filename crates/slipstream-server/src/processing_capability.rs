@@ -81,7 +81,14 @@ impl ProcessingCapabilityResponse {
             profiles: approved_profiles(),
             stages: StageStatesWire {
                 develop: if ready { "ready" } else { "unavailable" },
-                film: "unavailable",
+                // The film stage's readiness is independent of the
+                // darktable stage: a `darktable-disabled` deployment with
+                // a verified film runtime reports film ready.
+                film: match config.film.as_ref() {
+                    Some(film) if film.ready() && processing_available => "ready",
+                    Some(_) => "unavailable",
+                    None => "unavailable",
+                },
             },
         }
     }
@@ -125,10 +132,26 @@ mod tests {
             policy_sha256: "b".repeat(64),
             bundle_sha256: "c".repeat(64),
             bundle_root: PathBuf::from("/opt/slipstream-photo"),
+            film: None,
             failure,
         }
     }
 
+    fn film_ready() -> Option<crate::config::FilmConfig> {
+        Some(crate::config::FilmConfig {
+            bundle_sha256: "f".repeat(64),
+            bundle_root: PathBuf::from("/opt/slipstream-film"),
+            engine: PathBuf::from("/opt/runtime/bin/python"),
+            runner: PathBuf::from("/opt/slipstream-film/runner/film_runner.py"),
+            source_root: PathBuf::from("/opt/spektrafilm/src"),
+            parameter_default: serde_json::json!({
+                "camera": {}, "enlarger": {}, "scanner": {}, "io": {},
+                "settings": {}, "debug": {}, "filmRender": {},
+                "printRender": {}, "taps": {},
+            }),
+            failure: None,
+        })
+    }
     #[test]
     fn valid_local_bundle_reports_ready_development_and_unavailable_film() {
         let response =
@@ -141,6 +164,50 @@ mod tests {
         );
         assert_eq!(response.stages.develop, "ready");
         assert_eq!(response.stages.film, "unavailable");
+    }
+
+    #[test]
+    fn a_verified_film_runtime_reports_the_film_stage_ready_independently() {
+        let mut with_film = config(None);
+        with_film.film = film_ready();
+        let response =
+            ProcessingCapabilityResponse::from_config(&with_film, Some("a".repeat(32)), true);
+        assert_eq!(response.stages.develop, "ready");
+        assert_eq!(response.stages.film, "ready");
+
+        // A configured-but-unverified runtime stays truthfully unavailable
+        // even while development is ready.
+        let mut broken_film = config(None);
+        broken_film.film = Some(crate::config::FilmConfig {
+            failure: Some("film-bundle-unavailable"),
+            ..film_ready().expect("fixture")
+        });
+        let response =
+            ProcessingCapabilityResponse::from_config(&broken_film, Some("a".repeat(32)), true);
+        assert_eq!(response.stages.develop, "ready");
+        assert_eq!(response.stages.film, "unavailable");
+
+        // Film readiness never carries a resource-unavailable deployment.
+        let response =
+            ProcessingCapabilityResponse::from_config(&with_film, Some("a".repeat(32)), false);
+        assert_eq!(response.state, "resource-unavailable");
+        assert_eq!(response.stages.film, "unavailable");
+    }
+
+    #[tokio::test]
+    async fn a_darktable_disabled_deployment_reports_film_ready_on_its_own() {
+        let mut film_only = config(Some("darktable-disabled"));
+        film_only.film = film_ready();
+        let response =
+            ProcessingCapabilityResponse::from_config(&film_only, Some("a".repeat(32)), true);
+        assert_eq!(response.state, "darktable-disabled");
+        assert!(response.bundle_id.is_none());
+        assert_eq!(response.stages.develop, "unavailable");
+        assert_eq!(response.stages.film, "ready");
+        assert_eq!(
+            capability_condition(&film_only, true).await,
+            "darktable-disabled"
+        );
     }
 
     #[test]

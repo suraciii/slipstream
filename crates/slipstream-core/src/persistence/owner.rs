@@ -2,31 +2,30 @@ use super::albums::AlbumWriteError;
 use super::scan::{FingerprintCounts, FingerprintTarget, ScanApplication, ScanRecoveryPlan};
 use super::{
     DatabaseName, StateDirectory, StateError, StateFileIdentity, admission::StateDatabaseLock,
-    albums, decisions, development_proxy, edit_recipe, export, metadata, migrations, mutation,
-    queries, removal, scan, xmp,
+    albums, composable_recipe, decisions, development_proxy, edit_recipe, export, metadata,
+    migrations, mutation, processing_export, queries, removal, scan, xmp,
 };
 use crate::{
     AlbumBrowseTarget, AlbumCreationResult, AlbumMembershipMutation, AlbumMembershipResult,
     AlbumMutation, AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary,
     AppliedRelocations, CheckedAlbumMutation, CheckedAlbumMutationResult,
-    CheckedPhotoDecisionMutation, CheckedPhotoDecisionResult, DiscoveredOriginal, EditRecipeRead,
-    EditRecipeWriteOutcome, ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreMutation,
-    ExplicitPhotoRestoreResult, ExportAttempt, ExportLeaseOutcome, ExportRecord,
-    ExportRetryOutcome, ExportSettlement, ExportSubmission, ExportSubmissionResolution,
-    ExportSubmitOutcome, ExportSweepResult, LibraryRoot, MAXIMUM_PHOTO_RATING, OriginalFingerprint,
-    OriginalScanError, PermanentDeletionItemState, PermanentDeletionSelection,
-    PermanentDeletionTarget, PhotoAlbumMembership, PhotoOperationRemainder, PhotoQuery,
-    PhotoQueryError, PhotoQueryProjection, PhotoRead, PhotoRemovalMutation, PhotoRemovalResult,
-    PhotoRestoration, PhotoRestorationResult, PhotoStateBatchMutation, PhotoStateBatchResult,
-    PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateValue, PreviewSeed,
-    PreviewSeedResult, RebindEditRecipe, RecoveryRecord, RecoverySurvey, RemovedPhotoRecord,
-    RequestedRelocation, SaveEditRecipe, ScanSnapshot, SelectionState, WhiteBalanceIntent,
+    CheckedPhotoDecisionMutation, CheckedPhotoDecisionResult, ComposableEditRecipe,
+    ComposableEditRecipeWriteOutcome, DiscoveredOriginal, EditRecipeRead, EditRecipeWriteOutcome,
+    ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreMutation, ExplicitPhotoRestoreResult,
+    ExportAttempt, ExportLeaseOutcome, ExportRecord, ExportRetryOutcome, ExportSettlement,
+    ExportSubmission, ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult,
+    LibraryRoot, MAXIMUM_PHOTO_RATING, OriginalFingerprint, OriginalScanError,
+    PermanentDeletionItemState, PermanentDeletionSelection, PermanentDeletionTarget,
+    PhotoAlbumMembership, PhotoOperationRemainder, PhotoQuery, PhotoQueryError,
+    PhotoQueryProjection, PhotoRead, PhotoRemovalMutation, PhotoRemovalResult, PhotoRestoration,
+    PhotoRestorationResult, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField,
+    PhotoStateMutation, PhotoStateMutationResult, PhotoStateValue, PreviewSeed, PreviewSeedResult,
+    RebindEditRecipe, RecoveryRecord, RecoverySurvey, RemovedPhotoRecord, RequestedRelocation,
+    SaveComposableEditRecipe, SaveEditRecipe, ScanSnapshot, SelectionState, WhiteBalanceIntent,
     XmpCreateOutcome, XmpExportRecord,
 };
 
-use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
-};
+use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params};
 use std::{
     collections::{HashMap, HashSet},
     fmt,
@@ -40,6 +39,9 @@ use std::{
 use tokio::sync::oneshot;
 
 mod lifecycle;
+#[cfg(test)]
+#[path = "owner_tests.rs"]
+mod tests;
 #[cfg(test)]
 const DEFAULT_QUEUE_CAPACITY: usize = 64;
 
@@ -383,6 +385,89 @@ pub(super) enum Command {
     },
     SaveEditRecipe(SaveEditRecipe, Reply<EditRecipeWriteOutcome>),
     RebindEditRecipe(RebindEditRecipe, Reply<EditRecipeWriteOutcome>),
+    ReadComposableEditRecipe {
+        photo_id: String,
+        reply: Reply<Option<ComposableEditRecipe>>,
+    },
+    CreateXmp {
+        photo_id: String,
+        request_id: String,
+        expected_recipe: String,
+        expected_source: String,
+        now: i64,
+        reply: Reply<XmpCreateOutcome>,
+    },
+    ReadXmp {
+        export_id: String,
+        reply: Reply<Option<XmpExportRecord>>,
+    },
+    ListPhotoXmp {
+        photo_id: String,
+        reply: Reply<Option<Vec<XmpExportRecord>>>,
+    },
+    SaveComposableEditRecipe(
+        SaveComposableEditRecipe,
+        Reply<ComposableEditRecipeWriteOutcome>,
+    ),
+    ReadProcessingArtifact {
+        artifact_id: String,
+        reply: Reply<Option<crate::processing::ProcessingArtifact>>,
+    },
+    PublishProcessingArtifact(
+        crate::processing::ProcessingArtifact,
+        Reply<crate::processing::ProcessingArtifactPublication>,
+    ),
+    SubmitProcessingExport(
+        crate::processing::SubmitProcessingExport,
+        u64,
+        Reply<crate::processing::ProcessingExportSubmitOutcome>,
+    ),
+    SettleProcessingExport {
+        artifact: crate::processing::ProcessingArtifact,
+        request_id: String,
+        payload_digest: String,
+        now: u64,
+        reply: Reply<crate::processing::ProcessingExportSettlement>,
+    },
+    ReadProcessingExportWork {
+        request_id: String,
+        reply: Reply<Option<crate::processing::ProcessingExportWork>>,
+    },
+    BeginProcessingExportAttempt {
+        request_id: String,
+        now: u64,
+        reply: Reply<crate::processing::ProcessingExportAttemptOutcome>,
+    },
+    FailProcessingExport {
+        request_id: String,
+        reason_code: String,
+        now: u64,
+        reply: Reply<crate::processing::ProcessingExportFailureOutcome>,
+    },
+    CancelProcessingExport {
+        request_id: String,
+        now: u64,
+        reply: Reply<crate::processing::ProcessingExportCancelOutcome>,
+    },
+    UnfinishedProcessingExports(Reply<Vec<crate::processing::ProcessingExportWork>>),
+    SweepProcessingExportExpiry {
+        now: u64,
+        reply: Reply<Vec<String>>,
+    },
+    AcquireProcessingArtifactLease {
+        artifact_id: String,
+        now: u64,
+        reply: Reply<crate::processing::ProcessingArtifactLeaseOutcome>,
+    },
+    RenewProcessingArtifactLease {
+        lease_id: String,
+        now: u64,
+        reply: Reply<bool>,
+    },
+    ReleaseProcessingArtifactLease {
+        lease_id: String,
+        reply: Reply<bool>,
+    },
     ReadDevelopmentProxy {
         photo_id: String,
         reply: Reply<Option<crate::DevelopmentProxyRecord>>,
@@ -538,22 +623,6 @@ pub(super) enum Command {
         request_id: String,
         payload_digest: String,
         reply: Reply<Option<ExportSubmissionResolution>>,
-    },
-    CreateXmp {
-        photo_id: String,
-        request_id: String,
-        expected_recipe: String,
-        expected_source: String,
-        now: i64,
-        reply: Reply<XmpCreateOutcome>,
-    },
-    ReadXmp {
-        export_id: String,
-        reply: Reply<Option<XmpExportRecord>>,
-    },
-    ListPhotoXmp {
-        photo_id: String,
-        reply: Reply<Option<Vec<XmpExportRecord>>>,
     },
     ClaimExportPublication {
         export_id: String,
@@ -1768,6 +1837,188 @@ fn owner_main(
                 );
                 let _ = reply.send(result);
             }
+            Command::ReadComposableEditRecipe { photo_id, reply } => {
+                let _ = reply.send(composable_recipe::read_composable_edit_recipe(
+                    &connection,
+                    &photo_id,
+                ));
+            }
+            Command::SaveComposableEditRecipe(mutation, reply) => {
+                let result = composable_recipe::save_composable_edit_recipe(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    mutation,
+                );
+                let _ = reply.send(result);
+            }
+            Command::CreateXmp {
+                photo_id,
+                request_id,
+                expected_recipe,
+                expected_source,
+                now,
+                reply,
+            } => {
+                let _ = reply.send(xmp::create(
+                    &mut connection,
+                    &photo_id,
+                    &request_id,
+                    &expected_recipe,
+                    &expected_source,
+                    now,
+                ));
+            }
+            Command::ReadXmp { export_id, reply } => {
+                let _ = reply.send(xmp::read(&connection, &export_id));
+            }
+            Command::ListPhotoXmp { photo_id, reply } => {
+                let _ = reply.send(xmp::list(&connection, &photo_id));
+            }
+            Command::ReadProcessingArtifact { artifact_id, reply } => {
+                let _ = reply.send(processing_export::read_processing_artifact(
+                    &connection,
+                    &artifact_id,
+                ));
+            }
+            Command::PublishProcessingArtifact(artifact, reply) => {
+                let result = processing_export::publish_processing_artifact(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    artifact,
+                );
+                let _ = reply.send(result);
+            }
+            Command::SubmitProcessingExport(mutation, now, reply) => {
+                let result = processing_export::submit_processing_export(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    mutation,
+                    now,
+                );
+                let _ = reply.send(result);
+            }
+            Command::SettleProcessingExport {
+                artifact,
+                request_id,
+                payload_digest,
+                now,
+                reply,
+            } => {
+                let result = processing_export::settle_processing_export(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    artifact,
+                    &request_id,
+                    &payload_digest,
+                    now,
+                );
+                let _ = reply.send(result);
+            }
+            Command::ReadProcessingExportWork { request_id, reply } => {
+                let _ = reply.send(processing_export::read_processing_export_work(
+                    &connection,
+                    &request_id,
+                ));
+            }
+            Command::BeginProcessingExportAttempt {
+                request_id,
+                now,
+                reply,
+            } => {
+                let result = processing_export::begin_processing_export_attempt(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    &request_id,
+                    now,
+                );
+                let _ = reply.send(result);
+            }
+            Command::FailProcessingExport {
+                request_id,
+                reason_code,
+                now,
+                reply,
+            } => {
+                let result = processing_export::fail_processing_export(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    &request_id,
+                    &reason_code,
+                    now,
+                );
+                let _ = reply.send(result);
+            }
+            Command::CancelProcessingExport {
+                request_id,
+                now,
+                reply,
+            } => {
+                let result = processing_export::cancel_processing_export(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    &request_id,
+                    now,
+                );
+                let _ = reply.send(result);
+            }
+            Command::UnfinishedProcessingExports(reply) => {
+                let _ = reply.send(processing_export::unfinished_processing_exports(
+                    &connection,
+                ));
+            }
+            Command::SweepProcessingExportExpiry { now, reply } => {
+                let result = processing_export::sweep_processing_export_expiry(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    now,
+                );
+                let _ = reply.send(result);
+            }
+            Command::AcquireProcessingArtifactLease {
+                artifact_id,
+                now,
+                reply,
+            } => {
+                let result = processing_export::acquire_processing_artifact_lease(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    &artifact_id,
+                    now,
+                );
+                let _ = reply.send(result);
+            }
+            Command::RenewProcessingArtifactLease {
+                lease_id,
+                now,
+                reply,
+            } => {
+                let result = processing_export::renew_processing_artifact_lease(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    &lease_id,
+                    now,
+                );
+                let _ = reply.send(result);
+            }
+            Command::ReleaseProcessingArtifactLease { lease_id, reply } => {
+                let result = processing_export::release_processing_artifact_lease(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    &lease_id,
+                );
+                let _ = reply.send(result);
+            }
             Command::ReadPhotos {
                 photo_ids,
                 projection,
@@ -2151,29 +2402,6 @@ fn owner_main(
                     &payload_digest,
                 )));
             }
-            Command::CreateXmp {
-                photo_id,
-                request_id,
-                expected_recipe,
-                expected_source,
-                now,
-                reply,
-            } => {
-                let _ = reply.send(xmp::create(
-                    &mut connection,
-                    &photo_id,
-                    &request_id,
-                    &expected_recipe,
-                    &expected_source,
-                    now,
-                ));
-            }
-            Command::ReadXmp { export_id, reply } => {
-                let _ = reply.send(xmp::read(&connection, &export_id));
-            }
-            Command::ListPhotoXmp { photo_id, reply } => {
-                let _ = reply.send(xmp::list(&connection, &photo_id));
-            }
             Command::ClaimExportPublication {
                 export_id,
                 incarnation,
@@ -2311,26 +2539,6 @@ pub(super) fn write_transaction<T>(
         .commit()
         .map_err(|_| PersistenceError::Storage)?;
     Ok(result)
-}
-
-pub(super) fn photo_processing_source(
-    connection: &Connection,
-    photo_id: &str,
-) -> Result<Option<(crate::OriginalKind, bool)>, PersistenceError> {
-    connection
-        .query_row(
-            "SELECT o.kind,o.available,p.available FROM photos p
-             JOIN original_files o ON o.id=p.original_id WHERE p.id=?",
-            [photo_id],
-            |row| {
-                Ok((
-                    scan::parse_kind(&row.get::<_, String>(0)?)?,
-                    row.get::<_, i64>(1)? != 0 && row.get::<_, i64>(2)? != 0,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)
 }
 
 pub(super) fn white_balance_intent_name(intent: WhiteBalanceIntent) -> &'static str {
@@ -2489,412 +2697,4 @@ pub(super) fn permanently_deleted_original_ids(
                 .map(str::to_owned)
         })
         .collect())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::persistence::admission::StateDirectory;
-    use crate::persistence::albums;
-    use crate::persistence::test_support::*;
-    use crate::{
-        AlbumMembershipMutation, AlbumMutation, AlbumQueryFilter, CheckedAlbumMutation,
-        OriginalKind, PhotoStateBatchItem, PhotoStateBatchMutation, PhotoStateField,
-        PhotoStateMutation, PhotoStateValue, SelectionState,
-    };
-    use std::{fs, os::unix::fs::PermissionsExt};
-    use tokio::sync::oneshot;
-
-    #[tokio::test]
-    async fn effective_writers_advance_versions_while_noops_and_progress_do_not() {
-        let (_base, library, state, name, path) = fixture();
-        let persistence = Persistence::open(
-            state,
-            name,
-            library.canonical_path().to_string_lossy().into_owned(),
-        )
-        .unwrap();
-        let snapshot = persistence
-            .apply_scan(
-                vec![discovered("one.JPG", OriginalKind::Jpeg, 1, 1.0)],
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-        let photo_id = snapshot.photos[0].id.clone();
-        let read_photo = || async {
-            persistence
-                .photo_receiver(&photo_id)
-                .unwrap()
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap()
-        };
-        let initial_photo_version = read_photo().await.decision_version;
-        persistence
-            .mutate_photo_state(PhotoStateMutation {
-                photo_id: photo_id.clone(),
-                field: PhotoStateField::Rating,
-                value: PhotoStateValue::Rating(0),
-                expected_current: None,
-                album_id: None,
-            })
-            .await
-            .unwrap();
-        assert_eq!(read_photo().await.decision_version, initial_photo_version);
-        persistence
-            .mutate_photo_state(PhotoStateMutation {
-                photo_id: photo_id.clone(),
-                field: PhotoStateField::SelectionState,
-                value: PhotoStateValue::Selection(SelectionState::Selected),
-                expected_current: None,
-                album_id: None,
-            })
-            .await
-            .unwrap();
-        let changed_photo_version = read_photo().await.decision_version;
-        assert_ne!(changed_photo_version, initial_photo_version);
-        persistence
-            .mutate_photo_state_batch_receiver(PhotoStateBatchMutation {
-                photos: vec![PhotoStateBatchItem {
-                    photo_id: photo_id.clone(),
-                    expected_current: SelectionState::Selected,
-                }],
-                value: SelectionState::Selected,
-            })
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(read_photo().await.decision_version, changed_photo_version);
-        assert!(
-            persistence
-                .mutate_photo_state(PhotoStateMutation {
-                    photo_id: photo_id.clone(),
-                    field: PhotoStateField::SelectionState,
-                    value: PhotoStateValue::Selection(SelectionState::Rejected),
-                    expected_current: Some(PhotoStateValue::Selection(SelectionState::Undecided)),
-                    album_id: None,
-                })
-                .await
-                .is_err()
-        );
-        assert_eq!(read_photo().await.decision_version, changed_photo_version);
-        persistence
-            .mutate_photo_state(PhotoStateMutation {
-                photo_id: photo_id.clone(),
-                field: PhotoStateField::SelectionState,
-                value: PhotoStateValue::Selection(SelectionState::Undecided),
-                expected_current: Some(PhotoStateValue::Selection(SelectionState::Selected)),
-                album_id: None,
-            })
-            .await
-            .unwrap();
-        let changed_back_photo_version = read_photo().await.decision_version;
-        assert_ne!(changed_back_photo_version, initial_photo_version);
-        assert_ne!(changed_back_photo_version, changed_photo_version);
-
-        let album_id = persistence
-            .mutate_album(AlbumMutation::Create {
-                name: "Review".to_owned(),
-            })
-            .await
-            .unwrap()
-            .album_id;
-        let read_album = || async {
-            persistence
-                .album_receiver(&album_id)
-                .unwrap()
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap()
-        };
-        let initial_album_version = read_album().await.album_version;
-        let named_ids = persistence
-            .create_album_query_receiver(AlbumQueryFilter::ExactName("review".to_owned()), 10)
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(named_ids, vec![album_id.clone()]);
-        persistence
-            .mutate_album_membership(AlbumMembershipMutation::Add {
-                album_id: album_id.clone(),
-                photo_ids: vec![photo_id.clone()],
-            })
-            .await
-            .unwrap();
-        let membership_version = read_album().await.album_version;
-        assert_ne!(membership_version, initial_album_version);
-        let containing_ids = persistence
-            .create_album_query_receiver(AlbumQueryFilter::ContainsPhoto(photo_id.clone()), 10)
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(containing_ids, vec![album_id.clone()]);
-        let album_window = persistence
-            .albums_by_id_receiver(vec![album_id.clone(), "removed".to_owned()])
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(album_window[0].as_ref().unwrap().photo_count, 1);
-        assert!(album_window[1].is_none());
-        persistence
-            .mutate_album(AlbumMutation::SetProgress {
-                album_id: album_id.clone(),
-                photo_id: photo_id.clone(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(read_album().await.album_version, membership_version);
-        persistence
-            .mutate_album(AlbumMutation::Rename {
-                album_id: album_id.clone(),
-                name: "Review".to_owned(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(read_album().await.album_version, membership_version);
-        persistence
-            .mutate_album(AlbumMutation::Rename {
-                album_id: album_id.clone(),
-                name: "Final".to_owned(),
-            })
-            .await
-            .unwrap();
-        let final_album_version = read_album().await.album_version;
-        assert_ne!(final_album_version, membership_version);
-
-        // A sidecar detected at write admission refuses the transaction. The
-        // previously issued guards remain valid because no commit occurred.
-        fs::write(path.with_file_name("library.sqlite-wal"), b"blocked").unwrap();
-        assert!(
-            persistence
-                .mutate_photo_state(PhotoStateMutation {
-                    photo_id: photo_id.clone(),
-                    field: PhotoStateField::Rating,
-                    value: PhotoStateValue::Rating(5),
-                    expected_current: None,
-                    album_id: None,
-                })
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            read_photo().await.decision_version,
-            changed_back_photo_version
-        );
-        assert!(
-            persistence
-                .mutate_album(AlbumMutation::Rename {
-                    album_id: album_id.clone(),
-                    name: "Blocked".to_owned(),
-                })
-                .await
-                .is_err()
-        );
-        assert_eq!(read_album().await.album_version, final_album_version);
-    }
-
-    #[tokio::test]
-    async fn reopening_persistence_invalidates_process_epoch_versions() {
-        let (base, library, state, name, _path) = fixture();
-        let canonical_root = library.canonical_path().to_string_lossy().into_owned();
-        let persistence = Persistence::open(state, name.clone(), canonical_root.clone()).unwrap();
-        let snapshot = persistence
-            .apply_scan(
-                vec![discovered("one.JPG", OriginalKind::Jpeg, 1, 1.0)],
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-        let photo_id = snapshot.photos[0].id.clone();
-        let first = persistence
-            .photo_receiver(&photo_id)
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap()
-            .decision_version;
-        let album = persistence
-            .create_album_checked("Epoch".to_owned())
-            .await
-            .unwrap()
-            .album;
-        persistence.shutdown().unwrap();
-
-        let reopened_state =
-            StateDirectory::open_or_create(&library, base.0.join("state")).unwrap();
-        let reopened = Persistence::open(reopened_state, name, canonical_root).unwrap();
-        let second = reopened
-            .photo_receiver(&photo_id)
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap()
-            .decision_version;
-        assert_ne!(first, second);
-        let reopened_album = reopened
-            .album_receiver(&album.id)
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_ne!(album.album_version, reopened_album.album_version);
-        assert_eq!(
-            reopened
-                .mutate_album_checked(CheckedAlbumMutation::Rename {
-                    album_id: album.id.clone(),
-                    name: album.name,
-                    expected_version: album.album_version,
-                })
-                .await,
-            Err(albums::AlbumWriteError::VersionConflict {
-                album_id: album.id,
-                current_version: reopened_album.album_version,
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn unavailable_members_keep_state_and_sidecar_admission_blocks_writes() {
-        let (_base, library, state, name, path) = fixture();
-        let persistence = Persistence::open(
-            state,
-            name,
-            library.canonical_path().to_string_lossy().into_owned(),
-        )
-        .unwrap();
-        let snapshot = persistence
-            .apply_scan(
-                vec![discovered("one.JPG", OriginalKind::Jpeg, 1, 1.0)],
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-        let photo_id = snapshot.photos[0].id.clone();
-        persistence
-            .mutate_photo_state(PhotoStateMutation {
-                photo_id: photo_id.clone(),
-                field: PhotoStateField::Rating,
-                value: PhotoStateValue::Rating(4),
-                expected_current: None,
-                album_id: None,
-            })
-            .await
-            .unwrap();
-        let album_id = persistence
-            .mutate_album(AlbumMutation::Create {
-                name: "Keep".to_owned(),
-            })
-            .await
-            .unwrap()
-            .album_id;
-        persistence
-            .mutate_album(AlbumMutation::AddMembers {
-                album_id: album_id.clone(),
-                photo_ids: vec![photo_id.clone()],
-            })
-            .await
-            .unwrap();
-        persistence
-            .apply_scan(Vec::new(), Vec::new())
-            .await
-            .unwrap();
-        let member = &persistence.list_albums().await.unwrap()[0].members[0];
-        assert!(!member.available);
-        assert_eq!(member.rating, 4);
-        let sidecar = path.with_file_name("library.sqlite-journal");
-        fs::write(&sidecar, b"operator recovery data").unwrap();
-        fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600)).unwrap();
-        let before = fs::read(&path).unwrap();
-        assert_eq!(
-            persistence
-                .mutate_album(AlbumMutation::Create {
-                    name: "Blocked".to_owned()
-                })
-                .await,
-            Err(MutationError::Persistence)
-        );
-        assert_eq!(fs::read(&path).unwrap(), before);
-        assert_eq!(fs::read(&sidecar).unwrap(), b"operator recovery data");
-        persistence.shutdown().unwrap();
-    }
-
-    #[tokio::test]
-    async fn shutdown_rejects_library_mutations_after_lifecycle_close() {
-        let (_base, library_root, state, name, _path) = fixture();
-        let library = crate::Library::open(crate::LibraryConfig {
-            library_root: library_root.canonical_path().to_owned(),
-            state_directory: state.canonical_path().to_owned(),
-            database_basename: name.as_os_str().to_string_lossy().into_owned(),
-            ..crate::LibraryConfig::default()
-        })
-        .unwrap();
-        library.shutdown().unwrap();
-        assert!(matches!(
-            library.list_albums().await,
-            Err(crate::LibraryError::Closed)
-        ));
-        assert!(matches!(
-            library
-                .mutate_album(AlbumMutation::Create {
-                    name: "Nope".to_owned()
-                })
-                .await,
-            Err(crate::LibraryError::Closed)
-        ));
-    }
-
-    /// Builds the scan-owned query projection one Published Library would
-    /// share, from the same persisted snapshot the server publishes.
-    #[tokio::test]
-    async fn saturation_and_shutdown_drain_are_explicit() {
-        let (_base, library, state, name, _path) = fixture();
-        let persistence = Persistence::open_with_capacity(
-            state,
-            name,
-            library.canonical_path().to_string_lossy().into_owned(),
-            NonZeroUsize::new(1).unwrap(),
-        )
-        .unwrap();
-        let (entered_send, entered_receive) = oneshot::channel();
-        let (release_send, release_receive) = std::sync::mpsc::channel();
-        let (reply, receive) = oneshot::channel();
-        persistence
-            .submit(Command::Block {
-                entered: entered_send,
-                release: release_receive,
-                reply,
-            })
-            .unwrap();
-        entered_receive.await.unwrap();
-        let (queued_reply, queued_receive) = oneshot::channel();
-        persistence.submit(Command::Probe(queued_reply)).unwrap();
-        let (full_reply, _) = oneshot::channel();
-        assert!(matches!(
-            persistence.submit(Command::Probe(full_reply)),
-            Err(PersistenceError::Saturated)
-        ));
-
-        let shutdown_handle = persistence.clone();
-        let shutdown = tokio::task::spawn_blocking(move || shutdown_handle.shutdown());
-        tokio::task::yield_now().await;
-        release_send.send(()).unwrap();
-        assert!(receive.await.unwrap().is_ok());
-        assert!(queued_receive.await.unwrap().is_ok());
-        assert!(shutdown.await.unwrap().is_ok());
-        assert!(persistence.shutdown().is_ok());
-        assert!(matches!(
-            persistence.probe().await,
-            Err(PersistenceError::Closed)
-        ));
-    }
 }

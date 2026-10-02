@@ -37,7 +37,6 @@ import {
   type ReviewImagePresentation,
   type ViewPreviewSource,
 } from "./photo-view-presenter.js";
-import type { EditorProxyViewModel } from "./editor-proxy-view-model.js";
 import { createSourceSurfaceController } from "./source-surface.js";
 import { createGridPresenter } from "./grid-presenter.js";
 import type {
@@ -57,16 +56,8 @@ import {
   addressFor,
   type NavigationGridRestoration,
 } from "../model/browser-navigation.js";
-import type {
-  EditSourceKind,
-  EditSourceReadiness,
-  EditorWhiteBalancePresentation,
-} from "../model/photo-editor.js";
-import { WORKSPACE_OUTPUT_TEMPLATE } from "./workspace-output-surface.js";
-import type {
-  OutputTarget,
-  WorkspaceOutputsView,
-} from "../model/workspace-output-controller.js";
+import { PHOTO_EDITOR_TEMPLATE } from "./photo-editor-template.js";
+import type { EditorIntent, EditorViewModel } from "./editor-view-contract.js";
 import type { RecoveryApplyMapping } from "../model/recovery-review.js";
 export type {
   GridPhotoPreview,
@@ -136,107 +127,15 @@ export type GridProgressViewModel = Readonly<{
   undecided: number;
 }>;
 
-/// One Edit workspace presents the current edit, Film, or Original reference.
-/// These are presentation states, not stage tabs.
-export type EditorStage = "camera" | "develop" | "film";
-
-export type EditorViewModel = Readonly<{
-  photoId: string;
-  loading: boolean;
-  stage: EditorStage;
-  /// What the presented image actually is, in plain language.
-  stageNote: string;
-  /// Why Film is unavailable, when it is.
-  filmReason: string;
-  editSourceReadiness: EditSourceReadiness;
-  editSourceKind: EditSourceKind;
-  /// The Source support fact line: the readiness word, the Library's scan
-  /// phase while the source is being checked, and proxy provenance.
-  sourceFactNote: string;
-  /// The Processing axis: the deployment's engine capability, separately
-  /// from this Photo's source.
-  processingReadiness: "checking" | "ready" | "waiting" | "unavailable";
-  /// The Edit Preview axis for the chosen stage, or `null` when no Edit
-  /// Preview is described on that stage.
-  previewState: "pending" | "ready" | "stale" | "failed" | null;
-  processingAvailable: boolean;
-  /// Why the deployment cannot execute development work, when it cannot. An
-  /// unavailable deployment is explained instead of attempted.
-  capabilityNote: string;
-  exposureEv: number;
-  savedExposureEv: number;
-  baselineExposureEv: number;
-  exposureMinimumEv: number;
-  exposureMaximumEv: number;
-  exposureStepEv: number;
-  /// The white-balance intent in force, the modes a Photographer may select,
-  /// and why an adjustable mode is not offered.
-  whiteBalance: EditorWhiteBalancePresentation;
-  proxy?: EditorProxyViewModel;
-  canEdit: boolean;
-  canPreview: boolean;
-  previewing: boolean;
-  /// What the presented Edit Preview is, or why none is presented.
-  previewNote: string;
-  /// True while the retained image is older than the current settings.
-  previewStale: boolean;
-  saving: boolean;
-  dirty: boolean;
-  canUndo: boolean;
-  canRedo: boolean;
-  comparing: boolean;
-  conflict: Readonly<{ message: string }> | null;
-  draftNote: string;
-  outputs: WorkspaceOutputsView;
-  status: string;
-  /// The session's own detailed wording behind the compact status, presented
-  /// only under the optional Details affordance.
-  statusDetail: string;
-}>;
+export type {
+  EditorComposableViewModel,
+  EditorExportViewModel,
+  EditorStage,
+  EditorViewModel,
+} from "./editor-view-contract.js";
 
 export type LibraryBrowserIntent =
-  | Readonly<{ kind: "editor-open" | "editor-refresh"; photoId: string }>
-  | Readonly<{ kind: "editor-exposure"; photoId: string; exposureEv: number }>
-  | Readonly<{
-      kind: "editor-white-balance-mode";
-      photoId: string;
-      mode: string;
-    }>
-  | Readonly<{
-      kind: "editor-temperature";
-      photoId: string;
-      temperatureKelvin: number;
-    }>
-  | Readonly<{ kind: "editor-tint"; photoId: string; tintMilli: number }>
-  | Readonly<{ kind: "editor-stage"; photoId: string; stage: EditorStage }>
-  | Readonly<{ kind: "editor-compare"; photoId: string; pressed: boolean }>
-  | Readonly<{
-      kind:
-        | "editor-undo"
-        | "editor-redo"
-        | "editor-reset"
-        | "editor-reset-exposure"
-        | "editor-reset-white-balance"
-        | "editor-preview"
-        | "editor-rebind"
-        | "editor-use-saved"
-        | "editor-reapply"
-        | "editor-discard-draft"
-        | "editor-proxy-create"
-        | "editor-proxy-remove"
-        | "editor-xmp-submit"
-        | "editor-xmp-download";
-      photoId: string;
-    }>
-  | Readonly<{
-      kind:
-        | "editor-export-submit"
-        | "editor-export-cancel"
-        | "editor-export-retry"
-        | "editor-export-download";
-      photoId: string;
-      target: OutputTarget;
-    }>
+  | EditorIntent
   | Readonly<{ kind: "summary-action"; presentationId: number }>
   | Readonly<{ kind: "sign-out" }>
   /// Commits the View options draft once. A size-only change never reaches the
@@ -705,31 +604,7 @@ export function createLibraryBrowserView(
                   <div class="photo-tools-actions" aria-label="Photo actions"><button type="button" class="quiet" data-photo-tools-clear>Clear</button><button type="button" class="quiet" data-photo-tools-undo disabled>Undo</button></div>
                   <div class="photo-tools-entries" data-photo-tools-entries role="group" aria-label="Photo tools"><button type="button" data-photo-tools-entry="edit">Edit</button><button type="button" data-photo-tools-entry="albums">Albums</button><button type="button" data-photo-tools-entry="details">Details</button><button type="button" data-photo-tools-entry="zoom">Preview Zoom</button><button type="button" data-photo-tools-entry="nearby">Nearby Photos</button><button type="button" data-photo-tools-entry="sources">Sources</button></div>
                 </div>
-                <div class="photo-tools-view" id="photo-tools-view-edit" data-photo-tools-view="edit" hidden>
-                  <header class="photo-tools-view-header"><h3>Edit</h3><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
-                  <div class="photo-editor-controls" aria-label="Photo edit">
-                    <p class="photo-editor-status" data-photo-editor-status role="status" aria-live="polite"></p>
-                    <p class="photo-editor-preview-note" data-photo-editor-render-status role="status"></p>
-                    <img class="photo-editor-preview-image" data-photo-editor-preview-image alt="Current edit preview" hidden>
-                    <p class="photo-editor-preview-note" data-photo-editor-preview-note hidden></p>
-                    <div class="photo-editor-view-actions" role="group" aria-label="Edit view"><button type="button" data-photo-editor-stage="film" aria-pressed="false" disabled>Film</button><button type="button" class="quiet" data-photo-editor-stage="camera" aria-pressed="false">Original reference</button></div>
-                    <p class="photo-editor-stage-note" id="photo-editor-stage-note" data-photo-editor-stage-note role="status" hidden></p>
-                    <div class="photo-editor-field"><label for="photo-editor-exposure">Exposure</label><output data-photo-editor-exposure-value for="photo-editor-exposure">0.000 EV</output><input id="photo-editor-exposure" data-photo-editor-exposure type="range" min="0" max="1" step="0.001" value="0" aria-label="Exposure" disabled><button type="button" class="quiet" data-photo-editor-reset-exposure disabled>Reset exposure</button></div>
-                    <div class="photo-editor-field photo-editor-white-balance">
-                      <label for="photo-editor-white-balance-mode">White balance</label>
-                      <select id="photo-editor-white-balance-mode" data-photo-editor-white-balance-mode disabled><option value="as-shot">As shot</option><option value="temperature-tint" disabled>Temperature &amp; tint</option></select>
-                      <p class="photo-editor-note" data-photo-editor-white-balance-note hidden></p>
-                      <div class="photo-editor-field"><label for="photo-editor-temperature">Temperature</label><output data-photo-editor-temperature-value for="photo-editor-temperature">—</output><input id="photo-editor-temperature" data-photo-editor-temperature type="range" min="1000" max="40000" step="1" value="6500" aria-label="Temperature in Kelvin" disabled></div>
-                      <div class="photo-editor-field"><label for="photo-editor-tint">Tint</label><output data-photo-editor-tint-value for="photo-editor-tint">—</output><input id="photo-editor-tint" data-photo-editor-tint type="range" min="-150000" max="150000" step="1" value="0" aria-label="Tint" disabled></div>
-                      <button type="button" class="quiet" data-photo-editor-reset-white-balance disabled>Reset white balance</button>
-                    </div>
-                    <div class="photo-editor-actions"><button type="button" class="quiet" data-photo-editor-undo disabled>Undo</button><button type="button" class="quiet" data-photo-editor-redo disabled>Redo</button><button type="button" class="quiet" data-photo-editor-reset disabled>Reset</button><button type="button" class="quiet" data-photo-editor-compare aria-pressed="false" title="Press to compare the current settings with the unadjusted rendering" disabled>Baseline comparison</button><button type="button" data-photo-editor-preview disabled>Refresh preview</button><button type="button" class="quiet" data-photo-editor-rebind hidden disabled>Keep edit for the current file</button><button type="button" class="quiet" data-photo-editor-refresh>Reload edit</button></div>
-                    <p class="photo-editor-draft" data-photo-editor-draft hidden role="status"></p>
-                    <div class="photo-editor-conflict" data-photo-editor-conflict hidden><p data-photo-editor-conflict-message role="alert"></p><div class="photo-editor-actions"><button type="button" data-photo-editor-use-saved>Use saved edit</button><button type="button" class="quiet" data-photo-editor-reapply>Reapply my changes</button><button type="button" class="quiet" data-photo-editor-discard-draft>Discard draft</button></div></div>
-                    ${WORKSPACE_OUTPUT_TEMPLATE}
-                    <details class="photo-editor-details"><summary>Details</summary><p data-photo-editor-provenance></p><p data-photo-editor-detail hidden></p><p data-photo-editor-capability hidden></p><p class="photo-editor-fact"><span>White balance</span><span data-photo-editor-white-balance>As shot</span></p><p class="photo-editor-fact"><span>Edit source</span><span data-photo-editor-support>Checking…</span></p><p class="photo-editor-fact"><span>Development Proxy</span><span data-photo-editor-proxy-state>Checking…</span></p><div class="photo-editor-actions"><button type="button" class="quiet" data-photo-editor-proxy-create disabled>Create Development Proxy</button><button type="button" class="quiet" data-photo-editor-proxy-remove hidden disabled>Remove Development Proxy</button></div><p class="photo-editor-fact"><span>Processing</span><span data-photo-editor-processing>Checking…</span></p><p class="photo-editor-fact"><span>Edit Preview</span><span data-photo-editor-preview-state>Checking…</span></p></details>
-                  </div>
-                </div>
+${PHOTO_EDITOR_TEMPLATE}
                 <div class="photo-tools-view" id="photo-tools-view-albums" data-photo-tools-view="albums" hidden>
                   <header class="photo-tools-view-header"><h3>Albums</h3><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
                   <div class="membership" data-membership aria-label="Album membership"><div class="membership-facts"><p class="membership-heading">Albums</p><p class="membership-status" data-membership-status role="status">Loading Albums…</p><ul class="membership-list" data-membership-list hidden></ul><p class="membership-message" data-membership-message role="alert" hidden></p><div class="membership-actions"><button type="button" class="quiet" data-membership-manage aria-expanded="false" aria-controls="membership-panel">Manage</button><button type="button" data-membership-retry hidden>Retry Albums</button></div></div><div class="membership-panel" id="membership-panel" data-membership-panel hidden><div class="membership-options" data-membership-options></div></div></div>

@@ -166,6 +166,15 @@ validation are defined once in `film_identity.py`. The qualification image and
 Film adapter image carry that same module; the numerical bundle digest remains
 owned by `bundle.py` and `package.py`.
 
+`recipe_digest` hashes every numerical recipe field, stock name, and seed, and
+retains unknown fields so additions fail the pinned identity check. It excludes
+only `processing_bundle` and `gamut_workspace_allowance_bytes`: exact build
+provenance is verified independently, and bounded workspace allocation does not
+change the qualified numerical result. The LUT quality and reproducibility
+probes use this same projection; their `manifest_sha256` fields identify the
+numerical recipe. A matching recipe digest does not qualify a changed runtime
+bundle or resource envelope.
+
 The local `cam16ucs-srgb-f64-v1` workspace model admits only the fixed CAM16-UCS
 compression recipe, sRGB output, and nonempty C-contiguous native float64 RGB
 arrays. It rejects strided arrays rather than silently copying them. The caller

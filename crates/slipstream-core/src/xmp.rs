@@ -5,7 +5,7 @@ pub const XMP_RETENTION_SECONDS: i64 = 7 * 24 * 60 * 60;
 pub const XMP_CONTENT_TYPE: &str = "application/rdf+xml";
 // Pinned recipe identity from tools/development/film_identity.py.
 pub const XMP_FILM_RECIPE_SHA256: &str =
-    "a2dabe2581df7ed97b2af2ffe9bd4a80e579e0f49fd9627af49d86267a33ea7d";
+    "8efdd28d3a49fea7e71835dea82dbc416d9f95e4ae4216ae5fb7535087ec5cf8";
 pub const XMP_FILM_PROCEDURE: &str = "film-once-empty-cache-v1";
 
 #[derive(Clone, Debug, PartialEq)]

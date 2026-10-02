@@ -1,3 +1,4 @@
+import { createComposableEditorSurface } from "./composable-editor-surface.js";
 import { createWorkspaceOutputSurface } from "./workspace-output-surface.js";
 import type {
   EditorWhiteBalance,
@@ -168,6 +169,38 @@ export function createPhotoEditorSurfaceController({
     root,
     "[data-photo-editor-draft]",
   );
+  const editorControlsReadonly = required<HTMLElement>(
+    root,
+    "[data-photo-editor-controls-readonly]",
+  );
+  const editorExportTarget = required<HTMLElement>(
+    root,
+    "[data-photo-editor-export-target]",
+  );
+  const editorExportState = required<HTMLElement>(
+    root,
+    "[data-photo-editor-export-state]",
+  );
+  const editorExportSubmit = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-export-submit]",
+  );
+  const editorExportCancel = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-export-cancel]",
+  );
+  const editorExportRetry = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-export-retry]",
+  );
+  const editorExportDownload = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-export-download]",
+  );
+  const editorExportCheck = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-export-check]",
+  );
   const editorConflict = required<HTMLElement>(
     root,
     "[data-photo-editor-conflict]",
@@ -216,6 +249,11 @@ export function createPhotoEditorSurfaceController({
   let editorDraftBase: number | undefined;
   const listeners = new AbortController();
   const outputs = createWorkspaceOutputSurface(root, send, listeners.signal);
+  const composable = createComposableEditorSurface(
+    root,
+    send,
+    listeners.signal,
+  );
 
   const open = (photoId: string): void => {
     if (!alive || !photoId || !isPhotoVisible()) return;
@@ -255,6 +293,19 @@ export function createPhotoEditorSurfaceController({
       comparing: false,
       conflict: null,
       draftNote: "",
+      export: {
+        target: "development-tiff",
+        retainedTarget: null,
+        state: "idle",
+        note: "",
+        artifact: null,
+        canSubmit: false,
+        canCancel: false,
+        canRetry: false,
+        canDownload: false,
+        processingRequestId: null,
+        processingArtifact: null,
+      },
       outputs: {
         tiff: {
           target: "development-tiff",
@@ -291,6 +342,23 @@ export function createPhotoEditorSurfaceController({
           canDownload: false,
         },
       },
+      composable: {
+        composing: false,
+        legacyOnly: true,
+        unreadable: false,
+        readPending: true,
+        note: "",
+        modules: [],
+        steps: [],
+        currentStepId: null,
+        dirty: false,
+        saving: false,
+        savePending: false,
+        canAddStep: false,
+        editing: null,
+        artifacts: [],
+      },
+      controlsReadonlyNote: "",
       status: "Loading edit…",
       statusDetail: "",
     });
@@ -334,7 +402,12 @@ export function createPhotoEditorSurfaceController({
     const label = `${exposure.toFixed(3)} EV`;
     editorExposureValue.value = label;
     editorExposureValue.textContent = label;
-    editorExposure.disabled = model.loading || !model.canEdit;
+    // A composable recipe owns this Photo's processing: the fixed two-control
+    // editor explains itself and never writes behind the recipe's steps.
+    const locked = Boolean(model.controlsReadonlyNote);
+    editorControlsReadonly.textContent = model.controlsReadonlyNote;
+    editorControlsReadonly.hidden = !locked;
+    editorExposure.disabled = model.loading || !model.canEdit || locked;
     editorWhiteBalance.textContent = describeWhiteBalance(
       model.whiteBalance.intent,
     );
@@ -346,7 +419,7 @@ export function createPhotoEditorSurfaceController({
     if (adjustableOption) adjustableOption.disabled = !whiteBalance.adjustable;
     editorWhiteBalanceMode.value = whiteBalance.intent.mode;
     editorWhiteBalanceMode.disabled =
-      model.loading || !model.canEdit || !whiteBalance.adjustable;
+      model.loading || !model.canEdit || !whiteBalance.adjustable || locked;
     editorWhiteBalanceNote.textContent = whiteBalance.note;
     editorWhiteBalanceNote.hidden = !whiteBalance.note;
     const temperature = whiteBalance.temperatureKelvin;
@@ -354,7 +427,8 @@ export function createPhotoEditorSurfaceController({
       editorTemperature.min = String(temperature.minimum);
       editorTemperature.max = String(temperature.maximum);
       editorTemperature.value = String(temperature.value);
-      editorTemperature.disabled = model.loading || !temperature.enabled;
+      editorTemperature.disabled =
+        model.loading || !temperature.enabled || locked;
       const temperatureLabel = `${temperature.value} K`;
       editorTemperatureValue.value = temperatureLabel;
       editorTemperatureValue.textContent = temperatureLabel;
@@ -368,7 +442,7 @@ export function createPhotoEditorSurfaceController({
       editorTint.min = String(tint.minimum);
       editorTint.max = String(tint.maximum);
       editorTint.value = String(tint.value);
-      editorTint.disabled = model.loading || !tint.enabled;
+      editorTint.disabled = model.loading || !tint.enabled || locked;
       const tintLabel = `${tint.value}`;
       editorTintValue.value = tintLabel;
       editorTintValue.textContent = tintLabel;
@@ -380,9 +454,10 @@ export function createPhotoEditorSurfaceController({
     editorResetExposure.disabled =
       model.loading ||
       !model.canEdit ||
+      locked ||
       Math.abs(exposure - model.baselineExposureEv) < step / 2;
     editorResetWhiteBalance.disabled =
-      model.loading || !model.canEdit || !whiteBalance.resettable;
+      model.loading || !model.canEdit || !whiteBalance.resettable || locked;
     // The three readiness axes are presented as the independent facts they
     // are: the Edit source line carries its own wait or outcome, the
     // Processing line names the deployment's engines, and the Edit Preview
@@ -438,14 +513,16 @@ export function createPhotoEditorSurfaceController({
     const atBaseline =
       Math.abs(exposure - model.baselineExposureEv) < step / 2 &&
       !model.whiteBalance.resettable;
-    editorUndo.disabled = model.loading || !model.canUndo;
-    editorRedo.disabled = model.loading || !model.canRedo;
-    editorReset.disabled = model.loading || model.saving || atBaseline;
+    editorUndo.disabled = model.loading || !model.canUndo || locked;
+    editorRedo.disabled = model.loading || !model.canRedo || locked;
+    editorReset.disabled =
+      model.loading || model.saving || atBaseline || locked;
     // The comparison compares the unadjusted rendering with the current
     // settings; the Original reference presents the camera preview itself,
-    // so it offers no comparison of its own.
+    // so it offers no comparison of its own. A composable recipe owns the
+    // presented rendering, so its baseline is not this editor's comparison.
     editorCompare.disabled =
-      model.loading || !model.canPreview || model.stage === "camera";
+      model.loading || !model.canPreview || model.stage === "camera" || locked;
     editorCompare.setAttribute("aria-pressed", String(model.comparing));
     editorPreview.disabled =
       model.loading || model.previewing || !model.canPreview;
@@ -459,6 +536,28 @@ export function createPhotoEditorSurfaceController({
     editorUseSaved.disabled = model.saving;
     editorReapply.disabled = model.saving;
     editorDiscardDraft.disabled = model.saving;
+    const exported = model.export;
+    editorExportSubmit.closest<HTMLElement>(".photo-editor-export")!.hidden =
+      !model.composable.composing;
+    const exportLabel = "selected Processing Step";
+    editorExportTarget.textContent = exportLabel;
+    editorExportState.textContent = exported.note;
+    editorExportSubmit.textContent = `Export ${exportLabel}`;
+    editorExportSubmit.disabled =
+      model.loading || !model.canEdit || !exported.canSubmit;
+    editorExportCancel.hidden = !exported.canCancel;
+    editorExportRetry.hidden = !exported.canRetry;
+    editorExportRetry.textContent =
+      exported.state === "outcome-unknown" ? "Check result" : "Retry";
+    editorExportDownload.hidden = !exported.canDownload;
+    editorExportDownload.textContent = "Download Processing Artifact";
+    // A live composable Export reconciles through its durable work record;
+    // the status action reads that record again on demand.
+    editorExportCheck.hidden = !(
+      exported.processingRequestId !== null &&
+      (exported.state === "queued" || exported.state === "running")
+    );
+    composable.render(model);
     outputs.render(
       model.photoId,
       model.outputs,
@@ -677,6 +776,49 @@ export function createPhotoEditorSurfaceController({
     () => {
       if (editorPhotoId)
         send({ kind: "editor-proxy-remove", photoId: editorPhotoId });
+    },
+    { signal: listeners.signal },
+  );
+  editorExportSubmit.addEventListener(
+    "click",
+    () => {
+      if (editorPhotoId)
+        send({ kind: "editor-export-submit", photoId: editorPhotoId });
+    },
+    { signal: listeners.signal },
+  );
+  editorExportCancel.addEventListener(
+    "click",
+    () => {
+      if (editorPhotoId)
+        send({ kind: "editor-export-cancel", photoId: editorPhotoId });
+    },
+    { signal: listeners.signal },
+  );
+  editorExportRetry.addEventListener(
+    "click",
+    () => {
+      if (editorPhotoId)
+        send({ kind: "editor-export-retry", photoId: editorPhotoId });
+    },
+    { signal: listeners.signal },
+  );
+  editorExportDownload.addEventListener(
+    "click",
+    () => {
+      if (editorPhotoId)
+        send({ kind: "editor-export-download", photoId: editorPhotoId });
+    },
+    { signal: listeners.signal },
+  );
+  editorExportCheck.addEventListener(
+    "click",
+    () => {
+      if (editorPhotoId)
+        send({
+          kind: "editor-processing-export-check",
+          photoId: editorPhotoId,
+        });
     },
     { signal: listeners.signal },
   );

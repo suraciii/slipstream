@@ -151,10 +151,16 @@ These are ownership boundaries, not required packages or services. The first imp
 The production server is a Rust modular monolith. Rust owns HTTP, application lifecycle, SQLite, Photo Library indexing and confinement, Preview extraction, derivative caching, and durable mutations. Bun and TypeScript own the Web application, browser tests, and repository tooling; they are not a production server runtime. [`rust-server.md`](rust-server.md) defines the module and compatibility contracts.
 
 The browser uses ordinary Web platform image display and pointer/touch events, with a small established gesture library only if it reduces tested interaction complexity.
+LibRaw owns RAW container support and embedded JPEG extraction. The separate
+[Photo Development Architecture](photo-development.md) owns the bounded
+Processing Module adapters and their qualified image contracts; it does not
+change camera Preview source selection. [Processing Modules](processing-modules.md)
+defines caller-controlled single-module composition without making the launcher
+a workflow planner.
 
-LibRaw owns RAW container support and embedded JPEG extraction. The separate [Photo Development Architecture](photo-development.md) owns the bounded darktable and Spektrafilm processing path; it does not change camera Preview source selection.
-
-An established image library owns JPEG decode, orientation, resize, ICC preservation or conversion to sRGB, and derivative encoding. Slipstream must not build custom image codecs or color transforms.
+An established image library owns JPEG decode, orientation, resize, ICC
+preservation or conversion to sRGB, and derivative encoding. Slipstream must not
+build custom image codecs or color transforms.
 
 The selected server and Web technologies must support direct maintained library integration, bounded image-processing resources, and the supported deployment targets. This design does not require a specific application framework.
 

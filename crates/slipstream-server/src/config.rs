@@ -1,6 +1,6 @@
 use super::*;
 use sha2::{Digest, Sha256};
-
+use std::os::unix::fs::MetadataExt;
 pub const HEALTH_PATH: &str = "/healthz";
 
 pub(crate) const MAXIMUM_HEADER_BYTES: usize = 16 * 1024;
@@ -35,11 +35,48 @@ pub struct Config {
     pub metadata_supervisor: Option<PathBuf>,
 }
 
+/// The optional standalone SpektraFilm peer runtime (Issue #496). The
+/// bundle is independent of the darktable extension: it owns its pinned
+/// interpreter, runner, source tree, and complete default parameter tree,
+/// and its availability is reported separately from the darktable stage.
+/// `failure` is the truthful unavailable reason a deployment reports when
+/// the configured runtime is missing or fails verification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FilmConfig {
+    pub(crate) bundle_sha256: String,
+    pub(crate) bundle_root: PathBuf,
+    /// The pinned interpreter the manifest names (`engine`).
+    pub(crate) engine: PathBuf,
+    /// The local film runner the manifest names (`runner`).
+    pub(crate) runner: PathBuf,
+    /// The pinned SpektraFilm source tree the manifest names
+    /// (`source_root`).
+    pub(crate) source_root: PathBuf,
+    /// The runtime-generated complete default parameter tree, verified
+    /// against the module boundary's own admission shape at startup.
+    pub(crate) parameter_default: serde_json::Value,
+    pub(crate) failure: Option<&'static str>,
+}
+
+impl FilmConfig {
+    /// Whether this deployment's standalone SpektraFilm runtime is
+    /// installed and verified. Availability belongs to this module alone
+    /// and never derives from the darktable stage.
+    pub(crate) fn ready(&self) -> bool {
+        self.failure.is_none()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessingConfig {
     pub(crate) policy_sha256: String,
     pub(crate) bundle_sha256: String,
     pub(crate) bundle_root: PathBuf,
+    /// The independently verified standalone SpektraFilm peer runtime.
+    /// `None` means the deployment explicitly disabled the module; a
+    /// `Some` value with `failure` set is a configured-but-unavailable
+    /// runtime with its truthful reason.
+    pub(crate) film: Option<FilmConfig>,
     pub(crate) failure: Option<&'static str>,
 }
 
@@ -104,8 +141,24 @@ impl Config {
         .ok_or(ConfigError::Invalid("SLIPSTREAM_PUBLIC_ORIGIN"))?;
         let photo_development =
             get("SLIPSTREAM_PHOTO_DEVELOPMENT").unwrap_or_else(|| "auto".to_owned());
+        let film = film_bundle_config(
+            &mut get,
+            "SLIPSTREAM_FILM_MODULE",
+            "SLIPSTREAM_FILM_BUNDLE_DIRECTORY",
+        )?;
         let processing = match photo_development.as_str() {
-            "disabled" => None,
+            // The darktable stage stays disabled while an independently
+            // configured SpektraFilm runtime still opens the processing
+            // extension: the config carries the truthful darktable
+            // failure and empty darktable identity, and only the film
+            // paths are admissible.
+            "disabled" => film.map(|film| ProcessingConfig {
+                policy_sha256: LOCAL_PHOTO_POLICY_SHA256.to_owned(),
+                bundle_sha256: String::new(),
+                bundle_root: PathBuf::from("/opt/slipstream-photo"),
+                film: Some(film),
+                failure: Some("darktable-disabled"),
+            }),
             "auto" | "enabled" => {
                 let bundle_root = get("SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY")
                     .map(PathBuf::from)
@@ -118,6 +171,7 @@ impl Config {
                     policy_sha256: LOCAL_PHOTO_POLICY_SHA256.to_owned(),
                     bundle_sha256,
                     bundle_root,
+                    film,
                     failure,
                 })
             }
@@ -308,6 +362,218 @@ fn verify_bundle_file(path: &Path, digest: &str) -> Option<()> {
     (format!("{:x}", hasher.finalize()) == digest).then_some(())
 }
 
+/// The standalone SpektraFilm bundle directory's fixed manifest name.
+const FILM_MANIFEST_BYTES_MAX: u64 = 4 * 1024 * 1024;
+
+/// Resolve the optional standalone SpektraFilm peer from its typed
+/// `SLIPSTREAM_FILM_*` startup contract. `None` (module disabled) never
+/// fails the Library open; a configured-but-missing runtime reports the
+/// truthful `film-runtime-missing` reason, and a present bundle that fails
+/// verification reports `film-bundle-unavailable`.
+fn film_bundle_config(
+    get: &mut dyn FnMut(&str) -> Option<String>,
+    module_key: &'static str,
+    directory_key: &'static str,
+) -> Result<Option<FilmConfig>, ConfigError> {
+    let mode = get(module_key).unwrap_or_else(|| "auto".to_owned());
+    if mode == "disabled" {
+        return Ok(None);
+    }
+    if mode != "auto" && mode != "enabled" {
+        return Err(ConfigError::Invalid(module_key));
+    }
+    let bundle_root = get(directory_key)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/opt/slipstream-film"));
+    if !bundle_root.is_absolute() {
+        return Err(ConfigError::Invalid(directory_key));
+    }
+    if !bundle_root.is_dir() {
+        return Ok(Some(FilmConfig {
+            bundle_sha256: String::new(),
+            bundle_root,
+            engine: PathBuf::new(),
+            runner: PathBuf::new(),
+            source_root: PathBuf::new(),
+            parameter_default: serde_json::Value::Null,
+            failure: Some("film-runtime-missing"),
+        }));
+    }
+    let (config, failure) = verify_film_bundle(&bundle_root);
+    Ok(Some(match config {
+        Some(mut config) => {
+            config.failure = failure;
+            config
+        }
+        None => FilmConfig {
+            bundle_sha256: String::new(),
+            bundle_root,
+            engine: PathBuf::new(),
+            runner: PathBuf::new(),
+            source_root: PathBuf::new(),
+            parameter_default: serde_json::Value::Null,
+            failure,
+        },
+    }))
+}
+
+/// Verify the standalone SpektraFilm bundle's deterministic manifest and
+/// every asset it names. The pinned recipe, handoff, and finished-output
+/// identities must equal the module boundary's own constants, so a changed
+/// runtime can never silently change saved looks.
+fn verify_film_bundle(root: &Path) -> (Option<FilmConfig>, Option<&'static str>) {
+    let unavailable = "film-bundle-unavailable";
+    let manifest_path = root.join("bundle-manifest.json");
+    let Some(manifest) = read_bounded_json(&manifest_path, FILM_MANIFEST_BYTES_MAX) else {
+        return (None, Some(unavailable));
+    };
+    let Some(bundle) = read_bounded_text(&root.join("bundle"), 128)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| is_lower_hex(value, 64))
+    else {
+        return (None, Some(unavailable));
+    };
+    let digest_matches = read_bounded_bytes(&manifest_path, FILM_MANIFEST_BYTES_MAX)
+        .is_some_and(|bytes| format!("{:x}", Sha256::digest(&bytes)) == bundle);
+    if !digest_matches {
+        return (None, Some(unavailable));
+    }
+    if manifest["format"].as_u64() != Some(1)
+        || !is_lower_hex(
+            manifest["spektrafilm_commit"].as_str().unwrap_or_default(),
+            40,
+        )
+        || manifest["recipe_sha256"].as_str()
+            != Some(slipstream_processing::modules::SPEKTRAFILM_RECIPE_SHA256)
+        || manifest["input_icc_sha256"].as_str()
+            != Some(slipstream_processing::modules::SPEKTRAFILM_INPUT_ICC_SHA256)
+        || manifest["output_icc_sha256"].as_str()
+            != Some(slipstream_processing::modules::SPEKTRAFILM_OUTPUT_ICC_SHA256)
+        || manifest["finished_jpeg_quality"].as_u64() != Some(85)
+    {
+        return (None, Some(unavailable));
+    }
+    let Some(engine) = absolute_manifest_path(manifest["engine"].as_str()) else {
+        return (None, Some(unavailable));
+    };
+    let Some(runner) = absolute_manifest_path(manifest["runner"].as_str()) else {
+        return (None, Some(unavailable));
+    };
+    let Some(source_root) = absolute_manifest_path(manifest["source_root"].as_str()) else {
+        return (None, Some(unavailable));
+    };
+    let Some(engine_metadata) = fs::metadata(&engine).ok() else {
+        return (None, Some(unavailable));
+    };
+    if !engine_metadata.is_file() || engine_metadata.mode() & 0o111 == 0 {
+        return (None, Some(unavailable));
+    }
+    // Every named asset digest verifies: the bundle's own files, the
+    // pinned runtime tree, the patched source tree, and the qualified
+    // fixed-recipe modules the runner reuses.
+    let bundle_prefix = "/opt/slipstream-film/";
+    for (key, digest) in manifest["files"].as_object().into_iter().flatten() {
+        let Some(digest) = digest.as_str() else {
+            return (None, Some(unavailable));
+        };
+        let path = key
+            .strip_prefix(bundle_prefix)
+            .map(|relative| root.join(relative))
+            .unwrap_or_else(|| PathBuf::from(key));
+        if verify_bundle_file(&path, digest).is_none() {
+            return (None, Some(unavailable));
+        }
+    }
+    // The tree roots come from the manifest itself — the pinned runtime
+    // root behind the engine, the source root, and the qualified probe
+    // modules root — so verification never assumes a host layout.
+    let Some(probe_root) = absolute_manifest_path(manifest["probe_root"].as_str()) else {
+        return (None, Some(unavailable));
+    };
+    let Some(runtime_root) = engine.parent().and_then(Path::parent) else {
+        return (None, Some(unavailable));
+    };
+    for (tree_root, tree) in [
+        (runtime_root, "runtime"),
+        (source_root.as_path(), "source"),
+        (probe_root.as_path(), "probe"),
+    ] {
+        for (name, digest) in manifest[tree].as_object().into_iter().flatten() {
+            if Path::new(name)
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_)))
+            {
+                return (None, Some(unavailable));
+            }
+            if verify_bundle_file(&tree_root.join(name), digest.as_str().unwrap_or_default())
+                .is_none()
+            {
+                return (None, Some(unavailable));
+            }
+        }
+    }
+    // The complete default parameter tree is the runtime's own fixed
+    // recipe, bounded and admitted by the module boundary itself.
+    let parameters_path = manifest["files"]
+        .as_object()
+        .and_then(|files| {
+            files
+                .keys()
+                .find(|key| key.ends_with("parameters-default.json"))
+        })
+        .map(|key| {
+            key.strip_prefix(bundle_prefix)
+                .map_or_else(|| PathBuf::from(key), |relative| root.join(relative))
+        });
+    let Some(parameters_path) = parameters_path else {
+        return (None, Some(unavailable));
+    };
+    let Some(parameter_default) = read_bounded_json(&parameters_path, 1024 * 1024) else {
+        return (None, Some(unavailable));
+    };
+    let admitted = slipstream_processing::modules::validate_spektrafilm_parameters(
+        &slipstream_processing::modules::Parameters {
+            module: slipstream_processing::modules::SPEKTRAFILM_MODULE.to_owned(),
+            version: slipstream_processing::modules::SPEKTRAFILM_PARAMETER_VERSION.to_owned(),
+            tree: parameter_default.clone(),
+        },
+    );
+    if admitted.is_err() {
+        return (None, Some(unavailable));
+    }
+    (
+        Some(FilmConfig {
+            bundle_sha256: bundle,
+            bundle_root: root.to_path_buf(),
+            engine,
+            runner,
+            source_root,
+            parameter_default,
+            failure: None,
+        }),
+        None,
+    )
+}
+
+fn absolute_manifest_path(value: Option<&str>) -> Option<PathBuf> {
+    let path = PathBuf::from(value?);
+    path.is_absolute().then_some(path)
+}
+
+fn read_bounded_json(path: &Path, maximum: u64) -> Option<serde_json::Value> {
+    serde_json::from_slice(&read_bounded_bytes(path, maximum)?).ok()
+}
+
+fn read_bounded_bytes(path: &Path, maximum: u64) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .ok()?
+        .take(maximum + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    ((bytes.len() as u64) <= maximum).then_some(bytes)
+}
 fn is_lower_hex(value: &str, length: usize) -> bool {
     value.len() == length
         && value
@@ -592,3 +858,7 @@ pub(crate) const MAX_BROWSE_SNAPSHOTS: usize = 8;
 pub(crate) const BROWSE_SNAPSHOT_IDLE: Duration = Duration::from_secs(30 * 60);
 
 pub(crate) static NEXT_BROWSE_NAMESPACE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+#[path = "config_film_tests.rs"]
+mod film_bundle_tests;

@@ -1,6 +1,7 @@
 use super::{
     DatabaseName, PersistenceError, StateDirectory, edit_recipe,
-    owner::{photo_processing_source, random_uuid_v4, write_transaction},
+    owner::{random_uuid_v4, write_transaction},
+    processing_export::photo_processing_source,
 };
 use crate::{
     EXPORT_DEVELOPMENT_TIFF_WORKLOAD, EXPORT_FILM_JPEG_WORKLOAD, EXPORT_RETENTION_SECONDS,
@@ -16,7 +17,6 @@ use sha2::{Digest, Sha256};
 // Export lifecycle: durable records, request-identity receipts, exactly-once
 // settlement, bounded retention, and download leases. Every write runs in the
 // serialized owner so a racing cancel and completion settle exactly once.
-
 const EXPORT_RECEIPT_PREFIX: &str = "export_receipt:";
 const MAXIMUM_EXPORT_REQUEST_ID_BYTES: usize = 128;
 const MAXIMUM_EXPORT_OUTCOME_BYTES: usize = 200;

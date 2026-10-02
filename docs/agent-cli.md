@@ -9,13 +9,13 @@ does not ask a model to judge a Photo.
    contract and `published` state before starting work.
 2. Discover an existing Album with `albums list --name NAME`. Query selected
    Photos in that Album using `photos list --album ALBUM_ID --selection selected
-   --rating-min 4 --order capture-time-asc --limit 60`. Follow each
+--rating-min 4 --order capture-time-asc --limit 60`. Follow each
    `nextCursor` with `photos list --cursor CURSOR` until it is `null`. Preserve
    the returned order and report the total; later Photo facts can change.
 3. Create the destination with `albums create --name NAME`. Use its returned ID
    and current Album version. Write only explicitly selected Photo IDs in
    bounded `{"photoIds":["PHOTO_ID"]}` input files. Call `albums add ALBUM_ID
-   --input FILE --if-version VERSION` with the current version, then use the
+--input FILE --if-version VERSION` with the current version, then use the
    confirmed next version for any further batch. Never infer success from a
    lost response or silently repeat a mutation.
 4. Read `albums get ALBUM_ID` and return its `webUrl` for the Photographer to
@@ -59,8 +59,10 @@ Never promote a current-state guess into a claim that a lost mutation succeeded.
 
 Use a matching client/service candidate and a qualified processing deployment.
 Run commands in JSON mode and inspect their exit code and envelope before using
-the returned data. Help lists grammar; capability discovery controls available
-sources, ranges and stages.
+the returned data. The commands below exercise the closed transport facade
+installed by that deployment; its selector values are not product modules,
+pipeline stages, universal output targets, or composition semantics. Capability
+discovery controls the admitted module inputs, ranges, and refusal reasons.
 
 1. Run `processing capability`, then `photos recipe get PHOTO_ID`. Preserve
    the complete recipe read, including the nullable recipe version, source
@@ -83,7 +85,7 @@ sources, ranges and stages.
    exporting. Never generate a replacement ID merely because a response was lost.
 3. Run `photos recipe get PHOTO_ID` in a new process and retain the confirmed
    settings and recipe version. Request `photos edit-preview PHOTO_ID --stage
-   develop --file NEW_JPEG_PATH` or `--stage film` when the deployment reports
+develop --file NEW_JPEG_PATH` or `--stage film` when the deployment reports
    Film ready. Both stages use the same source/recipe/bundle identity framing
    and validate response metadata, digest, and JPEG structure before writing.
    A queued/running result has no file; invoke the read later. Inspect the
@@ -91,7 +93,7 @@ sources, ranges and stages.
    `--settings baseline` renders a comparison without changing the saved
    recipe. `photos preview` remains the Camera Preview.
 4. Run `photos export submit PHOTO_ID --target development-tiff --request-id
-   NEW_REQUEST_ID`. Save the Export ID and captured revisions. If another client
+NEW_REQUEST_ID`. Save the Export ID and captured revisions. If another client
    changed the recipe before submission, compare those revisions with the
    retained recipe read before attributing settings to the output. Inspect
    `photos export status EXPORT_ID` until terminal; exiting the CLI does not
@@ -114,3 +116,31 @@ frees, while a confirmed reason names the permanent condition for the
 current source revision. Do not substitute Camera Preview or TIFF for a
 refused Film result. Film qualification, cancellation and retained-snapshot
 retry are separate from this Develop walkthrough.
+
+## Compose Processing Steps
+
+The composable Issue #496 surface sits beside the legacy walkthrough above,
+which remains installed unchanged. Discover peers with `processing modules`,
+then run `photos processing-recipe get PHOTO_ID` and preserve the observed
+`sourceRevision`. Build the complete save document from the
+[CLI Reference](cli-reference.md#photo-development) — a new request ID, the
+observed guards, zero or more steps with each module's own `schemaVersion`
+and parameter `tree` copied verbatim from discovery, and exactly one selected
+`currentStepId` — and run `photos processing-recipe save PHOTO_ID --input
+FILE`. Copy module parameter trees; never invent, flatten, or merge them.
+Request the selected step's Preview with `photos processing-preview PHOTO_ID
+--step STEP_ID --file NEW_PNG_PATH`. A `step_not_current` or
+`source_changed` refusal means reread and decide again; a
+`module_parameters_unavailable` or `processing_unavailable` refusal names the
+deployment's missing qualification and never falls back to the legacy stage
+preview or the Camera Preview. An artifact input requires a published,
+immutable Export artifact selected explicitly with its concrete contract.
+
+Submit a composable export with `photos processing-export PHOTO_ID
+--input FILE`. A completed `201` response includes the retained artifact; a
+live duplicate is a `pending` `202` receipt, which you reconcile with
+`photos processing-export-status PHOTO_ID REQUEST_ID`. Use
+`photos processing-export-cancel` for queued or running work. Download a
+published artifact with `processing artifact-download ARTIFACT_ID --file
+NEW_TIFF_PATH`; the CLI validates provenance, length, digest, and contract and
+never replaces an existing destination.

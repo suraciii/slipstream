@@ -70,7 +70,6 @@ _Avoid_: Recovery Area, Removed Photos listing as a separate destination
 **Permanent Deletion**:
 The separately confirmed deletion of a reviewed Original File belonging to a Photo in Trash. It cannot be undone by Slipstream and is distinct from Remove from Library and Restore.
 
-
 ## Metadata
 
 **XMP Sidecar**:
@@ -133,35 +132,44 @@ Magnified Preview inspection for focus, motion, or expression. It is a Preview Z
 
 ## Development
 
+**Processing Module**:
+A photo-processing engine exposed through its own input, parameter, and output contracts. darktable and standalone SpektraFilm are peer modules, not a fixed ordered pair.
+_Avoid_: plugin, extension, Film capability
+
+**Processing Step**:
+One selected Processing Module, one identified input, and one captured parameter snapshot. A caller composes steps by explicitly choosing a published artifact as the next input.
+
+**Processing Artifact**:
+An immutable image published by a completed Export, with its input, module, parameter, bundle, and image-contract provenance. It is not an Original File or a new Photo.
+
 **Edit Recipe**:
-The saved exposure and white-balance intent for one Photo, together with its fixed Film Recipe. It is independent of Selection State, Rating, and Album membership.
+The saved editing intent for one Photo's Processing Steps. It is independent of Selection State, Rating, and Album membership.
 _Avoid_: edit history, darktable sidecar
 
 **Film Recipe**:
 A defined combination of film stock, print paper, and processing choices used to produce a simulated photograph.
 _Avoid_: filter, film name as complete recipe
 
-**Development Result**:
-The scene-linear image produced from a RAW Original after basic camera interpretation, exposure, and white balance, before film simulation or display rendering.
+A **Development Result**:
+A scene-referred image produced by an admitted Processing Module under a
+module-owned input, parameter, and output contract. The term describes the
+result's image contract; it does not require a later Film step or define a
+universal product output.
 _Avoid_: Preview, developed Original
 
-**Film Result**:
-The simulated photograph produced by applying a Film Recipe to a Development Result.
+A **Film Result**:
+A simulated photograph produced by an admitted standalone SpektraFilm step
+from an input artifact that meets that step's captured input contract. It is
+not a required successor to a Development Result.
 _Avoid_: camera Preview, film Original
 
 **Edit Preview**:
-A displayable rendition of a specified Development Result or Film Result for editing and comparison. Its stage and detail limits are explicit; it is separate from the camera-produced Preview used for selection.
+A bounded rendition of the current Processing Step's result for editing and comparison. It is separate from the camera-produced Preview and is not a Processing Artifact.
 _Avoid_: Preview when the kind is unclear
 
 **Development Proxy**:
 A service-owned, bounded scene-linear Development Result derived from a validated Original and retained as a rebuildable stand-in while that Original is unavailable. It carries the source revision, staged-byte evidence, approved profile, processing bundle, pipeline identity, and artifact identity. It is never an Original, a new Photo, or an Export source.
 
 **Export**:
-A request to produce a downloadable image from captured editing intent and a specified processing stage, together with its completion outcome. It does not create or modify an Original File.
+A separate explicit execution that produces a downloadable Processing Artifact from a captured Processing Step, together with its completion outcome. It does not create or modify an Original File.
 _Avoid_: save Original, imported Photo
-
-**Development TIFF**:
-An exported Development Result prepared for further scene-referred processing. It is distinct from a finished film image.
-
-**Finished JPEG**:
-An exported Film Result prepared for ordinary viewing and sharing.

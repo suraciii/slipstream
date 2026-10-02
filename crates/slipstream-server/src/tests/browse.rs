@@ -1,5 +1,5 @@
 use super::*;
-
+use crate::{config::BROWSE_SNAPSHOT_IDLE, folders::MAXIMUM_FILE_LOCATION_WINDOW};
 /// Bounded traversal for one explicit view order. Tests observe order only
 /// through the bounded protocol, never a complete-Photo route.
 async fn browse_ids_in_order(

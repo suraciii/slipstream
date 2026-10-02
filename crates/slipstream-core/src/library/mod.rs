@@ -2,18 +2,19 @@ use crate::{
     AlbumBrowseTarget, AlbumCreationResult, AlbumMembershipMutation, AlbumMembershipResult,
     AlbumMutation, AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary,
     AppliedRelocations, CaptureFact, CheckedAlbumMutation, CheckedAlbumMutationResult,
-    EditRecipeRead, EditRecipeWriteOutcome, ExplicitPhotoRemovalMutation,
-    ExplicitPhotoRestoreMutation, ExplicitPhotoRestoreResult, ExportAttempt, ExportLeaseOutcome,
-    ExportRecord, ExportRetryOutcome, ExportSettlement, ExportSubmission,
-    ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult, LibraryRoot,
-    NativeWorkBudget, NativeWorkPermit, OriginalCapability, OriginalDeletionOutcome,
+    ComposableEditRecipe, ComposableEditRecipeWriteOutcome, EditRecipeRead, EditRecipeWriteOutcome,
+    ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreMutation, ExplicitPhotoRestoreResult,
+    ExportAttempt, ExportLeaseOutcome, ExportRecord, ExportRetryOutcome, ExportSettlement,
+    ExportSubmission, ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult,
+    LibraryRoot, NativeWorkBudget, NativeWorkPermit, OriginalCapability, OriginalDeletionOutcome,
     PermanentDeletionItemState, PermanentDeletionResult, PermanentDeletionReview,
     PermanentDeletionSelection, PermanentDeletionTarget, PhotoAlbumMembership,
     PhotoOperationRemainder, PhotoQuery, PhotoQueryError, PhotoQueryProjection, PhotoRead,
     PhotoRemovalMutation, PhotoRemovalResult, PhotoRestoration, PhotoRestorationResult,
     PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateMutation, PhotoStateMutationResult,
     PreviewSeed, PreviewSeedResult, RebindEditRecipe, RecoverySurvey, RemovedPhotoRecord,
-    RequestedRelocation, SaveEditRecipe, ScanLimits, ScanResult, ScanSnapshot,
+    RequestedRelocation, SaveComposableEditRecipe, SaveEditRecipe, ScanLimits, ScanResult,
+    ScanSnapshot,
 };
 use crate::{
     capture::capture_source_revision,
@@ -33,9 +34,11 @@ use std::{
 
 #[cfg(test)]
 use std::sync::OnceLock;
+mod processing;
 mod scanner;
 #[cfg(test)]
 mod tests;
+mod xmp;
 #[cfg(test)]
 use scanner::inspect_capture_facts;
 use scanner::{ScanCommand, ScanState, Scanner, ScannerShared, scanner_main};
@@ -919,55 +922,6 @@ impl Library {
             .map_err(Into::into)
     }
 
-    pub async fn create_xmp_export(
-        &self,
-        photo_id: &str,
-        request_id: &str,
-        expected_recipe: &str,
-        expected_source: &str,
-        now: i64,
-    ) -> Result<crate::XmpCreateOutcome, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.create_xmp_receiver(
-                photo_id,
-                request_id,
-                expected_recipe,
-                expected_source,
-                now,
-            )
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
-    }
-    pub async fn xmp_export(
-        &self,
-        export_id: &str,
-    ) -> Result<Option<crate::XmpExportRecord>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.read_xmp_receiver(export_id)
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
-    }
-    pub async fn photo_xmp_exports(
-        &self,
-        photo_id: &str,
-    ) -> Result<Option<Vec<crate::XmpExportRecord>>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.list_xmp_receiver(photo_id)
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
-    }
     /// Durably claims the publication of one export attempt before its
     /// artifact is renamed into place.
     pub async fn claim_export_publication(
