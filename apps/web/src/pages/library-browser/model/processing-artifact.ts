@@ -11,7 +11,7 @@
 //! repeat the record field for field is refused rather than offered.
 
 import type { ComposableRecipeInput } from "../api/composable-recipe.js";
-import { isRecord } from "../api/editor.js";
+import { isRecord } from "../api/guards.js";
 import { blobSha256Hex } from "./browser-crypto.js";
 
 /// One published immutable Processing Artifact: the exact provenance the
@@ -39,6 +39,12 @@ export type ProcessingArtifactRecord = Readonly<{
   bundleId: string;
   sha256: string;
   byteLength: number;
+  filename: string;
+  publishedAt: string;
+  expiresAt: string;
+  orientation: string;
+  iccEmbedded: boolean;
+  sampleFormat: string;
 }>;
 
 const readString = (
@@ -101,7 +107,22 @@ export const parseProcessingArtifactRecord = (
   const bundleId = readString(value, "bundleId");
   const sha256 = readString(value, "sha256");
   const byteLength = readCount(value, "byteLength");
+  const filename = readString(value, "filename");
+  const publishedAt = readString(value, "publishedAt");
+  const expiresAt = readString(value, "expiresAt");
+  const orientation = readString(value, "orientation");
+  const sampleFormat = readString(value, "sampleFormat");
+  const iccEmbedded = value["iccEmbedded"];
   if (
+    !filename ||
+    /[\\/]/.test(filename) ||
+    !publishedAt ||
+    !Number.isFinite(Date.parse(publishedAt)) ||
+    !expiresAt ||
+    !Number.isFinite(Date.parse(expiresAt)) ||
+    !orientation ||
+    !sampleFormat ||
+    typeof iccEmbedded !== "boolean" ||
     !artifactId ||
     !photoId ||
     !stepId ||
@@ -113,6 +134,8 @@ export const parseProcessingArtifactRecord = (
     !byteLength
   )
     return undefined;
+  for (const character of filename)
+    if (character.charCodeAt(0) < 32) return undefined;
   const parameters = value["parameters"];
   if (
     !isRecord(parameters) ||
@@ -194,6 +217,12 @@ export const parseProcessingArtifactRecord = (
     bundleId,
     sha256,
     byteLength,
+    filename,
+    publishedAt,
+    expiresAt,
+    orientation,
+    iccEmbedded,
+    sampleFormat,
   });
 };
 
@@ -240,7 +269,14 @@ export const processingArtifactMatchesHeaders = (
     String(artifact.outputContract.geometry.height) &&
   headers.get("slipstream-artifact-byte-length") ===
     String(artifact.byteLength) &&
-  headers.get("slipstream-artifact-sha256") === artifact.sha256;
+  headers.get("slipstream-artifact-sha256") === artifact.sha256 &&
+  headers.get("slipstream-artifact-filename") === artifact.filename &&
+  headers.get("slipstream-artifact-published-at") === artifact.publishedAt &&
+  headers.get("slipstream-artifact-expires-at") === artifact.expiresAt &&
+  headers.get("slipstream-artifact-orientation") === artifact.orientation &&
+  headers.get("slipstream-artifact-icc-embedded") ===
+    String(artifact.iccEmbedded) &&
+  headers.get("slipstream-artifact-sample-format") === artifact.sampleFormat;
 
 /// Why a served artifact bytes body cannot be published, or `""` when it
 /// can: the body must be exactly the record's byte length and must hash to
@@ -263,8 +299,8 @@ export const describeProcessingArtifact = (
   artifact: ProcessingArtifactRecord,
   byteCount: (bytes: number) => string,
 ): string =>
-  `Processing Artifact ${artifact.artifactId}: ${artifact.module} over ${
+  `${artifact.filename}, published ${artifact.publishedAt}. Processing Artifact ${artifact.artifactId}: ${artifact.module} over ${
     artifact.input.binding.kind === "artifact"
       ? `artifact ${artifact.input.binding.artifactId}`
       : "the Original"
-  }, ${artifact.outputContract.format} ${artifact.outputContract.geometry.width}×${artifact.outputContract.geometry.height}, ${byteCount(artifact.byteLength)}, sha256 ${artifact.sha256.slice(0, 12)}…`;
+  }, ${artifact.outputContract.format} ${artifact.outputContract.geometry.width}×${artifact.outputContract.geometry.height}, ${artifact.orientation}, ${artifact.outputContract.colorSpace}, ${artifact.sampleFormat}, ICC ${artifact.iccEmbedded ? "embedded" : "absent"}, ${byteCount(artifact.byteLength)}, sha256 ${artifact.sha256.slice(0, 12)}…`;

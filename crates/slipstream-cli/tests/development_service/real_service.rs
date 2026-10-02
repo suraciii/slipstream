@@ -55,45 +55,8 @@ async fn wait_until_idle(server: &str) {
     panic!("fixture Library did not become idle");
 }
 
-/// Without a processing configuration the service reports the closed
-/// `disabled` condition, and the CLI passes the report through with its
-/// profiles, null identities, and unavailable stages.
-#[tokio::test]
-async fn the_real_service_capability_report_is_disabled_without_processing() {
-    let (base, config) = real_service_fixture();
-    let server = common::start_authenticated_server(config).await;
-    wait_until_idle(&server.url).await;
-    let (exit, report) = command(&server.url, &["processing", "capability"]).await;
-    assert_eq!(exit, 0);
-    let data = &report["data"];
-    assert_eq!(data["state"], "disabled");
-    assert_eq!(data["bundleId"], Value::Null);
-    assert_eq!(data["incarnation"], Value::Null);
-    assert_eq!(data["stages"]["develop"], "unavailable");
-    assert_eq!(data["stages"]["film"], "unavailable");
-    let profiles = data["profiles"].as_array().unwrap();
-    assert!(!profiles.is_empty());
-    for profile in profiles {
-        assert!(!profile["profileId"].as_str().is_some_and(str::is_empty));
-        let modes = profile["whiteBalanceModes"].as_array().unwrap();
-        assert!(!modes.is_empty());
-        assert!(
-            modes
-                .iter()
-                .all(|mode| mode.as_str().is_some_and(|mode| !mode.is_empty()))
-        );
-        assert_eq!(profile["whiteBalanceRanges"], Value::Null);
-    }
-    let exposure = &data["exposure"];
-    assert!(exposure["minimumEv"].as_f64().unwrap() < exposure["maximumEv"].as_f64().unwrap());
-    assert!(exposure["stepEv"].as_f64().unwrap() > 0.0);
-    server.close().await.unwrap();
-    fs::remove_dir_all(base).unwrap();
-}
-
-/// Module discovery remains available as a per-module contract document even
-/// when this deployment has no processing launcher; each peer carries its own
-/// refusal state and parameter schema.
+/// Discovery reports each peer's availability and parameter schema even
+/// when processing is disabled in this deployment.
 #[tokio::test]
 async fn the_real_service_module_discovery_preserves_peer_refusals() {
     let (base, config) = real_service_fixture();
@@ -112,39 +75,6 @@ async fn the_real_service_module_discovery_preserves_peer_refusals() {
         assert!(module["parameterSchema"].is_object());
         assert!(module["id"]["adapterVersion"].is_string());
     }
-    server.close().await.unwrap();
-    fs::remove_dir_all(base).unwrap();
-}
-/// A JPEG source class has no approved development profile: the real
-/// service refuses the Edit Preview read and the CLI maps the confirmed
-/// refusal onto exit 2 without creating the destination.
-#[tokio::test]
-async fn the_real_service_refuses_an_edit_preview_of_a_jpeg_source() {
-    let (base, config) = real_service_fixture();
-    let server = common::start_authenticated_server(config).await;
-    wait_until_idle(&server.url).await;
-    let (exit, page) = command(&server.url, &["photos", "list", "--limit", "60"]).await;
-    assert_eq!(exit, 0);
-    let photo_id = page["data"]["items"][0]["id"].as_str().unwrap().to_owned();
-    let destination = base.join("refused.jpg");
-    let (exit, refusal) = command(
-        &server.url,
-        &[
-            "photos",
-            "edit-preview",
-            &photo_id,
-            "--file",
-            destination.to_str().unwrap(),
-            "--stage",
-            "develop",
-        ],
-    )
-    .await;
-    assert_eq!(exit, 2, "{refusal}");
-    assert_eq!(refusal["error"]["code"], "unsupported_photo");
-    assert_eq!(refusal["error"]["effect"], "none");
-    assert_eq!(refusal["error"]["details"]["photoId"], photo_id);
-    assert!(!destination.exists());
     server.close().await.unwrap();
     fs::remove_dir_all(base).unwrap();
 }
@@ -379,6 +309,25 @@ async fn the_real_service_bounds_the_processing_preview_to_the_selected_step() {
     assert_eq!(refusal["error"]["code"], "processing_unavailable");
     assert_eq!(refusal["error"]["effect"], "none");
     assert!(!destination.exists());
+    server.close().await.unwrap();
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[tokio::test]
+async fn the_real_service_lists_no_exports_or_artifacts_before_any_submission() {
+    let (base, config) = real_service_fixture();
+    let server = common::start_authenticated_server(config).await;
+    wait_until_idle(&server.url).await;
+    let (exit, page) = command(&server.url, &["photos", "list", "--limit", "60"]).await;
+    assert_eq!(exit, 0, "{page}");
+    let photo_id = page["data"]["items"][0]["id"].as_str().unwrap();
+    let (exit, listed) =
+        command(&server.url, &["photos", "processing-export-list", photo_id]).await;
+    assert_eq!(exit, 0, "{listed}");
+    assert_eq!(listed["data"]["photoId"], photo_id);
+    assert_eq!(listed["data"]["exports"], json!([]));
+    assert_eq!(listed["data"]["artifacts"], json!([]));
+    assert_eq!(listed["data"]["historicalExports"], json!([]));
     server.close().await.unwrap();
     fs::remove_dir_all(base).unwrap();
 }

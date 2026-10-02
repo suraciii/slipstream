@@ -318,6 +318,10 @@ pub(in crate::persistence) fn sweep_processing_export_expiry(
                         )?;
                         delete_metadata_value(
                             transaction,
+                            &format!("processing_export_retry:{request_id}"),
+                        )?;
+                        delete_metadata_value(
+                            transaction,
                             &processing_export_acceptance_key(request_id),
                         )?;
                         write_metadata_value(
@@ -363,6 +367,10 @@ pub(in crate::persistence) fn sweep_processing_export_expiry(
             delete_metadata_value(
                 transaction,
                 &processing_export_work_key(&work.admission.request_id),
+            )?;
+            delete_metadata_value(
+                transaction,
+                &format!("processing_export_retry:{}", work.admission.request_id),
             )?;
             write_metadata_value(
                 transaction,

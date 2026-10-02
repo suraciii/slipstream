@@ -15,7 +15,6 @@ import {
   selectComposableStep,
   setComposableStepInput,
   setComposableStepParameters,
-  type ComposableModuleChoice,
   type ComposableRecipeDraft,
   type ComposableStepDraft,
 } from "./composable-recipe-draft.js";
@@ -55,20 +54,6 @@ const step = (
     tree,
   }),
 });
-
-const module = (
-  name: string,
-  parameterVersions: ReadonlyArray<string> = [`${name}-params-1`],
-): ComposableModuleChoice =>
-  Object.freeze({
-    name,
-    ready: true,
-    refusalNote: "",
-    parameterVersions,
-    defaultTree: {},
-  });
-
-const choices = [module("darktable"), module("spektrafilm")];
 
 const savedRecipe = (
   steps: ReadonlyArray<ComposableStepDraft>,
@@ -224,7 +209,7 @@ describe("composableSaveRequest", () => {
 
   test("builds the guarded save body for one Original-bound step", () => {
     const draft = draftWith([step("a", "darktable", originalInput())]);
-    const result = composableSaveRequest(draft, "save-1", choices);
+    const result = composableSaveRequest(draft, "save-1");
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") return;
     expect(result.request).toEqual({
@@ -238,7 +223,7 @@ describe("composableSaveRequest", () => {
 
   test("builds the guarded save body for an explicitly bound artifact input", () => {
     const draft = draftWith([step("a", "spektrafilm", artifactInput())]);
-    const result = composableSaveRequest(draft, "save-1", choices);
+    const result = composableSaveRequest(draft, "save-1");
     expect(result.kind).toBe("ok");
   });
 
@@ -249,47 +234,44 @@ describe("composableSaveRequest", () => {
       contract: { format: "tiff" },
     } as const;
     const draft = draftWith([step("a", "spektrafilm", incomplete)]);
-    const result = composableSaveRequest(draft, "save-1", choices);
+    const result = composableSaveRequest(draft, "save-1");
     expect(result.kind).toBe("refused");
   });
 
-  test("refuses a module discovery never settled", () => {
-    const draft = draftWith([step("a", "darktable", originalInput())]);
-    expect(composableSaveRequest(draft, "save-1", []).kind).toBe("refused");
-  });
-
-  test("refuses a module or parameter version discovery does not own", () => {
+  test("preserves structurally valid intent without module discovery or admitted execution", () => {
     const draft = draftWith([step("a", "unknown-module", originalInput())]);
-    expect(composableSaveRequest(draft, "save-1", choices).kind).toBe(
-      "refused",
-    );
-    const wrongVersion = draftWith([
+    const result = composableSaveRequest(draft, "save-1");
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") expect(result.request.steps).toEqual(draft.steps);
+    const unsupported = draftWith([
       {
         ...step("a", "darktable", originalInput()),
-        parameters: { schemaVersion: "darktable-params-9", tree: {} },
+        parameters: {
+          schemaVersion: "darktable-params-9",
+          tree: { unsupported: { value: 12 } },
+        },
       },
     ]);
-    expect(composableSaveRequest(wrongVersion, "save-1", choices).kind).toBe(
-      "refused",
-    );
+    const saved = composableSaveRequest(unsupported, "save-2");
+    expect(saved.kind).toBe("ok");
+    if (saved.kind === "ok")
+      expect(saved.request.steps[0]?.parameters).toEqual(
+        unsupported.steps[0]?.parameters,
+      );
   });
 
   test("refuses parameters that are not one JSON object", () => {
     const draft = draftWith([
       step("a", "darktable", originalInput(), [1, 2, 3]),
     ]);
-    expect(composableSaveRequest(draft, "save-1", choices).kind).toBe(
-      "refused",
-    );
+    expect(composableSaveRequest(draft, "save-1").kind).toBe("refused");
   });
 
   test("refuses an Original binding against another Photo or an earlier revision", () => {
     const stale = draftWith([
       step("a", "darktable", originalInput("source-earlier")),
     ]);
-    expect(composableSaveRequest(stale, "save-1", choices).kind).toBe(
-      "refused",
-    );
+    expect(composableSaveRequest(stale, "save-1").kind).toBe("refused");
     const foreign = draftWith([
       step("a", "darktable", {
         kind: "original",
@@ -297,9 +279,7 @@ describe("composableSaveRequest", () => {
         sourceRevision: "source-1",
       }),
     ]);
-    expect(composableSaveRequest(foreign, "save-1", choices).kind).toBe(
-      "refused",
-    );
+    expect(composableSaveRequest(foreign, "save-1").kind).toBe("refused");
   });
 
   test("refuses a missing selection while steps exist and a dangling selection", () => {
@@ -307,21 +287,17 @@ describe("composableSaveRequest", () => {
       ...draftWith([step("a", "darktable", originalInput())]),
       currentStepId: null,
     };
-    expect(composableSaveRequest(noSelection, "save-1", choices).kind).toBe(
-      "refused",
-    );
+    expect(composableSaveRequest(noSelection, "save-1").kind).toBe("refused");
     const dangling: ComposableRecipeDraft = {
       ...emptyDraft(),
       steps: [step("a", "darktable", originalInput())],
       currentStepId: "not-a-step",
     };
-    expect(composableSaveRequest(dangling, "save-1", choices).kind).toBe(
-      "refused",
-    );
+    expect(composableSaveRequest(dangling, "save-1").kind).toBe("refused");
   });
 
   test("accepts the zero-step recipe with no selection", () => {
-    const result = composableSaveRequest(emptyDraft(), "save-1", choices);
+    const result = composableSaveRequest(emptyDraft(), "save-1");
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") return;
     expect(result.request.currentStepId).toBeNull();
@@ -333,9 +309,7 @@ describe("composableSaveRequest", () => {
       ...emptyDraft(),
       sourceRevision: "",
     };
-    expect(composableSaveRequest(draft, "save-1", choices).kind).toBe(
-      "refused",
-    );
+    expect(composableSaveRequest(draft, "save-1").kind).toBe("refused");
   });
 });
 

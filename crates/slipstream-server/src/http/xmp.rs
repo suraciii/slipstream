@@ -1,12 +1,11 @@
-use super::export::{read_export_json_body, valid_export_request_id};
-use crate::http::{HttpState, cli_error};
+use crate::http::{HttpState, cli_error, read_body_bytes};
 use axum::{
     body::Body,
     extract::{Path, State},
     http::{Request, Response, StatusCode, header},
 };
 use serde::Deserialize;
-use slipstream_core::{WhiteBalanceIntent, XMP_CONTENT_TYPE, XmpCreateOutcome, XmpExportRecord};
+use slipstream_core::{XMP_CONTENT_TYPE, XmpCreateOutcome, XmpExportRecord};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 #[derive(Deserialize)]
@@ -15,6 +14,35 @@ struct BodyIn {
     request_id: String,
     expected_recipe_version: String,
     expected_source_revision: String,
+}
+/// The `requestId` wire shape: 1 to 128 characters of ASCII letters, digits,
+/// `.`, `_`, or `-`; unique per Photo and chosen by the caller.
+fn valid_export_request_id(request_id: &str) -> bool {
+    (1..=128).contains(&request_id.len())
+        && request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+/// Reads one XMP snapshot request body. Shape violations are refused before
+/// any state change, including unknown fields and oversized bodies.
+async fn read_export_json_body<T: serde::de::DeserializeOwned>(
+    request: Request<Body>,
+) -> Result<T, Response<Body>> {
+    let bytes = read_body_bytes(request).await.map_err(|_| {
+        error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_settings",
+            "The request body is outside the closed wire shape",
+        )
+    })?;
+    serde_json::from_slice(&bytes).map_err(|_| {
+        error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_settings",
+            "The request body is outside the closed wire shape",
+        )
+    })
 }
 fn now() -> i64 {
     std::time::SystemTime::now()
@@ -32,17 +60,40 @@ fn timestamp(value: i64) -> String {
         .expect("RFC3339 timestamp")
 }
 fn wire(record: &XmpExportRecord) -> serde_json::Value {
-    let standard = match record.white_balance {
-        WhiteBalanceIntent::AsShot => vec!["Exposure2012", "WhiteBalance"],
-        WhiteBalanceIntent::TemperatureTint { .. } => vec!["Exposure2012"],
-    };
+    // Retained documents predate newer generator capabilities. Advertise only
+    // properties present in these acknowledged bytes, never today's template.
+    let document = std::str::from_utf8(&record.document).unwrap_or_default();
+    let standard: Vec<_> = [
+        ("Exposure2012", "<crs:Exposure2012>"),
+        ("WhiteBalance", "<crs:WhiteBalance>"),
+    ]
+    .into_iter()
+    .filter_map(|(name, tag)| document.contains(tag).then_some(name))
+    .collect();
+    let slipstream: Vec<_> = [
+        ("PhotoId", "<slip:PhotoId>"),
+        ("RecipeVersion", "<slip:RecipeVersion>"),
+        ("SourceRevision", "<slip:SourceRevision>"),
+        ("SourceRevisionEncoding", "<slip:SourceRevisionEncoding>"),
+        ("StepId", "<slip:StepId>"),
+        ("Module", "<slip:Module>"),
+        ("ParameterSchemaVersion", "<slip:ParameterSchemaVersion>"),
+        ("RecipeSnapshot", "<slip:RecipeSnapshot>"),
+        ("RecipeSnapshotEncoding", "<slip:RecipeSnapshotEncoding>"),
+        ("WhiteBalance", "<slip:WhiteBalance>"),
+        ("TemperatureKelvin", "<slip:TemperatureKelvin>"),
+        ("TintMilli", "<slip:TintMilli>"),
+    ]
+    .into_iter()
+    .filter_map(|(name, tag)| document.contains(tag).then_some(name))
+    .collect();
     serde_json::json!({
         "exportId": record.export_id, "photoId": record.photo_id,
         "target": "edit-state-xmp", "state": "succeeded",
         "recipeVersion": record.recipe_version, "sourceRevision": record.source_revision,
         "createdAt": timestamp(record.created_at), "expiresAt": timestamp(record.expires_at),
         "artifact": {"filename": record.filename, "contentType": XMP_CONTENT_TYPE, "byteLength": record.byte_length, "sha256": record.sha256},
-        "parameterSupport": {"standard": standard, "slipstream": ["PhotoId", "RecipeVersion", "SourceRevision", "FilmRecipeSha256", "FilmProcedure", "WhiteBalance", "TemperatureKelvin", "TintMilli"]}
+        "parameterSupport": {"standard": standard, "slipstream": slipstream, "unsupported": ["Arbitrary darktable controls"]}
     })
 }
 pub(crate) async fn create(
@@ -106,6 +157,21 @@ pub(crate) async fn create(
             StatusCode::CONFLICT,
             "stale_edit",
             "The Photo has no confirmed edit recipe",
+        ),
+        Ok(XmpCreateOutcome::MissingStep) => error(
+            StatusCode::CONFLICT,
+            "stale_edit",
+            "The confirmed recipe has no selected processing step",
+        ),
+        Ok(XmpCreateOutcome::UnsupportedModule) => error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unsupported_module",
+            "XMP semantic export requires the selected darktable step",
+        ),
+        Ok(XmpCreateOutcome::UnsupportedParameters) => error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unsupported_parameters",
+            "The selected step has no unambiguous portable exposure and white-balance intent",
         ),
         Err(_) => error(
             StatusCode::INTERNAL_SERVER_ERROR,

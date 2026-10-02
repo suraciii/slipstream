@@ -90,6 +90,28 @@ fn export_identity(input: ProcessingInputEvidence) -> ProcessingExportIdentity {
 }
 
 #[test]
+fn long_opaque_source_revision_remains_distinct_from_recipe_identity() {
+    let source = format!("{}\0size\0timestamp", "nested/".repeat(256));
+    let mut saved = recipe(
+        vec![step(
+            "develop",
+            ProcessingInput::Original {
+                photo_id: "photo-1".into(),
+                source_revision: source.clone(),
+            },
+        )],
+        Some("develop"),
+    );
+    saved.source_revision = source.clone();
+    saved.validate().unwrap();
+    assert!(validate_revision(&source).is_err());
+    assert!(validate_source_revision(&"x".repeat(MAXIMUM_SOURCE_REVISION_BYTES)).is_ok());
+    assert!(validate_source_revision(&"x".repeat(MAXIMUM_SOURCE_REVISION_BYTES + 1)).is_err());
+    saved.revision = "x".repeat(MAXIMUM_REVISION_BYTES + 1);
+    assert!(saved.validate().is_err());
+}
+
+#[test]
 fn zero_one_and_many_step_recipes_validate() {
     let empty = recipe(vec![], None);
     empty.validate().unwrap();

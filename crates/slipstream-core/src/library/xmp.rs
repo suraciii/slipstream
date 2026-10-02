@@ -1,9 +1,9 @@
 use super::*;
 
 impl Library {
-    /// Captures one immutable XMP edit-state snapshot without opening the
-    /// Original or running any processing, decided inside one serialized
-    /// persistence-owner operation.
+    /// Captures the selected darktable step's semantic exposure and white-balance
+    /// intent without opening the Original or running processing. Arbitrary
+    /// controls are not portable; existing snapshots always replay unchanged.
     pub async fn create_xmp_export(
         &self,
         photo_id: &str,

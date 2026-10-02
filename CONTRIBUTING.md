@@ -234,15 +234,14 @@ SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES=<finite Development TIFF allowance> \
 bun x playwright test --grep real-processing --workers=1
 ```
 
-It carries the sample through one Photo Edit Recipe in the real browser:
-an exposure intent is committed and autosaved, a `development-tiff` Export is
-settled and downloaded before Preview, the Photo is reopened to verify the
-saved intent, and the baseline comparison presents its own rendition. A
-second client conflict is recovered with `Use saved recipe`. It checks the
-sample, its isolated Library copy, and the exercised same-basename external
-XMP sidecar for unchanged digests and metadata. Budget the engine child's
-startup and render time: one full-resolution development of the sample takes
-about a minute.
+It carries the sample through a selected darktable Processing Step in the real
+browser: a completed exposure action is autosaved, an explicit float32 linear
+ProPhoto TIFF Export is settled and downloaded, and reopening restores the
+confirmed recipe and retained output. A second client conflict is recovered
+with `Use saved recipe`. It checks the sample, its isolated Library copy, and
+the exercised same-basename external XMP sidecar for unchanged digests and
+metadata. Qualification of a later standalone SpektraFilm step requires an
+explicit retained artifact input and its own finite resource evidence.
 
 The opt-in [development qualification harness](tools/development/README.md)
 exercises pinned darktable and Spektrafilm processes in an isolated CPU container.

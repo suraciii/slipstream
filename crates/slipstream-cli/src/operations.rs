@@ -2,7 +2,6 @@ use super::*;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Operation {
     Status,
-    ProcessingCapability,
     ProcessingModules,
     ProcessingArtifact,
     PhotosProcessingExportStatus,
@@ -12,10 +11,10 @@ pub(crate) enum Operation {
     PhotosProcessingRecipeSave,
     PhotosProcessingPreview,
     PhotosProcessingExport,
-    PhotosRecipeGet,
-    PhotosRecipeSave,
-    PhotosRecipeRebind,
-    PhotosEditPreview,
+    PhotosProcessingRecipeRebind,
+    PhotosProcessingExportList,
+    PhotosProcessingExportRetry,
+    PhotosHistoricalExportDownload,
     PhotosProxyGet,
     PhotosProxyCreate,
     PhotosProxyRemove,
@@ -33,10 +32,6 @@ pub(crate) enum Operation {
     PhotosRestoreInspect,
     PhotosMetadata,
     PhotosMetadataSave,
-    PhotosExportSubmit,
-    PhotosExportList,
-    PhotosExportStatus,
-    PhotosExportDownload,
     AlbumsCreate,
     AlbumsRename,
     AlbumsDelete,
@@ -56,7 +51,6 @@ impl Operation {
     pub(crate) fn wire(self) -> &'static str {
         match self {
             Self::Status => "status",
-            Self::ProcessingCapability => "processing-capability",
             Self::ProcessingModules => "processing-modules",
             Self::ProcessingArtifact => "processing-artifact",
             Self::ProcessingArtifactDownload => "processing-artifact-download",
@@ -66,11 +60,11 @@ impl Operation {
             Self::PhotosProcessingExport => "photos-processing-export",
             Self::PhotosProcessingExportStatus => "photos-processing-export-status",
             Self::PhotosProcessingExportCancel => "photos-processing-export-cancel",
-            Self::PhotosRecipeGet => "photos-recipe-get",
-            Self::PhotosRecipeSave => "photos-recipe-save",
-            Self::PhotosRecipeRebind => "photos-recipe-rebind",
+            Self::PhotosProcessingRecipeRebind => "photos-processing-recipe-rebind",
+            Self::PhotosProcessingExportList => "photos-processing-export-list",
+            Self::PhotosProcessingExportRetry => "photos-processing-export-retry",
+            Self::PhotosHistoricalExportDownload => "photos-historical-export-download",
             Self::LibraryCheck => "library-check",
-            Self::PhotosEditPreview => "photos-edit-preview",
             Self::PhotosProxyGet => "photos-proxy-get",
             Self::PhotosProxyCreate => "photos-proxy-create",
             Self::PhotosProxyRemove => "photos-proxy-remove",
@@ -87,10 +81,6 @@ impl Operation {
             Self::PhotosRestoreInspect => "photos-restore-operation",
             Self::PhotosMetadata => "photos-metadata",
             Self::PhotosMetadataSave => "photos-metadata-save",
-            Self::PhotosExportSubmit => "photos-export-submit",
-            Self::PhotosExportList => "photos-export-list",
-            Self::PhotosExportStatus => "photos-export-status",
-            Self::PhotosExportDownload => "photos-export-download",
             Self::AlbumsCreate => "albums-create",
             Self::AlbumsRename => "albums-rename",
             Self::AlbumsDelete => "albums-delete",
@@ -112,7 +102,6 @@ pub(crate) fn command_operation(command: &Command) -> Operation {
     match command {
         Command::Status => Operation::Status,
         Command::Processing { command } => match command {
-            ProcessingCommand::Capability => Operation::ProcessingCapability,
             ProcessingCommand::Modules => Operation::ProcessingModules,
             ProcessingCommand::Artifact { .. } => Operation::ProcessingArtifact,
             ProcessingCommand::ArtifactDownload { .. } => Operation::ProcessingArtifactDownload,
@@ -133,7 +122,6 @@ pub(crate) fn command_operation(command: &Command) -> Operation {
             PhotoCommand::List(_) => Operation::PhotosList,
             PhotoCommand::Get { .. } => Operation::PhotosGet,
             PhotoCommand::Preview { .. } => Operation::PhotosPreview,
-            PhotoCommand::EditPreview(_) => Operation::PhotosEditPreview,
             PhotoCommand::Proxy { command } => match command {
                 development_proxy::DevelopmentProxyCommand::Get { .. } => Operation::PhotosProxyGet,
                 development_proxy::DevelopmentProxyCommand::Create { .. } => {
@@ -143,11 +131,6 @@ pub(crate) fn command_operation(command: &Command) -> Operation {
                     Operation::PhotosProxyRemove
                 }
             },
-            PhotoCommand::Recipe { command } => match command {
-                development::RecipeCommand::Get { .. } => Operation::PhotosRecipeGet,
-                development::RecipeCommand::Save(_) => Operation::PhotosRecipeSave,
-                development::RecipeCommand::Rebind(_) => Operation::PhotosRecipeRebind,
-            },
             PhotoCommand::ProcessingRecipe { command } => match command {
                 development::ProcessingRecipeCommand::Get { .. } => {
                     Operation::PhotosProcessingRecipeGet
@@ -155,11 +138,19 @@ pub(crate) fn command_operation(command: &Command) -> Operation {
                 development::ProcessingRecipeCommand::Save(_) => {
                     Operation::PhotosProcessingRecipeSave
                 }
+                development::ProcessingRecipeCommand::Rebind(_) => {
+                    Operation::PhotosProcessingRecipeRebind
+                }
             },
             PhotoCommand::ProcessingPreview { .. } => Operation::PhotosProcessingPreview,
             PhotoCommand::ProcessingExport(_) => Operation::PhotosProcessingExport,
             PhotoCommand::ProcessingExportStatus { .. } => Operation::PhotosProcessingExportStatus,
             PhotoCommand::ProcessingExportCancel { .. } => Operation::PhotosProcessingExportCancel,
+            PhotoCommand::ProcessingExportList { .. } => Operation::PhotosProcessingExportList,
+            PhotoCommand::ProcessingExportRetry { .. } => Operation::PhotosProcessingExportRetry,
+            PhotoCommand::HistoricalExportDownload { .. } => {
+                Operation::PhotosHistoricalExportDownload
+            }
             PhotoCommand::Set(_) => Operation::PhotosSet,
             PhotoCommand::Remove(_) => Operation::PhotosRemove,
             PhotoCommand::RemovalOperation { .. } => Operation::PhotosRemovalInspect,
@@ -167,12 +158,6 @@ pub(crate) fn command_operation(command: &Command) -> Operation {
             PhotoCommand::RestoreOperation { .. } => Operation::PhotosRestoreInspect,
             PhotoCommand::Metadata { .. } => Operation::PhotosMetadata,
             PhotoCommand::MetadataSave(_) => Operation::PhotosMetadataSave,
-            PhotoCommand::Export { command } => match command {
-                PhotoExportCommand::Submit(_) => Operation::PhotosExportSubmit,
-                PhotoExportCommand::List { .. } => Operation::PhotosExportList,
-                PhotoExportCommand::Status { .. } => Operation::PhotosExportStatus,
-                PhotoExportCommand::Download(_) => Operation::PhotosExportDownload,
-            },
         },
         Command::Trash { command } => match command {
             TrashCommand::List(_) => Operation::TrashList,
@@ -730,17 +715,14 @@ pub(crate) fn removal_wire_value(
     }
     serde_json::to_value(result).map_err(|_| CommandFailure::transport(operation))
 }
-mod export;
-pub(crate) use export::*;
 
 pub(crate) fn preview_valid(preview: &PreviewFacts) -> bool {
     match preview.state {
         PreviewState::Ready => {
             preview.source.is_some()
-                && preview
-                    .source_revision
-                    .as_deref()
-                    .is_some_and(|value| !value.is_empty())
+                && preview.source_revision.as_deref().is_some_and(|value| {
+                    !value.is_empty() && value.len() <= MAXIMUM_SOURCE_REVISION_BYTES
+                })
                 && preview.width.is_some_and(|value| value > 0)
                 && preview.height.is_some_and(|value| value > 0)
                 && preview.detail_limited.is_some()

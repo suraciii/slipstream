@@ -17,10 +17,8 @@
 //! `crate::persistence`. There is no predecessor, planner,
 //! ordering field, or hidden upstream pointer, and none may be added here:
 //! every downstream input names its artifact explicitly.
-//! The fixed single-module `EditRecipe`/`ExportSnapshot` vocabulary in
-//! `crate::domain` remains a separate compatibility surface; the
-//! composable routes own their caller-selected Processing Steps and artifacts,
-//! and this module changes none of the legacy vocabulary.
+//! Historical fixed recipe/export records remain readable for migration and
+//! retained output delivery; new editing and execution use this vocabulary.
 
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -39,8 +37,11 @@ pub const MAXIMUM_ARTIFACT_ID_BYTES: usize = 128;
 /// Longest admitted byte length of a Photo identity inside this vocabulary.
 pub const MAXIMUM_PHOTO_ID_BYTES: usize = 128;
 
-/// Longest admitted byte length of a recipe or source revision.
+/// Longest admitted byte length of a recipe revision.
 pub const MAXIMUM_REVISION_BYTES: usize = 128;
+
+/// Longest admitted byte length of an opaque published source revision.
+pub const MAXIMUM_SOURCE_REVISION_BYTES: usize = 16_384;
 
 /// Longest admitted byte length of every module-owned contract name: image
 /// format, sample precision, color space, transfer function, encoding
@@ -179,9 +180,7 @@ pub fn validate_bounded_name(value: &str, maximum: usize) -> Result<(), Processi
     Ok(())
 }
 
-/// Validates an opaque Library revision. Source revisions may contain the
-/// internal NUL separators used by the published capture identity, so they
-/// are bounded and non-empty but are not treated as presentation names.
+/// Validates an opaque recipe revision independently of source evidence.
 pub fn validate_revision(value: &str) -> Result<(), ProcessingContractError> {
     if value.is_empty() {
         return Err(ProcessingContractError::IdentifierEmpty);
@@ -191,6 +190,20 @@ pub fn validate_revision(value: &str) -> Result<(), ProcessingContractError> {
         return Err(ProcessingContractError::IdentifierTooLong {
             maximum: MAXIMUM_REVISION_BYTES,
             actual,
+        });
+    }
+    Ok(())
+}
+
+/// Validates opaque source evidence, including internal NUL separators.
+pub fn validate_source_revision(value: &str) -> Result<(), ProcessingContractError> {
+    if value.is_empty() {
+        return Err(ProcessingContractError::IdentifierEmpty);
+    }
+    if value.len() > MAXIMUM_SOURCE_REVISION_BYTES {
+        return Err(ProcessingContractError::IdentifierTooLong {
+            maximum: MAXIMUM_SOURCE_REVISION_BYTES,
+            actual: value.len(),
         });
     }
     Ok(())
@@ -511,7 +524,7 @@ impl ProcessingInput {
                 source_revision,
             } => {
                 validate_bounded_name(photo_id, MAXIMUM_PHOTO_ID_BYTES)?;
-                validate_revision(source_revision)?;
+                validate_source_revision(source_revision)?;
             }
             Self::Artifact {
                 artifact_id: _,
@@ -594,7 +607,7 @@ impl ComposableEditRecipe {
     pub fn validate(&self) -> Result<(), ProcessingContractError> {
         validate_bounded_name(&self.photo_id, MAXIMUM_PHOTO_ID_BYTES)?;
         validate_bounded_name(&self.revision, MAXIMUM_REVISION_BYTES)?;
-        validate_revision(&self.source_revision)?;
+        validate_source_revision(&self.source_revision)?;
         let actual = self.steps.len();
         if actual > MAXIMUM_RECIPE_STEPS {
             return Err(ProcessingContractError::TooManySteps {
@@ -648,12 +661,15 @@ pub enum ComposableRecipeRequestError {
     /// differ: a save must be bound to exactly the revision it guards
     /// against.
     SourceRevisionMismatch,
+    /// The caller identity is outside the closed request alphabet.
+    InvalidRequestId,
 }
 
 impl fmt::Display for ComposableRecipeRequestError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Contract(error) => write!(formatter, "request is not admissible: {error}"),
+            Self::InvalidRequestId => formatter.write_str("request identity is invalid"),
             Self::PhotoMismatch => {
                 formatter.write_str("request Photo identity and recipe Photo identity differ")
             }
@@ -693,6 +709,23 @@ pub struct SaveComposableEditRecipe {
     pub recipe: ComposableEditRecipe,
 }
 
+/// Rebinds only Original inputs under the observed recipe and source guards.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RebindComposableEditRecipe {
+    pub photo_id: String,
+    pub request_id: String,
+    pub expected_recipe_revision: String,
+    pub new_source_revision: String,
+}
+
+/// Saved intent and independently observed Original availability.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComposableEditRecipeRead {
+    pub recipe: Option<ComposableEditRecipe>,
+    pub current_source_revision: Option<String>,
+    pub source_available: bool,
+}
+
 /// The guarded outcome of one composable recipe save.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ComposableEditRecipeWriteOutcome {
@@ -720,6 +753,8 @@ pub enum ComposableEditRecipeWriteOutcome {
     Invalid(ComposableRecipeRequestError),
     /// The request identity was already used with a different payload.
     RequestConflict,
+    /// A settled identity has passed its seven-day reconciliation period.
+    ReceiptExpired,
 }
 
 /// The verified byte evidence of one invocation's input: the input binding

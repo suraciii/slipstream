@@ -239,6 +239,7 @@ pub(super) fn startup_schema(
             )
             .map_err(|_| PersistenceError::Storage)?;
     }
+    super::composable_recipe::migrate_legacy_recipes(&transaction)?;
     validate_database(&transaction)?;
     validate_canonical_schema(&transaction, SchemaVersion::V14)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
@@ -2393,7 +2394,6 @@ mod tests {
             )
         );
     }
-
     #[test]
     fn new_library_id_collision_is_rejected_before_insertion() {
         let connection = Connection::open_in_memory().unwrap();

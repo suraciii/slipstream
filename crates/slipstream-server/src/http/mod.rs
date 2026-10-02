@@ -39,7 +39,6 @@ pub(crate) struct HttpState {
     pub(crate) application: Arc<Application>,
     pub(crate) web_root: Arc<WebRoot>,
     pub(crate) processing: Option<ProcessingConfig>,
-    pub(crate) edit_preview: Arc<crate::edit_preview::EditPreviewOwner>,
 }
 
 pub(crate) struct CloseState {
@@ -165,37 +164,16 @@ pub(crate) fn create_router_with_processing(
     web_root: WebRoot,
     processing: Option<ProcessingConfig>,
 ) -> Router {
-    let owner = Arc::new(crate::edit_preview::EditPreviewOwner::production(
-        application.exports.as_ref().map(Arc::clone),
-    ));
-    create_router_with_preview(application, web_root, processing, owner)
-}
-
-/// Builds the router with explicit Edit Preview seams. Production resolves
-/// retained Development Results from the Export lifecycle and admits
-/// unretained identities through the preview-class render gate; route tests
-/// may inject scripted seams.
-pub(crate) fn create_router_with_preview(
-    application: Arc<Application>,
-    web_root: WebRoot,
-    processing: Option<ProcessingConfig>,
-    edit_preview: Arc<crate::edit_preview::EditPreviewOwner>,
-) -> Router {
     let state = HttpState {
         application,
         web_root: Arc::new(web_root),
         processing,
-        edit_preview,
     };
     Router::new()
         .route(HEALTH_PATH, get(healthz))
         .route("/api/overview", get(overview))
         .route("/api/status", get(cli::status))
         .route("/api/capabilities", get(cli::capabilities))
-        .route(
-            "/api/processing/capability",
-            get(crate::processing_capability::get_processing_capability),
-        )
         .route(
             "/api/processing/modules",
             get(crate::processing_modules::get_processing_modules),
@@ -220,17 +198,14 @@ pub(crate) fn create_router_with_preview(
                 .delete(crate::development_proxy::delete_development_proxy),
         )
         .route(
-            "/api/photos/{id}/edit-recipe",
-            get(crate::edit_recipe::get_edit_recipe).post(crate::edit_recipe::post_edit_recipe),
-        )
-        .route(
             "/api/photos/{id}/processing-recipe",
             get(crate::processing_recipe::get_composable_edit_recipe)
                 .post(crate::processing_recipe::post_composable_edit_recipe),
         )
         .route(
-            "/api/photos/{id}/edit-recipe/rebind",
-            get(browse::method_not_allowed).post(crate::edit_recipe::post_edit_recipe_rebind),
+            "/api/photos/{id}/processing-recipe/rebind",
+            get(browse::method_not_allowed)
+                .post(crate::processing_recipe::post_composable_edit_recipe_rebind),
         )
         .route(
             "/api/photos/{id}/edit-state-exports",
@@ -246,7 +221,7 @@ pub(crate) fn create_router_with_preview(
         )
         .route(
             "/api/photos/{id}/processing-exports",
-            get(browse::method_not_allowed)
+            get(crate::processing_export::list_processing_exports)
                 .post(crate::processing_export::submit_processing_export),
         )
         .route(
@@ -260,16 +235,16 @@ pub(crate) fn create_router_with_preview(
                 .post(crate::processing_export::cancel_processing_export),
         )
         .route(
+            "/api/photos/{id}/processing-exports/{requestId}/retry",
+            get(browse::method_not_allowed).post(crate::processing_export::retry_processing_export),
+        )
+        .route(
             "/api/processing-artifacts/{id}",
             get(crate::processing_export::get_processing_artifact),
         )
         .route(
             "/api/processing-artifacts/{id}/bytes",
             get(crate::processing_export::get_processing_artifact_bytes),
-        )
-        .route(
-            "/api/photos/{id}/edit-preview/{stage}",
-            get(crate::edit_preview::get_edit_preview),
         )
         .route("/api/file-locations", get(browse::get_file_locations))
         .route("/api/browse", post(browse::open_browse))
@@ -289,19 +264,8 @@ pub(crate) fn create_router_with_preview(
             get(photo::get_external_metadata).post(photo::post_external_metadata),
         )
         .route("/api/photos/{id}/albums", get(photo::get_photo_albums))
-        .route(
-            "/api/photos/{id}/exports",
-            get(export::list_photo_exports).post(export::submit_export),
-        )
+        .route("/api/photos/{id}/exports", get(export::list_photo_exports))
         .route("/api/exports/{id}", get(export::get_export))
-        .route(
-            "/api/exports/{id}/cancel",
-            get(browse::method_not_allowed).post(export::cancel_export),
-        )
-        .route(
-            "/api/exports/{id}/retry",
-            get(browse::method_not_allowed).post(export::retry_export),
-        )
         .route(
             "/api/exports/{id}/artifact",
             get(export::get_export_artifact),

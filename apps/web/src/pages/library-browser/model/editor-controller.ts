@@ -1,901 +1,369 @@
-import {
-  fetchEditRecipe,
-  parseProcessingCapability,
-  rebindEditRecipe,
-  saveEditRecipe,
-  withProcessingCapability,
-  type ProcessingCapability,
-} from "../api/editor.js";
-import { BASELINE_SETTINGS, type CurrentRendition } from "./edit-preview.js";
-import { createEditorRenditions } from "./editor-renditions.js";
 import { createWorkspaceOutputController } from "./workspace-output-controller.js";
-import {
-  createPhotoEditor,
-  type EditorFacts,
-  type EditorStep,
-  type PhotoEditor,
-} from "./photo-editor.js";
-import type { BrowserFetch } from "./access-session.js";
-import type {
-  EditorStage,
-  LibraryBrowserView,
-} from "../ui/library-browser-view.js";
-
-import { browserDraftStore } from "./editor-draft-store.js";
-import {
-  sourceFactNote,
-  plainConflictMessage,
-  plainWhiteBalanceNote,
-  compactEditorStatus,
-} from "./editor-presentation.js";
-import {
-  describePreviewRefusal,
-  describeEditRefusal,
-} from "./editor-refusals.js";
 import { createEditorComposableRecipe } from "./editor-composable-recipe.js";
 import { createEditorComposablePreview } from "./editor-composable-preview.js";
 import { createEditorProxyController } from "./editor-proxy-controller.js";
 import { createEditorProcessingExport } from "./editor-processing-export.js";
+import {
+  describePreviewRefusal,
+  describeEditRefusal,
+} from "./editor-refusals.js";
+import type { BrowserFetch } from "./access-session.js";
+import type { LibraryBrowserView } from "../ui/library-browser-view.js";
 import type {
   EditorController,
   EditorControllerDependencies,
 } from "./editor-controller-contract.js";
 export type { EditorController } from "./editor-controller-contract.js";
-const MAXIMUM_EDITOR_SESSIONS = 4;
 
 export function createEditorController(
   fetcher: BrowserFetch,
   view: LibraryBrowserView,
   dependencies: EditorControllerDependencies,
 ): EditorController {
-  const { isAlive, isCurrentPhoto, currentPhoto, libraryPhase } = dependencies;
-  /// One editing session per Photo. Each session keeps its own confirmed
-  /// recipe, local intent, session history, and local draft, so navigating to
-  /// another Photo never cancels or rebinds a pending save.
-  const editorSessions = new Map<string, PhotoEditor>();
-  const editorSession = (photoId: string): PhotoEditor => {
-    const existing = editorSessions.get(photoId);
-    if (existing) {
-      editorSessions.delete(photoId);
-      editorSessions.set(photoId, existing);
-      return existing;
-    }
-    const created = createPhotoEditor({ store: browserDraftStore() });
-    editorSessions.set(photoId, created);
-    for (const [key, session] of editorSessions) {
-      if (editorSessions.size <= MAXIMUM_EDITOR_SESSIONS) break;
-      // A session with a write in flight keeps its identity until the service
-      // settles it; the draft in storage already carries every other intent.
-      if (key === photoId || session.presentation().saving) continue;
-      editorSessions.delete(key);
-    }
-    return created;
+  let photoId: string | undefined;
+  let cameraReference = false;
+  let comparisonRequested = false;
+  const baselineReady = (): boolean =>
+    Boolean(
+      preview.current.url &&
+        baseline.current.url &&
+        preview.current.outcome === "ready" &&
+        baseline.current.outcome === "ready" &&
+        !preview.current.stale &&
+        !baseline.current.stale &&
+        preview.current.comparisonIdentity &&
+        preview.current.comparisonIdentity ===
+          baseline.current.comparisonIdentity &&
+        !composable.dirty(),
+    );
+  const presentSelected = (): void => {
+    if (cameraReference) return;
+    const url =
+      comparisonRequested && baselineReady()
+        ? baseline.current.url
+        : preview.current.url;
+    if (url) view.presentEditorPreview(url);
   };
-  const currentEditor = (): PhotoEditor | undefined => {
-    const photoId = currentPhoto()?.id;
-    return photoId ? editorSessions.get(photoId) : undefined;
-  };
-  /// The view the workspace presents. The current edit (develop) is always
-  /// the default; Film and the Original camera reference are explicit
-  /// actions the Photographer toggles on and back off.
-  let editorStage: EditorStage = "develop";
-  let editorComparing = false;
-  /// One recipe read per Photo at a time. A Refresh-source action or an
-  /// automatic publication refresh joins the read already under way.
-  const editorRecipeReads = new Map<string, Promise<void>>();
-  const editorRecipeGenerations = new Map<string, number>();
-
-  /// Resolves the writers waiting for this Photo's write stream to settle.
-  let editorWriteWaiters: Array<() => void> = [];
-  /// The automatic resolution of a save whose outcome is unknown: at most one
-  /// identical retry per lost response, so a lost receipt cannot spin.
-  let editorUnknownResolution: string | undefined;
-  let filmUnavailableReason = "Film is temporarily unavailable.";
-  /// The deployment's processing capability report, once one Edit session has
-  /// read it. It is the only source of the admitted adjustable controls.
-  let processingCapability: ProcessingCapability | undefined;
-  const settleEditorWriters = (): void => {
-    const waiters = editorWriteWaiters;
-    editorWriteWaiters = [];
-    for (const waiter of waiters) waiter();
-  };
-  const editorOwnsPhoto = (photoId: string): boolean =>
-    isAlive() &&
+  const owns = (id: string): boolean =>
+    photoId === id &&
+    dependencies.isAlive() &&
     view.editorVisible() &&
-    isCurrentPhoto(photoId) &&
-    currentPhoto()?.id === photoId;
-
+    dependencies.isCurrentPhoto(id) &&
+    dependencies.currentPhoto()?.id === id;
+  const clearPreview = (): void => {
+    comparisonRequested = false;
+    preview.clear();
+    baseline.clear();
+    view.clearEditorPreview();
+  };
+  const requestPreview = async (id: string): Promise<void> => {
+    if (!owns(id) || cameraReference || composable.readPending) return;
+    await preview.requestCurrent(id);
+  };
+  const composable = createEditorComposableRecipe(fetcher, {
+    ...dependencies,
+    editorOwnsPhoto: owns,
+    renderEditor: () => render(),
+    previewSelection: () => preview.selection,
+    clearEditorPreview: clearPreview,
+    requestEditorPreview: requestPreview,
+    markEditorPreviewStale: () => {
+      comparisonRequested = false;
+      preview.markStale();
+      baseline.markStale();
+      presentSelected();
+    },
+    describeEditRefusal,
+  });
+  const preview = createEditorComposablePreview(fetcher, {
+    cameraReference: () => cameraReference,
+    read: () => composable.read,
+    isDirty: composable.dirty,
+    editorOwnsPhoto: owns,
+    renderEditor: () => render(),
+    present: () => presentSelected(),
+    clearPresented: () => view.clearEditorPreview(),
+    describePreviewRefusal,
+  });
+  const baseline = createEditorComposablePreview(fetcher, {
+    comparison: "baseline",
+    cameraReference: () => cameraReference,
+    read: () => composable.read,
+    isDirty: composable.dirty,
+    editorOwnsPhoto: owns,
+    renderEditor: () => render(),
+    present: () => presentSelected(),
+    clearPresented: () => presentSelected(),
+    describePreviewRefusal,
+  });
   const proxy = createEditorProxyController(fetcher, {
-    session: (photoId) => editorSessions.get(photoId),
-    editorOwnsPhoto,
-    renderEditor: () => renderEditor(),
-    refreshSource: (photoId) => {
-      void loadEditorFacts(photoId, "refresh");
-      void composable.loadComposableRecipe(photoId);
+    sourceRevision: (id) =>
+      owns(id) && composable.read?.sourceAvailable !== false
+        ? (composable.read?.currentSourceRevision ??
+          composable.read?.sourceRevision)
+        : undefined,
+    editorOwnsPhoto: owns,
+    renderEditor: () => render(),
+    refreshSource: (id) => {
+      void composable.loadComposableRecipe(id);
     },
   });
   const outputs = createWorkspaceOutputController(fetcher, {
-    owns: editorOwnsPhoto,
-    render: () => renderEditor(),
-    facts: (photoId) => {
-      const session = editorSessions.get(photoId);
-      if (!session) return undefined;
-      const presented = session.presentation();
-      const facts = session.facts();
+    owns,
+    render: () => render(),
+    facts: (id) => {
+      if (!owns(id)) return undefined;
+      const state = composable.state;
+      const recipe = composable.read?.recipe;
       return {
-        recipeVersion: presented.recipeVersion,
-        sourceRevision: facts?.sourceRevision ?? null,
-        recipeSourceRevision:
-          facts?.recipeSourceRevision ?? facts?.sourceRevision ?? null,
-        saving: presented.saving,
-        dirty: presented.dirty,
-        conflict: Boolean(presented.conflict),
-        canRender:
-          !composable.mode() &&
-          presented.canEdit &&
-          presented.processingAvailable &&
-          presented.editSourceKind === "original",
-        canRenderFilm:
-          !composable.mode() &&
-          presented.canEdit &&
-          presented.processingAvailable &&
-          presented.editSourceKind === "original" &&
-          !filmUnavailableReason,
+        recipeRevision: recipe?.revision ?? null,
+        sourceRevision: recipe?.sourceRevision ?? null,
+        stepId: recipe?.currentStepId ?? null,
+        saving: state?.saving ?? false,
+        dirty: composable.dirty() || exports.unresolved(id),
+        conflict: state?.conflict ?? false,
       };
     },
-    settle: async (photoId) => {
-      for (;;) {
-        if (!editorOwnsPhoto(photoId)) return false;
-        const presented = editorSessions.get(photoId)?.presentation();
-        if (!presented || presented.conflict) return false;
-        if (!presented.saving) return !presented.dirty;
-        const { promise, resolve } = Promise.withResolvers<void>();
-        editorWriteWaiters.push(resolve);
-        await promise;
-      }
+  });
+  const exports = createEditorProcessingExport(fetcher, composable, {
+    editorOwnsPhoto: owns,
+    renderEditor: () => render(),
+    processingAvailable: () => {
+      const target = composable.target();
+      return (
+        target.kind === "step" &&
+        composable.modules.some(
+          (module) =>
+            module.id.name === target.step.module &&
+            module.availability.state === "ready",
+        ) &&
+        !(photoId && outputs.unresolved(photoId))
+      );
     },
+    describeEditRefusal,
   });
-  const renditions = createEditorRenditions({
-    fetcher,
-    ownsPhoto: editorOwnsPhoto,
-    capture: (photoId): CurrentRendition | undefined => {
-      const session = editorSessions.get(photoId);
-      const presented = session?.presentation();
-      if (
-        !session ||
-        !presented?.canEdit ||
-        !presented.processingAvailable ||
-        editorStage === "camera"
-      )
-        return undefined;
-      const facts = session.facts();
-      return {
-        photoId,
-        stage: editorStage,
-        sourceRevision: facts?.sourceRevision ?? null,
-        recipeVersion: presented.recipeVersion ?? "",
-        editSource: facts?.editSource ?? "original",
-        editSourceProxyId: facts?.editSourceProxyId ?? null,
-      };
-    },
-    describeRefusal: (response) => describePreviewRefusal(response),
-    changed: () => renderEditor(),
-    present: (settings, url) => {
-      if ((settings === BASELINE_SETTINGS) === editorComparing)
-        view.presentEditorPreview(url);
-    },
-  });
-  const composable = createEditorComposableRecipe(fetcher, {
-    ...dependencies,
-    editorOwnsPhoto,
-    renderEditor: () => renderEditor(),
-    stage: () => editorStage,
-    previewSelection: (): string | null | undefined =>
-      composable.target().kind === "legacy"
-        ? renditions.current.url ||
-          renditions.current.busy ||
-          renditions.current.pending
-          ? null
-          : undefined
-        : composablePreview.selection,
-    clearEditorPreview: () => clearEditorPreview(),
-    requestEditorPreview: (photoId): Promise<void> =>
-      requestEditorPreview(photoId),
-    markEditorPreviewStale: () => markEditorPreviewStale(),
-    describeEditRefusal: (response, subject) =>
-      describeEditRefusal(response, subject),
-  });
-  const composablePreview = createEditorComposablePreview(fetcher, {
-    session: (photoId) => editorSessions.get(photoId),
-    stage: () => editorStage,
-    read: () => composable.read,
-    isDirty: composable.dirty,
-    editorOwnsPhoto,
-    renderEditor: () => renderEditor(),
-    present: (url) => {
-      if (!editorComparing) view.presentEditorPreview(url);
-    },
-    clearPresented: () => view.clearEditorPreview(),
-    describePreviewRefusal: (response) => describePreviewRefusal(response),
-  });
-  const processingExport = createEditorProcessingExport(fetcher, composable, {
-    editorOwnsPhoto,
-    renderEditor: () => renderEditor(),
-    processingAvailable: () =>
-      currentEditor()?.presentation().processingAvailable ?? false,
-    describeEditRefusal: (response, subject) =>
-      describeEditRefusal(response, subject),
-  });
-  const currentPreview = () =>
-    composable.target().kind === "legacy"
-      ? renditions.current
-      : composablePreview.current;
-  const clearEditorComparison = renditions.clearComparison;
-  const requestEditorComparisonPreview = renditions.requestComparison;
-  const requestEditorPreview = async (photoId: string): Promise<void> => {
-    if (composable.readPending) return;
-    if (composable.target().kind === "legacy")
-      await renditions.requestCurrent(photoId);
-    else await composablePreview.requestCurrent(photoId);
-  };
-  const clearEditorPreview = (): void => {
-    renditions.clear();
-    composablePreview.clear();
-    view.clearEditorPreview();
-  };
-  /// The Processing axis. The axis is the deployment's engine capability,
-  /// not the Photo's source: a source wait belongs to the Edit source axis,
-  /// so a Photo whose facts have not settled never reclassifies the engines.
-  const processingReadiness = ():
-    | "checking"
-    | "ready"
-    | "waiting"
-    | "unavailable" =>
-    !processingCapability
-      ? "checking"
-      : processingCapability.state === "ready"
-        ? "ready"
-        : processingCapability.state === "resource-unavailable"
-          ? "waiting"
-          : "unavailable";
-  /// The Edit Preview axis for the chosen stage: what the presented
-  /// rendition is — pending, current, older than the settings, or failed.
-  /// `null` when the Camera stage is presented or no rendition can be
-  /// requested; the reason is on the other axes then, so the axis never
-  /// claims a state it cannot name.
-  const previewReadiness = ():
-    | "pending"
-    | "ready"
-    | "stale"
-    | "failed"
-    | null => {
-    if (editorStage === "camera") return null;
-    if (currentPreview().busy || currentPreview().pending) return "pending";
-    if (currentPreview().outcome === "failed") return "failed";
-    if (currentPreview().url) return currentPreview().stale ? "stale" : "ready";
-    return currentPreview().refused ? "failed" : null;
-  };
-  const renderEditor = (): void => {
-    const photoId = currentPhoto()?.id;
-    const session = currentEditor();
-    if (!photoId || !session) return;
-    const presented = session.presentation();
-
+  const render = (): void => {
+    if (!photoId || !owns(photoId)) return;
+    const recipeView = composable.view();
+    const state = composable.state;
+    const target = composable.target();
+    const current = preview.current;
+    const selected = target.kind === "step" ? target.step : undefined;
+    const module = selected
+      ? composable.modules.find((entry) => entry.id.name === selected.module)
+      : undefined;
+    const provenanceNote = cameraReference
+      ? "Original reference: the camera Preview of this Photo."
+      : target.kind === "unreadable"
+        ? "The Processing Recipe could not be read. Reload to check again."
+        : !selected
+          ? "No Processing Step is selected; no processing result is shown."
+          : `Preview of selected Processing Step ${selected.stepId} (${selected.module}).${composable.dirty() ? " Local changes are not yet confirmed." : ""}`;
     view.renderEditor({
       photoId,
-      loading: presented.photoId === "",
-      stage: editorStage,
-      stageNote: editorStageNote(),
-      filmReason:
-        filmUnavailableReason ||
-        (!presented.canEdit && presented.photoId !== ""
-          ? "Film is not available for this Photo."
-          : !presented.processingAvailable && presented.photoId !== ""
-            ? "Film is temporarily unavailable for this Photo."
-            : ""),
-      editSourceReadiness: presented.editSourceReadiness,
-      editSourceKind: presented.editSourceKind,
-      sourceFactNote: sourceFactNote(
-        presented.editSourceReadiness,
-        presented.editSourceKind,
-        libraryPhase,
+      loading: composable.readPending,
+      cameraReference,
+      canCompare: Boolean(
+        current.url &&
+          current.outcome === "ready" &&
+          !current.stale &&
+          !composable.dirty() &&
+          !cameraReference,
       ),
-      processingReadiness: processingReadiness(),
-      previewState: previewReadiness(),
-      processingAvailable: presented.processingAvailable,
-      capabilityNote: processingCapability
-        ? capabilityNote(processingCapability.state)
-        : "",
-      exposureEv: presented.settings.exposureEv,
-      savedExposureEv: presented.confirmed.exposureEv,
-      baselineExposureEv: presented.baseline.exposureEv,
-      exposureMinimumEv: presented.controls.minimumEv,
-      exposureMaximumEv: presented.controls.maximumEv,
-      exposureStepEv: presented.controls.stepEv,
-      whiteBalance: presented.whiteBalance.note
-        ? {
-            ...presented.whiteBalance,
-            note: plainWhiteBalanceNote(presented.whiteBalance.note),
-          }
-        : presented.whiteBalance,
+      comparing: comparisonRequested && baselineReady() && !cameraReference,
+      provenanceNote,
+      sourceFactNote:
+        composable.read?.sourceAvailable === false
+          ? "The Original source is unavailable."
+          : composable.read?.currentSourceRevision &&
+              composable.read.currentSourceRevision !==
+                composable.read.recipe?.sourceRevision
+            ? "The Original has changed since this recipe was saved."
+            : composable.read
+              ? "Original source revision checked."
+              : "Checking source…",
+      processingReadiness: !selected
+        ? "unavailable"
+        : !module
+          ? "checking"
+          : module.availability.state === "ready"
+            ? "ready"
+            : "unavailable",
+      previewState: cameraReference
+        ? null
+        : current.busy || current.pending
+          ? "pending"
+          : current.outcome === "failed" || current.refused
+            ? "failed"
+            : current.url
+              ? current.stale
+                ? "stale"
+                : "ready"
+              : null,
       proxy: proxy.view(photoId),
-      canEdit: presented.canEdit,
-      canPreview: presented.canEdit && presented.processingAvailable,
-      previewing: currentPreview().busy,
-      // Comparison progress describes the image actually presented.
-      previewNote: editorComparing
-        ? renditions.comparison.note
-        : currentPreview().note,
-      previewStale: !editorComparing && currentPreview().stale,
-      saving: presented.saving,
-      dirty: presented.dirty,
-      canUndo: presented.canUndo,
-      canRedo: presented.canRedo,
-      comparing: editorComparing,
-      conflict: presented.conflict
-        ? { message: plainConflictMessage(presented.conflict.message) }
-        : null,
-      draftNote: presented.draft.note,
-      outputs: outputs.view(photoId),
-      export: processingExport.view(),
-      composable: composable.view(),
-      controlsReadonlyNote: composable.mode()
-        ? "The two-control edit is read-only while a Processing Recipe owns this Photo's processing. Its steps are edited below."
+      canPreview: Boolean(selected) && !composable.dirty() && !cameraReference,
+      previewing: current.busy,
+      previewNote: comparisonRequested
+        ? baseline.current.outcome === "ready" && !baselineReady()
+          ? "The baseline does not match this current Preview's processing provenance, so the current Preview remains shown."
+          : baseline.current.note ||
+            "Preparing the selected step's baseline comparison…"
+        : current.note,
+      previewStale: current.stale,
+      saving: state?.saving ?? false,
+      dirty: composable.dirty(),
+      mutationsBlocked: Boolean(
+        state?.uncertain ||
+          state?.conflict ||
+          exports.unresolved(photoId) ||
+          outputs.unresolved(photoId),
+      ),
+      rebindAvailable: Boolean(
+        composable.read?.recipe &&
+          composable.read.sourceAvailable !== false &&
+          composable.read.currentSourceRevision &&
+          composable.read.currentSourceRevision !==
+            composable.read.recipe.sourceRevision,
+      ),
+      canUndo:
+        Boolean(state?.undo.length) &&
+        !state?.uncertain &&
+        !state?.conflict &&
+        !exports.unresolved(photoId) &&
+        !outputs.unresolved(photoId),
+      canRedo:
+        Boolean(state?.redo.length) &&
+        !state?.uncertain &&
+        !state?.conflict &&
+        !exports.unresolved(photoId) &&
+        !outputs.unresolved(photoId),
+      conflict: state?.conflict ? { message: state.note } : null,
+      draftNote: state
+        ? `${state.recovered ? state.note : ""}${state.recoveryAvailable ? "" : " Local settings remain in this session; browser reload recovery is unavailable."}`
         : "",
-      status: compactEditorStatus(presented),
-      statusDetail: presented.status,
+      export: exports.view(),
+      composable: recipeView,
+      outputs: outputs.view(photoId),
+      status: recipeView.note,
+      statusDetail: state?.uncertain
+        ? "The save outcome is unknown. Check the saved edit before another action."
+        : "",
     });
   };
-  /// What the presented image actually is, in plain language. A proxy-backed
-  /// rendition retains its provenance; it is not a full-resolution result.
-  const editorStageNote = (): string => {
-    if (editorStage === "camera")
-      return "Original reference: the camera preview of this Photo, before your edit.";
-    const stageName = editorStage === "film" ? "Film" : "Edit";
-    const proxy =
-      currentEditor()?.facts()?.editSource === "development-proxy"
-        ? " The current edit source is a Development Proxy, so this rendition's detail is the proxy's, not a full-resolution result."
-        : "";
-    if (editorComparing && renditions.comparison.url) {
-      // A comparison is only a comparison while both images describe the same
-      // development: a current rendition that is absent or older than the
-      // current settings is named instead of being compared as if it were
-      // current.
-      const current = !currentPreview().url
-        ? " No current preview is shown, so the comparison is shown alone."
-        : currentPreview().stale
-          ? " The current preview is older than the current settings."
-          : "";
-      return `${stageName} comparison: the unadjusted rendering, compared with the current settings.${current}${proxy}`;
-    }
-    const target = composable.target();
-    if (target.kind === "unreadable")
-      return "The Processing Recipe could not be read, so no processing result is shown. Reload to check again.";
-    if (target.kind === "none")
-      return "The Processing Recipe selects no Processing Step, so no processing result is shown.";
-    if (target.kind === "step") {
-      const composableStep = target.step;
-      if (composable.dirty())
-        return `Save the Processing Recipe to update the Preview of the selected Processing Step ${composableStep.stepId} (${composableStep.module}).`;
-      // The selected current step is this Photo's own composable processing:
-      // its Preview is presented for what it is, and the fixed two-control
-      // editor is never presented as this step's module parameters.
-      const module = composable.modules.find(
-        (description) => description.id.name === composableStep.module,
-      );
-      const availability = module
-        ? ` The module reports ${module.availability.state}${
-            module.availability.refusalReasons.length
-              ? ` (${module.availability.refusalReasons.join(", ")}).`
-              : "."
-          }`
-        : "";
-      return currentPreview().url
-        ? `The Preview of the selected Processing Step ${composableStep.stepId} (${composableStep.module}).${availability}`
-        : `The Preview of the selected Processing Step ${composableStep.stepId} (${composableStep.module}) is not shown yet.${availability}`;
-    }
-    if (!currentPreview().url)
-      return editorStage === "film"
-        ? "Film: the Film preview is not ready yet, so no edited image is shown."
-        : "Edit: the preview is not ready yet; the camera preview is shown.";
-    if (editorStage === "film")
-      return `Film: the fixed film look applied to your edit.${proxy}`;
-    const preview = currentPhoto()?.preview;
-    const jpegOriginal =
-      preview?.state === "ready" && preview.source === "jpeg-original"
-        ? " This Photo's camera preview is a JPEG Original."
-        : "";
-    return `Edit: a preview of your edited result at reduced resolution.${proxy}${jpegOriginal}`;
+  const open = (id: string): void => {
+    if (!id || !dependencies.isCurrentPhoto(id)) return;
+    clearPreview();
+    proxy.leave();
+    outputs.leave();
+    composable.reset();
+    exports.reset();
+    photoId = id;
+    cameraReference = false;
+    render();
+    void composable.loadComposableRecipe(id);
+    void composable.loadProcessingModules(id);
+    void proxy.read(id);
+    void exports.load(id);
+    outputs.open(id);
   };
-  /// Places the session's next guarded write in its Photo's stream. One write
-  /// is in flight per Photo, and the model coalesces later actions behind it.
-  const placeEditorWrite = async (
-    photoId: string,
-    session: PhotoEditor,
-    step: EditorStep,
-  ): Promise<void> => {
-    // The Export ordering barrier: an edit placed while a submission is
-    // settling waits behind it, so the accepted Export can never be retargeted
-    // by a later write.
-    const barrier = outputs.writeBarrier(photoId);
-    if (barrier) await barrier;
-    const request = step.request;
-    if (!request) {
-      settleEditorWriters();
-      if (currentPhoto()?.id === photoId) renderEditor();
-      return;
-    }
-    const controller = new AbortController();
-    const result = await saveEditRecipe(fetcher, request, controller.signal);
-    const next =
-      result.kind === "saved"
-        ? session.acknowledge(request, {
-            recipeVersion: result.recipeVersion,
-            sourceRevision: result.sourceRevision,
-          })
-        : session.refuse(request, result.refusal);
-    settleEditorWriters();
-    if (currentPhoto()?.id === photoId) renderEditor();
-    if (result.kind === "saved") {
-      // A save that lost its response is resolved through its own identity
-      // before further writes advance: one identical retry, then the explicit
-      // user action. A resolved receipt confirms or refuses that operation.
-      if (next.request === null) editorUnknownResolution = undefined;
-      // The preview follows the settings the service confirmed, so the
-      // rendition that arrives belongs to the recipe now in force.
-      if (next.request === null) void requestEditorPreview(photoId);
-    } else if (
-      result.refusal.code === "outcome_unknown" &&
-      editorUnknownResolution !== request.id
-    ) {
-      editorUnknownResolution = request.id;
-      window.setTimeout(() => {
-        if (!editorOwnsPhoto(photoId)) return;
-        const resolution = session.resolveUnknown();
-        renderEditor();
-        void placeEditorWrite(photoId, session, resolution);
-      }, 750);
-    }
-    await placeEditorWrite(photoId, session, next);
-  };
-  const editorFactsFromWire = (
-    photoId: string,
-    response:
-      | Readonly<{ kind: "ok"; facts: EditorFacts }>
-      | Readonly<{ kind: "failed"; message: string }>,
-    mode: "open" | "refresh",
-  ): void => {
-    const session = editorSession(photoId);
-    if (response.kind === "failed") {
-      if (mode === "open") {
-        // An unanswered read is not a confirmed read failure: the session
-        // opens on a retryable wait — no reason claimed, the transport's own
-        // message on the status line — instead of presenting the Photo as
-        // though its Original File had failed to read.
-        session.open({
-          photoId,
-          sourceRevision: null,
-          recipeVersion: null,
-          settings: {
-            exposureEv: 0,
-            whiteBalance: Object.freeze({ mode: "as-shot" }),
-          },
-          sourceSupport: "unavailable",
-          supportReason: "",
-          editSource: "original",
-          editSourceProxyId: null,
-          processingAvailable: false,
-          controls: {
-            minimumEv: 0,
-            maximumEv: 1,
-            stepEv: 0.001,
-            whiteBalanceModes: ["as-shot"],
-            adjustableWhiteBalance: [],
-          },
-        });
-        session.setStatus(response.message);
-      } else {
-        session.setStatus(response.message);
-      }
-      if (currentPhoto()?.id === photoId) renderEditor();
-      return;
-    }
-    const facts = processingCapability
-      ? withProcessingCapability(response.facts, processingCapability)
-      : response.facts;
-    const step = mode === "open" ? session.open(facts) : session.refresh(facts);
-    // A comparison is of one development: a source revision that moved makes
-    // the retained baseline rendition a comparison of an earlier source, so it
-    // is dropped rather than presented as this Photo's.
-    renditions.retainComparison({
-      photoId,
-      stage: editorStage,
-      sourceRevision: session.facts()?.sourceRevision ?? null,
-    });
-    if (currentPhoto()?.id === photoId) renderEditor();
-    void placeEditorWrite(photoId, session, step);
-    // The surface opens on the stage's rendition, so the Edit Preview is read
-    // as soon as the facts are known instead of leaving the camera Preview
-    // presented under a Develop provenance.
-    void requestEditorPreview(photoId);
-  };
-  /// Reads the current facts of one Photo. The read is stamped against the
-  /// revisions in force when it starts and discarded when they moved while it
-  /// was in flight, so a slow read can neither overwrite facts a save
-  /// acknowledgement already confirmed nor read as another client's change.
-  const loadEditorFacts = (
-    photoId: string,
-    mode: "open" | "refresh",
-  ): Promise<void> => {
-    const generation = editorRecipeGenerations.get(photoId) ?? 0;
-    const inFlight = editorRecipeReads.get(photoId);
-    if (inFlight) {
-      if (mode === "refresh") {
-        return inFlight.then(() => {
-          if (editorRecipeGenerations.get(photoId) !== generation) {
-            return loadEditorFacts(photoId, "refresh");
-          }
-        });
-      }
-      return inFlight;
-    }
-    const read = (async () => {
-      const session = editorSession(photoId);
-      const stampedRecipe = session.presentation().recipeVersion;
-      const stampedSource = session.facts()?.sourceRevision ?? null;
-      const controller = new AbortController();
-      const result = await fetchEditRecipe(fetcher, photoId, controller.signal);
-      if (!isAlive()) return;
-      const current = editorSessions.get(photoId);
+  const scoped =
+    <A extends unknown[]>(action: (id: string, ...args: A) => unknown) =>
+    (id: string, ...args: A): void => {
+      if (owns(id)) void action(id, ...args);
+    };
+  const mutate = <A extends unknown[]>(
+    action: (id: string, ...args: A) => unknown,
+  ) =>
+    scoped((id: string, ...args: A) => {
+      const state = composable.state;
       if (
-        current &&
-        (current.presentation().recipeVersion !== stampedRecipe ||
-          (current.facts()?.sourceRevision ?? null) !== stampedSource)
+        state?.uncertain ||
+        state?.conflict ||
+        exports.unresolved(id) ||
+        outputs.unresolved(id)
       )
         return;
-      editorFactsFromWire(photoId, result, mode);
-    })();
-    editorRecipeReads.set(photoId, read);
-    return read.finally(() => {
-      if (editorRecipeReads.get(photoId) === read)
-        editorRecipeReads.delete(photoId);
+      return action(id, ...args);
     });
-  };
-  /// Reads the deployment's processing capability once per Edit session. The
-  /// report is the only source of the adjustable white-balance ranges and of
-  /// the state of each stage, so a stage the deployment cannot execute is
-  /// explained instead of attempted.
-  const loadProcessingCapability = async (photoId: string): Promise<void> => {
-    try {
-      const response = await fetcher("/api/processing/capability", {
-        priority: "low",
-      });
-      if (!response.ok) return;
-      const capability = parseProcessingCapability(await response.json());
-      if (!capability) return;
-      processingCapability = capability;
-      filmUnavailableReason = filmStageReason(capability.stages.film);
-      if (
-        filmUnavailableReason &&
-        editorStage === "film" &&
-        editorOwnsPhoto(photoId)
-      )
-        applyEditorStage(photoId, "develop");
-      applyProcessingCapability(photoId);
-      if (currentPhoto()?.id === photoId) renderEditor();
-    } catch {
-      /* the deployment's capability report is optional presentation */
-    }
-  };
-  /// The deployment's capability state in the Photographer's words. Internal
-  /// causes (bundle, allowance) stay service concepts: the workspace says
-  /// what the Photographer can do and what stays safe.
-  const capabilityNote = (state: string): string => {
-    switch (state) {
-      case "disabled":
-        return "Editing previews and Export are not enabled in this deployment. Saved edits and downloads stay available.";
-      case "bundle-unavailable":
-        return "Processing is temporarily unavailable, so previews and Export cannot run. Saved edits and downloads stay available.";
-      case "source-unsupported":
-        return "This Photo is not supported for editing in this deployment.";
-      case "resource-unavailable":
-        return "Processing is temporarily unavailable. Try again later.";
-      default:
-        return "";
-    }
-  };
-  /// The deployment's answer for Film, in the workspace's words. A Photo the
-  /// deployment cannot process for Film is not the same failure as a
-  /// capability it has not enabled.
-  const filmStageReason = (state: string): string =>
-    state === "unsupported"
-      ? "Film is not available for this Photo."
-      : state === "unavailable"
-        ? "Film is temporarily unavailable."
-        : "";
-  /// Applies the capability report to one Photo's editing facts, so the
-  /// adjustable controls follow the report instead of assuming it.
-  const applyProcessingCapability = (photoId: string): void => {
-    const session = editorSessions.get(photoId);
-    const current = session?.facts();
-    if (!session || !current || !processingCapability) return;
-    const step = session.refresh(
-      withProcessingCapability(current, processingCapability),
-    );
-    void placeEditorWrite(photoId, session, step);
-  };
-  const openEditor = (photoId: string): void => {
-    if (!photoId) return;
-    clearEditorPreview();
-    editorComparing = false;
-    composable.reset();
-    processingExport.reset();
-    // The Edit workspace always opens on the current edit; Film is an
-    // explicit optional action, never the default view.
-    editorStage = "develop";
-    editorSession(photoId);
-    renderEditor();
-    void composable.loadComposableRecipe(photoId);
-    void composable.loadProcessingModules(photoId);
-    void loadEditorFacts(photoId, "open");
-    void proxy.read(photoId);
-    void loadProcessingCapability(photoId);
-    outputs.open(photoId);
-  };
-  const refreshEditor = (photoId: string): void => {
-    editorRecipeGenerations.set(
-      photoId,
-      (editorRecipeGenerations.get(photoId) ?? 0) + 1,
-    );
-    void loadEditorFacts(photoId, "refresh");
-    void composable.loadComposableRecipe(photoId);
-    void outputs.refresh(photoId);
-  };
-  /// The presented rendition is older than the settings in force as soon as
-  /// an edit action lands. The matching rendition clears the mark when it
-  /// arrives, so the workspace never presents an image as current after the
-  /// settings it shows have moved.
-  const markEditorPreviewStale = (): void => {
-    renditions.markStale();
-    composablePreview.markStale();
-  };
-  const commitEditorExposure = (photoId: string, exposureEv: number): void => {
-    const session = editorSessions.get(photoId);
-    if (!session) return;
-    const step = session.commitExposure(exposureEv);
-    markEditorPreviewStale();
-    renderEditor();
-    void placeEditorWrite(photoId, session, step);
-  };
-  /// One white-balance action: a selected mode, a settled temperature, or a
-  /// settled tint. Each is one edit action with its own guarded write.
-  const commitEditorWhiteBalance = (
-    photoId: string,
-    action:
-      | Readonly<{ kind: "mode"; mode: string }>
-      | Readonly<{ kind: "temperature"; temperatureKelvin: number }>
-      | Readonly<{ kind: "tint"; tintMilli: number }>,
-  ): void => {
-    const session = editorSessions.get(photoId);
-    if (!session) return;
-    const step =
-      action.kind === "mode"
-        ? session.selectWhiteBalanceMode(action.mode)
-        : action.kind === "temperature"
-          ? session.commitTemperature(action.temperatureKelvin)
-          : session.commitTint(action.tintMilli);
-    markEditorPreviewStale();
-    renderEditor();
-    void placeEditorWrite(photoId, session, step);
-  };
-  const stepEditorHistory = (
-    photoId: string,
-    operation:
-      | "undo"
-      | "redo"
-      | "reset"
-      | "resetExposure"
-      | "resetWhiteBalance",
-  ): void => {
-    const session = editorSessions.get(photoId);
-    if (!session) return;
-    const step =
-      operation === "undo"
-        ? session.undo()
-        : operation === "redo"
-          ? session.redo()
-          : operation === "resetExposure"
-            ? session.resetExposure()
-            : operation === "resetWhiteBalance"
-              ? session.resetWhiteBalance()
-              : session.reset();
-    markEditorPreviewStale();
-    renderEditor();
-    void placeEditorWrite(photoId, session, step);
-  };
-  /// Uses the recipe the service holds now. The read is the authoritative
-  /// source of the saved settings, so the conflict resolves to the service's
-  /// recipe instead of this client's older confirmed copy; a read that fails
-  /// leaves the conflict standing for another attempt.
-  const useSavedRecipe = async (photoId: string): Promise<void> => {
-    const session = editorSessions.get(photoId);
-    if (!session) return;
-    await loadEditorFacts(photoId, "refresh");
-    await composable.loadComposableRecipe(photoId);
-    const current = editorSessions.get(photoId);
-    if (!current) return;
-    const step = current.useSavedRecipe();
-    renderEditor();
-    void placeEditorWrite(photoId, current, step);
-    void requestEditorPreview(photoId);
-  };
-  const reapplyLocalSettings = (photoId: string): void => {
-    const session = editorSessions.get(photoId);
-    if (!session) return;
-    const step = session.reapplyLocal();
-    markEditorPreviewStale();
-    renderEditor();
-    void placeEditorWrite(photoId, session, step);
-  };
-  const discardEditorDraft = (photoId: string): void => {
-    const session = editorSessions.get(photoId);
-    if (!session) return;
-    session.discardDraft();
-    renderEditor();
-  };
-  const applyEditorStage = (photoId: string, stage: EditorStage): void => {
-    if (
-      stage === "film" &&
-      (filmUnavailableReason ||
-        !editorSessions.get(photoId)?.presentation().canEdit ||
-        !editorSessions.get(photoId)?.presentation().processingAvailable)
-    )
-      return;
-    if (stage === editorStage) return;
-    editorStage = stage;
-    editorComparing = false;
-    // A comparison is of one stage: the rendition of another stage, or of the
-    // other settings selector, is not this stage's comparison.
-    clearEditorComparison();
-    // A rendition of another view is never presented as this view's result:
-    // the surface shows no edited image until this view's own preview
-    // arrives, so Film can never fall back to a camera or Develop image.
-    clearEditorPreview();
-    renderEditor();
-    if (stage !== "camera") void requestEditorPreview(photoId);
-  };
-  /// The as-shot/baseline development comparison of the chosen stage. Pressing
-  /// the control presents the baseline development of the same stage beside the
-  /// current settings; releasing it presents the current rendition again. The
-  /// comparison never replaces the current rendition, the chosen stage, or the
-  /// saved recipe, and a comparison whose rendition is still being prepared
-  /// says so instead of presenting an unrelated image.
-  const setEditorComparison = (photoId: string, pressed: boolean): void => {
-    if (!isCurrentPhoto(photoId) || currentPhoto()?.id !== photoId) return;
-    editorComparing = pressed;
-    if (pressed) {
-      if (renditions.comparison.url)
-        view.presentEditorPreview(renditions.comparison.url);
-      else if (!renditions.comparison.busy) {
-        void requestEditorComparisonPreview(photoId);
-      }
-    } else {
-      const url = currentPreview().url;
-      if (url) view.presentEditorPreview(url);
-      else view.clearEditorPreview();
-    }
-    renderEditor();
-  };
-  /// Rebinds the stored recipe to the currently observed source. It is the one
-  /// explicit reconciliation the workspace offers when the service reports the
-  /// saved recipe is bound to different content.
-  const rebindEditor = async (photoId: string): Promise<void> => {
-    const session = editorSessions.get(photoId);
-    const facts = session?.facts();
-    const presented = session?.presentation();
-    if (!session || !facts || !presented) return;
-    if (!presented.recipeVersion || !facts.sourceRevision) {
-      session.setStatus("There is no saved edit for this Photo.");
-      renderEditor();
-      return;
-    }
-    const result = await rebindEditRecipe(
-      fetcher,
-      photoId,
-      presented.recipeVersion,
-      facts.sourceRevision,
-    );
-    if (!isAlive()) return;
-    if (result.kind !== "saved") {
-      session.setStatus(
-        result.refusal.message ||
-          "The update was refused. Reload the edit to read the current state.",
-      );
-      renderEditor();
-      return;
-    }
-    await loadEditorFacts(photoId, "refresh");
-    await composable.loadComposableRecipe(photoId);
-  };
-  const leaveEditor = (): void => {
-    outputs.leave();
-    proxy.leave();
-    composable.reset();
-    processingExport.reset();
-    clearEditorPreview();
-    editorComparing = false;
-    editorStage = "develop";
-    settleEditorWriters();
-  };
   return {
-    open: openEditor,
-    refresh: refreshEditor,
-    commitExposure: commitEditorExposure,
-    commitWhiteBalance: commitEditorWhiteBalance,
-    stepHistory: stepEditorHistory,
-    requestPreview: (photoId) => {
-      void requestEditorPreview(photoId);
+    open,
+    refresh: scoped((id) => {
+      if (composable.state?.uncertain) void composable.saveEditorComposable(id);
+      else void composable.loadComposableRecipe(id);
+      void composable.loadProcessingModules(id);
+      void proxy.read(id);
+      void exports.load(id);
+      void outputs.refresh(id);
+    }),
+    stepHistory: mutate((id, operation: "undo" | "redo") => {
+      comparisonRequested = false;
+      preview.markStale();
+      baseline.markStale();
+      presentSelected();
+      if (operation === "undo") void composable.undo(id);
+      else void composable.redo(id);
+    }),
+    requestPreview: scoped(requestPreview),
+    setCameraReference: scoped((id, pressed: boolean) => {
+      cameraReference = pressed;
+      render();
+      if (pressed) view.clearEditorPreview();
+      else if (preview.current.url) presentSelected();
+      else void requestPreview(id);
+    }),
+    setComparison: scoped((id, pressed: boolean) => {
+      if (
+        pressed &&
+        (cameraReference ||
+          composable.dirty() ||
+          preview.current.stale ||
+          preview.current.outcome !== "ready" ||
+          !preview.current.url)
+      )
+        return;
+      comparisonRequested = pressed;
+      render();
+      presentSelected();
+      if (pressed && !baselineReady()) void baseline.requestCurrent(id);
+    }),
+    useSaved: scoped(composable.useSaved),
+    reapplyLocal: scoped(composable.reapplyLocal),
+    discardDraft: scoped(composable.discardEditorComposable),
+    rebind: scoped(composable.rebind),
+    createProxy: scoped(proxy.create),
+    removeProxy: scoped(proxy.remove),
+    compose: mutate(composable.composeEditorSteps),
+    composableAddStep: mutate(composable.addEditorComposableStep),
+    composableRemoveStep: mutate(composable.removeEditorComposableStep),
+    composableSelectStep: mutate(composable.selectEditorComposableStep),
+    composableEditStep: scoped(composable.editEditorComposableStep),
+    composableParameters: mutate((id, text: string) => {
+      composable.editEditorComposableParameters(id, text);
+      composable.commitEditorComposableParameters(id);
+    }),
+    composableSchema: mutate(composable.editEditorComposableSchema),
+    composableInput: mutate(composable.editEditorComposableInput),
+    composableArtifactFetch: scoped(composable.fetchEditorArtifact),
+    composableSave: scoped(composable.saveEditorComposable),
+    composableDiscard: scoped(composable.discardEditorComposable),
+    checkProcessingExport: scoped(exports.check),
+    downloadArtifact: scoped(exports.downloadArtifact),
+    downloadHistorical: scoped(exports.downloadHistorical),
+    useArtifactInput: mutate(composable.useEditorArtifactInput),
+    submitXmp: scoped(outputs.submit),
+    downloadXmp: scoped(outputs.download),
+    submitExport: scoped(exports.submit),
+    cancelExport: scoped(exports.cancel),
+    retryExport: scoped(exports.retry),
+    downloadExport: scoped(exports.download),
+    leave: () => {
+      photoId = undefined;
+      outputs.leave();
+      proxy.leave();
+      exports.reset();
+      composable.reset();
+      clearPreview();
+      cameraReference = false;
     },
-    applyStage: applyEditorStage,
-    setComparison: setEditorComparison,
-    useSaved: (photoId) => {
-      void useSavedRecipe(photoId);
-    },
-    reapplyLocal: reapplyLocalSettings,
-    discardDraft: discardEditorDraft,
-    rebind: (photoId) => {
-      void rebindEditor(photoId);
-    },
-    createProxy: (photoId) => {
-      void proxy.create(photoId);
-    },
-    removeProxy: (photoId) => {
-      void proxy.remove(photoId);
-    },
-    compose: composable.composeEditorSteps,
-    composableAddStep: composable.addEditorComposableStep,
-    composableRemoveStep: composable.removeEditorComposableStep,
-    composableSelectStep: composable.selectEditorComposableStep,
-    composableEditStep: composable.editEditorComposableStep,
-    composableParameters: composable.editEditorComposableParameters,
-    composableSchema: composable.editEditorComposableSchema,
-    composableInput: composable.editEditorComposableInput,
-    composableArtifactFetch: (photoId, artifactId) => {
-      void composable.fetchEditorArtifact(photoId, artifactId);
-    },
-    composableSave: (photoId) => {
-      void composable.saveEditorComposable(photoId);
-    },
-    composableDiscard: composable.discardEditorComposable,
-    checkProcessingExport: (photoId) => {
-      void processingExport.check(photoId);
-    },
-    downloadArtifact: (photoId, artifactId) => {
-      void processingExport.downloadArtifact(photoId, artifactId);
-    },
-    useArtifactInput: composable.useEditorArtifactInput,
-    submitXmp: (photoId) => {
-      void outputs.submit(photoId);
-    },
-    downloadXmp: (photoId) => {
-      void outputs.download(photoId);
-    },
-    submitExport: (photoId, target) => {
-      if (target === undefined) void processingExport.submit(photoId);
-      else void outputs.submit(photoId, target);
-    },
-    cancelExport: (photoId, target) => {
-      if (target === undefined) void processingExport.cancel(photoId);
-      else void outputs.cancel(photoId, target);
-    },
-    retryExport: (photoId, target) => {
-      if (target === undefined) void processingExport.retry(photoId);
-      else void outputs.retry(photoId, target);
-    },
-    downloadExport: (photoId, target) => {
-      if (target === undefined) void processingExport.download(photoId);
-      else void outputs.download(photoId, target);
-    },
-    leave: leaveEditor,
   };
 }

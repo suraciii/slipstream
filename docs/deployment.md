@@ -225,14 +225,14 @@ and the acceptance runner are documented in
 
 ### Verification
 
-`GET /api/processing/capability` reports the closed capability condition
-following the merged Photo Development service surface
-(`design/photo-development.md`): `disabled` when the operator has disabled the
-capability, `bundle-unavailable` when an enabled path has missing or invalid
-engine assets, `source-unsupported`, `resource-unavailable`, and `ready` only
-when the bundled engine verifies at startup. It never reports a qualification
-harness profile as product capability. `/healthz` remains a Library readiness
-check and reports no processing state.
+`GET /api/processing/modules` reports each Processing Module's independent
+availability and refusal reasons after its bundled assets are verified at
+startup. A disabled or missing darktable runtime does not establish
+SpektraFilm's state, and readiness does not admit every input, parameter, or
+resource combination. Discovery reports bounded module-owned schemas and
+contracts; it never promotes a qualification harness profile to product
+admission. `/healthz` remains a Library readiness check and reports no
+processing state.
 
 Accept the deployment for processing only after the local smoke path exercises
 a real qualified RAW development end to end through this one-container path:

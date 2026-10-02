@@ -27,7 +27,6 @@
 //! tables in `export.rs` are a separate fixed surface that is neither read
 //! nor written here.
 
-use super::owner::Command;
 use super::{
     DatabaseName, PersistenceError, StateDirectory,
     composable_recipe::read_composable_edit_recipe,
@@ -46,8 +45,9 @@ use crate::processing::{
     ProcessingExportWorkState, ProcessingGeometry, ProcessingImageContract, ProcessingInput,
     ProcessingInputEvidence, ProcessingInputHandoffError, ProcessingModuleId,
     ProcessingParameterSnapshot, ProcessingStepId, SubmitProcessingExport, validate_bounded_name,
-    validate_revision,
+    validate_source_revision,
 };
+use crate::processing::{ProcessingExportList, ReplayProcessingExport, RetryProcessingExport};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -99,7 +99,9 @@ const PROCESSING_ARTIFACT_LEASE_STALE_SECONDS: u64 = 24 * 60 * 60;
 /// contract vocabulary, so this bound keeps one metadata value finite
 /// without ever clamping an admitted record; a value past it is a storage
 /// error, never a truncated write.
-const MAXIMUM_PROCESSING_EXPORT_RECORD_BYTES: usize = MAXIMUM_PARAMETER_SNAPSHOT_BYTES + 65_536;
+const MAXIMUM_PROCESSING_EXPORT_RECORD_BYTES: usize = MAXIMUM_PARAMETER_SNAPSHOT_BYTES
+    + 2 * crate::processing::MAXIMUM_SOURCE_REVISION_BYTES * 6
+    + 65_536;
 
 /// The strict stored shape of one published Processing Artifact. Unknown
 /// fields are refused, and every reconstructed value is revalidated before
@@ -444,11 +446,12 @@ pub(super) fn submit_processing_export(
         let Some(stored) = read_composable_edit_recipe(transaction, &mutation.photo_id)? else {
             return Ok(ProcessingExportSubmitOutcome::MissingRecipe);
         };
-        if let Some(current_source_revision) = facts.current_source_revision.as_deref() {
-            if current_source_revision != mutation.expected_source_revision {
-                return Ok(ProcessingExportSubmitOutcome::SourceChanged(Some(stored)));
-            }
-        } else if stored.source_revision != mutation.expected_source_revision {
+        if stored.source_revision != mutation.expected_source_revision {
+            return Ok(ProcessingExportSubmitOutcome::SourceChanged(Some(stored)));
+        }
+        if let Some(current_source_revision) = facts.current_source_revision.as_deref()
+            && current_source_revision != mutation.expected_source_revision
+        {
             return Ok(ProcessingExportSubmitOutcome::SourceChanged(Some(stored)));
         }
         if stored.revision != mutation.expected_recipe_revision {
@@ -497,6 +500,13 @@ pub(super) fn submit_processing_export(
                         ProcessingInputHandoffError::ArtifactMissing,
                     ));
                 };
+                if read_processing_artifact_retention_record(transaction, artifact_id.as_str())?
+                    .is_some_and(|retention| now >= retention.retain_until)
+                {
+                    return Ok(ProcessingExportSubmitOutcome::IncompatibleInput(
+                        ProcessingInputHandoffError::ArtifactMissing,
+                    ));
+                }
                 if &published.output_contract != contract {
                     return Ok(ProcessingExportSubmitOutcome::IncompatibleInput(
                         ProcessingInputHandoffError::ArtifactContractMismatch,
@@ -603,6 +613,9 @@ fn decision_identity(decision: &ProcessingExportAdapterDecision) -> String {
 
 mod lifecycle;
 pub(super) use lifecycle::*;
+
+mod retained;
+pub(super) use retained::*;
 
 mod records;
 use records::*;

@@ -46,21 +46,168 @@ pub(super) fn parse_processing_export(bytes: Vec<u8>) -> Result<Value, CommandFa
         "expectedRecipeRevision",
         Some(&input.expected_recipe_revision),
     )?;
-    validate_nonempty_revision(
-        "expectedSourceRevision",
-        Some(&input.expected_source_revision),
-    )?;
+    validate_source_revision("expectedSourceRevision", &input.expected_source_revision)?;
     serde_json::to_value(&input).map_err(|_| unusable_input())
 }
 
-/// Submits one guarded composable Export of the recipe's selected current
-/// Processing Step. The service captures the stored step's exact identity
-/// and either settles the immutable Processing Artifact in the same
-/// response, replays the committed receipt of one still-live duplicate, or
-/// records a durable, replayable, structured refusal. A settled artifact
-/// must repeat this Photo, this step, and a closed provenance record, and a
-/// replayed receipt must be the live work record of exactly this request;
-/// anything else stays an unknown outcome.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProcessingExportRetryInput {
+    request_id: String,
+}
+
+pub(super) fn parse_processing_export_retry(bytes: Vec<u8>) -> Result<Value, CommandFailure> {
+    let input: ProcessingExportRetryInput = serde_json::from_slice(&bytes).map_err(|_| {
+        CommandFailure::invalid(
+            "input",
+            "The input must contain exactly requestId for the new attempt.",
+        )
+    })?;
+    validate_request_identity(&input.request_id)?;
+    serde_json::to_value(input).map_err(|_| unusable_input())
+}
+
+pub(crate) async fn prepare_processing_export_retry(input: &str) -> Result<Value, CommandFailure> {
+    parse_processing_export_retry(read_input_bytes(input).await?)
+}
+
+pub(crate) async fn execute_processing_export_retry(
+    client: &ServiceClient,
+    admission: &AdmissionState,
+    photo_id: &str,
+    original_request_id: &str,
+    body: Value,
+) -> Result<Value, CommandFailure> {
+    let request_id = body["requestId"]
+        .as_str()
+        .ok_or_else(unusable_input)?
+        .to_owned();
+    let identity = MutationIdentity {
+        operation: PROCESSING_EXPORT_RETRY_OPERATION,
+        photo_ids: vec![photo_id.to_owned()],
+        album_id: None,
+        album_name: None,
+        mappings: Vec::new(),
+    };
+    let (status, bytes) = client
+        .mutation_statuses(
+            Method::POST,
+            &identity,
+            admission,
+            client.endpoint(&[
+                "api",
+                "photos",
+                photo_id,
+                "processing-exports",
+                original_request_id,
+                "retry",
+            ]),
+            Some(body),
+            &[StatusCode::CREATED, StatusCode::ACCEPTED],
+        )
+        .await?;
+    if status == StatusCode::ACCEPTED {
+        let pending: ProcessingExportPendingWire =
+            serde_json::from_slice(&bytes).map_err(|_| CommandFailure::unknown(&identity))?;
+        let step = pending.receipt["stepId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        return confirmed_processing_export_pending(
+            &identity,
+            photo_id,
+            &request_id,
+            &step,
+            pending,
+            &client.origin,
+        );
+    }
+    let result: ProcessingExportResultWire =
+        serde_json::from_slice(&bytes).map_err(|_| CommandFailure::unknown(&identity))?;
+    let step = result.artifact["stepId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    confirmed_processing_export(
+        &identity,
+        photo_id,
+        &request_id,
+        &step,
+        status,
+        result,
+        &client.origin,
+    )
+}
+
+pub(crate) async fn processing_export_list(
+    client: &ServiceClient,
+    photo_id: &str,
+) -> Result<Value, CommandFailure> {
+    let mut result: Value = client
+        .json(
+            PROCESSING_EXPORT_LIST_OPERATION,
+            Method::GET,
+            client.endpoint(&["api", "photos", photo_id, "processing-exports"]),
+            None,
+        )
+        .await?;
+    if !processing_export_list_valid(&result, photo_id) {
+        return Err(CommandFailure::transport(PROCESSING_EXPORT_LIST_OPERATION));
+    }
+    result["webUrl"] = Value::String(
+        web_url(&client.origin, &format!("/?photoId={photo_id}"))
+            .map_err(|()| CommandFailure::transport(PROCESSING_EXPORT_LIST_OPERATION))?,
+    );
+    Ok(result)
+}
+
+pub(super) fn processing_export_list_valid(result: &Value, photo_id: &str) -> bool {
+    let newest_first = |items: &[Value], key: &str| {
+        items.windows(2).all(|pair| {
+            pair[0][key]
+                .as_u64()
+                .zip(pair[1][key].as_u64())
+                .is_some_and(|(a, b)| a >= b)
+        })
+    };
+    result["photoId"] == json!(photo_id)
+        && result["exports"].as_array().is_some_and(|items| {
+            items.len() <= 64
+                && items
+                    .iter()
+                    .all(|work| processing_work_valid(work, photo_id, None))
+                && newest_first(items, "acceptedAt")
+        })
+        && result["artifacts"].as_array().is_some_and(|items| {
+            items.len() <= 64
+                && items
+                    .iter()
+                    .all(|artifact| processing_artifact_valid(artifact, photo_id))
+                && items.windows(2).all(|pair| {
+                    pair[0]["publishedAt"]
+                        .as_str()
+                        .zip(pair[1]["publishedAt"].as_str())
+                        .is_some_and(|(a, b)| a >= b)
+                })
+        })
+        && result["historicalExports"].as_array().is_some_and(|items| {
+            items.len() <= 64
+                && items
+                    .iter()
+                    .all(|record| crate::historical_export_download::record_valid(record, photo_id))
+                && items.windows(2).all(|pair| {
+                    pair[0]["createdAt"]
+                        .as_str()
+                        .zip(pair[1]["createdAt"].as_str())
+                        .is_some_and(|(a, b)| a >= b)
+                })
+        })
+}
+
+/// Submits the selected step once with caller-observed guards. A new or
+/// replayed admission returns its durable receipt promptly; a terminal replay
+/// returns its retained artifact or refusal. Unusable post-admission responses
+/// remain unknown outcomes.
 pub(crate) async fn execute_processing_export(
     client: &ServiceClient,
     admission: &AdmissionState,
@@ -121,19 +268,16 @@ pub(crate) async fn execute_processing_export(
     )
 }
 
-/// The replayed receipt of one still-live duplicate submission: the durable
-/// work record of the committed admission.
+/// The admission receipt of a new or replayed Processing Export.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ProcessingExportPendingWire {
     pub(super) receipt: Value,
-    pub(super) replayed: bool,
+    pub(super) outcome: String,
 }
 
-/// Validates one replayed live receipt against the submitted request. The
-/// receipt is the durable work record: it repeats this Photo and this
-/// request and is still in a live state, so the caller reconciles the same
-/// work through inspection instead of a second execution.
+/// Validates the receipt against the submitted identity. A service-owned
+/// attempt may settle before its acceptance response is read.
 pub(super) fn confirmed_processing_export_pending(
     identity: &MutationIdentity,
     photo_id: &str,
@@ -142,13 +286,9 @@ pub(super) fn confirmed_processing_export_pending(
     receipt: ProcessingExportPendingWire,
     origin: &Url,
 ) -> Result<Value, CommandFailure> {
-    if !receipt.replayed
+    if !matches!(receipt.outcome.as_str(), "accepted" | "replayed")
         || !processing_work_valid(&receipt.receipt, photo_id, Some(request_id))
         || receipt.receipt["stepId"] != json!(step_id)
-        || !matches!(
-            receipt.receipt["state"].as_str(),
-            Some("accepted" | "executing")
-        )
     {
         return Err(CommandFailure::unknown(identity));
     }
@@ -158,9 +298,9 @@ pub(super) fn confirmed_processing_export_pending(
         "photoId": photo_id,
         "requestId": request_id,
         "stepId": step_id,
-        "outcome": "pending",
+        "outcome": receipt.outcome,
         "state": receipt.receipt["state"],
-        "replayed": true,
+        "receipt": receipt.receipt,
         "webUrl": web_url,
     }))
 }
@@ -361,7 +501,7 @@ pub(crate) fn processing_work_valid(
         && bounded("stepId", MAXIMUM_STEP_ID_BYTES)
         && bounded("module", MAXIMUM_MODULE_ID_BYTES)
         && bounded("recipeRevision", MAXIMUM_REVISION_BYTES)
-        && bounded("sourceRevision", MAXIMUM_REVISION_BYTES)
+        && bounded("sourceRevision", crate::MAXIMUM_SOURCE_REVISION_BYTES)
         && bounded("adapterSchemaVersion", MAXIMUM_CONTRACT_NAME_BYTES)
         && parameters.is_some_and(|parameters| {
             parameters
@@ -370,7 +510,22 @@ pub(crate) fn processing_work_valid(
                 .is_some_and(|value| !value.is_empty())
                 && parameters.get("tree").is_some_and(Value::is_object)
         })
-        && record.get("input").is_some_and(Value::is_object)
+        && record
+            .get("input")
+            .and_then(|binding| serde_json::from_value::<ProcessingInputWire>(binding.clone()).ok())
+            .is_some_and(|binding| match binding {
+                ProcessingInputWire::Original {
+                    photo_id,
+                    source_revision,
+                } => {
+                    !photo_id.is_empty()
+                        && photo_id.len() <= MAXIMUM_PHOTO_ID_BYTES
+                        && bounded_source_revision(&source_revision)
+                }
+                ProcessingInputWire::Artifact { artifact_id, .. } => {
+                    !artifact_id.is_empty() && artifact_id.len() <= MAXIMUM_ARTIFACT_ID_BYTES
+                }
+            })
         && bounded("bundleId", MAXIMUM_REVISION_BYTES)
         && matches!(
             state,
@@ -436,7 +591,8 @@ pub(super) fn processing_artifact_valid(artifact: &Value, photo_id: &str) -> boo
                     .is_some_and(Value::is_string)
                     && binding
                         .and_then(|binding| binding.get("sourceRevision"))
-                        .is_some_and(Value::is_string)
+                        .and_then(Value::as_str)
+                        .is_some_and(bounded_source_revision)
             }
             Some("artifact") => {
                 binding
@@ -477,6 +633,22 @@ pub(super) fn processing_artifact_valid(artifact: &Value, photo_id: &str) -> boo
             .is_some_and(|length| length > 0)
         && artifact.get("outputContract").is_some_and(contract_shape)
         && bounded_name(&artifact["bundleId"], MAXIMUM_REVISION_BYTES)
+        && artifact
+            .get("filename")
+            .and_then(Value::as_str)
+            .is_some_and(|name| {
+                !name.is_empty()
+                    && !name.contains(['/', '\\'])
+                    && !name.chars().any(char::is_control)
+            })
+        && artifact
+            .get("publishedAt")
+            .and_then(Value::as_str)
+            .is_some_and(crate::valid_utc_time)
+        && artifact
+            .get("expiresAt")
+            .and_then(Value::as_str)
+            .is_some_and(crate::valid_utc_time)
         && artifact
             .get("sha256")
             .and_then(Value::as_str)

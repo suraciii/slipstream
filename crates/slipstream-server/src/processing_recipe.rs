@@ -1,8 +1,7 @@
 //! Caller-controlled composable Edit Recipe HTTP surface (Issue #496).
 //!
-//! The legacy `/edit-recipe` route remains the compatibility surface for the
-//! original two-control editor. This route exposes complete zero-or-more
-//! Processing Steps without a planner or implicit conversion.
+//! Stores complete caller-owned Processing Steps independently of execution
+//! availability, with explicit source rebinding and no implicit conversion.
 
 use axum::{
     Json,
@@ -15,7 +14,8 @@ use serde_json::{Value, json};
 use slipstream_core::{
     ComposableEditRecipe, ComposableEditRecipeWriteOutcome, LibraryError, ProcessingArtifactId,
     ProcessingGeometry, ProcessingImageContract, ProcessingInput, ProcessingModuleId,
-    ProcessingParameterSnapshot, ProcessingStep, ProcessingStepId, SaveComposableEditRecipe,
+    ProcessingParameterSnapshot, ProcessingStep, ProcessingStepId, RebindComposableEditRecipe,
+    SaveComposableEditRecipe,
 };
 use slipstream_processing::modules::{
     ImageContract, ModuleAvailability, ModuleRegistry, Parameters,
@@ -31,6 +31,14 @@ pub(crate) struct SaveBody {
     expected_source_revision: String,
     current_step_id: Option<String>,
     steps: Vec<StepBody>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RebindBody {
+    request_id: String,
+    expected_recipe_revision: String,
+    new_source_revision: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +95,8 @@ struct GeometryBody {
 struct RecipeResponse {
     photo_id: String,
     source_revision: String,
+    current_source_revision: Option<String>,
+    source_available: bool,
     recipe: Option<Value>,
 }
 
@@ -212,10 +222,10 @@ async fn validate_step_admission(
     state: &HttpState,
     recipe: &ComposableEditRecipe,
 ) -> Result<(), AdmissionError> {
-    let Some((photo, edit)) = state
+    let Some(read) = state
         .application
         .library
-        .edit_recipe_surface(&recipe.photo_id)
+        .composable_edit_recipe_read(&recipe.photo_id)
         .await
         .map_err(|error| AdmissionError::invalid(error.to_string()))?
     else {
@@ -223,7 +233,7 @@ async fn validate_step_admission(
             "The Photo is not part of the persisted Library",
         ));
     };
-    let current_source_revision = edit.current_source_revision.as_deref();
+    let current_source_revision = read.current_source_revision.as_deref();
     let requires_original = recipe
         .steps
         .iter()
@@ -250,14 +260,14 @@ async fn validate_step_admission(
             tree: step.parameters.tree.clone(),
         };
         registry
-            .validate_parameters(&parameters)
+            .validate_saved_parameters(&parameters)
             .map_err(|error| AdmissionError::invalid(error.message))?;
         match &step.input {
             ProcessingInput::Original {
                 photo_id,
                 source_revision,
             } => {
-                if photo_id != &photo.id
+                if photo_id != &recipe.photo_id
                     || source_revision != &recipe.source_revision
                     || current_source_revision != Some(recipe.source_revision.as_str())
                 {
@@ -345,11 +355,34 @@ fn contract_json(contract: &ProcessingImageContract) -> Value {
 }
 
 pub(crate) fn recipe_json(recipe: &ComposableEditRecipe) -> Value {
+    let registry = ModuleRegistry::new(ModuleAvailability::ready(), ModuleAvailability::ready());
+    let execution_refusals: Vec<Value> = recipe
+        .steps
+        .iter()
+        .filter_map(|step| {
+            let parameters = Parameters {
+                module: step.module.as_str().to_owned(),
+                version: step.parameters.schema_version.clone(),
+                tree: step.parameters.tree.clone(),
+            };
+            registry
+                .validate_parameters(&parameters)
+                .err()
+                .map(|refusal| {
+                    json!({
+                        "stepId": step.step_id.as_str(),
+                        "code": refusal.code,
+                        "message": refusal.message,
+                    })
+                })
+        })
+        .collect();
     json!({
         "photoId": recipe.photo_id,
         "revision": recipe.revision,
         "sourceRevision": recipe.source_revision,
         "currentStepId": recipe.current_step_id.as_ref().map(ProcessingStepId::as_str),
+        "executionRefusals": execution_refusals,
         "steps": recipe.steps.iter().map(|step| json!({
             "stepId": step.step_id.as_str(),
             "module": step.module.as_str(),
@@ -440,6 +473,11 @@ fn outcome_response(outcome: ComposableEditRecipeWriteOutcome) -> Response {
             "request_conflict",
             "The request identity was already used with a different payload",
         ),
+        ComposableEditRecipeWriteOutcome::ReceiptExpired => error(
+            StatusCode::CONFLICT,
+            "receipt_expired",
+            "The saved request identity has passed its reconciliation period",
+        ),
     }
 }
 
@@ -447,7 +485,12 @@ pub(crate) async fn get_composable_edit_recipe(
     State(state): State<HttpState>,
     Path(photo_id): Path<String>,
 ) -> Response {
-    let Some(edit) = (match state.application.library.edit_recipe(&photo_id).await {
+    let Some(read) = (match state
+        .application
+        .library
+        .composable_edit_recipe_read(&photo_id)
+        .await
+    {
         Ok(value) => value,
         Err(library_error) => {
             return error(
@@ -463,29 +506,12 @@ pub(crate) async fn get_composable_edit_recipe(
             "The Photo is not part of the persisted Library",
         );
     };
-    let recipe = match state
-        .application
-        .library
-        .composable_edit_recipe(&photo_id)
-        .await
-    {
-        Ok(value) => value,
-        Err(library_error) => {
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "storage",
-                library_error.to_string(),
-            );
-        }
-    };
     Json(RecipeResponse {
         photo_id,
-        // The response's source guard describes the current Library fact. A
-        // saved recipe can remain readable after its bound source is stale;
-        // returning the stale recipe binding here would let clients submit a
-        // request with an obsolete guard.
-        source_revision: edit.current_source_revision.unwrap_or_default(),
-        recipe: recipe.as_ref().map(recipe_json),
+        source_revision: read.current_source_revision.clone().unwrap_or_default(),
+        current_source_revision: read.current_source_revision,
+        source_available: read.source_available,
+        recipe: read.recipe.as_ref().map(recipe_json),
     })
     .into_response()
 }
@@ -504,23 +530,6 @@ pub(crate) async fn post_composable_edit_recipe(
             return error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_recipe", message);
         }
     };
-    let replay = match state
-        .application
-        .library
-        .composable_edit_recipe(&photo_id)
-        .await
-    {
-        Ok(Some(stored)) => {
-            expected_recipe_revision.as_deref() == Some(stored.revision.as_str())
-                && stored.source_revision == recipe.source_revision
-                && stored.current_step_id == recipe.current_step_id
-                && stored.steps == recipe.steps
-        }
-        Ok(None) | Err(_) => false,
-    };
-    if !replay && let Err(admission) = validate_step_admission(&state, &recipe).await {
-        return error(admission.status, admission.code, admission.message);
-    }
     let mutation = SaveComposableEditRecipe {
         photo_id,
         request_id,
@@ -528,6 +537,25 @@ pub(crate) async fn post_composable_edit_recipe(
         expected_source_revision,
         recipe,
     };
+    match state
+        .application
+        .library
+        .replay_composable_edit_recipe(mutation.clone())
+        .await
+    {
+        Ok(Some(outcome)) => return outcome_response(outcome),
+        Ok(None) => {}
+        Err(library_error) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "storage",
+                library_error.to_string(),
+            );
+        }
+    }
+    if let Err(admission) = validate_step_admission(&state, &mutation.recipe).await {
+        return error(admission.status, admission.code, admission.message);
+    }
     match state
         .application
         .library
@@ -543,6 +571,32 @@ pub(crate) async fn post_composable_edit_recipe(
         Err(library_error) => error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "processing_recipe",
+            library_error.to_string(),
+        ),
+    }
+}
+
+pub(crate) async fn post_composable_edit_recipe_rebind(
+    State(state): State<HttpState>,
+    Path(photo_id): Path<String>,
+    Json(body): Json<RebindBody>,
+) -> Response {
+    let mutation = RebindComposableEditRecipe {
+        photo_id,
+        request_id: body.request_id,
+        expected_recipe_revision: body.expected_recipe_revision,
+        new_source_revision: body.new_source_revision,
+    };
+    match state
+        .application
+        .library
+        .rebind_composable_edit_recipe(mutation)
+        .await
+    {
+        Ok(outcome) => outcome_response(outcome),
+        Err(library_error) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "storage",
             library_error.to_string(),
         ),
     }

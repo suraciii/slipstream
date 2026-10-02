@@ -31,7 +31,6 @@ async fn healthz_is_exact_json_and_head_api_has_no_body() {
             application: Arc::clone(&application),
             web_root: Arc::new(open_web_root(missing_web)),
             processing: None,
-            edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production(None)),
         });
     let response = tower::ServiceExt::oneshot(
         missing_router,

@@ -1,913 +1,481 @@
-import { test, expect, type Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
-  fixtureFetch,
-  startBrowserServer,
-  type BrowserServer,
-} from "./browser-server.js";
-
-let base: string;
-let running: BrowserServer;
-
-test.beforeEach(async ({ context }) => {
-  base = await mkdtemp(join(tmpdir(), "slipstream-export-browser-"));
-  const root = join(base, "originals");
-  await mkdir(root);
-  for (const name of ["001.jpg", "002.jpg"])
-    await copyFile("apps/web/test-fixtures/review.jpg", join(root, name));
-  running = await startBrowserServer({ base, root });
-  const login = await context.request.post(
-    `${running.url}/api/access/session`,
-    {
-      headers: { Origin: running.url },
-      data: { token: running.token },
-    },
-  );
-  expect(login.status()).toBe(204);
-  await expect
-    .poll(
-      async () =>
-        (
-          (await (await fixtureFetch(`${running.url}/api/status`)).json()) as {
-            state: string;
-          }
-        ).state,
-    )
-    .toBe("idle");
-});
-
-test.afterEach(async () => {
-  await running?.close();
-  if (base) await rm(base, { recursive: true, force: true });
-});
-
-async function openEdit(page: Page) {
-  await page.locator("[data-dock-more]").click();
-  await expect(page.locator("[data-photo-tools]")).toBeVisible();
-  await page.locator("[data-photo-tools-entry='edit']").click();
-  await expect(page.locator("[data-photo-tools-view='edit']")).toBeVisible();
-}
-
-async function navigate(page: Page, direction: "Next" | "Previous") {
-  await page.locator("[data-photo-tools-close]").click();
-  await page.getByRole("button", { name: direction, exact: true }).click();
-  await openEdit(page);
-}
+  processingBrowserTest as test,
+  processingRequestIdFixture,
+  sourceRevision,
+  moduleName,
+  outputContract,
+  mockEditor,
+  artifact,
+  work,
+  parameters,
+  json,
+  routePhoto,
+  submit,
+  exportRow,
+  artifactRow,
+  openFirst,
+  openEdit,
+  navigate,
+  setExposure,
+} from "./browser-test-support/processing-fixtures.js";
 
 for (const lostResponse of [
   "connection",
   "server-unknown",
   "server-error",
 ] as const) {
-  test(`an uncertain Export (${lostResponse}) keeps its Photo's identity without blocking another Photo`, async ({
+  test(`an uncertain Export (${lostResponse}) replays its exact captured request after navigating`, async ({
     page,
+    running,
   }) => {
-    const browse = await fixtureFetch(`${running.url}/api/browse`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Origin: running.url },
-      body: JSON.stringify({ source: "library" }),
-    });
-    const opened = (await browse.json()) as { token: string };
-    const listing = await fixtureFetch(
-      `${running.url}/api/browse/${opened.token}?start=0&limit=60`,
-    );
-    const { photos } = (await listing.json()) as {
-      photos: Array<{ id: string }>;
-    };
-    const [first, second] = photos.map((photo) => photo.id);
-    if (!first || !second) throw new Error("Expected two Photos");
-    await page.route("**/api/processing/capability", (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "ready",
-          stages: { develop: "ready", film: "unavailable" },
-          profiles: [],
-        }),
-      }),
-    );
-    const savedExposure = new Map([
-      [first, 0],
-      [second, 0],
-    ]);
-    await page.route("**/api/photos/*/edit-recipe", async (route) => {
-      const photoId = new URL(route.request().url()).pathname.split("/")[3];
-      if (!photoId || !savedExposure.has(photoId))
-        throw new Error("Unexpected Photo");
-      if (route.request().method() === "POST") {
-        const request = JSON.parse(route.request().postData() ?? "{}") as {
-          settings: { exposureEv: number };
-        };
-        savedExposure.set(photoId, request.settings.exposureEv);
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            outcome: "saved",
-            recipeVersion: "recipe-1",
-            sourceRevision: "source-1",
-          }),
-        });
-        return;
-      }
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          sourceSupport: "supported",
-          supportReason: null,
-          sourceRevision: "source-1",
-          recipe: {
-            recipeVersion: "recipe-1",
-            exposureEv: savedExposure.get(photoId),
-            whiteBalance: { mode: "as-shot" },
-          },
-          processingAvailable: true,
-          controls: {
-            exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
-            whiteBalanceModes: ["as-shot"],
-          },
-        }),
-      });
-    });
-    const submissions = new Map<
-      string,
-      Array<{
+    const state = await mockEditor(page, running);
+    const first = state.photos[0]!;
+    const second = state.photos[1]!;
+    const requests = new Map<string, string[]>();
+    await page.route("**/api/photos/*/processing-exports", async (route) => {
+      if (route.request().method() === "GET") return route.fallback();
+      const photoId = routePhoto(route);
+      const body = route.request().postData()!;
+      const captured = requests.get(photoId) ?? [];
+      captured.push(body);
+      requests.set(photoId, captured);
+      const request = JSON.parse(body) as {
         requestId: string;
-        target: string;
-        expectedRecipeVersion: string;
-        expectedSourceRevision: string;
-      }>
-    >();
-    await page.route("**/api/photos/*/exports", async (route) => {
-      const photoId = new URL(route.request().url()).pathname.split("/")[3];
-      if (!photoId) throw new Error("Export has no Photo");
-      if (route.request().method() === "GET") {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({ exports: [] }),
-        });
-        return;
-      }
-      const body = JSON.parse(route.request().postData() ?? "{}") as {
-        requestId: string;
-        target: string;
-        expectedRecipeVersion: string;
+        stepId: string;
+        expectedRecipeRevision: string;
         expectedSourceRevision: string;
       };
-      const requests = submissions.get(photoId) ?? [];
-      requests.push(body);
-      submissions.set(photoId, requests);
-      if (photoId === first && requests.length === 1) {
-        if (lostResponse === "connection") {
-          await route.abort("connectionreset");
-        } else {
-          await route.fulfill({
-            status: 500,
-            contentType: "application/json",
-            body: JSON.stringify({
-              error: {
-                code:
-                  lostResponse === "server-unknown"
-                    ? "outcome_unknown"
-                    : "internal_error",
-              },
-            }),
-          });
-        }
-        return;
+      if (photoId === first && captured.length === 1) {
+        if (lostResponse === "connection")
+          return route.abort("connectionreset");
+        return json(
+          route,
+          {
+            error: {
+              code:
+                lostResponse === "server-unknown"
+                  ? "outcome_unknown"
+                  : "internal_error",
+            },
+          },
+          500,
+        );
       }
-      await route.fulfill({
-        status: requests.length === 1 ? 201 : 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          exportId: `export-${photoId}`,
-          target: body.target,
-          recipeVersion: body.expectedRecipeVersion,
-          sourceRevision: body.expectedSourceRevision,
-          state: "succeeded",
-        }),
+      if (photoId === first) {
+        const retained = artifact(photoId, Buffer.from("published result"));
+        state.artifacts.set(photoId, [retained]);
+        return json(route, { artifact: retained, replayed: true }, 201);
+      }
+      const receipt = work(photoId, request.requestId, "accepted", {
+        recipeRevision: request.expectedRecipeRevision,
+        sourceRevision: request.expectedSourceRevision,
+        stepId: request.stepId,
+        parameters: state.recipes.get(photoId)!.steps[0]!.parameters,
       });
+      state.exports.set(photoId, [receipt]);
+      return json(route, { outcome: "accepted", receipt }, 202);
     });
-    await page.route("**/api/exports/*", (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          exportId: new URL(route.request().url()).pathname.split("/").at(-1),
-          target: "development-tiff",
-          state: "succeeded",
-          artifact: null,
-        }),
-      }),
-    );
-
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto(running.url);
-    await expect(page.locator("[data-grid-status]")).toContainText(
-      "Ready · 2 Photos",
-    );
-    await page.locator('[data-photo-index="0"]').click();
-    await expect(page.locator("[data-review]")).toBeVisible();
-    await openEdit(page);
-    const card = page.locator('[data-editor-output="development-tiff"]');
-    const submit = card.locator('[data-output-action="submit"]');
-    await expect(submit).toBeEnabled();
-    await submit.click();
-    const reconcile = card.locator('[data-output-action="retry"]');
-    await expect(reconcile).toBeVisible();
-    await expect(submit).toBeDisabled();
+    await openFirst(page, running.url);
+    await expect(submit(page)).toBeEnabled();
+    await submit(page).click();
+    await expect(
+      page.locator("[data-photo-editor-export-retry]"),
+    ).toBeVisible();
+    await expect(submit(page)).toBeDisabled();
     await navigate(page, "Next");
-    await expect(page.getByText("2 / 2")).toBeVisible();
-    const exposure = page.locator("[data-photo-editor-exposure]");
-    await expect(exposure).toBeEnabled();
-    await exposure.evaluate((element: HTMLInputElement) => {
-      element.value = "0.5";
-      element.dispatchEvent(new Event("input", { bubbles: true }));
-      element.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-    await expect.poll(() => savedExposure.get(second)).toBe(0.5);
-    await expect(submit).toBeEnabled();
-    await submit.click();
-    await expect(card.locator('[data-output-action="download"]')).toBeHidden();
-    await expect(submit).toBeEnabled();
+    await expect(
+      page.getByLabel("Exposure (EV)", { exact: true }),
+    ).toBeEnabled();
+    await setExposure(page, "0.5");
+    await expect
+      .poll(() => state.recipes.get(second)?.steps[0]?.parameters)
+      .toEqual(parameters(0.5));
+    await expect(submit(page)).toBeEnabled();
+    await submit(page).click();
+    await expect(
+      exportRow(
+        page,
+        processingRequestIdFixture(requests.get(second)![0]!),
+      ).getByRole("button", { name: "Cancel", exact: true }),
+    ).toBeVisible();
     await navigate(page, "Previous");
-    await expect(submit).toBeDisabled();
-    await expect(reconcile).toBeVisible();
-    await reconcile.click();
-    await expect(submit).toBeEnabled();
-    await expect(reconcile).toBeHidden();
-    expect(submissions.get(first)).toHaveLength(2);
-    expect(submissions.get(first)?.[1]).toEqual(submissions.get(first)?.[0]);
-    expect(submissions.get(second)).toHaveLength(1);
-    expect(submissions.get(second)?.[0]?.requestId).not.toBe(
-      submissions.get(first)?.[0]?.requestId,
+    await expect(submit(page)).toBeDisabled();
+    await page.locator("[data-photo-editor-export-retry]").click();
+    await expect(
+      artifactRow(page, "a".repeat(64)).getByRole("button", {
+        name: "Download",
+        exact: true,
+      }),
+    ).toBeEnabled();
+    await expect(submit(page)).toBeEnabled();
+    expect(requests.get(first)).toHaveLength(2);
+    expect(requests.get(first)![1]).toBe(requests.get(first)![0]);
+    expect(JSON.parse(requests.get(first)![0]!)).toMatchObject({
+      stepId: "step-1",
+      expectedRecipeRevision: "recipe-1",
+      expectedSourceRevision: sourceRevision,
+    });
+    expect(processingRequestIdFixture(requests.get(second)![0]!)).not.toBe(
+      processingRequestIdFixture(requests.get(first)![0]!),
     );
   });
 }
 
-test("a refused edit exposes its conflict and blocks image export", async ({
+test("a refused recipe save blocks export until the saved recipe is chosen", async ({
   page,
+  running,
 }) => {
-  await page.route("**/api/processing/capability", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        state: "ready",
-        stages: { develop: "ready", film: "unavailable" },
-        profiles: [],
-      }),
-    }),
-  );
-  await page.route("**/api/photos/*/edit-recipe", (route) => {
-    if (route.request().method() === "POST")
-      return route.fulfill({
-        status: 409,
-        contentType: "application/json",
-        body: JSON.stringify({
+  const state = await mockEditor(page, running, {
+    save: async (route) => {
+      await json(
+        route,
+        {
           error: {
             code: "recipe_conflict",
             message: "The saved edit changed.",
           },
-        }),
-      });
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        sourceSupport: "supported",
-        supportReason: null,
-        sourceRevision: "source-1",
-        recipe: {
-          recipeVersion: "recipe-1",
-          exposureEv: 0,
-          whiteBalance: { mode: "as-shot" },
         },
-        processingAvailable: true,
-        controls: {
-          exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
-          whiteBalanceModes: ["as-shot"],
-        },
-      }),
-    });
+        409,
+      );
+    },
   });
-
-  await page.goto(running.url);
-  await expect(page.locator("[data-grid-status]")).toContainText(
-    "Ready · 2 Photos",
-  );
-  await page.locator('[data-photo-index="0"]').click();
-  await openEdit(page);
-  const exposure = page.locator("[data-photo-editor-exposure]");
-  await expect(exposure).toBeEnabled();
-  await exposure.evaluate((element: HTMLInputElement) => {
-    element.value = "0.5";
-    element.dispatchEvent(new Event("input", { bubbles: true }));
-    element.dispatchEvent(new Event("change", { bubbles: true }));
-  });
+  await openFirst(page, running.url);
+  await setExposure(page, "0.5");
   await expect(page.locator("[data-photo-editor-conflict]")).toBeVisible();
-  await expect(
-    page.locator(
-      '[data-editor-output="development-tiff"] [data-output-action="submit"]',
-    ),
-  ).toBeDisabled();
+  await expect(submit(page)).toBeDisabled();
+  await page.locator("[data-photo-editor-use-saved]").click();
+  await expect(page.getByLabel("Exposure (EV)", { exact: true })).toHaveValue(
+    "0",
+  );
+  await expect(submit(page)).toBeEnabled();
+  expect(state.saves).toHaveLength(1);
 });
 
-test("an uncertain edit blocks image export until reconciled", async ({
-  page,
-}) => {
-  await page.route("**/api/processing/capability", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        state: "ready",
-        stages: { develop: "ready", film: "unavailable" },
-        profiles: [],
-      }),
-    }),
-  );
-  await page.route("**/api/photos/*/edit-recipe", (route) => {
-    if (route.request().method() === "POST")
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: "{",
-      });
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        sourceSupport: "supported",
-        supportReason: null,
-        sourceRevision: "source-1",
-        recipe: {
-          recipeVersion: "recipe-1",
-          exposureEv: 0,
-          whiteBalance: { mode: "as-shot" },
-        },
-        processingAvailable: true,
-        controls: {
-          exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
-          whiteBalanceModes: ["as-shot"],
-        },
-      }),
+for (const response of ["connection", "unreadable"] as const) {
+  test(`an uncertain recipe save (${response}) blocks export and reconciles its exact body`, async ({
+    page,
+    running,
+  }) => {
+    const state = await mockEditor(page, running, {
+      save: async (route, fixture, request) => {
+        if (fixture.saves.length === 1) {
+          if (response === "connection") return route.abort("failed");
+          return route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: "{",
+          });
+        }
+        const photoId = routePhoto(route);
+        const saved = {
+          ...fixture.recipes.get(photoId)!,
+          revision: "recipe-2",
+          currentStepId: request.currentStepId,
+          steps: request.steps,
+        };
+        fixture.recipes.set(photoId, saved);
+        await json(route, {
+          outcome: "replayed",
+          sourceRevision,
+          recipeVersion: saved.revision,
+          recipe: saved,
+        });
+      },
     });
+    await openFirst(page, running.url);
+    await setExposure(page, "0.5");
+    await expect.poll(() => state.saves.length).toBe(1);
+    await expect(submit(page)).toBeDisabled();
+    await expect(
+      page.getByLabel("Exposure (EV)", { exact: true }),
+    ).toBeDisabled();
+    await page.locator("[data-photo-editor-refresh]").click();
+    await expect(submit(page)).toBeEnabled();
+    await expect(page.getByLabel("Exposure (EV)", { exact: true })).toHaveValue(
+      "0.5",
+    );
+    expect(state.saves).toHaveLength(2);
+    expect(state.saves[1]).toEqual(state.saves[0]);
   });
+}
 
-  await page.goto(running.url);
-  await expect(page.locator("[data-grid-status]")).toContainText(
-    "Ready · 2 Photos",
-  );
-  await page.locator('[data-photo-index="0"]').click();
-  await openEdit(page);
-  const exposure = page.locator("[data-photo-editor-exposure]");
-  await expect(exposure).toBeEnabled();
-  await exposure.evaluate((element: HTMLInputElement) => {
-    element.value = "0.5";
-    element.dispatchEvent(new Event("input", { bubbles: true }));
-    element.dispatchEvent(new Event("change", { bubbles: true }));
-  });
-  await expect(
-    page.locator(
-      '[data-editor-output="development-tiff"] [data-output-action="submit"]',
-    ),
-  ).toBeDisabled();
+test("an unavailable module preserves editable intent but refuses new export", async ({
+  page,
+  running,
+}) => {
+  const state = await mockEditor(page, running, { available: false });
+  await openFirst(page, running.url);
+  await expect(page.getByLabel("Exposure (EV)", { exact: true })).toBeEnabled();
+  await setExposure(page, "0.5");
+  await expect
+    .poll(() => state.recipes.get(state.photos[0]!)?.steps[0]?.parameters)
+    .toEqual(parameters(0.5));
+  await expect(submit(page)).toBeDisabled();
 });
 
-test("a transport-lost edit offers a retry instead of remaining on Saving", async ({
+test("a recipe bound to an earlier Original retains settings and blocks export", async ({
   page,
+  running,
 }) => {
-  let writes = 0;
-  let savedExposure = 0;
-  let savedVersion = "recipe-1";
-  await page.route("**/api/processing/capability", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        state: "ready",
-        stages: { develop: "ready", film: "unavailable" },
-        profiles: [],
-      }),
+  await mockEditor(page, running, {
+    read: (photoId, saved) => ({
+      photoId,
+      sourceRevision,
+      currentSourceRevision: "replacement-source",
+      sourceAvailable: true,
+      recipe: saved,
     }),
+  });
+  await openFirst(page, running.url);
+  await expect(page.locator("[data-photo-editor-conflict]")).toBeVisible();
+  await expect(page.getByLabel("Exposure (EV)", { exact: true })).toHaveValue(
+    "0",
   );
-  await page.route("**/api/photos/*/edit-recipe", (route) => {
-    if (route.request().method() === "POST") {
-      writes += 1;
-      if (writes === 1) return route.abort("failed");
-      savedExposure = 0.5;
-      savedVersion = "recipe-2";
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          outcome: "saved",
-          recipeVersion: savedVersion,
-          sourceRevision: "source-1",
-        }),
-      });
-    }
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        sourceSupport: "supported",
-        supportReason: null,
-        sourceRevision: "source-1",
-        recipe: {
-          recipeVersion: savedVersion,
-          exposureEv: savedExposure,
-          whiteBalance: { mode: "as-shot" },
-        },
-        processingAvailable: true,
-        controls: {
-          exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
-          whiteBalanceModes: ["as-shot"],
-        },
-      }),
+  await expect(submit(page)).toBeDisabled();
+  await expect(page.locator("[data-photo-editor-rebind]")).toBeVisible();
+});
+
+test("an explicitly chosen retained artifact becomes the new selected step's export input", async ({
+  page,
+  running,
+}) => {
+  const state = await mockEditor(page, running);
+  const photoId = state.photos[0]!;
+  const retained = artifact(photoId, Buffer.from("retained input"));
+  state.artifacts.set(photoId, [retained]);
+  let submitted:
+    | {
+        requestId: string;
+        stepId: string;
+        expectedRecipeRevision: string;
+        expectedSourceRevision: string;
+      }
+    | undefined;
+  await page.route("**/api/photos/*/processing-exports", (route) => {
+    if (route.request().method() === "GET") return route.fallback();
+    submitted = JSON.parse(route.request().postData()!) as typeof submitted;
+    const saved = state.recipes.get(photoId)!;
+    const step = saved.steps.find((item) => item.stepId === submitted!.stepId)!;
+    const receipt = work(photoId, submitted!.requestId, "accepted", {
+      stepId: step.stepId,
+      recipeRevision: saved.revision,
+      input: step.input,
+      parameters: step.parameters,
     });
+    state.exports.set(photoId, [receipt]);
+    return json(route, { outcome: "accepted", receipt }, 202);
   });
-  await page.goto(running.url);
-  await expect(page.locator("[data-grid-status]")).toContainText(
-    "Ready · 2 Photos",
-  );
-  await page.locator('[data-photo-index="0"]').click();
-  await openEdit(page);
-  const exposure = page.locator("[data-photo-editor-exposure]");
-  await expect(exposure).toBeEnabled();
-  await exposure.evaluate((element: HTMLInputElement) => {
-    element.value = "0.5";
-    element.dispatchEvent(new Event("input", { bubbles: true }));
-    element.dispatchEvent(new Event("change", { bubbles: true }));
+  await openFirst(page, running.url);
+  await page
+    .locator("[data-photo-editor-new-step-input]")
+    .selectOption(`artifact:${retained.artifactId}`);
+  await page.locator("[data-photo-editor-composable-add]").click();
+  await expect.poll(() => state.recipes.get(photoId)?.steps.length).toBe(2);
+  const saved = state.recipes.get(photoId)!;
+  const selected = saved.steps.find(
+    (step) => step.stepId === saved.currentStepId,
+  )!;
+  expect(selected.input).toEqual({
+    kind: "artifact",
+    artifactId: retained.artifactId,
+    contract: outputContract,
   });
-  await expect.poll(() => writes).toBe(1);
-  await page.locator("[data-photo-editor-refresh]").click();
-  await expect.poll(() => writes).toBe(2);
-  await expect(page.locator("[data-photo-editor-exposure-value]")).toHaveText(
-    "0.500 EV",
-  );
-});
-
-test("a Photo without processing keeps its image actions disabled", async ({
-  page,
-}) => {
-  await page.route("**/api/processing/capability", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        state: "ready",
-        stages: { develop: "ready", film: "ready" },
-        profiles: [],
-      }),
-    }),
-  );
-  await page.route("**/api/photos/*/edit-recipe", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        sourceSupport: "supported",
-        supportReason: null,
-        sourceRevision: "source-1",
-        recipe: {
-          recipeVersion: "recipe-1",
-          exposureEv: 0,
-          whiteBalance: { mode: "as-shot" },
-        },
-        processingAvailable: false,
-        controls: {
-          exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
-          whiteBalanceModes: ["as-shot"],
-        },
-      }),
-    }),
-  );
-  await page.goto(running.url);
-  await expect(page.locator("[data-grid-status]")).toContainText(
-    "Ready · 2 Photos",
-  );
-  await page.locator('[data-photo-index="0"]').click();
-  await openEdit(page);
-  await expect(page.locator("[data-photo-editor-exposure]")).toBeEnabled();
-  await expect(page.locator('[data-photo-editor-stage="film"]')).toBeDisabled();
+  expect(selected.stepId).not.toBe("step-1");
+  await expect(submit(page)).toBeEnabled();
+  await submit(page).click();
+  await expect.poll(() => submitted?.stepId).toBe(selected.stepId);
+  expect(submitted).toMatchObject({
+    expectedRecipeRevision: saved.revision,
+    expectedSourceRevision: sourceRevision,
+  });
   await expect(
-    page.locator(
-      '[data-editor-output="development-tiff"] [data-output-action="submit"]',
-    ),
-  ).toBeDisabled();
+    exportRow(page, submitted!.requestId).getByRole("button", {
+      name: "Cancel",
+      exact: true,
+    }),
+  ).toBeEnabled();
 });
 
-test("Original reference ignores an earlier edit preview response", async ({
+async function png(page: Page): Promise<Buffer> {
+  return Buffer.from(
+    await page.evaluate(async () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 16;
+      canvas.height = 12;
+      const context = canvas.getContext("2d")!;
+      context.fillStyle = "#607080";
+      context.fillRect(0, 0, 16, 12);
+      const blob = await new Promise<Blob>((resolve) =>
+        canvas.toBlob((value) => resolve(value!), "image/png"),
+      );
+      return Array.from(new Uint8Array(await blob.arrayBuffer()));
+    }),
+  );
+}
+
+function previewHeaders(
+  photoId: string,
+  bytes: Buffer,
+): Record<string, string> {
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  return Object.fromEntries(
+    Object.entries({
+      "photo-id": photoId,
+      "step-id": "step-1",
+      "source-revision": Buffer.from(sourceRevision).toString("hex"),
+      "recipe-revision": "recipe-1",
+      sha256: digest,
+      width: "16",
+      height: "12",
+      geometry: "16",
+      "bundle-id": "fixture-bundle",
+      module: moduleName,
+      "adapter-schema-version": "v1",
+      "parameter-digest": digest,
+      "output-contract": digest,
+      "display-conversion": "srgb-v1",
+      identity: digest,
+      comparison: "current",
+      "input-sha256": "b".repeat(64),
+      "input-byte-length": "100",
+    }).map(([key, value]) => [`slipstream-processing-preview-${key}`, value]),
+  );
+}
+
+test("Original reference ignores a late selected-step preview", async ({
   page,
+  running,
 }) => {
-  let releasePreview: (() => void) | undefined;
-  const heldPreview = new Promise<void>((resolve) => {
-    releasePreview = resolve;
+  const state = await mockEditor(page, running);
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
   });
-  await page.route("**/api/processing/capability", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        state: "ready",
-        stages: { develop: "ready", film: "unavailable" },
-        profiles: [],
-      }),
-    }),
-  );
-  await page.route("**/api/photos/*/edit-recipe", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        sourceSupport: "supported",
-        supportReason: null,
-        sourceRevision: "source-1",
-        recipe: {
-          recipeVersion: "recipe-1",
-          exposureEv: 0,
-          whiteBalance: { mode: "as-shot" },
-        },
-        processingAvailable: true,
-        controls: {
-          exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
-          whiteBalanceModes: ["as-shot"],
-        },
-      }),
-    }),
-  );
-  const previewRequest = page.waitForRequest((request) =>
-    new URL(request.url()).pathname.includes("/edit-preview/"),
-  );
-  let previewSettled: (() => void) | undefined;
+  let settle!: () => void;
   const settled = new Promise<void>((resolve) => {
-    previewSettled = resolve;
+    settle = resolve;
   });
-  await page.route("**/api/photos/*/edit-preview/**", async (route) => {
-    await heldPreview;
-    const photoId = new URL(route.request().url()).pathname.split("/")[3];
-    const image = await readFile("apps/web/test-fixtures/review.jpg");
+  await page.goto(running.url);
+  await expect(page.locator("[data-grid-status]")).toContainText(
+    "Ready · 2 Photos",
+  );
+  const bytes = await png(page);
+  await page.route("**/api/photos/*/processing-preview/**", async (route) => {
+    await held;
     try {
       await route.fulfill({
         status: 200,
-        contentType: "image/jpeg",
-        headers: {
-          "slipstream-edit-preview-photo-id": photoId ?? "",
-          "slipstream-edit-preview-stage": "develop",
-          "slipstream-edit-preview-source-revision":
-            Buffer.from("source-1").toString("hex"),
-          "slipstream-edit-preview-recipe-version": "recipe-1",
-          "slipstream-edit-preview-width": "16",
-          "slipstream-edit-preview-height": "12",
-          "slipstream-edit-preview-display-transform": "display-transform-v1",
-          "slipstream-edit-preview-sha256": createHash("sha256")
-            .update(image)
-            .digest("hex"),
-        },
-        body: image,
+        contentType: "image/png",
+        headers: previewHeaders(state.photos[0]!, bytes),
+        body: bytes,
       });
     } catch {
-      // A cancelled fetch may prevent delivery after the stage changes.
+      // Switching to the Original may abort the selected-step fetch.
     } finally {
-      previewSettled?.();
+      settle();
     }
   });
+  const requested = page.waitForRequest((request) =>
+    new URL(request.url()).pathname.includes("/processing-preview/"),
+  );
   try {
-    await page.goto(running.url);
-    await expect(page.locator("[data-grid-status]")).toContainText(
-      "Ready · 2 Photos",
-    );
     await page.locator('[data-photo-index="0"]').click();
     await openEdit(page);
-    await previewRequest;
+    await requested;
     await expect(page.locator("[data-stage] img")).toBeVisible();
-    const cameraPreview = await page
+    const originalSrc = await page
       .locator("[data-stage] img")
       .getAttribute("src");
-    expect(cameraPreview).toBeTruthy();
-    const original = page.locator('[data-photo-editor-stage="camera"]');
-    await original.click();
-    await expect(original).toHaveAttribute("aria-pressed", "true");
-    await expect(page.locator("[data-stage] img")).toHaveAttribute(
-      "src",
-      cameraPreview!,
-    );
-    releasePreview?.();
+    expect(originalSrc).toBeTruthy();
+    await page.locator("[data-photo-editor-camera-reference]").click();
+    await expect(
+      page.locator("[data-photo-editor-camera-reference]"),
+    ).toHaveAttribute("aria-pressed", "true");
+    release();
     await settled;
     await expect(
       page.locator("[data-photo-editor-preview-image]"),
     ).toBeHidden();
     await expect(page.locator("[data-stage] img")).toHaveAttribute(
       "src",
-      cameraPreview!,
+      originalSrc!,
     );
   } finally {
-    releasePreview?.();
+    release();
   }
 });
 
-test("a Development Proxy supports editing but cannot start a full Export", async ({
+test("an admitted selected-step preview can finish after fifteen seconds of polling", async ({
   page,
-}) => {
-  let submissions = 0;
-  await page.route("**/api/processing/capability", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        state: "ready",
-        stages: { develop: "ready", film: "ready" },
-        profiles: [],
-      }),
-    }),
-  );
-  await page.route("**/api/photos/*/edit-recipe", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        sourceSupport: "supported",
-        supportReason: null,
-        sourceRevision: "source-1",
-        editSource: "development-proxy",
-        editSourceProxyId: "a".repeat(64),
-        recipe: {
-          recipeVersion: "recipe-1",
-          exposureEv: 0,
-          whiteBalance: { mode: "as-shot" },
-        },
-        processingAvailable: true,
-        controls: {
-          exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
-          whiteBalanceModes: ["as-shot"],
-        },
-      }),
-    }),
-  );
-  await page.route("**/api/photos/*/exports", (route) => {
-    if (route.request().method() === "POST") submissions += 1;
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ exports: [] }),
-    });
-  });
-
-  await page.goto(running.url);
-  await expect(page.locator("[data-grid-status]")).toContainText(
-    "Ready · 2 Photos",
-  );
-  await page.locator('[data-photo-index="0"]').click();
-  await openEdit(page);
-  await expect(page.locator("[data-photo-editor-exposure]")).toBeEnabled();
-  await expect(page.locator('[data-photo-editor-stage="film"]')).toBeEnabled();
-  await expect(
-    page.locator(
-      '[data-editor-output="development-tiff"] [data-output-action="submit"]',
-    ),
-  ).toBeDisabled();
-  expect(submissions).toBe(0);
-});
-
-test("a failed Export retains its specific failure reason", async ({
-  page,
-}) => {
-  await page.route("**/api/photos/*/exports", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ exports: [{ exportId: "failed-export" }] }),
-    }),
-  );
-  await page.route("**/api/exports/failed-export", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        exportId: "failed-export",
-        target: "development-tiff",
-        state: "failed",
-        failureReason:
-          "The processing allowance is insufficient for this output.",
-        artifact: null,
-      }),
-    }),
-  );
-
-  await page.goto(running.url);
-  await expect(page.locator("[data-grid-status]")).toContainText(
-    "Ready · 2 Photos",
-  );
-  await page.locator('[data-photo-index="0"]').click();
-  await openEdit(page);
-  await expect(
-    page.locator(
-      '[data-editor-output="development-tiff"] [data-output-diagnostic]',
-    ),
-  ).toContainText("The processing allowance is insufficient for this output.");
-});
-
-for (const digestPath of ["native", "worker"] as const) {
-  test(`a retained Finished JPEG validates and downloads using ${digestPath} hashing`, async ({
-    page,
-  }) => {
-    if (digestPath === "worker")
-      await page.addInitScript(() =>
-        Object.defineProperty(crypto, "subtle", { value: undefined }),
-      );
-    const bytes = Buffer.alloc(1024 * 1024 + 67);
-    for (let index = 0; index < bytes.length; index++)
-      bytes[index] = index % 251;
-    const artifact = {
-      exportId: "retained-film",
-      filename: "slipstream-film-retained-film.jpg",
-      orientation: "landscape",
-      sampleFormat: "uint8",
-      colorSpace: "sRGB",
-      iccEmbedded: true,
-      target: "film-jpeg",
-      stage: "film",
-      contentType: "image/jpeg",
-      width: 16,
-      height: 12,
-      profileIdentity: "fixed-film",
-      byteLength: bytes.length,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
-      expiresAt: "2099-01-01T00:00:00Z",
-    };
-    await page.route("**/api/processing/capability", (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          state: "ready",
-          stages: { develop: "ready", film: "unavailable" },
-          profiles: [],
-        }),
-      }),
-    );
-    await page.route("**/api/photos/*/edit-recipe", (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          sourceSupport: "supported",
-          supportReason: null,
-          sourceRevision: "source-1",
-          recipe: {
-            recipeVersion: "recipe-1",
-            exposureEv: 0,
-            whiteBalance: { mode: "as-shot" },
-          },
-          processingAvailable: true,
-          controls: {
-            exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
-            whiteBalanceModes: ["as-shot"],
-          },
-        }),
-      }),
-    );
-    await page.route("**/api/photos/*/exports", (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ exports: [{ exportId: "retained-film" }] }),
-      }),
-    );
-    await page.route("**/api/exports/retained-film", (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          exportId: "retained-film",
-          target: "film-jpeg",
-          state: "succeeded",
-          artifact,
-        }),
-      }),
-    );
-    await page.route("**/api/exports/retained-film/artifact", (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: "image/jpeg",
-        headers: {
-          "slipstream-artifact-export-id": "retained-film",
-          "slipstream-artifact-target": artifact.target,
-          "slipstream-artifact-stage": artifact.stage,
-          "slipstream-artifact-content-type": artifact.contentType,
-          "slipstream-artifact-width": String(artifact.width),
-          "slipstream-artifact-height": String(artifact.height),
-          "slipstream-artifact-profile-identity": artifact.profileIdentity,
-          "slipstream-artifact-byte-length": String(artifact.byteLength),
-          "slipstream-artifact-sha256": artifact.sha256,
-          "slipstream-artifact-expires-at": artifact.expiresAt,
-          "slipstream-artifact-filename": artifact.filename,
-          "slipstream-artifact-orientation": artifact.orientation,
-          "slipstream-artifact-sample-format": artifact.sampleFormat,
-          "slipstream-artifact-color-space": artifact.colorSpace,
-          "slipstream-artifact-icc-embedded": String(artifact.iccEmbedded),
-        },
-        body: bytes,
-      }),
-    );
-
-    await page.goto(running.url);
-    await expect(page.locator("[data-grid-status]")).toContainText(
-      "Ready · 2 Photos",
-    );
-    await page.locator('[data-photo-index="0"]').click();
-    await openEdit(page);
-    await expect(
-      page.locator(
-        '[data-editor-output="development-tiff"] [data-output-action="submit"]',
-      ),
-    ).toBeEnabled();
-    const downloadButton = page.locator(
-      '[data-editor-output="film-jpeg"] [data-output-action="download"]',
-    );
-    await expect(downloadButton).toBeVisible();
-    const download = page.waitForEvent("download");
-    await downloadButton.click();
-    const file = await download;
-    expect(file.suggestedFilename()).toBe("slipstream-film-retained-film.jpg");
-    expect(await readFile(await file.path())).toEqual(bytes);
-  });
-}
-
-test("an admitted Edit Preview remains observable after the old 15-second polling limit", async ({
-  page,
+  running,
 }) => {
   await page.clock.install();
-  await page.route("**/api/processing/capability", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        state: "ready",
-        stages: { develop: "ready", film: "unavailable" },
-        profiles: [],
-      }),
-    }),
-  );
-  await page.route("**/api/photos/*/edit-recipe", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        sourceSupport: "supported",
-        supportReason: null,
-        sourceRevision: "source-1",
-        recipe: {
-          recipeVersion: "recipe-1",
-          exposureEv: 0,
-          whiteBalance: { mode: "as-shot" },
-        },
-        processingAvailable: true,
-        controls: {
-          exposure: { minimumEv: 0, maximumEv: 1, stepEv: 0.001 },
-          whiteBalanceModes: ["as-shot"],
-        },
-      }),
-    }),
-  );
-  let requests = 0;
-  await page.route(
-    "**/api/photos/*/edit-preview/develop?settings=current",
-    (route) => {
-      requests += 1;
-      return route.fulfill({
-        status: requests <= 21 ? 202 : 503,
-        contentType: "application/json",
-        body:
-          requests <= 21
-            ? JSON.stringify({ state: "running" })
-            : JSON.stringify({ error: { code: "resource_unavailable" } }),
-      });
-    },
-  );
-
+  const state = await mockEditor(page, running);
   await page.goto(running.url);
   await expect(page.locator("[data-grid-status]")).toContainText(
     "Ready · 2 Photos",
   );
+  const bytes = await png(page);
+  let requests = 0;
+  await page.route("**/api/photos/*/processing-preview/**", (route) => {
+    requests++;
+    if (requests <= 21) return json(route, { state: "running" }, 202);
+    return route.fulfill({
+      status: 200,
+      contentType: "image/png",
+      headers: previewHeaders(state.photos[0]!, bytes),
+      body: bytes,
+    });
+  });
   await page.locator('[data-photo-index="0"]').click();
   await openEdit(page);
-  await expect(page.locator("[data-photo-editor-preview-note]")).toContainText(
-    "Rendering the preview",
-  );
-  for (let count = requests; count <= 21; count += 1) {
+  await expect.poll(() => requests).toBe(1);
+  for (let count = 1; count <= 21; count++) {
     await page.clock.runFor(751);
     await expect.poll(() => requests).toBeGreaterThan(count);
   }
-  await expect(page.locator("[data-photo-editor-preview-note]")).toContainText(
-    "Could not create the preview right now",
+  await expect(page.locator("[data-photo-editor-preview-image]")).toBeVisible();
+  await expect(
+    page.locator("[data-photo-editor-preview-image]"),
+  ).toHaveAttribute("src", /^blob:/);
+});
+
+test("numeric controls reject incomplete edits and synchronize Reset while focused", async ({
+  page,
+  running,
+}) => {
+  const state = await mockEditor(page, running);
+  const photoId = state.photos[0]!;
+  await openFirst(page, running.url);
+  const exposure = page.getByLabel("Exposure (EV)", { exact: true });
+  await setExposure(page, "1");
+  await expect
+    .poll(() => state.recipes.get(photoId)?.steps[0]?.parameters)
+    .toEqual(parameters(1));
+  await expect(exposure).toHaveValue("1");
+  const savedCount = state.saves.length;
+  await exposure.fill("");
+  await exposure.press("Tab");
+  expect(
+    await exposure.evaluate(
+      (input: HTMLInputElement) => input.validity.valueMissing,
+    ),
+  ).toBe(true);
+  await expect(exposure).toHaveValue("");
+  expect(state.saves.length).toBe(savedCount);
+  expect(state.recipes.get(photoId)?.steps[0]?.parameters).toEqual(
+    parameters(1),
   );
+  const reset = exposure
+    .locator("..")
+    .getByRole("button", { name: "Reset", exact: true });
+  await reset.click();
+  await expect(exposure).toHaveValue("0");
+  await expect(reset).toBeFocused();
+  await expect
+    .poll(() => state.recipes.get(photoId)?.steps[0]?.parameters)
+    .toEqual(parameters(0));
 });

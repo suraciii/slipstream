@@ -294,6 +294,14 @@ fn composable_recipe_read_preserves_module_trees_and_the_absent_recipe() {
         .expect("an absent recipe is a successful read");
     assert_eq!(value["recipe"], Value::Null);
     assert_eq!(value["sourceRevision"], "");
+    let gap: ProcessingRecipeReadWire = serde_json::from_value(json!({
+        "photoId": "p1", "sourceRevision": "", "currentSourceRevision": null,
+        "sourceAvailable": false, "recipe": recipe.clone(),
+    }))
+    .unwrap();
+    let retained = validated_processing_recipe_read(gap, "p1", &origin()).unwrap();
+    assert_eq!(retained["sourceRevision"], "");
+    assert_eq!(retained["recipe"], recipe);
 }
 
 #[test]
@@ -310,17 +318,18 @@ fn composable_recipe_read_refuses_responses_outside_the_closed_contract() {
             "photos-processing-recipe-get"
         );
     };
-    // A recipe bound to a different source revision than the read.
-    let mut mismatched_source = composable_recipe_fixture();
-    mismatched_source["sourceRevision"] = json!("source-4");
-    refused(
-        json!({
-            "photoId": "p1",
-            "sourceRevision": "source-3",
-            "recipe": mismatched_source,
-        }),
-        "p1",
-    );
+    // A changed observed source must leave retained intent inspectable.
+    let retained = composable_recipe_fixture();
+    let changed: ProcessingRecipeReadWire = serde_json::from_value(json!({
+        "photoId": "p1",
+        "sourceRevision": "source-4",
+        "recipe": retained.clone(),
+    }))
+    .expect("fixture decodes");
+    let inspected = validated_processing_recipe_read(changed, "p1", &origin())
+        .expect("retained intent stays readable after source changes");
+    assert_eq!(inspected["recipe"], retained);
+    assert_eq!(inspected["sourceRevision"], "source-4");
     // A current step that is not one of the recipe's steps.
     let mut stray_current = composable_recipe_fixture();
     stray_current["currentStepId"] = json!("develop-2");
@@ -395,4 +404,154 @@ fn composable_write_confirmation_partitions_outcomes_by_admitted_status() {
     unknown("saved", StatusCode::OK);
     unknown("replayed", StatusCode::CREATED);
     unknown("conflicted", StatusCode::OK);
+}
+
+#[test]
+fn source_revisions_round_trip_opaque_bytes_at_the_published_bound() {
+    for source in [format!("opaque\0\n{}", "é".repeat(200)), "x".repeat(16_384)] {
+        let mut step = composable_step("develop-1", "darktable");
+        step["input"]["sourceRevision"] = json!(source);
+        let mut save: Value =
+            serde_json::from_slice(&composable_save_document(json!([step]), json!("develop-1")))
+                .unwrap();
+        save["expectedSourceRevision"] = json!(source);
+        assert_eq!(
+            parse_processing_save(serde_json::to_vec(&save).unwrap()).unwrap(),
+            save
+        );
+        let rebind = json!({"requestId": "rebind-1", "expectedRecipeRevision": "recipe-9", "newSourceRevision": source});
+        assert_eq!(
+            parse_processing_rebind(serde_json::to_vec(&rebind).unwrap()).unwrap(),
+            rebind
+        );
+        let export = json!({"requestId": "export-1", "stepId": "develop-1", "expectedRecipeRevision": "recipe-9", "expectedSourceRevision": source});
+        assert_eq!(
+            parse_processing_export(serde_json::to_vec(&export).unwrap()).unwrap(),
+            export
+        );
+    }
+    for source in [String::new(), "é".repeat(8_193)] {
+        let rebind = json!({"requestId": "rebind-1", "expectedRecipeRevision": "recipe-9", "newSourceRevision": source});
+        refuses(
+            parse_processing_rebind(serde_json::to_vec(&rebind).unwrap()).unwrap_err(),
+            "newSourceRevision",
+        );
+    }
+    let rebind = json!({"requestId": "rebind-1", "expectedRecipeRevision": "r".repeat(129), "newSourceRevision": "source-3"});
+    refuses(
+        parse_processing_rebind(serde_json::to_vec(&rebind).unwrap()).unwrap_err(),
+        "expectedRecipeRevision",
+    );
+}
+
+#[test]
+fn explicit_retry_accepts_only_one_new_request_identity() {
+    let retry = json!({"requestId": "retry-1"});
+    assert_eq!(
+        parse_processing_export_retry(serde_json::to_vec(&retry).unwrap()).unwrap(),
+        retry
+    );
+    for bytes in [
+        br#"{"requestId":"retry-1","requestId":"retry-2"}"#.to_vec(),
+        br#"{"requestId":"retry-1","stepId":"new-step"}"#.to_vec(),
+        br#"{"requestId":"retry-1","expectedSourceRevision":"new-source"}"#.to_vec(),
+        b"{}".to_vec(),
+    ] {
+        refuses(parse_processing_export_retry(bytes).unwrap_err(), "input");
+    }
+    refuses(
+        parse_processing_export_retry(br#"{"requestId":"retry 1"}"#.to_vec()).unwrap_err(),
+        "requestId",
+    );
+}
+
+#[test]
+fn source_revision_limits_apply_to_save_guards_original_bindings_and_exports() {
+    for source in [String::new(), "x".repeat(16_385)] {
+        let mut save: Value =
+            serde_json::from_slice(&composable_save_document(json!([]), Value::Null)).unwrap();
+        save["expectedSourceRevision"] = json!(source);
+        refuses(
+            parse_processing_save(serde_json::to_vec(&save).unwrap()).unwrap_err(),
+            "expectedSourceRevision",
+        );
+
+        let mut step = composable_step("develop-1", "darktable");
+        step["input"]["sourceRevision"] = json!(source);
+        refuses(
+            parse_processing_save(composable_save_document(json!([step]), json!("develop-1")))
+                .unwrap_err(),
+            "sourceRevision",
+        );
+
+        let export = json!({"requestId": "export-1", "stepId": "develop-1", "expectedRecipeRevision": "recipe-9", "expectedSourceRevision": source});
+        refuses(
+            parse_processing_export(serde_json::to_vec(&export).unwrap()).unwrap_err(),
+            "expectedSourceRevision",
+        );
+    }
+    let mut recipe = composable_recipe_fixture();
+    let source = format!("opaque\0{}", "é".repeat(300));
+    recipe["sourceRevision"] = json!(source);
+    recipe["steps"][0]["input"]["sourceRevision"] = json!(source);
+    let read: ProcessingRecipeReadWire = serde_json::from_value(
+        json!({"photoId": "p1", "sourceRevision": source, "recipe": recipe.clone()}),
+    )
+    .unwrap();
+    let inspected = validated_processing_recipe_read(read, "p1", &origin()).unwrap();
+    assert_eq!(inspected["sourceRevision"], source);
+    assert_eq!(inspected["recipe"], recipe);
+}
+
+#[test]
+fn retained_work_and_artifact_validate_opaque_source_bytes_independently_of_recipe_revision() {
+    let source = format!("\0{}", "é".repeat(8_191)) + "x";
+    assert_eq!(source.len(), 16_384);
+    let binding = json!({"kind": "original", "photoId": "p1", "sourceRevision": source});
+    let parameters = json!({"schemaVersion": "darktable-params-1", "tree": {"stack": []}});
+    let work = json!({
+        "photoId": "p1", "requestId": "export-1", "stepId": "develop-1",
+        "module": "darktable", "recipeRevision": "r".repeat(128),
+        "sourceRevision": source, "adapterSchemaVersion": "darktable-adapter-1:darktable-params-1",
+        "parameters": parameters, "input": binding, "bundleId": "bundle-1",
+        "state": "accepted", "acceptedAt": 20, "attempt": null, "artifactId": null,
+        "failureReason": null, "terminalAt": null, "retainUntil": null,
+    });
+    assert!(processing_work_valid(&work, "p1", Some("export-1")));
+    for field in ["sourceRevision", "recipeRevision"] {
+        let mut invalid = work.clone();
+        invalid[field] = json!(if field == "sourceRevision" {
+            source.clone() + "x"
+        } else {
+            "r".repeat(129)
+        });
+        assert!(
+            !processing_work_valid(&invalid, "p1", Some("export-1")),
+            "{field}"
+        );
+    }
+    let mut invalid_binding = work.clone();
+    invalid_binding["input"]["sourceRevision"] = json!(source.clone() + "x");
+    assert!(!processing_work_valid(
+        &invalid_binding,
+        "p1",
+        Some("export-1")
+    ));
+
+    let artifact = json!({
+        "artifactId": "artifact-1", "photoId": "p1", "stepId": "develop-1",
+        "module": "darktable", "adapterSchemaVersion": "darktable-adapter-1:darktable-params-1",
+        "parameters": parameters,
+        "input": {"binding": binding, "sha256": "a".repeat(64), "byteLength": 24},
+        "outputContract": {"format": "image/tiff", "precision": "float32", "colorSpace": "prophoto-rgb", "transfer": "linear", "geometry": {"width": 8, "height": 4}, "encoding": "none"},
+        "bundleId": "bundle-1", "filename": "artifact-1.tif",
+        "publishedAt": "2026-10-02T12:00:00Z", "expiresAt": "2026-10-09T12:00:00Z",
+        "sha256": "b".repeat(64), "byteLength": 96,
+    });
+    assert!(processing_artifact_valid(&artifact, "p1"));
+    for invalid_source in [String::new(), source + "x"] {
+        let mut invalid = artifact.clone();
+        invalid["input"]["binding"]["sourceRevision"] = json!(invalid_source);
+        assert!(!processing_artifact_valid(&invalid, "p1"));
+    }
 }

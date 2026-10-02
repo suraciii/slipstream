@@ -4,13 +4,8 @@
 //!
 //! [Composable Photo Processing Modules](../../../../../../design/processing-modules.md)
 //! bounds the Preview to the recipe's caller-selected current Processing
-//! Step, and the route refuses a non-current step rather than walking the
-//! recipe for an implicitly usable predecessor. The same reading binds this
-//! workspace: a legacy Edit Preview render is never presented as the
-//! selected step's result, and the fixed two-control editor never writes
-//! module parameters. The selection and refusal reading lives here, away
-//! from the page's DOM and network work, so it can be checked without a
-//! browser.
+//! Step. Selection and refusal facts live here, independently of DOM and
+//! network work; an empty recipe has no processing result.
 
 import { blobSha256Hex } from "./browser-crypto.js";
 import type {
@@ -25,11 +20,7 @@ export type ComposableRecipeRead = Readonly<{
   recipe: ComposableRecipe | null;
 }>;
 
-/// The recipe's selected current Processing Step, or `null` when there is
-/// none to request: an unsettled read, a Photo with no saved composable
-/// recipe, a recipe without a selection, or a selection that names no step
-/// of the recipe itself. A `null` selection is the legacy two-control
-/// compatibility path, never a silently defaulted predecessor step.
+/// The recipe's selected current Processing Step, or null when none exists.
 export const selectedComposableStep = (
   read: ComposableRecipeRead | undefined,
 ): ComposableProcessingStep | null => {
@@ -39,29 +30,19 @@ export const selectedComposableStep = (
   return recipe.steps.find((step) => step.stepId === current) ?? null;
 };
 
-/// What the workspace's preview request is bound to. The four readings keep
-/// the composable and legacy surfaces separate: an unreadable recipe read
-/// never falls back to the legacy bytes, and a saved zero-step recipe never
-/// presents a processing result at all.
+/// What the workspace's preview request is bound to.
 export type ComposablePreviewTarget = Readonly<
   | { kind: "unreadable" }
-  | { kind: "legacy" }
   | { kind: "none" }
   | { kind: "step"; step: ComposableProcessingStep }
 >;
 
-/// The preview request's binding for one settled composable recipe read.
-/// `unreadable` marks a read that has not settled or failed — no request is
-/// made and nothing legacy is presented in its place; `legacy` marks a Photo
-/// with no saved composable recipe, the two-control compatibility path;
-/// `none` marks a saved recipe with no selected step — an empty recipe
-/// renders no processing result; `step` names the recipe's own selected
-/// current step.
+/// An unreadable recipe yields no request; an empty recipe has no selected step.
 export const composablePreviewTarget = (
   read: ComposableRecipeRead | undefined,
 ): ComposablePreviewTarget => {
   if (read === undefined) return { kind: "unreadable" };
-  if (read.recipe === null) return { kind: "legacy" };
+  if (read.recipe === null) return { kind: "none" };
   const step = selectedComposableStep(read);
   return step ? { kind: "step", step } : { kind: "none" };
 };
@@ -102,6 +83,7 @@ export type ComposablePreviewIdentity = Readonly<{
   stepId: string;
   recipeRevision: string;
   sourceRevision: string;
+  comparison?: "current" | "baseline";
 }>;
 
 /// The selected-step route's rendition identity headers, in the route's own
@@ -148,7 +130,8 @@ const decodeHexSourceRevision = (value: string | null): string | null => {
     value === null ||
     value.length === 0 ||
     value.length % 2 !== 0 ||
-    value.length > 16_384
+    value.length > 32_768 ||
+    !/^[0-9a-f]+$/i.test(value)
   )
     return null;
   const bytes: number[] = [];
@@ -158,8 +141,14 @@ const decodeHexSourceRevision = (value: string | null): string | null => {
     if (Number.isNaN(high) || Number.isNaN(low)) return null;
     bytes.push(high * 16 + low);
   }
-  const decoded = new TextDecoder().decode(new Uint8Array(bytes));
-  return decoded.length > 0 ? decoded : null;
+  try {
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(
+      new Uint8Array(bytes),
+    );
+    return decoded.length > 0 ? decoded : null;
+  } catch {
+    return null;
+  }
 };
 
 /// Why a served step Preview's identity cannot be presented, or `""` when
@@ -190,6 +179,14 @@ export const composablePreviewIdentityRefusal = (
     headers.get(RECIPE_REVISION_HEADER) === expected.recipeRevision &&
     decodeHexSourceRevision(headers.get(SOURCE_REVISION_HEADER)) ===
       expected.sourceRevision &&
+    (expected.comparison === undefined ||
+      headers.get(`${IDENTITY_HEADER_PREFIX}comparison`) ===
+        expected.comparison) &&
+    (expected.comparison === undefined ||
+      (digest(`${IDENTITY_HEADER_PREFIX}input-sha256`) &&
+        /^[1-9][0-9]*$/.test(
+          headers.get(`${IDENTITY_HEADER_PREFIX}input-byte-length`) ?? "",
+        ))) &&
     digest(SHA256_HEADER) &&
     dimension(WIDTH_HEADER) &&
     dimension(HEIGHT_HEADER) &&

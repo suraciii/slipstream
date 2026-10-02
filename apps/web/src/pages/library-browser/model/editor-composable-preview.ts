@@ -1,5 +1,5 @@
 import { fetchProcessingPreview } from "../api/processing-preview.js";
-import { isRecord } from "../api/editor.js";
+import { isRecord } from "../api/guards.js";
 import {
   composablePreviewDigestRefusal,
   composablePreviewIdentityRefusal,
@@ -8,13 +8,12 @@ import {
   type ComposableRecipeRead,
 } from "./composable-preview.js";
 import type { BrowserFetch } from "./access-session.js";
-import type { PhotoEditor } from "./photo-editor.js";
 import { composablePreviewTarget } from "./composable-preview.js";
 export function createEditorComposablePreview(
   fetcher: BrowserFetch,
   dependencies: Readonly<{
-    session: (photoId: string) => PhotoEditor | undefined;
-    stage: () => string;
+    cameraReference: () => boolean;
+    comparison?: "baseline";
     read: () => ComposableRecipeRead | undefined;
     isDirty: () => boolean;
     editorOwnsPhoto: (photoId: string) => boolean;
@@ -25,8 +24,7 @@ export function createEditorComposablePreview(
   }>,
 ) {
   const {
-    session,
-    stage,
+    cameraReference,
     read,
     isDirty,
     editorOwnsPhoto,
@@ -35,6 +33,8 @@ export function createEditorComposablePreview(
     clearPresented,
     describePreviewRefusal,
   } = dependencies;
+  const comparison = dependencies.comparison;
+  let comparisonIdentity: string | undefined;
   let editorPreviewUrl: string | undefined;
   let editorPreviewNote = "";
   let editorPreviewOutcome: "pending" | "ready" | "failed" | "unknown" =
@@ -43,10 +43,7 @@ export function createEditorComposablePreview(
   let editorPreviewBusy = false;
   let editorPreviewAbort: AbortController | undefined;
   let editorPreviewGeneration = 0;
-  /// The identity of the preview request in flight: Photo, stage, source
-  /// revision, recipe snapshot, and edit source. A retry of the same
-  /// identity joins the in-flight request instead of starting duplicate
-  /// physical work.
+  /// In-flight selected-step identity. Equal complete identities coalesce.
   let editorPreviewIdentity: string | undefined;
   /// True when the last preview outcome was a refusal and no rendition is
   /// presented, so the Edit Preview axis reports a failure rather than a
@@ -64,6 +61,7 @@ export function createEditorComposablePreview(
     editorPreviewGeneration += 1;
     editorPreviewBusy = false;
     editorPreviewIdentity = undefined;
+    comparisonIdentity = undefined;
     editorPreviewSelection = undefined;
     editorPreviewAttempts = 0;
     if (editorPreviewTimer !== undefined) {
@@ -79,7 +77,7 @@ export function createEditorComposablePreview(
 
     clearPresented();
   };
-  /// Poll admitted Processing Step previews within the same bounded window as legacy renditions.
+  /// Poll admitted Processing Step previews within a bounded wait window.
   const scheduleEditorPreviewFollowUp = (photoId: string): void => {
     if (editorPreviewAttempts >= PREVIEW_POLL_LIMIT) {
       editorPreviewNote =
@@ -89,7 +87,7 @@ export function createEditorComposablePreview(
       return;
     }
     editorPreviewAttempts += 1;
-    if (editorPreviewTimer !== undefined) clearTimeout(editorPreviewTimer);
+    clearTimeout(editorPreviewTimer);
     editorPreviewTimer = window.setTimeout(() => {
       editorPreviewTimer = undefined;
       void requestEditorPreview(photoId, true);
@@ -98,31 +96,15 @@ export function createEditorComposablePreview(
 
   /// One preview request follows each completed edit action and each settled
   /// save. A retained image stays presented and is marked out of date until
-  /// the matching rendition arrives, and an image for another source, stage,
-  /// settings snapshot, or edit source is refused.
+  /// the matching rendition arrives. A different source, step, or settings
+  /// snapshot cannot replace the current view.
   const requestEditorPreview = async (
     photoId: string,
     followUp = false,
   ): Promise<void> => {
-    const editor = session(photoId);
-    const presented = editor?.presentation();
-    if (
-      !editor ||
-      !presented ||
-      !presented.canEdit ||
-      !presented.processingAvailable ||
-      // The camera stage presents the camera Preview: it has no rendition of
-      // its own to request, and the closed route admits only Develop and Film.
-      stage() === "camera" ||
-      !editorOwnsPhoto(photoId)
-    )
-      return;
+    if (cameraReference() || !editorOwnsPhoto(photoId)) return;
 
-    // The composable binding in force. The read is captured here so a
-    // concurrent recipe read cannot retarget the request mid-flight. The
-    // four readings keep the surfaces separate: an unreadable read and a
-    // saved zero-step recipe never fall back to the legacy bytes, and a
-    // Photo with no saved composable recipe keeps the legacy path.
+    // Capture the selected recipe before requesting its bounded rendition.
     const composableRead = read();
     const target = composablePreviewTarget(composableRead);
     const dirty = isDirty();
@@ -157,19 +139,20 @@ export function createEditorComposablePreview(
       // presents another caller's intent as this one's result.
       if (editorPreviewUrl) editorPreviewStale = true;
       editorPreviewNote =
-        "Save the Processing Recipe to update the Preview of the selected Processing Step.";
+        "Waiting for the matching settings to be saved before updating the Preview.";
       editorPreviewOutcome = editorPreviewUrl ? "ready" : "pending";
       renderEditor();
       return;
     }
     const composableStep = target.kind === "step" ? target.step : null;
     if (!composableStep) return;
-    const identity = [
+    const identity = JSON.stringify([
       photoId,
-      composableStep.stepId,
+      composableStep,
       composableRead?.recipe?.revision ?? "",
       composableRead?.sourceRevision ?? "",
-    ].join("|");
+      comparison ?? "current",
+    ]);
     // A retry of the identity already in flight joins that request: the
     // in-flight attempt settles for this owner, and no duplicate physical
     // render is admitted behind it.
@@ -204,6 +187,7 @@ export function createEditorComposablePreview(
         photoId,
         composableStep.stepId,
         controller.signal,
+        comparison,
       );
     } catch {
       if (generation === editorPreviewGeneration) {
@@ -284,6 +268,7 @@ export function createEditorComposablePreview(
             stepId: composableStep.stepId,
             recipeRevision: composableRead?.recipe?.revision ?? "",
             sourceRevision: composableRead?.sourceRevision ?? "",
+            comparison: comparison ?? "current",
           }) ||
           composablePreviewPngRefusal(
             new Uint8Array(bytes),
@@ -307,11 +292,28 @@ export function createEditorComposablePreview(
     }
     if (editorPreviewUrl) URL.revokeObjectURL(editorPreviewUrl);
     editorPreviewUrl = URL.createObjectURL(image);
+    comparisonIdentity = JSON.stringify([
+      photoId,
+      composableStep.stepId,
+      composableRead?.recipe?.revision,
+      composableRead?.sourceRevision,
+      response.headers.get("slipstream-processing-preview-width"),
+      response.headers.get("slipstream-processing-preview-height"),
+      response.headers.get("slipstream-processing-preview-bundle-id"),
+      response.headers.get("slipstream-processing-preview-display-conversion"),
+      response.headers.get("slipstream-processing-preview-geometry"),
+      response.headers.get("slipstream-processing-preview-module"),
+      response.headers.get(
+        "slipstream-processing-preview-adapter-schema-version",
+      ),
+      response.headers.get("slipstream-processing-preview-input-sha256"),
+      response.headers.get("slipstream-processing-preview-input-byte-length"),
+    ]);
     editorPreviewStale = false;
     editorPreviewRefused = false;
     editorPreviewOutcome = "ready";
     if (composableStep) {
-      editorPreviewNote = `Preview of the selected Processing Step ${composableStep.stepId} (${composableStep.module}).`;
+      editorPreviewNote = `Preview of ${composableStep.stepId} (${composableStep.module}), ${response.headers.get("slipstream-processing-preview-width")} × ${response.headers.get("slipstream-processing-preview-height")} pixels. This bounded rendition is for color and tone; inspect a full-resolution artifact for grain and halation detail.`;
     }
     present(editorPreviewUrl);
     renderEditor();
@@ -326,6 +328,7 @@ export function createEditorComposablePreview(
         busy: editorPreviewBusy,
         pending: editorPreviewTimer !== undefined,
         refused: editorPreviewRefused,
+        comparisonIdentity,
       };
     },
     get selection() {
@@ -334,6 +337,13 @@ export function createEditorComposablePreview(
     requestCurrent: requestEditorPreview,
     clear: clearEditorPreview,
     markStale: (): void => {
+      editorPreviewGeneration += 1;
+      editorPreviewAbort?.abort();
+      editorPreviewAbort = undefined;
+      editorPreviewBusy = false;
+      editorPreviewIdentity = undefined;
+      clearTimeout(editorPreviewTimer);
+      editorPreviewTimer = undefined;
       if (editorPreviewUrl) editorPreviewStale = true;
     },
   };

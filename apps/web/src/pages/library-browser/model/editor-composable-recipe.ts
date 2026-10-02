@@ -1,8 +1,8 @@
 import {
   fetchComposableRecipe,
-  parseComposableRecipe,
-  saveComposableRecipe,
+  type ComposableRecipeRead,
 } from "../api/composable-recipe.js";
+import { createComposableAutosave } from "./composable-autosave.js";
 import {
   fetchProcessingModules,
   type ProcessingModuleDescription,
@@ -11,7 +11,6 @@ import {
   addComposableStep,
   composableDraftDiffers,
   composableModuleChoices,
-  composableSaveRequest,
   draftFromRecipe,
   nextComposableStepId,
   removeComposableStep,
@@ -24,7 +23,6 @@ import {
 import {
   composablePreviewTarget,
   selectedComposableStep,
-  type ComposableRecipeRead,
 } from "./composable-preview.js";
 import {
   describeProcessingArtifact,
@@ -32,20 +30,16 @@ import {
   processingArtifactInput,
   type ProcessingArtifactRecord,
 } from "./processing-artifact.js";
-import { isRecord } from "../api/editor.js";
 import { formatByteCount } from "./editor-presentation.js";
-import { randomUuid } from "./browser-crypto.js";
 import type { BrowserFetch } from "./access-session.js";
 import type { EditorControllerDependencies } from "./editor-controller-contract.js";
 import type { LibraryBrowserView } from "../ui/library-browser-view.js";
-type ComposableSaveRequest = Parameters<typeof saveComposableRecipe>[2];
 export function createEditorComposableRecipe(
   fetcher: BrowserFetch,
   dependencies: EditorControllerDependencies &
     Readonly<{
       editorOwnsPhoto: (photoId: string) => boolean;
       renderEditor: () => void;
-      stage: () => string;
       previewSelection: () => string | null | undefined;
       clearEditorPreview: () => void;
       requestEditorPreview: (photoId: string) => Promise<void>;
@@ -60,7 +54,6 @@ export function createEditorComposableRecipe(
     currentPhoto,
     editorOwnsPhoto,
     renderEditor,
-    stage,
     previewSelection,
     clearEditorPreview,
     requestEditorPreview,
@@ -70,9 +63,8 @@ export function createEditorComposableRecipe(
   let editorComposable: ComposableRecipeRead | undefined;
   let editorComposableAbort: AbortController | undefined;
   let editorComposableGeneration = 0;
-  /// True while this scope's composable recipe read is in flight. The
-  /// opening preview request waits for it, so a valid current step can
-  /// retarget the preview before any legacy bytes are fetched.
+  /// Whether the current Photo's recipe read has not yet settled. Preview
+  /// requests wait for the selected step and its confirmed recipe.
   let editorComposableReadPending = false;
   /// The caller-controlled draft of this Photo's composable Processing
   /// Recipe. Present exactly while the workspace is composing: it starts
@@ -88,22 +80,13 @@ export function createEditorComposableRecipe(
   /// and is explained in its own note.
   let editorComposableParametersText = "";
   let editorComposableParametersValid = true;
+  let parametersEditing = false;
   /// The input binding choice the step editor offers: the guarded Original
   /// or one explicitly selected retained Processing Artifact.
   let editorComposableInputChoice: "original" | "artifact" = "original";
   let editorComposableArtifactChoice = "";
   let editorComposableNote = "";
   let editorComposableSaving = false;
-  /// The last submitted save, reusable verbatim until its outcome is
-  /// reconciled: a lost response is resolved by resubmitting the identical
-  /// body under the same request identity.
-  let editorComposableSubmission:
-    | Readonly<{
-        photoId: string;
-        requestId: string;
-        body: string;
-      }>
-    | undefined;
   /// Retained Processing Artifacts of this session: every artifact this
   /// workspace inspected, offered as the only explicit downstream inputs.
   /// Nothing chains automatically; the caller selects one per step.
@@ -111,6 +94,59 @@ export function createEditorComposableRecipe(
   let processingModules: ReadonlyArray<ProcessingModuleDescription> = [];
   let processingModulesGeneration = 0;
   let editorScopeGeneration = 0;
+  let activePhotoId: string | undefined;
+  const syncEditing = (): void => {
+    const steps = editorComposableDraft?.steps;
+    const step =
+      steps?.find((item) => item.stepId === editorComposableEditingStepId) ??
+      steps?.find(
+        (item) => item.stepId === editorComposableDraft?.currentStepId,
+      );
+    editorComposableEditingStepId = step?.stepId;
+    editorComposableParametersText = step
+      ? JSON.stringify(step.parameters.tree, null, 2)
+      : "";
+    editorComposableParametersValid = true;
+    editorComposableInputChoice =
+      step?.input.kind === "artifact" ? "artifact" : "original";
+    editorComposableArtifactChoice =
+      step?.input.kind === "artifact" ? step.input.artifactId : "";
+  };
+  const autosave = createComposableAutosave(fetcher, (photoId) => {
+    if (photoId !== activePhotoId || !editorOwnsPhoto(photoId)) return;
+    const state = autosave.get(photoId);
+    if (!state) return;
+    editorComposable = state.read;
+    if (!parametersEditing) {
+      editorComposableDraft = state.draft;
+      syncEditing();
+    }
+    editorComposableSaving = state.saving;
+    editorComposableNote =
+      state.note +
+      (state.recoveryAvailable
+        ? ""
+        : " Local settings remain in this session; browser reload recovery is unavailable.");
+    renderEditor();
+    if (
+      !state.saving &&
+      !state.pending &&
+      !state.conflict &&
+      !composableDraftDiffers(state.draft, state.read.recipe)
+    )
+      void requestEditorPreview(photoId);
+  });
+  const completeAction = (photoId: string): void => {
+    if (editorComposableDraft) {
+      const state = autosave.get(photoId);
+      if (state)
+        editorComposableDraft = {
+          ...editorComposableDraft,
+          baseRevision: state.draft.baseRevision,
+        };
+      void autosave.change(photoId, editorComposableDraft);
+    }
+  };
   const ownsEditorScope = (photoId: string, generation: number): boolean =>
     generation === editorScopeGeneration && editorOwnsPhoto(photoId);
   const retainArtifact = (artifact: ProcessingArtifactRecord): void => {
@@ -134,22 +170,23 @@ export function createEditorComposableRecipe(
       return;
     editorComposableReadPending = false;
     if (read !== undefined) {
+      activePhotoId = photoId;
+      const state = autosave.open(photoId, read);
+      editorComposableDraft = state.draft;
+      editorComposableSaving = state.saving;
+      editorComposableNote =
+        state.note +
+        (state.recoveryAvailable
+          ? ""
+          : " Local settings remain in this session; browser reload recovery is unavailable.");
       const selection = selectedComposableStep(read)?.stepId ?? null;
       if (previewSelection() !== undefined && previewSelection() !== selection)
         clearEditorPreview();
-      editorComposable = read;
+      editorComposable = state.read;
+      syncEditing();
     }
     if (currentPhoto()?.id === photoId) renderEditor();
-    if (stage() !== "camera") void requestEditorPreview(photoId);
-  };
-  /// The guarded source revision one already-submitted save body carried, so
-  /// a replay's confirmation is checked against exactly what was sent.
-  const readSubmittedSourceRevision = (body: string): string => {
-    const parsed: unknown = JSON.parse(body);
-    return isRecord(parsed) &&
-      typeof parsed["expectedSourceRevision"] === "string"
-      ? parsed["expectedSourceRevision"]
-      : "";
+    void requestEditorPreview(photoId);
   };
   /// The module choices discovery currently offers this session, as the
   /// draft's own save guards and step editor read them.
@@ -161,15 +198,20 @@ export function createEditorComposableRecipe(
   /// dirty draft never previews or exports: the routes serve the saved
   /// recipe, and this workspace does not present one caller's intent as
   /// another's result.
-  const composableDirty = (): boolean =>
-    editorComposableDraft !== undefined &&
-    composableDraftDiffers(
-      editorComposableDraft,
-      editorComposable?.recipe ?? null,
+  const composableDirty = (): boolean => {
+    const state = activePhotoId ? autosave.get(activePhotoId) : undefined;
+    return Boolean(
+      state?.pending ||
+        state?.conflict ||
+        state?.uncertain ||
+        (editorComposableDraft &&
+          composableDraftDiffers(
+            editorComposableDraft,
+            editorComposable?.recipe ?? null,
+          )),
     );
-  /// Composable mode owns the workspace while a composable recipe is saved
-  /// or a draft is in progress. Photos with no saved recipe keep the
-  /// two-control compatibility path until the caller starts composing.
+  };
+  /// The workspace owns a composable draft even when no recipe is saved.
   const composableMode = (): boolean =>
     (editorComposable !== undefined && editorComposable.recipe !== null) ||
     editorComposableDraft !== undefined;
@@ -209,12 +251,12 @@ export function createEditorComposableRecipe(
     materializeComposableDraft(photoId);
     renderEditor();
   };
-  /// Adds one Processing Step for a module discovery reports, with the
-  /// module's own schema-derived default parameter tree, and opens it in
-  /// the step editor. The input choice starts where the module admits it:
-  /// darktable over this Photo's guarded Original, and standalone
-  /// SpektraFilm over an artifact the caller still has to select.
-  const addEditorComposableStep = (photoId: string, module: string): void => {
+  /// Adds a step only after the caller chooses its identified input.
+  const addEditorComposableStep = (
+    photoId: string,
+    module: string,
+    artifactId?: string,
+  ): void => {
     if (!editorOwnsPhoto(photoId)) return;
     const draft = materializeComposableDraft(photoId);
     const choice = composableChoices().find((item) => item.name === module);
@@ -224,15 +266,51 @@ export function createEditorComposableRecipe(
       renderEditor();
       return;
     }
+    const description = processingModules.find(
+      (item) => item.id.name === module,
+    );
+    const artifact = artifactId
+      ? editorArtifacts.find((item) => item.artifactId === artifactId)
+      : undefined;
+    if (
+      artifactId &&
+      (!artifact || Date.parse(artifact.expiresAt) <= Date.now())
+    ) {
+      editorComposableNote =
+        "Choose a retained, unexpired export as this step's input.";
+      renderEditor();
+      return;
+    }
+    const admitted = artifact
+      ? description?.admittedInputs.some(
+          (contract) =>
+            contract["format"] === artifact.outputContract.format &&
+            contract["colorSpace"] === artifact.outputContract.colorSpace &&
+            contract["transferFunction"] === artifact.outputContract.transfer &&
+            String(contract["precisionBits"]) ===
+              artifact.outputContract.precision.replace(/^(?:float|uint)/, ""),
+        )
+      : description?.admittedInputs.some(
+          (contract) => contract["colorSpace"] === "camera-native",
+        );
+    if (!admitted) {
+      editorComposableNote = artifact
+        ? "This module does not admit the selected export's image contract. Choose a compatible input."
+        : "This module requires a compatible export as input. Choose one explicitly before adding the step.";
+      renderEditor();
+      return;
+    }
     const stepId = nextComposableStepId(draft, module);
     editorComposableDraft = addComposableStep(draft, {
       stepId,
       module,
-      input: {
-        kind: "original",
-        photoId,
-        sourceRevision: draft.sourceRevision,
-      },
+      input: artifact
+        ? processingArtifactInput(artifact)
+        : {
+            kind: "original",
+            photoId,
+            sourceRevision: draft.sourceRevision,
+          },
       parameters: {
         schemaVersion: choice.parameterVersions[0] ?? "",
         tree: structuredClone(choice.defaultTree),
@@ -245,11 +323,11 @@ export function createEditorComposableRecipe(
       2,
     );
     editorComposableParametersValid = true;
-    editorComposableInputChoice =
-      module === "darktable" ? "original" : "artifact";
-    editorComposableArtifactChoice = "";
+    editorComposableInputChoice = artifact ? "artifact" : "original";
+    editorComposableArtifactChoice = artifact?.artifactId ?? "";
     editorComposableNote = "";
     markEditorPreviewStale();
+    completeAction(photoId);
     renderEditor();
   };
   const removeEditorComposableStep = (
@@ -260,17 +338,9 @@ export function createEditorComposableRecipe(
     const draft = materializeComposableDraft(photoId);
     if (!draft) return;
     editorComposableDraft = removeComposableStep(draft, stepId);
-    if (editorComposableEditingStepId === stepId) {
-      editorComposableEditingStepId = editorComposableDraft.steps[0]?.stepId;
-      const editing = editorComposableDraft.steps.find(
-        (step) => step.stepId === editorComposableEditingStepId,
-      );
-      editorComposableParametersText = editing
-        ? JSON.stringify(editing.parameters.tree, null, 2)
-        : "";
-      editorComposableParametersValid = true;
-    }
+    syncEditing();
     markEditorPreviewStale();
+    completeAction(photoId);
     renderEditor();
   };
   /// Selects the recipe's current Processing Step. The selection is part of
@@ -283,7 +353,10 @@ export function createEditorComposableRecipe(
     const draft = materializeComposableDraft(photoId);
     if (!draft) return;
     editorComposableDraft = selectComposableStep(draft, stepId);
+    editorComposableEditingStepId = stepId;
+    syncEditing();
     markEditorPreviewStale();
+    completeAction(photoId);
     renderEditor();
   };
   /// Opens one step in the step editor: its own parameters text and its own
@@ -314,6 +387,7 @@ export function createEditorComposableRecipe(
     text: string,
   ): void => {
     if (!editorOwnsPhoto(photoId)) return;
+    parametersEditing = true;
     editorComposableParametersText = text;
     const draft = editorComposableDraft;
     const stepId = editorComposableEditingStepId;
@@ -360,6 +434,7 @@ export function createEditorComposableRecipe(
       tree: step.parameters.tree,
     });
     markEditorPreviewStale();
+    completeAction(photoId);
     renderEditor();
   };
   /// Chooses the step's explicit input binding: this Photo's guarded
@@ -383,6 +458,7 @@ export function createEditorComposableRecipe(
         sourceRevision: draft.sourceRevision,
       });
       markEditorPreviewStale();
+      completeAction(photoId);
       renderEditor();
       return;
     }
@@ -395,6 +471,12 @@ export function createEditorComposableRecipe(
       renderEditor();
       return;
     }
+    if (Date.parse(artifact.expiresAt) <= Date.now()) {
+      editorComposableNote =
+        "This export has expired. Export again before using it as input.";
+      renderEditor();
+      return;
+    }
     editorComposableArtifactChoice = artifactId;
     editorComposableDraft = setComposableStepInput(
       draft,
@@ -403,6 +485,7 @@ export function createEditorComposableRecipe(
     );
     editorComposableNote = "";
     markEditorPreviewStale();
+    completeAction(photoId);
     renderEditor();
   };
   /// Fetches one Processing Artifact's provenance by the caller-held
@@ -459,179 +542,23 @@ export function createEditorComposableRecipe(
     );
     renderEditor();
   };
-  /// Submits the guarded save of the composable draft. The guards run on
-  /// this caller first, in the service's own order; the service remains
-  /// authoritative. A lost or unusable response keeps the exact submission
-  /// reusable under its request identity.
+  const commitEditorComposableParameters = (photoId: string): void => {
+    if (!editorOwnsPhoto(photoId) || !editorComposableParametersValid) return;
+    parametersEditing = false;
+    completeAction(photoId);
+  };
   const saveEditorComposable = async (photoId: string): Promise<void> => {
-    if (!editorOwnsPhoto(photoId) || editorComposableSaving) return;
-    // An unresolved submission replays its own body; it is never rebuilt.
-    if (editorComposableSubmission) {
-      if (editorComposableSubmission.photoId !== photoId) return;
-      editorComposableNote = "Checking the previous save's result…";
-      editorComposableSaving = true;
-      renderEditor();
-      await submitEditorComposableBody(
-        photoId,
-        editorComposableSubmission.requestId,
-        editorComposableSubmission.body,
-        JSON.parse(editorComposableSubmission.body) as ComposableSaveRequest,
-      );
-      return;
-    }
-    const draft = materializeComposableDraft(photoId);
-    if (!draft) return;
-    if (!editorComposableParametersValid) {
-      editorComposableNote =
-        "The step's parameters are not one JSON object, so the recipe cannot be saved.";
-      renderEditor();
-      return;
-    }
-    const guarded = composableSaveRequest(
-      draft,
-      `web-recipe-${randomUuid().replaceAll("-", "").slice(0, 24)}`,
-      composableChoices(),
-    );
-    if (guarded.kind === "refused") {
-      editorComposableNote = guarded.note;
-      renderEditor();
-      return;
-    }
-    editorComposableNote = "Saving the Processing Recipe…";
-    editorComposableSaving = true;
-    renderEditor();
-    await submitEditorComposableBody(
-      photoId,
-      guarded.request.requestId,
-      JSON.stringify(guarded.request),
-      guarded.request,
-    );
+    if (!editorOwnsPhoto(photoId)) return;
+    commitEditorComposableParameters(photoId);
+    await autosave.flush(photoId);
   };
-  const submitEditorComposableBody = async (
-    photoId: string,
-    requestId: string,
-    body: string,
-    request: ComposableSaveRequest,
-  ): Promise<void> => {
-    const generation = editorScopeGeneration;
-    editorComposableSubmission = { photoId, requestId, body };
-    let response: Response;
-    try {
-      response = await saveComposableRecipe(fetcher, photoId, request);
-    } catch {
-      if (ownsEditorScope(photoId, generation)) {
-        editorComposableSaving = false;
-        editorComposableNote =
-          "The save outcome is unknown. Check its result before editing again.";
-        renderEditor();
-      }
-      return;
-    }
-    if (!ownsEditorScope(photoId, generation)) return;
-    const outcome: unknown = await response.json().catch(() => undefined);
-    if (!ownsEditorScope(photoId, generation)) return;
-    if (response.status !== 200 && response.status !== 201) {
-      editorComposableSaving = false;
-      const error =
-        isRecord(outcome) && isRecord(outcome["error"])
-          ? outcome["error"]
-          : undefined;
-      const code =
-        error && typeof error["code"] === "string" ? error["code"] : "";
-      if (response.status >= 500 || code === "outcome_unknown") {
-        editorComposableNote =
-          "The save outcome is unknown. Check its result before editing again.";
-      } else if (code === "recipe_conflict") {
-        editorComposableSubmission = undefined;
-        editorComposableNote =
-          "The saved Processing Recipe changed elsewhere. Reload to read the current recipe, then decide again.";
-      } else if (code === "source_changed") {
-        editorComposableSubmission = undefined;
-        editorComposableNote =
-          "This Photo's Original changed elsewhere. Reload to check again.";
-      } else if (code === "request_conflict") {
-        editorComposableSubmission = undefined;
-        editorComposableNote =
-          "This request identity was already used with a different recipe. Compose again and save with a new identity.";
-      } else {
-        editorComposableSubmission = undefined;
-        editorComposableNote =
-          error && typeof error["message"] === "string"
-            ? `The save was refused: ${error["message"]}`
-            : "The save was refused. Reload to check again.";
-      }
-      renderEditor();
-      return;
-    }
-    const responseSource =
-      isRecord(outcome) && typeof outcome["sourceRevision"] === "string"
-        ? outcome["sourceRevision"]
-        : "";
-    const parsedSave = responseSource
-      ? parseComposableRecipe(
-          {
-            photoId,
-            sourceRevision: responseSource,
-            recipe: isRecord(outcome) ? outcome["recipe"] : undefined,
-          },
-          photoId,
-        )
-      : undefined;
-    const saved = parsedSave?.recipe;
-    const recipeVersion =
-      isRecord(outcome) && typeof outcome["recipeVersion"] === "string"
-        ? outcome["recipeVersion"]
-        : "";
-    const resultKind =
-      isRecord(outcome) && typeof outcome["outcome"] === "string"
-        ? outcome["outcome"]
-        : "";
-    const submitted = readSubmittedSourceRevision(body);
-    if (
-      !saved ||
-      !(
-        resultKind === "saved" ||
-        resultKind === "replayed" ||
-        resultKind === "unchanged"
-      ) ||
-      recipeVersion !== saved.revision ||
-      responseSource !== submitted
-    ) {
-      editorComposableSaving = false;
-      editorComposableNote =
-        "The save outcome is unknown. Check its result before editing again.";
-      renderEditor();
-      return;
-    }
-    editorComposableSaving = false;
-    editorComposableSubmission = undefined;
-    clearEditorPreview();
-    editorComposable = { sourceRevision: saved.sourceRevision, recipe: saved };
-    editorComposableNote =
-      resultKind === "saved"
-        ? `Saved the Processing Recipe (revision ${saved.revision}).`
-        : `The Processing Recipe is unchanged (revision ${saved.revision}).`;
-    renderEditor();
-    // The saved recipe is now the preview's authority: the current step's
-    // own Preview follows the committed selection.
-    if (stage() !== "camera") void requestEditorPreview(photoId);
-  };
-  /// Drops the local draft and returns to the saved recipe's shape. Nothing
-  /// is submitted; the service keeps its own committed revision.
   const discardEditorComposable = (photoId: string): void => {
     if (!editorOwnsPhoto(photoId)) return;
-    editorComposableDraft = undefined;
-    editorComposableEditingStepId = undefined;
-    editorComposableParametersText = "";
-    editorComposableParametersValid = true;
-    editorComposableNote = "";
-    editorComposableSubmission = undefined;
-    renderEditor();
-    if (stage() !== "camera") void requestEditorPreview(photoId);
+    if (autosave.get(photoId)?.pending) return;
+    parametersEditing = false;
+    autosave.useSaved(photoId);
   };
-  /// Reads independent peer-module discovery without changing the legacy
-  /// capability state or its controls. A failed discovery read leaves the
-  /// capability report and current recipe facts untouched.
+  /// Reads independent module discovery without changing saved recipe facts.
   const loadProcessingModules = async (photoId: string): Promise<void> => {
     const generation = ++processingModulesGeneration;
     try {
@@ -666,6 +593,8 @@ export function createEditorComposableRecipe(
   };
   const reset = (): void => {
     editorScopeGeneration += 1;
+    activePhotoId = undefined;
+    parametersEditing = false;
     editorComposable = undefined;
     editorComposableGeneration += 1;
     processingModules = [];
@@ -682,7 +611,6 @@ export function createEditorComposableRecipe(
     editorComposableArtifactChoice = "";
     editorComposableNote = "";
     editorComposableSaving = false;
-    editorComposableSubmission = undefined;
     editorArtifacts = [];
     editorComposableReadPending = false;
   };
@@ -720,7 +648,6 @@ export function createEditorComposableRecipe(
         : undefined;
       return {
         composing,
-        legacyOnly: !composing && target.kind !== "unreadable",
         unreadable: target.kind === "unreadable",
         readPending: editorComposableReadPending,
         note: editorComposableNote,
@@ -740,13 +667,18 @@ export function createEditorComposableRecipe(
         currentStepId: draft?.currentStepId ?? null,
         dirty,
         saving: editorComposableSaving,
-        savePending: editorComposableSubmission !== undefined,
+        savePending: Boolean(
+          activePhotoId && autosave.get(activePhotoId)?.pending,
+        ),
         canAddStep: choices.length > 0,
         editing: editingStep
           ? {
               stepId: editingStep.stepId,
               module: editingStep.module,
               schemaVersion: editingStep.parameters.schemaVersion,
+              parameterSchema: processingModules.find(
+                (module) => module.id.name === editingStep.module,
+              )?.parameterSchema,
               schemaVersions: editingModule?.parameterVersions ?? [],
               inputChoice: editorComposableInputChoice,
               artifactChoice: editorComposableArtifactChoice,
@@ -754,14 +686,37 @@ export function createEditorComposableRecipe(
               parametersValid: editorComposableParametersValid,
             }
           : null,
-        artifacts: editorArtifacts.map((artifact) => ({
-          artifactId: artifact.artifactId,
-          note: describeProcessingArtifact(artifact, formatByteCount),
-          canUse: editingStep !== undefined,
-        })),
+        artifacts: editorArtifacts.map((artifact) => {
+          const expired = Date.parse(artifact.expiresAt) <= Date.now();
+          const current = draft?.steps.find(
+            (step) => step.stepId === draft.currentStepId,
+          );
+          const older =
+            current !== undefined &&
+            (current.module !== artifact.module ||
+              JSON.stringify(current.parameters) !==
+                JSON.stringify(artifact.parameters) ||
+              JSON.stringify(current.input) !==
+                JSON.stringify(artifact.input.binding));
+          return {
+            artifactId: artifact.artifactId,
+            note: `${describeProcessingArtifact(artifact, formatByteCount)}${older ? " Based on earlier settings." : ""}${expired ? " This export has expired. Export again." : ""}`,
+            canUse: editingStep !== undefined && !expired,
+            canDownload: !expired,
+          };
+        }),
       };
     },
     loadComposableRecipe,
+    get state() {
+      return activePhotoId ? autosave.get(activePhotoId) : undefined;
+    },
+    commitEditorComposableParameters,
+    undo: autosave.undo,
+    redo: autosave.redo,
+    useSaved: autosave.useSaved,
+    reapplyLocal: autosave.reapply,
+    rebind: autosave.rebind,
     composeEditorSteps,
     addEditorComposableStep,
     removeEditorComposableStep,

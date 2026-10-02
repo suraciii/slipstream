@@ -123,6 +123,10 @@ pub(super) async fn download(
         || !header_is("slipstream-artifact-id", artifact_id)
         || !header_is("slipstream-artifact-photo-id", photo_id)
         || !header_is(
+            "slipstream-artifact-filename",
+            artifact["filename"].as_str().unwrap_or_default(),
+        )
+        || !header_is(
             "slipstream-artifact-step-id",
             artifact["stepId"].as_str().unwrap_or_default(),
         )
@@ -180,6 +184,8 @@ pub(super) async fn download(
         "photoId": photo_id,
         "stepId": artifact["stepId"],
         "module": artifact["module"],
+        "filename": artifact["filename"],
+        "expiresAt": artifact["expiresAt"],
         "bundleId": artifact["bundleId"],
         "adapterSchemaVersion": artifact["adapterSchemaVersion"],
         "width": width,

@@ -130,7 +130,6 @@ export type GridProgressViewModel = Readonly<{
 export type {
   EditorComposableViewModel,
   EditorExportViewModel,
-  EditorStage,
   EditorViewModel,
 } from "./editor-view-contract.js";
 

@@ -1,11 +1,35 @@
-import { isRecord } from "../api/editor.js";
+import { isRecord } from "../api/guards.js";
 import { composablePreviewRefusalNote } from "./composable-preview.js";
 import { plainEditorMessage } from "./editor-presentation.js";
-import {
-  asEditorSupportReason,
-  isRetryableSupportReason,
-  supportReasonExplanation,
-} from "./photo-editor.js";
+type SourceSupportReason =
+  | ""
+  | "original-missing"
+  | "original-unreadable"
+  | "read-pending"
+  | "resource-unavailable";
+const asEditorSupportReason = (value: unknown): SourceSupportReason =>
+  value === "original-missing" ||
+  value === "original-unreadable" ||
+  value === "read-pending" ||
+  value === "resource-unavailable"
+    ? value
+    : "";
+const isRetryableSupportReason = (reason: SourceSupportReason): boolean =>
+  reason === "read-pending" || reason === "resource-unavailable";
+const supportReasonExplanation = (reason: SourceSupportReason): string => {
+  switch (reason) {
+    case "original-missing":
+      return "This Photo's Original File is missing from its remembered Location";
+    case "original-unreadable":
+      return "Reading this Photo's Original File failed for its current source revision";
+    case "read-pending":
+      return "This Photo's source read is still pending while the Library recovers";
+    case "resource-unavailable":
+      return "The Library could not spare the capacity to read this Photo's Original File";
+    default:
+      return "Current source facts are unavailable";
+  }
+};
 export const describePreviewRefusal = async (
   response: Response,
 ): Promise<string> => {

@@ -1,6 +1,9 @@
 use super::parameters::validate_darktable_tree;
 use super::*;
 
+#[path = "saved_intent_tests.rs"]
+mod saved_intent_tests;
+
 fn both_ready() -> ModuleRegistry {
     ModuleRegistry::new(ModuleAvailability::ready(), ModuleAvailability::ready())
 }
@@ -430,20 +433,11 @@ fn run_refuses_incompatible_input_contracts() {
 fn film_discovery_defaults_execute_and_portrait_contract_uses_same_admission() {
     let registry = both_ready();
     let description = registry.describe(SPEKTRAFILM_MODULE).unwrap();
-    let properties = description.parameter_schema["properties"]
-        .as_object()
-        .unwrap();
-    let mut tree = Map::new();
-    for group in SPEKTRAFILM_GROUPS {
-        tree.insert(group.to_owned(), properties[group]["const"].clone());
-    }
-    let mut output = Map::new();
-    for (field, schema) in properties["output"]["properties"].as_object().unwrap() {
-        output.insert(field.clone(), schema["const"].clone());
-    }
-    tree.insert("output".to_owned(), Value::Object(output));
-    let tree = Value::Object(tree);
+    let tree = description.parameter_schema["default"].clone();
     assert_eq!(tree, pinned_film_tree());
+    registry
+        .validate_saved_parameters(&spektrafilm_parameters(tree.clone()))
+        .unwrap();
     let portrait = handoff_input(6376, 9568);
     registry
         .admit_input_contract(SPEKTRAFILM_MODULE, &portrait.contract)
@@ -512,7 +506,6 @@ fn run_refuses_malformed_trees_before_execution() {
         }).collect::<Vec<_>>()});
     let error = validate_darktable_tree(DARKTABLE_MODULE, &oversize_stack).unwrap_err();
     assert_eq!(error.code, ModuleErrorCode::MalformedParameterTree);
-    assert!(error.message.contains("128-entry bound"));
     let maximal_stack = json!({"stack": (0..128).map(|_| {
             json!({"operation": "a", "multiPriority": 0, "enabled": true, "params": {}})
         }).collect::<Vec<_>>()});

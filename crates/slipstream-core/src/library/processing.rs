@@ -1,10 +1,133 @@
 use super::*;
 
 impl Library {
-    /// Reads one Photo's saved composable Edit Recipe in one serialized
-    /// persistence-owner operation. `None` means no composable recipe has
-    /// been saved for the Photo; the fixed single-module recipe surface is
-    /// separate and unchanged.
+    pub async fn replay_composable_edit_recipe(
+        &self,
+        mutation: SaveComposableEditRecipe,
+    ) -> Result<Option<ComposableEditRecipeWriteOutcome>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .replay_composable_edit_recipe_receiver(mutation)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    pub async fn replay_processing_export_retry(
+        &self,
+        photo_id: &str,
+        previous_request_id: &str,
+        request_id: &str,
+    ) -> Result<Option<crate::processing::ProcessingExportSubmitOutcome>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.replay_processing_export_retry_receiver(
+                photo_id,
+                previous_request_id,
+                request_id,
+            )
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    pub async fn composable_edit_recipe_read(
+        &self,
+        photo_id: &str,
+    ) -> Result<Option<crate::processing::ComposableEditRecipeRead>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .composable_edit_recipe_read_receiver(photo_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    pub async fn rebind_composable_edit_recipe(
+        &self,
+        mutation: crate::processing::RebindComposableEditRecipe,
+    ) -> Result<ComposableEditRecipeWriteOutcome, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .rebind_composable_edit_recipe_receiver(mutation)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    pub async fn list_processing_exports(
+        &self,
+        photo_id: &str,
+        now: u64,
+    ) -> Result<crate::processing::ProcessingExportList, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .list_processing_exports_receiver(photo_id, now)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    pub async fn replay_processing_export(
+        &self,
+        mutation: crate::processing::ReplayProcessingExport,
+    ) -> Result<Option<crate::processing::ProcessingExportSubmitOutcome>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.replay_processing_export_receiver(mutation)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    pub async fn retry_processing_export(
+        &self,
+        mutation: crate::processing::RetryProcessingExport,
+        now: u64,
+    ) -> Result<crate::processing::ProcessingExportSubmitOutcome, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .retry_processing_export_receiver(mutation, now)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    pub async fn processing_artifact_retention(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<crate::processing::ProcessingArtifactRetention>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .read_processing_artifact_retention_receiver(artifact_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Reads one Photo's retained composable recipe.
     pub async fn composable_edit_recipe(
         &self,
         photo_id: &str,

@@ -11,7 +11,7 @@ pub(super) fn validate_submit_request(
     validate_bounded_name(&mutation.photo_id, MAXIMUM_PHOTO_ID_BYTES).map_err(contract)?;
     validate_bounded_name(&mutation.expected_recipe_revision, MAXIMUM_REVISION_BYTES)
         .map_err(contract)?;
-    validate_revision(&mutation.expected_source_revision).map_err(contract)?;
+    validate_source_revision(&mutation.expected_source_revision).map_err(contract)?;
     validate_bounded_name(
         &mutation.bundle_id,
         crate::processing::MAXIMUM_CONTRACT_NAME_BYTES,

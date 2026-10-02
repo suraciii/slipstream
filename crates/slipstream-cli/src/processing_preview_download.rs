@@ -7,9 +7,9 @@
 //! Camera Preview, a legacy stage rendition, or another module's result.
 use super::preview_download::{Destination, complete_png};
 use super::{
-    CLI_CONTRACT_VERSION, CONTRACT_HEADER, CommandFailure, ErrorResponse, Operation,
-    PublicationState, ServiceClient, access_boundary_failure, redact_value, response_bytes,
-    valid_sha256, validated_route_failure, web_url,
+    CLI_CONTRACT_VERSION, CONTRACT_HEADER, CommandFailure, ErrorResponse, MutationIdentity,
+    Operation, PublicationState, ServiceClient, access_boundary_failure, redact_value,
+    response_bytes, valid_sha256, validated_route_failure, web_url,
 };
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -25,7 +25,7 @@ const OPERATION: Operation = Operation::PhotosProcessingPreview;
 const MAXIMUM_PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The bound of one opaque identity fact the response repeats.
-const MAXIMUM_IDENTITY_BYTES: usize = 8192;
+const MAXIMUM_IDENTITY_BYTES: usize = 128;
 
 /// The frame-dimension bound, so a declared geometry is at least
 /// representable in the medium the rendition is served as.
@@ -48,6 +48,9 @@ const PARAMETER_DIGEST_HEADER: &str = "slipstream-processing-preview-parameter-d
 const OUTPUT_CONTRACT_HEADER: &str = "slipstream-processing-preview-output-contract";
 const DISPLAY_CONVERSION_HEADER: &str = "slipstream-processing-preview-display-conversion";
 const IDENTITY_HEADER: &str = "slipstream-processing-preview-identity";
+const COMPARISON_HEADER: &str = "slipstream-processing-preview-comparison";
+const INPUT_SHA256_HEADER: &str = "slipstream-processing-preview-input-sha256";
+const INPUT_BYTE_LENGTH_HEADER: &str = "slipstream-processing-preview-input-byte-length";
 
 /// The bounded native render's own display rendition medium.
 const RENDITION_CONTENT_TYPE: &str = "image/png";
@@ -83,6 +86,8 @@ struct RenditionMetadata {
     width: u32,
     height: u32,
     sha256: String,
+    input_sha256: String,
+    input_byte_length: u64,
 }
 
 /// The one value of `name`, as text. A repeated or non-text value is not one
@@ -114,7 +119,7 @@ fn bounded_text(value: &str) -> Option<String> {
 fn decode_source_revision(value: &str) -> Option<String> {
     if value.is_empty()
         || !value.len().is_multiple_of(2)
-        || value.len() > 2 * MAXIMUM_IDENTITY_BYTES
+        || value.len() > 2 * crate::MAXIMUM_SOURCE_REVISION_BYTES
     {
         return None;
     }
@@ -142,13 +147,26 @@ fn rendition_metadata(
     step_id: &str,
 ) -> Option<RenditionMetadata> {
     let identifies = |name: &str, expected: &str| header_value(headers, name) == Some(expected);
-    if !identifies(PHOTO_ID_HEADER, photo_id) || !identifies(STEP_ID_HEADER, step_id) {
+    if !identifies(PHOTO_ID_HEADER, photo_id)
+        || !identifies(STEP_ID_HEADER, step_id)
+        || !identifies(COMPARISON_HEADER, "current")
+    {
         return None;
     }
     let width = dimension(header_value(headers, WIDTH_HEADER)?)?;
     let height = dimension(header_value(headers, HEIGHT_HEADER)?)?;
     let sha256 = header_value(headers, SHA256_HEADER)?.to_owned();
     if !valid_sha256(&sha256) {
+        return None;
+    }
+    let input_sha256 = header_value(headers, INPUT_SHA256_HEADER)?.to_owned();
+    if !valid_sha256(&input_sha256) {
+        return None;
+    }
+    let input_byte_length = header_value(headers, INPUT_BYTE_LENGTH_HEADER)?
+        .parse::<u64>()
+        .ok()?;
+    if input_byte_length == 0 {
         return None;
     }
     let source_revision = decode_source_revision(header_value(headers, SOURCE_REVISION_HEADER)?)?;
@@ -175,6 +193,8 @@ fn rendition_metadata(
         width,
         height,
         sha256,
+        input_sha256,
+        input_byte_length,
     })
 }
 
@@ -247,6 +267,15 @@ pub(super) async fn download(
         let error = serde_json::from_slice::<ErrorResponse>(&bytes)
             .map_err(|_| CommandFailure::transport(OPERATION))?
             .error;
+        if error.code == "outcome_unknown" {
+            return Err(CommandFailure::unknown(&MutationIdentity {
+                operation: OPERATION,
+                photo_ids: vec![photo_id.to_owned()],
+                album_id: None,
+                album_name: None,
+                mappings: Vec::new(),
+            }));
+        }
         return Err(validated_route_failure(error, OPERATION, &client.token)
             .unwrap_or_else(|| CommandFailure::transport(OPERATION)));
     }
@@ -305,6 +334,9 @@ pub(super) async fn download(
         "state": "ready",
         "sourceRevision": metadata.source_revision,
         "recipeRevision": metadata.recipe_revision,
+        "comparison": "current",
+        "inputSha256": metadata.input_sha256,
+        "inputByteLength": metadata.input_byte_length,
         "contentType": RENDITION_CONTENT_TYPE,
         "width": metadata.width,
         "height": metadata.height,
@@ -364,6 +396,9 @@ mod tests {
             (OUTPUT_CONTRACT_HEADER, SHA256),
             (DISPLAY_CONVERSION_HEADER, "display-transform-v1"),
             (IDENTITY_HEADER, SHA256),
+            (COMPARISON_HEADER, "current"),
+            (INPUT_SHA256_HEADER, SHA256),
+            (INPUT_BYTE_LENGTH_HEADER, "24"),
         ]
     }
 
@@ -375,6 +410,65 @@ mod tests {
         assert_eq!(metadata.recipe_revision, "recipe-9");
         assert_eq!((metadata.width, metadata.height), (8, 4));
         assert_eq!(metadata.sha256, "a".repeat(64));
+    }
+
+    #[test]
+    fn baseline_or_missing_input_evidence_never_publishes_as_current_preview() {
+        let mut frame = headers(&ready_headers());
+        frame.insert(
+            COMPARISON_HEADER,
+            reqwest::header::HeaderValue::from_static("baseline"),
+        );
+        assert!(rendition_metadata(&frame, "p1", "develop-1").is_none());
+        frame.insert(
+            COMPARISON_HEADER,
+            reqwest::header::HeaderValue::from_static("current"),
+        );
+        frame.remove(INPUT_SHA256_HEADER);
+        assert!(rendition_metadata(&frame, "p1", "develop-1").is_none());
+        frame.insert(
+            INPUT_SHA256_HEADER,
+            reqwest::header::HeaderValue::from_str(&"a".repeat(64)).unwrap(),
+        );
+        frame.insert(
+            INPUT_BYTE_LENGTH_HEADER,
+            reqwest::header::HeaderValue::from_static("0"),
+        );
+        assert!(rendition_metadata(&frame, "p1", "develop-1").is_none());
+    }
+
+    #[test]
+    fn preview_source_and_recipe_revisions_use_separate_byte_bounds() {
+        let source = format!(
+            "original\0{}",
+            "s".repeat(crate::MAXIMUM_SOURCE_REVISION_BYTES - 9)
+        );
+        let encoded: String = source
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let mut frame = headers(&ready_headers());
+        frame.insert(
+            SOURCE_REVISION_HEADER,
+            reqwest::header::HeaderValue::from_str(&encoded).unwrap(),
+        );
+        let result = rendition_metadata(&frame, "p1", "develop-1").expect("bounded opaque source");
+        assert_eq!(result.source_revision, source);
+        frame.insert(
+            SOURCE_REVISION_HEADER,
+            reqwest::header::HeaderValue::from_str(&format!("{encoded}00")).unwrap(),
+        );
+        assert!(rendition_metadata(&frame, "p1", "develop-1").is_none());
+        frame.insert(
+            SOURCE_REVISION_HEADER,
+            reqwest::header::HeaderValue::from_static("736f757263652d33"),
+        );
+        frame.insert(
+            RECIPE_REVISION_HEADER,
+            reqwest::header::HeaderValue::from_str(&"r".repeat(129)).unwrap(),
+        );
+        assert!(rendition_metadata(&frame, "p1", "develop-1").is_none());
     }
 
     #[test]

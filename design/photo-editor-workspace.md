@@ -210,9 +210,11 @@ lost response is not proof that a write failed.
 
 ## Ownership and ordering rules
 
-- Every browser continuation carries a Photo-scope generation. Leaving the
-  Photo, replacing its source binding, or changing the selected step
-  invalidates only the continuations it owns.
+- Visible workspace and Preview continuations carry a Photo-scope generation.
+  Leaving the Photo, replacing its source binding, or changing the selected step
+  invalidates those continuations. The Photo's save owner and its unresolved
+  captured request survive navigation, as defined in
+  [Leave, navigation, and reopen](#leave-navigation-and-reopen).
 - Recipe writes are ordered by the captured expected recipe revision and source
   revision. The service's guarded result is authoritative.
 - Preview settlement is ordered by the captured identity tuple, not by network

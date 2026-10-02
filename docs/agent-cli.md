@@ -55,92 +55,56 @@ that historical attribution may remain unknown. A `library check` timeout does
 not stop its admitted scan; use `status` to inspect the service-owned cycle.
 Never promote a current-state guess into a claim that a lost mutation succeeded.
 
-## Develop a RAW Photo
-
-Use a matching client/service candidate and a qualified processing deployment.
-Run commands in JSON mode and inspect their exit code and envelope before using
-the returned data. The commands below exercise the closed transport facade
-installed by that deployment; its selector values are not product modules,
-pipeline stages, universal output targets, or composition semantics. Capability
-discovery controls the admitted module inputs, ranges, and refusal reasons.
-
-1. Run `processing capability`, then `photos recipe get PHOTO_ID`. Preserve
-   the complete recipe read, including the nullable recipe version, source
-   revision and `webUrl`. Continue only for an available supported source and
-   the intended stage. Read the reported exposure range/step and
-   white-balance modes; do not infer them from the camera name. An absent
-   recipe has `recipe: null`. Diagnose a disabled edit across three
-   independent axes — `processing capability` (engine), `status` (Library
-   scan phase), and the read's `sourceSupport`/`supportReason` (this Photo's
-   source) — and report them separately. A retryable reason
-   (`read-pending`, `resource-unavailable`) means wait and re-read after the
-   scan or capacity frees; only a confirmed reason (`original-missing`,
-   `original-unreadable`) is permanent. Never treat a recovering Library or a
-   busy engine as an unreadable Original.
-2. Construct the complete save JSON shown in the
-   [CLI Reference](cli-reference.md#photo-development). Copy the observed guards,
-   choose a new request ID, and set the intended exposure and white balance.
-   Run `photos recipe save PHOTO_ID --input FILE`. On conflict, reread and
-   decide again. On uncertainty, retain the exact input and reconcile before
-   exporting. Never generate a replacement ID merely because a response was lost.
-3. Run `photos recipe get PHOTO_ID` in a new process and retain the confirmed
-   settings and recipe version. Request `photos edit-preview PHOTO_ID --stage
-develop --file NEW_JPEG_PATH` or `--stage film` when the deployment reports
-   Film ready. Both stages use the same source/recipe/bundle identity framing
-   and validate response metadata, digest, and JPEG structure before writing.
-   A queued/running result has no file; invoke the read later. Inspect the
-   ready rendition with its returned recipe/source identity and detail limits.
-   `--settings baseline` renders a comparison without changing the saved
-   recipe. `photos preview` remains the Camera Preview.
-4. Run `photos export submit PHOTO_ID --target development-tiff --request-id
-NEW_REQUEST_ID`. Save the Export ID and captured revisions. If another client
-   changed the recipe before submission, compare those revisions with the
-   retained recipe read before attributing settings to the output. Inspect
-   `photos export status EXPORT_ID` until terminal; exiting the CLI does not
-   cancel service work. A failed/cancelled Export is not a completed artifact.
-5. After `succeeded`, run `photos export download EXPORT_ID --file NEW_TIFF_PATH`.
-   Report completion only when `fileCommitted` is true. The TIFF is float32 RGB.
-   Independently hash and decode the file for acceptance; the download response's
-   SHA-256 comes from the service receipt. Existing paths must not be replaced.
-6. Return the Photo `webUrl`, confirmed settings, captured revisions, Export ID,
-   terminal state and local file path. The Photographer can inspect the same
-   saved recipe in Web. Do not treat a pending preview, accepted Export, or
-   receipt as proof of a downloaded image.
-
-Reset uses a new guarded save of 0 EV/as-shot. Source replacement requires a
-deliberate `photos recipe rebind PHOTO_ID --input FILE` with the observed
-recipe version and new source revision; never rebind automatically. A
-refused source, engine or stage requires the reported recovery action: a
-retryable `supportReason` is re-read after the admitted scan or capacity
-frees, while a confirmed reason names the permanent condition for the
-current source revision. Do not substitute Camera Preview or TIFF for a
-refused Film result. Film qualification, cancellation and retained-snapshot
-retry are separate from this Develop walkthrough.
-
 ## Compose Processing Steps
 
-The composable Issue #496 surface sits beside the legacy walkthrough above,
-which remains installed unchanged. Discover peers with `processing modules`,
-then run `photos processing-recipe get PHOTO_ID` and preserve the observed
-`sourceRevision`. Build the complete save document from the
-[CLI Reference](cli-reference.md#photo-development) — a new request ID, the
-observed guards, zero or more steps with each module's own `schemaVersion`
-and parameter `tree` copied verbatim from discovery, and exactly one selected
-`currentStepId` — and run `photos processing-recipe save PHOTO_ID --input
-FILE`. Copy module parameter trees; never invent, flatten, or merge them.
-Request the selected step's Preview with `photos processing-preview PHOTO_ID
---step STEP_ID --file NEW_PNG_PATH`. A `step_not_current` or
-`source_changed` refusal means reread and decide again; a
-`module_parameters_unavailable` or `processing_unavailable` refusal names the
-deployment's missing qualification and never falls back to the legacy stage
-preview or the Camera Preview. An artifact input requires a published,
-immutable Export artifact selected explicitly with its concrete contract.
+Use a matching client and service with qualified module assets. Run commands
+in JSON mode and inspect the exit code and envelope before using their data.
+The [CLI Reference](cli-reference.md#photo-development) owns the exact command
+grammar, input shapes, and result fields.
 
-Submit a composable export with `photos processing-export PHOTO_ID
---input FILE`. A completed `201` response includes the retained artifact; a
-live duplicate is a `pending` `202` receipt, which you reconcile with
-`photos processing-export-status PHOTO_ID REQUEST_ID`. Use
-`photos processing-export-cancel` for queued or running work. Download a
-published artifact with `processing artifact-download ARTIFACT_ID --file
-NEW_TIFF_PATH`; the CLI validates provenance, length, digest, and contract and
-never replaces an existing destination.
+1. Run `processing modules` and `photos processing-recipe get PHOTO_ID`.
+   Preserve the observed source revision, recipe revision, and Photo Web URL.
+   Read each module's own availability, qualified parameter schema, input
+   contract, and resource limits. Module readiness does not prove that the
+   selected Photo or artifact is compatible. Library scan progress remains
+   independent; never classify a busy engine as an unreadable Original.
+2. Build a complete guarded save document with a new request identity, the
+   observed revisions, zero or more steps, and the selected current step.
+   Each step has its own module, explicit Original or artifact binding, and
+   complete versioned parameter tree. Copy admitted defaults from discovery;
+   never flatten, merge, or invent module parameters. Run
+   `photos processing-recipe save PHOTO_ID --input FILE`. On conflict, read
+   current facts and decide again. On uncertainty, retain and replay the exact
+   input under the same identity before dependent writes or processing.
+3. Request `photos processing-preview PHOTO_ID --step STEP_ID --file PATH`.
+   Use a new destination. Inspect the returned input, parameter, bundle, and
+   Preview identity. Pending work is not a downloaded image. A refusal does
+   not permit another module or Camera Preview to stand in for the result.
+4. Submit `photos processing-export PHOTO_ID --input FILE` with a new request
+   identity and the confirmed recipe and source guards. Keep the exact input.
+   Accepted work continues under service ownership after the client exits.
+   Inspect `photos processing-export-status PHOTO_ID REQUEST_ID` until its
+   terminal outcome. A lost submission response requires replay of the exact
+   submission; absence from a list alone does not prove non-admission.
+5. Download a completed artifact with
+   `processing artifact-download ARTIFACT_ID --file PATH`. Report a local
+   download only after `fileCommitted` is true. The client verifies provenance,
+   image contract, byte length, and SHA-256 and never replaces an existing
+   destination. Independently hash and decode the file for qualification.
+6. To compose another step, explicitly select a retained compatible artifact
+   and its concrete contract as input. Exporting an upstream step again does
+   not retarget this binding. Return the Photo Web URL, confirmed step and
+   parameters, captured revisions, request identity, terminal state, artifact
+   identity, and committed local path.
+
+Reopening a Photo restores retained tasks and artifacts from the service. A
+failed or cancelled task may be retried explicitly with a new request identity
+against its retained snapshot. A retry never captures today's recipe in place
+of that snapshot. Expired input, changed source, unavailable assets, and
+insufficient capacity require the reported recovery action.
+
+Source replacement requires an explicit guarded rebind using both the observed
+recipe revision and newly observed source revision. Reopening or requesting a
+Preview must not rebind saved intent. Qualification remains specific to the
+module, bundle, input, parameter tree, output contract, geometry, and finite
+execution allowance exercised by the qualification evidence.

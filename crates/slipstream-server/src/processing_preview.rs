@@ -13,7 +13,7 @@ use axum::{
 };
 use slipstream_core::{
     ProcessingGeometry, ProcessingImageContract, ProcessingInput, ProcessingModuleId,
-    ProcessingPreviewIdentity, derivative::DISPLAY_TRANSFORM_VERSION,
+    ProcessingParameterSnapshot, ProcessingPreviewIdentity, derivative::DISPLAY_TRANSFORM_VERSION,
 };
 use slipstream_processing::{
     local_preview::PREVIEW_LONG_EDGE,
@@ -22,6 +22,7 @@ use slipstream_processing::{
     },
 };
 use std::{
+    borrow::Cow,
     collections::HashMap,
     sync::{
         Arc, LazyLock, Mutex,
@@ -34,6 +35,56 @@ use crate::{
     http::{CLI_CONTRACT_HEADER, HttpState, require_cli_contract, require_published, valid_id},
 };
 
+#[derive(Clone, Copy, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum PreviewComparison {
+    #[default]
+    Current,
+    Baseline,
+}
+
+impl PreviewComparison {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Baseline => "baseline",
+        }
+    }
+}
+
+fn preview_parameters<'a>(
+    step: &'a slipstream_core::ProcessingStep,
+    comparison: PreviewComparison,
+) -> Result<Cow<'a, ProcessingParameterSnapshot>, String> {
+    match comparison {
+        PreviewComparison::Current => Ok(Cow::Borrowed(&step.parameters)),
+        PreviewComparison::Baseline => {
+            let registry =
+                ModuleRegistry::new(ModuleAvailability::ready(), ModuleAvailability::ready());
+            let description = registry
+                .describe(step.module.as_str())
+                .map_err(|error| error.message)?;
+            let tree = description
+                .parameter_schema
+                .get("default")
+                .filter(|tree| tree.is_object())
+                .ok_or_else(|| "The module has no published default parameter tree".to_owned())?
+                .clone();
+            let parameters = Parameters {
+                module: step.module.as_str().to_owned(),
+                version: step.parameters.schema_version.clone(),
+                tree,
+            };
+            registry
+                .validate_parameters(&parameters)
+                .map_err(|error| error.message)?;
+            ProcessingParameterSnapshot::new(&parameters.version, parameters.tree)
+                .map(Cow::Owned)
+                .map_err(|error| error.to_string())
+        }
+    }
+}
+
 type PreviewIntentRegistry = Mutex<HashMap<String, (u64, Arc<AtomicBool>)>>;
 
 static PREVIEW_INTENTS: LazyLock<PreviewIntentRegistry> =
@@ -44,8 +95,12 @@ fn preview_intents() -> &'static PreviewIntentRegistry {
     &PREVIEW_INTENTS
 }
 
-fn begin_preview_intent(photo_id: &str, step_id: &str) -> (String, u64, Arc<AtomicBool>) {
-    let key = format!("{photo_id}\0{step_id}");
+fn begin_preview_intent(
+    photo_id: &str,
+    step_id: &str,
+    comparison: PreviewComparison,
+) -> (String, u64, Arc<AtomicBool>) {
+    let key = format!("{photo_id}\0{step_id}\0{}", comparison.as_str());
     let generation = NEXT_PREVIEW_INTENT.fetch_add(1, Ordering::Relaxed);
     let token = Arc::new(AtomicBool::new(false));
     let mut intents = preview_intents()
@@ -156,6 +211,7 @@ fn output_contract(
 
 fn preview_identity(
     step: &slipstream_core::ProcessingStep,
+    parameters: &ProcessingParameterSnapshot,
     execution: &ProcessingPreviewExecution,
     bundle_id: &str,
 ) -> Result<ProcessingPreviewIdentity, String> {
@@ -170,9 +226,9 @@ fn preview_identity(
         module,
         adapter_schema_version: format!(
             "{}:{}",
-            description.id.adapter_version, step.parameters.schema_version
+            description.id.adapter_version, parameters.schema_version
         ),
-        parameter_digest: step.parameters.canonical_digest(),
+        parameter_digest: parameters.canonical_digest(),
         output_contract: output_contract(step)?,
         bundle_id: bundle_id.to_owned(),
         geometry: ProcessingGeometry::new(PREVIEW_LONG_EDGE, PREVIEW_LONG_EDGE)
@@ -195,6 +251,7 @@ fn ready_response(
     step_id: &str,
     recipe: &slipstream_core::ComposableEditRecipe,
     bundle_id: &str,
+    comparison: PreviewComparison,
 ) -> Response {
     let mut response = Response::new(Body::from(execution.bytes));
     *response.status_mut() = StatusCode::OK;
@@ -206,6 +263,21 @@ fn ready_response(
     headers.insert(
         "cache-control",
         "no-store".parse().expect("valid cache control"),
+    );
+    insert_header(
+        headers,
+        "slipstream-processing-preview-comparison",
+        comparison.as_str().to_owned(),
+    );
+    insert_header(
+        headers,
+        "slipstream-processing-preview-input-sha256",
+        identity.input.sha256.clone(),
+    );
+    insert_header(
+        headers,
+        "slipstream-processing-preview-input-byte-length",
+        identity.input.byte_length.to_string(),
     );
     insert_header(
         headers,
@@ -341,6 +413,17 @@ pub(crate) async fn get_processing_preview(
     {
         return *response;
     }
+    let comparison = match request.uri().query() {
+        None | Some("") | Some("comparison=current") => PreviewComparison::Current,
+        Some("comparison=baseline") => PreviewComparison::Baseline,
+        _ => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "invalid_comparison",
+                "Preview comparison must be current or baseline",
+            );
+        }
+    };
     if let Err(response) = require_published(&state.application) {
         return *response;
     }
@@ -421,6 +504,16 @@ pub(crate) async fn get_processing_preview(
             "Processing is not configured for this deployment",
         );
     };
+    let preview_parameters = match preview_parameters(step, comparison) {
+        Ok(parameters) => parameters,
+        Err(_) => {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "baseline_unavailable",
+                "The module's published default parameters are unavailable",
+            );
+        }
+    };
 
     let (execution, bundle_id) = match step.module.as_str() {
         DARKTABLE_MODULE => {
@@ -454,10 +547,11 @@ pub(crate) async fn get_processing_preview(
             }
             let parameters = Parameters {
                 module: step.module.as_str().to_owned(),
-                version: step.parameters.schema_version.clone(),
-                tree: step.parameters.tree.clone(),
+                version: preview_parameters.schema_version.clone(),
+                tree: preview_parameters.tree.clone(),
             };
-            let (intent_key, generation, cancellation) = begin_preview_intent(&photo_id, &step_id);
+            let (intent_key, generation, cancellation) =
+                begin_preview_intent(&photo_id, &step_id, comparison);
             let rendered = exports
                 .render_selected_preview(
                     &photo_id,
@@ -491,10 +585,11 @@ pub(crate) async fn get_processing_preview(
             };
             let parameters = Parameters {
                 module: step.module.as_str().to_owned(),
-                version: step.parameters.schema_version.clone(),
-                tree: step.parameters.tree.clone(),
+                version: preview_parameters.schema_version.clone(),
+                tree: preview_parameters.tree.clone(),
             };
-            let (intent_key, generation, cancellation) = begin_preview_intent(&photo_id, &step_id);
+            let (intent_key, generation, cancellation) =
+                begin_preview_intent(&photo_id, &step_id, comparison);
             let rendered = exports
                 .render_film_preview(
                     artifact_id.as_str(),
@@ -543,7 +638,7 @@ pub(crate) async fn get_processing_preview(
             "The Preview no longer matches the selected Processing Step",
         );
     }
-    let identity = match preview_identity(step, &execution, &bundle_id) {
+    let identity = match preview_identity(step, &preview_parameters, &execution, &bundle_id) {
         Ok(identity) => identity,
         Err(_) => {
             return error(
@@ -554,6 +649,54 @@ pub(crate) async fn get_processing_preview(
         }
     };
     ready_response(
-        execution, &identity, &photo_id, &step_id, &recipe, &bundle_id,
+        execution, &identity, &photo_id, &step_id, &recipe, &bundle_id, comparison,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paired_intents_stay_current_until_their_own_mode_is_superseded() {
+        let (current_key, current_generation, current_token) = begin_preview_intent(
+            "paired-intents-test",
+            "selected",
+            PreviewComparison::Current,
+        );
+        let (baseline_key, baseline_generation, baseline_token) = begin_preview_intent(
+            "paired-intents-test",
+            "selected",
+            PreviewComparison::Baseline,
+        );
+        assert!(current_preview_intent(
+            &current_key,
+            current_generation,
+            &current_token
+        ));
+        assert!(current_preview_intent(
+            &baseline_key,
+            baseline_generation,
+            &baseline_token
+        ));
+
+        let (new_key, new_generation, new_token) = begin_preview_intent(
+            "paired-intents-test",
+            "selected",
+            PreviewComparison::Current,
+        );
+        assert!(!current_preview_intent(
+            &current_key,
+            current_generation,
+            &current_token
+        ));
+        assert!(current_preview_intent(
+            &baseline_key,
+            baseline_generation,
+            &baseline_token
+        ));
+        assert!(current_preview_intent(&new_key, new_generation, &new_token));
+        finish_preview_intent(&new_key, new_generation);
+        finish_preview_intent(&baseline_key, baseline_generation);
+    }
 }

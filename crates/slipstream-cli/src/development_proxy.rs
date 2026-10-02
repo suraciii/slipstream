@@ -121,6 +121,7 @@ where
 fn proxy_valid(proxy: &ProxyFactsWire) -> bool {
     valid_sha256(&proxy.proxy_id)
         && !proxy.source_revision.is_empty()
+        && proxy.source_revision.len() <= super::MAXIMUM_SOURCE_REVISION_BYTES
         && proxy.source_size > 0
         && valid_sha256(&proxy.source_sha256)
         && !proxy.source_profile_id.is_empty()
@@ -199,7 +200,9 @@ fn parse_create(bytes: Vec<u8>) -> Result<Value, CommandFailure> {
              observed source revision verbatim.",
         )
     })?;
-    if input.expected_source_revision.is_empty() {
+    if input.expected_source_revision.is_empty()
+        || input.expected_source_revision.len() > super::MAXIMUM_SOURCE_REVISION_BYTES
+    {
         return Err(CommandFailure::invalid(
             "expectedSourceRevision",
             "The source revision is required.",

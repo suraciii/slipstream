@@ -178,6 +178,8 @@ pub struct Application {
     pub(crate) shared: Arc<SharedLibrary>,
     /// The Export lifecycle owner when the deployment configures processing.
     pub(crate) exports: Option<Arc<crate::export_manager::ExportManager>>,
+    /// Retained publication storage remains readable without an engine.
+    pub(crate) export_artifacts_directory: PathBuf,
     /// Durable Development Proxy lifecycle, available with processing.
     pub(crate) proxies: Option<Arc<crate::development_proxy::DevelopmentProxyManager>>,
     scan_cycle: ScanCycle,
@@ -194,13 +196,6 @@ pub struct Application {
     pub(crate) shutdown: Mutex<bool>,
 }
 impl Application {
-    pub(crate) fn instance_epoch(&self) -> &str {
-        &self.instance_epoch
-    }
-
-    pub(crate) fn processing_available(&self) -> bool {
-        self.exports.is_some()
-    }
     pub(crate) fn admit_scan_cycle(
         self: &Arc<Self>,
         scan_gate: Option<oneshot::Receiver<()>>,
@@ -405,6 +400,7 @@ impl Application {
             library,
             library_root: config.library_root.clone(),
             exports,
+            export_artifacts_directory: config.state_directory.join("exports").join("artifacts"),
             proxies,
             scan_cycle: ScanCycle::new(),
             preview,

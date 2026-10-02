@@ -397,7 +397,6 @@ async fn static_files_have_revalidation_and_head_without_a_body() {
         application: Arc::clone(&application),
         web_root: Arc::new(open_web_root(root.clone())),
         processing: None,
-        edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production(None)),
     });
     let response = tower::ServiceExt::oneshot(
         app.clone(),
@@ -457,7 +456,6 @@ async fn installation_resources_revalidate_and_never_fall_back_to_html() {
         application: Arc::clone(&application),
         web_root: Arc::new(open_web_root(root.clone())),
         processing: None,
-        edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production(None)),
     });
     for (path, content_type, expected) in [
         (

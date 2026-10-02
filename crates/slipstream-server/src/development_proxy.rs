@@ -43,6 +43,8 @@ use crate::{
 };
 
 const QUALITY_LIMIT: &str = "2560-long-edge";
+/// Source facts have not yet been published for the observed Original.
+const READ_PENDING: &str = "read-pending";
 const MAX_FAILURE_REASON: usize = 120;
 const MAX_FAILURES: usize = 1024;
 const MAX_PENDING_BUILDS: usize = 64;
@@ -276,35 +278,6 @@ impl DevelopmentProxyManager {
             .map_err(|_| FactsFailure::Storage)?
             .ok_or(FactsFailure::Missing)?;
         Ok((photo, read))
-    }
-
-    pub(crate) async fn current_record(&self, photo_id: &str) -> Option<DevelopmentProxyRecord> {
-        let (photo, read) = self.read_facts(photo_id).await.ok()?;
-        let record = self.library.development_proxy(photo_id).await.ok()??;
-        // Without a published Capture fact bound to the observed source the
-        // record cannot be revalidated; fail closed instead of accepting a
-        // proxy built from an unpublished identity.
-        let expected =
-            self.expectation(read.current_source_revision.as_deref()?, &record.profile_id);
-        if !record.current_against(&expected) {
-            return None;
-        }
-        if photo.original_available {
-            let (size, digest) = self.source_hash(&photo).await.ok()?;
-            if size != record.source_size || digest != record.source_sha256 {
-                return None;
-            }
-        }
-        self.artifact_valid(&record).await.then_some(record)
-    }
-
-    pub(crate) async fn current_artifact(
-        &self,
-        photo_id: &str,
-    ) -> Option<(DevelopmentProxyRecord, PathBuf)> {
-        let record = self.current_record(photo_id).await?;
-        let path = self.artifact_path(&record);
-        Some((record, path))
     }
 
     async fn state(&self, photo_id: &str) -> Result<ProxyStateWire, FactsFailure> {
@@ -562,7 +535,7 @@ impl DevelopmentProxyManager {
     ) -> Result<(), BuildFailure> {
         let rendered = self
             .render
-            .render(photo_id, "develop", "baseline", claim.cancellation.clone())
+            .render(photo_id, claim.cancellation.clone())
             .await
             .map_err(preview_build_failure)?;
         let result = self
@@ -869,7 +842,7 @@ fn proxy_error(error: ProxyError, photo_id: &str) -> Response<Body> {
             StatusCode::SERVICE_UNAVAILABLE,
             "resource_unavailable",
             "The source facts are pending publication; retry once the read settles",
-            serde_json::json!({"photoId":photo_id,"reason":crate::edit_recipe::READ_PENDING}),
+            serde_json::json!({"photoId":photo_id,"reason":READ_PENDING}),
         ),
         ProxyError::Unsupported => cli_error(
             StatusCode::UNPROCESSABLE_ENTITY,

@@ -488,19 +488,6 @@ pub(crate) struct ExportArtifactWire {
     pub(crate) expires_at: String,
 }
 
-/// The body of one accepted Export submission or replay.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ExportSubmitWire {
-    pub(crate) export_id: String,
-    pub(crate) state: &'static str,
-    pub(crate) target: &'static str,
-    pub(crate) recipe_version: String,
-    pub(crate) source_revision: String,
-    pub(crate) receipt_expires_at: Option<String>,
-    pub(crate) artifact_expires_at: Option<String>,
-}
-
 /// One bounded list entry of a Photo's retained Exports.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -538,23 +525,6 @@ pub(crate) struct ExportInspectWire {
     pub(crate) failure_reason: Option<String>,
     pub(crate) receipt_expires_at: Option<String>,
     pub(crate) artifact: Option<ExportArtifactWire>,
-}
-
-/// The settled Export one cancellation returns.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ExportCancelWire {
-    pub(crate) export_id: String,
-    pub(crate) state: &'static str,
-    pub(crate) terminal_outcome: Option<&'static str>,
-}
-
-/// The admitted retry attempt.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ExportRetryWire {
-    pub(crate) export_id: String,
-    pub(crate) state: &'static str,
 }
 
 fn export_time(seconds: u64) -> String {
@@ -623,22 +593,6 @@ pub(crate) fn export_artifact_object(
     })
 }
 
-pub(crate) fn export_submit(record: &slipstream_core::ExportRecord) -> ExportSubmitWire {
-    let (target, _, _) = export_format(&record.snapshot.workload);
-    ExportSubmitWire {
-        export_id: record.id.clone(),
-        state: record.state.name(),
-        target,
-        recipe_version: record.snapshot.recipe_revision.clone(),
-        source_revision: record.snapshot.source_revision.clone(),
-        receipt_expires_at: receipt_expires_at(record),
-        artifact_expires_at: record
-            .artifact
-            .as_ref()
-            .map(|artifact| export_time(artifact.expires_at)),
-    }
-}
-
 pub(crate) fn export_summary(record: &slipstream_core::ExportRecord) -> ExportSummaryWire {
     let (target, _, _) = export_format(&record.snapshot.workload);
     ExportSummaryWire {
@@ -668,20 +622,5 @@ pub(crate) fn export_inspect(record: &slipstream_core::ExportRecord) -> ExportIn
         failure_reason: record.outcome.clone(),
         receipt_expires_at: receipt_expires_at(record),
         artifact: export_artifact_object(record),
-    }
-}
-
-pub(crate) fn export_cancel(record: &slipstream_core::ExportRecord) -> ExportCancelWire {
-    ExportCancelWire {
-        export_id: record.id.clone(),
-        state: record.state.name(),
-        terminal_outcome: terminal_outcome(record.state),
-    }
-}
-
-pub(crate) fn export_retry(record: &slipstream_core::ExportRecord) -> ExportRetryWire {
-    ExportRetryWire {
-        export_id: record.id.clone(),
-        state: record.state.name(),
     }
 }

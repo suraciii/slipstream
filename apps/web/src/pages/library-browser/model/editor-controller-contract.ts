@@ -1,6 +1,4 @@
 import type { PhotoSummary } from "../api/contracts.js";
-import type { EditorStage } from "../ui/library-browser-view.js";
-import type { OutputTarget } from "./workspace-output-controller.js";
 
 export type EditorControllerDependencies = Readonly<{
   isAlive: () => boolean;
@@ -15,25 +13,9 @@ export type EditorControllerDependencies = Readonly<{
 export type EditorController = Readonly<{
   open: (photoId: string) => void;
   refresh: (photoId: string) => void;
-  commitExposure: (photoId: string, exposureEv: number) => void;
-  commitWhiteBalance: (
-    photoId: string,
-    action:
-      | Readonly<{ kind: "mode"; mode: string }>
-      | Readonly<{ kind: "temperature"; temperatureKelvin: number }>
-      | Readonly<{ kind: "tint"; tintMilli: number }>,
-  ) => void;
-  stepHistory: (
-    photoId: string,
-    operation:
-      | "undo"
-      | "redo"
-      | "reset"
-      | "resetExposure"
-      | "resetWhiteBalance",
-  ) => void;
+  stepHistory: (photoId: string, operation: "undo" | "redo") => void;
   requestPreview: (photoId: string) => void;
-  applyStage: (photoId: string, stage: EditorStage) => void;
+  setCameraReference: (photoId: string, pressed: boolean) => void;
   setComparison: (photoId: string, pressed: boolean) => void;
   useSaved: (photoId: string) => void;
   reapplyLocal: (photoId: string) => void;
@@ -43,7 +25,11 @@ export type EditorController = Readonly<{
   removeProxy: (photoId: string) => void;
   /// Starts composing this Photo's composable Processing Recipe.
   compose: (photoId: string) => void;
-  composableAddStep: (photoId: string, module: string) => void;
+  composableAddStep: (
+    photoId: string,
+    module: string,
+    artifactId?: string,
+  ) => void;
   composableRemoveStep: (photoId: string, stepId: string) => void;
   composableSelectStep: (photoId: string, stepId: string) => void;
   composableEditStep: (photoId: string, stepId: string) => void;
@@ -58,16 +44,17 @@ export type EditorController = Readonly<{
   composableSave: (photoId: string) => void;
   composableDiscard: (photoId: string) => void;
   /// Reconciles the live composable Export through its durable work record.
-  checkProcessingExport: (photoId: string) => void;
+  checkProcessingExport: (photoId: string, requestId?: string) => void;
   /// Downloads one retained Processing Artifact's validated bytes.
   downloadArtifact: (photoId: string, artifactId: string) => void;
+  downloadHistorical: (photoId: string, exportId: string) => void;
   /// Selects one retained artifact as a step's explicit input binding.
   useArtifactInput: (photoId: string, artifactId: string) => void;
   submitXmp: (photoId: string) => void;
   downloadXmp: (photoId: string) => void;
-  submitExport: (photoId: string, target?: OutputTarget) => void;
-  cancelExport: (photoId: string, target?: OutputTarget) => void;
-  retryExport: (photoId: string, target?: OutputTarget) => void;
-  downloadExport: (photoId: string, target?: OutputTarget) => void;
+  submitExport: (photoId: string) => void;
+  cancelExport: (photoId: string, requestId?: string) => void;
+  retryExport: (photoId: string, requestId?: string) => void;
+  downloadExport: (photoId: string) => void;
   leave: () => void;
 }>;

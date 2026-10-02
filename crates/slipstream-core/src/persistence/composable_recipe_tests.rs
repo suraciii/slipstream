@@ -10,6 +10,9 @@ use crate::source_revision;
 use rusqlite::Connection;
 use std::path::PathBuf;
 
+#[path = "composable_recipe_tests/durability.rs"]
+mod durability;
+
 struct Seeded {
     _tree: TempTree,
     _root: crate::LibraryRoot,
@@ -418,7 +421,7 @@ async fn identity_and_guard_mismatches_are_invalid_requests() {
             ),
         )
         .await,
-        ComposableEditRecipeWriteOutcome::Invalid(ComposableRecipeRequestError::Contract(_))
+        ComposableEditRecipeWriteOutcome::Invalid(ComposableRecipeRequestError::InvalidRequestId)
     ));
     assert!(matches!(
         save_recipe(
@@ -426,7 +429,7 @@ async fn identity_and_guard_mismatches_are_invalid_requests() {
             save("raw-photo", &"r".repeat(129), None, &seeded.source, control,),
         )
         .await,
-        ComposableEditRecipeWriteOutcome::Invalid(ComposableRecipeRequestError::Contract(_))
+        ComposableEditRecipeWriteOutcome::Invalid(ComposableRecipeRequestError::InvalidRequestId)
     ));
 }
 
@@ -495,7 +498,7 @@ async fn replay_returns_the_committed_recipe_and_a_changed_payload_conflicts() {
         vec![step(
             "tone",
             "darktable",
-            original_input("raw-photo", &seeded.source),
+            original_input("raw-photo", "another-source-revision"),
         )],
         Some("tone"),
     );

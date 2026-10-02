@@ -15,8 +15,8 @@
 //! Original; the independently qualified SpektraFilm adapter consumes an
 //! explicitly selected retained Development TIFF. Every other pairing
 //! records a durable, replayable, structured refusal before execution.
-//! The `/exports` route retains the fixed transport contract documented in
-//! the CLI specification and cannot publish for a selected composable step.
+//! Historical `/exports` reads retain acknowledged records and bytes.
+//! New execution uses only the composable Processing Step surface.
 //!
 //! `GET /api/photos/{id}/processing-exports/{requestId}` reads the durable
 //! work record — the committed lifecycle state a caller reconciles against
@@ -58,6 +58,10 @@ use execution::{execute_admitted_export, fail_admitted_export, terminal_work_res
 #[path = "processing_artifact_download.rs"]
 mod download;
 pub(crate) use download::get_processing_artifact_bytes;
+#[path = "processing_export_retained.rs"]
+mod retained;
+use retained::{artifact_timestamp, retained_artifact_json};
+pub(crate) use retained::{list_processing_exports, retry_processing_export};
 
 /// The closed reason code recorded when the deployment's adapter boundary
 /// refuses a selected module's complete parameter tree.
@@ -336,9 +340,30 @@ pub(crate) async fn submit_processing_export(
             );
         }
     };
-    // The deployment boundary comes first, exactly like the legacy Export
-    // surface: an unconfigured deployment answers for itself before any
-    // data-level outcome, and it records nothing.
+    let replay = slipstream_core::ReplayProcessingExport {
+        photo_id: photo_id.clone(),
+        request_id: body.request_id.clone(),
+        step_id: step_id.clone(),
+        expected_recipe_revision: body.expected_recipe_revision.clone(),
+        expected_source_revision: body.expected_source_revision.clone(),
+    };
+    match state
+        .application
+        .library
+        .replay_processing_export(replay)
+        .await
+    {
+        Ok(Some(outcome)) => return outcome_response(&state, outcome).await,
+        Ok(None) => {}
+        Err(_) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "storage",
+                "The Export receipt could not be read",
+            );
+        }
+    }
+    // Retained caller intent has resolved; only a new request needs engines.
     if state.processing.is_none() || state.application.exports.is_none() {
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -390,6 +415,16 @@ pub(crate) async fn submit_processing_export(
             );
         }
     };
+    if selected.0 == DARKTABLE_MODULE
+        && let Some(reason) = processing.failure
+    {
+        return error_details(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "module_parameters_unavailable",
+            "The darktable module is unavailable",
+            json!({"reasonCode": reason, "reason": "The configured darktable module failed availability verification"}),
+        );
+    }
     let registry = ModuleRegistry::new(ModuleAvailability::ready(), ModuleAvailability::ready());
     if let Err(reason) = registry.validate_parameters(&selected.2) {
         return error_details(
@@ -414,47 +449,31 @@ pub(crate) async fn submit_processing_export(
             "The selected Processing Step names an unknown module",
         );
     };
-    if selected.0 == SPEKTRAFILM_MODULE && film_ready {
-        // A retained request must reconcile under its captured resources;
-        // only a new request faces the current deployment's admission guard.
-        let retained = match state
-            .application
-            .library
-            .processing_export_work(&body.request_id)
-            .await
-        {
-            Ok(work) => work.is_some(),
+    if selected.0 == SPEKTRAFILM_MODULE
+        && film_ready
+        && let ProcessingInput::Artifact { contract, .. } = &selected.1
+    {
+        let required = crate::film_resources::minimum_live_bytes(
+            contract.geometry.width,
+            contract.geometry.height,
+        );
+        let limit = match crate::film_resources::effective_memory_limit() {
+            Ok(limit) => limit,
             Err(_) => {
                 return error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "storage",
-                    "The Export receipt could not be read",
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "resource_unavailable",
+                    "A finite Film processing memory allowance could not be verified",
                 );
             }
         };
-        if !retained && let ProcessingInput::Artifact { contract, .. } = &selected.1 {
-            let required = crate::film_resources::minimum_live_bytes(
-                contract.geometry.width,
-                contract.geometry.height,
+        if required > limit {
+            return error_details(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "resource_unavailable",
+                "The processing memory allowance cannot contain this full-resolution Film Export",
+                json!({"operation": "photos-processing-export", "module": SPEKTRAFILM_MODULE, "minimumLiveBytes": required, "memoryLimitBytes": limit}),
             );
-            let limit = match crate::film_resources::effective_memory_limit() {
-                Ok(limit) => limit,
-                Err(_) => {
-                    return error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "resource_unavailable",
-                        "A finite Film processing memory allowance could not be verified",
-                    );
-                }
-            };
-            if required > limit {
-                return error_details(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "resource_unavailable",
-                    "The processing memory allowance cannot contain this full-resolution Film Export",
-                    json!({"operation": "photos-processing-export", "module": SPEKTRAFILM_MODULE, "minimumLiveBytes": required, "memoryLimitBytes": limit}),
-                );
-            }
         }
     }
     let mutation = SubmitProcessingExport {
@@ -498,41 +517,61 @@ pub(crate) async fn submit_processing_export(
             );
         }
     };
-    let admission = match outcome {
-        ProcessingExportSubmitOutcome::Admitted(admission) => admission,
-        other => return outcome_response(&state, other).await,
-    };
-    let exports = state
-        .application
-        .exports
-        .as_ref()
-        .expect("processing configured");
-    let request_id = admission.request_id.clone();
-    let execution_state = state.clone();
-    let processing = processing.clone();
-    let (completed, response) = tokio::sync::oneshot::channel();
-    if !exports.spawn_task(async move {
-        let result = execute_admitted_export(&execution_state, &processing, admission).await;
-        // The request only owns delivery. Execution and durable settlement
-        // continue under the service even when its response is abandoned.
-        let _ = completed.send(result);
-    }) {
-        return fail_admitted_export(&state, &request_id, EXECUTION_FAILED).await;
-    }
-    response.await.unwrap_or_else(|_| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "outcome_unknown",
-            "The Export result is unconfirmed; reconcile through inspection",
-        )
-    })
+    dispatch_outcome(&state, processing, outcome).await
 }
 
-fn artifact_created_response(
+async fn dispatch_outcome(
+    state: &HttpState,
+    processing: &crate::config::ProcessingConfig,
+    outcome: ProcessingExportSubmitOutcome,
+) -> Response {
+    let admission = match outcome {
+        ProcessingExportSubmitOutcome::Admitted(admission) => admission,
+        other => return outcome_response(state, other).await,
+    };
+    let request_id = admission.request_id.clone();
+    let work = match state
+        .application
+        .library
+        .processing_export_work(&request_id)
+        .await
+    {
+        Ok(Some(work)) => work,
+        _ => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "outcome_unknown",
+                "The accepted receipt could not be read; reconcile through inspection",
+            );
+        }
+    };
+    let execution_state = state.clone();
+    let processing = processing.clone();
+    let Some(exports) = state.application.exports.as_ref() else {
+        return fail_admitted_export(state, &request_id, EXECUTION_FAILED).await;
+    };
+    if !exports.spawn_task(async move {
+        let _ = execute_admitted_export(&execution_state, &processing, admission).await;
+    }) {
+        return fail_admitted_export(state, &request_id, EXECUTION_FAILED).await;
+    }
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({"outcome": "accepted", "receipt": work_json(&work)})),
+    )
+        .into_response()
+}
+
+async fn artifact_created_response(
+    state: &HttpState,
     artifact: &slipstream_core::ProcessingArtifact,
     replayed: bool,
 ) -> Response {
-    let body = json!({"artifact": artifact_json(artifact), "replayed": replayed});
+    let value = match retained_artifact_json(state, artifact).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let body = json!({"artifact": value, "replayed": replayed});
     (StatusCode::CREATED, axum::Json(body)).into_response()
 }
 
@@ -577,7 +616,7 @@ async fn outcome_response(state: &HttpState, outcome: ProcessingExportSubmitOutc
             };
             (
                 StatusCode::ACCEPTED,
-                Json(json!({"receipt": receipt, "replayed": true})),
+                Json(json!({"outcome": "replayed", "receipt": receipt})),
             )
                 .into_response()
         }
@@ -611,7 +650,7 @@ async fn outcome_response(state: &HttpState, outcome: ProcessingExportSubmitOutc
             json!({"operation": "photos-processing-export", "retryAfterSeconds": null}),
         ),
         ProcessingExportSubmitOutcome::ArtifactReplayed(artifact) => {
-            artifact_created_response(&artifact, true)
+            artifact_created_response(state, &artifact, true).await
         }
         ProcessingExportSubmitOutcome::RecipeConflict(recipe) => error_details(
             StatusCode::CONFLICT,
@@ -850,7 +889,10 @@ pub(crate) async fn get_processing_artifact(
         .processing_artifact(&artifact_id)
         .await
     {
-        Ok(Some(artifact)) => Json(artifact_json(&artifact)).into_response(),
+        Ok(Some(artifact)) => match retained_artifact_json(&state, &artifact).await {
+            Ok(value) => Json(value).into_response(),
+            Err(response) => response,
+        },
         Ok(None) => error(
             StatusCode::NOT_FOUND,
             "unknown_artifact",

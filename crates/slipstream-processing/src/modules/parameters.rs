@@ -134,28 +134,28 @@ fn optional_identifier(
 /// pinned development handoff. Anything else is refused before the engine
 /// starts.
 pub(super) fn validate_darktable_tree(module: &str, tree: &Value) -> Result<(), ModuleError> {
+    validate_saved_tree(module, tree)?;
     let object = tree
         .as_object()
-        .ok_or_else(|| malformed(module, "the parameter tree is not an object".into()))?;
-    reject_unknown_keys(module, object, "the parameter tree", &["stack", "output"])?;
+        .expect("saved tree validation checks object");
     if let Some(output) = object.get("output") {
         validate_darktable_output(module, output)?;
     }
     if let Some(stack) = object.get("stack") {
         let entries = stack
             .as_array()
-            .ok_or_else(|| malformed(module, "`stack` is not an array".into()))?;
-        if entries.len() > DARKTABLE_STACK_OPERATIONS_MAX {
-            return Err(malformed(
-                module,
-                format!(
-                    "`stack` has {} entries, above the {DARKTABLE_STACK_OPERATIONS_MAX}-entry bound",
-                    entries.len()
-                ),
-            ));
-        }
+            .expect("saved tree validation checks stack array");
         for (index, entry) in entries.iter().enumerate() {
-            validate_darktable_entry(module, index, entry)?;
+            if entry["operation"] == "temperature"
+                && entry["params"].get("temperatureKelvin").is_some()
+            {
+                return Err(unsupported(
+                    module,
+                    format!(
+                        "stack entry {index} retains temperature/tint intent without a qualified native mapping"
+                    ),
+                ));
+            }
         }
     }
     Ok(())
@@ -249,6 +249,134 @@ fn validate_darktable_entry(module: &str, index: usize, entry: &Value) -> Result
                 module,
                 format!("{container} `{key}` is not a string"),
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Persistence validates every structural field before qualification. A valid
+/// unsupported value remains editing intent and does not become executable.
+pub(super) fn validate_saved_tree(module: &str, tree: &Value) -> Result<(), ModuleError> {
+    let object = tree
+        .as_object()
+        .ok_or_else(|| malformed(module, "the parameter tree is not an object".into()))?;
+    if module == DARKTABLE_MODULE {
+        reject_unknown_keys(module, object, "the parameter tree", &["stack", "output"])?;
+        if let Some(stack) = object.get("stack") {
+            let entries = stack
+                .as_array()
+                .ok_or_else(|| malformed(module, "`stack` is not an array".into()))?;
+            if entries.len() > DARKTABLE_STACK_OPERATIONS_MAX {
+                return Err(malformed(
+                    module,
+                    "`stack` exceeds the operation bound".into(),
+                ));
+            }
+            for (index, entry) in entries.iter().enumerate() {
+                validate_darktable_entry(module, index, entry)?;
+                let params = entry["params"]
+                    .as_object()
+                    .expect("entry checks params object");
+                if entry["operation"] == "exposure" {
+                    for key in [
+                        "black",
+                        "exposure",
+                        "deflicker_percentile",
+                        "deflicker_target_level",
+                    ] {
+                        if params.get(key).is_some_and(|value| !value.is_number()) {
+                            return Err(malformed(
+                                module,
+                                format!("stack entry {index} `{key}` is not a number"),
+                            ));
+                        }
+                    }
+                    for key in ["compensate_exposure_bias", "compensate_hilite_pres"] {
+                        if params.get(key).is_some_and(|value| !value.is_boolean()) {
+                            return Err(malformed(
+                                module,
+                                format!("stack entry {index} `{key}` is not a boolean"),
+                            ));
+                        }
+                    }
+                    if params.get("mode").is_some_and(|value| !value.is_string()) {
+                        return Err(malformed(
+                            module,
+                            format!("stack entry {index} `mode` is not a string"),
+                        ));
+                    }
+                }
+                if entry["operation"] == "temperature"
+                    && (params.contains_key("temperatureKelvin")
+                        || params.contains_key("tintMilli"))
+                {
+                    reject_unknown_keys(
+                        module,
+                        params,
+                        "retained white balance",
+                        &["temperatureKelvin", "tintMilli"],
+                    )?;
+                    for (key, minimum, maximum) in [
+                        ("temperatureKelvin", 1000, 40000),
+                        ("tintMilli", -150000, 150000),
+                    ] {
+                        let value =
+                            required(module, params, "retained white balance", key)?.as_i64();
+                        if value.is_none_or(|value| !(minimum..=maximum).contains(&value)) {
+                            return Err(malformed(
+                                module,
+                                format!(
+                                    "retained white balance `{key}` must be an integer in {minimum}..={maximum}"
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        let mut allowed = SPEKTRAFILM_GROUPS.to_vec();
+        allowed.push("output");
+        reject_unknown_keys(module, object, "the parameter tree", &allowed)?;
+        for group in SPEKTRAFILM_GROUPS {
+            if !required(module, object, "the parameter tree", group)?.is_object() {
+                return Err(malformed(module, format!("`{group}` is not an object")));
+            }
+        }
+    }
+    if let Some(output) = object.get("output") {
+        let fields = output
+            .as_object()
+            .ok_or_else(|| malformed(module, "`output` is not an object".into()))?;
+        reject_unknown_keys(
+            module,
+            fields,
+            "`output`",
+            &[
+                "format",
+                "precisionBits",
+                "colorSpace",
+                "transferFunction",
+                "geometry",
+                "encoding",
+            ],
+        )?;
+        for key in ["format", "colorSpace", "transferFunction"] {
+            if !required(module, fields, "`output`", key)?.is_string() {
+                return Err(malformed(module, format!("`output.{key}` is not a string")));
+            }
+        }
+        if required(module, fields, "`output`", "precisionBits")?
+            .as_u64()
+            .is_none()
+        {
+            return Err(malformed(
+                module,
+                "`output.precisionBits` is not a nonnegative integer".into(),
+            ));
+        }
+        for key in ["geometry", "encoding"] {
+            optional_identifier(module, fields, key)?;
         }
     }
     Ok(())
