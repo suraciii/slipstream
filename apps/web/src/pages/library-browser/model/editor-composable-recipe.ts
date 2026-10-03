@@ -266,6 +266,13 @@ export function createEditorComposableRecipe(
       renderEditor();
       return;
     }
+    if (!choice.ready) {
+      editorComposableNote = choice.refusalNote
+        ? `${module} is unavailable: ${choice.refusalNote}`
+        : `${module} is unavailable in this deployment.`;
+      renderEditor();
+      return;
+    }
     const description = processingModules.find(
       (item) => item.id.name === module,
     );
@@ -670,7 +677,7 @@ export function createEditorComposableRecipe(
         savePending: Boolean(
           activePhotoId && autosave.get(activePhotoId)?.pending,
         ),
-        canAddStep: choices.length > 0,
+        canAddStep: choices.some((choice) => choice.ready),
         editing: editingStep
           ? {
               stepId: editingStep.stepId,

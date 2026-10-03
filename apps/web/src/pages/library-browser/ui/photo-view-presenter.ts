@@ -27,6 +27,7 @@ export type PhotoShellViewModel = PhotoFactsViewModel &
     sourceName: string;
     photoId?: string | undefined;
     available?: boolean | undefined;
+    canReviewRecovery?: boolean | undefined;
     previewSource?: ViewPreviewSource | undefined;
     limitedDetail?: boolean | undefined;
     previewUrl?: string | undefined;
@@ -91,11 +92,13 @@ export function createPhotoViewPresenter({
   zoom,
   renderRating,
   resetGestures,
+  reviewRecovery,
 }: Readonly<{
   root: HTMLElement;
   zoom: Readonly<{ resetForImage(): void; applyZoom(): void }>;
   renderRating(rating: number): void;
   resetGestures(): void;
+  reviewRecovery(): void;
 }>): PhotoViewPresenter {
   const title = required<HTMLElement>(root, "[data-photo-title]");
   const position = required<HTMLElement>(root, "[data-position]");
@@ -124,6 +127,7 @@ export function createPhotoViewPresenter({
   let currentSelection: ViewSelectionState = "undecided";
   let photoSurface: object = {};
   let photoStatusSurface: object = {};
+  let canReviewRecovery = false;
 
   const renderPhotoFacts = (model: PhotoFactsViewModel) => {
     if (!alive) return;
@@ -207,16 +211,30 @@ export function createPhotoViewPresenter({
     if (isLimited) previewSource.title = LIMITED_PREVIEW_DETAIL;
     else previewSource.removeAttribute("title");
   };
+  const renderStatus = (text: string): void => {
+    status.replaceChildren();
+    if (text) status.append(document.createTextNode(text));
+    if (canReviewRecovery) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "summary-action";
+      button.textContent = "Review unavailable originals";
+      button.addEventListener("click", reviewRecovery);
+      status.append(" ", button);
+    }
+  };
   const setPhotoStatus = (text: string) => {
-    if (!alive || status.textContent === text) return;
+    if (!alive) return;
     photoStatusSurface = {};
-    status.textContent = text;
+    renderStatus(text);
   };
   const renderPhotoShell = (model: PhotoShellViewModel) => {
     if (!alive) return undefined;
     resetGestures();
+    canReviewRecovery = Boolean(
+      model.photoId && model.available === false && model.canReviewRecovery,
+    );
     title.textContent = model.sourceName;
-    currentPhotoId = model.photoId;
     photoSurface = {};
     renderPhotoFacts(model);
     renderPhotoMetadata();

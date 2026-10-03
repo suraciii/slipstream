@@ -1169,6 +1169,18 @@ impl Application {
         selection: BrowseSelectionFilter,
         preferred_photo_id: Option<&str>,
     ) -> Result<BrowseOpenResponse, ServerError> {
+        self.browse_open_with_mode(source, order, selection, preferred_photo_id, true)
+            .await
+    }
+
+    pub async fn browse_open_with_mode(
+        &self,
+        source: BrowseSourceRequest,
+        order: BrowseViewOrder,
+        selection: BrowseSelectionFilter,
+        preferred_photo_id: Option<&str>,
+        resume: bool,
+    ) -> Result<BrowseOpenResponse, ServerError> {
         // Only an Album source owns persisted membership position, so
         // `album-order` is rejected for every other source before any
         // Snapshot is created instead of silently behaving as a time view.
@@ -1253,8 +1265,7 @@ impl Application {
                 // anchor; only an open without one resumes at the durable
                 // saved position, so a filter or order change never lands on
                 // a different Photo than the one current in the browser.
-                let resume_member_id = preferred_photo_id
-                    .is_none()
+                let resume_member_id = (resume && preferred_photo_id.is_none())
                     .then(|| album_resume_member(&target.members, target.saved_photo_id.as_deref()))
                     .flatten();
                 let guard = self

@@ -26,6 +26,7 @@ export type BrowseSourceRequest =
   | Readonly<{
       kind: "library";
       preferredPhotoId?: string;
+      resume?: boolean;
       order?: SourceViewOrder;
       selection?: SelectionFilter;
     }>
@@ -33,6 +34,7 @@ export type BrowseSourceRequest =
       kind: "album";
       albumId: string;
       preferredPhotoId?: string;
+      resume?: boolean;
       order?: SourceViewOrder;
       selection?: SelectionFilter;
     }>
@@ -41,6 +43,7 @@ export type BrowseSourceRequest =
       folderPath: string;
       publication: string;
       preferredPhotoId?: string;
+      resume?: boolean;
       order?: SourceViewOrder;
       selection?: SelectionFilter;
     }>;
@@ -143,6 +146,7 @@ export async function openBrowse(
           ...(source.preferredPhotoId
             ? { photoId: source.preferredPhotoId }
             : {}),
+          ...(source.resume ? { resume: true } : {}),
         }),
         signal,
         priority: "high",

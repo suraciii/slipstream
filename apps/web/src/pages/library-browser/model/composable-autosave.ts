@@ -36,28 +36,19 @@ export type ComposableAutosaveState = {
 };
 const recoveryKey = "slipstream-composable-drafts-v1";
 const maximumRecoveryCodeUnits = 1024 * 1024;
+const canonicalSettings = (
+  value: Pick<ComposableRecipeDraft, "steps" | "currentStepId">,
+) => ({
+  steps: [...value.steps].sort((left, right) =>
+    left.stepId < right.stepId ? -1 : left.stepId > right.stepId ? 1 : 0,
+  ),
+  currentStepId: value.currentStepId,
+});
 const sameSettings = (
   a: Pick<ComposableRecipeDraft, "steps" | "currentStepId">,
   b: Pick<ComposableRecipeDraft, "steps" | "currentStepId">,
 ) =>
-  JSON.stringify({
-    steps: a.steps.map(({ stepId, module, input, parameters }) => ({
-      stepId,
-      module,
-      input,
-      parameters,
-    })),
-    currentStepId: a.currentStepId,
-  }) ===
-  JSON.stringify({
-    steps: b.steps.map(({ stepId, module, input, parameters }) => ({
-      stepId,
-      module,
-      input,
-      parameters,
-    })),
-    currentStepId: b.currentStepId,
-  });
+  JSON.stringify(canonicalSettings(a)) === JSON.stringify(canonicalSettings(b));
 const observedSourceRevision = (read: RecipeRead): string | undefined =>
   (read.currentSourceRevision ?? read.sourceRevision) || undefined;
 
@@ -247,6 +238,24 @@ export function createComposableAutosave(
                 state.uncertain = true;
                 state.conflict = false;
               }
+              const recoveredPending = state.pending;
+              if (
+                state.read.recipe &&
+                recoveredPending &&
+                sameSettings(state.read.recipe, recoveredPending.draft) &&
+                state.read.recipe.sourceRevision ===
+                  observedSourceRevision(state.read)
+              ) {
+                state.draft = {
+                  ...state.draft,
+                  steps: canonicalSettings(state.draft).steps,
+                  baseRevision: state.read.recipe.revision,
+                };
+                state.pending = undefined;
+                state.uncertain = false;
+                state.recovered = false;
+                state.note = "Recovered the previously saved edit.";
+              }
             }
           } catch {
             state.conflict = true;
@@ -323,7 +332,11 @@ export function createComposableAutosave(
       state.uncertain = false;
       state.failure = false;
       state.recovered = false;
-      state.draft = { ...state.draft, baseRevision: saved.revision };
+      state.draft = {
+        ...state.draft,
+        steps: canonicalSettings(state.draft).steps,
+        baseRevision: saved.revision,
+      };
       state.note = sameSettings(state.draft, saved)
         ? "Saved edit."
         : "Saving newer settings…";

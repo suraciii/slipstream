@@ -18,6 +18,7 @@ type SourceLifecycleOutcome =
 
 type SourceOpenOptions = Readonly<{
   preferredPhotoId?: string;
+  resume?: boolean;
   mode?: "replace" | "reopen";
   order?: SourceViewOrder;
   selection?: SelectionFilter;

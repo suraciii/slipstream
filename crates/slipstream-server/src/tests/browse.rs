@@ -518,6 +518,18 @@ async fn album_saved_position_falls_back_by_membership_position_in_time_views() 
         album_resume(&application, &album, BrowseViewOrder::AlbumOrder).await,
         (1, a.clone())
     );
+    let fresh = application
+        .browse_open_with_mode(
+            BrowseSourceRequest::Album(album.clone()),
+            BrowseViewOrder::AlbumOrder,
+            BrowseSelectionFilter::All,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(fresh.position, 0);
+    application.browse_close(&fresh.token);
     let ascending = browse_ids_in_order(
         &application,
         BrowseSourceRequest::Album(album.clone()),

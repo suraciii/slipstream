@@ -236,6 +236,10 @@ or:
 { "source": "album", "albumId": "opaque-id" }
 ```
 
+For an Album, an explicit Resume request adds `"resume": true`. An ordinary
+Album source open omits this field and always creates the Album Grid at its
+initial position. Resume is never inferred from the absence of `photoId`.
+
 It optionally accepts one explicit view order. For `library` and `folder`
 sources the values are `"capture-time-asc"` (the default when omitted) and
 `"capture-time-desc"`. For `album` sources the values are `"album-order"`

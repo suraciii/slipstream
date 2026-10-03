@@ -831,6 +831,7 @@ function mountPrivateLibraryBrowser(
     kind,
     album,
     preferredPhotoId,
+    resume,
     folder,
     order,
     selection,
@@ -852,6 +853,7 @@ function mountPrivateLibraryBrowser(
       order,
       selection,
       establishment,
+      resume,
     );
   };
 
@@ -861,6 +863,7 @@ function mountPrivateLibraryBrowser(
     order: SourceViewOrder = "source-default",
     selection: SelectionFilter = "all",
     establishment: SourceEstablishmentOptions = {},
+    resume = false,
   ): Promise<SourceEstablishment> {
     const destinationEstablishment =
       establishment.intent ??
@@ -883,6 +886,7 @@ function mountPrivateLibraryBrowser(
     photoDetails.clearMetadata();
     const lifecycleOpen = sourceLifecycle.beginOpen(requested, {
       ...(preferredPhotoId ? { preferredPhotoId } : {}),
+      ...(resume ? { resume: true } : {}),
       order,
       selection,
     });
@@ -1408,6 +1412,7 @@ function mountPrivateLibraryBrowser(
       total: sourceGrid.total,
       photoId: photo?.id,
       available: photo?.available,
+      canReviewRecovery: photo?.available === false,
       originalFilename: photo?.originalFilename,
       selectionState: photo?.selectionState,
       rating: photo?.rating,

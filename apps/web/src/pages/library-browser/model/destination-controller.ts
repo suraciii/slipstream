@@ -46,6 +46,7 @@ export type OpenSourceOptions = Readonly<{
   kind: "library" | "album" | "folder";
   album?: AlbumSummary;
   preferredPhotoId?: string;
+  resume?: boolean;
   folder?: { location: string; name: string };
   order?: SourceViewOrder;
   selection?: SelectionFilter;
@@ -351,6 +352,7 @@ export function createDestinationController(deps: Dependencies) {
       const outcome = await deps.openSource({
         kind: "album",
         album,
+        resume: true,
         establishment: { address: alreadyCurrent ? "replace" : "push", intent },
       });
       if (!current(intent) || outcome.kind !== "established") return;

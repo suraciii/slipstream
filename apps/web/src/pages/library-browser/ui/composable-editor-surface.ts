@@ -256,6 +256,7 @@ export function createComposableEditorSurface(
       option.textContent = module.ready
         ? module.name
         : `${module.name} (unavailable: ${module.refusalNote})`;
+      option.disabled = !module.ready;
       moduleSelect.append(option);
     }
     if (composable.modules.some((module) => module.name === selectedModule))

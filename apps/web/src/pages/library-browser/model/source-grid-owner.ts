@@ -183,6 +183,7 @@ export interface SourceGridOwner {
     source: SourceGridSource,
     options?: Readonly<{
       preferredPhotoId?: string;
+      resume?: boolean;
       mode?: "replace" | "reopen";
       order?: SourceViewOrder;
       selection?: SelectionFilter;
@@ -312,6 +313,7 @@ const sourceRequest = (
   order: SourceViewOrder,
   selection: SelectionFilter,
   preferredPhotoId?: string,
+  resume = false,
 ): BrowseSourceRequest =>
   source.kind === "library"
     ? {
@@ -319,6 +321,7 @@ const sourceRequest = (
         order,
         selection,
         ...(preferredPhotoId ? { preferredPhotoId } : {}),
+        ...(resume ? { resume: true } : {}),
       }
     : source.kind === "album"
       ? {
@@ -327,6 +330,7 @@ const sourceRequest = (
           order,
           selection,
           ...(preferredPhotoId ? { preferredPhotoId } : {}),
+          ...(resume ? { resume: true } : {}),
         }
       : {
           kind: "folder",
@@ -335,6 +339,7 @@ const sourceRequest = (
           order,
           selection,
           ...(preferredPhotoId ? { preferredPhotoId } : {}),
+          ...(resume ? { resume: true } : {}),
         };
 
 const freezeSource = (source: SourceGridSource): SourceGridSource =>
@@ -619,6 +624,7 @@ export function createSourceGridOwner(
     nextSource: SourceGridSource,
     options: Readonly<{
       preferredPhotoId?: string;
+      resume?: boolean;
       mode?: "replace" | "reopen";
       order?: SourceViewOrder;
       selection?: SelectionFilter;
@@ -671,6 +677,7 @@ export function createSourceGridOwner(
           viewOrder,
           viewSelection,
           options.preferredPhotoId,
+          options.resume,
         ),
         task.signal!,
       );

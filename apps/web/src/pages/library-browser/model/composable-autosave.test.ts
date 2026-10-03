@@ -188,6 +188,56 @@ test("expired receipt never authorizes a fresh dependent write", async () => {
   await owner.flush("p1");
   expect(writes[1]).toBe(writes[0]);
 });
+test("acknowledges a committed recipe after server canonicalizes step order", async () => {
+  const local = {
+    ...draft("p1", 1),
+    steps: [
+      ...draft("p1", 1).steps,
+      {
+        ...draft("p1", 2).steps[0]!,
+        stepId: "develop-long",
+      },
+      {
+        ...draft("p1", 3).steps[0]!,
+        stepId: "darktable-1",
+      },
+    ],
+  };
+  const owner = createComposableAutosave(
+    (_url, init) => {
+      const request = parseSaveRequest(requestBody(init));
+      return Promise.resolve(
+        Response.json({
+          outcome: "saved",
+          sourceRevision: request.expectedSourceRevision,
+          recipeVersion: "r1",
+          recipe: {
+            photoId: "p1",
+            revision: "r1",
+            sourceRevision: request.expectedSourceRevision,
+            currentStepId: request.currentStepId,
+            steps: [...request.steps].sort((a, b) =>
+              a.stepId < b.stepId ? -1 : a.stepId > b.stepId ? 1 : 0,
+            ),
+          },
+        }),
+      );
+    },
+    () => {},
+    memoryStorage(),
+  );
+  owner.open("p1", { sourceRevision: "source\0opaque", recipe: null });
+  await owner.change("p1", local);
+  const state = owner.get("p1");
+  expect(state?.uncertain).toBe(false);
+  expect(state?.pending).toBeUndefined();
+  expect(state?.note).toBe("Saved edit.");
+  expect(state?.draft.steps.map((step) => step.stepId)).toEqual([
+    "darktable-1",
+    "develop-long",
+    "step",
+  ]);
+});
 
 test("explicit rebind uses observed source and preserves local parameter changes", async () => {
   const old = {
