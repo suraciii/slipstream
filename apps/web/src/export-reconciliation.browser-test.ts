@@ -287,8 +287,9 @@ test("an explicitly chosen retained artifact becomes the new selected step's exp
   await expect(submit(page)).toBeEnabled();
   await submit(page).click();
   await expect.poll(() => submitted?.stepId).toBe(selected.stepId);
+  const latest = state.recipes.get(photoId)!;
   expect(submitted).toMatchObject({
-    expectedRecipeRevision: saved.revision,
+    expectedRecipeRevision: latest.revision,
     expectedSourceRevision: sourceRevision,
   });
   await expect(

@@ -330,7 +330,11 @@ export async function cli(server: string, invocation: string[]) {
 // saved Album position under the unavailable-member fallback rules.
 export async function state(url: string, albumId: string): Promise<AlbumState> {
   const opened = (await (
-    await post(url, "/api/browse", { source: "album", albumId: albumId })
+    await post(url, "/api/browse", {
+      source: "album",
+      albumId: albumId,
+      resume: true,
+    })
   ).json()) as { token: string; total: number; position: number };
   const members: AlbumMember[] = [];
   let start = 0;
