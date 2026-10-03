@@ -50,7 +50,9 @@ is convenience, not enforcement. Both consume the same contract examples in
 their tests; this does not require sharing domain implementation code.
 
 Transport performs no transparent write retry and follows no redirects. A
-whole-command deadline bounds all requests. Signal handling cancels reads and
+whole-command deadline bounds all requests except the resumable Processing
+Artifact transfer, which instead bounds each control request and forward
+progress through its idle timeout. Signal handling cancels reads and
 local downloads and reports mutation uncertainty when admission is possible;
 it never equates a dropped connection with server cancellation.
 
@@ -356,6 +358,43 @@ temporary file owned by this invocation. After it, output or interruption failur
 preserves the final JPEG and reports the committed local effect as specified by
 the CLI reference; it never retries into an existing or different path. The
 output path is local client data; it is not sent as a server Original Location.
+
+### Resumable Processing Artifact Transfer
+
+A Processing Artifact is immutable, so its SHA-256 is also the strong HTTP
+identity of its retained bytes. `GET /api/processing-artifacts/{id}/bytes`
+returns that identity as `ETag` and advertises `Accept-Ranges: bytes`. A caller
+may request one contiguous range. A matching `If-Range` permits a `206`
+response with `Content-Range`; a stale `If-Range` safely returns the complete
+`200` representation. An invalid or unsatisfiable range returns `416` with the
+full length and no byte stream. The response repeats the complete artifact
+provenance headers for both successful statuses.
+
+The service acquires one finite artifact lease before opening the retained file.
+The lease is renewed while the response body is live and released when the body
+drains or is dropped. Ranges do not create a second Artifact, a Download Job,
+or a server-side copy.
+
+The CLI hashes the response incrementally. An interrupted Artifact download
+keeps only a destination-private partial file and a small identity sidecar.
+On retry, matching state is rehashed and resumed with one range; malformed or
+mismatched state is discarded. The final no-replace publication remains the
+local commit point, so a partial, short, extra, corrupt, expired, or
+interrupted transfer never appears at the requested path. Artifact transfer
+uses an idle-progress timeout rather than a fixed total transfer deadline.
+
+Buffering the complete artifact is rejected because full-resolution TIFFs can
+exceed client memory. A server-side copy or durable Download Job is rejected
+because the retained immutable bytes and lease already provide the required
+identity and lifecycle without another Artifact owner.
+
+### Resumable Transfer Verification
+
+The transfer boundary must prove bounded client memory, incremental digest
+validation, private partial-state recovery after interruption and server
+restart, correct range and `If-Range` behavior, no-replace publication, lease
+protection until body settlement, and explicit expiry refusal. Both TIFF and
+JPEG artifacts use the same identity and publication rules.
 
 CLI Preview work uses the shared bounded scheduler as background demand below
 an active Web Photo View. One CLI process sends one Preview request at a time;

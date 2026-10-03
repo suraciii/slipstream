@@ -127,12 +127,84 @@ enum Step {
     /// Serve a caller-selected JSON contract response.
     Json(u16, Value),
     HistoricalBytes(Value, Vec<u8>),
+    /// Serve the Artifact bytes route with a caller-shaped reply.
+    ArtifactBytes(ArtifactReply),
+}
+
+/// One scripted reply of the Artifact bytes route. The published facts are
+/// the provenance record the response headers must repeat; `bytes` is the
+/// object, of which `sent` may be short for an interrupted transfer.
+struct ArtifactReply {
+    facts: Value,
+    bytes: Vec<u8>,
+    sent: Option<usize>,
+    declared: Option<usize>,
+    honor_range: bool,
+    header_override: Option<(String, String)>,
+    pace: Option<(usize, Duration)>,
+    stall: Option<Duration>,
+}
+
+impl ArtifactReply {
+    /// The complete object with the published facts.
+    fn new(facts: Value, bytes: Vec<u8>) -> Self {
+        Self {
+            facts,
+            bytes,
+            sent: None,
+            declared: None,
+            honor_range: false,
+            header_override: None,
+            pace: None,
+            stall: None,
+        }
+    }
+
+    /// Announce the full published length but write only `sent` bytes, as a
+    /// cut connection does.
+    fn interrupted(mut self, sent: usize) -> Self {
+        self.sent = Some(sent);
+        self
+    }
+
+    /// Advertise a length other than the bytes actually written.
+    fn declared(mut self, declared: usize) -> Self {
+        self.declared = Some(declared);
+        self
+    }
+
+    /// Answer the request's single range when its validator matches.
+    fn honor_range(mut self) -> Self {
+        self.honor_range = true;
+        self
+    }
+
+    /// Rewrite one repeated provenance header after framing.
+    fn header(mut self, name: &str, value: &str) -> Self {
+        self.header_override = Some((name.to_owned(), value.to_owned()));
+        self
+    }
+
+    /// Write the body in fixed chunks with a delay after each one.
+    fn pace(mut self, chunk: usize, delay: Duration) -> Self {
+        self.pace = Some((chunk, delay));
+        self
+    }
+
+    /// Keep the connection open this long after the written bytes, as a
+    /// stalled peer does.
+    fn stall(mut self, hold: Duration) -> Self {
+        self.stall = Some(hold);
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
 struct RecordedRequest {
     request_line: String,
     body: Vec<u8>,
+    range: Option<String>,
+    if_range: Option<String>,
 }
 
 struct FakeService {
@@ -210,14 +282,24 @@ fn fake_service_with(steps: Vec<Step>, rendition: Arc<Vec<u8>>) -> FakeService {
                                 .contains("slipstream-cli-contract: 1"),
                             "CLI request did not frame the contract header"
                         );
+                        let header = |name: &str| {
+                            head.lines().find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.trim()
+                                    .eq_ignore_ascii_case(name)
+                                    .then(|| value.trim().to_owned())
+                            })
+                        };
                         sender
                             .send(RecordedRequest {
                                 request_line: head.lines().next().unwrap_or_default().to_owned(),
                                 body,
+                                range: header("range"),
+                                if_range: header("if-range"),
                             })
                             .expect("the test holds the recording receiver");
                         if let Some(step) = steps.get(next_step) {
-                            answer(&mut stream, step, &rendition);
+                            answer(&mut stream, step, &rendition, &head);
                         }
                         next_step += 1;
                         drop(stream);
@@ -273,7 +355,7 @@ fn read_request(stream: &mut impl Read) -> (String, Vec<u8>) {
     (head, buffer[end + 4..end + 4 + length].to_vec())
 }
 
-fn answer(stream: &mut impl Write, step: &Step, rendition: &[u8]) {
+fn answer(stream: &mut impl Write, step: &Step, rendition: &[u8], request_head: &str) {
     match step {
         Step::Capabilities => write_json_response(stream, 200, "OK", &capabilities_body()),
         Step::CapabilitiesWithoutRemovalLimit => {
@@ -351,6 +433,136 @@ fn answer(stream: &mut impl Write, step: &Step, rendition: &[u8]) {
             let _ = stream.write_all(b"\r\n");
             let _ = stream.write_all(bytes);
         }
+        Step::ArtifactBytes(reply) => write_artifact_bytes(stream, reply, request_head),
+    }
+}
+
+/// The Artifact bytes response in the service's own header naming: the
+/// published facts repeated field for field, one optional contiguous range,
+/// and a body that a caller may cut short or pace.
+fn write_artifact_bytes(stream: &mut impl Write, reply: &ArtifactReply, request_head: &str) {
+    let facts = &reply.facts;
+    let total = facts["byteLength"].as_u64().expect("published byte length");
+    let sha256 = facts["sha256"].as_str().expect("published digest");
+    let etag = format!("\"{sha256}\"");
+    let header = |name: &str| {
+        request_head.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.trim()
+                .eq_ignore_ascii_case(name)
+                .then(|| value.trim().to_owned())
+        })
+    };
+    let content_type = match facts["outputContract"]["format"]
+        .as_str()
+        .unwrap_or_default()
+        .strip_prefix("image/")
+        .unwrap_or_else(|| {
+            facts["outputContract"]["format"]
+                .as_str()
+                .unwrap_or_default()
+        }) {
+        "tiff" => "image/tiff",
+        _ => "image/jpeg",
+    };
+    let mut status = 200_u16;
+    let mut content_range = None;
+    let mut start = 0_usize;
+    let mut end = reply.sent.unwrap_or(reply.bytes.len());
+    let mut advertised = reply.declared.unwrap_or(total as usize);
+    if reply.honor_range
+        && let Some(value) = header("range")
+    {
+        let matches = header("if-range").as_deref() == Some(etag.as_str());
+        let requested = value
+            .strip_prefix("bytes=")
+            .filter(|value| !value.contains(','))
+            .and_then(|value| value.split_once('-'))
+            .and_then(|(start, _)| start.parse::<u64>().ok());
+        if matches {
+            match requested {
+                Some(offset) if offset < total => {
+                    start = offset as usize;
+                    end = reply.bytes.len();
+                    advertised = end - start;
+                    status = 206;
+                    content_range = Some(format!("bytes {offset}-{}/{total}", total - 1));
+                }
+                _ => {
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nContent-Range: bytes */{total}\r\nConnection: close\r\n\r\n"
+                    );
+                    return;
+                }
+            }
+        }
+    }
+    let mut head = format!(
+        "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nContent-Length: {advertised}\r\nETag: {etag}\r\nAccept-Ranges: bytes\r\n",
+        if status == 206 {
+            "Partial Content"
+        } else {
+            "OK"
+        }
+    );
+    if let Some(content_range) = &content_range {
+        head.push_str(&format!("Content-Range: {content_range}\r\n"));
+    }
+    for (name, value) in [
+        ("id", facts["artifactId"].clone()),
+        ("photo-id", facts["photoId"].clone()),
+        ("filename", facts["filename"].clone()),
+        ("step-id", facts["stepId"].clone()),
+        ("module", facts["module"].clone()),
+        (
+            "adapter-schema-version",
+            facts["adapterSchemaVersion"].clone(),
+        ),
+        ("bundle-id", facts["bundleId"].clone()),
+        (
+            "width",
+            facts["outputContract"]["geometry"]["width"].clone(),
+        ),
+        (
+            "height",
+            facts["outputContract"]["geometry"]["height"].clone(),
+        ),
+        ("byte-length", facts["byteLength"].clone()),
+        ("sha256", facts["sha256"].clone()),
+    ] {
+        let value = value
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| value.to_string());
+        let line_name = format!("slipstream-artifact-{name}");
+        let value = match &reply.header_override {
+            Some((override_name, override_value)) if *override_name == line_name => {
+                override_value.clone()
+            }
+            _ => value,
+        };
+        head.push_str(&format!("{line_name}: {value}\r\n"));
+    }
+    head.push_str("Connection: close\r\n\r\n");
+    let _ = stream.write_all(head.as_bytes());
+    let body = &reply.bytes[start..end];
+    match reply.pace {
+        None => {
+            let _ = stream.write_all(body);
+        }
+        Some((chunk, delay)) => {
+            for chunk in body.chunks(chunk.max(1)) {
+                if stream.write_all(chunk).is_err() {
+                    return;
+                }
+                let _ = stream.flush();
+                std::thread::sleep(delay);
+            }
+        }
+    }
+    if let Some(hold) = reply.stall {
+        std::thread::sleep(hold);
     }
 }
 
@@ -511,6 +723,8 @@ async fn recipe_save_writes_nothing_when_the_capability_report_is_incomplete() {
     fs::remove_dir_all(base).unwrap();
 }
 
+#[path = "development_service/artifact_download.rs"]
+mod artifact_download;
 #[path = "development_service/composable.rs"]
 mod composable;
 // ---------------------------------------------------------------- previews

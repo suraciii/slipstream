@@ -23,7 +23,7 @@ pub(crate) async fn execute(
         Command::Processing {
             command: ProcessingCommand::ArtifactDownload { file, .. },
         } => Some(preview_download::Destination::preflight(
-            preview_download::DestinationKind::Artifact,
+            preview_download::DestinationKind::ProcessingArtifact,
             file,
         )?),
         Command::Photos {
@@ -141,7 +141,7 @@ pub(crate) async fn execute(
         } => development_proxy::prepare(command).await?,
         _ => None,
     };
-    let client = ServiceClient::new(origin, token)?;
+    let client = ServiceClient::new(origin, token, std::time::Duration::from_secs(cli.timeout))?;
     let limits = client.capabilities(operation).await?;
 
     let result = async {
@@ -152,14 +152,12 @@ pub(crate) async fn execute(
                     development::processing_artifact(&client, artifact_id).await
                 }
                 ProcessingCommand::ArtifactDownload { artifact_id, .. } => {
-                    // The staged destination was preflighted so an existing
-                    // file is never replaced; a refusal or an
-                    // unidentifiable transfer publishes nothing.
                     processing_artifact_download::download(
                         &client,
                         artifact_id,
                         preview_destination.expect("Processing Artifact destination was checked"),
                         publication,
+                        std::time::Duration::from_secs(cli.timeout),
                     )
                     .await
                 }

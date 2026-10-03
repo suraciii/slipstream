@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use std::{
     ffi::CString,
     fs::{File, OpenOptions},
+    io::Read,
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::fs::OpenOptionsExt,
@@ -27,6 +28,7 @@ const OPERATION: Operation = Operation::PhotosPreview;
 pub(super) enum DestinationKind {
     Preview,
     Artifact,
+    ProcessingArtifact,
     ProcessingPreview,
 }
 
@@ -34,7 +36,7 @@ impl DestinationKind {
     fn noun(self) -> &'static str {
         match self {
             Self::Preview => "Preview",
-            Self::Artifact => "Processing Artifact",
+            Self::Artifact | Self::ProcessingArtifact => "Processing Artifact",
             Self::ProcessingPreview => "Processing Preview",
         }
     }
@@ -44,7 +46,7 @@ impl DestinationKind {
     fn write_operation(self) -> &'static str {
         match self {
             Self::Preview | Self::ProcessingPreview => "write-preview",
-            Self::Artifact => "write-output",
+            Self::Artifact | Self::ProcessingArtifact => "write-output",
         }
     }
 }
@@ -69,6 +71,14 @@ impl Destination {
             CommandFailure::invalid("file", format!("The {noun} path must be valid UTF-8."))
         })?)
         .map_err(|_| CommandFailure::invalid("file", format!("The {noun} path is invalid.")))?;
+        if kind == DestinationKind::ProcessingArtifact
+            && name.as_bytes().len() + ".slipstream-part.json".len() > libc::NAME_MAX as usize
+        {
+            return Err(CommandFailure::invalid(
+                "file",
+                "The Processing Artifact path is too long for resumable state.",
+            ));
+        }
         let parent = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -121,6 +131,70 @@ impl Destination {
         // cancellation. Closing this fd before publication discards it.
         let file = unsafe { File::from(std::os::fd::OwnedFd::from_raw_fd(fd)) };
         Ok(tokio::fs::File::from_std(file))
+    }
+    /// Opens a private, directory-relative state file without following a
+    /// symlink. These names are never the requested destination.
+    pub(super) fn private_file(
+        &self,
+        suffix: &str,
+        truncate: bool,
+    ) -> Result<tokio::fs::File, CommandFailure> {
+        let name = CString::new(format!("{}{}", self.name.to_string_lossy(), suffix))
+            .map_err(|_| self.local_io())?;
+        let mut flags = libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+        if truncate {
+            flags |= libc::O_TRUNC;
+        }
+        let fd = unsafe { libc::openat(self.directory.as_raw_fd(), name.as_ptr(), flags, 0o600) };
+        if fd < 0 {
+            return Err(self.local_io());
+        }
+        let file = unsafe { File::from(std::os::fd::OwnedFd::from_raw_fd(fd)) };
+        Ok(tokio::fs::File::from_std(file))
+    }
+    pub(super) fn lock_private(&self, file: &tokio::fs::File) -> Result<(), CommandFailure> {
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(self.local_io())
+        }
+    }
+
+    pub(super) fn private_bytes(&self, suffix: &str) -> Result<Option<Vec<u8>>, CommandFailure> {
+        let name = CString::new(format!("{}{}", self.name.to_string_lossy(), suffix))
+            .map_err(|_| self.local_io())?;
+        let fd = unsafe {
+            libc::openat(
+                self.directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            return if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+                Ok(None)
+            } else {
+                Err(self.local_io())
+            };
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        let mut bytes = Vec::new();
+        file.take(64 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| self.local_io())?;
+        Ok(Some(bytes))
+    }
+
+    pub(super) fn remove_private(&self, suffix: &str) -> Result<(), CommandFailure> {
+        let name = CString::new(format!("{}{}", self.name.to_string_lossy(), suffix))
+            .map_err(|_| self.local_io())?;
+        let result = unsafe { libc::unlinkat(self.directory.as_raw_fd(), name.as_ptr(), 0) };
+        if result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+            Ok(())
+        } else {
+            Err(self.local_io())
+        }
     }
 
     pub(super) fn publish(&self, file: &tokio::fs::File) -> Result<(), CommandFailure> {
@@ -527,6 +601,19 @@ mod tests {
                 .unwrap()
                 .contains(token)
         );
+    }
+
+    #[test]
+    fn artifact_destination_reserves_space_for_private_state_names() {
+        let base =
+            std::env::temp_dir().join(format!("slipstream-cli-name-limit-{}", std::process::id()));
+        std::fs::create_dir(&base).unwrap();
+        let path = base.join("a".repeat(libc::NAME_MAX as usize));
+        let failure = Destination::preflight(DestinationKind::ProcessingArtifact, &path)
+            .err()
+            .unwrap();
+        assert_eq!(failure.payload.code, "invalid_input");
+        std::fs::remove_dir(&base).unwrap();
     }
 
     #[tokio::test]

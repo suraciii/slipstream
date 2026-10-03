@@ -28,9 +28,12 @@ origin prints one unencrypted-connection warning to stderr before any request.
 The CLI must not follow HTTP redirects. There is no profile file, automatic
 discovery, or login command.
 
-`--timeout` is an integer from 1 through 300 seconds and defaults to 30. It
-bounds the whole command after argument parsing, including preview transfer.
-Expiry uses the result rules below. It does not cancel an admitted mutation.
+`--timeout` is an integer from 1 through 300 seconds and defaults to 30. For
+ordinary commands it bounds the whole command after argument parsing, including
+Preview transfer. For `processing artifact-download`, it bounds control
+requests and the maximum idle time between response chunks; a transfer that
+continues making progress may run longer. Expiry uses the result rules below.
+It does not cancel an admitted mutation.
 
 `--input FILE` reads one UTF-8 JSON document; `--input -` reads stdin. The input
 must fit 64 KiB. An oversized document is refused as soon as a read crosses the
@@ -706,9 +709,15 @@ Publication and expiry use RFC3339 UTC strings; work lifecycle times are integer
 The filename derives from module, step, and immutable artifact identity with
 `.tif` or `.jpg`. `artifact-download` validates the record against transfer
 headers, including filename, length, and recomputed SHA-256, before publishing
-to the caller's `PATH`. It reports `filename`, expiry, byte evidence,
-provenance, `path`, and `fileCommitted: true`. Existing files and symbolic
-links are never replaced; mismatched or partial transfers publish nothing.
+to the caller's `PATH`. The transfer is incremental and uses private
+`PATH.slipstream-part` and `PATH.slipstream-part.json` state when interrupted.
+Matching state is rehashed before a single contiguous HTTP range is resumed;
+mismatched state or a server that ignores the range restarts safely from zero.
+Neither private state nor a mismatched, short, extra, or corrupt transfer is
+published. An unknown or expired artifact removes its private transfer state
+and reports `unknown_artifact` or `artifact_expired`. It reports `filename`,
+expiry, byte evidence, provenance, `path`, and `fileCommitted: true` only
+after no-replace publication. Existing files and symbolic links are never replaced.
 
 `historicalExports` preserves existing read-only image Export records separately
 from Processing Artifacts. Each record contains `exportId`, `photoId`, `state`,

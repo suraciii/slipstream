@@ -109,7 +109,57 @@ pub(crate) async fn get_processing_artifact_bytes(
             );
         }
     };
-    let file = match tokio::fs::File::open(&path).await {
+    let requested_range = {
+        let mut values = request.headers().get_all(header::RANGE).iter();
+        match (values.next(), values.next()) {
+            (None, None) => None,
+            (Some(value), None) => Some(value.to_str().ok()),
+            _ => Some(None),
+        }
+    };
+    let etag = format!("\"{}\"", artifact.sha256);
+    let range_not_satisfiable = || {
+        Response::builder()
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(
+                header::CONTENT_RANGE,
+                format!("bytes */{}", artifact.byte_length),
+            )
+            .body(Body::empty())
+            .expect("valid range response")
+    };
+    let if_range = request
+        .headers()
+        .get(header::IF_RANGE)
+        .map(|value| value.to_str().ok());
+    let range = match (requested_range, if_range) {
+        (Some(Some(value)), Some(Some(if_range))) if if_range == etag => {
+            match parse_artifact_range(value, artifact.byte_length) {
+                Some(range) => Some(range),
+                None => {
+                    release_lease.await;
+                    return range_not_satisfiable();
+                }
+            }
+        }
+        (Some(Some(_)), Some(Some(_)) | Some(None)) => None,
+        (Some(Some(value)), None) => match parse_artifact_range(value, artifact.byte_length) {
+            Some(range) => Some(range),
+            None => {
+                release_lease.await;
+                return range_not_satisfiable();
+            }
+        },
+        (Some(None), _) => {
+            release_lease.await;
+            return range_not_satisfiable();
+        }
+        (None, _) => None,
+    };
+    let (stream_start, stream_length, status) = range
+        .map(|(start, end)| (start, end - start + 1, StatusCode::PARTIAL_CONTENT))
+        .unwrap_or((0, artifact.byte_length, StatusCode::OK));
+    let mut file = match tokio::fs::File::open(&path).await {
         Ok(file) => file,
         Err(_) => {
             release_lease.await;
@@ -120,6 +170,21 @@ pub(crate) async fn get_processing_artifact_bytes(
             );
         }
     };
+    if stream_start != 0 {
+        use tokio::io::AsyncSeekExt as _;
+        if file
+            .seek(std::io::SeekFrom::Start(stream_start))
+            .await
+            .is_err()
+        {
+            release_lease.await;
+            return error(
+                StatusCode::CONFLICT,
+                "output_unavailable",
+                "The artifact file could not be opened",
+            );
+        }
+    }
     let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(4);
     // The response body reports its end — drained or dropped — through this
     // channel, which is what actually settles the download.
@@ -157,14 +222,17 @@ pub(crate) async fn get_processing_artifact_bytes(
         let library = Arc::clone(library);
         let lease_id = lease_id.clone();
         let renewer = renewer;
+        let mut remaining = stream_length;
         tokio::spawn(async move {
             use tokio::io::AsyncReadExt as _;
             let mut file = file;
             let mut buffer = vec![0_u8; 512 * 1024];
-            loop {
-                match file.read(&mut buffer).await {
+            while remaining > 0 {
+                let read_size = remaining.min(buffer.len() as u64) as usize;
+                match file.read(&mut buffer[..read_size]).await {
                     Ok(0) => break,
                     Ok(count) => {
+                        remaining -= count as u64;
                         if sender.send(Ok(buffer[..count].to_vec())).await.is_err() {
                             break;
                         }
@@ -185,10 +253,19 @@ pub(crate) async fn get_processing_artifact_bytes(
         })
     };
     drop(pump);
-    let builder = Response::builder()
-        .status(StatusCode::OK)
+    let mut builder = Response::builder()
+        .status(status)
         .header(header::CONTENT_TYPE, content_type)
-        .header(header::CONTENT_LENGTH, artifact.byte_length.to_string())
+        .header(header::CONTENT_LENGTH, stream_length.to_string())
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::ETAG, &etag);
+    if let Some((start, end)) = range {
+        builder = builder.header(
+            header::CONTENT_RANGE,
+            format!("bytes {}-{}/{}", start, end, artifact.byte_length),
+        );
+    }
+    builder = builder
         .header(header::CACHE_CONTROL, "no-store")
         .header("x-content-type-options", "nosniff")
         .header("slipstream-artifact-id", artifact.artifact_id.as_str())
@@ -263,6 +340,65 @@ impl futures_core::Stream for ArtifactFileStream {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        self.0.poll_recv(cx)
+        let poll = self.0.poll_recv(cx);
+        if let std::task::Poll::Ready(None) = &poll {
+            drop(self.1.take());
+        }
+        poll
+    }
+}
+
+fn parse_artifact_range(value: &str, full_length: u64) -> Option<(u64, u64)> {
+    let value = value.strip_prefix("bytes=")?;
+    if value.is_empty() || value.contains(',') || value.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let (start, end) = value.split_once('-')?;
+    if start.is_empty() {
+        let suffix = end.parse::<u64>().ok()?;
+        if suffix == 0 || full_length == 0 {
+            return None;
+        }
+        return Some((full_length.saturating_sub(suffix), full_length - 1));
+    }
+    let start = start.parse::<u64>().ok()?;
+    if start >= full_length {
+        return None;
+    }
+    let end = if end.is_empty() {
+        full_length - 1
+    } else {
+        end.parse::<u64>().ok()?.min(full_length - 1)
+    };
+    (start <= end).then_some((start, end))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_artifact_range;
+
+    #[test]
+    fn one_contiguous_range_is_the_only_admitted_form() {
+        assert_eq!(parse_artifact_range("bytes=0-3", 10), Some((0, 3)));
+        assert_eq!(parse_artifact_range("bytes=4-", 10), Some((4, 9)));
+        assert_eq!(parse_artifact_range("bytes=-3", 10), Some((7, 9)));
+        assert_eq!(parse_artifact_range("bytes=-99", 10), Some((0, 9)));
+        assert_eq!(parse_artifact_range("bytes=7-99", 10), Some((7, 9)));
+        // Multi-range, unattributable, and empty forms are refused, never
+        // answered with a silently widened or narrowed byte span.
+        for value in [
+            "bytes=0-1,3-4",
+            "bytes=0-1 2-3",
+            "bytes=",
+            "bytes=0",
+            "items=0-1",
+            "bytes=10-",
+            "bytes=5-4",
+            "bytes=-0",
+            "bytes=99999999999999999999-",
+        ] {
+            assert_eq!(parse_artifact_range(value, 10), None, "for {value}");
+        }
+        assert_eq!(parse_artifact_range("bytes=0-", 0), None);
     }
 }

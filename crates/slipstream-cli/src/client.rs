@@ -3,6 +3,7 @@ pub(crate) struct ServiceClient {
     pub(crate) origin: Url,
     pub(crate) client: Client,
     pub(crate) token: String,
+    pub(crate) control_timeout: std::time::Duration,
 }
 
 impl fmt::Debug for ServiceClient {
@@ -15,7 +16,11 @@ impl fmt::Debug for ServiceClient {
 }
 
 impl ServiceClient {
-    pub(crate) fn new(origin: Url, token: String) -> Result<Self, CommandFailure> {
+    pub(crate) fn new(
+        origin: Url,
+        token: String,
+        control_timeout: std::time::Duration,
+    ) -> Result<Self, CommandFailure> {
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -24,6 +29,7 @@ impl ServiceClient {
             origin,
             client,
             token,
+            control_timeout,
         })
     }
 

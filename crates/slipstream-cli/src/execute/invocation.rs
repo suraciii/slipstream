@@ -30,15 +30,25 @@ pub async fn invoke_until(
     let operation = command_operation(&cli.command);
     let admission = AdmissionState::default();
     let publication = PublicationState::default();
-    let command = tokio::time::timeout_at(
-        deadline,
-        execute(&cli, environment, &admission, &publication),
+    let artifact_download = matches!(
+        &cli.command,
+        Command::Processing {
+            command: ProcessingCommand::ArtifactDownload { .. }
+        }
     );
+    let command = execute(&cli, environment, &admission, &publication);
     tokio::pin!(command);
+    let deadline_signal = async {
+        if artifact_download {
+            std::future::pending::<()>().await;
+        }
+        tokio::time::sleep_until(deadline).await;
+    };
+    tokio::pin!(deadline_signal);
     let (exit_code, envelope) = tokio::select! {
         result = &mut command => match result {
-            Ok(Ok(data)) => (0, Envelope::success(data)),
-            Ok(Err(failure)) => {
+            Ok(data) => (0, Envelope::success(data)),
+            Err(failure) => {
                 let envelope = match failure.data {
                     Some(data) if failure.payload.effect == "partial" => {
                         Envelope::partial(*data, failure.payload)
@@ -48,14 +58,14 @@ pub async fn invoke_until(
                 };
                 (failure.exit_code, envelope)
             }
-            Err(_) => {
-                let failure = deadline_failure(operation, &publication, &admission);
-                let envelope = match failure.data {
-                    Some(data) => Envelope::partial(*data, failure.payload),
-                    None => Envelope::error(failure.payload),
-                };
-                (failure.exit_code, envelope)
-            }
+        },
+        _ = &mut deadline_signal => {
+            let failure = deadline_failure(operation, &publication, &admission);
+            let envelope = match failure.data {
+                Some(data) => Envelope::partial(*data, failure.payload),
+                None => Envelope::error(failure.payload),
+            };
+            (failure.exit_code, envelope)
         },
         _ = tokio::signal::ctrl_c() => {
             if let Some(data) = publication.committed() {

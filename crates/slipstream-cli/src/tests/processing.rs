@@ -216,3 +216,31 @@ fn composable_processing_commands_parse_their_closed_forms() {
         );
     }
 }
+#[test]
+fn artifact_download_timeout_uses_the_bounded_cli_value() {
+    let default = Cli::try_parse_from([
+        "slipstream",
+        "processing",
+        "artifact-download",
+        "artifact-1",
+        "--file",
+        "out.tiff",
+    ])
+    .unwrap();
+    assert_eq!(default.timeout, DEFAULT_TIMEOUT_SECONDS);
+
+    let configured = Cli::try_parse_from([
+        "slipstream",
+        "--timeout",
+        "7",
+        "processing",
+        "artifact-download",
+        "artifact-1",
+        "--file",
+        "out.tiff",
+    ])
+    .unwrap();
+    assert_eq!(configured.timeout, 7);
+    assert!(Cli::try_parse_from(["slipstream", "--timeout", "0", "status"]).is_err());
+    assert!(Cli::try_parse_from(["slipstream", "--timeout", "301", "status"]).is_err());
+}

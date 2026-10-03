@@ -10,8 +10,22 @@ use serde_json::{Value, json};
 
 impl ServiceClient {
     /// Negotiates the contract and returns the advertised request bounds the
-    /// operational commands enforce locally.
+    /// operational commands enforce locally. Artifact download control reads
+    /// use the command's bounded control timeout.
     pub(super) async fn capabilities(
+        &self,
+        operation: Operation,
+    ) -> Result<AdvertisedLimits, CommandFailure> {
+        if operation == Operation::ProcessingArtifactDownload {
+            tokio::time::timeout(self.control_timeout, self.capabilities_unbounded(operation))
+                .await
+                .map_err(|_| CommandFailure::transport(operation))?
+        } else {
+            self.capabilities_unbounded(operation).await
+        }
+    }
+
+    async fn capabilities_unbounded(
         &self,
         operation: Operation,
     ) -> Result<AdvertisedLimits, CommandFailure> {
