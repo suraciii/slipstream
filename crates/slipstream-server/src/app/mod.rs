@@ -1252,19 +1252,11 @@ impl Application {
                 )
             }
             BrowseSourceRequest::Album(id) => {
-                // The persisted member list and the published facts are read
-                // as one publication: a removal committed in between must not
-                // leave a removed Photo in the Album source that open returns.
-                let _publication = self.shared.publication.lock().await;
                 let target = self
                     .library
                     .album_browse_target(&id)
                     .await?
                     .ok_or(ServerError::BrowseNotFound)?;
-                // A view change supplies the browser's current Photo as the
-                // anchor; only an open without one resumes at the durable
-                // saved position, so a filter or order change never lands on
-                // a different Photo than the one current in the browser.
                 let resume_member_id = (resume && preferred_photo_id.is_none())
                     .then(|| album_resume_member(&target.members, target.saved_photo_id.as_deref()))
                     .flatten();

@@ -27,7 +27,6 @@ export type PhotoShellViewModel = PhotoFactsViewModel &
     sourceName: string;
     photoId?: string | undefined;
     available?: boolean | undefined;
-    canReviewRecovery?: boolean | undefined;
     previewSource?: ViewPreviewSource | undefined;
     limitedDetail?: boolean | undefined;
     previewUrl?: string | undefined;
@@ -231,9 +230,7 @@ export function createPhotoViewPresenter({
   const renderPhotoShell = (model: PhotoShellViewModel) => {
     if (!alive) return undefined;
     resetGestures();
-    canReviewRecovery = Boolean(
-      model.photoId && model.available === false && model.canReviewRecovery,
-    );
+    canReviewRecovery = Boolean(model.photoId && model.available === false);
     title.textContent = model.sourceName;
     photoSurface = {};
     renderPhotoFacts(model);

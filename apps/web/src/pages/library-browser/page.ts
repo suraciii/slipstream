@@ -431,10 +431,6 @@ function mountPrivateLibraryBrowser(
     !pageBusy &&
     !photoOwner.busy &&
     !photoOwner.opening;
-  // Grid status text has one owner at a time. The range status rewrites the
-  // line only when its own text changes, so merged window completions never
-  // churn it, and every other status takes the line over until the range
-  // reports again.
   let rangeStatusText: string | undefined;
   const setGridStatusText = (text: string) => {
     rangeStatusText = undefined;
@@ -1412,7 +1408,6 @@ function mountPrivateLibraryBrowser(
       total: sourceGrid.total,
       photoId: photo?.id,
       available: photo?.available,
-      canReviewRecovery: photo?.available === false,
       originalFilename: photo?.originalFilename,
       selectionState: photo?.selectionState,
       rating: photo?.rating,
