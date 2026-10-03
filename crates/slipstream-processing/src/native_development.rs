@@ -17,6 +17,18 @@ use std::{
 
 const METADATA_BYTES_MAX: u64 = 16 * 1024 * 1024;
 
+/// Explicit manual controls of the qualified development request. These
+/// override image-dependent native defaults, including highlight compensation.
+pub(crate) fn manual_exposure_parameters(exposure: f64) -> Value {
+    json!({
+        "mode": "EXPOSURE_MODE_MANUAL",
+        "black": 0.0,
+        "exposure": exposure,
+        "compensate_exposure_bias": false,
+        "compensate_hilite_pres": false
+    })
+}
+
 /// The external termination authority of one local execution: a cancelled
 /// flag polled together with the absolute deadline by the engine watchdog.
 pub(crate) struct Guard {
@@ -173,13 +185,7 @@ pub(crate) fn develop_at(
                 "operation": "exposure",
                 "multi_priority": 0,
                 "enabled": true,
-                "params": {
-                    "mode": "EXPOSURE_MODE_MANUAL",
-                    "black": 0.0,
-                    "exposure": exposure_milli_ev as f64 / 1000.0,
-                    "compensate_exposure_bias": false,
-                    "compensate_hilite_pres": false
-                }
+                "params": manual_exposure_parameters(exposure_milli_ev as f64 / 1000.0)
             }]
         }),
     )?;

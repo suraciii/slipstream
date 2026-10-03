@@ -157,7 +157,6 @@ Confirmed missing or unreadable Originals must retain saved editing intent,
 prior results, and downloadable outputs. Exporting an already confirmed edit
 state file requires neither the Original nor a processing engine.
 
-
 The Grid must retain its camera-produced thumbnails and indicate Photos with
 saved edits. Its bounded Photo summaries must report whether a saved Edit
 Recipe exists. This fact remains true when the recipe matches the processing
@@ -283,7 +282,6 @@ refusing its download. Pending or failed newer work must not hide earlier output
 Reopening the Photo restores retained outputs and unfinished work from the
 service. Exporting current confirmed settings creates a new task and file.
 
-
 Export must capture the step's input, module, and control settings when the
 Photographer invokes it. Those settings must be confirmed by the service
 before the Export is accepted. A save failure or conflict must not cause older
@@ -309,13 +307,16 @@ must not be copied into output as a claim of supported editing interchange.
 ### Edit State File
 
 The Photographer must be able to export the current confirmed editing state
-as an XMP parameter file. Saving or unresolved local settings must block this
-action with an explanation. The file must retain exposure, white-balance
-intent, the fixed Film Recipe, and its Photo/source/state provenance. Standard
-Camera Raw fields may carry only parameters with matching semantics. Unqualified
-temperature/tint mappings and Slipstream effects must remain in the Slipstream
-namespace; the output must disclose that other editors cannot reproduce all
-effects. A file does not establish complete Lightroom interchange.
+as an XMP parameter file from an explicitly selected darktable step. Saving or
+unresolved local settings must block this action with an explanation. The file
+must retain the complete recipe, selected step, semantic exposure and white-balance
+intent, and Photo/source/state provenance. A Film Recipe is included when it is
+present in the saved steps. The action must refuse a selection that cannot provide
+unambiguous semantic exposure and white balance. Standard Camera Raw fields may
+carry only parameters with matching semantics. Unqualified temperature/tint
+mappings and Slipstream effects must remain in the Slipstream namespace; the
+output must disclose that other editors cannot reproduce all effects. A file
+does not establish complete Lightroom interchange.
 
 An edit state file is a service-owned output, not an associated XMP Sidecar.
 It must never write beside an Original or become another source of truth.

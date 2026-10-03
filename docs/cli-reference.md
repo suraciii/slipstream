@@ -90,9 +90,8 @@ slipstream albums get ALBUM_ID
 published availability, Photo count, and the existing scan facts. A reachable
 service with an initializing or failed scan is a successful status query; the
 scan state remains explicit. An incompatible service is an error. The scan
-facts are the Library axis only; `processing capability` and a Photo's
-`sourceSupport` are separate axes that a recovering or saturated scan does
-not change.
+facts are the Library axis only; Processing Module availability and a Photo's
+input support are separate axes that a recovering or saturated scan does not change.
 
 Compatibility is checked before any operational request. Use a client and service
 built from the same candidate source revision. Contract version 1 alone does not
@@ -545,88 +544,51 @@ exists.
 ## Photo Development
 
 Camera Preview (`photos preview`) remains independent of saved editing intent.
-The following commands use the shared Photo Development operations:
+The shared Processing Module surface uses this grammar:
 
-````text literal
-slipstream processing capability
+```text literal
 slipstream processing modules
-slipstream photos recipe get PHOTO_ID
-slipstream photos recipe save PHOTO_ID --input FILE
-slipstream photos recipe rebind PHOTO_ID --input FILE
+slipstream processing artifact ARTIFACT_ID
+slipstream processing artifact-download ARTIFACT_ID --file PATH
 slipstream photos processing-recipe get PHOTO_ID
 slipstream photos processing-recipe save PHOTO_ID --input FILE
+slipstream photos processing-recipe rebind PHOTO_ID --input FILE
 slipstream photos processing-preview PHOTO_ID --step STEP_ID --file PATH
 slipstream photos processing-export PHOTO_ID --input FILE
+slipstream photos processing-export-list PHOTO_ID
 slipstream photos processing-export-status PHOTO_ID REQUEST_ID
 slipstream photos processing-export-cancel PHOTO_ID REQUEST_ID
-slipstream processing artifact-download ARTIFACT_ID --file PATH
+slipstream photos processing-export-retry PHOTO_ID REQUEST_ID --input FILE
+slipstream photos historical-export-download EXPORT_ID --file PATH
 slipstream photos proxy get PHOTO_ID
 slipstream photos proxy create PHOTO_ID --input FILE
 slipstream photos proxy remove PHOTO_ID
-slipstream photos edit-preview PHOTO_ID --stage develop|film --file PATH [--settings current|baseline]
-slipstream photos export submit PHOTO_ID --target development-tiff|film-jpeg --request-id REQUEST_ID
-slipstream photos export list PHOTO_ID
-slipstream photos export status EXPORT_ID
-slipstream photos export download EXPORT_ID --file PATH
 ```
 
-The `develop`/`film` stage values and the `development-tiff`/`film-jpeg`
-targets are closed transport selectors of the commands installed today. They
-are not product concepts, module identities, or a composition language, and
-they do not define module ordering or admission. The target product model is
-the caller-controlled Processing Step of
-[Processing Modules](../design/processing-modules.md): one module, one input
-binding, and one complete parameter snapshot per step, with output format,
-color handling, precision, and encoding as ordinary module parameters. That
-module contract does not change the commands installed today. `edit-preview
---stage film` uses the same source revision, recipe version, bundle-bound
-rendition identity, response metadata, digest, and JPEG validation as
-`--stage develop`; it is admissible only when the capability report marks
-that selector ready, and a ready `develop` selector does not make `film`
-ready.
+`processing modules` reads `GET /api/processing/modules`. It preserves each
+peer module's parameter schema tree, finite limits, versions, availability,
+and refusal reasons. Discovery does not authorize arbitrary engine controls.
+The service separately checks input, parameters, bundle, and resources before
+execution. [Processing Modules](../design/processing-modules.md) owns the
+module boundary. Output format, precision, color, geometry, and encoding are
+ordinary module parameters. Each execution selects one step; composition
+requires explicitly selecting a published immutable artifact as another
+step's input. Commands perform no implicit conversion or chaining.
 
-These commands are not a workflow DSL. No command discovers arbitrary module
-parameters, converts one module's input to another's, chains modules, or
-invokes a second module on the caller's behalf. Composing modules is a
-caller-controlled sequence of explicit invocations in which only a published,
-immutable Export artifact may be selected as a later step's input. The module
-boundary, discovery, and artifact handoff are owned by
-[Processing Modules](../design/processing-modules.md).
-
-`processing capability` returns the service's processing capability report,
-including state, observed bundle and incarnation, profiles, exposure range and
-step, white-balance modes and ranges, and the installed surface's per-selector
-availability (`develop` and `film`, each `ready`, `unavailable`, or
-`unsupported`). Those availability entries describe the closed transport
-selectors above, not module identities; this report is not a general
-module-discovery interface, and one selector's state is never inferred from
-the other's. These facts control admissible processing for the installed
-commands; the client must not infer support from a camera name or a previously
-successful operation.
-
-`processing modules` is the read-only Issue #496 discovery surface. It
-preserves the darktable and standalone SpektraFilm peer descriptions,
-module-owned parameter schema trees, finite limits, and independent
-availability/refusal reasons. A described control is not product admission:
-the service still validates the selected step's input identity, complete
-parameter snapshot, bundle, and resource policy before execution.
-
-`photos processing-recipe` is the Issue #496 composable surface beside the
-legacy two-control `photos recipe` commands, which remain installed unchanged.
 `processing-recipe get` returns `photoId`, the observed `sourceRevision`
-(empty when none is currently published), the nullable composable `recipe`,
-and the CLI's `webUrl`. An absent recipe is a successful read with
-`recipe: null`. A retained recipe reports its committed `revision`, the
-guarded `sourceRevision`, the caller-selected `currentStepId`, and zero or
-more `steps`, each with its `stepId`, `module`, explicit `input` binding
-(`original` with `photoId` and `sourceRevision`, or `artifact` with
-`artifactId` and its concrete image `contract`), and complete module-owned
-`parameters` (`schemaVersion` plus `tree`). The CLI validates the closed
-shapes and preserves every module-owned parameter tree verbatim; it never
-flattens trees, merges schemas across modules, or interprets unknown fields.
+(empty when none is published), nullable `recipe`, and `webUrl`. A saved
+recipe contains `photoId`, `revision`, its bound `sourceRevision`, nullable
+`currentStepId`, and `steps`. Each step contains `stepId`, `module`, `input`,
+and `parameters`. An Original input contains `kind: "original"`, `photoId`,
+and `sourceRevision`. An Artifact input contains `kind: "artifact"`,
+`artifactId`, and `contract` with `format`, `precision`, `colorSpace`,
+`transfer`, `encoding`, and `geometry` (`width`, `height`). Parameters contain
+`schemaVersion` and an opaque object `tree`. Reads preserve retained intent,
+including unsupported controls and bindings to an older source revision.
+The observed source revision can differ from the saved binding; processing
+requires explicit rebind before using a changed Original.
 
-`processing-recipe save` takes exactly this JSON document, with all keys
-required including the nullable ones:
+`processing-recipe save` requires every key in this document, including nulls:
 
 ```json
 {
@@ -638,184 +600,157 @@ required including the nullable ones:
 }
 ```
 
-Each step repeats the read shape above. `steps` may be empty; a recipe with
-steps must select exactly one `currentStepId` from them, step ids must be
-unique, and every identity stays inside the published bounds (64 bytes for
-step and module ids, 128 for artifact ids, revisions, and contract names, 64
-steps, tree depth 32). The CLI refuses a malformed document with exit 2
-before any network access and submits the exact prepared body once. Both
-writes report `photoId`, `requestId`, `outcome` (`saved` with 201, or
-`replayed`/`unchanged` with 200), the retained `recipe`, `recipeVersion`,
-`sourceRevision`, and `webUrl`. A lost or unusable response after admission
-is `outcome_unknown`, exit 7; a repeated request identity with a different
-payload is `request_conflict`, exit 4. The CLI never fetches a newer recipe
-revision to replace the caller's guard and never retries a refused or lost
-write. Confirmed refusals map onto the shared structured table:
-`recipe_conflict` and `source_changed` carry the retained recipe (exit 4),
-`invalid_recipe` and `incompatible_input` are exit 2, `unknown_photo`,
-`unknown_step`, and `unknown_module` are exit 3, `step_not_current` is
-exit 4, and `source_unavailable` and `module_parameters_unavailable` are
-exit 6.
+The nullable recipe guard explicitly requires absence when null. Steps may be
+empty; otherwise `currentStepId` selects exactly one of the unique step IDs.
+Step and module IDs are at most 64 bytes. Artifact IDs, Photo IDs, recipe
+revisions, and contract names are at most 128 bytes. A recipe has at most
+64 steps, parameter trees have depth at most 32, and geometry edges are
+1 through 65536. Source revisions have a separate bound of 16384 bytes;
+they are opaque UTF-8 strings that may contain NUL. Copy them verbatim in
+JSON with `\u0000` escapes. Request IDs use 1 through 128 ASCII letters,
+digits, `.`, `_`, or `-`. Every document remains subject to the 64 KiB input
+bound. The CLI preserves the complete module trees and sends the prepared
+body once, without reading replacement guards. A wire-valid unsupported
+setting remains saved intent; execution availability does not rewrite it.
 
-`photos processing-preview PHOTO_ID --step STEP_ID --file PATH` requests the
-Preview of the recipe's selected current Processing Step only. The service
-refuses a step that is not the recipe's current selection (`step_not_current`,
-exit 4), a stale source or Original binding (`source_changed`, exit 4), and
-any module parameter tree no qualified adapter can consume
-(`module_parameters_unavailable` or `processing_unavailable`, exit 6); the
-command never falls back to the legacy stage preview, another module, or the
-Camera Preview. The destination obeys the same local-file safety rules as the
-other Preview downloads — an existing file or symbolic link is never
-replaced — and no file is created for any refusal. The CLI validates the PNG
-bytes against the route's complete Preview identity, geometry, content digest,
-and provenance headers before publishing the file.
-
-`photos processing-export PHOTO_ID --input FILE` submits the complete
-composable export document once, with its request identity and expected recipe
-and source revisions. A `201` is a completed export; a duplicate request that
-is still live is reported as a `pending` receipt with `202` and must be
-reconciled with `photos processing-export-status PHOTO_ID REQUEST_ID`. Status
-returns the bounded request state and retained artifact or failure when
-terminal. `photos processing-export-cancel` requests cancellation of queued or
-running work and is safe to repeat. These commands never replace a caller's
-guards or retry a lost admission.
-
-`processing artifact-download ARTIFACT_ID --file PATH` downloads only a
-published Processing Artifact whose byte length, SHA-256 digest, image
-contract, artifact identity, and provenance headers all agree with the
-artifact read. The destination is staged and no existing file or symbolic link
-is replaced; any mismatch publishes nothing.
-
-`photos proxy get` reports `state` as `absent`, `building`, `current`, or
-`stale`, with nullable `proxy` facts and the last bounded `failure`. `proxy
-create` takes exactly this JSON object, sent once as the create body:
-
-```json
-{ "expectedSourceRevision": "observed-source-revision" }
-````
-
-Replace the example revision with the value observed by a prior read, copied
-verbatim. A RAW source revision carries NUL separators, so it can only travel
-in the document: copy the string with its `\u0000` escapes and never re-enter
-it by hand. A `building` response is accepted work, not a completed artifact;
-read the command again to reconcile it. The command never refreshes the
-revision or silently retries. `proxy remove` is idempotent. A proxy is a
-preview stand-in only: Original-backed export submission still returns
-`original_required` while the Original is unavailable. An explicitly selected
-retained Processing Artifact may be used by a compatible later module step
-subject to its own lease, expiry, and admission checks.
-
-`recipe get` returns `photoId`, nullable `sourceRevision`, nullable `recipe`,
-`sourceSupport`, nullable `supportReason`, `processingAvailable`, `controls`,
-`editSource` (`original` or `development-proxy`), and `editSourceProxyId`,
-which is present only when `editSource` is `development-proxy`. A valid proxy
-may make editing processing available while
-the Original remains unavailable; it never makes an Export admissible.
-Their meanings and closed values are defined by the shared
-[Edit Recipe wire contract](../design/photo-development.md#wire-contract).
-`supportReason` separates retryable wait states (`read-pending`,
-`resource-unavailable` — re-read after the admitted scan or capacity frees)
-from confirmed outcomes (`original-missing`, `original-unreadable` —
-permanent for the current source revision). The CLI adds `webUrl`, the Photo
-Destination. An absent recipe is a successful read with `recipe: null`, not a
-saved baseline. Retained unsupported settings remain readable and must not
-be presented as currently executable.
-
-`recipe save` takes exactly this JSON object. Replace the example revisions
-with the observed values; `expectedRecipeVersion: null` explicitly requires
-that no recipe exists. All keys are required, including that nullable key.
+`processing-recipe rebind` requires exactly this document:
 
 ```json
 {
-  "requestId": "edit-001",
-  "expectedRecipeVersion": null,
-  "expectedSourceRevision": "observed-source-revision",
-  "settings": {
-    "exposureEv": 1.0,
-    "whiteBalance": { "mode": "as-shot" }
-  }
+  "requestId": "rebind-001",
+  "expectedRecipeRevision": "observed-recipe-revision",
+  "newSourceRevision": "newly-observed-source-revision"
 }
 ```
 
-Input uses the shared wire types, request-identity grammar and white-balance
-payload bounds. Exposure must satisfy the current reported range and step.
-The service remains authoritative for source, revision and processing checks.
-The CLI never fetches a newer recipe version to replace the caller's guard.
-Reset is an ordinary guarded save of `exposureEv: 0` and as-shot white balance.
-It preserves Photo identity and is not deletion of the recipe.
+Rebind creates a new recipe revision, preserves step identity, selection,
+module, and exact parameter trees, and changes only Original source bindings.
+Artifact inputs retain their immutable identities. Save and rebind report
+`photoId`, `requestId`, `outcome` (`saved`, `replayed`, or `unchanged`),
+`recipe`, `recipeVersion`, `sourceRevision`, and `webUrl`. `saved` uses 201;
+`replayed` and `unchanged` use 200. Lost or unusable write responses are
+`outcome_unknown`, exit 7. Reconcile the identical request before dependent
+work; a replay confirms retained admission, not the absence of later edits.
 
-`recipe rebind` takes exactly `requestId`, `expectedRecipeVersion`, and
-`newSourceRevision`, all nonempty strings with the shared wire meanings. It
-explicitly adopts the observed new source while preserving saved settings.
-Both writes return `photoId`, `requestId`, `outcome` (`saved` or `unchanged`),
-`recipeVersion`, `sourceRevision`, and `webUrl`. A lost or invalid response after
-admission is `outcome_unknown`, exit 7. Reconcile by reading the recipe or
-explicitly repeating the identical input and request ID before dependent work.
-A repeated ID with different input is `request_conflict`; no write retries are
-automatic. A replay confirms its retained receipt, not that no later edit exists.
+`processing-preview` requests only the selected current step's bounded
+Preview. It performs one request without polling. Accepted work reports
+`state: "queued"` or `"running"`, `fileCommitted: false`, and the selected identity; invoke
+the read again to reconcile. A ready result includes `photoId`, `stepId`,
+`state: "ready"`, `sourceRevision`, `recipeRevision`, `contentType`, `width`,
+`height`, `byteLength`, `sha256`, `path`, `webUrl`, and
+`fileCommitted: true`. The CLI validates PNG identity headers, geometry,
+length, digest, and image structure before publishing without replacement.
+A refusal publishes no file. A Preview never becomes a full-resolution
+handoff, selects another module, or substitutes Camera Preview.
+The ready result also exposes `comparison: "current"`, `inputSha256`, and
+`inputByteLength` from validated input-evidence headers. A baseline rendition
+cannot satisfy an ordinary current Preview request.
+An explicit `outcome_unknown` response retains exit 7 and effect `unknown`,
+with the Photo identity and `photos-processing-preview` operation. The CLI
+publishes no file and performs no automatic retry.
 
-`edit-preview` selects `current` by default. `baseline` uses 0 EV and as-shot
-without saving. It performs one request, without polling. Accepted pending work
-returns success with `photoId`, `stage`, `settings`, `state` (`queued` or
-`running`), `fileCommitted: false`, and `webUrl`; no output file exists. Invoke
-the same read later. A ready rendition returns `state: "ready"`, the same
-identity fields, `sourceRevision`, `recipeVersion`, `displayTransform`,
-`contentType: "image/jpeg"`, `width`, `height`, `byteLength`, `sha256`,
-`expiresAt`, `detailLimited: true`, `path`, and `fileCommitted: true`.
-Baseline has an empty `recipeVersion`; current can also be empty when no recipe
-exists. Source and recipe revisions identify the returned rendition, which may
-become stale after a later edit or source change. An Edit Preview executes only
-the selected step: it is bounded to 64 MiB, is not a full-resolution Export or
-handoff, and never invokes another module to prepare input or finish output.
-The client validates identity, length, digest and JPEG structure before
-publishing without replacement, using the same local-file safety rules as
-Camera Preview. Pending or failed work must not leave a completed-looking file.
-A refused or unavailable processing selector never falls back to the Camera
-Preview or another module.
-A service-reported indeterminate render admission is `outcome_unknown`, exit 7,
-effect `unknown`; request the preview again to reconcile it. It does not imply
-a local file was published.
+`processing-export` requires exactly the following guarded body:
 
-`export submit` reads current source and saved-recipe revisions, then submits
-exactly those guards with the caller's request ID. Absence is `missing_recipe`.
-A `development-tiff` export contains full-resolution float32 RGB, not 16-bit
-samples.
-Submission success reports `exportId`, `state`, `target`, `recipeVersion`,
-`sourceRevision`, nullable `receiptExpiresAt`, and nullable `artifactExpiresAt`.
-It confirms admission or replay, not completion. List returns `exports` of
-`exportId`, `state`, `target`, captured `recipeVersion` and `sourceRevision`,
-`createdAt`, and nullable `settledAt`. Status returns the shared
-[Export inspection representation](../design/photo-development.md#wire-contract),
-including captured recipe/source revisions, terminal outcome, failure code and
-retained artifact. Keep the confirmed recipe read beside the Export receipt
-when reporting captured settings; status does not return those settings.
-Queued and running are successful inspections; the caller inspects again later.
-Submitting the same ID only replays when the captured request still matches;
-after a later Photo edit, inspect the original Export instead of resubmitting.
+```json
+{
+  "requestId": "export-001",
+  "stepId": "develop-1",
+  "expectedRecipeRevision": "observed-recipe-revision",
+  "expectedSourceRevision": "observed-source-revision"
+}
+```
 
-`export download` requires a retained completed artifact. Its data contains
-`exportId`, `path`, `target`, `stage`, `contentType`, `width`, `height`,
-`profileIdentity`, `filename`, `orientation`, `sampleFormat`, `colorSpace`,
-`iccEmbedded`, `byteLength`, `sha256`, `expiresAt`, and `fileCommitted: true`.
-The SHA-256 is the service receipt digest. Transfer binds all artifact headers
-and length to that receipt and publishes without replacement. Independently hash
-and decode downloaded bytes for acceptance. Receipt/artifact expiry is reported
-separately; a successful submit or status must not be reported as a local download.
+Admission captures the selected saved step's input, complete parameters,
+module/schema, bundle, and intended output. Accepted initial submissions and
+captured retries return 202 promptly with `outcome: "accepted"` or
+`"replayed"` and the durable `receipt`. The CLI adds `photoId`, `requestId`,
+`stepId`, current `state`, and `webUrl`. Work continues under service
+ownership after the command exits. A receipt may already be terminal when
+read. A successful terminal replay uses the retained `{artifact,replayed}`
+wire response and reports the artifact with `outcome: "replayed"`.
+No command automatically retries a lost admission or replaces its guards.
 
-Development errors retain the shared service code and structured details:
-`invalid_settings` and `unsupported_photo` exit 2; `unknown_photo`,
-`unknown_export`, and `missing_recipe` exit 3; `recipe_conflict`, `source_changed`,
-`requires_rebind`, `request_conflict`, `export_conflict`, and `output_unavailable`
-exit 4; `receipt_expired`, `export_expired`, `artifact_expired`,
-`processing_unavailable`, `resource_unavailable`, and `retained_output_full`
-exit 6. Confirmed refusals have effect `none`; unusable write responses retain
-effect `unknown`. Conflict details carry current revisions when the service
-provides them. A `resource_unavailable` refusal that follows from the Photo's
-source state carries the closed `supportReason` in its details, so a retryable
-pending or resource-exhausted source is distinguishable from a confirmed
-unreadable one. No command silently rebinds a source, changes decisions or
-Albums, enables an unavailable processing selector, converts or chains module
-inputs, or submits an Export after an uncertain save.
+`processing-export-list` returns `photoId`, `exports`, `artifacts`,
+`historicalExports`, and `webUrl`. Each array is durable, newest first, and
+independently bounded to 64 records. This view bound does not shorten retained
+data's disclosed lifetime. All retained records remain readable after restart
+or when processing is unavailable.
+`processing-export-status` reads the work record named by Photo and request
+identity. Each record retains `requestId`, `photoId`, `stepId`, `module`,
+`recipeRevision`, `sourceRevision`, `adapterSchemaVersion`, `parameters`,
+captured `input` binding, `bundleId`, `acceptedAt`, nullable `attempt`, and `state`
+(`accepted`, `executing`, `succeeded`, `failed`, or `cancelled`). Terminal
+records include `terminalAt`, applicable `artifactId` or `failureReason`,
+and disclosed `retainUntil`; inapplicable terminal fields are null.
+`processing-export-cancel` asks the service to settle cancellation; the first
+terminal decision wins. Repeating cancellation never reruns an engine.
+
+`processing-export-retry PHOTO_ID REQUEST_ID` requires exactly:
+
+```json
+{ "requestId": "new-export-attempt-002" }
+```
+
+It creates a new attempt from the retained failed or cancelled request's
+captured snapshot. It never reads today's recipe to reconstruct that intent.
+Admission revalidates captured source/input, bundle, and resource guards.
+Inspect the new request ID to reconcile its outcome. Identical retained
+requests replay before inspecting current recipe or module availability;
+the same identity with a different body conflicts.
+
+`processing artifact` returns a published artifact's complete immutable
+provenance and `webUrl`: `artifactId`, `photoId`, `stepId`, `module`,
+`adapterSchemaVersion`, `parameters`, verified `input`, `outputContract`,
+`bundleId`, `sha256`, `byteLength`, `filename`, `publishedAt`, and `expiresAt`.
+Publication and expiry use RFC3339 UTC strings; work lifecycle times are integers.
+The filename derives from module, step, and immutable artifact identity with
+`.tif` or `.jpg`. `artifact-download` validates the record against transfer
+headers, including filename, length, and recomputed SHA-256, before publishing
+to the caller's `PATH`. It reports `filename`, expiry, byte evidence,
+provenance, `path`, and `fileCommitted: true`. Existing files and symbolic
+links are never replaced; mismatched or partial transfers publish nothing.
+
+`historicalExports` preserves existing read-only image Export records separately
+from Processing Artifacts. Each record contains `exportId`, `photoId`, `state`,
+historical `target`, captured `recipeVersion` and `sourceRevision`, `createdAt`,
+nullable `settledAt`, `bundleId`, nullable `terminalOutcome`, `failureReason`,
+`receiptExpiresAt`, and `artifact`. These records do not imply complete
+composable provenance. A retained artifact preserves its `exportId`, `target`,
+`stage`, `contentType`, `filename`, `orientation`, `sampleFormat`, `colorSpace`,
+`iccEmbedded`, `width`, `height`, `profileIdentity`, `byteLength`, `sha256`,
+and `expiresAt` exactly as retained.
+
+`historical-export-download` reads that existing record and downloads its retained
+bytes through `GET /api/exports/{id}/artifact`. It validates every historical
+artifact header, length, and recomputed SHA-256 before publishing without
+replacement. It reports `exportId`, `photoId`, `historical: true`, complete
+`artifact` metadata, `path`, `webUrl`, and `fileCommitted: true`. Failed or
+expired transfers publish no file. The command does not submit, retry, or
+reinterpret a historical Export as a Processing Artifact.
+
+`photos proxy get` reports `state` (`absent`, `building`, `current`, or
+`stale`), nullable `proxy`, and bounded `failure`. Create requires exactly:
+
+```json
+{ "expectedSourceRevision": "observed-source-revision" }
+```
+
+Create sends the observed revision once. `building` confirms accepted work;
+read again to reconcile it. Remove is idempotent. A Development Proxy remains
+a Preview stand-in and cannot authorize an Original-backed Export while its
+Original is unavailable. Explicit compatible retained artifact inputs remain
+subject to their own lease, expiry, and admission checks.
+
+Development errors preserve structured codes and details. `invalid_settings`,
+`invalid_recipe`, and `incompatible_input` exit 2; `unknown_photo`, `unknown_step`,
+`unknown_module`, `unknown_request`, `unknown_artifact`, and `missing_recipe`
+exit 3; `recipe_conflict`, `source_changed`, `requires_rebind`,
+`request_conflict`, `step_not_current`, `original_required`, and `export_terminal` exit 4;
+expired receipts/artifacts, unavailable processing/source/resources, and
+`retained_output_full` exit 6. Confirmed refusals have effect `none`;
+unusable responses to possibly admitted writes retain effect `unknown`.
+No command changes decisions or Albums, silently rebinds, enables an
+unavailable module, or submits dependent work after an uncertain save.
 
 ## Output Envelope
 
@@ -1072,14 +1007,19 @@ For `authentication_required`, `access_denied`, `server_busy`, `storage_failed`,
 `operation` is one of `status`, `library-check`, `folders-list`, `albums-list`,
 `albums-get`, `photos-list`, `photos-get`, `photos-preview`, `photos-set`,
 `albums-create`, `albums-rename`, `albums-delete`, `albums-add`, `albums-remove`,
-`albums-reorder`, `processing-capability`, `photos-recipe-get`,
-`photos-recipe-save`, `photos-recipe-rebind`, `photos-edit-preview`,
-`photos-export-submit`, `photos-export-list`, `photos-export-status`,
-`photos-export-download`, `recovery-unavailable`, `recovery-propose`, or
-`recovery-apply`. `photoIds` in `outcome_unknown` contains all submitted
+`albums-reorder`, `processing-modules`, `processing-artifact`,
+`processing-artifact-download`, `photos-processing-recipe-get`,
+`photos-processing-recipe-save`, `photos-processing-recipe-rebind`,
+`photos-processing-preview`, `photos-processing-export`,
+`photos-processing-export-list`, `photos-processing-export-status`,
+`photos-processing-export-cancel`, `photos-processing-export-retry`,
+`photos-historical-export-download`,
+`photos-proxy-get`, `photos-proxy-create`, `photos-proxy-remove`,
+`recovery-unavailable`, `recovery-propose`, or `recovery-apply`.
+`photoIds` in `outcome_unknown` contains all submitted
 Photo IDs in request order. The Album fields identify the submitted target when
 one exists and are null otherwise. Recipe writes, Export submission, and Recovery application can
-have unknown mutation outcomes; capability, recipe reads, Recovery reads, and
+have unknown mutation outcomes; module discovery, recipe reads, Recovery reads, and
 download transfers use read/transfer errors and do not claim a saved mutation.
 
 Command failures select codes as follows:

@@ -178,6 +178,8 @@ pub struct Application {
     pub(crate) shared: Arc<SharedLibrary>,
     /// The Export lifecycle owner when the deployment configures processing.
     pub(crate) exports: Option<Arc<crate::export_manager::ExportManager>>,
+    /// Retained publication storage remains readable without an engine.
+    pub(crate) export_artifacts_directory: PathBuf,
     /// Durable Development Proxy lifecycle, available with processing.
     pub(crate) proxies: Option<Arc<crate::development_proxy::DevelopmentProxyManager>>,
     scan_cycle: ScanCycle,
@@ -194,13 +196,6 @@ pub struct Application {
     pub(crate) shutdown: Mutex<bool>,
 }
 impl Application {
-    pub(crate) fn instance_epoch(&self) -> &str {
-        &self.instance_epoch
-    }
-
-    pub(crate) fn processing_available(&self) -> bool {
-        self.exports.is_some()
-    }
     pub(crate) fn admit_scan_cycle(
         self: &Arc<Self>,
         scan_gate: Option<oneshot::Receiver<()>>,
@@ -405,6 +400,7 @@ impl Application {
             library,
             library_root: config.library_root.clone(),
             exports,
+            export_artifacts_directory: config.state_directory.join("exports").join("artifacts"),
             proxies,
             scan_cycle: ScanCycle::new(),
             preview,
@@ -1173,6 +1169,18 @@ impl Application {
         selection: BrowseSelectionFilter,
         preferred_photo_id: Option<&str>,
     ) -> Result<BrowseOpenResponse, ServerError> {
+        self.browse_open_with_mode(source, order, selection, preferred_photo_id, true)
+            .await
+    }
+
+    pub async fn browse_open_with_mode(
+        &self,
+        source: BrowseSourceRequest,
+        order: BrowseViewOrder,
+        selection: BrowseSelectionFilter,
+        preferred_photo_id: Option<&str>,
+        resume: bool,
+    ) -> Result<BrowseOpenResponse, ServerError> {
         // Only an Album source owns persisted membership position, so
         // `album-order` is rejected for every other source before any
         // Snapshot is created instead of silently behaving as a time view.
@@ -1244,21 +1252,12 @@ impl Application {
                 )
             }
             BrowseSourceRequest::Album(id) => {
-                // The persisted member list and the published facts are read
-                // as one publication: a removal committed in between must not
-                // leave a removed Photo in the Album source that open returns.
-                let _publication = self.shared.publication.lock().await;
                 let target = self
                     .library
                     .album_browse_target(&id)
                     .await?
                     .ok_or(ServerError::BrowseNotFound)?;
-                // A view change supplies the browser's current Photo as the
-                // anchor; only an open without one resumes at the durable
-                // saved position, so a filter or order change never lands on
-                // a different Photo than the one current in the browser.
-                let resume_member_id = preferred_photo_id
-                    .is_none()
+                let resume_member_id = (resume && preferred_photo_id.is_none())
                     .then(|| album_resume_member(&target.members, target.saved_photo_id.as_deref()))
                     .flatten();
                 let guard = self

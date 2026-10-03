@@ -80,17 +80,10 @@
   font-size: 0.85rem;
 }
 
-.photo-editor-composable textarea,
 .photo-editor-composable select,
 .photo-editor-composable input[type="text"] {
   width: 100%;
   min-width: 0;
-}
-
-.photo-editor-composable textarea {
-  resize: vertical;
-  font-family: var(--mono, monospace);
-  font-size: 0.8rem;
 }
 
 .photo-editor-composable-artifacts {
@@ -103,5 +96,30 @@
   min-width: 0;
   font-size: 0.85rem;
   color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.photo-editor-composable pre {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-size: 0.8rem;
+}
+
+[data-photo-editor-module-controls] {
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+[data-photo-editor-module-controls] input[type="number"] {
+  width: 100%;
+  min-width: 0;
+}
+
+[data-photo-editor-export-list] li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
   overflow-wrap: anywhere;
 }

@@ -2,26 +2,25 @@ use super::albums::AlbumWriteError;
 use super::scan::{FingerprintCounts, FingerprintTarget, ScanApplication, ScanRecoveryPlan};
 use super::{
     DatabaseName, StateDirectory, StateError, StateFileIdentity, admission::StateDatabaseLock,
-    albums, composable_recipe, decisions, development_proxy, edit_recipe, export, metadata,
-    migrations, mutation, processing_export, queries, removal, scan, xmp,
+    albums, decisions, development_proxy, edit_recipe, export, metadata, migrations, mutation,
+    queries, removal, scan, xmp,
 };
 use crate::{
     AlbumBrowseTarget, AlbumCreationResult, AlbumMembershipMutation, AlbumMembershipResult,
     AlbumMutation, AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary,
     AppliedRelocations, CheckedAlbumMutation, CheckedAlbumMutationResult,
-    CheckedPhotoDecisionMutation, CheckedPhotoDecisionResult, ComposableEditRecipe,
-    ComposableEditRecipeWriteOutcome, DiscoveredOriginal, EditRecipeRead, EditRecipeWriteOutcome,
-    ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreMutation, ExplicitPhotoRestoreResult,
-    ExportAttempt, ExportLeaseOutcome, ExportRecord, ExportRetryOutcome, ExportSettlement,
-    ExportSubmission, ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult,
-    LibraryRoot, MAXIMUM_PHOTO_RATING, OriginalFingerprint, OriginalScanError,
-    PermanentDeletionItemState, PermanentDeletionSelection, PermanentDeletionTarget,
-    PhotoAlbumMembership, PhotoOperationRemainder, PhotoQuery, PhotoQueryError,
-    PhotoQueryProjection, PhotoRead, PhotoRemovalMutation, PhotoRemovalResult, PhotoRestoration,
-    PhotoRestorationResult, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField,
-    PhotoStateMutation, PhotoStateMutationResult, PhotoStateValue, PreviewSeed, PreviewSeedResult,
-    RebindEditRecipe, RecoveryRecord, RecoverySurvey, RemovedPhotoRecord, RequestedRelocation,
-    SaveComposableEditRecipe, SaveEditRecipe, ScanSnapshot, SelectionState, WhiteBalanceIntent,
+    CheckedPhotoDecisionMutation, CheckedPhotoDecisionResult, DiscoveredOriginal, EditRecipeRead,
+    EditRecipeWriteOutcome, ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreMutation,
+    ExplicitPhotoRestoreResult, ExportAttempt, ExportLeaseOutcome, ExportRecord,
+    ExportRetryOutcome, ExportSettlement, ExportSubmission, ExportSubmissionResolution,
+    ExportSubmitOutcome, ExportSweepResult, LibraryRoot, MAXIMUM_PHOTO_RATING, OriginalFingerprint,
+    OriginalScanError, PermanentDeletionItemState, PermanentDeletionSelection,
+    PermanentDeletionTarget, PhotoAlbumMembership, PhotoOperationRemainder, PhotoQuery,
+    PhotoQueryError, PhotoQueryProjection, PhotoRead, PhotoRemovalMutation, PhotoRemovalResult,
+    PhotoRestoration, PhotoRestorationResult, PhotoStateBatchMutation, PhotoStateBatchResult,
+    PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateValue, PreviewSeed,
+    PreviewSeedResult, RebindEditRecipe, RecoveryRecord, RecoverySurvey, RemovedPhotoRecord,
+    RequestedRelocation, SaveEditRecipe, ScanSnapshot, SelectionState, WhiteBalanceIntent,
     XmpCreateOutcome, XmpExportRecord,
 };
 
@@ -39,6 +38,7 @@ use std::{
 use tokio::sync::oneshot;
 
 mod lifecycle;
+pub(super) mod processing;
 #[cfg(test)]
 #[path = "owner_tests.rs"]
 mod tests;
@@ -385,10 +385,7 @@ pub(super) enum Command {
     },
     SaveEditRecipe(SaveEditRecipe, Reply<EditRecipeWriteOutcome>),
     RebindEditRecipe(RebindEditRecipe, Reply<EditRecipeWriteOutcome>),
-    ReadComposableEditRecipe {
-        photo_id: String,
-        reply: Reply<Option<ComposableEditRecipe>>,
-    },
+    Processing(processing::Command),
     CreateXmp {
         photo_id: String,
         request_id: String,
@@ -404,69 +401,6 @@ pub(super) enum Command {
     ListPhotoXmp {
         photo_id: String,
         reply: Reply<Option<Vec<XmpExportRecord>>>,
-    },
-    SaveComposableEditRecipe(
-        SaveComposableEditRecipe,
-        Reply<ComposableEditRecipeWriteOutcome>,
-    ),
-    ReadProcessingArtifact {
-        artifact_id: String,
-        reply: Reply<Option<crate::processing::ProcessingArtifact>>,
-    },
-    PublishProcessingArtifact(
-        crate::processing::ProcessingArtifact,
-        Reply<crate::processing::ProcessingArtifactPublication>,
-    ),
-    SubmitProcessingExport(
-        crate::processing::SubmitProcessingExport,
-        u64,
-        Reply<crate::processing::ProcessingExportSubmitOutcome>,
-    ),
-    SettleProcessingExport {
-        artifact: crate::processing::ProcessingArtifact,
-        request_id: String,
-        payload_digest: String,
-        now: u64,
-        reply: Reply<crate::processing::ProcessingExportSettlement>,
-    },
-    ReadProcessingExportWork {
-        request_id: String,
-        reply: Reply<Option<crate::processing::ProcessingExportWork>>,
-    },
-    BeginProcessingExportAttempt {
-        request_id: String,
-        now: u64,
-        reply: Reply<crate::processing::ProcessingExportAttemptOutcome>,
-    },
-    FailProcessingExport {
-        request_id: String,
-        reason_code: String,
-        now: u64,
-        reply: Reply<crate::processing::ProcessingExportFailureOutcome>,
-    },
-    CancelProcessingExport {
-        request_id: String,
-        now: u64,
-        reply: Reply<crate::processing::ProcessingExportCancelOutcome>,
-    },
-    UnfinishedProcessingExports(Reply<Vec<crate::processing::ProcessingExportWork>>),
-    SweepProcessingExportExpiry {
-        now: u64,
-        reply: Reply<Vec<String>>,
-    },
-    AcquireProcessingArtifactLease {
-        artifact_id: String,
-        now: u64,
-        reply: Reply<crate::processing::ProcessingArtifactLeaseOutcome>,
-    },
-    RenewProcessingArtifactLease {
-        lease_id: String,
-        now: u64,
-        reply: Reply<bool>,
-    },
-    ReleaseProcessingArtifactLease {
-        lease_id: String,
-        reply: Reply<bool>,
     },
     ReadDevelopmentProxy {
         photo_id: String,
@@ -1837,20 +1771,8 @@ fn owner_main(
                 );
                 let _ = reply.send(result);
             }
-            Command::ReadComposableEditRecipe { photo_id, reply } => {
-                let _ = reply.send(composable_recipe::read_composable_edit_recipe(
-                    &connection,
-                    &photo_id,
-                ));
-            }
-            Command::SaveComposableEditRecipe(mutation, reply) => {
-                let result = composable_recipe::save_composable_edit_recipe(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    mutation,
-                );
-                let _ = reply.send(result);
+            Command::Processing(command) => {
+                processing::dispatch(command, &state, &database_name, &mut connection);
             }
             Command::CreateXmp {
                 photo_id,
@@ -1874,150 +1796,6 @@ fn owner_main(
             }
             Command::ListPhotoXmp { photo_id, reply } => {
                 let _ = reply.send(xmp::list(&connection, &photo_id));
-            }
-            Command::ReadProcessingArtifact { artifact_id, reply } => {
-                let _ = reply.send(processing_export::read_processing_artifact(
-                    &connection,
-                    &artifact_id,
-                ));
-            }
-            Command::PublishProcessingArtifact(artifact, reply) => {
-                let result = processing_export::publish_processing_artifact(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    artifact,
-                );
-                let _ = reply.send(result);
-            }
-            Command::SubmitProcessingExport(mutation, now, reply) => {
-                let result = processing_export::submit_processing_export(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    mutation,
-                    now,
-                );
-                let _ = reply.send(result);
-            }
-            Command::SettleProcessingExport {
-                artifact,
-                request_id,
-                payload_digest,
-                now,
-                reply,
-            } => {
-                let result = processing_export::settle_processing_export(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    artifact,
-                    &request_id,
-                    &payload_digest,
-                    now,
-                );
-                let _ = reply.send(result);
-            }
-            Command::ReadProcessingExportWork { request_id, reply } => {
-                let _ = reply.send(processing_export::read_processing_export_work(
-                    &connection,
-                    &request_id,
-                ));
-            }
-            Command::BeginProcessingExportAttempt {
-                request_id,
-                now,
-                reply,
-            } => {
-                let result = processing_export::begin_processing_export_attempt(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &request_id,
-                    now,
-                );
-                let _ = reply.send(result);
-            }
-            Command::FailProcessingExport {
-                request_id,
-                reason_code,
-                now,
-                reply,
-            } => {
-                let result = processing_export::fail_processing_export(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &request_id,
-                    &reason_code,
-                    now,
-                );
-                let _ = reply.send(result);
-            }
-            Command::CancelProcessingExport {
-                request_id,
-                now,
-                reply,
-            } => {
-                let result = processing_export::cancel_processing_export(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &request_id,
-                    now,
-                );
-                let _ = reply.send(result);
-            }
-            Command::UnfinishedProcessingExports(reply) => {
-                let _ = reply.send(processing_export::unfinished_processing_exports(
-                    &connection,
-                ));
-            }
-            Command::SweepProcessingExportExpiry { now, reply } => {
-                let result = processing_export::sweep_processing_export_expiry(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    now,
-                );
-                let _ = reply.send(result);
-            }
-            Command::AcquireProcessingArtifactLease {
-                artifact_id,
-                now,
-                reply,
-            } => {
-                let result = processing_export::acquire_processing_artifact_lease(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &artifact_id,
-                    now,
-                );
-                let _ = reply.send(result);
-            }
-            Command::RenewProcessingArtifactLease {
-                lease_id,
-                now,
-                reply,
-            } => {
-                let result = processing_export::renew_processing_artifact_lease(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &lease_id,
-                    now,
-                );
-                let _ = reply.send(result);
-            }
-            Command::ReleaseProcessingArtifactLease { lease_id, reply } => {
-                let result = processing_export::release_processing_artifact_lease(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &lease_id,
-                );
-                let _ = reply.send(result);
             }
             Command::ReadPhotos {
                 photo_ids,

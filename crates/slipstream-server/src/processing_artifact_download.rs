@@ -20,23 +20,19 @@ pub(crate) async fn get_processing_artifact_bytes(
     if let Err(response) = require_published(&state.application) {
         return *response;
     }
-    if slipstream_core::ProcessingArtifactId::new(&artifact_id).is_err() {
+    if slipstream_core::ProcessingArtifactId::new(&artifact_id).is_err()
+        || !artifact_id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
+        || artifact_id == "."
+        || artifact_id == ".."
+    {
         return error(
             StatusCode::NOT_FOUND,
             "unknown_artifact",
             "The Processing Artifact is unknown",
         );
     }
-    let exports = match state.application.exports.as_ref() {
-        Some(exports) => exports,
-        None => {
-            return error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "processing_unavailable",
-                "Processing is not configured for this deployment",
-            );
-        }
-    };
     let library = &state.application.library;
     // The closed per-retention refusals come before any lease is taken.
     let lease = match library
@@ -81,9 +77,9 @@ pub(crate) async fn get_processing_artifact_bytes(
         .format
         .strip_prefix("image/")
         .unwrap_or(&artifact.output_contract.format);
-    let (content_type, extension) = match output_format {
-        "tiff" => ("image/tiff", "tiff"),
-        "jpeg" => ("image/jpeg", "jpg"),
+    let content_type = match output_format {
+        "tiff" => "image/tiff",
+        "jpeg" => "image/jpeg",
         _ => {
             release_lease.await;
             return error(
@@ -93,14 +89,25 @@ pub(crate) async fn get_processing_artifact_bytes(
             );
         }
     };
-    let Some(path) = exports.artifact_path_for_module(&artifact_id, artifact.module.as_str())
-    else {
-        release_lease.await;
-        return error(
-            StatusCode::NOT_FOUND,
-            "unknown_artifact",
-            "The Processing Artifact identity is invalid",
-        );
+    let extension = if output_format == "tiff" {
+        "tiff"
+    } else {
+        "jpg"
+    };
+    let path = state
+        .application
+        .export_artifacts_directory
+        .join(format!("{artifact_id}.{extension}"));
+    let retention = match library.processing_artifact_retention(&artifact_id).await {
+        Ok(Some(retention)) => retention,
+        _ => {
+            release_lease.await;
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "storage",
+                "The artifact retention evidence could not be read",
+            );
+        }
     };
     let file = match tokio::fs::File::open(&path).await {
         Ok(file) => file,
@@ -122,7 +129,13 @@ pub(crate) async fn get_processing_artifact_bytes(
     let renewer = {
         let library = Arc::clone(library);
         let lease_id = lease_id.clone();
-        let interval = exports.lease_renewal_interval();
+        let interval = state
+            .application
+            .exports
+            .as_ref()
+            .map_or(std::time::Duration::from_secs(30), |exports| {
+                exports.lease_renewal_interval()
+            });
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -182,6 +195,21 @@ pub(crate) async fn get_processing_artifact_bytes(
         .header("slipstream-artifact-photo-id", &artifact.photo_id)
         .header("slipstream-artifact-step-id", artifact.step_id.as_str())
         .header("slipstream-artifact-module", artifact.module.as_str())
+        .header("slipstream-artifact-filename", artifact.filename())
+        .header(
+            "slipstream-artifact-published-at",
+            artifact_timestamp(retention.published_at_unix_seconds),
+        )
+        .header(
+            "slipstream-artifact-expires-at",
+            artifact_timestamp(retention.expires_at_unix_seconds),
+        )
+        .header("slipstream-artifact-orientation", "top-left")
+        .header("slipstream-artifact-icc-embedded", "true")
+        .header(
+            "slipstream-artifact-sample-format",
+            &artifact.output_contract.precision,
+        )
         .header(
             "slipstream-artifact-adapter-schema-version",
             &artifact.adapter_schema_version,
@@ -202,7 +230,7 @@ pub(crate) async fn get_processing_artifact_bytes(
         .header("slipstream-artifact-sha256", &artifact.sha256)
         .header(
             header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{artifact_id}.{extension}\""),
+            format!("attachment; filename=\"{}\"", artifact.filename()),
         );
     builder
         .body(Body::from_stream(ArtifactFileStream(

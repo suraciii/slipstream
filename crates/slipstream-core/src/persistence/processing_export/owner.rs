@@ -1,8 +1,87 @@
 use super::*;
+use crate::persistence::owner::{Command as OwnerCommand, processing::Command};
 /// The owner-facing request surface of the composable Export records: one
 /// receiver per command so the central dispatch in `owner.rs` stays the
 /// single serialized writer.
 impl crate::persistence::owner::Persistence {
+    pub(crate) fn replay_processing_export_retry_receiver(
+        &self,
+        photo_id: &str,
+        previous_request_id: &str,
+        request_id: &str,
+    ) -> Result<
+        oneshot::Receiver<Result<Option<ProcessingExportSubmitOutcome>, PersistenceError>>,
+        PersistenceError,
+    > {
+        let (send, receive) = oneshot::channel();
+        self.submit(OwnerCommand::Processing(
+            Command::ReplayProcessingExportRetry {
+                photo_id: photo_id.to_owned(),
+                previous_request_id: previous_request_id.to_owned(),
+                request_id: request_id.to_owned(),
+                reply: send,
+            },
+        ))?;
+        Ok(receive)
+    }
+    pub(crate) fn read_processing_artifact_retention_receiver(
+        &self,
+        artifact_id: &str,
+    ) -> Result<
+        oneshot::Receiver<
+            Result<Option<crate::processing::ProcessingArtifactRetention>, PersistenceError>,
+        >,
+        PersistenceError,
+    > {
+        let (send, receive) = oneshot::channel();
+        self.submit(OwnerCommand::Processing(
+            Command::ReadProcessingArtifactRetention(artifact_id.to_owned(), send),
+        ))?;
+        Ok(receive)
+    }
+    pub(crate) fn list_processing_exports_receiver(
+        &self,
+        photo_id: &str,
+        now: u64,
+    ) -> Result<oneshot::Receiver<Result<ProcessingExportList, PersistenceError>>, PersistenceError>
+    {
+        let (send, receive) = oneshot::channel();
+        self.submit(OwnerCommand::Processing(Command::ListProcessingExports(
+            photo_id.to_owned(),
+            now,
+            send,
+        )))?;
+        Ok(receive)
+    }
+
+    pub(crate) fn replay_processing_export_receiver(
+        &self,
+        mutation: ReplayProcessingExport,
+    ) -> Result<
+        oneshot::Receiver<Result<Option<ProcessingExportSubmitOutcome>, PersistenceError>>,
+        PersistenceError,
+    > {
+        let (send, receive) = oneshot::channel();
+        self.submit(OwnerCommand::Processing(Command::ReplayProcessingExport(
+            mutation, send,
+        )))?;
+        Ok(receive)
+    }
+
+    pub(crate) fn retry_processing_export_receiver(
+        &self,
+        mutation: RetryProcessingExport,
+        now: u64,
+    ) -> Result<
+        oneshot::Receiver<Result<ProcessingExportSubmitOutcome, PersistenceError>>,
+        PersistenceError,
+    > {
+        let (send, receive) = oneshot::channel();
+        self.submit(OwnerCommand::Processing(Command::RetryProcessingExport(
+            mutation, now, send,
+        )))?;
+        Ok(receive)
+    }
     pub(crate) fn read_processing_artifact_receiver(
         &self,
         artifact_id: &str,
@@ -11,10 +90,10 @@ impl crate::persistence::owner::Persistence {
         PersistenceError,
     > {
         let (send, receive) = oneshot::channel();
-        self.submit(Command::ReadProcessingArtifact {
+        self.submit(OwnerCommand::Processing(Command::ReadProcessingArtifact {
             artifact_id: artifact_id.to_owned(),
             reply: send,
-        })?;
+        }))?;
         Ok(receive)
     }
 
@@ -26,7 +105,9 @@ impl crate::persistence::owner::Persistence {
         PersistenceError,
     > {
         let (send, receive) = oneshot::channel();
-        self.submit(Command::PublishProcessingArtifact(artifact, send))?;
+        self.submit(OwnerCommand::Processing(
+            Command::PublishProcessingArtifact(Box::new(artifact), send),
+        ))?;
         Ok(receive)
     }
 
@@ -39,7 +120,9 @@ impl crate::persistence::owner::Persistence {
         PersistenceError,
     > {
         let (send, receive) = oneshot::channel();
-        self.submit(Command::SubmitProcessingExport(mutation, now, send))?;
+        self.submit(OwnerCommand::Processing(Command::SubmitProcessingExport(
+            mutation, now, send,
+        )))?;
         Ok(receive)
     }
 
@@ -54,13 +137,13 @@ impl crate::persistence::owner::Persistence {
         PersistenceError,
     > {
         let (send, receive) = oneshot::channel();
-        self.submit(Command::SettleProcessingExport {
-            artifact,
+        self.submit(OwnerCommand::Processing(Command::SettleProcessingExport {
+            artifact: Box::new(artifact),
             request_id: request_id.to_owned(),
             payload_digest: payload_digest.to_owned(),
             now,
             reply: send,
-        })?;
+        }))?;
         Ok(receive)
     }
 
@@ -72,10 +155,12 @@ impl crate::persistence::owner::Persistence {
         PersistenceError,
     > {
         let (send, receive) = oneshot::channel();
-        self.submit(Command::ReadProcessingExportWork {
-            request_id: request_id.to_owned(),
-            reply: send,
-        })?;
+        self.submit(OwnerCommand::Processing(
+            Command::ReadProcessingExportWork {
+                request_id: request_id.to_owned(),
+                reply: send,
+            },
+        ))?;
         Ok(receive)
     }
 
@@ -88,11 +173,13 @@ impl crate::persistence::owner::Persistence {
         PersistenceError,
     > {
         let (send, receive) = oneshot::channel();
-        self.submit(Command::BeginProcessingExportAttempt {
-            request_id: request_id.to_owned(),
-            now,
-            reply: send,
-        })?;
+        self.submit(OwnerCommand::Processing(
+            Command::BeginProcessingExportAttempt {
+                request_id: request_id.to_owned(),
+                now,
+                reply: send,
+            },
+        ))?;
         Ok(receive)
     }
 
@@ -106,12 +193,12 @@ impl crate::persistence::owner::Persistence {
         PersistenceError,
     > {
         let (send, receive) = oneshot::channel();
-        self.submit(Command::FailProcessingExport {
+        self.submit(OwnerCommand::Processing(Command::FailProcessingExport {
             request_id: request_id.to_owned(),
             reason_code: reason_code.to_owned(),
             now,
             reply: send,
-        })?;
+        }))?;
         Ok(receive)
     }
 
@@ -124,11 +211,11 @@ impl crate::persistence::owner::Persistence {
         PersistenceError,
     > {
         let (send, receive) = oneshot::channel();
-        self.submit(Command::CancelProcessingExport {
+        self.submit(OwnerCommand::Processing(Command::CancelProcessingExport {
             request_id: request_id.to_owned(),
             now,
             reply: send,
-        })?;
+        }))?;
         Ok(receive)
     }
 
@@ -139,7 +226,9 @@ impl crate::persistence::owner::Persistence {
         PersistenceError,
     > {
         let (send, receive) = oneshot::channel();
-        self.submit(Command::UnfinishedProcessingExports(send))?;
+        self.submit(OwnerCommand::Processing(
+            Command::UnfinishedProcessingExports(send),
+        ))?;
         Ok(receive)
     }
 
@@ -148,7 +237,9 @@ impl crate::persistence::owner::Persistence {
         now: u64,
     ) -> Result<oneshot::Receiver<Result<Vec<String>, PersistenceError>>, PersistenceError> {
         let (send, receive) = oneshot::channel();
-        self.submit(Command::SweepProcessingExportExpiry { now, reply: send })?;
+        self.submit(OwnerCommand::Processing(
+            Command::SweepProcessingExportExpiry { now, reply: send },
+        ))?;
         Ok(receive)
     }
 
@@ -161,11 +252,13 @@ impl crate::persistence::owner::Persistence {
         PersistenceError,
     > {
         let (send, receive) = oneshot::channel();
-        self.submit(Command::AcquireProcessingArtifactLease {
-            artifact_id: artifact_id.to_owned(),
-            now,
-            reply: send,
-        })?;
+        self.submit(OwnerCommand::Processing(
+            Command::AcquireProcessingArtifactLease {
+                artifact_id: artifact_id.to_owned(),
+                now,
+                reply: send,
+            },
+        ))?;
         Ok(receive)
     }
 
@@ -175,11 +268,13 @@ impl crate::persistence::owner::Persistence {
         now: u64,
     ) -> Result<oneshot::Receiver<Result<bool, PersistenceError>>, PersistenceError> {
         let (send, receive) = oneshot::channel();
-        self.submit(Command::RenewProcessingArtifactLease {
-            lease_id: lease_id.to_owned(),
-            now,
-            reply: send,
-        })?;
+        self.submit(OwnerCommand::Processing(
+            Command::RenewProcessingArtifactLease {
+                lease_id: lease_id.to_owned(),
+                now,
+                reply: send,
+            },
+        ))?;
         Ok(receive)
     }
 
@@ -188,10 +283,12 @@ impl crate::persistence::owner::Persistence {
         lease_id: &str,
     ) -> Result<oneshot::Receiver<Result<bool, PersistenceError>>, PersistenceError> {
         let (send, receive) = oneshot::channel();
-        self.submit(Command::ReleaseProcessingArtifactLease {
-            lease_id: lease_id.to_owned(),
-            reply: send,
-        })?;
+        self.submit(OwnerCommand::Processing(
+            Command::ReleaseProcessingArtifactLease {
+                lease_id: lease_id.to_owned(),
+                reply: send,
+            },
+        ))?;
         Ok(receive)
     }
 }

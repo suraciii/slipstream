@@ -31,6 +31,8 @@ pub enum ProcessingRecipeCommand {
     /// Guarded save of the complete composable recipe with explicit
     /// revisions.
     Save(ProcessingRecipeWriteArgs),
+    /// Rebind retained intent to the newly observed Original revision.
+    Rebind(ProcessingRecipeWriteArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -54,6 +56,9 @@ pub(crate) async fn prepare_processing(
         ProcessingRecipeCommand::Save(args) => Ok(Some(parse_processing_save(
             read_input_bytes(&args.input).await?,
         )?)),
+        ProcessingRecipeCommand::Rebind(args) => Ok(Some(parse_processing_rebind(
+            read_input_bytes(&args.input).await?,
+        )?)),
     }
 }
 
@@ -71,6 +76,27 @@ pub(super) struct SaveProcessingRecipeInput {
     #[serde(deserialize_with = "required_nullable_string")]
     pub(super) current_step_id: Option<String>,
     pub(super) steps: Vec<ProcessingStepWire>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RebindProcessingRecipeInput {
+    request_id: String,
+    expected_recipe_revision: String,
+    new_source_revision: String,
+}
+
+pub(super) fn parse_processing_rebind(bytes: Vec<u8>) -> Result<Value, CommandFailure> {
+    let input: RebindProcessingRecipeInput = serde_json::from_slice(&bytes).map_err(|_| {
+        CommandFailure::invalid("input", "The input must contain exactly requestId, expectedRecipeRevision, and newSourceRevision.")
+    })?;
+    validate_request_identity(&input.request_id)?;
+    validate_nonempty_revision(
+        "expectedRecipeRevision",
+        Some(&input.expected_recipe_revision),
+    )?;
+    validate_source_revision("newSourceRevision", &input.new_source_revision)?;
+    serde_json::to_value(input).map_err(|_| unusable_input())
 }
 
 /// One Processing Step record: an opaque step identity unique within the
@@ -153,10 +179,7 @@ pub(super) fn parse_processing_save(bytes: Vec<u8>) -> Result<Value, CommandFail
         "expectedRecipeRevision",
         input.expected_recipe_revision.as_deref(),
     )?;
-    validate_nonempty_revision(
-        "expectedSourceRevision",
-        Some(&input.expected_source_revision),
-    )?;
+    validate_source_revision("expectedSourceRevision", &input.expected_source_revision)?;
     validate_nonempty_revision("currentStepId", input.current_step_id.as_deref())?;
     if input.steps.len() > MAXIMUM_RECIPE_STEPS {
         return Err(CommandFailure::invalid(
@@ -180,12 +203,7 @@ pub(super) fn parse_processing_save(bytes: Vec<u8>) -> Result<Value, CommandFail
                 source_revision,
             } => {
                 validate_bounded_argument("photoId", photo_id, MAXIMUM_PHOTO_ID_BYTES)?;
-                if !bounded_revision(source_revision) {
-                    return Err(CommandFailure::invalid(
-                        "sourceRevision",
-                        "The Original source revision must be 1 through 128 bytes.",
-                    ));
-                }
+                validate_source_revision("sourceRevision", source_revision)?;
             }
             ProcessingInputWire::Artifact {
                 artifact_id,
@@ -263,11 +281,13 @@ pub(super) fn validate_bounded_argument(
     Ok(())
 }
 
-/// One bounded opaque revision: nonempty and at most 128 bytes. Source
-/// revisions may carry the capture identity's NUL separators, so they are
-/// bounded without being treated as presentation names.
+/// One bounded opaque recipe revision.
 pub(super) fn bounded_revision(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAXIMUM_REVISION_BYTES
+}
+
+pub(super) fn bounded_source_revision(value: &str) -> bool {
+    !value.is_empty() && value.len() <= crate::MAXIMUM_SOURCE_REVISION_BYTES
 }
 
 /// The nesting depth of one module-owned parameter tree, measured
@@ -306,7 +326,11 @@ pub(crate) async fn execute_processing(
         ProcessingRecipeCommand::Get { photo_id } => processing_recipe_get(client, photo_id).await,
         ProcessingRecipeCommand::Save(args) => {
             let body = prepared.ok_or_else(unusable_input)?;
-            processing_recipe_write(client, admission, args, body).await
+            processing_recipe_write(client, admission, args, body, false).await
+        }
+        ProcessingRecipeCommand::Rebind(args) => {
+            let body = prepared.ok_or_else(unusable_input)?;
+            processing_recipe_write(client, admission, args, body, true).await
         }
     }
 }
@@ -335,6 +359,7 @@ async fn processing_recipe_write(
     admission: &AdmissionState,
     args: &ProcessingRecipeWriteArgs,
     body: Value,
+    rebind: bool,
 ) -> Result<Value, CommandFailure> {
     let prepared_field = |key: &str| {
         body.get(key)
@@ -345,11 +370,19 @@ async fn processing_recipe_write(
     let Some(request_id) = prepared_field("requestId") else {
         return Err(unusable_input());
     };
-    let Some(submitted_source) = prepared_field("expectedSourceRevision") else {
+    let Some(submitted_source) = prepared_field(if rebind {
+        "newSourceRevision"
+    } else {
+        "expectedSourceRevision"
+    }) else {
         return Err(unusable_input());
     };
     let identity = MutationIdentity {
-        operation: PROCESSING_SAVE_OPERATION,
+        operation: if rebind {
+            PROCESSING_REBIND_OPERATION
+        } else {
+            PROCESSING_SAVE_OPERATION
+        },
         photo_ids: vec![args.photo_id.clone()],
         album_id: None,
         album_name: None,
@@ -360,7 +393,17 @@ async fn processing_recipe_write(
             Method::POST,
             &identity,
             admission,
-            client.endpoint(&["api", "photos", &args.photo_id, "processing-recipe"]),
+            if rebind {
+                client.endpoint(&[
+                    "api",
+                    "photos",
+                    &args.photo_id,
+                    "processing-recipe",
+                    "rebind",
+                ])
+            } else {
+                client.endpoint(&["api", "photos", &args.photo_id, "processing-recipe"])
+            },
             Some(body),
             &[StatusCode::OK, StatusCode::CREATED],
         )
@@ -467,8 +510,8 @@ pub(super) fn processing_recipe_valid(recipe: &ProcessingRecipeWire, photo_id: &
             && value == value.trim()
     };
     recipe.photo_id == photo_id
-        && bounded_name(&recipe.revision, MAXIMUM_REVISION_BYTES)
-        && bounded_revision(&recipe.source_revision)
+        && bounded_revision(&recipe.revision)
+        && bounded_source_revision(&recipe.source_revision)
         && recipe.steps.len() <= MAXIMUM_RECIPE_STEPS
         && recipe.steps.iter().all(|step| {
             bounded_name(&step.step_id, MAXIMUM_STEP_ID_BYTES)
@@ -480,7 +523,7 @@ pub(super) fn processing_recipe_valid(recipe: &ProcessingRecipeWire, photo_id: &
                         source_revision,
                     } => {
                         bounded_name(photo_id, MAXIMUM_PHOTO_ID_BYTES)
-                            && bounded_revision(source_revision)
+                            && bounded_source_revision(source_revision)
                     }
                     ProcessingInputWire::Artifact {
                         artifact_id,
@@ -518,9 +561,8 @@ pub(super) fn processing_recipe_valid(recipe: &ProcessingRecipeWire, photo_id: &
 /// Validates one composable recipe read against the closed wire contract
 /// and renders the CLI result with the added Photo Destination `webUrl`. An
 /// absent recipe is a successful read with `recipe: null`, not a saved
-/// baseline; a retained recipe stays inside the closed step shapes and is
-/// bound to the revision the read reports. A response outside the contract
-/// is a transport failure, not a claimed state.
+/// baseline; a retained recipe keeps its source binding even when the currently
+/// observed source differs. A response outside the contract is a transport failure.
 pub(super) fn validated_processing_recipe_read(
     read: ProcessingRecipeReadWire,
     photo_id: &str,
@@ -529,12 +571,12 @@ pub(super) fn validated_processing_recipe_read(
     let invalid = || CommandFailure::transport(PROCESSING_GET_OPERATION);
     let recipe_valid = match &read.recipe {
         None => true,
-        Some(recipe) => {
-            processing_recipe_valid(recipe, photo_id)
-                && recipe.source_revision == read.source_revision
-        }
+        Some(recipe) => processing_recipe_valid(recipe, photo_id),
     };
-    if read.photo_id != photo_id || !recipe_valid {
+    if read.photo_id != photo_id
+        || !recipe_valid
+        || (!read.source_revision.is_empty() && !bounded_source_revision(&read.source_revision))
+    {
         return Err(invalid());
     }
     let web_url = web_url(origin, &format!("/?photoId={photo_id}")).map_err(|()| invalid())?;

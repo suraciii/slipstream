@@ -1,5 +1,5 @@
 import type { BrowserFetch } from "../model/access-session.js";
-import { isRecord } from "./editor.js";
+import { isRecord } from "./guards.js";
 
 export type ProcessingModuleAvailability = Readonly<{
   state: "ready" | "unavailable";

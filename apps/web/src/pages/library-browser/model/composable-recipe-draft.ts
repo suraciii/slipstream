@@ -17,7 +17,7 @@ import type {
   ComposableRecipeInput,
 } from "../api/composable-recipe.js";
 import type { ProcessingModuleDescription } from "../api/processing-modules.js";
-import { isRecord } from "../api/editor.js";
+import { isRecord } from "../api/guards.js";
 import {
   processingArtifactInput,
   type ProcessingArtifactRecord,
@@ -70,12 +70,15 @@ export type ComposableModuleChoice = Readonly<{
 /// which the owning module's admission still judges.
 const defaultTreeFromSchema = (schema: unknown): Record<string, unknown> => {
   if (!isRecord(schema) || schema["type"] !== "object") return {};
+  if (isRecord(schema["default"])) return structuredClone(schema["default"]);
   const properties = isRecord(schema["properties"]) ? schema["properties"] : {};
   const tree: Record<string, unknown> = {};
   for (const [name, property] of Object.entries(properties)) {
     if (!isRecord(property)) continue;
     if ("const" in property && property["const"] !== undefined) {
       tree[name] = property["const"];
+    } else if ("default" in property) {
+      tree[name] = structuredClone(property["default"]);
     } else if (property["type"] === "object") {
       tree[name] = defaultTreeFromSchema(property);
     } else if (property["type"] === "array") {
@@ -113,8 +116,15 @@ export const draftFromRecipe = (
 ): ComposableRecipeDraft => ({
   photoId,
   baseRevision: recipe?.revision ?? null,
-  sourceRevision,
-  steps: recipe ? [...recipe.steps] : [],
+  sourceRevision: recipe?.sourceRevision ?? sourceRevision,
+  steps: recipe
+    ? recipe.steps.map(({ stepId, module, input, parameters }) => ({
+        stepId,
+        module,
+        input,
+        parameters,
+      }))
+    : [],
   currentStepId: recipe?.currentStepId ?? null,
   retiredStepIds: [],
 });
@@ -283,41 +293,42 @@ export type ComposableSaveRequest =
 export const composableSaveRequest = (
   draft: ComposableRecipeDraft,
   requestId: string,
-  modules: ReadonlyArray<ComposableModuleChoice>,
 ): ComposableSaveRequest => {
   const refused = (note: string): ComposableSaveRequest => ({
     kind: "refused",
     note,
   });
-  if (!draft.sourceRevision)
+  if (!draft.sourceRevision || draft.sourceRevision.length > 16384)
     return refused(
       "The current source revision is not available, so the Processing Recipe cannot be saved. Reload to check again.",
-    );
-  if (modules.length === 0)
-    return refused(
-      "Module discovery is not available right now, so the Processing Recipe cannot be saved. Reload to check again.",
     );
   if (draft.steps.length > MAXIMUM_RECIPE_STEPS)
     return refused(
       `A Processing Recipe carries at most ${MAXIMUM_RECIPE_STEPS} steps.`,
     );
-  const byName = new Map(modules.map((module) => [module.name, module]));
+  if (
+    !requestId ||
+    requestId.length > 128 ||
+    (draft.baseRevision !== null &&
+      (!draft.baseRevision || draft.baseRevision.length > 128))
+  )
+    return refused("The save identity or edit revision is invalid.");
   const seen = new Set<string>();
   for (const step of draft.steps) {
+    if (
+      !step.stepId ||
+      step.stepId.length > 128 ||
+      !step.module ||
+      !step.parameters.schemaVersion
+    )
+      return refused(
+        "Each step needs a bounded identity, module, and parameter version.",
+      );
     if (seen.has(step.stepId))
       return refused(
         `The step identity ${step.stepId} is used twice; each step needs its own identity.`,
       );
     seen.add(step.stepId);
-    const module = byName.get(step.module);
-    if (!module)
-      return refused(
-        `The step ${step.stepId} names the module ${step.module}, which this deployment does not know.`,
-      );
-    if (!module.parameterVersions.includes(step.parameters.schemaVersion))
-      return refused(
-        `The module ${step.module} does not admit the parameter version ${step.parameters.schemaVersion}. Choose a version discovery reports.`,
-      );
     if (!isRecord(step.parameters.tree))
       return refused(
         `The parameters of the step ${step.stepId} are not one JSON object.`,

@@ -31,7 +31,10 @@ when their module and parameters match.
 The browser or programmatic caller selects one record as the current step.
 Updating a step creates a new guarded recipe snapshot and Preview identity;
 it does not mutate an accepted Export or a published artifact. A caller may
-save zero steps, one step, or any finite set of individually admitted steps.
+save zero steps, one step, or a bounded collection of structurally valid steps.
+Saving intent is separate from execution qualification: an unavailable module or
+unqualified setting stays readable and saveable under the
+[retained-intent rules](photo-development.md#recipe-writes-and-autosave).
 There is no predecessor, planner, or hidden ordering field: an artifact input
 is the only composition edge. Slipstream does not accept or execute a workflow
 graph.
@@ -113,9 +116,10 @@ standalone SpektraFilm.
 
 The fixed standalone Film adapter publishes every complete recipe group as a
 required property with its pinned `const` value in `parameterSchema`. Callers
-construct the executable default tree from those values. Saving or executing a
-tree with a missing group or changed recipe value is refused before engine work;
-bundle verification also compares the runtime-emitted defaults with that same
+construct the executable default tree from those values. Missing required groups
+are structurally invalid; execution with changed recipe values is refused before
+engine work. Structurally valid unqualified values remain saved intent. Bundle
+verification also compares the runtime-emitted defaults with that same
 pinned tree. Film input admission uses the concrete linear ProPhoto float32 TIFF
 contract and the runtime's geometry bounds, including portrait handoffs, rather
 than requiring the dimensions of a discovery example. Its advertised 900,000 ms
@@ -134,6 +138,13 @@ An Edit Preview executes only the selected current step against its captured
 input and parameters. It must not select another module to prepare input or
 finish output. A missing compatible input is a refusal, not permission to run
 an upstream step. Camera Preview cannot substitute for the result.
+
+Comparison uses the selected module's published default parameter tree against
+the same captured input, with the same geometry, bundle, and display conversion.
+The baseline operand is a separate Preview intent, so requesting it must not
+supersede the current-settings operand. Each operand identifies its actual
+parameter digest. A missing or unqualified default makes comparison unavailable;
+it must not change the saved tree or replace an ordinary Preview's parameters.
 
 The Preview has an explicit finite geometry and resource bound. The adapter
 must compute the selected module's result at that admitted geometry and may

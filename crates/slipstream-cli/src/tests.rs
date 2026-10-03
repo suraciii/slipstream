@@ -1054,274 +1054,6 @@ fn decision_batches_partition_from_validated_results_only() {
 }
 
 #[test]
-fn photo_export_commands_parse_and_validate() {
-    let submit = |arguments: &[&str]| {
-        let mut invocation = vec!["slipstream", "photos", "export", "submit", "p1"];
-        invocation.extend(arguments);
-        Cli::try_parse_from(invocation)
-    };
-    assert!(submit(&["--target", "development-tiff", "--request-id", "r1"]).is_ok());
-    assert!(submit(&["--target", "film-jpeg", "--request-id", "r1"]).is_ok());
-    assert!(submit(&["--target", "film-jpeg"]).is_err());
-    assert!(submit(&["--request-id", "r1"]).is_err());
-    assert!(submit(&["--target", "gallery-print", "--request-id", "r1"]).is_err());
-    // Only the two closed targets exist; abbreviations stay off.
-    assert!(submit(&["-t", "film-jpeg", "--request-id", "r1"]).is_err());
-
-    let export = |arguments: &[&str]| {
-        let mut invocation = vec!["slipstream", "photos", "export"];
-        invocation.extend(arguments);
-        Cli::try_parse_from(invocation)
-    };
-    assert!(export(&["status", "e1"]).is_ok());
-    assert!(export(&["list", "p1"]).is_ok());
-    assert!(export(&["download", "e1", "--file", "out.tiff"]).is_ok());
-    assert!(export(&["download", "e1"]).is_err());
-    assert!(export(&["status"]).is_err());
-
-    // The submit request identity shares the service's closed rule, and
-    // it is checked before any network access.
-    let valid = |request_id: &str| {
-        let parsed =
-            submit(&["--target", "film-jpeg", "--request-id", request_id]).expect("parses");
-        validate_command(&parsed.command)
-    };
-    assert!(valid("r1").is_ok());
-    assert!(valid("A.9_-repeat").is_ok());
-    assert!(valid("has space").is_err());
-    assert!(valid("slash/none").is_err());
-    assert!(valid("unicode-é").is_err());
-    let too_long = "a".repeat(129);
-    assert!(valid(&too_long).is_err());
-    let exactly_128 = "a".repeat(128);
-    assert!(valid(&exactly_128).is_ok());
-}
-
-#[test]
-fn export_submit_response_must_echo_the_captured_revisions() {
-    let identity = MutationIdentity {
-        operation: Operation::PhotosExportSubmit,
-        photo_ids: vec!["p1".to_owned()],
-        album_id: None,
-        album_name: None,
-        mappings: Vec::new(),
-    };
-    let confirmed = |result: ExportSubmitWire| {
-        confirmed_export_submit(&identity, "film-jpeg", "recipe-2", "source-7", result)
-    };
-    let submit = |target: &str, recipe: &str, source: &str| ExportSubmitWire {
-        export_id: "e1".to_owned(),
-        state: "queued".to_owned(),
-        target: target.to_owned(),
-        recipe_version: recipe.to_owned(),
-        source_revision: source.to_owned(),
-        receipt_expires_at: None,
-        artifact_expires_at: None,
-    };
-    let confirmed_value =
-        confirmed(submit("film-jpeg", "recipe-2", "source-7")).expect("echoes submission");
-    assert_eq!(confirmed_value["exportId"], "e1");
-    assert_eq!(confirmed_value["target"], "film-jpeg");
-    assert_eq!(confirmed_value["receiptExpiresAt"], Value::Null);
-    for label in [
-        ("target", submit("development-tiff", "recipe-2", "source-7")),
-        ("recipe", submit("film-jpeg", "recipe-1", "source-7")),
-        ("source", submit("film-jpeg", "recipe-2", "source-8")),
-    ] {
-        let failure = confirmed(label.1).unwrap_err();
-        assert_eq!(failure.exit_code, 7, "for {}", label.0);
-        assert_eq!(failure.payload.code, "outcome_unknown", "for {}", label.0);
-    }
-    let unknown_identity = submit("film-jpeg", "recipe-2", "source-7");
-    let unknown = confirmed(ExportSubmitWire {
-        export_id: "space id".to_owned(),
-        ..unknown_identity
-    })
-    .unwrap_err();
-    assert_eq!(unknown.exit_code, 7);
-    let stale_time = confirmed(ExportSubmitWire {
-        receipt_expires_at: Some("yesterday".to_owned()),
-        ..submit("film-jpeg", "recipe-2", "source-7")
-    })
-    .unwrap_err();
-    assert_eq!(stale_time.exit_code, 7);
-}
-
-#[test]
-fn export_inspection_is_validated_against_the_closed_state_machine() {
-    let artifact = ExportArtifactWire {
-        export_id: "e1".to_owned(),
-        target: "development-tiff".to_owned(),
-        stage: "develop".to_owned(),
-        content_type: "image/tiff".to_owned(),
-        filename: "e1.tiff".to_owned(),
-        orientation: "top-left".to_owned(),
-        sample_format: "float32".to_owned(),
-        color_space: "RGB".to_owned(),
-        icc_embedded: false,
-        width: 5542,
-        height: 3696,
-        profile_identity: "profile".to_owned(),
-        byte_length: 4096,
-        sha256: "a".repeat(64),
-        expires_at: "2026-01-01T12:00:00Z".to_owned(),
-    };
-    let inspect = |state: &str, terminal: Option<&str>, artifact: Option<ExportArtifactWire>| {
-        ExportInspectWire {
-            export_id: "e1".to_owned(),
-            photo_id: "p1".to_owned(),
-            state: state.to_owned(),
-            target: "development-tiff".to_owned(),
-            recipe_version: "recipe-2".to_owned(),
-            source_revision: "source-7".to_owned(),
-            created_at: "2026-01-01T12:00:00Z".to_owned(),
-            settled_at: terminal.map(|_| "2026-01-01T12:00:01Z".to_owned()),
-            bundle_id: "bundle".to_owned(),
-            terminal_outcome: terminal.map(str::to_owned),
-            failure_reason: None,
-            receipt_expires_at: None,
-            artifact,
-        }
-    };
-    let value = validated_export_inspect(
-        inspect("running", None, None),
-        "e1",
-        Operation::PhotosExportStatus,
-    )
-    .expect("running inspection is valid");
-    assert_eq!(value.state, "running");
-    validated_export_inspect(
-        inspect("succeeded", Some("succeeded"), Some(artifact.clone())),
-        "e1",
-        Operation::PhotosExportStatus,
-    )
-    .expect("succeeded inspection is valid");
-
-    let transport = |data: ExportInspectWire| {
-        validated_export_inspect(data, "e1", Operation::PhotosExportStatus).unwrap_err()
-    };
-    for label in [
-        ("unknown state", inspect("expired", None, None)),
-        ("wrong terminal", inspect("failed", Some("succeeded"), None)),
-        (
-            "terminal on active",
-            inspect("queued", Some("queued"), None),
-        ),
-        ("unknown target", {
-            let mut data = inspect("succeeded", Some("succeeded"), None);
-            data.target = "gallery-print".to_owned();
-            data
-        }),
-        ("invalid creation time", {
-            let mut data = inspect("running", None, None);
-            data.created_at = "yesterday".to_owned();
-            data
-        }),
-        ("invalid settlement time", {
-            let mut data = inspect("failed", Some("failed"), None);
-            data.settled_at = Some("tomorrow".to_owned());
-            data
-        }),
-    ] {
-        let failure = transport(label.1);
-        assert_eq!(failure.payload.code, "transport_failed", "for {}", label.0);
-    }
-    // The artifact object must name its own Export with the closed
-    // per-target stage and media type.
-    for label in [
-        ("wrong export", {
-            let mut artifact = artifact.clone();
-            artifact.export_id = "other".to_owned();
-            inspect("succeeded", Some("succeeded"), Some(artifact))
-        }),
-        ("jpeg stage on tiff target", {
-            let mut artifact = artifact.clone();
-            artifact.stage = "film".to_owned();
-            inspect("succeeded", Some("succeeded"), Some(artifact))
-        }),
-        ("wrong media type", {
-            let mut artifact = artifact.clone();
-            artifact.content_type = "image/jpeg".to_owned();
-            inspect("succeeded", Some("succeeded"), Some(artifact))
-        }),
-        ("short digest", {
-            let mut artifact = artifact.clone();
-            artifact.sha256 = "a".repeat(63);
-            inspect("succeeded", Some("succeeded"), Some(artifact))
-        }),
-        ("missing filename", {
-            let mut artifact = artifact.clone();
-            artifact.filename.clear();
-            inspect("succeeded", Some("succeeded"), Some(artifact))
-        }),
-        ("missing color space", {
-            let mut artifact = artifact.clone();
-            artifact.color_space.clear();
-            inspect("succeeded", Some("succeeded"), Some(artifact))
-        }),
-    ] {
-        let failure = transport(label.1);
-        assert_eq!(failure.payload.code, "transport_failed", "for {}", label.0);
-    }
-}
-
-#[test]
-fn export_list_entries_carry_only_closed_states_and_targets() {
-    let entry = |target: &str| ExportSummaryWire {
-        export_id: "e1".to_owned(),
-        state: "succeeded".to_owned(),
-        target: target.to_owned(),
-        recipe_version: "recipe-2".to_owned(),
-        source_revision: "source-7".to_owned(),
-        created_at: "2026-01-01T12:00:00Z".to_owned(),
-        settled_at: Some("2026-01-01T12:00:01Z".to_owned()),
-    };
-    assert_eq!(
-        export_list_value(
-            ExportListWire {
-                exports: vec![entry("film-jpeg")]
-            },
-            Operation::PhotosExportList
-        )
-        .unwrap()["exports"][0]["target"],
-        "film-jpeg"
-    );
-    assert_eq!(
-        export_list_value(
-            ExportListWire {
-                exports: vec![entry("development-tiff")]
-            },
-            Operation::PhotosExportList
-        )
-        .unwrap()["exports"][0]["target"],
-        "development-tiff"
-    );
-    assert_eq!(
-        export_list_value(
-            ExportListWire {
-                exports: Vec::new()
-            },
-            Operation::PhotosExportList
-        )
-        .unwrap()["exports"]
-            .as_array()
-            .unwrap()
-            .len(),
-        0
-    );
-    for target in ["gallery-print", ""] {
-        let failure = export_list_value(
-            ExportListWire {
-                exports: vec![entry(target)],
-            },
-            Operation::PhotosExportList,
-        )
-        .unwrap_err();
-        assert_eq!(failure.payload.code, "transport_failed", "for {target}");
-    }
-}
-
-#[test]
 fn development_surface_refusals_map_onto_the_closed_exit_codes() {
     let refusal = |code: &str| ErrorPayload {
         code: code.to_owned(),
@@ -1330,7 +1062,7 @@ fn development_surface_refusals_map_onto_the_closed_exit_codes() {
         details: json!({}),
     };
     let mapped = |code: &str| {
-        validated_route_failure(refusal(code), Operation::PhotosExportSubmit, "")
+        validated_route_failure(refusal(code), Operation::PhotosProcessingExport, "")
             .unwrap_or_else(|| panic!("{code} must map to a confirmed failure"))
     };
     assert_eq!(mapped("invalid_settings").exit_code, 2);
@@ -1362,7 +1094,7 @@ fn development_surface_refusals_map_onto_the_closed_exit_codes() {
     assert!(
         validated_route_failure(
             refusal("outcome_unknown"),
-            Operation::PhotosExportSubmit,
+            Operation::PhotosProcessingExport,
             ""
         )
         .is_none()
@@ -2042,15 +1774,20 @@ fn deadline_expiry_keeps_the_admitted_and_transport_mappings_elsewhere() {
     assert_eq!(transport.payload.effect, "none");
     // An admitted mutation keeps its unknown outcome and identity details.
     let admission = AdmissionState::default();
-    admission.admit(MutationIdentity::bare(Operation::PhotosRecipeSave));
+    admission.admit(MutationIdentity::bare(
+        Operation::PhotosProcessingRecipeSave,
+    ));
     let admitted = deadline_failure(
-        Operation::PhotosRecipeSave,
+        Operation::PhotosProcessingRecipeSave,
         &PublicationState::default(),
         &admission,
     );
     assert_eq!(admitted.exit_code, 7);
     assert_eq!(admitted.payload.code, "outcome_unknown");
-    assert_eq!(admitted.payload.details["operation"], "photos-recipe-save");
+    assert_eq!(
+        admitted.payload.details["operation"],
+        "photos-processing-recipe-save"
+    );
 }
 
 #[tokio::test]
@@ -2099,62 +1836,6 @@ async fn a_timed_out_library_check_reports_the_unknown_scan_outcome() {
     );
     std::fs::remove_file(&token).ok();
     drop(listener);
-}
-
-#[test]
-fn source_refusals_carry_the_closed_support_reason() {
-    // A save or rebind refused for the Photo's source state reports the same
-    // closed `supportReason` the recipe read reports, and a preview refusal
-    // names it as `reason`, so the retryable waits stay distinguishable from
-    // the confirmed outcomes in the failure envelope.
-    let refusal = |details: Value| ErrorPayload {
-        code: "resource_unavailable".to_owned(),
-        message: "Current source facts cannot be read, so no guarded write is possible.".to_owned(),
-        effect: "none".to_owned(),
-        details,
-    };
-    for reason in [
-        "original-missing",
-        "original-unreadable",
-        "read-pending",
-        "resource-unavailable",
-    ] {
-        let save = validated_route_failure(
-            refusal(json!({"photoId": "p1", "supportReason": reason})),
-            Operation::PhotosRecipeSave,
-            "",
-        )
-        .unwrap_or_else(|| panic!("{reason} is a confirmed source refusal"));
-        assert_eq!(save.exit_code, 6, "{reason}");
-        assert_eq!(save.payload.details["supportReason"], json!(reason));
-        let preview = validated_route_failure(
-            refusal(json!({"stage": "develop", "reason": reason})),
-            Operation::PhotosEditPreview,
-            "",
-        )
-        .unwrap_or_else(|| panic!("{reason} is a confirmed preview refusal"));
-        assert_eq!(preview.exit_code, 6, "{reason}");
-        assert_eq!(preview.payload.details["reason"], json!(reason));
-    }
-    // A reported `supportReason` outside the closed set is not a confirmed
-    // refusal; an internal preview reason such as `preview-superseded`
-    // stays a valid deployment-condition detail.
-    assert!(
-        validated_route_failure(
-            refusal(json!({"photoId": "p1", "supportReason": "original-rotated"})),
-            Operation::PhotosRecipeSave,
-            ""
-        )
-        .is_none()
-    );
-    assert!(
-        validated_route_failure(
-            refusal(json!({"stage": "develop", "reason": "preview-superseded"})),
-            Operation::PhotosEditPreview,
-            ""
-        )
-        .is_some()
-    );
 }
 
 mod development_proxy;

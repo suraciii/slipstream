@@ -146,52 +146,67 @@ retained-receipt rules are owned by
 
 ## Operator end-to-end acceptance
 
-`acceptance.py` drives a deployed instance through the real HTTP surface of
-the merged wire contract (`design/photo-development.md`, Service Surface):
-capability read, resolution of the Photo for an approved-profile RAW fixture,
-Edit Recipe read, a guarded exposure save and its guarded reversal, the
-`develop` Edit Preview, a submitted `development-tiff` Export through
-terminal settlement, and artifact download with byte-level validation
-(digest, byte length, geometry, content type, the embedded float32 linear
-ProPhoto RGB framing, pinned source-profile identity, and every Deflate
-strip). It hashes the fixture Original and any external XMP sidecar before
-and after the run and fails if bytes, size, mode, or modification time
-changed; the only files it creates are downloaded artifacts inside the
-explicit output directory.
+`acceptance.py` drives a dedicated deployment through the selected-step HTTP
+surface: `GET /api/processing/modules`, approved RAW Photo resolution,
+`GET/POST /api/photos/{id}/processing-recipe`, a guarded +1 EV save and exact
+intent reversal, explicit selected darktable Export via
+`POST /api/photos/{id}/processing-exports` (202), durable status reconciliation,
+and `GET /api/processing-artifacts/{id}` plus `/bytes`. It reopens the saved
+recipe and checks the bounded selected-step PNG from
+`GET /api/photos/{id}/processing-preview/{step_id}`. Every required missing
+route fails acceptance; dependent steps cannot turn that failure into success.
 
-The runner must never target an operator's live library. It refuses to start
-without an explicit acknowledgement flag and is meant for a dedicated
-acceptance deployment started with the ordinary Compose command above:
+The TIFF inspection retains digest, byte length, full geometry, float32 linear
+ProPhoto RGB framing, pinned embedded ICC identity, every inflated Deflate
+strip, and bounded trailing padding checks. Captured Photo, input byte evidence,
+step, module, complete parameters, adapter version and bundle must match across
+the receipt, status, immutable artifact and download headers. Original and
+external XMP bytes, size, mode and modification time must remain unchanged.
+
+Run only with an explicitly approved fixture on a dedicated acceptance instance:
 
 ```sh
 python3 tools/processing/acceptance.py \
   --base-url https://acceptance.example.com \
   --token-file /run/secrets/slipstream-cli-token \
-  --fixture /absolute/private/fixtures/approved-camera.raw \
+  --fixture /absolute/private/fixtures/approved-sony.ARW \
   --output-dir /absolute/private/acceptance-downloads \
   --max-download-bytes 4294967296 \
+  --request-timeout 30 \
+  --settlement-timeout 900 \
+  --preview-timeout 180 \
+  --poll-interval 2 \
   --i-acknowledge-this-is-an-acceptance-instance \
   --expected-bundle-sha256 BUNDLE_SHA256
 ```
 
-`--base-url` must be HTTPS (plain HTTP is accepted only for loopback hosts),
-`--token-file` holds the bearer token and must not be group- or
-other-writable, and `--max-download-bytes` must carry the deployment's
-retained-output allowance (`SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES`) so the
-qualified artifact's declared size is admitted; it is capped at the service's
-hard output maximum (`MAX_OUTPUT_BYTES`,
-`crates/slipstream-processing/src/local_photo.rs`). `--expected-bundle-sha256` is
-the bundle digest printed by the image build and is checked against the
-capability report's `bundleId`. Exit codes: `0` when every step that ran
-passed, `1` when any step failed, and `2` when the run was blocked or the
-invocation was refused.
+The bearer comes only from a bounded regular token file that is not group- or
+other-writable. Redirects are refused. Prefer HTTPS; HTTP prints an explicit
+unencrypted-connection warning. All timeout arguments must be finite, positive
+and at most 3600 seconds. The output directory must be private (no group/other
+permissions), cannot be a symlink or contain the fixture, and downloads create
+exclusive mode-0600 files. `--max-download-bytes` admits the deployment's retained
+output allowance up to the service's 4 GiB single-output maximum. The expected
+bundle is compared with the captured Export bundle, since module discovery does
+not expose bundle identity. Exit codes are 0 for complete success, 1 for failure,
+and 2 for refused invocation or a blocked run.
 
-The runner reports honestly what it could not run. The Film
-(`finished-jpeg`) service stage remains a separate qualification gate and is
-recorded as not covered; a route the deployment does not serve yet makes
-dependent steps skipped with `route-not-deployed` instead of failing. The
-logic is tested without a deployment by `test_acceptance.py`'s in-process
-stub deployment.
+Qualification is finite: the approved fixture, pinned `darktable-adapter-1` /
+`darktable-params-1` identity, discovered exact manual-exposure baseline tree,
+0/+1 EV controls, source-preserving float32 linear ProPhoto TIFF, bounded Preview,
+and admitted deployment resources. It does not qualify arbitrary RAW cameras,
+native controls, stack combinations or future schema versions. Existing selected
+intent outside this qualified tree is refused without substitution. Reversal
+preserves the exact prior intent; processing then explicitly restores +1 EV.
+
+Standalone SpektraFilm is an independent optional qualification and this runner
+reports it not covered. Run a separate Film qualification only when its concrete
+immutable TIFF input, fixed recipe, engine bundle and finite resources have been
+explicitly admitted; darktable success does not widen that claim. Focused local
+HTTP fault fixtures and byte inspection tests establish runner safety, never
+real engine qualification. The prior real RAW/module/Preview/Export/restart/XMP
+evidence remains the baseline; migrating this tooling does not require rerunning
+that whole acceptance.
 
 ## Native reference qualification
 

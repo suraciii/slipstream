@@ -8,7 +8,7 @@
  */
 
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null;
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
 /// An object whose keys are exactly `keys`: an answer that omits, invents, or
 /// duplicates a field is not the shape the contract names.

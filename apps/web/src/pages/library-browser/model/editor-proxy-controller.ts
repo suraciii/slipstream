@@ -6,18 +6,17 @@ import {
 } from "../api/development-proxy.js";
 import { formatByteCount } from "./editor-presentation.js";
 import type { BrowserFetch } from "./access-session.js";
-import type { PhotoEditor } from "./photo-editor.js";
 import type { LibraryBrowserView } from "../ui/library-browser-view.js";
 export function createEditorProxyController(
   fetcher: BrowserFetch,
   dependencies: Readonly<{
-    session: (photoId: string) => PhotoEditor | undefined;
+    sourceRevision: (photoId: string) => string | null | undefined;
     editorOwnsPhoto: (photoId: string) => boolean;
     renderEditor: () => void;
     refreshSource: (photoId: string) => void;
   }>,
 ) {
-  const { session, editorOwnsPhoto, renderEditor, refreshSource } =
+  const { sourceRevision, editorOwnsPhoto, renderEditor, refreshSource } =
     dependencies;
   let editorProxy: DevelopmentProxyStatus = {
     photoId: "",
@@ -52,26 +51,27 @@ export function createEditorProxyController(
     }
   };
   const createProxy = async (photoId: string): Promise<void> => {
-    const editor = session(photoId);
-    const sourceRevision = editor?.facts()?.sourceRevision;
-    if (!editor || !sourceRevision) return;
+    if (!editorOwnsPhoto(photoId)) return;
+    const revision = sourceRevision(photoId);
+    if (!revision) return;
+    const generation = ++editorProxyGeneration;
     editorProxyFailure = "";
     editorProxy = { photoId, state: "building", proxy: null, failure: null };
     renderEditor();
-    const result = await createDevelopmentProxy(
-      fetcher,
-      photoId,
-      sourceRevision,
-    );
-    if (!editorOwnsPhoto(photoId)) return;
+    const result = await createDevelopmentProxy(fetcher, photoId, revision);
+    if (generation !== editorProxyGeneration || !editorOwnsPhoto(photoId))
+      return;
     if (result.kind === "failed") editorProxyFailure = result.message;
     else editorProxy = result.status;
     renderEditor();
     void readProxy(photoId);
   };
   const removeProxy = async (photoId: string): Promise<void> => {
-    const result = await removeDevelopmentProxy(fetcher, photoId);
     if (!editorOwnsPhoto(photoId)) return;
+    const generation = ++editorProxyGeneration;
+    const result = await removeDevelopmentProxy(fetcher, photoId);
+    if (generation !== editorProxyGeneration || !editorOwnsPhoto(photoId))
+      return;
     if (result.kind === "failed") editorProxyFailure = result.message;
     else editorProxy = result.status;
     renderEditor();
@@ -85,6 +85,13 @@ export function createEditorProxyController(
     remove: removeProxy,
     leave: (): void => {
       editorProxyGeneration += 1;
+      editorProxy = {
+        photoId: "",
+        state: "absent",
+        proxy: null,
+        failure: null,
+      };
+      editorProxyFailure = "";
       clearTimeout(editorProxyTimer);
       editorProxyTimer = undefined;
     },
@@ -93,10 +100,7 @@ export function createEditorProxyController(
     ): NonNullable<
       Parameters<LibraryBrowserView["renderEditor"]>[0]["proxy"]
     > => {
-      const editor = session(photoId);
-      if (!editor)
-        throw new Error("Proxy presentation requires an editing session.");
-      const presented = editor.presentation();
+      const revision = sourceRevision(photoId);
       return {
         state: editorProxy.state,
         note:
@@ -120,11 +124,7 @@ export function createEditorProxyController(
               pipelineVersion: editorProxy.proxy.pipelineVersion,
             }
           : null,
-        canCreate:
-          presented.editSourceReadiness === "ready" &&
-          Boolean(editor.facts()?.sourceRevision) &&
-          editorProxy.state !== "building" &&
-          presented.editSourceKind !== "development-proxy",
+        canCreate: Boolean(revision) && editorProxy.state !== "building",
         canRemove: editorProxy.state === "current",
       };
     },

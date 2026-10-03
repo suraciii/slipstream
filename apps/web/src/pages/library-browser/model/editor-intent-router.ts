@@ -15,47 +15,17 @@ export function routeEditorIntent(
     case "editor-refresh":
       editor.refresh(intent.photoId);
       return true;
-    case "editor-exposure":
-      editor.commitExposure(intent.photoId, intent.exposureEv);
-      return true;
-    case "editor-white-balance-mode":
-      editor.commitWhiteBalance(intent.photoId, {
-        kind: "mode",
-        mode: intent.mode,
-      });
-      return true;
-    case "editor-temperature":
-      editor.commitWhiteBalance(intent.photoId, {
-        kind: "temperature",
-        temperatureKelvin: intent.temperatureKelvin,
-      });
-      return true;
-    case "editor-tint":
-      editor.commitWhiteBalance(intent.photoId, {
-        kind: "tint",
-        tintMilli: intent.tintMilli,
-      });
-      return true;
     case "editor-undo":
       editor.stepHistory(intent.photoId, "undo");
       return true;
     case "editor-redo":
       editor.stepHistory(intent.photoId, "redo");
       return true;
-    case "editor-reset":
-      editor.stepHistory(intent.photoId, "reset");
-      return true;
-    case "editor-reset-exposure":
-      editor.stepHistory(intent.photoId, "resetExposure");
-      return true;
-    case "editor-reset-white-balance":
-      editor.stepHistory(intent.photoId, "resetWhiteBalance");
-      return true;
     case "editor-preview":
       void editor.requestPreview(intent.photoId);
       return true;
-    case "editor-stage":
-      editor.applyStage(intent.photoId, intent.stage);
+    case "editor-camera-reference":
+      editor.setCameraReference(intent.photoId, intent.pressed);
       return true;
     case "editor-compare":
       editor.setComparison(intent.photoId, intent.pressed);
@@ -82,7 +52,11 @@ export function routeEditorIntent(
       editor.compose(intent.photoId);
       return true;
     case "editor-composable-add":
-      editor.composableAddStep(intent.photoId, intent.module);
+      editor.composableAddStep(
+        intent.photoId,
+        intent.module,
+        intent.artifactId,
+      );
       return true;
     case "editor-composable-remove":
       editor.composableRemoveStep(intent.photoId, intent.stepId);
@@ -116,25 +90,28 @@ export function routeEditorIntent(
       editor.composableDiscard(intent.photoId);
       return true;
     case "editor-processing-export-check":
-      editor.checkProcessingExport(intent.photoId);
+      editor.checkProcessingExport(intent.photoId, intent.requestId);
       return true;
     case "editor-artifact-download":
       editor.downloadArtifact(intent.photoId, intent.artifactId);
+      return true;
+    case "editor-historical-download":
+      editor.downloadHistorical(intent.photoId, intent.exportId);
       return true;
     case "editor-artifact-use":
       editor.useArtifactInput(intent.photoId, intent.artifactId);
       return true;
     case "editor-export-submit":
-      void editor.submitExport(intent.photoId, intent.target);
+      void editor.submitExport(intent.photoId);
       return true;
     case "editor-export-cancel":
-      void editor.cancelExport(intent.photoId, intent.target);
+      void editor.cancelExport(intent.photoId, intent.requestId);
       return true;
     case "editor-export-retry":
-      void editor.retryExport(intent.photoId, intent.target);
+      void editor.retryExport(intent.photoId, intent.requestId);
       return true;
     case "editor-export-download":
-      void editor.downloadExport(intent.photoId, intent.target);
+      void editor.downloadExport(intent.photoId);
       return true;
     case "editor-xmp-submit":
       editor.submitXmp(intent.photoId);

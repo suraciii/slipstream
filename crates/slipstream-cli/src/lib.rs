@@ -16,8 +16,7 @@ use url::Url;
 mod compatibility;
 mod development;
 mod development_proxy;
-mod edit_preview_download;
-mod export_download;
+mod historical_export_download;
 mod preview_download;
 mod processing_artifact_download;
 mod processing_preview_download;
@@ -32,6 +31,7 @@ const MAXIMUM_INPUT_BYTES: usize = 64 * 1024;
 const MAXIMUM_MUTATION_PHOTO_IDS: usize = 100;
 const MAXIMUM_RECOVERY_APPLY: usize = 100;
 const MAXIMUM_TRASH_IDS: usize = 5_000;
+pub(crate) const MAXIMUM_SOURCE_REVISION_BYTES: usize = 16_384;
 mod client;
 mod commands;
 mod execute;
@@ -45,10 +45,9 @@ mod tests;
 pub(crate) use client::*;
 pub(crate) use commands::*;
 pub use commands::{
-    AlbumCommand, AlbumListArgs, AlbumMembershipArgs, Cli, Command, ExportTargetArg, FolderCommand,
-    FolderListArgs, InvocationResult, LibraryCommand, OrderArg, OriginalKindArg, OutputFormat,
-    ParseErrorPreferences, PhotoCommand, PhotoDecisionArgs, PhotoExportCommand,
-    PhotoExportDownloadArgs, PhotoExportSubmitArgs, PhotoListArgs, PhotoMetadataSaveArgs,
+    AlbumCommand, AlbumListArgs, AlbumMembershipArgs, Cli, Command, FolderCommand, FolderListArgs,
+    InvocationResult, LibraryCommand, OrderArg, OriginalKindArg, OutputFormat,
+    ParseErrorPreferences, PhotoCommand, PhotoDecisionArgs, PhotoListArgs, PhotoMetadataSaveArgs,
     PhotoRemovalArgs, PhotoRestoreArgs, PreviewSize, ProcessingCommand, RecoveryApplyArgs,
     RecoveryCommand, RecoveryProposeArgs, RecoveryUnavailableArgs, SelectionArg, SetSelectionArg,
     TrashCommand, TrashListArgs, TrashReviewArgs, parse_error_preferences,

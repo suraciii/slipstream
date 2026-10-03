@@ -1,5 +1,5 @@
 import type { BrowserFetch } from "../model/access-session.js";
-import { isRecord } from "./editor.js";
+import { isRecord } from "./guards.js";
 
 export type ComposableRecipeInput = Readonly<
   | { kind: "original"; photoId: string; sourceRevision: string }
@@ -22,7 +22,17 @@ export type ComposableRecipe = Readonly<{
   revision: string;
   sourceRevision: string;
   currentStepId: string | null;
+  executionRefusals?: ReadonlyArray<
+    Readonly<{ stepId: string; code: string; message: string }>
+  >;
   steps: ReadonlyArray<ComposableProcessingStep>;
+}>;
+
+export type ComposableRecipeRead = Readonly<{
+  sourceRevision: string;
+  currentSourceRevision?: string | null;
+  sourceAvailable?: boolean;
+  recipe: ComposableRecipe | null;
 }>;
 
 const readInput = (value: unknown): ComposableRecipeInput | undefined => {
@@ -93,6 +103,19 @@ const readRecipe = (value: unknown): ComposableRecipe | undefined => {
         revision: value["revision"],
         sourceRevision: value["sourceRevision"],
         currentStepId: value["currentStepId"],
+        ...(Array.isArray(value["executionRefusals"])
+          ? {
+              executionRefusals: value["executionRefusals"].filter(
+                (
+                  item,
+                ): item is { stepId: string; code: string; message: string } =>
+                  isRecord(item) &&
+                  typeof item["stepId"] === "string" &&
+                  typeof item["code"] === "string" &&
+                  typeof item["message"] === "string",
+              ),
+            }
+          : {}),
         steps: Object.freeze(steps),
       })
     : undefined;
@@ -101,9 +124,7 @@ const readRecipe = (value: unknown): ComposableRecipe | undefined => {
 export const parseComposableRecipe = (
   value: unknown,
   photoId: string,
-):
-  | Readonly<{ sourceRevision: string; recipe: ComposableRecipe | null }>
-  | undefined => {
+): ComposableRecipeRead | undefined => {
   if (
     !isRecord(value) ||
     value["photoId"] !== photoId ||
@@ -114,11 +135,28 @@ export const parseComposableRecipe = (
   if (rawRecipe === null)
     return Object.freeze({
       sourceRevision: value["sourceRevision"],
+      ...(typeof value["currentSourceRevision"] === "string" ||
+      value["currentSourceRevision"] === null
+        ? { currentSourceRevision: value["currentSourceRevision"] }
+        : {}),
+      ...(typeof value["sourceAvailable"] === "boolean"
+        ? { sourceAvailable: value["sourceAvailable"] }
+        : {}),
       recipe: null,
     });
   const recipe = readRecipe(rawRecipe);
-  return recipe
-    ? Object.freeze({ sourceRevision: value["sourceRevision"], recipe })
+  return recipe && recipe.photoId === photoId
+    ? Object.freeze({
+        sourceRevision: value["sourceRevision"],
+        recipe,
+        ...(typeof value["currentSourceRevision"] === "string" ||
+        value["currentSourceRevision"] === null
+          ? { currentSourceRevision: value["currentSourceRevision"] }
+          : {}),
+        ...(typeof value["sourceAvailable"] === "boolean"
+          ? { sourceAvailable: value["sourceAvailable"] }
+          : {}),
+      })
     : undefined;
 };
 
@@ -126,10 +164,7 @@ export const fetchComposableRecipe = async (
   fetcher: BrowserFetch,
   photoId: string,
   signal: AbortSignal,
-): Promise<
-  | Readonly<{ sourceRevision: string; recipe: ComposableRecipe | null }>
-  | undefined
-> => {
+): Promise<ComposableRecipeRead | undefined> => {
   try {
     const response = await fetcher(
       `/api/photos/${encodeURIComponent(photoId)}/processing-recipe`,
@@ -166,3 +201,26 @@ export const saveComposableRecipe = async (
       steps: request.steps,
     }),
   });
+
+/** Reconciliation must replay the captured bytes, including its request identity. */
+export const saveComposableRecipeBody = (
+  fetcher: BrowserFetch,
+  photoId: string,
+  body: string,
+  rebind = false,
+): Promise<Response> =>
+  fetcher(
+    `/api/photos/${encodeURIComponent(photoId)}/processing-recipe${rebind ? "/rebind" : ""}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body },
+  );
+
+export const rebindComposableRecipe = (
+  fetcher: BrowserFetch,
+  photoId: string,
+  request: Readonly<{
+    requestId: string;
+    expectedRecipeRevision: string;
+    newSourceRevision: string;
+  }>,
+): Promise<Response> =>
+  saveComposableRecipeBody(fetcher, photoId, JSON.stringify(request), true);

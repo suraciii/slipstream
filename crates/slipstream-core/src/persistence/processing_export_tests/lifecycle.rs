@@ -525,4 +525,348 @@ async fn expired_terminal_receipts_are_swept_and_tombstoned() {
         submit(&seeded, replay_of(&seeded, &cancelled_admission)).await,
         ProcessingExportSubmitOutcome::Expired
     ));
+    let connection = Connection::open(&seeded.path).unwrap();
+    for admission in [&failed_admission, &cancelled_admission] {
+        let retry_id = format!("retry-{}", admission.request_id);
+        assert_eq!(
+            replay_processing_export_retry(
+                &connection,
+                "raw-photo",
+                &admission.request_id,
+                &retry_id
+            )
+            .unwrap(),
+            Some(ProcessingExportSubmitOutcome::Expired)
+        );
+        assert_eq!(
+            seeded
+                .persistence
+                .retry_processing_export_receiver(retry_request(admission, &retry_id), deadline)
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap(),
+            ProcessingExportSubmitOutcome::Expired
+        );
+        assert!(
+            seeded
+                .persistence
+                .read_processing_export_work_receiver(&retry_id)
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+fn retry_request(admission: &ProcessingExportAdmission, request_id: &str) -> RetryProcessingExport {
+    RetryProcessingExport {
+        photo_id: admission.photo_id.clone(),
+        previous_request_id: admission.request_id.clone(),
+        request_id: request_id.to_owned(),
+        bundle_id: admission.bundle_id.clone(),
+        retained_output_bytes_max: u64::MAX,
+        adapter: ProcessingExportAdapterDecision::Qualified {
+            adapter_version: "darktable-adapter-1".to_owned(),
+            parameter_schema_version: "darktable-params-1".to_owned(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn retained_replay_ignores_deleted_recipe_and_preserves_exact_guards() {
+    let seeded = seeded();
+    let admission = admitted(&seeded, "retained-replay").await;
+    let connection = Connection::open(&seeded.path).unwrap();
+    connection
+        .execute(
+            "DELETE FROM library_metadata WHERE key LIKE 'composable_edit_recipe:%'",
+            [],
+        )
+        .unwrap();
+    let mut replay = ReplayProcessingExport {
+        photo_id: admission.photo_id.clone(),
+        request_id: admission.request_id.clone(),
+        step_id: admission.step_id.clone(),
+        expected_recipe_revision: admission.recipe_revision.clone(),
+        expected_source_revision: admission.source_revision.clone(),
+    };
+    assert_eq!(
+        replay_processing_export(&connection, replay.clone()).unwrap(),
+        Some(ProcessingExportSubmitOutcome::Pending(admission))
+    );
+    replay.expected_source_revision.push_str("changed");
+    assert_eq!(
+        replay_processing_export(&connection, replay).unwrap(),
+        Some(ProcessingExportSubmitOutcome::RequestConflict)
+    );
+}
+
+#[tokio::test]
+async fn retry_captures_prior_intent_and_replays_after_parent_expiry() {
+    let seeded = seeded();
+    let admission = admitted(&seeded, "retry-parent").await;
+    seeded
+        .persistence
+        .cancel_processing_export_receiver(&admission.request_id, 1_100)
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    save_recipe(
+        &seeded,
+        "changed-recipe",
+        Some(&admission.recipe_revision),
+        original_step_input("raw-photo", &seeded.source),
+    )
+    .await;
+    let request = retry_request(&admission, "retry-new");
+    let ProcessingExportSubmitOutcome::Admitted(retried) = seeded
+        .persistence
+        .retry_processing_export_receiver(request.clone(), 1_200)
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("retained cancelled snapshot should retry");
+    };
+    let mut expected = admission.clone();
+    expected.request_id = retried.request_id.clone();
+    expected.payload_digest = retried.payload_digest.clone();
+    assert_eq!(retried, expected);
+    let connection = Connection::open(&seeded.path).unwrap();
+    let mut changed = request.clone();
+    changed.bundle_id = "different-bundle".to_owned();
+    changed.retained_output_bytes_max = 0;
+    assert_eq!(
+        seeded
+            .persistence
+            .retry_processing_export_receiver(changed, 1_300)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap(),
+        ProcessingExportSubmitOutcome::Pending(retried.clone())
+    );
+    seeded
+        .persistence
+        .sweep_processing_export_expiry_receiver(
+            1_100 + PROCESSING_EXPORT_RECEIPT_RETENTION_SECONDS,
+        )
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        replay_processing_export_retry(&connection, "raw-photo", "retry-parent", "retry-new")
+            .unwrap(),
+        Some(ProcessingExportSubmitOutcome::Pending(retried))
+    );
+    assert_eq!(
+        replay_processing_export_retry(&connection, "raw-photo", "different-parent", "retry-new")
+            .unwrap(),
+        Some(ProcessingExportSubmitOutcome::RequestConflict)
+    );
+}
+
+#[tokio::test]
+async fn retry_refuses_changed_bundle_source_and_resources_without_new_work() {
+    let seeded = seeded();
+    let admission = admitted(&seeded, "guard-parent").await;
+    seeded
+        .persistence
+        .cancel_processing_export_receiver(&admission.request_id, 1_100)
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    let mut request = retry_request(&admission, "guard-retry");
+    request.bundle_id = "different".to_owned();
+    assert_eq!(
+        seeded
+            .persistence
+            .retry_processing_export_receiver(request.clone(), 1_200)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap(),
+        ProcessingExportSubmitOutcome::Unavailable
+    );
+    request.bundle_id = admission.bundle_id.clone();
+    request.retained_output_bytes_max = 0;
+    assert_eq!(
+        seeded
+            .persistence
+            .retry_processing_export_receiver(request.clone(), 1_200)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap(),
+        ProcessingExportSubmitOutcome::RetainedOutputFull
+    );
+    request.retained_output_bytes_max = u64::MAX;
+    let connection = Connection::open(&seeded.path).unwrap();
+    connection
+        .execute(
+            "UPDATE original_files SET size=size+1 WHERE id='raw-original'",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        seeded
+            .persistence
+            .retry_processing_export_receiver(request, 1_200)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap(),
+        ProcessingExportSubmitOutcome::Unavailable
+            | ProcessingExportSubmitOutcome::SourceChanged(None)
+    ));
+    assert!(
+        read_processing_export_work(&connection, "guard-retry")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn retained_lists_are_newest_first_bounded_and_hide_expired_outputs() {
+    let seeded = seeded();
+    let admission = admitted(&seeded, "list-seed").await;
+    let mut connection = Connection::open(&seeded.path).unwrap();
+    let transaction = connection.transaction().unwrap();
+    for index in 0..70 {
+        let mut capture = admission.clone();
+        capture.request_id = format!("list-{index:03}");
+        let mut output = settled_artifact(&capture);
+        output.artifact_id =
+            ProcessingArtifactId::new(&format!("list-artifact-{index:03}")).unwrap();
+        let work = ProcessingExportWork {
+            admission: capture.clone(),
+            state: ProcessingExportWorkState::Succeeded,
+            accepted_at: 2_000 + index,
+            attempt: None,
+            artifact_id: Some(output.artifact_id.clone()),
+            failure_reason: None,
+            terminal_at: Some(2_100 + index),
+            retain_until: Some(3_000 + index),
+        };
+        write_metadata_value(
+            &transaction,
+            &processing_export_work_key(&capture.request_id),
+            &serialize_record(&work_record(&work)).unwrap(),
+        )
+        .unwrap();
+        write_metadata_value(
+            &transaction,
+            &processing_artifact_key(output.artifact_id.as_str()),
+            &serialize_record(&artifact_record(&output)).unwrap(),
+        )
+        .unwrap();
+        write_metadata_value(
+            &transaction,
+            &processing_artifact_retention_key(output.artifact_id.as_str()),
+            &serialize_record(&ProcessingArtifactRetentionRecord {
+                artifact_id: output.artifact_id.as_str().to_owned(),
+                retain_until: 3_000 + index,
+                requests: vec![capture.request_id],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    transaction.commit().unwrap();
+    let mut unretained = settled_artifact(&admission);
+    unretained.artifact_id = ProcessingArtifactId::new("bare-publication").unwrap();
+    seeded
+        .persistence
+        .publish_processing_artifact_receiver(unretained)
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    let listed = list_processing_exports(&connection, "raw-photo", 2_500).unwrap();
+    assert_eq!(
+        listed
+            .works
+            .iter()
+            .map(|work| work.admission.request_id.as_str())
+            .collect::<Vec<_>>(),
+        (6..70)
+            .rev()
+            .map(|index| format!("list-{index:03}"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        listed
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.artifact_id.as_str())
+            .collect::<Vec<_>>(),
+        (6..70)
+            .rev()
+            .map(|index| format!("list-artifact-{index:03}"))
+            .collect::<Vec<_>>()
+    );
+    let expired = list_processing_exports(&connection, "raw-photo", 3_070).unwrap();
+    assert_eq!(
+        expired
+            .works
+            .iter()
+            .map(|work| work.admission.request_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["list-seed"]
+    );
+    assert!(expired.artifacts.is_empty());
+}
+
+#[tokio::test]
+async fn retained_admission_roundtrips_maximum_opaque_source_with_parameters() {
+    let seeded = seeded();
+    let mut admission = admitted(&seeded, "opaque-source-export").await;
+    admission.source_revision = "\0".repeat(crate::processing::MAXIMUM_SOURCE_REVISION_BYTES);
+    admission.input = original_step_input(&admission.photo_id, &admission.source_revision);
+    admission.parameters = ProcessingParameterSnapshot::new(
+        "darktable-params-1",
+        serde_json::json!({"payload": "x".repeat(240_000)}),
+    )
+    .unwrap();
+    admission.validate().unwrap();
+    let work = ProcessingExportWork {
+        admission: admission.clone(),
+        state: ProcessingExportWorkState::Accepted,
+        accepted_at: 1_000,
+        attempt: None,
+        artifact_id: None,
+        failure_reason: None,
+        terminal_at: None,
+        retain_until: None,
+    };
+    let mut connection = Connection::open(&seeded.path).unwrap();
+    let transaction = connection.transaction().unwrap();
+    write_metadata_value(
+        &transaction,
+        &processing_export_work_key(&admission.request_id),
+        &serialize_record(&work_record(&work)).unwrap(),
+    )
+    .unwrap();
+    transaction.commit().unwrap();
+    assert_eq!(
+        replay_processing_export(
+            &connection,
+            ReplayProcessingExport {
+                photo_id: admission.photo_id.clone(),
+                request_id: admission.request_id.clone(),
+                step_id: admission.step_id.clone(),
+                expected_recipe_revision: admission.recipe_revision.clone(),
+                expected_source_revision: admission.source_revision.clone(),
+            }
+        )
+        .unwrap(),
+        Some(ProcessingExportSubmitOutcome::Pending(admission))
+    );
 }

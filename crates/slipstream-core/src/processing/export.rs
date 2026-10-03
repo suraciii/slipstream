@@ -110,7 +110,7 @@ impl ProcessingExportAdmission {
         validate_bounded_name(&self.request_id, MAXIMUM_EXPORT_REQUEST_ID_BYTES)?;
         validate_digest(&self.payload_digest)?;
         validate_bounded_name(&self.recipe_revision, MAXIMUM_REVISION_BYTES)?;
-        validate_revision(&self.source_revision)?;
+        validate_source_revision(&self.source_revision)?;
         validate_bounded_name(&self.adapter_schema_version, MAXIMUM_CONTRACT_NAME_BYTES)?;
         self.parameters.validate()?;
         self.input.validate()?;
@@ -153,6 +153,37 @@ pub struct SubmitProcessingExport {
     /// The deployment's adapter qualification decision for the selected
     /// module's complete parameter tree.
     pub adapter: ProcessingExportAdapterDecision,
+}
+
+/// Caller-owned fields needed to resolve an uncertain submission independently
+/// of current recipes, module availability, and deployment allowances.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplayProcessingExport {
+    pub photo_id: String,
+    pub request_id: String,
+    pub step_id: ProcessingStepId,
+    pub expected_recipe_revision: String,
+    pub expected_source_revision: String,
+}
+
+/// Explicitly retry a retained failed or cancelled captured snapshot under a
+/// new request identity. Current deployment guards never rewrite that snapshot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RetryProcessingExport {
+    pub photo_id: String,
+    pub previous_request_id: String,
+    pub request_id: String,
+    pub bundle_id: String,
+    pub retained_output_bytes_max: u64,
+    pub adapter: ProcessingExportAdapterDecision,
+}
+
+/// Durable retained work and artifacts for a Photo, newest first, independently
+/// bounded to 64 records per collection.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProcessingExportList {
+    pub works: Vec<ProcessingExportWork>,
+    pub artifacts: Vec<ProcessingArtifact>,
 }
 
 /// The durable record of one explicitly refused composable Export: the
@@ -198,7 +229,7 @@ impl ProcessingExportRefusal {
         validate_bounded_name(&self.request_id, MAXIMUM_EXPORT_REQUEST_ID_BYTES)?;
         validate_digest(&self.payload_digest)?;
         validate_bounded_name(&self.recipe_revision, MAXIMUM_REVISION_BYTES)?;
-        validate_revision(&self.source_revision)?;
+        validate_source_revision(&self.source_revision)?;
         validate_bounded_name(&self.parameter_schema_version, MAXIMUM_CONTRACT_NAME_BYTES)?;
         validate_digest(&self.parameter_digest)?;
         self.input.validate()?;
@@ -352,7 +383,42 @@ pub struct ProcessingArtifact {
     pub byte_length: u64,
 }
 
+/// Durable publication and expiry timestamps, separate from immutable provenance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessingArtifactRetention {
+    pub published_at_unix_seconds: u64,
+    pub expires_at_unix_seconds: u64,
+}
+
 impl ProcessingArtifact {
+    /// Download name contains only ASCII filename characters. The artifact
+    /// identity keeps independently published results distinct.
+    pub fn filename(&self) -> String {
+        fn safe(value: &str) -> String {
+            value
+                .bytes()
+                .map(|byte| {
+                    if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') {
+                        char::from(byte)
+                    } else {
+                        '_'
+                    }
+                })
+                .collect()
+        }
+        let extension = if matches!(self.output_contract.format.as_str(), "jpeg" | "image/jpeg") {
+            "jpg"
+        } else {
+            "tif"
+        };
+        format!(
+            "{}-{}-{}.{}",
+            safe(self.module.as_str()),
+            safe(self.step_id.as_str()),
+            safe(self.artifact_id.as_str()),
+            extension
+        )
+    }
     /// Validates every component of the published record.
     pub fn validate(&self) -> Result<(), ProcessingContractError> {
         validate_bounded_name(&self.photo_id, MAXIMUM_PHOTO_ID_BYTES)?;

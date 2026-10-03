@@ -130,7 +130,6 @@ export type GridProgressViewModel = Readonly<{
 export type {
   EditorComposableViewModel,
   EditorExportViewModel,
-  EditorStage,
   EditorViewModel,
 } from "./editor-view-contract.js";
 
@@ -1450,6 +1449,7 @@ ${RECOVERY_PANEL_TEMPLATE}
     zoom: zoomController,
     renderRating: (value) => ratingControls.render(value),
     resetGestures: () => photoGestures.reset(),
+    reviewRecovery: () => send({ kind: "recovery-entry" }),
   });
   const photoGestures = createPhotoGestures({
     preview,

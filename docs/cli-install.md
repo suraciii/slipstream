@@ -56,6 +56,6 @@ Use a client and service built from the same candidate source revision. A
 contract-1 response can still be incomplete: `incompatible_server` preserves
 the advertised versions and identifies a missing or invalid capability field.
 Install the matching service candidate before retrying; do not bypass this
-check. For RAW development, also inspect `processing capability` and follow
-the [Agent workflow](agent-cli.md#develop-a-raw-photo). A working client/service
-pair does not qualify the deployment's native processing stages.
+check. For photo processing, also inspect `processing modules` and follow
+the [Agent workflow](agent-cli.md#compose-processing-steps). A working
+client/service pair does not qualify its native modules or parameter combinations.

@@ -116,13 +116,13 @@ pub(super) async fn execute_admitted_export(
     {
         Ok(slipstream_core::ProcessingExportSettlement::Settled(_)) => {
             executed.publication.release().await;
-            artifact_created_response(&artifact, false)
+            artifact_created_response(state, &artifact, false).await
         }
         Ok(slipstream_core::ProcessingExportSettlement::Replayed(_)) => {
             executed.publication.release().await;
             // The committed publication owns this identity and identical
             // bytes already sit under it; the retained file stays.
-            artifact_created_response(&artifact, true)
+            artifact_created_response(state, &artifact, true).await
         }
         Ok(slipstream_core::ProcessingExportSettlement::Terminal(work)) => {
             // The first terminal decision won while this attempt executed
@@ -211,7 +211,7 @@ pub(super) async fn terminal_work_response(
                 .processing_artifact(artifact_id.as_str())
                 .await
             {
-                Ok(Some(artifact)) => artifact_created_response(&artifact, true),
+                Ok(Some(artifact)) => artifact_created_response(state, &artifact, true).await,
                 _ => error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "outcome_unknown",

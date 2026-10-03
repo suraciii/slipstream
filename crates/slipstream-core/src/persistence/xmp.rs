@@ -1,8 +1,5 @@
 use super::owner::{Command, Persistence, PersistenceError, random_uuid_v4};
-use crate::{
-    EditRecipe, EditRecipeSettings, WhiteBalanceIntent, XMP_RETENTION_SECONDS, XmpCreateOutcome,
-    XmpExportRecord,
-};
+use crate::{WhiteBalanceIntent, XMP_RETENTION_SECONDS, XmpCreateOutcome, XmpExportRecord};
 use rusqlite::{Connection, OptionalExtension, params};
 use tokio::sync::oneshot;
 
@@ -150,29 +147,26 @@ pub(super) fn create(
     if exists.is_none() {
         return Ok(XmpCreateOutcome::NotFound);
     }
-    let current = transaction.query_row(
-        "SELECT revision,source_revision,exposure_ev,white_balance_mode,temperature_kelvin,tint_milli FROM edit_recipes WHERE photo_id=?",
-        [photo_id], |r| {
-            let mode: String = r.get(3)?;
-            Ok(EditRecipe { photo_id: photo_id.to_owned(), revision: r.get(0)?, source_revision: r.get(1)?,
-                settings: EditRecipeSettings { exposure_ev: r.get(2)?, white_balance: balance(&mode, r.get(4)?, r.get(5)?)? } })
-        },
-    ).optional().map_err(|_| PersistenceError::Storage)?;
+    let current = super::composable_recipe::read_composable_edit_recipe(&transaction, photo_id)?;
     let Some(recipe) = current else {
         return Ok(XmpCreateOutcome::MissingRecipe);
     };
     if recipe.revision != expected_recipe || recipe.source_revision != expected_source {
         return Ok(XmpCreateOutcome::Stale);
     }
+    let settings = match crate::xmp::semantic_settings(&recipe) {
+        Ok(settings) => settings,
+        Err(error) => return Ok(error.into()),
+    };
     let id = format!("xmp-{}", random_uuid_v4()?);
-    let document = crate::xmp::document(&recipe);
+    let document = crate::xmp::document(&recipe, &settings);
     let byte_length = i64::try_from(document.len()).map_err(|_| PersistenceError::Storage)?;
     let filename = format!("{id}.xmp");
     let sha256 = crate::xmp::digest(&document);
     let expires_at = now
         .checked_add(XMP_RETENTION_SECONDS)
         .ok_or(PersistenceError::Storage)?;
-    let (mode, temp, tint) = match recipe.settings.white_balance {
+    let (mode, temp, tint) = match settings.white_balance {
         WhiteBalanceIntent::AsShot => ("as-shot", None, None),
         WhiteBalanceIntent::TemperatureTint {
             temperature_kelvin,
@@ -185,7 +179,7 @@ pub(super) fn create(
     };
     transaction.execute(
         "INSERT INTO xmp_exports(id,photo_id,request_id,payload_digest,recipe_revision,source_revision,exposure_ev,white_balance_mode,temperature_kelvin,tint_milli,created_at,expires_at,filename,document,byte_length,sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        params![id, photo_id, request_id, payload_digest, recipe.revision, recipe.source_revision, recipe.settings.exposure_ev, mode, temp, tint, now, expires_at, filename, document, byte_length, sha256],
+        params![id, photo_id, request_id, payload_digest, recipe.revision, recipe.source_revision, settings.exposure_ev, mode, temp, tint, now, expires_at, filename, document, byte_length, sha256],
     ).map_err(|_| PersistenceError::Storage)?;
     let saved = transaction
         .query_row(
@@ -266,11 +260,44 @@ mod tests {
             },
         );
         let source = "missing.ARW\0size\0mtime";
-        connection.execute("INSERT INTO edit_recipes(photo_id,revision,source_revision,exposure_ev,white_balance_mode) VALUES('photo','recipe',?,0.5,'as-shot')", [source]).unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
+        assert_eq!(
+            create(&mut connection, "photo", "missing", "recipe", source, now).unwrap(),
+            XmpCreateOutcome::MissingRecipe
+        );
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('composable_edit_recipe:photo',?)",
+                [serde_json::json!({
+                    "photo_id":"photo", "revision":"recipe", "source_revision":source,
+                    "current_step_id":null, "steps":[]
+                })
+                .to_string()],
+            )
+            .unwrap();
+        assert_eq!(
+            create(&mut connection, "photo", "empty", "recipe", source, now).unwrap(),
+            XmpCreateOutcome::MissingStep
+        );
+        connection
+            .execute(
+                "DELETE FROM library_metadata WHERE key='composable_edit_recipe:photo'",
+                [],
+            )
+            .unwrap();
+        connection.execute("INSERT INTO library_metadata(key,value) VALUES('composable_edit_recipe:photo',?)", [serde_json::json!({
+            "photo_id":"photo", "revision":"recipe", "source_revision":source,
+            "current_step_id":"selected", "steps":[{
+                "step_id":"selected", "module":"darktable",
+                "input":{"Original":{"photo_id":"photo","source_revision":source}},
+                "parameters":{"schema_version":"darktable-params-1","tree":{"stack":[
+                    {"operation":"exposure","multiPriority":0,"enabled":true,"params":{"mode":"EXPOSURE_MODE_MANUAL","exposure":0.5}}
+                ]}}
+            }]
+        }).to_string()]).unwrap();
         assert_eq!(
             create(&mut connection, "photo", "stale", "wrong", source, now).unwrap(),
             XmpCreateOutcome::Stale
@@ -294,7 +321,10 @@ mod tests {
             )
             .unwrap();
         connection
-            .execute("DELETE FROM edit_recipes WHERE photo_id='photo'", [])
+            .execute(
+                "DELETE FROM library_metadata WHERE key='composable_edit_recipe:photo'",
+                [],
+            )
             .unwrap();
         drop(connection);
         let mut reopened = Connection::open(&path).unwrap();

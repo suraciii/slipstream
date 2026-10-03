@@ -34,6 +34,8 @@ pub(crate) struct BrowseOpenBody {
     #[serde(default)]
     photo_id: Option<String>,
     #[serde(default)]
+    resume: bool,
+    #[serde(default)]
     order: Option<String>,
     #[serde(default)]
     selection: Option<String>,
@@ -99,7 +101,13 @@ pub(crate) async fn open_browse(
     };
     match state
         .application
-        .browse_open(source, order, selection, preferred_photo_id.as_deref())
+        .browse_open_with_mode(
+            source,
+            order,
+            selection,
+            preferred_photo_id.as_deref(),
+            body.resume,
+        )
         .await
     {
         Ok(result) => json_response(StatusCode::OK, &result),

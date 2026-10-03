@@ -21,7 +21,7 @@ const EXPORT_RECEIPT_PREFIX: &str = "export_receipt:";
 const MAXIMUM_EXPORT_REQUEST_ID_BYTES: usize = 128;
 const MAXIMUM_EXPORT_OUTCOME_BYTES: usize = 200;
 /// Bounded per-Photo list returned by the retained-export listing.
-const EXPORT_LIST_LIMIT: usize = 60;
+const EXPORT_LIST_LIMIT: usize = 64;
 /// A lease protects an artifact for the duration of one download stream. This
 /// bound only reclaims leases leaked by a crashed process; ordinary downloads
 /// release their lease when the stream settles.

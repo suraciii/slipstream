@@ -105,6 +105,23 @@ fn artifact() -> ProcessingArtifact {
     }
 }
 
+#[test]
+fn artifact_filenames_use_module_format_and_safe_step_identity() {
+    let mut output = artifact();
+    output.step_id = ProcessingStepId::new("develop / first").unwrap();
+    output.output_contract.format = "tiff".to_owned();
+    assert_eq!(
+        output.filename(),
+        "darktable-develop___first-artifact-a1.tif"
+    );
+    output.module = ProcessingModuleId::new("spektrafilm").unwrap();
+    output.step_id = ProcessingStepId::new("film step").unwrap();
+    for format in ["jpeg", "image/jpeg"] {
+        output.output_contract.format = format.to_owned();
+        assert_eq!(output.filename(), "spektrafilm-film_step-artifact-a1.jpg");
+    }
+}
+
 fn no_adapter_decision() -> ProcessingExportAdapterDecision {
     ProcessingExportAdapterDecision::NoQualifiedAdapter {
         reason_code: "module_parameters_unavailable".to_owned(),
@@ -261,6 +278,56 @@ async fn artifact_bound_submission_survives_unavailable_original() {
     )
     .await;
     assert!(matches!(outcome, ProcessingExportSubmitOutcome::Refused(_)));
+}
+
+#[tokio::test]
+async fn artifact_export_cannot_implicitly_rebind_saved_recipe_to_observed_source() {
+    let seeded = seeded();
+    let upstream = artifact();
+    publish(&seeded, upstream.clone()).await;
+    let revision = save_recipe(
+        &seeded,
+        "artifact-stale-recipe",
+        None,
+        ProcessingInput::Artifact {
+            artifact_id: upstream.artifact_id,
+            contract: upstream.output_contract,
+        },
+    )
+    .await;
+    let observed = source_revision("shoot/one.ARW", 18, 2_000.0).unwrap();
+    Connection::open(&seeded.path).unwrap().execute(
+        "UPDATE original_files SET size=18,mtime_ms=2000,capture_source_revision=? WHERE id='raw-original'",
+        [format!("{}\0fixture-device\0fixture-inode", observed)],
+    ).unwrap();
+    let outcome = submit(
+        &seeded,
+        SubmitProcessingExport {
+            photo_id: "raw-photo".to_owned(),
+            request_id: "implicit-rebind-export".to_owned(),
+            step_id: ProcessingStepId::new("develop-1").unwrap(),
+            expected_recipe_revision: revision,
+            expected_source_revision: observed,
+            bundle_id: "b".repeat(64),
+            retained_output_bytes_max: u64::MAX,
+            adapter: no_adapter_decision(),
+        },
+    )
+    .await;
+    let ProcessingExportSubmitOutcome::SourceChanged(Some(saved)) = outcome else {
+        panic!("a newly observed source cannot replace the saved recipe binding: {outcome:?}");
+    };
+    assert_eq!(saved.source_revision, seeded.source);
+    assert!(
+        seeded
+            .persistence
+            .read_processing_export_work_receiver("implicit-rebind-export")
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

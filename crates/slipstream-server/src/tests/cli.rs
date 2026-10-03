@@ -1531,76 +1531,10 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
             }
         })
     );
-    let processing = response_json(
-        send(
-            &router,
-            authenticated_request()
-                .uri("https://camera.local/api/processing/capability")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await,
-    )
-    .await;
-    assert_eq!(
-        processing,
-        serde_json::json!({
-            "state": "disabled",
-            "bundleId": null,
-            "incarnation": null,
-            "exposure": {"minimumEv": 0.0, "maximumEv": 1.0, "stepEv": 0.001},
-            "profiles": [
-                {
-                    "profileId": "sony-ilce-7rm5-arw",
-                    "whiteBalanceModes": ["as-shot"],
-                    "whiteBalanceRanges": null
-                },
-                {
-                    "profileId": "sony-ilce-7cm2-arw",
-                    "whiteBalanceModes": ["as-shot"],
-                    "whiteBalanceRanges": null
-                }
-            ],
-            "stages": {"develop": "unavailable", "film": "unavailable"}
-        })
-    );
     let configured_router = crate::http::create_router_with_processing(
         Arc::clone(&application),
         open_web_root(config.web_root()),
         Some(unresolved_processing_config()),
-    );
-    let opted_in = response_json(
-        send(
-            &configured_router,
-            authenticated_request()
-                .uri("https://camera.local/api/processing/capability")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await,
-    )
-    .await;
-    assert_eq!(
-        opted_in,
-        serde_json::json!({
-            "bundleId": null,
-            "state": "bundle-unavailable",
-            "incarnation": null,
-            "exposure": {"minimumEv": 0.0, "maximumEv": 1.0, "stepEv": 0.001},
-            "profiles": [
-                {
-                    "profileId": "sony-ilce-7rm5-arw",
-                    "whiteBalanceModes": ["as-shot"],
-                    "whiteBalanceRanges": null
-                },
-                {
-                    "profileId": "sony-ilce-7cm2-arw",
-                    "whiteBalanceModes": ["as-shot"],
-                    "whiteBalanceRanges": null
-                }
-            ],
-            "stages": {"develop": "unavailable", "film": "unavailable"}
-        })
     );
     let health = send(
         &configured_router,

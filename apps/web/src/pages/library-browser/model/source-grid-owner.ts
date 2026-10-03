@@ -18,10 +18,7 @@ import { TaskScope } from "./async-ownership.js";
 
 const WINDOW_SIZE = 60;
 const MAX_RETAINED_FACTS = WINDOW_SIZE * 3;
-/// The largest Photo range the Grid presents at a supported large viewport,
-/// with one window of buffer on each side.
 const MAX_VIEWPORT_RANGE = MAX_RETAINED_FACTS + WINDOW_SIZE * 2;
-/// Cap for the retained-fact bound: that range and its buffer again.
 const MAX_RETAINED_FACTS_CAP = MAX_VIEWPORT_RANGE + WINDOW_SIZE * 2;
 const MAX_RETAINED_THUMBNAILS = WINDOW_SIZE * 4;
 
@@ -153,7 +150,6 @@ export interface GridThumbnailImage {
   onerror: GlobalEventHandlers["onerror"];
   removeAttribute(name: string): void;
   setDeliveryFailed(failed: boolean): void;
-  /// Reports a terminal Thumbnail result without changing Review Preview facts.
   setThumbnailState(state: "unavailable" | "failed"): void;
 }
 
@@ -183,6 +179,7 @@ export interface SourceGridOwner {
     source: SourceGridSource,
     options?: Readonly<{
       preferredPhotoId?: string;
+      resume?: boolean;
       mode?: "replace" | "reopen";
       order?: SourceViewOrder;
       selection?: SelectionFilter;
@@ -312,6 +309,7 @@ const sourceRequest = (
   order: SourceViewOrder,
   selection: SelectionFilter,
   preferredPhotoId?: string,
+  resume = false,
 ): BrowseSourceRequest =>
   source.kind === "library"
     ? {
@@ -319,6 +317,7 @@ const sourceRequest = (
         order,
         selection,
         ...(preferredPhotoId ? { preferredPhotoId } : {}),
+        ...(resume ? { resume: true } : {}),
       }
     : source.kind === "album"
       ? {
@@ -327,6 +326,7 @@ const sourceRequest = (
           order,
           selection,
           ...(preferredPhotoId ? { preferredPhotoId } : {}),
+          ...(resume ? { resume: true } : {}),
         }
       : {
           kind: "folder",
@@ -335,6 +335,7 @@ const sourceRequest = (
           order,
           selection,
           ...(preferredPhotoId ? { preferredPhotoId } : {}),
+          ...(resume ? { resume: true } : {}),
         };
 
 const freezeSource = (source: SourceGridSource): SourceGridSource =>
@@ -619,6 +620,7 @@ export function createSourceGridOwner(
     nextSource: SourceGridSource,
     options: Readonly<{
       preferredPhotoId?: string;
+      resume?: boolean;
       mode?: "replace" | "reopen";
       order?: SourceViewOrder;
       selection?: SelectionFilter;
@@ -656,9 +658,6 @@ export function createSourceGridOwner(
       thumbnails = new Map();
       thumbnailDeliveryFailures = new Map();
       thumbnailStates = new Map();
-      // A new source is described by its own fresh windows, so no decision
-      // recorded for the replaced one can apply to it.
-      committedDecisions.clear();
     }
     const task = sourceTasks.beginLatest("browse-open", {
       abortTransport: true,
@@ -671,6 +670,7 @@ export function createSourceGridOwner(
           viewOrder,
           viewSelection,
           options.preferredPhotoId,
+          options.resume,
         ),
         task.signal!,
       );

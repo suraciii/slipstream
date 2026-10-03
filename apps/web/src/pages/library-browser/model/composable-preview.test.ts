@@ -5,7 +5,6 @@ import {
   composablePreviewIdentityRefusal,
   composablePreviewPngRefusal,
   composablePreviewReadRefusal,
-  composablePreviewRefusalNote,
   composablePreviewTarget,
   selectedComposableStep,
 } from "./composable-preview.js";
@@ -108,8 +107,8 @@ describe("composablePreviewTarget", () => {
     expect(composablePreviewTarget(undefined).kind).toBe("unreadable");
   });
 
-  test("a Photo with no saved composable recipe keeps the legacy path", () => {
-    expect(composablePreviewTarget(read(null)).kind).toBe("legacy");
+  test("a Photo with no saved recipe renders no processing result", () => {
+    expect(composablePreviewTarget(read(null)).kind).toBe("none");
   });
 
   test("a saved zero-step or unselected recipe renders no processing result", () => {
@@ -129,48 +128,6 @@ describe("composablePreviewTarget", () => {
       steps: [step("develop-1")],
     });
     expect(composablePreviewTarget(dangling).kind).toBe("none");
-  });
-});
-
-describe("composablePreviewRefusalNote", () => {
-  test("says every refusal the selected-step route owns in the workspace's words", () => {
-    const notes = [
-      "missing_recipe",
-      "source_changed",
-      "step_not_current",
-      "unknown_step",
-      "unknown_module",
-      "incompatible_input",
-      "module_parameters_unavailable",
-    ].map((code) => composablePreviewRefusalNote(code));
-    for (const note of notes) expect(note).toBeDefined();
-    expect(
-      notes.filter((note, index) => notes.indexOf(note) === index).length,
-    ).toBe(notes.length);
-    // A refusal that leaves nothing to reload must say so instead of offering
-    // one; the wording is the workspace's, not the service's code.
-    expect(composablePreviewRefusalNote("missing_recipe")).toBe(
-      "No Processing Recipe is saved for this Photo anymore, so no Preview is shown. Reload to check again.",
-    );
-    expect(composablePreviewRefusalNote("step_not_current")).toBe(
-      "The selected Processing Step is no longer the recipe's current step, so no Preview is shown. Reload to check again.",
-    );
-    expect(composablePreviewRefusalNote("module_parameters_unavailable")).toBe(
-      "The selected Processing Step's parameters have no qualified rendering adapter in this deployment yet, so no Preview is shown.",
-    );
-  });
-
-  test("owns no code the selected-step route does not answer", () => {
-    // A code this client does not know stays the caller's disclosure of the
-    // service's own answer; it is never reworded into a composable refusal.
-    expect(
-      composablePreviewRefusalNote("processing_unavailable"),
-    ).toBeUndefined();
-    expect(
-      composablePreviewRefusalNote("resource_unavailable"),
-    ).toBeUndefined();
-    expect(composablePreviewRefusalNote("made-up-code")).toBeUndefined();
-    expect(composablePreviewRefusalNote("")).toBeUndefined();
   });
 });
 
@@ -215,6 +172,55 @@ describe("composablePreviewIdentityRefusal", () => {
     expect(composablePreviewIdentityRefusal(identityHeaders(), expected)).toBe(
       "",
     );
+  });
+  test("source identity framing preserves the full separate bound and NUL", () => {
+    const sourceRevision = "x".repeat(16_383) + "\u0000";
+    const headers = identityHeaders();
+    headers.set(
+      "slipstream-processing-preview-source-revision",
+      "78".repeat(16_383) + "00",
+    );
+    expect(
+      composablePreviewIdentityRefusal(headers, {
+        ...expected,
+        sourceRevision,
+      }),
+    ).toBe("");
+    headers.set(
+      "slipstream-processing-preview-source-revision",
+      "78".repeat(16_385),
+    );
+    expect(
+      composablePreviewIdentityRefusal(headers, {
+        ...expected,
+        sourceRevision: "x".repeat(16_385),
+      }),
+    ).not.toBe("");
+  });
+  test("comparison responses identify their requested mode and execution input", () => {
+    const headers = identityHeaders();
+    headers.set("slipstream-processing-preview-comparison", "baseline");
+    headers.set("slipstream-processing-preview-input-sha256", "a".repeat(64));
+    headers.set("slipstream-processing-preview-input-byte-length", "1024");
+    expect(
+      composablePreviewIdentityRefusal(headers, {
+        ...expected,
+        comparison: "baseline",
+      }),
+    ).toBe("");
+    expect(
+      composablePreviewIdentityRefusal(headers, {
+        ...expected,
+        comparison: "current",
+      }),
+    ).not.toBe("");
+    headers.delete("slipstream-processing-preview-input-sha256");
+    expect(
+      composablePreviewIdentityRefusal(headers, {
+        ...expected,
+        comparison: "baseline",
+      }),
+    ).not.toBe("");
   });
 
   test("rejects a foreign or partial identity", () => {

@@ -1,23 +1,18 @@
-//! Ephemeral preview-class rendering through the same local Photo
-//! Development executor an Export uses.
+//! Ephemeral baseline rendering for Development Proxy construction through
+//! the shared local Photo Development executor.
 //!
-//! This module owns the ephemeral attempt lifecycle — attempt identity,
-//! cooperative cancellation, staging, and discard — and the temporary bytes
-//! one attempt owns. It creates no durable Export row, publication claim, or
-//! retained-output reservation: the durable Export lifecycle keeps those,
-//! and the Preview registry keeps rendition admission, retention deadlines,
-//! and the sweep that enforces them. The execution resources stay single:
-//! one Library, one serialized heavy-work admission slot, and one confined
-//! workspace, reached through the ExportManager's narrow operations.
+//! This module owns cooperative cancellation, staging, validation, and the
+//! temporary bytes of one native render. It creates no durable Export row,
+//! publication claim, or retained-output reservation. The Development Proxy
+//! installs its own bounded artifact and discards these temporary bytes.
+//! Execution uses the shared Library, heavy-work admission slot, and confined
+//! workspace through the ExportManager's narrow operations.
 
+use crate::export_manager::ExportManager;
 use crate::export_manager::output_validation::{
     OUTPUT_VALIDATION_FAILED, validate_output, verify_developed_output,
 };
-use crate::export_manager::{DevelopmentTiffFacts, ExportManager};
-use slipstream_core::{ExportExposureRange, ExportRecipePayload, ExportTarget, Library};
-use slipstream_processing::photo_profile::{
-    APPROVED_EXPOSURE_MILLI_EV_MAX, APPROVED_EXPOSURE_MILLI_EV_MIN,
-};
+use slipstream_core::{ExportTarget, Library};
 use std::{
     path::PathBuf,
     sync::{
@@ -55,30 +50,11 @@ impl PreviewCancellation {
     }
 }
 
-/// The render-time identity inputs of one Original preview attempt: the
-/// selectors it was admitted under and the source, recipe, and bundle facts
-/// the attempt re-derived while it ran. The caller maps these into its own
-/// Preview identity; this evidence never carries that vocabulary.
-pub(crate) struct RenderedIdentity {
-    pub(crate) stage: &'static str,
-    pub(crate) settings: &'static str,
-    pub(crate) bundle_sha256: String,
-    pub(crate) source_revision: String,
-    pub(crate) recipe_revision: Option<String>,
-    pub(crate) exposure_milli_ev: i64,
-}
-
-/// The typed rendered-output evidence of one Original preview attempt: the
-/// validated output's private location and identity, the staged source
-/// evidence it rendered from, and the identity inputs observed at render
-/// time.
+/// One validated baseline render and the staged Original evidence used to
+/// produce it. The Development Proxy owns the durable identity and retention.
 pub(crate) struct RenderedPreview {
     pub(crate) attempt_key: String,
     pub(crate) path: PathBuf,
-    pub(crate) size: u64,
-    pub(crate) sha256: String,
-    pub(crate) identity: RenderedIdentity,
-    pub(crate) output_facts: DevelopmentTiffFacts,
     pub(crate) source_size: u64,
     pub(crate) source_sha256: String,
     pub(crate) source_profile_id: String,
@@ -113,23 +89,13 @@ impl PreviewRender {
         Self { library, exports }
     }
 
-    /// Runs one preview-class attempt through the same local
-    /// `development-tiff` workload as an Export. No persistence row,
-    /// retained-output reservation, or durable artifact publication is
-    /// touched.
+    /// Runs the baseline `development-tiff` workload through the shared local
+    /// executor without creating a durable Export or reserving retention.
     pub(crate) async fn render(
         &self,
         photo_id: &str,
-        stage: &'static str,
-        settings: &'static str,
         cancellation: PreviewCancellation,
     ) -> Result<RenderedPreview, String> {
-        if stage == "film" {
-            // The fixed Film stage has no qualified local execution path;
-            // the caller reports the stage unavailable instead of admitting
-            // work that can never produce a rendition.
-            return Err("the Film stage is not qualified for local development".to_owned());
-        }
         let _slot = self.exports.acquire_heavy_slot().await;
         if cancellation.is_cancelled() {
             return Err("preview render cancelled".to_owned());
@@ -138,8 +104,6 @@ impl PreviewRender {
         if cancellation.is_cancelled() {
             return Err("preview render cancelled".to_owned());
         }
-        let bundle_sha256 = self.exports.bundle_sha256().to_owned();
-
         let photo = self
             .library
             .photo(photo_id)
@@ -158,31 +122,7 @@ impl PreviewRender {
         let Some(source_revision) = read.current_source_revision.clone() else {
             return Err("source facts are pending publication".to_owned());
         };
-        // The baseline selector names the processing baseline itself: 0 EV
-        // against the documented baseline and as-shot white balance,
-        // independently of the saved recipe. A Photo without a saved recipe
-        // is that same baseline.
-        let baseline = settings == "baseline";
         let target = ExportTarget::DevelopmentTiff;
-        let recipe = match read.recipe.as_ref() {
-            Some(recipe) if !baseline => ExportRecipePayload::capture(
-                &recipe.settings,
-                ExportExposureRange {
-                    minimum_milli_ev: APPROVED_EXPOSURE_MILLI_EV_MIN,
-                    maximum_milli_ev: APPROVED_EXPOSURE_MILLI_EV_MAX,
-                },
-            )
-            .map_err(|_| "captured recipe is not representable by the execution payload")?,
-            _ => ExportRecipePayload {
-                exposure_milli_ev: 0,
-                white_balance_mode: "as-shot",
-            },
-        };
-        let recipe_revision = match read.recipe.as_ref() {
-            Some(recipe) if !baseline => Some(recipe.revision.clone()),
-            _ => None,
-        };
-        let exposure_milli_ev = recipe.exposure_milli_ev;
         let (staged, source_profile_id) = self
             .exports
             .stage_preview_original(
@@ -218,7 +158,7 @@ impl PreviewRender {
             .develop(
                 staged.path().to_path_buf(),
                 output_path.clone(),
-                exposure_milli_ev,
+                0,
                 cancellation.token(),
             )
             .await;
@@ -228,12 +168,12 @@ impl PreviewRender {
         // Verify the developed bytes against the executor's report and the
         // closed Development TIFF contract before the ephemeral publication.
         let validation_path = output_path.clone();
-        let output_facts = match tokio::task::spawn_blocking(move || {
+        match tokio::task::spawn_blocking(move || {
             verify_developed_output(&validation_path, &identity, target)
         })
         .await
         {
-            Ok(Ok(facts)) => facts,
+            Ok(Ok(_)) => (),
             Ok(Err(_)) => return Err(OUTPUT_VALIDATION_FAILED.to_owned()),
             Err(error) => return Err(format!("preview validation task failed: {error}")),
         };
@@ -252,17 +192,6 @@ impl PreviewRender {
         Ok(RenderedPreview {
             attempt_key,
             path: published.path,
-            size: published.size,
-            sha256: published.sha256,
-            identity: RenderedIdentity {
-                stage,
-                settings,
-                bundle_sha256,
-                source_revision,
-                recipe_revision,
-                exposure_milli_ev,
-            },
-            output_facts,
             source_size,
             source_sha256,
             source_profile_id,

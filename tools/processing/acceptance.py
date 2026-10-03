@@ -1,39 +1,17 @@
-"""Photo development workflow acceptance runner for Issue #334.
+"""Selected darktable step operator acceptance for Issue #496.
 
-Drives a deployed Slipstream instance through the real HTTP surface defined by
-`design/photo-development.md` (Service Surface and Wire contract): capability
-read, Photo resolution, Edit Recipe read, guarded exposure save and reversal,
-Edit Preview, Development TIFF Export through terminal settlement, and artifact
-download with byte-level validation.  The tool never writes inside the
-instance's Library or Originals directory: the only files it creates are
-downloaded artifacts inside the explicit output directory, and it proves the
-fixture Original and any external XMP sidecar unchanged by hashing them before
-and after the run without opening them for writing.
-
-The Film (`finished-jpeg`) service stage is implemented.  Native Film
-qualification remains an explicit deployment gate, so this runner records that
-gate as not covered instead of claiming production acceptance from a generic
-workflow run.
-
-The tool must never run against an operator's live library.  It refuses to run
-without `--i-acknowledge-this-is-an-acceptance-instance`, and the documented
-target is a dedicated acceptance deployment (see tools/processing/README.md).
-`--max-download-bytes` carries that deployment's retained-output allowance, so
-the runner admits the qualified Development TIFF's declared size instead of
-refusing it against a smaller default bound.
-
-Exit codes: 0 when every step that ran passed, 1 when any step failed, and 2
-when the run was blocked (steps could not run, for example because a route of
-the merged wire contract is not deployed yet) or the invocation was refused.
-A JSON report is printed on standard output; a human-readable summary goes to
-standard error.
+Run only against an acknowledged dedicated acceptance instance and an explicitly
+approved RAW fixture. Qualification remains limited to the pinned engine,
+fixture, manual exposure tree, output contract and finite deployment allocation.
+Standalone SpektraFilm qualification is a separate explicitly admitted exercise.
 """
-
 from __future__ import annotations
-
 import argparse
+import copy
 import hashlib
 import json
+import math
+import os
 import re
 import secrets
 import stat
@@ -49,166 +27,27 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 MAX_JSON_BYTES = 1024 * 1024
-# The read bound for an artifact download.  The default covers a small
-# deployment; a full-resolution float32 Development TIFF is larger, so the
-# operator passes the deployment's own published bound with
-# `--max-download-bytes` (its `SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES`
-# value, see docs/deployment.md).
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
-# The service's hard output maximum (`MAX_OUTPUT_BYTES` in
-# `crates/slipstream-processing/src/photo.rs`): the most any single published
-# artifact can be.  A larger configured bound would only invite reading bytes
-# the deployment cannot legitimately publish.
 MAXIMUM_DOWNLOAD_BYTES = 4 * 1024 * 1024 * 1024
 DOWNLOAD_SLACK_BYTES = 65536
-
-# The qualified writer writes each compressed strip through its own buffer, so
-# a written strip can extend one byte past its declared `StripByteCounts` entry
-# and the artifact can end a few bytes past the last declared strip. That
-# padding is not payload: every declared strip is inflated and compared to its
-# declared row bytes above, which is what proves the artifact covers its
-# geometry.
 STRIP_PADDING_MAXIMUM = 64
 MAX_TOKEN_BYTES = 4096
 MAX_QUERY_PAGES = 50
-
-CAPABILITY_PATH = "/api/processing/capability"
-CAPABILITIES_PATH = "/api/capabilities"
-PHOTO_QUERIES_PATH = "/api/photo-queries"
-EDIT_RECIPE_PATH = "/api/photos/{id}/edit-recipe"
-EDIT_PREVIEW_PATH = "/api/photos/{id}/edit-preview/{stage}"
-PHOTO_EXPORTS_PATH = "/api/photos/{id}/exports"
-EXPORT_PATH = "/api/exports/{id}"
-EXPORT_ARTIFACT_PATH = "/api/exports/{id}/artifact"
-
-# The server publishes its page bound in `GET /api/capabilities`
-# (`limits.listPageMaximum`, currently 60, `crates/slipstream-server/src/queries.rs`
-# `MAXIMUM_LIST_PAGE`).  The runner uses the published value for paging and
-# falls back to the current bound when the capability read is unavailable.
 FALLBACK_LIST_PAGE_MAXIMUM = 60
 MAXIMUM_QUERY_LIMIT_BOUND = 10_000
-
-DEVELOPMENT_TARGET = "development-tiff"
-DEVELOP_STAGE = "develop"
-DISPLAY_TRANSFORM_IDENTITY = "display-transform-v1"
-DEVELOPMENT_CONTENT_TYPE = "image/tiff"
-PREVIEW_CONTENT_TYPE = "image/jpeg"
-
-# The pinned Development TIFF source profiles from design/development-color.md:
-# the bundle asset and the legacy-normalized profile the qualified darktable run
-# embeds.  They differ only in description-tag bytes.
+CAPABILITIES_PATH = "/api/capabilities"
+PHOTO_QUERIES_PATH = "/api/photo-queries"
+MODULES_PATH = "/api/processing/modules"
+RECIPE_PATH = "/api/photos/{id}/processing-recipe"
+PREVIEW_PATH = "/api/photos/{id}/processing-preview/{step}"
+EXPORTS_PATH = "/api/photos/{id}/processing-exports"
+ARTIFACT_PATH = "/api/processing-artifacts/{id}"
 PINNED_SOURCE_PROFILE_DIGESTS = (
     "df7b2c677645f1ca5364b52e62f8db04ca61f80163792942f3e409a84a6b12ed",
     "7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe",
 )
-
-CAPABILITY_STATES = (
-    "disabled",
-    "bundle-unavailable",
-    "source-unsupported",
-    "resource-unavailable",
-    "ready",
-)
-STAGE_STATES = ("ready", "unavailable", "unsupported")
-SOURCE_SUPPORT_STATES = ("supported", "unavailable", "unsupported")
-# The closed `supportReason` set from the Edit Recipe wire contract
-# (design/photo-development.md#wire-contract).  `original-missing` and
-# `original-unreadable` are confirmed outcomes for the current source
-# revision; `read-pending` and `resource-unavailable` are retryable wait
-# states the service resolves without a restart.
-SUPPORT_REASONS = (
-    "original-missing",
-    "original-unreadable",
-    "read-pending",
-    "resource-unavailable",
-)
-RETRYABLE_SUPPORT_REASONS = ("read-pending", "resource-unavailable")
-
-ARTIFACT_METADATA_FIELDS = (
-    "exportId",
-    "target",
-    "stage",
-    "contentType",
-    "filename",
-    "orientation",
-    "sampleFormat",
-    "colorSpace",
-    "iccEmbedded",
-    "width",
-    "height",
-    "profileIdentity",
-    "byteLength",
-    "sha256",
-    "expiresAt",
-)
-PREVIEW_METADATA_FIELDS = (
-    "photoId",
-    "stage",
-    "contentType",
-    "width",
-    "height",
-    "byteLength",
-    "sha256",
-    "sourceRevision",
-    "recipeVersion",
-    "displayTransform",
-    "expiresAt",
-)
-
-# The closed wire-field names of the merged contract travel in typed response
-# headers under the route's kebab-case prefix (`crates/slipstream-server/src`
-# `edit_preview.rs` and `http.rs`); content type and byte length travel in the
-# standard `Content-Type` and `Content-Length` headers.
-ARTIFACT_METADATA_HEADERS = {
-    "exportId": "slipstream-artifact-export-id",
-    "target": "slipstream-artifact-target",
-    "stage": "slipstream-artifact-stage",
-    "contentType": "Content-Type",
-    "filename": "slipstream-artifact-filename",
-    "orientation": "slipstream-artifact-orientation",
-    "sampleFormat": "slipstream-artifact-sample-format",
-    "colorSpace": "slipstream-artifact-color-space",
-    "iccEmbedded": "slipstream-artifact-icc-embedded",
-    "width": "slipstream-artifact-width",
-    "height": "slipstream-artifact-height",
-    "profileIdentity": "slipstream-artifact-profile-identity",
-    "byteLength": "slipstream-artifact-byte-length",
-    "sha256": "slipstream-artifact-sha256",
-    "expiresAt": "slipstream-artifact-expires-at",
-}
-PREVIEW_METADATA_HEADERS = {
-    "photoId": "slipstream-edit-preview-photo-id",
-    "stage": "slipstream-edit-preview-stage",
-    "contentType": "Content-Type",
-    "width": "slipstream-edit-preview-width",
-    "height": "slipstream-edit-preview-height",
-    "byteLength": "Content-Length",
-    "sha256": "slipstream-edit-preview-sha256",
-    "sourceRevision": "slipstream-edit-preview-source-revision",
-    "recipeVersion": "slipstream-edit-preview-recipe-version",
-    "displayTransform": "slipstream-edit-preview-display-transform",
-    "expiresAt": "slipstream-edit-preview-expires-at",
-}
-
-_SAVE_OUTCOMES = (
-    "saved",
-    "unchanged",
-    "unknown",
-    "receipt_expired",
-    "recipe_conflict",
-    "source_changed",
-    "requires_rebind",
-    "request_conflict",
-    "missing_recipe",
-    "unsupported",
-    "invalid_settings",
-    "unavailable",
-)
-_EXPORT_STATES = ("queued", "running", "succeeded", "failed", "cancelled")
 _LOWER_HEX_64 = re.compile(r"\A[0-9a-f]{64}\Z")
-_LOWER_HEX_32 = re.compile(r"\A[0-9a-f]{32}\Z")
 _REQUEST_IDENTITY = re.compile(r"\A[A-Za-z0-9._-]{1,128}\Z")
-
 
 class AcceptanceFailure(Exception):
     """A step failed for the recorded reason."""
@@ -218,14 +57,6 @@ class AcceptanceFailure(Exception):
         self.reason = reason
         self.detail = detail or {}
 
-
-class RouteMissing(Exception):
-    """A route of the merged wire contract is not deployed; the step is skipped."""
-
-    def __init__(self, reason: str, detail: dict | None = None):
-        super().__init__(reason)
-        self.reason = reason
-        self.detail = detail or {}
 
 
 class TransportFailure(Exception):
@@ -289,280 +120,100 @@ def _require_string(payload: dict, key: str, problems: list) -> str | None:
     return value
 
 
-def validate_capability(payload: object) -> tuple[dict, list]:
-    """Validate `GET /api/processing/capability` against the wire contract."""
-    problems: list = []
-    facts: dict = {}
-    if not isinstance(payload, dict):
-        return facts, ["payload-not-object"]
-    facts["state"] = payload.get("state")
-    if payload.get("state") not in CAPABILITY_STATES:
-        problems.append("state-outside-closed-set")
-    # The bundle identity is null when the optional Photo extension is not
-    # installed; a ready capability always names it, and a present value must
-    # be the exact identity shape (`bundle_id` 64 hex, `incarnation` 32 hex
-    # server startup identity, `processing_capability.rs`).
-    ready = payload.get("state") == "ready"
-    facts["bundleId"] = payload.get("bundleId")
-    bundle_id = payload.get("bundleId")
-    if bundle_id is None:
-        if ready:
-            problems.append("bundleId-missing-when-ready")
-    elif not _LOWER_HEX_64.match(str(bundle_id)):
-        problems.append("bundleId-not-lowercase-hex-64")
-    facts["incarnation"] = payload.get("incarnation")
-    incarnation = payload.get("incarnation")
-    if incarnation is None:
-        if ready:
-            problems.append("incarnation-missing-when-ready")
-    elif not _LOWER_HEX_32.match(str(incarnation)):
-        problems.append("incarnation-not-lowercase-hex-32")
-    exposure = payload.get("exposure")
-    if not isinstance(exposure, dict):
-        problems.append("exposure-missing-or-not-object")
-    else:
-        for key in ("minimumEv", "maximumEv", "stepEv"):
-            value = exposure.get(key)
-            if not isinstance(value, (int, float)) or isinstance(value, bool):
-                problems.append(f"exposure-{key}-missing-or-not-number")
-        facts["exposure"] = exposure
-    profiles = payload.get("profiles")
-    if not isinstance(profiles, list):
-        problems.append("profiles-missing-or-not-array")
-        facts["profiles"] = []
-    else:
-        cleaned = []
-        for index, profile in enumerate(profiles):
-            if not isinstance(profile, dict):
-                problems.append(f"profiles-{index}-not-object")
-                continue
-            entry = {
-                "profileId": profile.get("profileId"),
-                "whiteBalanceModes": profile.get("whiteBalanceModes"),
-                "whiteBalanceRanges": profile.get("whiteBalanceRanges"),
-            }
-            if not isinstance(entry["profileId"], str) or not entry["profileId"]:
-                problems.append(f"profiles-{index}-profileId-missing")
-            modes = entry["whiteBalanceModes"]
-            if not isinstance(modes, list):
-                problems.append(f"profiles-{index}-whiteBalanceModes-missing")
-            elif any(not isinstance(mode, str) or not mode for mode in modes):
-                problems.append(f"profiles-{index}-whiteBalanceModes-element-not-string")
-            if entry["whiteBalanceRanges"] is not None:
-                ranges = entry["whiteBalanceRanges"]
-                if not isinstance(ranges, dict):
-                    problems.append(f"profiles-{index}-whiteBalanceRanges-invalid")
-                else:
-                    for mode, bound in ranges.items():
-                        if not isinstance(mode, str) or not isinstance(bound, dict):
-                            problems.append(f"profiles-{index}-whiteBalanceRanges-entry-invalid")
-            cleaned.append(entry)
-        facts["profiles"] = cleaned
-    stages = payload.get("stages")
-    if not isinstance(stages, dict) or set(stages) != {"develop", "film"}:
-        problems.append("stages-must-name-develop-and-film")
-        facts["stages"] = {}
-    else:
-        for key, value in stages.items():
-            if value not in STAGE_STATES:
-                problems.append(f"stages-{key}-outside-closed-set")
-        facts["stages"] = dict(stages)
-    return facts, problems
+def qualified_darktable_tree(exposure: float) -> dict:
+    return {"stack": [{"operation": "exposure", "multiPriority": 0,
+        "enabled": True, "params": {"mode": "EXPOSURE_MODE_MANUAL",
+        "black": 0.0, "exposure": exposure, "compensate_exposure_bias": False,
+        "compensate_hilite_pres": False}}], "output": {"format": "tiff",
+        "precisionBits": 32, "colorSpace": "prophoto-rgb",
+        "transferFunction": "linear", "geometry": "source-preserving"}}
 
 
 def validate_recipe_read(payload: object, photo_id: str) -> tuple[dict, list]:
-    """Validate `GET /api/photos/{id}/edit-recipe` against the wire contract."""
-    problems: list = []
-    facts: dict = {}
+    problems = []
     if not isinstance(payload, dict):
-        return facts, ["payload-not-object"]
+        return {}, ["payload-not-object"]
     if payload.get("photoId") != photo_id:
         problems.append("photoId-mismatch")
-    source_revision = payload.get("sourceRevision")
-    facts["sourceRevision"] = source_revision
-    if source_revision is not None and (
-        not isinstance(source_revision, str) or not source_revision
-    ):
-        problems.append("sourceRevision-not-string-or-null")
-    support = payload.get("sourceSupport")
-    facts["sourceSupport"] = support
-    if support not in SOURCE_SUPPORT_STATES:
-        problems.append("sourceSupport-outside-closed-set")
-    if support == "unavailable":
-        if source_revision is not None:
-            problems.append("sourceRevision-must-be-null-when-unavailable")
-        if payload.get("supportReason") not in SUPPORT_REASONS:
-            problems.append("supportReason-invalid-for-unavailable")
-    else:
-        if payload.get("supportReason") is not None:
-            problems.append("supportReason-must-be-null-unless-unavailable")
+    source = payload.get("sourceRevision")
+    if not isinstance(source, str) or not source or len(source.encode("utf-8")) > 16384:
+        problems.append("sourceRevision-invalid")
     recipe = payload.get("recipe")
-    facts["recipe"] = recipe
     if recipe is not None:
         if not isinstance(recipe, dict):
-            problems.append("recipe-not-object-or-null")
+            problems.append("recipe-not-object")
         else:
-            if not isinstance(recipe.get("recipeVersion"), str) or not recipe.get("recipeVersion"):
-                problems.append("recipe-recipeVersion-missing")
-            exposure = recipe.get("exposureEv")
-            if not isinstance(exposure, (int, float)) or isinstance(exposure, bool):
-                problems.append("recipe-exposureEv-missing-or-not-number")
-            white_balance = recipe.get("whiteBalance")
-            if not isinstance(white_balance, dict) or not isinstance(
-                white_balance.get("mode"), str
-            ):
-                problems.append("recipe-whiteBalance-invalid")
-    if not isinstance(payload.get("processingAvailable"), bool):
-        problems.append("processingAvailable-missing-or-not-boolean")
-    controls = payload.get("controls")
-    if not isinstance(controls, dict):
-        problems.append("controls-missing-or-not-object")
-    else:
-        exposure_controls = controls.get("exposure")
-        if not isinstance(exposure_controls, dict):
-            problems.append("controls-exposure-missing")
-        else:
-            for key in ("minimumEv", "maximumEv", "stepEv"):
-                if not isinstance(exposure_controls.get(key), (int, float)) or isinstance(
-                    exposure_controls.get(key), bool
-                ):
-                    problems.append(f"controls-exposure-{key}-invalid")
-        if not isinstance(controls.get("whiteBalanceModes"), list):
-            problems.append("controls-whiteBalanceModes-missing")
-        facts["controls"] = controls
+            if recipe.get("photoId") != photo_id:
+                problems.append("recipe-photoId-mismatch")
+            revision = recipe.get("revision")
+            if not isinstance(revision, str) or not revision or len(revision.encode("utf-8")) > 128:
+                problems.append("recipe-revision-missing-or-outside-bound")
+            if recipe.get("sourceRevision") != source:
+                problems.append("recipe-requires-explicit-rebind")
+            steps = recipe.get("steps")
+            if not isinstance(steps, list):
+                problems.append("recipe-steps-not-array")
+            elif any(not isinstance(step, dict) or not isinstance(step.get("stepId"), str)
+                     or not step["stepId"] for step in steps):
+                problems.append("recipe-step-invalid")
+            elif recipe.get("currentStepId") is not None and sum(
+                step.get("stepId") == recipe["currentStepId"] for step in steps) != 1:
+                problems.append("recipe-current-step-invalid")
+    return dict(payload), problems
+
+
+def validate_captured_identity(value: object, expected: dict) -> list:
+    if not isinstance(value, dict):
+        return ["captured-identity-not-object"]
+    return [f"{key}-mismatch" for key, wanted in expected.items() if value.get(key) != wanted]
+
+
+def validate_png(data: bytes, maximum_edge: int) -> tuple[dict, list]:
+    """Inspect complete PNG framing, CRCs, dimensions and bounded decoded rows."""
+    facts, problems = {}, []
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        return facts, ["png-signature-invalid"]
+    position, compressed, seen_end = 8, bytearray(), False
+    while position < len(data):
+        if position + 12 > len(data):
+            return facts, ["png-chunk-truncated"]
+        size = struct.unpack(">I", data[position:position+4])[0]
+        kind = data[position+4:position+8]
+        end = position + 12 + size
+        if end > len(data):
+            return facts, ["png-chunk-truncated"]
+        payload = data[position+8:end-4]
+        if zlib.crc32(kind + payload) & 0xffffffff != struct.unpack(">I", data[end-4:end])[0]:
+            return facts, ["png-crc-invalid"]
+        if kind == b"IHDR":
+            if position != 8 or size != 13 or facts:
+                return facts, ["png-ihdr-invalid"]
+            width, height, bits, color, compression, filtering, interlace = struct.unpack(">IIBBBBB", payload)
+            if not 0 < width <= maximum_edge or not 0 < height <= maximum_edge:
+                return facts, ["png-geometry-exceeds-bound"]
+            if bits != 8 or color not in (2, 6) or (compression, filtering, interlace) != (0, 0, 0):
+                return facts, ["png-pixel-contract-invalid"]
+            facts = {"width": width, "height": height, "channels": 3 if color == 2 else 4}
+        elif kind == b"IDAT":
+            compressed.extend(payload)
+        elif kind == b"IEND":
+            if size or end != len(data):
+                return facts, ["png-end-invalid"]
+            seen_end = True
+        position = end
+    if not facts or not seen_end:
+        return facts, ["png-incomplete"]
+    expected = (facts["width"] * facts["channels"] + 1) * facts["height"]
+    decoder = zlib.decompressobj()
+    try:
+        decoded = decoder.decompress(compressed, expected + 1)
+    except zlib.error:
+        return facts, ["png-deflate-invalid"]
+    if len(decoded) != expected or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+        problems.append("png-decoded-size-invalid")
+    elif any(decoded[row * (facts["width"] * facts["channels"] + 1)] > 4 for row in range(facts["height"])):
+        problems.append("png-filter-invalid")
     return facts, problems
-
-
-def build_save_body(
-    request_id: str,
-    expected_recipe_version: str | None,
-    expected_source_revision: str,
-    exposure_ev: float,
-    white_balance_mode: str = "as-shot",
-) -> dict:
-    return {
-        "requestId": request_id,
-        "expectedRecipeVersion": expected_recipe_version,
-        "expectedSourceRevision": expected_source_revision,
-        "settings": {
-            "exposureEv": exposure_ev,
-            "whiteBalance": {"mode": white_balance_mode},
-        },
-    }
-
-
-def validate_save_response(payload: object) -> tuple[dict, list]:
-    """Validate a guarded-save response for the outcome the caller asserts."""
-    problems: list = []
-    facts: dict = {}
-    if not isinstance(payload, dict):
-        return facts, ["payload-not-object"]
-    outcome = payload.get("outcome")
-    facts["outcome"] = outcome
-    if outcome not in _SAVE_OUTCOMES:
-        problems.append("outcome-outside-closed-set")
-        return facts, problems
-    if outcome in ("saved", "unchanged"):
-        version = payload.get("recipeVersion")
-        if not isinstance(version, str) or not version:
-            problems.append("recipeVersion-missing-for-committed-outcome")
-        facts["recipeVersion"] = version
-        revision = payload.get("sourceRevision")
-        if not isinstance(revision, str) or not revision:
-            problems.append("sourceRevision-missing-for-committed-outcome")
-        facts["sourceRevision"] = revision
-    if outcome in (
-        "recipe_conflict",
-        "source_changed",
-        "requires_rebind",
-        "request_conflict",
-    ):
-        facts["currentSourceRevision"] = payload.get("currentSourceRevision")
-        facts["currentRecipeVersion"] = payload.get("currentRecipeVersion")
-    return facts, problems
-
-
-def choose_exposure(controls: dict, baseline: float | None) -> float:
-    """Pick one guard-safe exposure step away from the baseline, on the grid."""
-    exposure = controls.get("exposure", {})
-    minimum = exposure.get("minimumEv")
-    maximum = exposure.get("maximumEv")
-    step = exposure.get("stepEv")
-    if step is None or step <= 0:
-        raise AcceptanceFailure("exposure-step-invalid", {"stepEv": step})
-    base = 0.0 if baseline is None else baseline
-    steps = round((base - minimum) / step)
-    snapped = round(minimum + steps * step, 9)
-    up = round(snapped + step, 9)
-    down = round(snapped - step, 9)
-    if up <= maximum:
-        return up
-    if down >= minimum:
-        return down
-    raise AcceptanceFailure(
-        "no-exposure-headroom",
-        {"minimumEv": minimum, "maximumEv": maximum, "stepEv": step},
-    )
-
-
-def exposure_on_grid(controls: dict, value: float) -> float:
-    """Snap a target exposure onto the approved grid and clamp into range."""
-    exposure = controls.get("exposure", {})
-    minimum = exposure.get("minimumEv")
-    maximum = exposure.get("maximumEv")
-    step = exposure.get("stepEv")
-    if step is None or step <= 0:
-        raise AcceptanceFailure("exposure-step-invalid", {"stepEv": step})
-    base = 0.0 if value is None else value
-    steps = round((base - minimum) / step)
-    snapped = round(minimum + steps * step, 9)
-    return min(maximum, max(minimum, snapped))
-
-
-def collect_metadata_headers(headers, fields, header_names) -> tuple[dict, list]:
-    """Collect the closed typed metadata set from response headers.
-
-    `header_names` maps each wire field to the header that carries it; the
-    standard `Content-Type` and `Content-Length` headers carry the content
-    type and byte length of both framed routes.
-    """
-    metadata: dict = {}
-    problems: list = []
-    for name in fields:
-        header_name = header_names[name]
-        values = headers.get_all(header_name)
-        if not values:
-            problems.append(f"header-{name}-missing")
-            continue
-        if len(values) != 1:
-            problems.append(f"header-{name}-repeated")
-            continue
-        metadata[name] = values[0]
-    return metadata, problems
-
-
-def header_object_mismatches(metadata: dict, artifact: dict) -> list:
-    """Compare download headers with the inspect artifact object, field for field."""
-    problems: list = []
-    for name in ARTIFACT_METADATA_FIELDS:
-        if name not in metadata or name not in artifact:
-            continue
-        header_value = metadata[name]
-        object_value = artifact[name]
-        if name in ("width", "height", "byteLength"):
-            try:
-                if int(header_value) != object_value:
-                    problems.append(f"{name}-header-object-mismatch")
-            except (TypeError, ValueError):
-                problems.append(f"{name}-header-not-integer")
-            continue
-        if name == "iccEmbedded":
-            if header_value != ("true" if object_value is True else "false"):
-                problems.append(f"{name}-header-object-mismatch")
-            continue
-        if str(header_value) != str(object_value):
-            problems.append(f"{name}-header-object-mismatch")
-    return problems
 
 
 def artifact_download_limit(declared: object, maximum: int = MAX_DOWNLOAD_BYTES) -> tuple[int, list]:
@@ -584,216 +235,6 @@ def artifact_download_limit(declared: object, maximum: int = MAX_DOWNLOAD_BYTES)
         problems.append("declared-byteLength-exceeds-download-limit")
         return maximum, problems
     return min(declared + DOWNLOAD_SLACK_BYTES, maximum), problems
-
-
-def validate_artifact_object(artifact: object, maximum: int = MAX_DOWNLOAD_BYTES) -> tuple[dict, list]:
-    """Validate the closed artifact metadata object of `GET /api/exports/{id}`."""
-    problems: list = []
-    if not isinstance(artifact, dict):
-        return {}, ["artifact-not-object-or-null"]
-    if set(artifact) != set(ARTIFACT_METADATA_FIELDS):
-        problems.append("artifact-fields-not-exactly-closed-set")
-    facts = dict(artifact)
-    for name in ("width", "height", "byteLength"):
-        if not isinstance(artifact.get(name), int) or isinstance(artifact.get(name), bool):
-            problems.append(f"artifact-{name}-not-integer")
-    declared = artifact.get("byteLength")
-    if isinstance(declared, int) and not isinstance(declared, bool):
-        if declared <= 0:
-            problems.append("artifact-byteLength-not-positive")
-        elif declared > maximum:
-            problems.append("artifact-byteLength-exceeds-download-limit")
-    if not _LOWER_HEX_64.match(str(artifact.get("sha256", ""))):
-        problems.append("artifact-sha256-not-lowercase-hex-64")
-    if parse_timestamp(artifact.get("expiresAt")) is None:
-        problems.append("artifact-expiresAt-unparsable")
-    if artifact.get("target") != DEVELOPMENT_TARGET:
-        problems.append("artifact-target-not-development-tiff")
-    if artifact.get("stage") != DEVELOP_STAGE:
-        problems.append("artifact-stage-not-develop")
-    expected = {
-        "contentType": DEVELOPMENT_CONTENT_TYPE,
-        "filename": f"{artifact.get('exportId')}.tiff",
-        "orientation": "top-left",
-        "sampleFormat": "float32",
-        "colorSpace": "scene-linear ProPhoto RGB",
-        "iccEmbedded": True,
-    }
-    for name, value in expected.items():
-        if artifact.get(name) != value or (
-            name == "iccEmbedded" and artifact.get(name) is not True
-        ):
-            problems.append(f"artifact-{name}-invalid")
-    return facts, problems
-
-
-def validate_export_submission(
-    payload: object,
-    expected_recipe_version: str | None = None,
-    expected_source_revision: str | None = None,
-) -> tuple[dict, list]:
-    """Validate the 201/200 body of `POST /api/photos/{id}/exports`."""
-    problems: list = []
-    facts: dict = {}
-    export_id = payload.get("exportId") if isinstance(payload, dict) else None
-    if not isinstance(export_id, str) or not export_id:
-        problems.append("exportId-missing")
-    elif not valid_request_identity(export_id):
-        problems.append("exportId-outside-character-set")
-    facts["exportId"] = export_id
-    facts["state"] = payload.get("state")
-    if payload.get("state") not in ("queued", "running"):
-        problems.append("state-not-queued-or-running")
-    if payload.get("target") != DEVELOPMENT_TARGET:
-        problems.append("target-not-development-tiff")
-    for key in ("recipeVersion", "sourceRevision"):
-        if not isinstance(payload.get(key), str) or not payload.get(key):
-            problems.append(f"{key}-missing")
-    if expected_recipe_version is not None and payload.get("recipeVersion") != expected_recipe_version:
-        problems.append("recipeVersion-mismatch")
-    if expected_source_revision is not None and payload.get("sourceRevision") != expected_source_revision:
-        problems.append("sourceRevision-mismatch")
-    facts["receiptExpiresAt"] = payload.get("receiptExpiresAt")
-    if payload.get("receiptExpiresAt") is not None:
-        problems.append("receiptExpiresAt-not-null-while-active")
-    facts["artifactExpiresAt"] = payload.get("artifactExpiresAt")
-    if payload.get("artifactExpiresAt") is not None:
-        problems.append("artifactExpiresAt-not-null-before-publication")
-    return facts, problems
-
-
-def validate_export_inspection(
-    payload: object,
-    export_id: str,
-    photo_id: str | None = None,
-    recipe_version: str | None = None,
-    source_revision: str | None = None,
-    maximum_download_bytes: int = MAX_DOWNLOAD_BYTES,
-) -> tuple[dict, list]:
-    """Validate `GET /api/exports/{id}` against the wire contract."""
-    problems: list = []
-    facts: dict = {}
-    if not isinstance(payload, dict):
-        return facts, ["payload-not-object"]
-    if payload.get("exportId") != export_id:
-        problems.append("exportId-mismatch")
-    if photo_id is not None and payload.get("photoId") != photo_id:
-        problems.append("photoId-mismatch")
-    if recipe_version is not None and payload.get("recipeVersion") != recipe_version:
-        problems.append("recipeVersion-mismatch")
-    if source_revision is not None and payload.get("sourceRevision") != source_revision:
-        problems.append("sourceRevision-mismatch")
-    state = payload.get("state")
-    facts["state"] = state
-    if state not in _EXPORT_STATES:
-        problems.append("state-outside-closed-set")
-    if payload.get("target") != DEVELOPMENT_TARGET:
-        problems.append("target-not-development-tiff")
-    for key in ("recipeVersion", "sourceRevision", "bundleId"):
-        if not isinstance(payload.get(key), str) or not payload.get(key):
-            problems.append(f"{key}-missing")
-    terminal = payload.get("terminalOutcome")
-    facts["terminalOutcome"] = terminal
-    expected_terminal = state if state in ("succeeded", "failed", "cancelled") else None
-    if terminal != expected_terminal:
-        problems.append("terminalOutcome-inconsistent-with-state")
-    if state == "succeeded":
-        if payload.get("receiptExpiresAt") is None:
-            problems.append("receiptExpiresAt-null-after-settlement")
-        artifact = payload.get("artifact")
-        if artifact is None:
-            problems.append("artifact-null-after-succeeded")
-        else:
-            artifact_facts, artifact_problems = validate_artifact_object(
-                artifact, maximum_download_bytes
-            )
-            if isinstance(artifact, dict) and artifact.get("exportId") != payload.get("exportId"):
-                problems.append("artifact-exportId-mismatch")
-            facts["artifact"] = artifact_facts
-            problems.extend(artifact_problems)
-    else:
-        facts["artifact"] = payload.get("artifact")
-        if payload.get("artifact") is not None and state in ("failed", "cancelled"):
-            problems.append("artifact-present-without-success")
-    facts["failureReason"] = payload.get("failureReason")
-    if state == "failed" and not isinstance(payload.get("failureReason"), str):
-        problems.append("failureReason-missing-after-failure")
-    return facts, problems
-
-
-def validate_preview_headers(
-    metadata: dict,
-    photo_id: str,
-    expected_source_revision: str,
-    expected_recipe_version: str,
-) -> list:
-    problems: list = []
-    if metadata.get("photoId") != photo_id:
-        problems.append("header-photoId-mismatch")
-    if metadata.get("stage") != DEVELOP_STAGE:
-        problems.append("header-stage-not-develop")
-    if metadata.get("contentType") != PREVIEW_CONTENT_TYPE:
-        problems.append("header-contentType-unsupported")
-    if metadata.get("sourceRevision") != expected_source_revision:
-        problems.append("header-sourceRevision-mismatch")
-    if metadata.get("recipeVersion") != expected_recipe_version:
-        problems.append("header-recipeVersion-mismatch")
-    if metadata.get("displayTransform") != DISPLAY_TRANSFORM_IDENTITY:
-        problems.append("header-displayTransform-unexpected")
-    for name in ("width", "height", "byteLength"):
-        try:
-            int(metadata[name])
-        except (KeyError, TypeError, ValueError):
-            problems.append(f"header-{name}-not-integer")
-    if not _LOWER_HEX_64.match(str(metadata.get("sha256", ""))):
-        problems.append("header-sha256-not-lowercase-hex-64")
-    if parse_timestamp(metadata.get("expiresAt")) is None:
-        problems.append("header-expiresAt-unparsable")
-    return problems
-
-
-def validate_preview_body(metadata: dict, body: bytes) -> tuple[dict, list]:
-    """Check the preview stream bytes against the declared typed metadata."""
-    problems: list = []
-    facts: dict = {"decode": None}
-    if metadata.get("byteLength") is not None:
-        try:
-            if int(metadata["byteLength"]) != len(body):
-                problems.append("byteLength-mismatch")
-        except (TypeError, ValueError):
-            problems.append("byteLength-not-integer")
-    digest = sha256_hex(body)
-    facts["sha256"] = digest
-    if metadata.get("sha256") != digest:
-        problems.append("sha256-mismatch")
-    content_type = str(metadata.get("contentType", ""))
-    facts["contentType"] = content_type
-    if content_type != PREVIEW_CONTENT_TYPE:
-        problems.append("preview-contentType-unsupported")
-    width = _optional_int(metadata.get("width"))
-    height = _optional_int(metadata.get("height"))
-    if body[:2] == b"\xff\xd8":
-        facts["decode"] = "jpeg-marker-walk"
-        jpeg_facts, jpeg_problems = validate_jpeg(body)
-        problems.extend(jpeg_problems)
-        facts["width"] = jpeg_facts.get("width")
-        facts["height"] = jpeg_facts.get("height")
-        if jpeg_facts.get("width") != width or jpeg_facts.get("height") != height:
-            problems.append("dimensions-mismatch")
-    else:
-        facts["decode"] = "unsupported-container"
-        if content_type == PREVIEW_CONTENT_TYPE:
-            problems.append("preview-body-contentType-mismatch")
-        else:
-            problems.append("preview-body-not-a-decodable-container")
-    return facts, problems
-
-
-def _optional_int(value: object) -> int | None:
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
 
 
 _TIFF_TYPE_SIZES = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8}
@@ -1020,53 +461,6 @@ def validate_development_tiff(
         problems.append("tiff-unaccounted-trailing-payload")
     return facts, problems
 
-def validate_jpeg(body: bytes) -> tuple[dict, list]:
-    """Walk the JPEG marker structure far enough to trust container dimensions."""
-    facts: dict = {"width": None, "height": None}
-    problems: list = []
-    if len(body) < 4 or body[:2] != b"\xff\xd8":
-        return facts, ["jpeg-soi-missing"]
-    position = 2
-    saw_sof = False
-    while position < len(body) - 1:
-        if body[position] != 0xFF:
-            problems.append("jpeg-marker-framing-broken")
-            return facts
-        while position < len(body) and body[position] == 0xFF:
-            position += 1
-        if position >= len(body):
-            break
-        marker = body[position]
-        position += 1
-        if marker in (0x01, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8):
-            continue
-        if marker == 0xD9:
-            facts["sawEOI"] = True
-            break
-        if position + 2 > len(body):
-            problems.append("jpeg-segment-truncated")
-            return facts
-        length = struct.unpack(">H", body[position : position + 2])[0]
-        if length < 2 or position + length > len(body):
-            problems.append("jpeg-segment-length-invalid")
-            return facts
-        segment = body[position + 2 : position + length]
-        if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
-            if len(segment) >= 5:
-                facts["height"] = struct.unpack(">H", segment[1:3])[0]
-                facts["width"] = struct.unpack(">H", segment[3:5])[0]
-            saw_sof = True
-        if marker == 0xDA:
-            facts["sawSOS"] = True
-            break
-        position += length
-    if not saw_sof:
-        problems.append("jpeg-sof-missing")
-    if body[-2:] != b"\xff\xd9":
-        problems.append("jpeg-eoi-missing")
-    return facts, problems
-
-
 def snapshot_original(path: Path) -> dict:
     """Read-only identity snapshot of one Original or sidecar file."""
     metadata = path.stat()
@@ -1158,18 +552,17 @@ def prepare_output_dir(raw: str, fixture: Path) -> Path:
         output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     except OSError as error:
         raise InvocationRefused("output-dir-unusable") from error
+    if output_dir.is_symlink():
+        raise InvocationRefused("output-dir-symlink")
     if not output_dir.is_dir():
         raise InvocationRefused("output-dir-not-directory")
+    if stat.S_IMODE(output_dir.stat().st_mode) & 0o077:
+        raise InvocationRefused("output-dir-not-private")
     resolved_output = output_dir.resolve()
     resolved_fixture = fixture.resolve()
     if resolved_fixture == resolved_output or resolved_output in resolved_fixture.parents:
         raise InvocationRefused("output-dir-must-not-contain-fixture")
     return output_dir
-
-
-# ---------------------------------------------------------------------------
-# HTTP client.
-# ---------------------------------------------------------------------------
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -1291,14 +684,14 @@ def structured_code(payload: object) -> str | None:
 
 
 def require_success(response: Response, parsed: object, context: str, accepted=(200,)):
-    """Turn a non-accepted response into a failure or a route-missing skip."""
+    """Fail any non-accepted response, including required undeployed routes."""
     if response.status in accepted:
         if not isinstance(parsed, dict):
             raise AcceptanceFailure(f"{context}-payload-not-object", {})
         return
     code = structured_code(parsed)
     if response.status == 404 and code is None:
-        raise RouteMissing(
+        raise AcceptanceFailure(
             "route-not-deployed",
             {"path": context, "status": response.status},
         )
@@ -1306,11 +699,6 @@ def require_success(response: Response, parsed: object, context: str, accepted=(
         f"{context}-refused",
         {"status": response.status, "code": code},
     )
-
-
-# ---------------------------------------------------------------------------
-# Runner.
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -1341,153 +729,333 @@ class StepRecord:
 
 
 class Runner:
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        token: str,
-        fixture: Path,
-        output_dir: Path,
-        request_timeout: float = 30.0,
-        settlement_timeout: float = 900.0,
-        preview_timeout: float = 120.0,
-        poll_interval: float = 2.0,
-        max_download_bytes: int = MAX_DOWNLOAD_BYTES,
-        accepted_profile_digests: tuple[str, ...] = PINNED_SOURCE_PROFILE_DIGESTS,
-        expected_identities: dict | None = None,
-        monotonic=time.monotonic,
-    ):
-        self.client = Client(base_url, token, timeout=request_timeout, max_download_bytes=max_download_bytes)
-        self.fixture = fixture
-        self.output_dir = output_dir
-        self.settlement_timeout = settlement_timeout
-        self.preview_timeout = preview_timeout
-        self.poll_interval = poll_interval
+    def __init__(self, *, base_url, token, fixture, output_dir,
+                 request_timeout=30.0, settlement_timeout=900.0,
+                 preview_timeout=120.0, poll_interval=2.0,
+                 max_download_bytes=MAX_DOWNLOAD_BYTES,
+                 accepted_profile_digests=PINNED_SOURCE_PROFILE_DIGESTS,
+                 expected_identities=None, monotonic=time.monotonic):
+        self.client = Client(base_url, token, request_timeout, max_download_bytes=max_download_bytes)
+        self.fixture, self.output_dir = fixture, output_dir
+        self.settlement_timeout, self.preview_timeout = settlement_timeout, preview_timeout
+        self.poll_interval, self.monotonic = poll_interval, monotonic
         self.accepted_profile_digests = accepted_profile_digests
         self.expected_identities = expected_identities or {}
-        self.monotonic = monotonic
-        self.steps: list[StepRecord] = []
-        self.identities: dict = {}
-        self.capability: dict = {}
-        self.photo_id: str | None = None
-        self.source_revision: str | None = None
-        self.observed_recipe: dict | None = None
-        self.recipe_version: str | None = None
-        self.saved_recipe: dict | None = None
-        self.controls: dict = {}
-        self.export_id: str | None = None
-        self.export_artifact: dict | None = None
-        self.written_files: list[str] = []
-        self.invariance_before: dict = {}
+        self.steps, self.identities, self.written_files = [], {}, []
+        self.invariance_before = {}
+        self.photo_id = self.source_revision = self.recipe_version = None
+        self.observed_recipe = self.saved_recipe = None
+        self.module = {}
+        self.step_id = new_request_identity("darktable")
+        self.export_request = self.export_identity = self.export_artifact = None
 
-    # -- plumbing -----------------------------------------------------------
-
-    def _step(self, name: str, function, gates: tuple = ()) -> StepRecord:
+    def _step(self, name, function, gates=()):
         record = StepRecord(name=name, startedAt=now_iso())
-        mark = self.monotonic()
-        log_mark = len(self.client.log)
-        gate = self._gate_block(gates)
-        if gate is not None:
-            record.status = "skipped"
-            record.reason = gate[0]
-            record.detail = gate[1]
+        start, mark = self.monotonic(), len(self.client.log)
+        blocked = next((step for step in self.steps if step.name in gates and step.status != "pass"), None)
+        if blocked:
+            record.status, record.reason = "skipped", "prerequisite-not-passed"
+            record.detail = {"prerequisite": blocked.name}
         else:
             try:
                 record.detail = function() or {}
-                record.status = "pass"
-            except AcceptanceFailure as error:
-                record.status = "fail"
-                record.reason = error.reason
-                record.detail = error.detail
-            except RouteMissing as error:
-                record.status = "skipped"
-                record.reason = error.reason
-                record.detail = error.detail
-            except TransportFailure as error:
-                record.status = "fail"
-                record.reason = error.reason
-                record.detail = error.detail
-        record.durationSeconds = self.monotonic() - mark
+            except (AcceptanceFailure, TransportFailure) as error:
+                record.status, record.reason, record.detail = "fail", error.reason, error.detail
+            except OSError as error:
+                record.status, record.reason = "fail", "local-file-unavailable"
+                record.detail = {"error": type(error).__name__}
+        record.durationSeconds = self.monotonic() - start
         record.finishedAt = now_iso()
-        record.requests = [
-            {"method": entry.method, "path": entry.path, "status": entry.status}
-            for entry in self.client.log[log_mark:]
-        ]
+        record.requests = [{"method": entry.method, "path": entry.path, "status": entry.status}
+                           for entry in self.client.log[mark:]]
         self.steps.append(record)
-        return record
 
-    def _gate_block(self, gates: tuple) -> tuple | None:
-        for gate in gates:
-            if isinstance(gate, tuple):
-                name, condition, reason, detail = gate
-                if not condition():
-                    return (reason, detail)
+    def _step_discovery(self):
+        response, payload = self.client.request_json("GET", MODULES_PATH)
+        require_success(response, payload, "module-discovery")
+        modules = payload.get("modules")
+        if not isinstance(modules, list):
+            raise AcceptanceFailure("modules-not-array")
+        peers = [module for module in modules if isinstance(module, dict) and module.get("id", {}).get("name") == "darktable"]
+        if len(peers) != 1:
+            raise AcceptanceFailure("darktable-discovery-ambiguous")
+        self.module = peers[0]
+        if self.module.get("parameterVersions") != ["darktable-params-1"] or self.module.get("id", {}).get("adapterVersion") != "darktable-adapter-1":
+            raise AcceptanceFailure("darktable-qualification-version-changed")
+        if not isinstance(self.module.get("parameterSchema"), dict):
+            raise AcceptanceFailure("darktable-parameter-schema-missing")
+        if self.module["parameterSchema"].get("default") != qualified_darktable_tree(0.0):
+            raise AcceptanceFailure("darktable-qualified-default-changed")
+        limits = self.module.get("limits", {})
+        if any(not isinstance(limits.get(key), int) or isinstance(limits[key], bool) or limits[key] <= 0
+               for key in ("maxInputBytes", "maxParameterBytes", "maxOutputPixels", "deadlineMillis")):
+            raise AcceptanceFailure("darktable-limits-invalid")
+        self.identities["module"] = "darktable"
+        self.identities["adapterSchemaVersion"] = "darktable-adapter-1"
+        self.identities["stepId"] = self.step_id
+        return {"module": "darktable", "availability": self.module.get("availability"), "limits": limits}
+
+    def _require_ready(self):
+        if self.module.get("availability", {}).get("state") != "ready":
+            raise AcceptanceFailure("darktable-not-ready", {"availability": self.module.get("availability")})
+
+    def _read_recipe(self, context):
+        deadline = self.monotonic() + self.settlement_timeout
+        while True:
+            response, payload = self.client.request_json("GET", RECIPE_PATH.format(id=self.photo_id))
+            require_success(response, payload, context)
+            if payload.get("sourceRevision") == "" and self.monotonic() < deadline:
+                time.sleep(min(self.poll_interval, max(0, deadline - self.monotonic())))
                 continue
-            record = self._record(gate)
-            if record is not None and record.status != "pass":
-                return (
-                    "prerequisite-not-passed",
-                    {
-                        "prerequisite": record.name,
-                        "prerequisiteStatus": record.status,
-                        "prerequisiteReason": record.reason,
-                    },
-                )
-        return None
+            facts, problems = validate_recipe_read(payload, self.photo_id)
+            if problems:
+                raise AcceptanceFailure(context + "-invalid", {"problems": problems})
+            return facts
 
-    def _record(self, name: str) -> StepRecord | None:
-        for record in self.steps:
-            if record.name == name:
-                return record
-        return None
+    def _step_recipe_read(self):
+        facts = self._read_recipe("recipe-read")
+        self.source_revision = facts["sourceRevision"]
+        self.observed_recipe = facts["recipe"]
+        self.recipe_version = (facts["recipe"] or {}).get("revision")
+        if self.observed_recipe:
+            self.step_id = self.observed_recipe.get("currentStepId") or self.step_id
+            selected = next((step for step in self.observed_recipe["steps"] if step["stepId"] == self.step_id), None)
+            if selected is None or selected.get("module") != "darktable" or selected.get("input") != self._original_input():
+                raise AcceptanceFailure("fixture-selected-step-not-qualified")
+            if selected.get("parameters", {}).get("schemaVersion") != "darktable-params-1" or selected["parameters"].get("tree") not in (qualified_darktable_tree(0.0), qualified_darktable_tree(1.0)):
+                raise AcceptanceFailure("fixture-retained-intent-outside-qualified-tree")
+        self.identities.update(sourceRevision=self.source_revision, stepId=self.step_id)
+        return {"hadSavedRecipe": self.observed_recipe is not None, "sourceRevision": self.source_revision}
 
-    def _skip(self, reason: str, detail: dict | None = None):
-        raise RouteMissing(reason, detail)
+    def _original_input(self):
+        return {"kind": "original", "photoId": self.photo_id, "sourceRevision": self.source_revision}
 
-    # -- steps ---------------------------------------------------------------
+    def _recipe_intent(self, exposure):
+        steps = copy.deepcopy((self.observed_recipe or {}).get("steps", []))
+        step = {"stepId": self.step_id, "module": "darktable", "input": self._original_input(),
+                "parameters": {"schemaVersion": "darktable-params-1", "tree": qualified_darktable_tree(exposure)}}
+        for index, prior in enumerate(steps):
+            if prior["stepId"] == self.step_id:
+                steps[index] = step
+                break
+        else:
+            steps.append(step)
+        return {"currentStepId": self.step_id, "steps": steps}
 
-    def _step_capability(self) -> dict:
-        response, payload = self.client.request_json("GET", CAPABILITY_PATH)
-        require_success(response, payload, "capability")
-        facts, problems = validate_capability(payload)
+    def _guarded_save(self, intent, purpose):
+        body = dict(copy.deepcopy(intent), requestId=new_request_identity(purpose),
+                    expectedRecipeRevision=self.recipe_version, expectedSourceRevision=self.source_revision)
+        response, payload = self.client.request_json("POST", RECIPE_PATH.format(id=self.photo_id), body)
+        require_success(response, payload, "recipe-save", accepted=(200, 201))
+        recipe = payload.get("recipe")
+        if payload.get("outcome") not in ("saved", "unchanged") or not isinstance(recipe, dict):
+            raise AcceptanceFailure("recipe-save-outcome-unexpected")
+        expected = dict(intent, photoId=self.photo_id, sourceRevision=self.source_revision)
+        problems = validate_captured_identity(recipe, expected)
+        version = recipe.get("revision")
+        if not isinstance(version, str) or not version or payload.get("recipeVersion") != version or payload.get("sourceRevision") != self.source_revision:
+            problems.append("save-guards-mismatch")
         if problems:
-            raise AcceptanceFailure("capability-invalid", {"problems": problems})
-        self.capability = facts
-        self.identities["capabilityState"] = facts["state"]
-        self.identities["bundleId"] = facts["bundleId"]
-        self.identities["incarnation"] = facts["incarnation"]
-        expected_bundle = self.expected_identities.get("bundleSha256")
-        if (
-            expected_bundle
-            and facts["bundleId"]
-            and expected_bundle != facts["bundleId"]
-        ):
-            raise AcceptanceFailure(
-                "capability-bundle-mismatch",
-                {"expected": expected_bundle, "observed": facts["bundleId"]},
-            )
-        detail = {
-            "state": facts["state"],
-            "bundleId": facts["bundleId"],
-            "stages": facts["stages"],
-        }
-        return detail
+            raise AcceptanceFailure("recipe-save-invalid", {"problems": problems})
+        self.recipe_version, self.saved_recipe = version, recipe
+        return {"revision": version, "outcome": payload["outcome"]}
 
-    def _processing_ready(self) -> bool:
-        return self.capability.get("state") == "ready"
+    def _step_save_exposure(self):
+        return self._guarded_save(self._recipe_intent(1.0), "save")
 
-    def _develop_ready(self) -> bool:
-        return self.capability.get("stages", {}).get(DEVELOP_STAGE) == "ready"
+    def _step_save_reversal(self):
+        baseline = ({key: copy.deepcopy(self.observed_recipe[key]) for key in ("currentStepId", "steps")}
+                    if self.observed_recipe else {"currentStepId": None, "steps": []})
+        result = self._guarded_save(baseline, "reversal")
+        self._step_recipe_reopen()
+        # Restore the qualified +1 EV selection for explicit processing.
+        self._guarded_save(self._recipe_intent(1.0), "restore-selection")
+        return result
 
-    def _require_processing_ready(self):
-        if not self._processing_ready() or not self._develop_ready():
-            self._skip(
-                "processing-not-ready",
-                {
-                    "capabilityState": self.capability.get("state"),
-                    "developStage": self.capability.get("stages", {}).get(DEVELOP_STAGE),
-                },
-            )
+    def _step_recipe_reopen(self):
+        facts = self._read_recipe("recipe-reopen")
+        if facts["recipe"] != self.saved_recipe or facts["sourceRevision"] != self.source_revision:
+            raise AcceptanceFailure("recipe-reopen-changed")
+        return {"revision": self.recipe_version, "unchanged": True}
+
+    def _captured(self):
+        selected = next(step for step in self.saved_recipe["steps"] if step["stepId"] == self.step_id)
+        return {"photoId": self.photo_id, "requestId": self.export_request["requestId"],
+                "stepId": self.step_id, "module": "darktable", "recipeRevision": self.recipe_version,
+                "sourceRevision": self.source_revision, "parameters": selected["parameters"],
+                "input": selected["input"], "adapterSchemaVersion": "darktable-adapter-1"}
+
+    def _step_submit_export(self):
+        self._require_ready()
+        self.export_request = {"requestId": new_request_identity("export"), "stepId": self.step_id,
+            "expectedRecipeRevision": self.recipe_version, "expectedSourceRevision": self.source_revision}
+        response, payload = self.client.request_json("POST", EXPORTS_PATH.format(id=self.photo_id), self.export_request)
+        require_success(response, payload, "export-submit", accepted=(202,))
+        receipt = payload.get("receipt")
+        problems = validate_captured_identity(receipt, self._captured())
+        if payload.get("outcome") != "accepted":
+            problems.append("outcome-not-accepted")
+        if not isinstance(receipt, dict) or receipt.get("state") not in ("accepted", "executing", "succeeded"):
+            problems.append("receipt-state-invalid")
+        bundle = receipt.get("bundleId") if isinstance(receipt, dict) else None
+        if not isinstance(bundle, str) or not _LOWER_HEX_64.fullmatch(bundle):
+            problems.append("bundleId-invalid")
+        if self.expected_identities.get("bundleSha256") and bundle != self.expected_identities["bundleSha256"]:
+            problems.append("bundleId-mismatch")
+        if problems:
+            raise AcceptanceFailure("export-submit-invalid", {"problems": problems})
+        self.export_identity = dict(self._captured(), bundleId=bundle)
+        self.identities.update(bundleId=bundle, exportRequestId=self.export_request["requestId"])
+        return {"requestId": self.export_request["requestId"], "state": receipt["state"]}
+
+    def _step_export_settlement(self):
+        deadline = self.monotonic() + self.settlement_timeout
+        path = EXPORTS_PATH.format(id=self.photo_id) + "/" + self.export_request["requestId"]
+        while True:
+            response, work = self.client.request_json("GET", path)
+            require_success(response, work, "export-status")
+            problems = validate_captured_identity(work, self.export_identity)
+            if work.get("state") not in ("accepted", "executing", "succeeded", "failed", "cancelled"):
+                problems.append("state-invalid")
+            if problems:
+                raise AcceptanceFailure("export-status-invalid", {"problems": problems})
+            if work["state"] in ("succeeded", "failed", "cancelled"):
+                break
+            if self.monotonic() >= deadline:
+                raise AcceptanceFailure("export-settlement-timeout", {"state": work["state"]})
+            time.sleep(min(self.poll_interval, max(0, deadline - self.monotonic())))
+        if work["state"] != "succeeded":
+            raise AcceptanceFailure("export-not-succeeded", {"state": work["state"], "failureReason": work.get("failureReason")})
+        terminal_at, retain_until = work.get("terminalAt"), work.get("retainUntil")
+        if (not isinstance(terminal_at, int) or isinstance(terminal_at, bool)
+                or not isinstance(retain_until, int) or isinstance(retain_until, bool)
+                or retain_until <= terminal_at or retain_until <= time.time()
+                or work.get("failureReason") is not None):
+            raise AcceptanceFailure("export-terminal-receipt-invalid")
+        artifact_id = work.get("artifactId")
+        if not valid_request_identity(artifact_id):
+            raise AcceptanceFailure("artifact-id-invalid")
+        response, artifact = self.client.request_json("GET", ARTIFACT_PATH.format(id=artifact_id))
+        require_success(response, artifact, "artifact-inspect")
+        expected = {key: value for key, value in self.export_identity.items() if key not in ("requestId", "recipeRevision", "sourceRevision", "input")}
+        expected["artifactId"] = artifact_id
+        problems = validate_captured_identity(artifact, expected)
+        input_evidence = artifact.get("input", {})
+        snapshot = self.invariance_before[str(self.fixture)]
+        if input_evidence != {"binding": self._original_input(), "sha256": snapshot["sha256"], "byteLength": snapshot["byteLength"]}:
+            problems.append("artifact-input-evidence-mismatch")
+        contract = artifact.get("outputContract", {})
+        for key, value in {"format": "tiff", "precision": "float32", "colorSpace": "prophoto-rgb", "transfer": "linear", "encoding": "deflate"}.items():
+            if contract.get(key) != value:
+                problems.append("artifact-output-" + key + "-invalid")
+        geometry = contract.get("geometry", {})
+        if any(not isinstance(geometry.get(key), int) or isinstance(geometry[key], bool) or geometry[key] <= 0 for key in ("width", "height")):
+            problems.append("artifact-geometry-invalid")
+        _, size_problems = artifact_download_limit(artifact.get("byteLength"), self.client.max_download_bytes)
+        problems.extend(size_problems)
+        if not _LOWER_HEX_64.fullmatch(str(artifact.get("sha256", ""))):
+            problems.append("artifact-sha256-invalid")
+        published = parse_timestamp(artifact.get("publishedAt"))
+        expires = parse_timestamp(artifact.get("expiresAt"))
+        if published is None or expires is None or expires <= published or expires <= datetime.now(timezone.utc):
+            problems.append("artifact-retention-invalid")
+        if artifact.get("filename") != f"{artifact_id}.tif":
+            problems.append("artifact-filename-invalid")
+        if problems:
+            raise AcceptanceFailure("artifact-inspect-invalid", {"problems": problems})
+        self.export_artifact = artifact
+        self.identities["exportState"] = work["state"]
+        return {"state": work["state"], "artifact": artifact}
+
+    def _step_download_artifact(self):
+        artifact = self.export_artifact
+        artifact_id = artifact["artifactId"]
+        destination = self.output_dir / artifact["filename"]
+        if destination.is_symlink() or destination.exists() or self.output_dir.resolve() not in destination.resolve().parents:
+            raise AcceptanceFailure("artifact-path-occupied-or-unsafe")
+        limit, _ = artifact_download_limit(artifact["byteLength"], self.client.max_download_bytes)
+        response = self.client.request("GET", ARTIFACT_PATH.format(id=artifact_id) + "/bytes", max_bytes=limit)
+        if response.status != 200:
+            raise AcceptanceFailure("artifact-download-refused", {"status": response.status})
+        problems = []
+        geometry = artifact["outputContract"]["geometry"]
+        headers = {"slipstream-artifact-id": artifact_id, "slipstream-artifact-photo-id": self.photo_id,
+            "slipstream-artifact-step-id": self.step_id, "slipstream-artifact-module": "darktable",
+            "slipstream-artifact-adapter-schema-version": artifact["adapterSchemaVersion"],
+            "slipstream-artifact-bundle-id": artifact["bundleId"], "slipstream-artifact-sha256": artifact["sha256"],
+            "slipstream-artifact-byte-length": str(artifact["byteLength"]),
+            "slipstream-artifact-width": str(geometry["width"]), "slipstream-artifact-height": str(geometry["height"]),
+            "slipstream-artifact-filename": artifact["filename"],
+            "slipstream-artifact-published-at": artifact["publishedAt"],
+            "slipstream-artifact-expires-at": artifact["expiresAt"],
+            "Content-Type": "image/tiff", "Content-Length": str(artifact["byteLength"]),
+            "Content-Disposition": f'attachment; filename="{artifact["filename"]}"'}
+        for header, expected in headers.items():
+            if response.headers.get_all(header) != [expected]:
+                problems.append(header + "-mismatch")
+        if len(response.data) != artifact["byteLength"] or sha256_hex(response.data) != artifact["sha256"]:
+            problems.append("artifact-bytes-mismatch")
+        facts, tiff_problems = validate_development_tiff(response.data, geometry["width"], geometry["height"], self.accepted_profile_digests)
+        problems.extend(tiff_problems)
+        if problems:
+            raise AcceptanceFailure("artifact-invalid", {"problems": problems, "tiff": facts})
+        with destination.open("xb") as stream:
+            os.chmod(destination, 0o600)
+            stream.write(response.data)
+        self.written_files.append(str(destination))
+        self.identities["artifact"] = artifact
+        return {"sha256": artifact["sha256"], "byteLength": len(response.data), "tiff": facts}
+
+    def _step_preview(self):
+        self._require_ready()
+        path = PREVIEW_PATH.format(id=self.photo_id, step=urllib.parse.quote(self.step_id, safe=""))
+        deadline = self.monotonic() + self.preview_timeout
+        original_timeout = self.client.timeout
+        self.client.timeout = min(original_timeout, self.preview_timeout)
+        try:
+            while True:
+                response = self.client.request("GET", path, max_bytes=min(self.client.max_download_bytes, 16 * 1024 * 1024))
+                if response.status != 202:
+                    break
+                if self.monotonic() >= deadline:
+                    raise AcceptanceFailure("preview-render-timeout")
+                time.sleep(min(self.poll_interval, max(0, deadline - self.monotonic())))
+                self.client.timeout = min(original_timeout, max(0.001, deadline - self.monotonic()))
+        finally:
+            self.client.timeout = original_timeout
+        if response.status != 200:
+            raise AcceptanceFailure("preview-refused", {"status": response.status})
+        prefix = "slipstream-processing-preview-"
+        expected = {"photo-id": self.photo_id, "step-id": self.step_id, "module": "darktable",
+            "source-revision": self.source_revision.encode("utf-8").hex(),
+            "recipe-revision": self.recipe_version, "adapter-schema-version": "darktable-adapter-1",
+            "bundle-id": self.identities["bundleId"], "sha256": sha256_hex(response.data)}
+        problems = [key + "-mismatch" for key, value in expected.items() if response.headers.get_all(prefix + key) != [value]]
+        parameters = next(step["parameters"] for step in self.saved_recipe["steps"] if step["stepId"] == self.step_id)
+        parameter_digest = sha256_hex(json.dumps({"kind": "processing-parameters-v1",
+            "schema_version": parameters["schemaVersion"], "parameters": parameters["tree"]},
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        if response.headers.get_all(prefix + "parameter-digest") != [parameter_digest]:
+            problems.append("parameter-digest-mismatch")
+        for key in ("parameter-digest", "output-contract", "identity"):
+            if not _LOWER_HEX_64.fullmatch(response.headers.get(prefix + key, "")):
+                problems.append(key + "-invalid")
+        if response.headers.get("Content-Type") != "image/png":
+            problems.append("content-type-invalid")
+        bound = response.headers.get(prefix + "geometry", "")
+        if not bound.isdigit() or not 0 < int(bound) <= 1224:
+            problems.append("preview-geometry-invalid")
+            bound = "1224"
+        if not response.headers.get(prefix + "display-conversion"):
+            problems.append("display-conversion-missing")
+        facts, png_problems = validate_png(response.data, int(bound))
+        problems.extend(png_problems)
+        for key in ("width", "height"):
+            if response.headers.get(prefix + key) != str(facts.get(key)):
+                problems.append(key + "-mismatch")
+        if problems:
+            raise AcceptanceFailure("preview-invalid", {"problems": problems})
+        return dict(facts, sha256=sha256_hex(response.data), geometryBound=int(bound))
 
     def _list_page_maximum(self) -> int:
         """The server-published Photo list page bound for query paging."""
@@ -1564,470 +1132,6 @@ class Runner:
         self.identities["photoId"] = self.photo_id
         return {"photoId": self.photo_id, "photosSeen": seen, "listPageMaximum": page_limit}
 
-    def _step_recipe_read(self) -> dict:
-        deadline = self.monotonic() + self.settlement_timeout
-        polls = 0
-        while True:
-            response, payload = self.client.request_json(
-                "GET", EDIT_RECIPE_PATH.format(id=self.photo_id)
-            )
-            require_success(response, payload, "recipe-read")
-            facts, problems = validate_recipe_read(payload, self.photo_id)
-            if problems:
-                raise AcceptanceFailure("recipe-read-invalid", {"problems": problems})
-            reason = payload.get("supportReason")
-            if facts["sourceSupport"] == "unavailable":
-                # A retryable reason is a wait state, not a contract failure:
-                # the Published Library stays authoritative and a later read
-                # serves the source revision once the scan or capacity frees.
-                if reason in RETRYABLE_SUPPORT_REASONS:
-                    if self.monotonic() >= deadline:
-                        raise AcceptanceFailure(
-                            "source-read-pending",
-                            {"supportReason": reason, "polls": polls},
-                        )
-                    polls += 1
-                    time.sleep(self.poll_interval)
-                    continue
-                raise AcceptanceFailure(
-                    "source-unavailable",
-                    {"supportReason": reason},
-                )
-            if facts["sourceSupport"] == "unsupported":
-                raise AcceptanceFailure(
-                    "source-unsupported",
-                    {"profiles": self.capability.get("profiles")},
-                )
-            self.source_revision = facts["sourceRevision"]
-            self.observed_recipe = facts.get("recipe")
-            self.controls = facts.get("controls") or {}
-            recipe = facts.get("recipe") or {}
-            self.recipe_version = recipe.get("recipeVersion")
-            self.identities["sourceRevision"] = self.source_revision
-            self.identities["recipeVersionObserved"] = self.recipe_version
-            return {
-                "sourceRevision": self.source_revision,
-                "hadSavedRecipe": facts.get("recipe") is not None,
-                "processingAvailable": payload.get("processingAvailable"),
-                "readWaits": polls,
-            }
-
-    def _baseline_exposure(self) -> float | None:
-        if self.observed_recipe and isinstance(
-            self.observed_recipe.get("exposureEv"), (int, float)
-        ):
-            return float(self.observed_recipe["exposureEv"])
-        return None
-
-    def _guarded_save(self, purpose: str, exposure: float, expected_version: str | None) -> dict:
-        body = build_save_body(
-            new_request_identity(purpose), expected_version, self.source_revision, exposure
-        )
-        modes = self.controls.get("whiteBalanceModes") or []
-        if "as-shot" not in modes:
-            raise AcceptanceFailure(
-                "as-shot-mode-not-admitted",
-                {"whiteBalanceModes": modes},
-            )
-        response, payload = self.client.request_json(
-            "POST", EDIT_RECIPE_PATH.format(id=self.photo_id), payload=body
-        )
-        require_success(response, payload, "recipe-save")
-        facts, problems = validate_save_response(payload)
-        if problems:
-            raise AcceptanceFailure("recipe-save-invalid", {"problems": problems})
-        if facts["outcome"] != "saved":
-            raise AcceptanceFailure(
-                "recipe-save-outcome-unexpected",
-                {"expected": "saved", "observed": facts["outcome"]},
-            )
-        if facts.get("sourceRevision") != self.source_revision:
-            raise AcceptanceFailure(
-                "source-revision-changed",
-                {
-                    "expected": self.source_revision,
-                    "observed": facts.get("sourceRevision"),
-                },
-            )
-        self.recipe_version = facts["recipeVersion"]
-        return facts
-
-    def _step_save_exposure(self) -> dict:
-        target = exposure_on_grid(self.controls, 1.0)
-        if target != 1.0:
-            raise AcceptanceFailure("one-ev-not-admitted", {"controls": self.controls})
-        facts = self._guarded_save("save", target, self.recipe_version)
-        self.saved_recipe = {
-            "recipeVersion": self.recipe_version,
-            "exposureEv": target,
-            "whiteBalance": {"mode": "as-shot"},
-        }
-        self.identities["recipeVersionAfterSave"] = self.recipe_version
-        self.identities["savedExposureEv"] = target
-        return {"exposureEv": target, "recipeVersion": facts["recipeVersion"]}
-
-    def _step_save_undo(self) -> dict:
-        reversal_target = exposure_on_grid(self.controls, 0.0)
-        reversal = self._guarded_save("undo", reversal_target, self.recipe_version)
-        self.saved_recipe = {
-            "recipeVersion": self.recipe_version,
-            "exposureEv": reversal_target,
-            "whiteBalance": {"mode": "as-shot"},
-        }
-        self._step_recipe_reopen()
-        target = 1.0
-        facts = self._guarded_save("save", target, reversal["recipeVersion"])
-        self.saved_recipe = {
-            "recipeVersion": self.recipe_version,
-            "exposureEv": target,
-            "whiteBalance": {"mode": "as-shot"},
-        }
-        self.identities["recipeVersionAfterUndo"] = self.recipe_version
-        self.identities["savedExposureEv"] = target
-        return {
-            "reversalExposureEv": reversal_target,
-            "reversalRecipeVersion": reversal["recipeVersion"],
-            "exposureEv": target,
-            "recipeVersion": facts["recipeVersion"],
-        }
-
-    def _step_recipe_reopen(self) -> dict:
-        response, payload = self.client.request_json(
-            "GET", EDIT_RECIPE_PATH.format(id=self.photo_id)
-        )
-        require_success(response, payload, "recipe-reopen")
-        facts, problems = validate_recipe_read(payload, self.photo_id)
-        if problems:
-            raise AcceptanceFailure("recipe-reopen-invalid", {"problems": problems})
-        if facts["sourceSupport"] != "supported":
-            raise AcceptanceFailure(
-                "recipe-reopen-unsupported", {"sourceSupport": facts["sourceSupport"]}
-            )
-        reopened = facts.get("recipe")
-        expected = self.saved_recipe
-        if not isinstance(reopened, dict) or expected is None:
-            raise AcceptanceFailure("recipe-reopen-missing", {})
-        mismatches = [
-            field
-            for field in ("recipeVersion", "exposureEv", "whiteBalance")
-            if reopened.get(field) != expected.get(field)
-        ]
-        if facts["sourceRevision"] != self.source_revision:
-            mismatches.append("sourceRevision-read")
-        if mismatches:
-            raise AcceptanceFailure(
-                "recipe-reopen-changed",
-                {"fields": mismatches, "expected": expected, "observed": reopened},
-            )
-        self.identities["recipeVersionReopened"] = reopened["recipeVersion"]
-        self.identities["sourceRevisionReopened"] = facts["sourceRevision"]
-        return {
-            "recipeVersion": reopened["recipeVersion"],
-            "sourceRevision": facts["sourceRevision"],
-            "exposureEv": reopened["exposureEv"],
-            "whiteBalance": reopened["whiteBalance"],
-            "unchanged": True,
-        }
-    def _step_edit_preview(self) -> dict:
-        self._require_processing_ready()
-        path = EDIT_PREVIEW_PATH.format(id=self.photo_id, stage=DEVELOP_STAGE)
-        deadline = self.monotonic() + self.preview_timeout
-        polls = 0
-        while True:
-            response = self.client.request("GET", path, max_bytes=self.client.max_download_bytes)
-            if response.status == 202:
-                polls += 1
-                try:
-                    payload = json.loads(response.data)
-                except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                    raise AcceptanceFailure(
-                        "preview-admission-not-json", {"error": type(error).__name__}
-                    ) from error
-                state = payload.get("state") if isinstance(payload, dict) else None
-                if state not in ("queued", "running"):
-                    raise AcceptanceFailure(
-                        "preview-admission-invalid",
-                        {"state": state},
-                    )
-                if self.monotonic() >= deadline:
-                    raise AcceptanceFailure("preview-render-timeout", {"polls": polls})
-                time.sleep(self.poll_interval)
-                continue
-            if response.status == 404:
-                code = structured_code(self._safe_json(response))
-                if code is None:
-                    self._skip("route-not-deployed", {"path": "edit-preview", "status": 404})
-                raise AcceptanceFailure("preview-refused", {"status": 404, "code": code})
-            if response.status != 200:
-                raise AcceptanceFailure(
-                    "preview-refused",
-                    {"status": response.status, "code": structured_code(self._safe_json(response))},
-                )
-            break
-        metadata, problems = collect_metadata_headers(
-            response.headers, PREVIEW_METADATA_FIELDS, PREVIEW_METADATA_HEADERS
-        )
-        # The preview route hex-encodes the opaque source revision for its
-        # header (`edit_preview.rs`); compare against the same encoding of the
-        # revision the recipe read observed.
-        problems.extend(
-            validate_preview_headers(
-                metadata,
-                self.photo_id,
-                (self.source_revision or "").encode("utf-8").hex(),
-                self.recipe_version or "",
-            )
-        )
-        if problems:
-            raise AcceptanceFailure("preview-metadata-invalid", {"problems": problems})
-        body_facts, body_problems = validate_preview_body(metadata, response.data)
-        if body_problems:
-            raise AcceptanceFailure(
-                "preview-body-invalid",
-                {"problems": body_problems, "facts": body_facts},
-            )
-        expiry = parse_timestamp(metadata.get("expiresAt"))
-        if expiry is not None and expiry <= datetime.now(timezone.utc):
-            problems.append("preview-already-expired")
-        if metadata.get("recipeVersion") != self.identities.get("exportRecipeVersion"):
-            problems.append("preview-export-recipeVersion-mismatch")
-        if metadata.get("sourceRevision") != (
-            self.identities.get("exportSourceRevision") or ""
-        ).encode("utf-8").hex():
-            problems.append("preview-export-sourceRevision-mismatch")
-        if problems:
-            raise AcceptanceFailure("preview-metadata-invalid", {"problems": problems})
-        return {
-            "contentType": body_facts.get("contentType"),
-            "width": body_facts.get("width"),
-            "height": body_facts.get("height"),
-            "sha256": body_facts.get("sha256"),
-            "displayTransform": metadata.get("displayTransform"),
-            "recipeVersion": metadata.get("recipeVersion"),
-            "sourceRevision": metadata.get("sourceRevision"),
-            "capturedIdentity": {
-                "recipeVersion": self.recipe_version,
-                "sourceRevision": self.source_revision,
-            },
-            "decode": body_facts.get("decode"),
-        }
-
-    @staticmethod
-    def _safe_json(response: Response) -> object:
-        try:
-            return json.loads(response.data)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return None
-
-    def _step_submit_export(self) -> dict:
-        self._require_processing_ready()
-        body = {
-            "requestId": new_request_identity("export"),
-            "expectedRecipeVersion": self.recipe_version,
-            "expectedSourceRevision": self.source_revision,
-            "target": DEVELOPMENT_TARGET,
-        }
-        response, payload = self.client.request_json(
-            "POST", PHOTO_EXPORTS_PATH.format(id=self.photo_id), payload=body
-        )
-        require_success(response, payload, "export-submit", accepted=(201,))
-        facts, problems = validate_export_submission(
-            payload, self.recipe_version, self.source_revision
-        )
-        if problems:
-            raise AcceptanceFailure(
-                "export-submit-invalid", {"problems": problems, "facts": facts}
-            )
-        self.export_id = facts["exportId"]
-        self.identities["exportId"] = self.export_id
-        self.identities["exportRecipeVersion"] = self.recipe_version
-        self.identities["exportSourceRevision"] = self.source_revision
-        return {"exportId": self.export_id, "state": facts["state"]}
-
-    def _step_export_settlement(self) -> dict:
-        self._require_processing_ready()
-        deadline = self.monotonic() + self.settlement_timeout
-        path = EXPORT_PATH.format(id=self.export_id)
-        while True:
-            response, payload = self.client.request_json("GET", path)
-            require_success(response, payload, "export-inspect")
-            facts, problems = validate_export_inspection(
-                payload,
-                self.export_id,
-                photo_id=self.photo_id,
-                recipe_version=self.recipe_version,
-                source_revision=self.source_revision,
-                maximum_download_bytes=self.client.max_download_bytes,
-            )
-            state = facts.get("state")
-            if state in ("succeeded", "failed", "cancelled"):
-                break
-            if self.monotonic() >= deadline:
-                raise AcceptanceFailure(
-                    "export-settlement-timeout",
-                    {"state": state, "problems": problems},
-                )
-            time.sleep(self.poll_interval)
-        expected_bundle = self.capability.get("bundleId")
-        if expected_bundle and payload.get("bundleId") != expected_bundle:
-            problems.append("export-bundle-mismatch")
-        if facts["state"] != "succeeded":
-            raise AcceptanceFailure(
-                "export-not-succeeded",
-                {
-                    "state": facts["state"],
-                    "terminalOutcome": facts.get("terminalOutcome"),
-                    "failureReason": facts.get("failureReason"),
-                },
-            )
-        if problems:
-            raise AcceptanceFailure("export-inspect-invalid", {"problems": problems})
-        self.export_artifact = facts["artifact"]
-        self.identities["exportState"] = facts["state"]
-        self.identities["exportBundleId"] = payload.get("bundleId")
-        self.identities["receiptExpiresAt"] = payload.get("receiptExpiresAt")
-        return {
-            "state": facts["state"],
-            "artifact": {
-                key: self.export_artifact.get(key)
-                for key in ("exportId", "sha256", "byteLength", "width", "height", "expiresAt")
-            },
-        }
-
-    def _step_download_artifact(self) -> dict:
-        self._require_processing_ready()
-        destination = self._artifact_destination()
-        path = EXPORT_ARTIFACT_PATH.format(id=self.export_id)
-        declared = None
-        if self.export_artifact:
-            declared = self.export_artifact.get("byteLength")
-        limit, limit_problems = artifact_download_limit(declared, self.client.max_download_bytes)
-        if limit_problems:
-            raise AcceptanceFailure(
-                "artifact-declared-size-invalid", {"problems": limit_problems}
-            )
-        response = self.client.request("GET", path, max_bytes=limit)
-        if response.status == 404:
-            code = structured_code(self._safe_json(response))
-            if code is None:
-                self._skip("route-not-deployed", {"path": "export-artifact", "status": 404})
-        if response.status != 200:
-            raise AcceptanceFailure(
-                "artifact-download-refused",
-                {"status": response.status, "code": structured_code(self._safe_json(response))},
-            )
-        metadata, problems = collect_metadata_headers(
-            response.headers, ARTIFACT_METADATA_FIELDS, ARTIFACT_METADATA_HEADERS
-        )
-        if metadata.get("exportId") != self.export_id:
-            problems.append("header-exportId-mismatch")
-        if metadata.get("target") != DEVELOPMENT_TARGET:
-            problems.append("header-target-not-development-tiff")
-        if metadata.get("stage") != DEVELOP_STAGE:
-            problems.append("header-stage-not-develop")
-        if metadata.get("contentType") != DEVELOPMENT_CONTENT_TYPE:
-            problems.append("header-contentType-not-development-tiff")
-        digest = sha256_hex(response.data)
-        if metadata.get("sha256") != digest:
-            problems.append("header-sha256-mismatch")
-        byte_length = _optional_int(metadata.get("byteLength"))
-        if byte_length != len(response.data):
-            problems.append("header-byteLength-mismatch")
-        expiry = parse_timestamp(metadata.get("expiresAt"))
-        if expiry is None:
-            problems.append("header-expiresAt-unparsable")
-        elif expiry <= datetime.now(timezone.utc):
-            problems.append("artifact-already-expired")
-        if self.export_artifact is not None:
-            problems.extend(header_object_mismatches(metadata, self.export_artifact))
-        tiff_facts, tiff_problems = validate_development_tiff(
-            response.data,
-            expected_width=_optional_int(metadata.get("width")),
-            expected_height=_optional_int(metadata.get("height")),
-            accepted_profile_digests=self.accepted_profile_digests,
-        )
-        problems.extend(tiff_problems)
-        profile_identity = metadata.get("profileIdentity")
-        facts = {
-            "sha256": digest,
-            "byteLength": len(response.data),
-            "contentType": metadata.get("contentType"),
-            "expiresAt": metadata.get("expiresAt"),
-            "profileIdentity": profile_identity,
-            "tiff": tiff_facts,
-        }
-        if profile_identity and tiff_facts.get("profileSha256"):
-            if profile_identity != tiff_facts["profileSha256"]:
-                both_pinned = (
-                    profile_identity in self.accepted_profile_digests
-                    and tiff_facts.get("profileAccepted") is True
-                )
-                if not both_pinned:
-                    problems.append("profileIdentity-does-not-match-embedded-profile")
-                else:
-                    facts["profileIdentityRule"] = "pinned-pair"
-            else:
-                facts["profileIdentityRule"] = "embedded-digest"
-        if problems:
-            raise AcceptanceFailure(
-                "artifact-invalid", {"problems": problems, "facts": facts}
-            )
-        if destination.exists() or destination.is_symlink():
-            raise AcceptanceFailure(
-                "artifact-path-occupied", {"path": str(destination)}
-            )
-        destination.write_bytes(response.data)
-        self.written_files.append(str(destination))
-        self.identities["artifact"] = {
-            "exportId": self.export_id,
-            "sha256": digest,
-            "byteLength": len(response.data),
-            "width": tiff_facts.get("width"),
-            "height": tiff_facts.get("height"),
-            "profileIdentity": profile_identity,
-            "expiresAt": metadata.get("expiresAt"),
-        }
-        return facts
-
-    def _artifact_destination(self) -> Path:
-        """Resolve a safe destination inside the output directory.
-
-        The exportId comes from the service, so the destination is constrained
-        by the ID character set, path containment, and a symlink refusal: a
-        traversal ID or a pre-created symlink (including a dangling one) must
-        never move the artifact write outside `--output-dir`.
-        """
-        if not valid_request_identity(self.export_id or ""):
-            raise AcceptanceFailure(
-                "export-id-invalid-charset", {"exportId": self.export_id}
-            )
-        destination = self.output_dir / f"{self.export_id}.tiff"
-        if destination.is_symlink():
-            raise AcceptanceFailure(
-                "artifact-path-symlink", {"path": str(destination)}
-            )
-        resolved_output = self.output_dir.resolve()
-        resolved_destination = destination.resolve()
-        if resolved_output not in resolved_destination.parents:
-            raise AcceptanceFailure(
-                "artifact-path-escapes-output-dir",
-                {"path": str(destination), "resolved": str(resolved_destination)},
-            )
-        return destination
-
-    def _step_film_stage(self) -> dict:
-        self._skip(
-            "film-stage-native-qualification-required",
-            {
-                "observedCapabilityStage": self.capability.get("stages", {}).get("film"),
-                "note": (
-                    "The finished-jpeg Film service stage is implemented, but "
-                    "this generic runner does not claim native Film qualification."
-                ),
-            },
-        )
-
-
     def _step_invariance_after(self) -> dict:
         snapshots, unreadable = self._current_snapshots()
         if unreadable:
@@ -2066,127 +1170,42 @@ class Runner:
             raise InvocationRefused("fixture-unreadable")
         self.invariance_before = snapshots
 
-    # -- orchestration -------------------------------------------------------
-
-    def run(self) -> dict:
-        started = self.monotonic()
+    def run(self):
+        start = self.monotonic()
         self._invariance_before()
-        self._step("capability", self._step_capability)
-        self._step("resolve-photo", self._step_resolve_photo, gates=("capability",))
-        self._step("read-recipe", self._step_recipe_read, gates=("resolve-photo",))
-        self._step("save-exposure", self._step_save_exposure, gates=("read-recipe",))
-        self._step("save-undo", self._step_save_undo, gates=("save-exposure",))
-        self._step(
-            "submit-export",
-            self._step_submit_export,
-            gates=(
-                "save-undo",
-                (
-                    "develop-ready",
-                    self._develop_ready,
-                    "develop-stage-not-ready",
-                    {
-                        "capabilityState": self.capability.get("state"),
-                        "developStage": self.capability.get("stages", {}).get(DEVELOP_STAGE),
-                    },
-                ),
-            ),
-        )
-        self._step("export-settlement", self._step_export_settlement, gates=("submit-export",))
-        self._step("download-artifact", self._step_download_artifact, gates=("export-settlement",))
-        self._step("recipe-reopen", self._step_recipe_reopen, gates=("download-artifact",))
-        self._step(
-            "edit-preview",
-            self._step_edit_preview,
-            gates=(
-                "recipe-reopen",
-                (
-                    "develop-ready",
-                    self._develop_ready,
-                    "develop-stage-not-ready",
-                    {
-                        "capabilityState": self.capability.get("state"),
-                        "developStage": self.capability.get("stages", {}).get(DEVELOP_STAGE),
-                    },
-                ),
-            ),
-        )
-        self._step("film-stage", self._step_film_stage)
+        self._step("module-discovery", self._step_discovery)
+        self._step("resolve-photo", self._step_resolve_photo, ("module-discovery",))
+        self._step("read-recipe", self._step_recipe_read, ("resolve-photo",))
+        self._step("save-exposure", self._step_save_exposure, ("read-recipe",))
+        self._step("save-reversal", self._step_save_reversal, ("save-exposure",))
+        self._step("submit-export", self._step_submit_export, ("save-reversal",))
+        self._step("export-settlement", self._step_export_settlement, ("submit-export",))
+        self._step("download-artifact", self._step_download_artifact, ("export-settlement",))
+        self._step("recipe-reopen", self._step_recipe_reopen, ("save-reversal",))
+        self._step("selected-preview", self._step_preview, ("submit-export", "recipe-reopen"))
         self._step("original-invariance", self._step_invariance_after)
-        return self.report(started)
-
-    def report(self, started: float) -> dict:
-        failed = [record.name for record in self.steps if record.status == "fail"]
-        skipped = [record for record in self.steps if record.status == "skipped"]
-        not_run = [
-            {"step": record.name, "reason": record.reason, "detail": record.detail}
-            for record in skipped
-        ]
-        film_observed = self.capability.get("stages", {}).get("film")
-        if failed:
-            status = "failed"
-        elif any(record.name != "film-stage" for record in skipped):
-            status = "blocked"
-        else:
-            status = "passed"
-        return {
-            "scope": "photo-development-acceptance-workflow",
-            "issue": 334,
-            "status": status,
-            "startedAt": self.steps[0].startedAt if self.steps else now_iso(),
-            "finishedAt": now_iso(),
-            "durationSeconds": round(self.monotonic() - started, 3),
-            "acknowledgement": {
-                "acceptanceInstance": True,
-                "flag": "--i-acknowledge-this-is-an-acceptance-instance",
-            },
+        failed = [step for step in self.steps if step.status == "fail"]
+        skipped = [step for step in self.steps if step.status == "skipped"]
+        return {"scope": "selected-darktable-step-acceptance", "issue": 496,
+            "status": "failed" if failed else "blocked" if skipped else "passed",
+            "startedAt": self.steps[0].startedAt, "finishedAt": now_iso(),
+            "durationSeconds": round(self.monotonic() - start, 3),
             "target": {"baseUrl": self.client.base_url},
-            "operatorSuppliedIdentities": self.expected_identities,
-            "identities": self.identities,
+            "operatorSuppliedIdentities": self.expected_identities, "identities": self.identities,
             "fixture": self.invariance_before.get(str(self.fixture), {}),
-            "sidecars": [
-                snapshot
-                for path, snapshot in self.invariance_before.items()
-                if path != str(self.fixture)
-            ],
-            "steps": [record.as_dict() for record in self.steps],
-            "notRun": not_run,
-            "counters": {
-                "requests": len(self.client.log),
-                "stepsPassed": sum(1 for record in self.steps if record.status == "pass"),
-                "stepsFailed": len(failed),
-                "stepsSkipped": len(skipped),
-                "writtenFiles": len(self.written_files),
-            },
-            "writtenFiles": list(self.written_files),
-            "filmStage": {
-                "covered": False,
-                "nativeQualificationRequired": True,
-                "observedCapabilityStage": film_observed,
-            },
-        }
+            "sidecars": [value for path, value in self.invariance_before.items() if path != str(self.fixture)],
+            "steps": [step.as_dict() for step in self.steps],
+            "notRun": [{"step": step.name, "reason": step.reason} for step in skipped],
+            "writtenFiles": self.written_files,
+            "qualification": {"module": "darktable", "exposureEv": [0, 1],
+                "parameterSchemaVersion": "darktable-params-1", "fixtureOnly": True,
+                "standaloneSpektraFilm": "not-covered; requires separately admitted fixture and resources"}}
 
 
-def render_summary(report: dict) -> str:
-    lines = []
-    for record in report["steps"]:
-        marker = {"pass": "PASS", "fail": "FAIL", "skipped": "SKIP"}[record["status"]]
-        suffix = f" ({record['reason']})" if record.get("reason") else ""
-        lines.append(f"[{marker}] {record['name']}{suffix}")
-    lines.append(f"Status: {report['status']}")
-    if report["filmStage"]["covered"] is False:
-        lines.append(
-            "Film (finished-jpeg) stage not covered: native Film qualification remains a separate gate."
-        )
-    for entry in report["notRun"]:
-        if entry["step"] != "film-stage":
-            lines.append(f"Could not run {entry['step']}: {entry['reason']}")
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Command line.
-# ---------------------------------------------------------------------------
+def render_summary(report):
+    return "\n".join([f"[{step['status'].upper()}] {step['name']}" +
+        (f" ({step['reason']})" if step.get("reason") else "") for step in report["steps"]] +
+        [f"Status: {report['status']}", "Standalone SpektraFilm qualification not covered."])
 
 
 def download_bound(value: str) -> int:
@@ -2213,7 +1232,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--i-acknowledge-this-is-an-acceptance-instance", action="store_true")
     parser.add_argument(
         "--expected-bundle-sha256",
-        help="Bundle digest the capability report must name (the image build's printed bundle identity).",
+        help="Bundle digest captured by the selected Export (the image build's printed bundle identity).",
     )
     parser.add_argument("--request-timeout", type=float, default=30.0)
     parser.add_argument("--settlement-timeout", type=float, default=900.0)
@@ -2236,7 +1255,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def refused_report(reason: str) -> dict:
     return {
         "scope": "photo-development-acceptance-workflow",
-        "issue": 334,
+        "issue": 496,
         "status": "refused",
         "reason": reason,
     }
@@ -2244,6 +1263,10 @@ def refused_report(reason: str) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = parse_args(argv)
+    if any(not math.isfinite(value) or value <= 0 or value > 3600 for value in
+           (arguments.request_timeout, arguments.settlement_timeout, arguments.preview_timeout, arguments.poll_interval)):
+        print(json.dumps(refused_report("timeout-outside-finite-bound")))
+        return 2
     if not arguments.i_acknowledge_this_is_an_acceptance_instance:
         print(
             "Refusing to run: pass --i-acknowledge-this-is-an-acceptance-instance to confirm "

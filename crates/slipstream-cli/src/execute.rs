@@ -15,21 +15,6 @@ pub(crate) async fn execute(
             file,
         )?),
         Command::Photos {
-            command:
-                PhotoCommand::Export {
-                    command: PhotoExportCommand::Download(args),
-                },
-        } => Some(preview_download::Destination::preflight(
-            preview_download::DestinationKind::Export,
-            &args.file,
-        )?),
-        Command::Photos {
-            command: PhotoCommand::EditPreview(args),
-        } => Some(preview_download::Destination::preflight(
-            preview_download::DestinationKind::EditPreview,
-            &args.file,
-        )?),
-        Command::Photos {
             command: PhotoCommand::ProcessingPreview { file, .. },
         } => Some(preview_download::Destination::preflight(
             preview_download::DestinationKind::ProcessingPreview,
@@ -37,6 +22,12 @@ pub(crate) async fn execute(
         )?),
         Command::Processing {
             command: ProcessingCommand::ArtifactDownload { file, .. },
+        } => Some(preview_download::Destination::preflight(
+            preview_download::DestinationKind::Artifact,
+            file,
+        )?),
+        Command::Photos {
+            command: PhotoCommand::HistoricalExportDownload { file, .. },
         } => Some(preview_download::Destination::preflight(
             preview_download::DestinationKind::Artifact,
             file,
@@ -123,12 +114,6 @@ pub(crate) async fn execute(
         }
         _ => None,
     };
-    let pending_recipe = match &cli.command {
-        Command::Photos {
-            command: PhotoCommand::Recipe { command },
-        } => development::prepare(command).await?,
-        _ => None,
-    };
     let pending_processing_recipe = match &cli.command {
         Command::Photos {
             command: PhotoCommand::ProcessingRecipe { command },
@@ -139,6 +124,9 @@ pub(crate) async fn execute(
         Command::Photos {
             command: PhotoCommand::ProcessingExport(args),
         } => Some(development::prepare_processing_export(&args.input).await?),
+        Command::Photos {
+            command: PhotoCommand::ProcessingExportRetry { input, .. },
+        } => Some(development::prepare_processing_export_retry(input).await?),
         _ => None,
     };
     let pending_recovery_apply = match &cli.command {
@@ -159,7 +147,6 @@ pub(crate) async fn execute(
     let result = async {
         match &cli.command {
             Command::Processing { command } => match command {
-                ProcessingCommand::Capability => development::capability(&client).await,
                 ProcessingCommand::Modules => development::modules(&client).await,
                 ProcessingCommand::Artifact { artifact_id } => {
                     development::processing_artifact(&client, artifact_id).await
@@ -177,9 +164,6 @@ pub(crate) async fn execute(
                     .await
                 }
             },
-            Command::Photos {
-                command: PhotoCommand::Recipe { command },
-            } => development::execute(&client, admission, command, pending_recipe).await,
             Command::Photos {
                 command: PhotoCommand::ProcessingRecipe { command },
             } => {
@@ -230,12 +214,29 @@ pub(crate) async fn execute(
                     .await
             }
             Command::Photos {
-                command: PhotoCommand::EditPreview(args),
+                command: PhotoCommand::ProcessingExportList { photo_id },
+            } => development::processing_export_list(&client, photo_id).await,
+            Command::Photos {
+                command:
+                    PhotoCommand::ProcessingExportRetry {
+                        photo_id,
+                        request_id,
+                        ..
+                    },
             } => {
-                edit_preview_download::download(
+                let body = pending_processing_export.ok_or_else(development::unusable_input)?;
+                development::execute_processing_export_retry(
+                    &client, admission, photo_id, request_id, body,
+                )
+                .await
+            }
+            Command::Photos {
+                command: PhotoCommand::HistoricalExportDownload { export_id, .. },
+            } => {
+                historical_export_download::download(
                     &client,
-                    args,
-                    preview_destination.expect("Edit Preview destination was checked"),
+                    export_id,
+                    preview_destination.expect("Historical Export destination was checked"),
                     publication,
                 )
                 .await
@@ -803,59 +804,6 @@ pub(crate) async fn execute(
                     }
                 }
             }
-            Command::Photos {
-                command:
-                    PhotoCommand::Export {
-                        command: PhotoExportCommand::Submit(args),
-                    },
-            } => export_submission(&client, admission, args, operation).await,
-            Command::Photos {
-                command:
-                    PhotoCommand::Export {
-                        command: PhotoExportCommand::List { photo_id },
-                    },
-            } => {
-                let data: ExportListWire = client
-                    .json(
-                        operation,
-                        Method::GET,
-                        client.endpoint(&["api", "photos", photo_id, "exports"]),
-                        None,
-                    )
-                    .await?;
-                export_list_value(data, operation)
-            }
-            Command::Photos {
-                command:
-                    PhotoCommand::Export {
-                        command: PhotoExportCommand::Status { export_id },
-                    },
-            } => {
-                let data: ExportInspectWire = client
-                    .json(
-                        operation,
-                        Method::GET,
-                        client.endpoint(&["api", "exports", export_id]),
-                        None,
-                    )
-                    .await?;
-                let inspected = validated_export_inspect(data, export_id, operation)?;
-                serde_json::to_value(inspected).map_err(|_| CommandFailure::transport(operation))
-            }
-            Command::Photos {
-                command:
-                    PhotoCommand::Export {
-                        command: PhotoExportCommand::Download(args),
-                    },
-            } => {
-                export_download::download(
-                    &client,
-                    &args.export_id,
-                    preview_destination.expect("Export destination was checked"),
-                    publication,
-                )
-                .await
-            }
             Command::Trash {
                 command: TrashCommand::List(args),
             } => {
@@ -1207,23 +1155,10 @@ pub(crate) fn validate_command(command: &Command) -> Result<(), CommandFailure> 
         Command::Photos {
             command:
                 PhotoCommand::ProcessingExportStatus { request_id, .. }
-                | PhotoCommand::ProcessingExportCancel { request_id, .. },
+                | PhotoCommand::ProcessingExportCancel { request_id, .. }
+                | PhotoCommand::ProcessingExportRetry { request_id, .. },
         } => {
             if !valid_request_identity(request_id) {
-                return Err(CommandFailure::invalid(
-                    "request-id",
-                    "The request identity must be 1 through 128 characters of ASCII letters, digits, '.', '_', or '-'.",
-                ));
-            }
-            Ok(())
-        }
-        Command::Photos {
-            command:
-                PhotoCommand::Export {
-                    command: PhotoExportCommand::Submit(args),
-                },
-        } => {
-            if !valid_request_identity(&args.request_id) {
                 return Err(CommandFailure::invalid(
                     "request-id",
                     "The request identity must be 1 through 128 characters of ASCII letters, digits, '.', '_', or '-'.",

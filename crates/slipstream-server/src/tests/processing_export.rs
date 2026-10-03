@@ -169,6 +169,24 @@ async fn export_status(
     .await
 }
 
+async fn settled_export(router: &Router, photo_id: &str, request_id: &str) -> serde_json::Value {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (status, work) = export_status(router, photo_id, request_id).await;
+            assert_eq!(status, StatusCode::OK);
+            if matches!(
+                work["state"].as_str(),
+                Some("succeeded" | "failed" | "cancelled")
+            ) {
+                return work;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("accepted Export must reach a terminal state")
+}
+
 fn published_artifact(photo_id: &str, source_revision: &str) -> ProcessingArtifact {
     ProcessingArtifact {
         artifact_id: ProcessingArtifactId::new("artifact-a1").unwrap(),
@@ -206,6 +224,8 @@ fn published_artifact(photo_id: &str, source_revision: &str) -> ProcessingArtifa
 
 #[path = "processing_export_publication.rs"]
 mod publication;
+#[path = "processing_export_retained.rs"]
+mod retained;
 
 #[tokio::test]
 async fn submission_records_and_replays_the_explicit_adapter_refusal() {
@@ -333,85 +353,31 @@ async fn submission_without_a_recipe_names_the_missing_surface() {
 }
 
 #[tokio::test]
-async fn selected_step_legacy_export_cannot_publish() {
-    let (base, config) = export_fixture();
-    let (application, router) = export_application(&config).await;
-    let photo_id = first_photo_id(&application).await;
-    let (recipe_revision, source_revision) =
-        save_selected_step(&router, &photo_id, "recipe-1").await;
-
-    let response = post_json(
-        &router,
-        &format!("/api/photos/{photo_id}/exports"),
-        serde_json::json!({
-            "requestId": "legacy-export-1",
-            "expectedRecipeVersion": recipe_revision,
-            "expectedSourceRevision": source_revision,
-            "target": "development-tiff",
-        }),
-        Some("https://camera.local"),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body = response_json(response).await;
-    assert_eq!(body["error"]["code"], "module_parameters_unavailable");
-    assert_eq!(body["error"]["effect"], "none");
-
-    application.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(base);
-}
-
-#[tokio::test]
 async fn artifact_route_reads_published_provenance_and_refuses_unknown_ids() {
     let (base, config) = export_fixture();
     let (application, router) = export_application(&config).await;
     let photo_id = first_photo_id(&application).await;
-    let (_, source_revision) = save_selected_step(&router, &photo_id, "recipe-1").await;
-
-    // A real externally-created record: publication flows through the same
-    // serialized Library owner a qualified adapter will use, and is
-    // insert-only under its identity.
-    let artifact = published_artifact(&photo_id, &source_revision);
+    let (revision, source) = save_selected_step(&router, &photo_id, "recipe-1").await;
+    let submit = submit_body("export-provenance", "develop-1", &revision, &source);
     assert_eq!(
-        application
-            .library
-            .publish_processing_artifact(artifact.clone())
-            .await
-            .unwrap(),
-        ProcessingArtifactPublication::Published
+        post_processing_export(&router, &photo_id, &submit).await.0,
+        StatusCode::ACCEPTED
     );
-    let mut other = artifact.clone();
-    other.sha256 = "e".repeat(64);
-    assert_eq!(
-        application
-            .library
-            .publish_processing_artifact(other)
-            .await
-            .unwrap(),
-        ProcessingArtifactPublication::IdentityConflict
-    );
-
-    let (status, body) = get_json(&router, "/api/processing-artifacts/artifact-a1").await;
+    let work = settled_export(&router, &photo_id, "export-provenance").await;
+    assert_eq!(work["state"], "succeeded");
+    let artifact_id = work["artifactId"].as_str().unwrap();
+    let (status, body) =
+        get_json(&router, &format!("/api/processing-artifacts/{artifact_id}")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["artifactId"], "artifact-a1");
+    assert_eq!(body["artifactId"], artifact_id);
     assert_eq!(body["photoId"], photo_id);
     assert_eq!(body["stepId"], "develop-1");
     assert_eq!(body["module"], "darktable");
-    assert_eq!(body["adapterSchemaVersion"], "darktable-adapter-1");
-    assert_eq!(body["parameters"]["schemaVersion"], "darktable-params-1");
+    assert_eq!(body["parameters"], work["parameters"]);
     assert_eq!(body["input"]["binding"]["kind"], "original");
-    assert_eq!(body["input"]["sha256"], "a".repeat(64));
-    assert_eq!(body["input"]["byteLength"], 4096);
-    assert_eq!(body["outputContract"]["format"], "image/tiff");
-    assert_eq!(body["outputContract"]["geometry"]["width"], 9504);
-    assert_eq!(body["bundleId"], "c".repeat(64));
-    assert_eq!(body["sha256"], "d".repeat(64));
-    assert_eq!(body["byteLength"], 12_288);
-
     let (status, body) = get_json(&router, "/api/processing-artifacts/artifact-none").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "unknown_artifact");
-
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -501,9 +467,14 @@ async fn qualified_darktable_export_executes_publishes_and_replays() {
         save_selected_step(&router, &photo_id, "recipe-1").await;
 
     let body = submit_body("export-1", "develop-1", &recipe_revision, &source_revision);
+    let (status, accepted) = post_processing_export(&router, &photo_id, &body).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "submit body: {accepted}");
+    assert_eq!(accepted["outcome"], "accepted");
+    assert_eq!(accepted["receipt"]["state"], "accepted");
+    let settled = settled_export(&router, &photo_id, "export-1").await;
+    assert_eq!(settled["state"], "succeeded");
     let (status, created) = post_processing_export(&router, &photo_id, &body).await;
-    assert_eq!(status, StatusCode::CREATED, "submit body: {created}");
-    assert_eq!(created["replayed"], false);
+    assert_eq!(status, StatusCode::CREATED);
     let artifact = &created["artifact"];
     let artifact_id = artifact["artifactId"].as_str().unwrap().to_owned();
     assert!(artifact_id.starts_with("pa-"));
@@ -609,73 +580,6 @@ async fn qualified_darktable_export_executes_publishes_and_replays() {
     let _ = fs::remove_dir_all(base);
 }
 
-#[tokio::test]
-async fn admitted_export_publishes_after_the_submission_disconnects() {
-    let (base, config) = export_fixture();
-    let engine = FakePhotoEngine::at(&base);
-    engine.hang_attempt(1);
-    let (application, router) = export_application(&config).await;
-    let photo_id = first_photo_id(&application).await;
-    let (recipe_revision, source_revision) =
-        save_selected_step(&router, &photo_id, "recipe-1").await;
-    let body = submit_body(
-        "export-disconnected",
-        "develop-1",
-        &recipe_revision,
-        &source_revision,
-    );
-    let pending = tokio::spawn({
-        let router = router.clone();
-        let photo_id = photo_id.clone();
-        let body = body.clone();
-        async move { post_processing_export(&router, &photo_id, &body).await }
-    });
-    engine.wait_for_runs(1).await;
-    pending.abort();
-    assert!(pending.await.unwrap_err().is_cancelled());
-    engine.release();
-
-    let work = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let (_, work) = export_status(&router, &photo_id, "export-disconnected").await;
-            if work["state"] == "succeeded" {
-                break work;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("an admitted Export must publish after the submitter disconnects");
-    let artifact_id = work["artifactId"].as_str().unwrap();
-    let response = send(
-        &router,
-        authenticated_request()
-            .uri(format!("/api/processing-artifacts/{artifact_id}/bytes"))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(
-        response.into_body(),
-        slipstream_core::MAXIMUM_EXPORT_BYTES as usize,
-    )
-    .await
-    .unwrap();
-    let (status, replayed) = post_processing_export(&router, &photo_id, &body).await;
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(replayed["replayed"], true);
-    assert_eq!(replayed["artifact"]["artifactId"], artifact_id);
-    assert_eq!(replayed["artifact"]["byteLength"], bytes.len());
-    assert_eq!(
-        replayed["artifact"]["sha256"],
-        format!("{:x}", sha2::Sha256::digest(&bytes))
-    );
-    assert_eq!(engine.runs(), 1);
-    application.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(base);
-}
-
 /// One admitted qualified export whose engine run fails records its
 /// terminal failure durably — the bounded reason is the closed wire name —
 /// and the committed record replays for the same identity without a
@@ -696,6 +600,11 @@ async fn qualified_export_engine_failure_records_the_terminal_failure() {
         &recipe_revision,
         &source_revision,
     );
+    let (status, accepted) = post_processing_export(&router, &photo_id, &body).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(accepted["receipt"]["state"], "accepted");
+    let work = settled_export(&router, &photo_id, "export-failed").await;
+    assert_eq!(work["state"], "failed");
     let (status, failed) = post_processing_export(&router, &photo_id, &body).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(failed["error"]["code"], "export_terminal");
@@ -783,7 +692,7 @@ async fn live_work_replays_its_receipt_and_cancels_durably() {
     assert_eq!(receipt["requestId"], "export-live");
     assert_eq!(receipt["stepId"], "develop-1");
     assert_eq!(receipt["state"], "accepted");
-    assert_eq!(accepted["replayed"], true);
+    assert_eq!(accepted["outcome"], "replayed");
     assert_eq!(engine.runs(), 0, "no engine attempt ever started");
 
     // The status route reads the same committed receipt.
@@ -881,12 +790,67 @@ async fn artifact_bytes_download_under_a_lease_with_provenance_headers() {
         &recipe_revision,
         &source_revision,
     );
+    let (status, accepted) = post_processing_export(&router, &photo_id, &body).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(accepted["receipt"]["state"], "accepted");
+    assert_eq!(
+        settled_export(&router, &photo_id, "export-bytes").await["state"],
+        "succeeded"
+    );
     let (status, created) = post_processing_export(&router, &photo_id, &body).await;
     assert_eq!(status, StatusCode::CREATED);
     let artifact = created["artifact"].clone();
     let artifact_id = artifact["artifactId"].as_str().unwrap().to_owned();
     let byte_length = artifact["byteLength"].as_u64().unwrap();
     let sha256 = artifact["sha256"].as_str().unwrap().to_owned();
+    assert_eq!(
+        artifact["filename"],
+        format!("darktable-develop-1-{artifact_id}.tif")
+    );
+    let (_, settled) = export_status(&router, &photo_id, "export-bytes").await;
+    let timestamp = |seconds: u64| {
+        time::OffsetDateTime::from_unix_timestamp(seconds as i64)
+            .unwrap()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap()
+    };
+    assert_eq!(
+        artifact["publishedAt"],
+        timestamp(settled["terminalAt"].as_u64().unwrap())
+    );
+    assert_eq!(
+        artifact["expiresAt"],
+        timestamp(settled["retainUntil"].as_u64().unwrap())
+    );
+    assert_eq!(artifact["orientation"], "top-left");
+    assert_eq!(artifact["iccEmbedded"], true);
+    let recipe_uri = format!("/api/photos/{photo_id}/processing-recipe");
+    let (_, current) = get_json(&router, &recipe_uri).await;
+    let mut steps = current["recipe"]["steps"].clone();
+    steps[0]["parameters"]["tree"]["output"] = serde_json::json!({
+        "format": "jpeg", "precisionBits": 8, "colorSpace": "srgb", "transferFunction": "srgb"
+    });
+    let response = post_json(
+        &router,
+        &recipe_uri,
+        serde_json::json!({
+            "requestId": "recipe-after-publication", "expectedRecipeRevision": recipe_revision,
+            "expectedSourceRevision": source_revision, "currentStepId": "develop-1", "steps": steps
+        }),
+        Some("https://camera.local"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(artifact["sampleFormat"], "float32");
+    let router = create_router_with_processing(
+        Arc::clone(&application),
+        crate::http::open_web_root(config.web_root()),
+        None,
+    );
+    let (status, replayed) = post_processing_export(&router, &photo_id, &body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(replayed["replayed"], true);
+    assert_eq!(replayed["artifact"], artifact);
 
     let response = send(
         &router,
@@ -906,10 +870,40 @@ async fn artifact_bytes_download_under_a_lease_with_provenance_headers() {
     assert_eq!(header("slipstream-artifact-id"), artifact_id);
     assert_eq!(header("slipstream-artifact-sha256"), sha256);
     assert_eq!(header("slipstream-artifact-module"), "darktable");
+    assert_eq!(
+        header("slipstream-artifact-filename"),
+        artifact["filename"].as_str().unwrap()
+    );
+    assert_eq!(
+        header("slipstream-artifact-published-at"),
+        artifact["publishedAt"].as_str().unwrap()
+    );
+    assert_eq!(
+        header("slipstream-artifact-expires-at"),
+        artifact["expiresAt"].as_str().unwrap()
+    );
+    assert_eq!(header("slipstream-artifact-orientation"), "top-left");
+    assert_eq!(header("slipstream-artifact-icc-embedded"), "true");
+    assert_eq!(header("slipstream-artifact-sample-format"), "float32");
     let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024 * 1024)
         .await
         .unwrap();
     assert_eq!(bytes.len() as u64, byte_length);
+
+    let (status, retained) = get_json(
+        &router,
+        &format!("/api/photos/{photo_id}/processing-exports"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        retained["exports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|work| work["requestId"] == "export-bytes" && work["state"] == "succeeded")
+    );
+    assert_eq!(retained["artifacts"], serde_json::json!([artifact.clone()]));
     use sha2::{Digest, Sha256};
     assert_eq!(format!("{:x}", Sha256::digest(&bytes)), sha256);
 

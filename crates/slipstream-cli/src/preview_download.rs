@@ -27,9 +27,7 @@ const OPERATION: Operation = Operation::PhotosPreview;
 pub(super) enum DestinationKind {
     Preview,
     Artifact,
-    EditPreview,
     ProcessingPreview,
-    Export,
 }
 
 impl DestinationKind {
@@ -37,9 +35,7 @@ impl DestinationKind {
         match self {
             Self::Preview => "Preview",
             Self::Artifact => "Processing Artifact",
-            Self::EditPreview => "Edit Preview",
             Self::ProcessingPreview => "Processing Preview",
-            Self::Export => "Export",
         }
     }
 
@@ -47,8 +43,8 @@ impl DestinationKind {
     /// The post-publication reporting failure always reports `write-output`.
     fn write_operation(self) -> &'static str {
         match self {
-            Self::Preview | Self::EditPreview | Self::ProcessingPreview => "write-preview",
-            Self::Artifact | Self::Export => "write-output",
+            Self::Preview | Self::ProcessingPreview => "write-preview",
+            Self::Artifact => "write-output",
         }
     }
 }
@@ -244,7 +240,7 @@ fn admitted_metadata(
             "jpeg-original" | "raw-embedded-jpeg"
         )
         || metadata.source_revision.is_empty()
-        || metadata.source_revision.len() > 8192
+        || metadata.source_revision.len() > crate::MAXIMUM_SOURCE_REVISION_BYTES
         || metadata.width == 0
         || metadata.height == 0
         || metadata.detail_limited != (metadata.width.max(metadata.height) < 2560)

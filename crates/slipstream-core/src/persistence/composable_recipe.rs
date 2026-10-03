@@ -8,23 +8,23 @@
 //! the caller's selected current step. Steps are stored in canonical
 //! `step_id` order so equal recipes serialize to equal bytes; that order is
 //! a serialization detail only, never a pipeline order, and steps stay
-//! addressed by `step_id`. The fixed single-module recipe in
-//! `edit_recipe.rs` is a separate surface that is neither read nor written
-//! here.
+//! addressed by `step_id`. Legacy recipes migrate once at startup while
+//! their historical rows and Export/XMP data remain intact.
 
-use super::owner::Command;
+use super::owner::{Command as OwnerCommand, processing::Command};
 use super::{
     DatabaseName, PersistenceError, StateDirectory,
     edit_recipe::read_edit_recipe,
     owner::{random_uuid_v4, write_transaction},
 };
 use crate::processing::{
-    ComposableEditRecipe, ComposableEditRecipeWriteOutcome, ComposableRecipeRequestError,
-    MAXIMUM_PARAMETER_SNAPSHOT_BYTES, MAXIMUM_PHOTO_ID_BYTES, MAXIMUM_RECIPE_STEPS,
-    MAXIMUM_REVISION_BYTES, ProcessingArtifactId, ProcessingContractError, ProcessingGeometry,
-    ProcessingImageContract, ProcessingInput, ProcessingModuleId, ProcessingParameterSnapshot,
-    ProcessingStep, ProcessingStepId, SaveComposableEditRecipe, validate_bounded_name,
-    validate_revision,
+    ComposableEditRecipe, ComposableEditRecipeRead, ComposableEditRecipeWriteOutcome,
+    ComposableRecipeRequestError, MAXIMUM_PARAMETER_SNAPSHOT_BYTES, MAXIMUM_PHOTO_ID_BYTES,
+    MAXIMUM_RECIPE_STEPS, MAXIMUM_REVISION_BYTES, MAXIMUM_SOURCE_REVISION_BYTES,
+    ProcessingArtifactId, ProcessingContractError, ProcessingGeometry, ProcessingImageContract,
+    ProcessingInput, ProcessingModuleId, ProcessingParameterSnapshot, ProcessingStep,
+    ProcessingStepId, RebindComposableEditRecipe, SaveComposableEditRecipe, validate_bounded_name,
+    validate_source_revision,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -44,10 +44,12 @@ impl super::owner::Persistence {
         PersistenceError,
     > {
         let (send, receive) = oneshot::channel();
-        self.submit(Command::ReadComposableEditRecipe {
-            photo_id: photo_id.to_owned(),
-            reply: send,
-        })?;
+        self.submit(OwnerCommand::Processing(
+            Command::ReadComposableEditRecipe {
+                photo_id: photo_id.to_owned(),
+                reply: send,
+            },
+        ))?;
         Ok(receive)
     }
 
@@ -59,19 +61,130 @@ impl super::owner::Persistence {
         PersistenceError,
     > {
         let (send, receive) = oneshot::channel();
-        self.submit(Command::SaveComposableEditRecipe(mutation, send))?;
+        self.submit(OwnerCommand::Processing(Command::SaveComposableEditRecipe(
+            mutation, send,
+        )))?;
         Ok(receive)
     }
+    pub(crate) fn replay_composable_edit_recipe_receiver(
+        &self,
+        mutation: SaveComposableEditRecipe,
+    ) -> Result<
+        oneshot::Receiver<Result<Option<ComposableEditRecipeWriteOutcome>, PersistenceError>>,
+        PersistenceError,
+    > {
+        let (send, receive) = oneshot::channel();
+        self.submit(OwnerCommand::Processing(
+            Command::ReplayComposableEditRecipe(mutation, send),
+        ))?;
+        Ok(receive)
+    }
+    pub(crate) fn composable_edit_recipe_read_receiver(
+        &self,
+        photo_id: &str,
+    ) -> Result<
+        oneshot::Receiver<Result<Option<ComposableEditRecipeRead>, PersistenceError>>,
+        PersistenceError,
+    > {
+        let (send, receive) = oneshot::channel();
+        self.submit(OwnerCommand::Processing(
+            Command::ReadComposableEditRecipeFacts {
+                photo_id: photo_id.to_owned(),
+                reply: send,
+            },
+        ))?;
+        Ok(receive)
+    }
+
+    pub(crate) fn rebind_composable_edit_recipe_receiver(
+        &self,
+        mutation: RebindComposableEditRecipe,
+    ) -> Result<
+        oneshot::Receiver<Result<ComposableEditRecipeWriteOutcome, PersistenceError>>,
+        PersistenceError,
+    > {
+        let (send, receive) = oneshot::channel();
+        self.submit(OwnerCommand::Processing(
+            Command::RebindComposableEditRecipe(mutation, send),
+        ))?;
+        Ok(receive)
+    }
+}
+
+fn valid_request_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAXIMUM_COMPOSABLE_RECIPE_REQUEST_ID_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+fn receipt_clock() -> Result<u64, PersistenceError> {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| PersistenceError::Storage)?
+        .as_millis();
+    u64::try_from(millis).map_err(|_| PersistenceError::Storage)
+}
+
+fn receipt_tombstone_key(photo_id: &str, request_id: &str) -> String {
+    format!(
+        "{COMPOSABLE_EDIT_RECIPE_TOMBSTONE_PREFIX}{}:{photo_id}{request_id}",
+        photo_id.len()
+    )
+}
+
+fn replay_receipt(
+    transaction: &Transaction<'_>,
+    photo_id: &str,
+    request_id: &str,
+    digest: &str,
+    now: u64,
+) -> Result<Option<ComposableEditRecipeWriteOutcome>, PersistenceError> {
+    let expired: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM library_metadata WHERE key=?)",
+            [receipt_tombstone_key(photo_id, request_id)],
+            |row| row.get(0),
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    if expired {
+        return Ok(Some(ComposableEditRecipeWriteOutcome::ReceiptExpired));
+    }
+    let Some(receipt) = read_composable_recipe_receipt(transaction, photo_id, request_id)? else {
+        return Ok(None);
+    };
+    if now >= receipt.settled_at.saturating_add(SAVE_RECEIPT_RETENTION_MS) {
+        write_metadata_value(
+            transaction,
+            &receipt_tombstone_key(photo_id, request_id),
+            "expired",
+        )?;
+        transaction
+            .execute(
+                "DELETE FROM library_metadata WHERE key=?",
+                [composable_recipe_receipt_key(photo_id, request_id)],
+            )
+            .map_err(|_| PersistenceError::Storage)?;
+        return Ok(Some(ComposableEditRecipeWriteOutcome::ReceiptExpired));
+    }
+    if receipt.photo_id != photo_id || receipt.payload_digest != digest {
+        return Ok(Some(ComposableEditRecipeWriteOutcome::RequestConflict));
+    }
+    let recipe = parse_recipe_record(receipt.recipe)?;
+    Ok(Some(match receipt.outcome {
+        ComposableReceiptOutcome::Saved => ComposableEditRecipeWriteOutcome::Replayed(recipe),
+        ComposableReceiptOutcome::Unchanged => ComposableEditRecipeWriteOutcome::Unchanged(recipe),
+    }))
 }
 
 /// The `library_metadata` key namespace of one Photo's saved composable
 /// recipe: `composable_edit_recipe:<photo_id>`.
 const COMPOSABLE_EDIT_RECIPE_PREFIX: &str = "composable_edit_recipe:";
 
-// Save receipts stay durable at this internal boundary, exactly like the
-// fixed recipe receipts: without an explicit expiry contract, deleting a
-// receipt could let an old request identity be reused for a different save.
 const COMPOSABLE_EDIT_RECIPE_RECEIPT_PREFIX: &str = "composable_edit_recipe_receipt:";
+const COMPOSABLE_EDIT_RECIPE_TOMBSTONE_PREFIX: &str = "composable_edit_recipe_expired:";
+const SAVE_RECEIPT_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 /// Longest admitted byte length of one composable save request identity.
 const MAXIMUM_COMPOSABLE_RECIPE_REQUEST_ID_BYTES: usize = 128;
@@ -81,8 +194,10 @@ const MAXIMUM_COMPOSABLE_RECIPE_REQUEST_ID_BYTES: usize = 128;
 /// vocabulary, so this bound keeps one metadata value finite without ever
 /// clamping an admitted recipe; a value past it is a storage error, never a
 /// truncated write.
-const MAXIMUM_COMPOSABLE_RECIPE_RECORD_BYTES: usize =
-    MAXIMUM_RECIPE_STEPS * MAXIMUM_PARAMETER_SNAPSHOT_BYTES + 65_536;
+const MAXIMUM_COMPOSABLE_RECIPE_RECORD_BYTES: usize = MAXIMUM_RECIPE_STEPS
+    * (MAXIMUM_PARAMETER_SNAPSHOT_BYTES + MAXIMUM_SOURCE_REVISION_BYTES * 6)
+    + MAXIMUM_SOURCE_REVISION_BYTES * 6
+    + 65_536;
 
 /// The strict stored shape of one composable recipe. Unknown fields are
 /// refused, and every reconstructed value is revalidated before use.
@@ -155,6 +270,7 @@ struct ComposableParametersRecord {
 struct ComposableRecipeReceipt {
     photo_id: String,
     payload_digest: String,
+    settled_at: u64,
     outcome: ComposableReceiptOutcome,
     recipe: ComposableRecipeRecord,
 }
@@ -180,9 +296,8 @@ struct SavePayload<'a> {
 }
 
 /// Reads one Photo's saved composable recipe in a single serialized read.
-/// `None` means no composable recipe has been saved for the Photo; the fixed
-/// recipe surface is not consulted. A record that is malformed, oversized,
-/// or no longer admissible is a storage error, never a partially parsed
+/// `None` means no recipe was saved or migrated for the Photo. A record
+/// that is malformed, oversized, or no longer admissible is a storage error, never a partially parsed
 /// recipe.
 pub(super) fn read_composable_edit_recipe(
     connection: &Connection,
@@ -203,12 +318,239 @@ pub(super) fn read_composable_edit_recipe(
         .transpose()
 }
 
+/// Metadata-only cutover preserves every legacy recipe, XMP, and Export row.
+pub(super) fn migrate_legacy_recipes(
+    transaction: &Transaction<'_>,
+) -> Result<(), PersistenceError> {
+    let migrated: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM library_metadata WHERE key='composable_recipe_migration_v1')", [], |row| row.get(0)).map_err(|_| PersistenceError::Storage)?;
+    if migrated {
+        return Ok(());
+    }
+    let now = receipt_clock()?;
+    let rows = {
+        let mut statement = transaction.prepare("SELECT photo_id,revision,source_revision,exposure_ev,white_balance_mode,temperature_kelvin,tint_milli FROM edit_recipes").map_err(|_| PersistenceError::Storage)?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<i32>>(5)?,
+                    row.get::<_, Option<i32>>(6)?,
+                ))
+            })
+            .map_err(|_| PersistenceError::Storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| PersistenceError::Storage)?
+    };
+    for (photo_id, revision, source_revision, exposure, mode, temperature, tint) in rows {
+        if read_composable_edit_recipe(transaction, &photo_id)?.is_some() {
+            continue;
+        }
+        let mut stack = vec![
+            serde_json::json!({"operation":"exposure","multiPriority":0,"enabled":true,
+            "params":{"mode":"EXPOSURE_MODE_MANUAL","black":0.0,"exposure":exposure,"compensate_exposure_bias":false,"compensate_hilite_pres":false}}),
+        ];
+        if mode == "temperature-tint" {
+            stack.push(serde_json::json!({"operation":"temperature","multiPriority":0,"enabled":true,
+                "params":{"temperatureKelvin":temperature.ok_or(PersistenceError::Storage)?,"tintMilli":tint.ok_or(PersistenceError::Storage)?}}));
+        } else if mode != "as-shot" {
+            return Err(PersistenceError::Storage);
+        }
+        let step_id =
+            ProcessingStepId::new("legacy-darktable").map_err(|_| PersistenceError::Storage)?;
+        let recipe = ComposableEditRecipe { photo_id: photo_id.clone(),revision,source_revision:source_revision.clone(),
+            current_step_id:Some(step_id.clone()),steps:vec![ProcessingStep {
+                step_id,module:ProcessingModuleId::new("darktable").map_err(|_| PersistenceError::Storage)?,
+                input:ProcessingInput::Original {photo_id:photo_id.clone(),source_revision},
+                parameters:ProcessingParameterSnapshot::new("darktable-params-1",serde_json::json!({"stack":stack,
+                    "output":{"format":"tiff","precisionBits":32,"colorSpace":"prophoto-rgb","transferFunction":"linear","geometry":"source-preserving"}})).map_err(|_| PersistenceError::Storage)?,
+            }] };
+        recipe.validate().map_err(|_| PersistenceError::Storage)?;
+        write_composable_recipe_record(transaction, &photo_id, &recipe)?;
+    }
+    let receipts = {
+        let mut statement = transaction.prepare("SELECT key,value FROM library_metadata WHERE key LIKE 'composable_edit_recipe_receipt:%' OR key LIKE 'edit_recipe_receipt:%'").map_err(|_| PersistenceError::Storage)?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|_| PersistenceError::Storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| PersistenceError::Storage)?
+    };
+    for (key, value) in receipts {
+        let mut record: Value =
+            serde_json::from_str(&value).map_err(|_| PersistenceError::Storage)?;
+        let photo_id = record
+            .get("photo_id")
+            .and_then(Value::as_str)
+            .ok_or(PersistenceError::Storage)?
+            .to_owned();
+        let prefix = if key.starts_with(COMPOSABLE_EDIT_RECIPE_RECEIPT_PREFIX) {
+            COMPOSABLE_EDIT_RECIPE_RECEIPT_PREFIX
+        } else {
+            "edit_recipe_receipt:"
+        };
+        let request_id = key.strip_prefix(prefix).ok_or(PersistenceError::Storage)?;
+        if prefix == COMPOSABLE_EDIT_RECIPE_RECEIPT_PREFIX {
+            if record.get("settled_at").is_some() {
+                continue;
+            }
+            record
+                .as_object_mut()
+                .ok_or(PersistenceError::Storage)?
+                .insert("settled_at".to_owned(), Value::from(now));
+            write_metadata_value(
+                transaction,
+                &composable_recipe_receipt_key(&photo_id, request_id),
+                &serde_json::to_string(&record).map_err(|_| PersistenceError::Storage)?,
+            )?;
+            transaction
+                .execute("DELETE FROM library_metadata WHERE key=?", [key])
+                .map_err(|_| PersistenceError::Storage)?;
+        } else {
+            // A retired two-control request cannot be replayed as a new composable write.
+            write_metadata_value(
+                transaction,
+                &receipt_tombstone_key(&photo_id, request_id),
+                "expired",
+            )?;
+        }
+    }
+    write_metadata_value(transaction, "composable_recipe_migration_v1", "complete")
+}
+
+pub(super) fn read_composable_edit_recipe_facts(
+    connection: &Connection,
+    photo_id: &str,
+) -> Result<Option<ComposableEditRecipeRead>, PersistenceError> {
+    let Some(facts) = read_edit_recipe(connection, photo_id)? else {
+        return Ok(None);
+    };
+    Ok(Some(ComposableEditRecipeRead {
+        recipe: read_composable_edit_recipe(connection, photo_id)?,
+        current_source_revision: facts.current_source_revision,
+        source_available: facts.source_available,
+    }))
+}
+
+pub(super) fn rebind_composable_edit_recipe(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    mutation: RebindComposableEditRecipe,
+) -> Result<ComposableEditRecipeWriteOutcome, PersistenceError> {
+    if !valid_request_id(&mutation.request_id) {
+        return Ok(ComposableEditRecipeWriteOutcome::Invalid(
+            ComposableRecipeRequestError::InvalidRequestId,
+        ));
+    }
+    for result in [
+        validate_bounded_name(&mutation.photo_id, MAXIMUM_PHOTO_ID_BYTES),
+        validate_bounded_name(&mutation.expected_recipe_revision, MAXIMUM_REVISION_BYTES),
+        validate_source_revision(&mutation.new_source_revision),
+    ] {
+        if let Err(error) = result {
+            return Ok(ComposableEditRecipeWriteOutcome::Invalid(
+                ComposableRecipeRequestError::Contract(error),
+            ));
+        }
+    }
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&serde_json::json!({
+                "kind":"composable-edit-recipe-rebind-v1", "photo_id":mutation.photo_id,
+                "expected_recipe_revision":mutation.expected_recipe_revision,
+                "new_source_revision":mutation.new_source_revision
+            }))
+            .map_err(|_| PersistenceError::Storage)?
+        )
+    );
+    write_transaction(state, database_name, connection, |transaction| {
+        let now = receipt_clock()?;
+        if let Some(outcome) = replay_receipt(
+            transaction,
+            &mutation.photo_id,
+            &mutation.request_id,
+            &digest,
+            now,
+        )? {
+            return Ok(outcome);
+        }
+        let Some(facts) = read_edit_recipe(transaction, &mutation.photo_id)? else {
+            return Ok(ComposableEditRecipeWriteOutcome::MissingPhoto);
+        };
+        let stored = read_composable_edit_recipe(transaction, &mutation.photo_id)?;
+        if !facts.source_available || facts.current_source_revision.is_none() {
+            return Ok(ComposableEditRecipeWriteOutcome::Unavailable);
+        }
+        if facts.current_source_revision.as_deref() != Some(mutation.new_source_revision.as_str()) {
+            return Ok(ComposableEditRecipeWriteOutcome::SourceChanged(stored));
+        }
+        if stored.as_ref().map(|recipe| recipe.revision.as_str())
+            != Some(mutation.expected_recipe_revision.as_str())
+        {
+            return Ok(ComposableEditRecipeWriteOutcome::Conflict(stored));
+        }
+        let mut committed = stored.ok_or(PersistenceError::Storage)?;
+        committed.source_revision = mutation.new_source_revision.clone();
+        for step in &mut committed.steps {
+            if let ProcessingInput::Original {
+                source_revision, ..
+            } = &mut step.input
+            {
+                *source_revision = mutation.new_source_revision.clone();
+            }
+        }
+        committed.revision = random_uuid_v4()?;
+        write_composable_recipe_record(transaction, &mutation.photo_id, &committed)?;
+        write_composable_recipe_receipt(
+            transaction,
+            &mutation.request_id,
+            &ComposableRecipeReceipt {
+                photo_id: mutation.photo_id.clone(),
+                payload_digest: digest,
+                settled_at: now,
+                outcome: ComposableReceiptOutcome::Saved,
+                recipe: recipe_record(&committed),
+            },
+        )?;
+        Ok(ComposableEditRecipeWriteOutcome::Saved(committed))
+    })
+}
+
 /// Saves one complete composable recipe behind both guards. The whole
 /// decision — receipt replay, Photo existence, source availability, the
 /// published source revision, the stored recipe revision, and the commit —
 /// happens inside one write transaction on the serialized owner, so the
 /// source revision a save is guarded against can never come from a
 /// different committed read than the stored recipe it is compared to.
+pub(super) fn replay_composable_edit_recipe(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    mutation: SaveComposableEditRecipe,
+) -> Result<Option<ComposableEditRecipeWriteOutcome>, PersistenceError> {
+    if let Err(error) = validate_save_request(&mutation) {
+        return Ok(Some(ComposableEditRecipeWriteOutcome::Invalid(error)));
+    }
+    let submitted = canonical_recipe(&mutation.recipe);
+    let digest = save_payload_digest(&mutation, &submitted)?;
+    write_transaction(state, database_name, connection, |transaction| {
+        replay_receipt(
+            transaction,
+            &mutation.photo_id,
+            &mutation.request_id,
+            &digest,
+            receipt_clock()?,
+        )
+    })
+}
+
 pub(super) fn save_composable_edit_recipe(
     state: &StateDirectory,
     database_name: &DatabaseName,
@@ -221,19 +563,15 @@ pub(super) fn save_composable_edit_recipe(
     let submitted = canonical_recipe(&mutation.recipe);
     let payload_digest = save_payload_digest(&mutation, &submitted)?;
     write_transaction(state, database_name, connection, |transaction| {
-        if let Some(receipt) = read_composable_recipe_receipt(transaction, &mutation.request_id)? {
-            if receipt.photo_id != mutation.photo_id || receipt.payload_digest != payload_digest {
-                return Ok(ComposableEditRecipeWriteOutcome::RequestConflict);
-            }
-            let recipe = parse_recipe_record(receipt.recipe)?;
-            return Ok(match receipt.outcome {
-                ComposableReceiptOutcome::Saved => {
-                    ComposableEditRecipeWriteOutcome::Replayed(recipe)
-                }
-                ComposableReceiptOutcome::Unchanged => {
-                    ComposableEditRecipeWriteOutcome::Unchanged(recipe)
-                }
-            });
+        let now = receipt_clock()?;
+        if let Some(outcome) = replay_receipt(
+            transaction,
+            &mutation.photo_id,
+            &mutation.request_id,
+            &payload_digest,
+            now,
+        )? {
+            return Ok(outcome);
         }
         // One serialized read: the Photo's support facts and the stored
         // composable recipe come from the same committed state, so a scan
@@ -243,16 +581,32 @@ pub(super) fn save_composable_edit_recipe(
             return Ok(ComposableEditRecipeWriteOutcome::MissingPhoto);
         };
         let stored = read_composable_edit_recipe(transaction, &mutation.photo_id)?;
-        if !facts.source_available || facts.current_source_revision.is_none() {
-            // No confirmed source facts are bound to the observed Original:
-            // either it is unavailable or no Capture fact has published a
-            // revision for it, so no guarded save exists.
-            return Ok(ComposableEditRecipeWriteOutcome::Unavailable);
-        }
-        if facts.current_source_revision.as_deref()
-            != Some(mutation.expected_source_revision.as_str())
+        let has_original = submitted
+            .steps
+            .iter()
+            .any(|step| matches!(step.input, ProcessingInput::Original { .. }));
+        let descriptor = transaction.query_row(
+            "SELECT o.relative_path,o.size,o.mtime_ms FROM original_files o JOIN photos p ON p.original_id=o.id WHERE p.id=?",
+            [&mutation.photo_id], |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,f64>(2)?)))
+            .map_err(|_| PersistenceError::Storage)?;
+        let size = u64::try_from(descriptor.1).map_err(|_| PersistenceError::Storage)?;
+        let observed = crate::source_revision(&descriptor.0, size, descriptor.2)
+            .map_err(|_| PersistenceError::Storage)?;
+        if observed != mutation.expected_source_revision
+            || stored
+                .as_ref()
+                .is_some_and(|recipe| recipe.source_revision != mutation.expected_source_revision)
         {
             return Ok(ComposableEditRecipeWriteOutcome::SourceChanged(stored));
+        }
+        if has_original && (!facts.source_available || facts.current_source_revision.is_none()) {
+            return Ok(ComposableEditRecipeWriteOutcome::Unavailable);
+        }
+        if !has_original
+            && stored.is_none()
+            && (!facts.source_available || facts.current_source_revision.is_none())
+        {
+            return Ok(ComposableEditRecipeWriteOutcome::Unavailable);
         }
         if stored.as_ref().map(|recipe| recipe.revision.as_str())
             != mutation.expected_recipe_revision.as_deref()
@@ -268,6 +622,7 @@ pub(super) fn save_composable_edit_recipe(
                 &ComposableRecipeReceipt {
                     photo_id: mutation.photo_id.clone(),
                     payload_digest,
+                    settled_at: now,
                     outcome: ComposableReceiptOutcome::Unchanged,
                     recipe: recipe_record(committed),
                 },
@@ -285,6 +640,7 @@ pub(super) fn save_composable_edit_recipe(
             &ComposableRecipeReceipt {
                 photo_id: mutation.photo_id.clone(),
                 payload_digest,
+                settled_at: now,
                 outcome: ComposableReceiptOutcome::Saved,
                 recipe: recipe_record(&committed),
             },
@@ -302,13 +658,11 @@ fn validate_save_request(
     mutation: &SaveComposableEditRecipe,
 ) -> Result<(), ComposableRecipeRequestError> {
     let contract = |error: ProcessingContractError| ComposableRecipeRequestError::Contract(error);
-    validate_bounded_name(
-        &mutation.request_id,
-        MAXIMUM_COMPOSABLE_RECIPE_REQUEST_ID_BYTES,
-    )
-    .map_err(contract)?;
+    if !valid_request_id(&mutation.request_id) {
+        return Err(ComposableRecipeRequestError::InvalidRequestId);
+    }
     validate_bounded_name(&mutation.photo_id, MAXIMUM_PHOTO_ID_BYTES).map_err(contract)?;
-    validate_revision(&mutation.expected_source_revision).map_err(contract)?;
+    validate_source_revision(&mutation.expected_source_revision).map_err(contract)?;
     if let Some(expected) = &mutation.expected_recipe_revision {
         validate_bounded_name(expected, MAXIMUM_REVISION_BYTES).map_err(contract)?;
     }
@@ -317,6 +671,13 @@ fn validate_save_request(
         return Err(ComposableRecipeRequestError::PhotoMismatch);
     }
     if mutation.recipe.source_revision != mutation.expected_source_revision {
+        return Err(ComposableRecipeRequestError::SourceRevisionMismatch);
+    }
+    if mutation.recipe.steps.iter().any(|step| {
+        matches!(&step.input,
+        ProcessingInput::Original { photo_id, source_revision }
+        if photo_id != &mutation.photo_id || source_revision != &mutation.expected_source_revision)
+    }) {
         return Err(ComposableRecipeRequestError::SourceRevisionMismatch);
     }
     Ok(())
@@ -366,8 +727,11 @@ fn composable_recipe_key(photo_id: &str) -> String {
     format!("{COMPOSABLE_EDIT_RECIPE_PREFIX}{photo_id}")
 }
 
-fn composable_recipe_receipt_key(request_id: &str) -> String {
-    format!("{COMPOSABLE_EDIT_RECIPE_RECEIPT_PREFIX}{request_id}")
+fn composable_recipe_receipt_key(photo_id: &str, request_id: &str) -> String {
+    format!(
+        "{COMPOSABLE_EDIT_RECIPE_RECEIPT_PREFIX}{}:{photo_id}{request_id}",
+        photo_id.len()
+    )
 }
 
 /// Reads and strictly parses one stored receipt. A malformed or oversized
@@ -375,12 +739,13 @@ fn composable_recipe_receipt_key(request_id: &str) -> String {
 /// parsed cannot prove a replay.
 fn read_composable_recipe_receipt(
     connection: &Connection,
+    photo_id: &str,
     request_id: &str,
 ) -> Result<Option<ComposableRecipeReceipt>, PersistenceError> {
     let value = connection
         .query_row(
             "SELECT value FROM library_metadata WHERE key=?",
-            [composable_recipe_receipt_key(request_id)],
+            [composable_recipe_receipt_key(photo_id, request_id)],
             |row| row.get::<_, String>(0),
         )
         .optional()
@@ -417,7 +782,7 @@ fn write_composable_recipe_receipt(
 ) -> Result<(), PersistenceError> {
     write_metadata_value(
         transaction,
-        &composable_recipe_receipt_key(request_id),
+        &composable_recipe_receipt_key(&receipt.photo_id, request_id),
         &serialize_record(receipt)?,
     )
 }
@@ -459,6 +824,15 @@ fn parse_stored_value<T: for<'de> Deserialize<'de>>(value: &str) -> Result<T, Pe
 
 fn validate_digest_hex(value: &str) -> Result<(), PersistenceError> {
     crate::processing::validate_digest(value).map_err(|_| PersistenceError::Storage)
+}
+
+pub(crate) fn serialize_recipe_snapshot(recipe: &ComposableEditRecipe) -> String {
+    serde_json::to_string(&recipe_record(recipe)).expect("validated recipe snapshot serialization")
+}
+
+#[cfg(test)]
+pub(crate) fn deserialize_recipe_snapshot(snapshot: &str) -> ComposableEditRecipe {
+    parse_recipe_record(serde_json::from_str(snapshot).unwrap()).unwrap()
 }
 
 /// The stored shape of one recipe: a complete copy in canonical `step_id`

@@ -62,6 +62,12 @@ describe("browser crypto helpers", () => {
         bundleId: "b".repeat(64),
         sha256: digest,
         byteLength: 3,
+        filename: "darktable-develop-1-artifact.tif",
+        publishedAt: "2026-10-01T00:00:00Z",
+        expiresAt: "2099-10-01T00:00:00Z",
+        orientation: "top-left",
+        iccEmbedded: true,
+        sampleFormat: "float32",
       };
       expect(await processingArtifactDigestRefusal(artifact, bytes)).toBe("");
       expect(

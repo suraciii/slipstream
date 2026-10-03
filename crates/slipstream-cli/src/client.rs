@@ -420,12 +420,19 @@ pub(crate) fn validated_route_failure(
             details.is_empty()
                 || (matches!(
                     operation,
-                    Operation::PhotosProcessingRecipeSave | Operation::PhotosProcessingExport
+                    Operation::PhotosProcessingRecipeSave
+                        | Operation::PhotosProcessingRecipeRebind
+                        | Operation::PhotosProcessingExport
+                        | Operation::PhotosProcessingExportRetry
                 ) && composable_recipe_details(details))
-                || (string("currentSourceRevision").is_some()
-                    && details.get("currentRecipeVersion").is_some_and(|value| {
-                        value.is_null() || value.as_str().is_some_and(|value| !value.is_empty())
-                    }))
+                || (string("currentSourceRevision").is_some_and(|value| {
+                    !value.is_empty() && value.len() <= MAXIMUM_SOURCE_REVISION_BYTES
+                }) && details.get("currentRecipeVersion").is_some_and(|value| {
+                    value.is_null()
+                        || value
+                            .as_str()
+                            .is_some_and(|value| !value.is_empty() && value.len() <= 128)
+                }))
         }
         // The composable Processing Step surface: each refusal is a
         // confirmed refusal that changed nothing. The composable Export's
@@ -438,16 +445,29 @@ pub(crate) fn validated_route_failure(
         | "source_unavailable"
         | "module_parameters_unavailable" => {
             details.is_empty()
-                || (operation == Operation::PhotosProcessingExport
-                    && processing_export_refusal_details(code, details))
+                || (code == "module_parameters_unavailable"
+                    && string("reasonCode").is_some_and(|value| !value.is_empty())
+                    && string("reason").is_some_and(|value| !value.is_empty())
+                    && details.len() == 2)
+                || (matches!(
+                    operation,
+                    Operation::PhotosProcessingExport | Operation::PhotosProcessingExportRetry
+                ) && processing_export_refusal_details(code, details))
         }
         "incompatible_input" => {
             details.is_empty()
-                || (operation == Operation::PhotosProcessingExport
-                    && processing_export_refusal_details(code, details))
+                || (matches!(
+                    operation,
+                    Operation::PhotosProcessingExport | Operation::PhotosProcessingExportRetry
+                ) && processing_export_refusal_details(code, details))
         }
         "invalid_settings" => {
-            details.is_empty() || (string("argument").is_some() && string("reason").is_some())
+            details.is_empty()
+                || (string("argument").is_some() && string("reason").is_some())
+                || (string("module").is_some_and(|value| !value.is_empty())
+                    && string("reasonCode").is_some_and(|value| !value.is_empty())
+                    && string("reason").is_some_and(|value| !value.is_empty())
+                    && details.len() == 3)
         }
         "unknown_photo" => {
             details.is_empty()
@@ -537,8 +557,9 @@ fn composable_recipe_details(details: &serde_json::Map<String, Value>) -> bool {
         .filter_map(|step| step.get("stepId").and_then(Value::as_str))
         .collect();
     string("photoId").is_some_and(|value| !value.is_empty())
-        && string("revision").is_some_and(|value| !value.is_empty())
-        && string("sourceRevision").is_some_and(|value| !value.is_empty())
+        && string("revision").is_some_and(|value| !value.is_empty() && value.len() <= 128)
+        && string("sourceRevision")
+            .is_some_and(|value| !value.is_empty() && value.len() <= MAXIMUM_SOURCE_REVISION_BYTES)
         && step_ids.len() == steps.len()
         && step_ids.iter().all(|id| !id.is_empty())
         && match details.get("currentStepId") {
@@ -568,8 +589,9 @@ fn processing_export_refusal_details(code: &str, details: &serde_json::Map<Strin
     string("photoId").is_some_and(|value| !value.is_empty())
         && string("requestId").is_some_and(|value| !value.is_empty())
         && string("stepId").is_some_and(|value| !value.is_empty())
-        && string("recipeRevision").is_some_and(|value| !value.is_empty())
-        && string("sourceRevision").is_some_and(|value| !value.is_empty())
+        && string("recipeRevision").is_some_and(|value| !value.is_empty() && value.len() <= 128)
+        && string("sourceRevision")
+            .is_some_and(|value| !value.is_empty() && value.len() <= MAXIMUM_SOURCE_REVISION_BYTES)
         && string("module").is_some_and(|value| !value.is_empty())
         && string("parameterSchemaVersion").is_some_and(|value| !value.is_empty())
         && string("parameterDigest").is_some_and(|value| !value.is_empty())

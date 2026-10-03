@@ -10,9 +10,8 @@
 use crate::config::ProcessingConfig;
 use crate::photo_executor::PhotoExecutor;
 use slipstream_core::{
-    ExportAttempt, ExportRecord, ExportSettlement, ExportSnapshot, ExportState, ExportTarget,
-    ExportWorkspace, Library, LibraryRoot, OriginalCapability, OriginalKind, RelativeOriginalPath,
-    StagedOriginal,
+    ExportRecord, ExportSettlement, ExportState, ExportTarget, ExportWorkspace, Library,
+    LibraryRoot, OriginalCapability, OriginalKind, RelativeOriginalPath, StagedOriginal,
 };
 use slipstream_processing::local_photo::OutputIdentity;
 #[path = "export_manager_composable.rs"]
@@ -21,7 +20,6 @@ pub(crate) use composable::{ProcessingExportExecution, ProcessingPreviewExecutio
 use slipstream_processing::photo_profile;
 #[path = "output_validation.rs"]
 pub(crate) mod output_validation;
-pub(crate) use output_validation::DevelopmentTiffFacts;
 #[cfg(test)]
 use output_validation::validate_development_tiff;
 use output_validation::{
@@ -58,13 +56,6 @@ pub(crate) struct ExportManager {
     /// through. It owns the fresh engine child, its private scratch, and
     /// its cleanup; this manager owns admission and settlement.
     executor: Arc<PhotoExecutor>,
-    /// The random identity minted at server startup that names every
-    /// attempt this process runs. A restart mints a fresh one, so a
-    /// durable attempt from another process is never mistaken for live
-    /// work of this one.
-    incarnation: String,
-    /// Orders the attempts of this server lifetime.
-    next_sequence: AtomicU64,
     /// The cancellation tokens of the attempts this process is running,
     /// keyed by Export identity. HTTP cancellation settles the durable
     /// record first and then flips the live token so the engine child and
@@ -135,15 +126,6 @@ impl Drop for ProcessingPublication {
 /// A live download renews its lease well inside the staleness window.
 const LEASE_RENEWAL_INTERVAL: u64 = 10 * 60 * 1000;
 
-/// The random attempt-incarnation identity of one server lifetime: 32
-/// lowercase hex characters, exactly the width the persistence boundary
-/// validates.
-fn startup_incarnation() -> Result<String, String> {
-    let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).map_err(|error| format!("startup randomness: {error}"))?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
 impl ExportManager {
     /// Opens the application-owned Export workspace and the shared local
     /// Photo Development executor. Blocking filesystem work; the caller
@@ -168,8 +150,6 @@ impl ExportManager {
             resolver,
             workspace,
             executor,
-            incarnation: startup_incarnation()?,
-            next_sequence: AtomicU64::new(1),
             running: Mutex::new(HashMap::new()),
             allowance,
             admission: Arc::new(tokio::sync::Mutex::new(())),
@@ -271,12 +251,6 @@ impl ExportManager {
         self.drain_tasks().await;
     }
 
-    /// The retained artifact file of one Export identity. The path stays
-    /// private to the service; responses carry identity facts only.
-    pub(crate) fn artifact_path(&self, export_id: &str) -> Option<PathBuf> {
-        self.artifact_path_for_workload(export_id, "development-tiff")
-    }
-
     pub(crate) fn artifact_path_for_workload(
         &self,
         export_id: &str,
@@ -325,13 +299,6 @@ impl ExportManager {
         (self.resolver)(photo_id)
     }
 
-    /// The shared serialized Library instance this manager was opened
-    /// with. The preview render executor reads render-time facts through
-    /// the same single instance; this is a resource reference, not a copy.
-    pub(crate) fn library(&self) -> &Arc<Library> {
-        &self.library
-    }
-
     /// The bundle identity every attempt of this deployment executes
     /// under. Startup configuration cannot change while the service runs.
     pub(crate) fn bundle_sha256(&self) -> &str {
@@ -367,45 +334,9 @@ impl ExportManager {
             .await
     }
 
-    /// The retained Development TIFF of one Photo whose captured snapshot
-    /// matches the current Edit identity and whose retention has not expired,
-    /// or `None` when no matching artifact is retained.
-    ///
-    /// This is the durable Development Result retention the Edit Preview
-    /// derivation resolves against: a published Development TIFF artifact is
-    /// the retained result, and its disclosed expiry is its retention. A
-    /// Library read failure resolves as "not retained" so the caller refuses
-    /// fail-closed instead of serving a result it cannot vouch for.
-    pub(crate) async fn retained_development_result(
-        &self,
-        photo_id: &str,
-        identity: &RetainedDevelopmentIdentity<'_>,
-    ) -> Option<RetainedDevelopmentTiff> {
-        let records = self.library.photo_exports(photo_id).await.ok().flatten()?;
-        retained_development_tiff_of(&records, identity, unix_seconds(), |export_id| {
-            self.artifact_path(export_id)
-        })
-    }
-
-    /// Admits one accepted Export: the heavy attempt runs in the background
-    /// and survives browser departure. Duplicate identities never reach this
-    /// entry because the persistence owner deduplicates first.
-    pub(crate) fn start(self: &Arc<Self>, export: ExportRecord) {
-        let manager = Arc::clone(self);
-        let _ = self.spawn_task(async move {
-            if manager.shutting_down.load(Ordering::Acquire) || export.attempt.is_some() {
-                // A record with a persisted attempt was started before; only
-                // restart reconciliation may resolve it, never a new launch.
-                return;
-            }
-            manager.execute(export).await;
-        });
-    }
-
-    /// Resolves unfinished work after a restart. Queued work starts through
-    /// the ordinary admission path; running work is resolved from the
-    /// durable snapshot into a validated publication or a terminal
-    /// failure, never a replacement attempt.
+    /// Resolves historical unfinished work without launching retired workloads.
+    /// Persisted attempts retain validated publication recovery; unattempted
+    /// queued records settle as interrupted.
     pub(crate) fn reconcile_after_restart(self: &Arc<Self>) {
         let manager = Arc::clone(self);
         let _ = self.spawn_task(async move {
@@ -419,7 +350,9 @@ impl ExportManager {
                 if record.attempt.is_some() {
                     manager.clone().resolve_interrupted(record).await;
                 } else {
-                    manager.start(record);
+                    manager
+                        .settle_failed(&record.id, INTERRUPTED_ATTEMPT.to_owned())
+                        .await;
                 }
             }
         });
@@ -656,151 +589,9 @@ impl ExportManager {
             token.store(true, Ordering::Release);
         }
     }
-    /// One bounded heavy attempt: stage, develop, validate, claim, publish.
-    async fn execute(self: &Arc<Self>, export: ExportRecord) {
-        if self.shutting_down.load(Ordering::Acquire) {
-            return;
-        }
-        let export_id = export.id.clone();
-        let _slot = self.admission.lock().await;
-        if self.shutting_down.load(Ordering::Acquire) {
-            return;
-        }
-        // The record may have settled (cancelled) while queued.
-        let record = match self.library.export(&export_id).await {
-            Ok(Some(record)) if !record.state.is_terminal() => record,
-            Ok(_) => return,
-            Err(_) => {
-                return self
-                    .settle_failed(&export_id, PERSISTENCE_UNAVAILABLE.to_owned())
-                    .await;
-            }
-        };
-        let snapshot = record.snapshot.clone();
-
-        // The attempt identity is minted locally: the incarnation names this
-        // server lifetime and the sequence orders its attempts.
-        let attempt = ExportAttempt {
-            incarnation: self.incarnation.clone(),
-            sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
-        };
-        let record = match self
-            .library
-            .begin_export_attempt(&export_id, attempt.clone())
-            .await
-        {
-            Ok(Some(record)) if !record.state.is_terminal() => record,
-            // Settled by cancellation or lost between admission and attempt
-            // persistence.
-            Ok(_) => return,
-            Err(_) => {
-                return self
-                    .settle_failed(&export_id, PERSISTENCE_UNAVAILABLE.to_owned())
-                    .await;
-            }
-        };
-
-        // Stage the Original through the confined Library boundary and bind
-        // the verified bytes to the record before any engine contact.
-        let staged = match self.stage_original(&snapshot).await {
-            Ok(staged) => staged,
-            Err(error) => return self.settle_failed(&export_id, error).await,
-        };
-        let staged_facts = staged.facts();
-        let record = match self
-            .library
-            .record_export_source(
-                &record.id,
-                staged_facts.source_facts.size,
-                &staged_facts.sha256,
-            )
-            .await
-        {
-            Ok(Some(record)) if !record.state.is_terminal() => record,
-            Ok(_) => return,
-            Err(_) => {
-                return self
-                    .settle_failed(&export_id, PERSISTENCE_UNAVAILABLE.to_owned())
-                    .await;
-            }
-        };
-
-        // The staged source evidence the attempt runs against must be the
-        // one the persistence boundary recorded.
-        if record.source.is_none() {
-            return self
-                .settle_failed(
-                    &export_id,
-                    "staged source evidence was not recorded".to_owned(),
-                )
-                .await;
-        }
-
-        // Once an attempt identity is persisted, its outcome may only settle
-        // while it is still the record's current attempt: a retry or
-        // cancellation that superseded this task never steals the truth.
-        if let Err(error) = self
-            .drive_attempt(&record, &snapshot, staged, &attempt)
-            .await
-        {
-            let still_current = match self.library.export(&export_id).await {
-                Ok(Some(current)) => {
-                    current.state == ExportState::Running
-                        && current.attempt.as_ref() == Some(&attempt)
-                }
-                _ => false,
-            };
-            if still_current {
-                self.settle_failed(&export_id, error).await;
-            }
-        }
-    }
-}
-
-/// The outcome of one cancellation request against an Export.
-pub(crate) enum ExportCancelOutcome {
-    /// The Export identity is unknown.
-    Unknown,
-    /// The settled Export, exactly once against the actual completion state.
-    Settled(Box<ExportRecord>),
-    /// The actual completion could not be proven; nothing was settled.
-    Uncertain,
 }
 
 impl ExportManager {
-    /// Cancels one Export exactly once against the actual completion state.
-    /// The durable exactly-once cancellation settles the record first; a
-    /// completion that raced it and already settled keeps its published
-    /// artifact, and the live engine attempt is signalled afterwards so the
-    /// child and its scratch are torn down before the slot is released.
-    pub(crate) async fn cancel(&self, export_id: &str) -> ExportCancelOutcome {
-        let record = match self.library.export(export_id).await {
-            Ok(Some(record)) => record,
-            Ok(None) => return ExportCancelOutcome::Unknown,
-            Err(_) => return ExportCancelOutcome::Uncertain,
-        };
-        if record.state.is_terminal() {
-            return ExportCancelOutcome::Settled(Box::new(record));
-        }
-        match self.library.cancel_export(export_id).await {
-            Ok(Some(record)) => {
-                if let Some(token) = self.running_token(export_id) {
-                    token.store(true, Ordering::Release);
-                }
-                ExportCancelOutcome::Settled(Box::new(record))
-            }
-            Ok(None) => ExportCancelOutcome::Unknown,
-            Err(_) => ExportCancelOutcome::Uncertain,
-        }
-    }
-
-    /// Resolves, copies, and verifies the Original. A changed source revision
-    /// refuses the attempt before any engine contact.
-    async fn stage_original(&self, snapshot: &ExportSnapshot) -> Result<StagedOriginal, String> {
-        self.stage_original_for(&snapshot.photo_id, &snapshot.source_revision)
-            .await
-    }
-
     /// The common staging seam used by durable Exports and preview-class
     /// attempts. The expected source revision is supplied directly so the
     /// ephemeral path never needs an Export snapshot or persistence row.
@@ -889,142 +680,6 @@ impl ExportManager {
         .map_err(|error| format!("staging worker failed: {error}"))?
     }
 
-    /// Runs the local engine attempt of one admitted Export: develop into a
-    /// private temporary, validate against the closed contract and the
-    /// executor's report, then claim and publish atomically. `staged` is
-    /// dropped once the engine consumed the source copy, removing the
-    /// private file.
-    async fn drive_attempt(
-        &self,
-        record: &ExportRecord,
-        snapshot: &ExportSnapshot,
-        staged: StagedOriginal,
-        attempt: &ExportAttempt,
-    ) -> Result<(), String> {
-        let export_id = record.id.clone();
-        let recipe = snapshot.recipe_payload().map_err(|_| {
-            "captured recipe is not representable by the execution payload".to_owned()
-        })?;
-        let target = export_target(&snapshot.workload)?;
-
-        // The private output the engine writes; validation gates any
-        // publication, and dropping the writer discards a partial output.
-        let writer = self
-            .workspace
-            .begin_artifact(&export_id, target)
-            .map_err(|error| format!("output staging failed: {error}"))?;
-        let output_path = writer.temporary_path().to_path_buf();
-
-        // The live cancellation token: HTTP cancellation settles the record
-        // and flips it; the executor kills the engine process group and
-        // removes its scratch before the slot is released.
-        let token = self.begin_running(&export_id);
-        let developed = self
-            .executor
-            .develop(
-                staged.path().to_path_buf(),
-                output_path.clone(),
-                recipe.exposure_milli_ev,
-                Arc::clone(&token),
-            )
-            .await;
-        drop(staged);
-        self.end_running(&export_id, &token);
-        let identity = developed?;
-
-        // Verify the developed bytes against the executor's report and the
-        // closed Development TIFF contract before anything is claimed or
-        // renamed into place.
-        let validation_path = output_path.clone();
-        let facts = tokio::task::spawn_blocking(move || {
-            verify_developed_output(&validation_path, &identity, target)
-        })
-        .await
-        .map_err(|error| format!("validation task failed: {error}"))?
-        .map_err(|_| OUTPUT_VALIDATION_FAILED.to_owned())?;
-
-        // Cancellation must win the race up to this point: a settled record
-        // is never published and the engine result is discarded.
-        let current = self
-            .library
-            .export(&export_id)
-            .await
-            .map_err(|_| PERSISTENCE_UNAVAILABLE.to_owned())?
-            .ok_or("export record disappeared")?;
-        if current.state != ExportState::Running || current.attempt.as_ref() != Some(attempt) {
-            return Err("export was settled by cancellation".to_owned());
-        }
-
-        // A publication claim from an earlier process names that process's
-        // attempt, never this one. A claimed file this attempt did not
-        // publish is a stale leftover to discard; only the claim this
-        // attempt is about to take can adopt the rename below.
-        let claim = self
-            .library
-            .export_publication_claim(&export_id)
-            .await
-            .unwrap_or(None);
-        let claim_is_current =
-            claim.as_ref() == Some(&(attempt.incarnation.clone(), attempt.sequence));
-        if claim_is_current {
-            let published_path = self
-                .artifact_path_for_workload(&export_id, &snapshot.workload)
-                .ok_or_else(|| "the publication claim named no artifact directory".to_owned())?;
-            if tokio::fs::metadata(&published_path).await.is_ok() {
-                return self
-                    .settle_from_published_file(&export_id, &published_path, target)
-                    .await;
-            }
-            return Err("the claimed publication never produced its artifact".to_owned());
-        }
-        if let Some(published_path) =
-            self.artifact_path_for_workload(&export_id, &snapshot.workload)
-            && tokio::fs::metadata(&published_path).await.is_ok()
-        {
-            // A file without a matching claim belongs to a superseded
-            // attempt; it is never this attempt's output.
-            let _ = fs::remove_file(&published_path);
-        }
-
-        // Claim the publication durably before the rename, so a crash around
-        // it leaves recoverable evidence instead of an unattributed file.
-        if self
-            .library
-            .claim_export_publication(&export_id, &attempt.incarnation, attempt.sequence)
-            .await
-            .is_err()
-        {
-            return Err("the publication could not be claimed durably".to_owned());
-        }
-
-        let published = writer
-            .publish(|path| validate_output(path, target).map(|_| ()))
-            .map_err(|error| format!("artifact publication failed: {error}"))?;
-        let settled = self
-            .library
-            .settle_export(
-                &export_id,
-                ExportSettlement::Succeeded {
-                    artifact_size: published.size,
-                    artifact_sha256: published.sha256.clone(),
-                    published_at: unix_seconds(),
-                    artifact_width: facts.width,
-                    artifact_height: facts.height,
-                    artifact_profile_identity: facts.profile_identity,
-                },
-            )
-            .await
-            .map_err(|_| PERSISTENCE_UNAVAILABLE.to_owned())?;
-        if let Some(settled) = settled
-            && settled.state != ExportState::Succeeded
-        {
-            // Cancellation won the exactly-once settlement race; the renamed
-            // file belongs to no record and must not leak.
-            let _ = fs::remove_file(&published.path);
-        }
-        Ok(())
-    }
-
     async fn settle_from_published_file(
         &self,
         export_id: &str,
@@ -1086,95 +741,6 @@ impl ExportManager {
 }
 
 const PERSISTENCE_UNAVAILABLE: &str = "persistence is unavailable";
-
-/// The current Edit identity facts a retained Development TIFF must have been
-/// produced under to be current for one Edit Preview derivation: the exact
-/// recipe revision and exposure, the source revision, and the bundle.
-pub(crate) struct RetainedDevelopmentIdentity<'a> {
-    /// Whether the request names the processing baseline rather than one
-    /// saved recipe revision: a baseline request matches any captured
-    /// snapshot produced under exactly the baseline settings, while every
-    /// other request matches the captured revision exactly.
-    pub(crate) matches_baseline: bool,
-    pub(crate) recipe_revision: Option<&'a str>,
-    pub(crate) exposure_milli_ev: i64,
-    pub(crate) source_revision: &'a str,
-    pub(crate) bundle_sha256: &'a str,
-}
-
-/// One retained Development TIFF: the published artifact of a succeeded
-/// Development TIFF Export with the identity its publication captured. The
-/// path stays private to the service; responses carry identity facts only.
-pub(crate) struct RetainedDevelopmentTiff {
-    pub(crate) path: PathBuf,
-    pub(crate) sha256: String,
-    pub(crate) byte_length: u64,
-    pub(crate) recipe_revision: String,
-    pub(crate) exposure_milli_ev: i64,
-    pub(crate) source_revision: String,
-    pub(crate) bundle_id: String,
-}
-
-/// The first retained Development TIFF in one Photo's Export records, in the
-/// Library's retention order, that was produced under exactly the current
-/// identity. The caller reads the records through the durable Export
-/// lifecycle; this selection is pure so the ordering and identity rules are
-/// testable without a Library.
-pub(crate) fn retained_development_tiff_of(
-    records: &[ExportRecord],
-    identity: &RetainedDevelopmentIdentity<'_>,
-    now_unix_seconds: u64,
-    artifact_path: impl Fn(&str) -> Option<PathBuf>,
-) -> Option<RetainedDevelopmentTiff> {
-    records.iter().find_map(|record| {
-        retained_development_tiff(record, identity, now_unix_seconds, &artifact_path)
-    })
-}
-
-/// The retained Development TIFF of one Export record when it was produced
-/// under exactly the current identity, its Export settled successfully, and
-/// its artifact retention is still live. Any other identity is not current
-/// and must never be served as one.
-pub(crate) fn retained_development_tiff(
-    record: &ExportRecord,
-    identity: &RetainedDevelopmentIdentity<'_>,
-    now_unix_seconds: u64,
-    artifact_path: impl Fn(&str) -> Option<PathBuf>,
-) -> Option<RetainedDevelopmentTiff> {
-    if record.state != ExportState::Succeeded || record.snapshot.workload != "development-tiff" {
-        return None;
-    }
-    // The captured snapshot's own execution payload is the identity the
-    // attempt ran under: a snapshot that cannot produce one never ran.
-    let payload = record.snapshot.recipe_payload().ok()?;
-    let snapshot = &record.snapshot;
-    // A baseline request names the processing baseline rather than a saved
-    // recipe, so any snapshot whose captured settings are exactly that
-    // baseline is the same development whatever revision captured them.
-    // Every other request matches the captured revision exactly.
-    let revision_matches = identity.matches_baseline
-        || Some(snapshot.recipe_revision.as_str()) == identity.recipe_revision;
-    let matches = revision_matches
-        && payload.exposure_milli_ev == identity.exposure_milli_ev
-        && snapshot.source_revision == identity.source_revision
-        && snapshot.bundle_id == identity.bundle_sha256;
-    if !matches {
-        return None;
-    }
-    let artifact = record.artifact.as_ref()?;
-    if artifact.expires_at <= now_unix_seconds {
-        return None;
-    }
-    Some(RetainedDevelopmentTiff {
-        path: artifact_path(&record.id)?,
-        sha256: artifact.sha256.clone(),
-        byte_length: artifact.size,
-        recipe_revision: snapshot.recipe_revision.clone(),
-        exposure_milli_ev: payload.exposure_milli_ev,
-        source_revision: snapshot.source_revision.clone(),
-        bundle_id: snapshot.bundle_id.clone(),
-    })
-}
 
 fn bounded_outcome(outcome: &str) -> String {
     outcome.chars().take(200).collect()

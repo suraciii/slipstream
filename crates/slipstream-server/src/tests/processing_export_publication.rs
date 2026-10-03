@@ -54,7 +54,9 @@ async fn publication_survives_sweep_until_durable_settlement() {
             )
             .await
             .unwrap();
-        let path = manager.artifact_path(&executed.artifact_id).unwrap();
+        let path = manager
+            .artifact_path_for_workload(&executed.artifact_id, "development-tiff")
+            .unwrap();
         let bytes = fs::read(&path).unwrap();
         // Execution has renamed the real validated TIFF, but no artifact
         // record exists yet. Sweep must preserve these exact bytes.
@@ -97,6 +99,42 @@ async fn publication_survives_sweep_until_durable_settlement() {
             drop(executed);
             manager.sweep_expiry().await;
             assert_eq!(fs::read(&path).unwrap(), bytes);
+            let artifact_id = application
+                .library
+                .processing_export_work(request_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .artifact_id
+                .unwrap();
+            let (status, metadata) = get_json(
+                &router,
+                &format!("/api/processing-artifacts/{}", artifact_id.as_str()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let expected_published = time::OffsetDateTime::from_unix_timestamp(now as i64)
+                .unwrap()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap();
+            assert_eq!(metadata["publishedAt"], expected_published);
+            let work = application
+                .library
+                .processing_export_work(request_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let expected_expiry =
+                time::OffsetDateTime::from_unix_timestamp(work.retain_until.unwrap() as i64)
+                    .unwrap()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap();
+            assert_eq!(metadata["expiresAt"], expected_expiry);
+            assert_eq!(metadata["byteLength"], bytes.len());
+            assert_eq!(
+                metadata["sha256"],
+                format!("{:x}", sha2::Sha256::digest(&bytes))
+            );
         } else {
             // An uncertain outcome with work still executing cannot authorize
             // deleting bytes. A later durable cancellation proves no claim.
@@ -113,7 +151,9 @@ async fn publication_survives_sweep_until_durable_settlement() {
         }
     }
     // Startup has no live publication claims and still clears orphan leftovers.
-    let orphan = manager.artifact_path("pa-orphan").unwrap();
+    let orphan = manager
+        .artifact_path_for_workload("pa-orphan", "development-tiff")
+        .unwrap();
     fs::write(&orphan, b"unclaimed interrupted publication").unwrap();
     application.shutdown().await.unwrap();
     drop(router);

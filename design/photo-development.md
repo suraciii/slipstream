@@ -19,12 +19,13 @@ The Photo owns one current Edit Recipe containing zero or more Processing Step
 records. Each record has a stable opaque `step_id`, one selected module, one
 identified input binding, and one complete parameter snapshot under the
 [module contract](processing-modules.md#model-and-ownership). A repeated module
-uses a different step identity. No saved steps means no saved editing intent;
-opening an admitted RAW development step uses the processing baseline and
-as-shot white balance. Saving baseline settings still creates intent, and reset
-does not delete a step. Recipe revisions remain independent of Rating and
-Selection State. The active browser step is a selection over this collection,
-not a hidden pipeline position.
+uses a different step identity. A persisted recipe, including an empty recipe,
+is saved editing intent; absence of a recipe is the unsaved state. Opening an
+admitted RAW development step uses the processing baseline and as-shot white
+balance. Saving baseline settings still creates intent, and reset does not
+delete a step. Recipe revisions remain independent of Rating and Selection
+State. The active browser step is a selection over this collection, not a hidden
+pipeline position.
 
 A step's input binding is one of three guarded kinds: the Photo's Original
 File under its guarded source revision, one retained immutable Processing
@@ -271,13 +272,13 @@ Even a process that cannot stop immediately must not publish its stale result.
 Temporary comparison requests own their admission, supersession, and delivery
 separately from the main preview and do not change saved intent.
 
-A comparison may request the module's baseline rendition — the processing
-baseline of 0 EV and as-shot white balance derived from the input rather
-than from the saved recipe — so the compared view stays on the same
-development while the saved recipe moves. Every Preview admission settles:
-completion, failure, and cancellation free its identity, a later request
-cannot report work that no longer exists as still running, and an attempt
-the service abandons is cancelled rather than left for deadline cleanup.
+A comparison requests the selected module's published default tree under the
+[module comparison contract](processing-modules.md#bounded-current-step-preview).
+For darktable this baseline uses 0 EV and as-shot white balance from the input.
+Every Preview admission settles: completion, failure, and cancellation free its
+identity, a later request cannot report work that no longer exists as still
+running, and an attempt the service abandons is cancelled rather than left for
+deadline cleanup.
 Each response is a current rendition, a queued/running admission result, or
 a refusal naming the selected module or incompatible input and reason.
 
@@ -378,10 +379,12 @@ required. Re-rendering with unqualified replacement assets is forbidden.
 Location Recovery with equal content preserves editing intent after validation.
 A changed published source revision invalidates use of the bound recipe until an
 explicit rebind. That operation must identify both the previously observed
-recipe revision and the newly observed source revision. It must return a new
-recipe revision; ordinary saves and processing must not rebind as a side effect.
-Rebinding remains subject to concurrent-source and edit checks. Exact input
-bytes are independently verified when processing stages the Original.
+recipe revision and the newly observed source revision. It must compare both
+guards atomically and return a new recipe revision. Rebind updates only Original
+input source bindings; it preserves step identities, current selection, complete
+parameter trees, and artifact bindings. Ordinary saves and processing must not
+rebind as a side effect. Exact input bytes are independently verified when
+processing stages the Original.
 
 Photo read models must expose whether a saved recipe exists and processing
 availability without eagerly rendering every Photo. The saved-edit fact is
@@ -391,20 +394,46 @@ retirement as an unreferenced record in Retire and Bind.
 
 The service must offer bounded operations to discover admitted module support,
 read/change Edit Recipe intent, request the current step's Preview,
-submit/list/inspect/cancel Exports, and obtain a validated artifact. Web and CLI
-share identity and guards. Artifact responses expose identity, type, size, expiry,
-and matching content metadata; partial downloads must not be reported complete.
+submit/list/inspect/cancel/retry Exports, and obtain a validated artifact. Web and
+CLI share identity and guards. Per-Photo work and artifact lists each show at
+most 64 records, newest first with a deterministic identity tie order. They
+restore unfinished work and retained terminal metadata after navigation and
+restart; a newer failed or pending request must not hide an earlier downloadable
+output. Artifact responses expose module, complete concrete output contract,
+identity, publication time, filename, type, size, expiry, TIFF color/orientation/
+sample facts, and matching content metadata. Filenames distinguish the module,
+step, and immutable artifact identity. Partial downloads must not be reported
+complete. These read-view bounds must not evict unexpired receipts or artifacts.
+
+Historical fixed-stage image Exports remain inspectable and downloadable through
+read-only history. Their captured metadata, bytes, expiry, and active download
+leases remain authoritative. They must not be converted into Processing Artifacts
+when complete module/schema/parameter provenance is absent. The bounded history
+view is not a retention limit. Retired fixed-stage mutations must not execute
+again on restart; unfinished records settle through interrupted-work recovery
+without invoking the retired pipeline.
+
+Migration preserves existing composable recipes. Legacy two-control intent becomes
+a darktable-owned snapshot preserving exact semantic exposure and white balance,
+including unqualified values; it must not substitute baseline values. Settled
+save receipts without recorded settlement time begin their seven-day retention
+at migration. Legacy request identities whose payload cannot be replayed under
+the new contract remain reserved in the Photo's namespace and report expiry,
+instead of authorizing a different write.
 
 ### Edit state file snapshots
 
-An edit state file captures a confirmed Edit Recipe in one transaction, with
-its Photo identity, source revision, fixed Film Recipe SHA-256 and procedure.
-Schema v14 owns the XMP export table. The service persists exact document bytes,
-filename, byte length, SHA-256 and creation/expiry times alongside the request
-identity and captured recipe settings. Regenerating a document on read is
-rejected: generator changes would alter previously acknowledged download
-evidence. Restart, later recipe changes and unavailable Originals or processing
-engines must leave the retained document and its evidence unchanged.
+An edit state file captures a confirmed Edit Recipe and its caller-selected
+darktable step in one transaction, with Photo, source, recipe, and complete
+module parameter provenance. The selected step must provide unambiguous semantic
+exposure and white-balance intent; a non-darktable selection or an unsupported
+semantic extraction is refused without inventing baseline values. Schema v14
+owns the XMP export table. The service persists exact document bytes, filename,
+byte length, SHA-256, and creation/expiry times alongside the request identity
+and captured recipe. Regenerating a document on read is rejected: generator
+changes would alter previously acknowledged download evidence. Restart, later
+recipe changes, migration, and unavailable Originals or processing engines must
+leave retained historical documents and their evidence unchanged.
 
 The closed request identity uses the same syntax as image Export requests.
 The Photo scopes the identity; a different payload conflicts, the same payload
@@ -417,13 +446,20 @@ again before choosing a new snapshot identity. Read failures return HTTP 503
 `resource_unavailable`; an unconfirmed create returns HTTP 500 `outcome_unknown`.
 Storage failures must never become missing records.
 
-The XMP uses Camera Raw `Exposure2012` for EV and `WhiteBalance` for As Shot.
-Custom temperature/tint intent stays in the Slipstream namespace. Photo and
-recipe provenance, `FilmRecipeSha256` and `FilmProcedure` also use that
-namespace. The opaque UTF-8 source revision contains NUL separators and is
-encoded losslessly as lowercase hexadecimal with the sibling property
-`SourceRevisionEncoding` set to `hex-utf8`;
-raw revision bytes must never appear as forbidden XML characters.
+The XMP uses Camera Raw `Exposure2012` only for semantic EV and `WhiteBalance`
+only for As Shot. Custom temperature/tint intent, selected step identity, complete
+recipe provenance, and module parameter snapshots stay in the Slipstream
+namespace. A Film Recipe is captured only when present in that recipe, never
+invented as an implicit successor. The opaque UTF-8 source revision contains NUL
+separators and is encoded losslessly as lowercase hexadecimal with the sibling
+property `SourceRevisionEncoding` set to `hex-utf8`; raw revision bytes must never
+appear as forbidden XML characters.
+
+`RecipeSnapshot` carries the complete canonical stored recipe as XML-escaped
+UTF-8 JSON, with `RecipeSnapshotEncoding` set to `json-utf8`. Its field names
+and Original/Artifact variants use the durable recipe record shape. It preserves
+every step, parameter tree, input contract, and current selection; JSON escaping
+preserves embedded NUL bytes without placing forbidden characters in the XML.
 
 POST returns root creation and expiry times and artifact filename, content
 type, length and SHA-256. GET list returns at most 64 snapshots, including expired
@@ -511,7 +547,7 @@ A guarded save returns exactly one outcome:
 | `request_conflict` | The request identity was already used with a different payload.                                     |
 | `missing_recipe`   | A write requiring an existing recipe found none.                                                    |
 | `unsupported`      | The Photo's source class is not admitted by the selected module's qualification.                    |
-| `invalid_settings` | The settings are outside the admitted range or shape.                                               |
+| `invalid_settings` | The settings have a malformed or incomplete structural shape.                                       |
 | `unavailable`      | Current source facts cannot be read — confirmed or still pending — so no guarded write is possible. |
 
 The service evaluates these guards in one closed order: request-identity

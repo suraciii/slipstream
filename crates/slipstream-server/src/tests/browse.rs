@@ -464,7 +464,6 @@ async fn photo_albums_route_reports_true_membership_from_the_owner() {
 async fn album_saved_position_falls_back_by_membership_position_in_time_views() {
     let (base, config) = prepare_fixture();
     let root = &config.library_root;
-    // `c` deliberately has no Capture Time so a time view puts it last.
     capture_metadata_fixture(&root.join("a.jpg"), "2026:01:01 09:00:00");
     capture_metadata_fixture(&root.join("b.jpg"), "2026:01:01 10:00:00");
     jpeg_fixture(&root.join("c.jpg"), 8, 4, [1, 2, 3]);
@@ -482,8 +481,6 @@ async fn album_saved_position_falls_back_by_membership_position_in_time_views() 
         by_name["b.jpg"].clone(),
         by_name["c.jpg"].clone(),
     );
-
-    // Membership order starts with the Photo that will become unavailable.
     let album = application
         .mutate_album(slipstream_core::AlbumMutation::Create {
             name: "Picks".to_owned(),
@@ -511,13 +508,22 @@ async fn album_saved_position_falls_back_by_membership_position_in_time_views() 
         .unwrap();
     fs::remove_file(root.join("c.jpg")).unwrap();
     application.rescan().await.unwrap();
-
-    // Saved `c` is unavailable, so every order resumes at the next available
-    // member by membership position: `a`.
     assert_eq!(
         album_resume(&application, &album, BrowseViewOrder::AlbumOrder).await,
         (1, a.clone())
     );
+    let fresh = application
+        .browse_open_with_mode(
+            BrowseSourceRequest::Album(album.clone()),
+            BrowseViewOrder::AlbumOrder,
+            BrowseSelectionFilter::All,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(fresh.position, 0);
+    application.browse_close(&fresh.token);
     let ascending = browse_ids_in_order(
         &application,
         BrowseSourceRequest::Album(album.clone()),
@@ -542,13 +548,10 @@ async fn album_saved_position_falls_back_by_membership_position_in_time_views() 
         ordering_locations(&application, &descending).await,
         vec!["b.jpg", "a.jpg", "c.jpg"]
     );
-    // Membership position picks `a` even though its view position differs.
     assert_eq!(
         album_resume(&application, &album, BrowseViewOrder::CaptureTimeDescending).await,
         (1, a.clone())
     );
-    // The explicit preferred Photo still outranks the saved position, and the
-    // persisted membership positions never move.
     let opened = application
         .browse_open(
             BrowseSourceRequest::Album(album.clone()),
@@ -584,7 +587,6 @@ async fn descending_paged_windows_stay_globally_ordered_without_duplicates() {
             &format!("2026:01:01 09:{:02}:{:02}", index / 60, index % 60),
         );
     }
-    // Two Photos without a valid Capture Time stay last in both directions.
     jpeg_fixture(&root.join("d.jpg"), 8, 4, [1, 2, 3]);
     jpeg_fixture(&root.join("z.jpg"), 8, 4, [4, 5, 6]);
     let application = Application::open(&config).await.unwrap();
@@ -611,8 +613,6 @@ async fn descending_paged_windows_stay_globally_ordered_without_duplicates() {
     let unique = descending.iter().collect::<std::collections::BTreeSet<_>>();
     assert_eq!(unique.len(), descending.len(), "windows repeated a Photo");
 
-    // The same paged traversal in ascending order is the exact inverse of the
-    // time partition, proving both directions page one global order.
     let ascending = browse_ids_in_pages(
         &application,
         BrowseSourceRequest::Library,

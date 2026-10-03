@@ -40,6 +40,12 @@ const record = (): {
   bundleId: "c".repeat(64),
   sha256: "d".repeat(64),
   byteLength: 12_000_000,
+  filename: "captured-output.tiff",
+  publishedAt: "2026-10-01T12:00:00Z",
+  expiresAt: "2099-10-01T12:00:00Z",
+  orientation: "top-left",
+  iccEmbedded: true,
+  sampleFormat: "float32",
 });
 
 const recordHeaders = () =>
@@ -54,6 +60,12 @@ const recordHeaders = () =>
     "slipstream-artifact-height": "6336",
     "slipstream-artifact-byte-length": "12000000",
     "slipstream-artifact-sha256": "d".repeat(64),
+    "slipstream-artifact-filename": "captured-output.tiff",
+    "slipstream-artifact-published-at": "2026-10-01T12:00:00Z",
+    "slipstream-artifact-expires-at": "2099-10-01T12:00:00Z",
+    "slipstream-artifact-orientation": "top-left",
+    "slipstream-artifact-icc-embedded": "true",
+    "slipstream-artifact-sample-format": "float32",
   });
 
 describe("parseProcessingArtifactRecord", () => {
@@ -80,6 +92,27 @@ describe("parseProcessingArtifactRecord", () => {
     };
     const artifact = parseProcessingArtifactRecord(value);
     expect(artifact?.input.binding.kind).toBe("artifact");
+  });
+
+  test("refuses unsafe filenames and unreadable retention metadata", () => {
+    for (const filename of [
+      "../output.tiff",
+      "folder/output.tiff",
+      "bad\u0000.tiff",
+      "",
+    ]) {
+      expect(
+        parseProcessingArtifactRecord({ ...record(), filename }),
+      ).toBeUndefined();
+    }
+    for (const key of ["publishedAt", "expiresAt"]) {
+      expect(
+        parseProcessingArtifactRecord({ ...record(), [key]: "tomorrow" }),
+      ).toBeUndefined();
+    }
+    expect(parseProcessingArtifactRecord(record())?.filename).toBe(
+      "captured-output.tiff",
+    );
   });
 
   test("refuses an unknown, malformed, or unsigned shape", () => {

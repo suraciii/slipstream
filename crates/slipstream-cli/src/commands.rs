@@ -102,8 +102,6 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum ProcessingCommand {
-    /// Read the service's current processing capability report.
-    Capability,
     /// Discover peer processing modules, schemas, limits, and availability.
     Modules,
     /// Read one published immutable Processing Artifact's provenance.
@@ -113,12 +111,12 @@ pub enum ProcessingCommand {
         artifact_id: String,
     },
     /// Download one published immutable Processing Artifact's validated
-    /// bytes to a new local TIFF file.
+    /// bytes to a new local TIFF or JPEG file.
     ArtifactDownload {
         /// One Processing Artifact ID.
         #[arg(value_name = "ARTIFACT_ID", value_parser = nonempty)]
         artifact_id: String,
-        /// New local TIFF path; an existing file or symbolic link is never
+        /// New local image path; an existing file or symbolic link is never
         /// replaced.
         #[arg(long, value_name = "PATH", required = true)]
         file: PathBuf,
@@ -360,11 +358,6 @@ pub enum PhotoCommand {
         #[arg(long, value_enum, default_value_t = PreviewSize::Review)]
         size: PreviewSize,
     },
-    /// Read, save, or explicitly rebind one Photo's Edit Recipe.
-    Recipe {
-        #[command(subcommand)]
-        command: development::RecipeCommand,
-    },
     /// Read or save one Photo's composable Processing Recipe of zero or
     /// more module-owned Processing Steps.
     ProcessingRecipe {
@@ -372,7 +365,7 @@ pub enum PhotoCommand {
         command: development::ProcessingRecipeCommand,
     },
     /// Request the Preview of the recipe's selected current Processing
-    /// Step; a refusal never falls back and no rendition is downloaded.
+    /// Step; pending admission and refusal publish no local file.
     ProcessingPreview {
         #[arg(value_parser = nonempty)]
         photo_id: String,
@@ -406,8 +399,27 @@ pub enum PhotoCommand {
         #[arg(value_name = "REQUEST_ID", value_parser = nonempty)]
         request_id: String,
     },
-    /// Request an Edit Preview for the selected stage or download its ready rendition.
-    EditPreview(edit_preview_download::EditPreviewArgs),
+    /// List retained Processing Export work and published artifacts.
+    ProcessingExportList {
+        #[arg(value_name = "PHOTO_ID", value_parser = nonempty)]
+        photo_id: String,
+    },
+    /// Retry failed or cancelled work from its captured snapshot.
+    ProcessingExportRetry {
+        #[arg(value_name = "PHOTO_ID", value_parser = nonempty)]
+        photo_id: String,
+        #[arg(value_name = "REQUEST_ID", value_parser = nonempty)]
+        request_id: String,
+        #[arg(long, value_name = "FILE", value_parser = nonempty)]
+        input: String,
+    },
+    /// Download a retained image Export from the historical surface.
+    HistoricalExportDownload {
+        #[arg(value_name = "EXPORT_ID", value_parser = nonempty)]
+        export_id: String,
+        #[arg(long, value_name = "PATH", required = true)]
+        file: PathBuf,
+    },
     /// Read, build, or remove one Photo's on-demand Development Proxy
     /// against an observed source revision.
     Proxy {
@@ -424,11 +436,6 @@ pub enum PhotoCommand {
     /// against the evidence observed by a prior Read. The input document
     /// cannot name a filesystem path.
     MetadataSave(PhotoMetadataSaveArgs),
-    /// Submit, inspect, and download a developed Photo Export.
-    Export {
-        #[command(subcommand)]
-        command: PhotoExportCommand,
-    },
 }
 
 #[derive(Debug, Args)]
@@ -439,73 +446,6 @@ pub struct PhotoMetadataSaveArgs {
     /// {"evidence":{...},"changes":{...}}; `-` reads it from stdin.
     #[arg(long, value_name = "FILE", value_parser = nonempty)]
     pub input: String,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum PhotoExportCommand {
-    /// Submit one Export against the Edit Recipe and source revision
-    /// observed by this command, using the caller's request identity.
-    Submit(PhotoExportSubmitArgs),
-    /// List a Photo's retained Exports in retention order.
-    List {
-        #[arg(value_name = "PHOTO_ID", value_parser = nonempty)]
-        photo_id: String,
-    },
-    /// Inspect one Export's current state and retained artifact facts.
-    Status {
-        #[arg(value_name = "EXPORT_ID", value_parser = nonempty)]
-        export_id: String,
-    },
-    /// Download one settled Export's artifact to a new local file.
-    Download(PhotoExportDownloadArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct PhotoExportSubmitArgs {
-    #[arg(value_name = "PHOTO_ID", value_parser = nonempty)]
-    pub photo_id: String,
-    /// Developed output target of the Export.
-    #[arg(long, value_enum)]
-    pub target: ExportTargetArg,
-    /// Caller-generated exactly-once identity: 1 through 128 characters of
-    /// ASCII letters, digits, '.', '_', or '-'.
-    #[arg(long, value_name = "REQUEST_ID", value_parser = nonempty)]
-    pub request_id: String,
-}
-
-#[derive(Debug, Args)]
-pub struct PhotoExportDownloadArgs {
-    #[arg(value_name = "EXPORT_ID", value_parser = nonempty)]
-    pub export_id: String,
-    /// New local file path; an existing file or symbolic link is never replaced.
-    #[arg(long, value_name = "PATH", required = true)]
-    pub file: PathBuf,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-pub enum ExportTargetArg {
-    /// Full-resolution float32 RGB TIFF of the saved Edit Recipe.
-    DevelopmentTiff,
-    /// Finished JPEG rendered through the qualified film pipeline.
-    FilmJpeg,
-}
-
-impl ExportTargetArg {
-    pub(crate) fn wire(self) -> &'static str {
-        match self {
-            Self::DevelopmentTiff => "development-tiff",
-            Self::FilmJpeg => "film-jpeg",
-        }
-    }
-
-    pub(crate) fn parse(value: &str) -> Option<Self> {
-        match value {
-            "development-tiff" => Some(Self::DevelopmentTiff),
-            "film-jpeg" => Some(Self::FilmJpeg),
-            _ => None,
-        }
-    }
 }
 
 /// One caller-generated mutation or attempt identity, shared with the

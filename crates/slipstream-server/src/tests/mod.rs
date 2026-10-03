@@ -12,7 +12,6 @@ use std::{
 
 mod browse;
 mod cli;
-mod edit_recipe;
 mod export_routes;
 mod lifecycle;
 mod metadata;
@@ -364,14 +363,6 @@ fn approved_raw_fixture(path: &Path) -> Vec<u8> {
     bytes
 }
 
-fn unapproved_raw_fixture(path: &Path) {
-    let mut bytes = approved_raw_fixture_bytes();
-    let model_offset = 8 + 2 + 3 * 12 + 4 + 5;
-    let replacement = b"ACME-1\0\0\0\0";
-    bytes[model_offset..model_offset + replacement.len()].copy_from_slice(replacement);
-    fs::write(path, &bytes).unwrap();
-}
-
 fn configured_router(application: &Arc<Application>, web_root: impl Into<PathBuf>) -> Router {
     application.access.seed_test_token();
     crate::http::create_router_with_processing(
@@ -576,12 +567,6 @@ impl FakePhotoEngine {
         fs::write(self.bundle_root.join("script-hang"), run.to_string()).unwrap();
     }
 
-    /// Scripts every run to write the output and then die before completing
-    /// the protocol.
-    pub(super) fn die_after_writing(&self) {
-        fs::write(self.bundle_root.join("script-die"), b"1").unwrap();
-    }
-
     /// Releases a hung attempt and clears every scripted failure mode.
     pub(super) fn release(&self) {
         for marker in ["script-hang", "script-fail", "script-corrupt", "script-die"] {
@@ -635,77 +620,6 @@ fn valid_development_tiff_fixture() -> Vec<u8> {
     bytes
 }
 
-fn edit_recipe_uri(photo_id: &str) -> String {
-    format!("https://camera.local/api/photos/{photo_id}/edit-recipe")
-}
-
-async fn get_edit_recipe(router: &Router, photo_id: &str) -> (StatusCode, serde_json::Value) {
-    let response = get_cli_json(router, &format!("/api/photos/{photo_id}/edit-recipe")).await;
-    let status = response.status();
-    (status, response_json(response).await)
-}
-
-async fn save_recipe(
-    router: &Router,
-    photo_id: &str,
-    body: serde_json::Value,
-) -> (StatusCode, serde_json::Value) {
-    let response =
-        post_cli_json(router, &format!("/api/photos/{photo_id}/edit-recipe"), body).await;
-    let status = response.status();
-    (status, response_json(response).await)
-}
-
-async fn rebind_recipe(
-    router: &Router,
-    photo_id: &str,
-    body: serde_json::Value,
-) -> (StatusCode, serde_json::Value) {
-    let response = post_cli_json(
-        router,
-        &format!("/api/photos/{photo_id}/edit-recipe/rebind"),
-        body,
-    )
-    .await;
-    let status = response.status();
-    (status, response_json(response).await)
-}
-
-fn save_body(
-    request_id: &str,
-    expected_recipe_version: Option<&str>,
-    expected_source_revision: &str,
-    exposure_ev: f64,
-) -> serde_json::Value {
-    serde_json::json!({
-        "requestId": request_id,
-        "expectedRecipeVersion": expected_recipe_version,
-        "expectedSourceRevision": expected_source_revision,
-        "settings": {"exposureEv": exposure_ev, "whiteBalance": {"mode": "as-shot"}}
-    })
-}
-
-fn rebind_body(
-    request_id: &str,
-    expected_recipe_version: &str,
-    new_source_revision: &str,
-) -> serde_json::Value {
-    serde_json::json!({
-        "requestId": request_id,
-        "expectedRecipeVersion": expected_recipe_version,
-        "newSourceRevision": new_source_revision,
-    })
-}
-
-fn error_code(body: &serde_json::Value) -> &str {
-    body["error"]["code"].as_str().unwrap_or("")
-}
-
-// ------------------------------------ Retained Development Result matching
-
-/// The retained Development TIFF of an Export record: which records are the
-/// retained Development Result of a current identity, and which are not.
-mod retained_development_result;
 /// Photo ID by ordering Location name for one set of IDs.
 async fn photo_ids_by_location(
     application: &Application,

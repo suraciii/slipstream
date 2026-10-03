@@ -24,7 +24,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 mod parameters;
-use parameters::{validate_parameter_tree, validate_spektrafilm_tree};
+use parameters::{validate_parameter_tree, validate_saved_tree, validate_spektrafilm_tree};
 #[cfg(test)]
 #[path = "modules/tests.rs"]
 mod tests;
@@ -414,10 +414,35 @@ impl ModuleRegistry {
     pub fn descriptions(&self) -> &[ModuleDescription] {
         &self.modules
     }
-    /// Validate one complete module-owned parameter envelope without
-    /// consulting availability or input admission. Recipe persistence and
-    /// Export admission use this same check so malformed or unsupported
-    /// output contracts fail before any engine work.
+    /// Validate a retained editing tree independently of engine availability
+    /// and execution qualification. Valid unsupported intent stays verbatim.
+    pub fn validate_saved_parameters(&self, parameters: &Parameters) -> Result<(), ModuleError> {
+        let description = self.describe(&parameters.module)?;
+        let request = serde_json::to_vec(parameters).expect("serializable parameters");
+        if request.len() > description.limits.max_parameter_bytes {
+            return Err(refusal(
+                ModuleErrorCode::ParameterTreeTooLarge,
+                format!(
+                    "parameter request exceeds the {}-byte bound of module `{}`",
+                    description.limits.max_parameter_bytes, parameters.module
+                ),
+            ));
+        }
+        if !description.parameter_versions.contains(&parameters.version) {
+            return Err(refusal(
+                ModuleErrorCode::UnsupportedParameterVersion,
+                format!(
+                    "module `{}` does not admit parameter version `{}`",
+                    parameters.module, parameters.version
+                ),
+            ));
+        }
+        validate_saved_tree(&parameters.module, &parameters.tree)
+    }
+
+    /// Validate one complete module-owned execution parameter envelope without
+    /// consulting availability or input admission. Unsupported output contracts
+    /// and retained controls without a qualified mapping fail before engine work.
     pub fn validate_parameters(&self, parameters: &Parameters) -> Result<(), ModuleError> {
         let description = self.describe(&parameters.module)?;
         let request = serde_json::to_vec(parameters).expect("serializable parameters");
@@ -769,6 +794,31 @@ pub fn validate_spektrafilm_parameters(parameters: &Parameters) -> Result<(), Mo
 /// The current darktable description, with its bounded module-owned
 /// parameter envelope, ordered stack, and pinned Development TIFF handoff.
 fn darktable_description(availability: ModuleAvailability) -> ModuleDescription {
+    let manual = crate::native_development::manual_exposure_parameters(0.0);
+    let output = json!({
+        "format": DARKTABLE_OUTPUT_FORMAT,
+        "precisionBits": DARKTABLE_OUTPUT_PRECISION_BITS,
+        "colorSpace": DARKTABLE_OUTPUT_COLOR_SPACE,
+        "transferFunction": DARKTABLE_OUTPUT_TRANSFER,
+        "geometry": DARKTABLE_OUTPUT_GEOMETRY
+    });
+    let entry =
+        json!({"operation": "exposure", "multiPriority": 0, "enabled": true, "params": manual});
+    let mut controls = Map::new();
+    for (key, value) in manual.as_object().expect("manual controls are an object") {
+        let kind = if value.is_boolean() {
+            "boolean"
+        } else if value.is_string() {
+            "string"
+        } else {
+            "number"
+        };
+        controls.insert(key.clone(), json!({
+            "type": kind,
+            "default": value,
+            "x-qualification": if key == "exposure" { "editable-manual-exposure" } else { "fixed-qualified-default" }
+        }));
+    }
     ModuleDescription {
         id: ModuleId {
             name: DARKTABLE_MODULE.into(),
@@ -778,14 +828,26 @@ fn darktable_description(availability: ModuleAvailability) -> ModuleDescription 
         parameter_schema: json!({
             "type": "object",
             "additionalProperties": false,
+            "default": {"stack": [entry], "output": output},
+            "x-qualification": "Explicit manual baseline controls reuse the qualified native development request. Exposure is editable; mode, black and both compensation controls stay at these defaults. White balance remains as-shot. Native image-dependent defaults are not qualified defaults. Independent pixel-reference qualification covers 0 and 1 EV only; schema discovery does not grant additional control execution.",
             "properties": {
                 "stack": {
                     "type": "array",
                     "maxItems": DARKTABLE_STACK_OPERATIONS_MAX,
+                    "default": [entry],
                     "items": {
                         "type": "object",
                         "additionalProperties": false,
                         "required": ["operation", "multiPriority", "enabled", "params"],
+                        "default": entry,
+                        "allOf": [{
+                            "if": {"properties": {"operation": {"const": "exposure"}}, "required": ["operation"]},
+                            "then": {"properties": {"params": {
+                                "type": "object",
+                                "default": manual,
+                                "properties": controls
+                            }}}
+                        }],
                         "properties": {
                             "operation": {
                                 "type": "string",
@@ -804,6 +866,7 @@ fn darktable_description(availability: ModuleAvailability) -> ModuleDescription 
                 "output": {
                     "type": "object",
                     "additionalProperties": false,
+                    "default": output,
                     "required": ["format", "precisionBits", "colorSpace", "transferFunction"],
                     "properties": {
                         "format": {"const": DARKTABLE_OUTPUT_FORMAT},
@@ -878,6 +941,7 @@ fn spektrafilm_description(availability: ModuleAvailability) -> ModuleDescriptio
         parameter_schema: json!({
             "type": "object",
             "additionalProperties": false,
+            "default": pinned,
             "required": SPEKTRAFILM_GROUPS.to_vec(),
             "properties": properties
         }),
