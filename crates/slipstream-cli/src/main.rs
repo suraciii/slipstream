@@ -132,14 +132,27 @@ async fn main() -> ExitCode {
             );
         }
     };
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(cli.timeout);
     let server_environment = match env::var("SLIPSTREAM_SERVER_URL") {
         Ok(value) => Some(value),
         Err(env::VarError::NotPresent) => None,
         Err(env::VarError::NotUnicode(_)) => Some(String::new()),
     };
+    let artifact_download = matches!(
+        &cli.command,
+        slipstream_cli::Command::Processing {
+            command: slipstream_cli::ProcessingCommand::ArtifactDownload { .. }
+        }
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(cli.timeout);
     let result = invoke_until(cli, server_environment.as_deref(), deadline).await;
-    let exit_code = publish_until(result, deadline).await;
+    // Artifact transfer ignores the command deadline while making progress;
+    // bound only the final stdout handoff after the result is available.
+    let publish_deadline = if artifact_download {
+        tokio::time::Instant::now() + Duration::from_secs(30)
+    } else {
+        deadline
+    };
+    let exit_code = publish_until(result, publish_deadline).await;
     // Terminal exit bounds executable teardown. Returning through the async
     // runtime's destructor would join a still-blocked input worker held open
     // on `--input -`, outliving the whole-command deadline the published

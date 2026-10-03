@@ -21,7 +21,14 @@ pub struct Cli {
     pub output: OutputFormat,
 
     /// Whole-command deadline in seconds.
-    #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_TIMEOUT_SECONDS, value_parser = clap::value_parser!(u64).range(1..=300))]
+    /// Processing Artifact downloads use it for control requests and each
+    /// transfer idle period instead of a total transfer deadline.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        default_value_t = DEFAULT_TIMEOUT_SECONDS,
+        value_parser = clap::value_parser!(u64).range(1..=300)
+    )]
     pub timeout: u64,
 
     #[command(subcommand)]

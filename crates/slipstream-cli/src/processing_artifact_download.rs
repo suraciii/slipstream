@@ -11,10 +11,12 @@ use super::{
     PublicationState, ServiceClient, access_boundary_failure, development, response_bytes,
     validated_route_failure, web_url,
 };
-use reqwest::StatusCode;
+use reqwest::{StatusCode, header};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncWriteExt;
+use std::io::SeekFrom;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 const OPERATION: Operation = Operation::ProcessingArtifactDownload;
 
@@ -41,6 +43,7 @@ fn header_value<'a>(headers: &'a reqwest::header::HeaderMap, name: &str) -> Opti
 
 /// Recomputes the digest of the received bytes and compares it with the
 /// record's published digest, so only the bytes the record named publish.
+#[cfg(test)]
 fn digest_matches(bytes: &[u8], claimed: &str) -> bool {
     let digest = Sha256::digest(bytes);
     claimed.len() == 64
@@ -54,21 +57,45 @@ fn digest_matches(bytes: &[u8], claimed: &str) -> bool {
                     .is_some_and(|(high, low)| u32::from(*byte) == high * 16 + low)
             })
 }
+const PART: &str = ".slipstream-part";
+const META: &str = ".slipstream-part.json";
 
-/// Performs one validated Processing Artifact download. The provenance read
-/// names the artifact the transfer must repeat field for field; the streamed
-/// bytes are checked by declared length and recomputed digest and only then
-/// published without replacement. A refusal or an unidentifiable response
-/// publishes nothing.
+fn clear_private_state(destination: &Destination) {
+    let _ = destination.remove_private(PART);
+    let _ = destination.remove_private(META);
+}
+
+fn is_terminal_artifact_failure(failure: &CommandFailure) -> bool {
+    matches!(
+        failure.payload.code.as_str(),
+        "artifact_expired" | "unknown_artifact"
+    )
+}
+
+/// Downloads into a private resumable file. Only the completed private inode
+/// is linked into the requested destination after every byte is validated.
 pub(super) async fn download(
     client: &ServiceClient,
     artifact_id: &str,
     destination: Destination,
     publication: &PublicationState,
+    idle_timeout: Duration,
 ) -> Result<Value, CommandFailure> {
-    // The provenance record is the trusted object the transfer validates
-    // against; without it a 200 stream cannot be attributed to anything.
-    let artifact = development::processing_artifact(client, artifact_id).await?;
+    let artifact = match tokio::time::timeout(
+        idle_timeout,
+        development::processing_artifact(client, artifact_id),
+    )
+    .await
+    {
+        Err(_) => return Err(CommandFailure::transport(OPERATION)),
+        Ok(Ok(artifact)) => artifact,
+        Ok(Err(failure)) => {
+            if is_terminal_artifact_failure(&failure) {
+                clear_private_state(&destination);
+            }
+            return Err(failure);
+        }
+    };
     let output_format = artifact["outputContract"]["format"]
         .as_str()
         .unwrap_or_default();
@@ -80,19 +107,94 @@ pub(super) async fn download(
     let width = artifact["outputContract"]["geometry"]["width"].as_u64();
     let height = artifact["outputContract"]["geometry"]["height"].as_u64();
     let photo_id = artifact["photoId"].as_str().unwrap_or_default();
+    let filename = artifact["filename"].as_str().unwrap_or_default();
     let Some(byte_length) = byte_length.filter(|length| *length > 0) else {
         return Err(CommandFailure::transport(OPERATION));
     };
-    if width.is_none() || height.is_none() || sha256.is_empty() {
+    if width.is_none() || height.is_none() || sha256.len() != 64 || filename.is_empty() {
         return Err(CommandFailure::transport(OPERATION));
     }
-    let mut response = client
+    let identity = json!({
+        "artifactId": artifact_id, "filename": filename, "byteLength": byte_length,
+        "sha256": sha256, "contentType": content_type, "outputFormat": output_format,
+    });
+    let matching = destination
+        .private_bytes(META)?
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|value| value == identity);
+    let mut partial = destination.private_file(PART, false)?;
+    destination.lock_private(&partial)?;
+    let mut offset = if matching {
+        partial
+            .metadata()
+            .await
+            .map_err(|_| destination.local_io())?
+            .len()
+    } else {
+        0
+    };
+    if !matching || offset > byte_length {
+        partial
+            .set_len(0)
+            .await
+            .map_err(|_| destination.local_io())?;
+        offset = 0;
+    }
+    if !matching || offset == 0 {
+        let mut sidecar = destination.private_file(META, true)?;
+        sidecar
+            .write_all(identity.to_string().as_bytes())
+            .await
+            .map_err(|_| destination.local_io())?;
+        sidecar
+            .sync_all()
+            .await
+            .map_err(|_| destination.local_io())?;
+    }
+    let mut hasher = Sha256::new();
+    if offset > 0 {
+        partial
+            .seek(SeekFrom::Start(0))
+            .await
+            .map_err(|_| destination.local_io())?;
+        let mut remaining = offset;
+        let mut buf = [0_u8; 64 * 1024];
+        while remaining > 0 {
+            let read = partial
+                .read(&mut buf)
+                .await
+                .map_err(|_| destination.local_io())?;
+            if read == 0 {
+                break;
+            }
+            let take = read.min(remaining as usize);
+            hasher.update(&buf[..take]);
+            remaining -= take as u64;
+        }
+        if remaining != 0 || offset == byte_length {
+            // A complete partial is never trusted as a cache hit; always
+            // validate by downloading the immutable object again.
+            partial
+                .set_len(0)
+                .await
+                .map_err(|_| destination.local_io())?;
+            offset = 0;
+            hasher = Sha256::new();
+        }
+    }
+    let mut request = client
         .client
         .get(client.endpoint(&["api", "processing-artifacts", artifact_id, "bytes"]))
         .header(CONTRACT_HEADER, CLI_CONTRACT_VERSION)
-        .bearer_auth(&client.token)
-        .send()
+        .bearer_auth(&client.token);
+    if offset > 0 && offset < byte_length {
+        request = request
+            .header(header::RANGE, format!("bytes={offset}-"))
+            .header(header::IF_RANGE, format!("\"{sha256}\""));
+    }
+    let mut response = tokio::time::timeout(idle_timeout, request.send())
         .await
+        .map_err(|_| CommandFailure::transport(OPERATION))?
         .map_err(|_| CommandFailure::transport(OPERATION))?;
     let status = response.status();
     if status.is_redirection() {
@@ -101,31 +203,54 @@ pub(super) async fn download(
     if let Some(failure) = access_boundary_failure(status, None, &[], OPERATION) {
         return Err(failure);
     }
-    if status != StatusCode::OK {
-        let bytes = response_bytes(response, OPERATION).await?;
-        if let Some(failure) = access_boundary_failure(status, None, &bytes, OPERATION) {
-            return Err(failure);
-        }
+    if status != StatusCode::OK && status != StatusCode::PARTIAL_CONTENT {
+        let bytes = tokio::time::timeout(idle_timeout, response_bytes(response, OPERATION))
+            .await
+            .map_err(|_| CommandFailure::transport(OPERATION))??;
         let error = serde_json::from_slice::<ErrorResponse>(&bytes)
             .map_err(|_| CommandFailure::transport(OPERATION))?
             .error;
-        return Err(validated_route_failure(error, OPERATION, &client.token)
-            .unwrap_or_else(|| CommandFailure::transport(OPERATION)));
+        let failure = validated_route_failure(error, OPERATION, &client.token)
+            .unwrap_or_else(|| CommandFailure::transport(OPERATION));
+        if is_terminal_artifact_failure(&failure) {
+            clear_private_state(&destination);
+        }
+        return Err(failure);
     }
-    // A 200 stream without the trusted artifact record read above cannot be
-    // validated against anything; the record's own facts are repeated header
-    // for header, so a substituted, truncated, or differently sized artifact
-    // is refused instead of published.
+    let ranged = offset > 0 && status == StatusCode::PARTIAL_CONTENT;
+    if offset > 0 && status == StatusCode::OK {
+        partial
+            .set_len(0)
+            .await
+            .map_err(|_| destination.local_io())?;
+        offset = 0;
+        hasher = Sha256::new();
+    }
+    let expected_length = byte_length - offset;
+    let valid_range = if ranged {
+        response
+            .headers()
+            .get(header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("bytes "))
+            .and_then(|v| v.strip_suffix(&format!("/{byte_length}")))
+            .and_then(|v| v.split_once('-'))
+            .and_then(|(start, end)| Some((start.parse::<u64>().ok()?, end.parse::<u64>().ok()?)))
+            .is_some_and(|(start, end)| start == offset && end.checked_add(1) == Some(byte_length))
+    } else {
+        status == StatusCode::OK
+    };
     let header_is =
         |name: &str, expected: &str| header_value(response.headers(), name) == Some(expected);
-    if response.content_length() != Some(byte_length)
+    let etag = format!("\"{sha256}\"");
+    if !header_is("etag", &etag)
+        || !header_is("accept-ranges", "bytes")
+        || !valid_range
+        || response.content_length() != Some(expected_length)
         || !header_is("content-type", content_type)
         || !header_is("slipstream-artifact-id", artifact_id)
         || !header_is("slipstream-artifact-photo-id", photo_id)
-        || !header_is(
-            "slipstream-artifact-filename",
-            artifact["filename"].as_str().unwrap_or_default(),
-        )
+        || !header_is("slipstream-artifact-filename", filename)
         || !header_is(
             "slipstream-artifact-step-id",
             artifact["stepId"].as_str().unwrap_or_default(),
@@ -155,50 +280,60 @@ pub(super) async fn download(
         || !header_is("slipstream-artifact-byte-length", &byte_length.to_string())
         || !header_is("slipstream-artifact-sha256", sha256)
     {
+        clear_private_state(&destination);
         return Err(CommandFailure::transport(OPERATION));
     }
-    let mut file = destination.anonymous_file()?;
-    let mut bytes = Vec::new();
-    let maximum = usize::try_from(byte_length).unwrap_or(usize::MAX);
-    while let Some(chunk) = response
-        .chunk()
+    partial
+        .seek(SeekFrom::Start(offset))
+        .await
+        .map_err(|_| destination.local_io())?;
+    let mut received = offset;
+    while let Some(chunk) = tokio::time::timeout(idle_timeout, response.chunk())
         .await
         .map_err(|_| CommandFailure::transport(OPERATION))?
+        .map_err(|_| CommandFailure::transport(OPERATION))?
     {
-        if bytes.len().saturating_add(chunk.len()) > maximum {
+        if received.saturating_add(chunk.len() as u64) > byte_length {
+            clear_private_state(&destination);
             return Err(CommandFailure::transport(OPERATION));
         }
-        file.write_all(&chunk)
+        partial
+            .write_all(&chunk)
             .await
             .map_err(|_| destination.local_io())?;
-        bytes.extend_from_slice(&chunk);
+        partial
+            .sync_data()
+            .await
+            .map_err(|_| destination.local_io())?;
+        hasher.update(&chunk);
+        received = received.saturating_add(chunk.len() as u64);
     }
-    if bytes.len() != maximum || !digest_matches(&bytes, sha256) {
+    if received != byte_length || format!("{:x}", hasher.finalize()) != sha256 {
+        if received == byte_length {
+            // Every expected byte arrived but the immutable identity does not
+            // match, so this partial can never settle; discard it instead of
+            // letting future retries resume the same corrupt prefix.
+            clear_private_state(&destination);
+        }
         return Err(CommandFailure::transport(OPERATION));
     }
-    file.sync_all().await.map_err(|_| destination.local_io())?;
+    partial
+        .sync_all()
+        .await
+        .map_err(|_| destination.local_io())?;
     let web_url = web_url(&client.origin, &format!("/?photoId={photo_id}"))
         .map_err(|()| CommandFailure::transport(OPERATION))?;
     let mut data = json!({
-        "artifactId": artifact_id,
-        "photoId": photo_id,
-        "stepId": artifact["stepId"],
-        "module": artifact["module"],
-        "filename": artifact["filename"],
-        "expiresAt": artifact["expiresAt"],
-        "bundleId": artifact["bundleId"],
-        "adapterSchemaVersion": artifact["adapterSchemaVersion"],
-        "width": width,
-        "height": height,
-        "byteLength": byte_length,
-        "sha256": sha256,
-        "path": destination.path(),
-        "webUrl": web_url,
-        "fileCommitted": true,
+        "artifactId": artifact_id, "photoId": photo_id, "stepId": artifact["stepId"],
+        "module": artifact["module"], "filename": filename, "expiresAt": artifact["expiresAt"],
+        "bundleId": artifact["bundleId"], "adapterSchemaVersion": artifact["adapterSchemaVersion"],
+        "width": width, "height": height, "byteLength": byte_length, "sha256": sha256,
+        "path": destination.path(), "webUrl": web_url, "fileCommitted": true,
     });
     super::redact_value(&mut data, &client.token);
-    destination.publish(&file)?;
+    destination.publish(&partial)?;
     publication.record("Processing Artifact", data.clone());
+    clear_private_state(&destination);
     if !destination.fsync_directory() {
         return Err(CommandFailure::published_file(
             data,

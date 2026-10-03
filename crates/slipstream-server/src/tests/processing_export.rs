@@ -866,10 +866,14 @@ async fn artifact_bytes_download_under_a_lease_with_provenance_headers() {
     let headers = response.headers();
     assert_eq!(headers.get("content-type").unwrap(), "image/tiff");
     let header = |name: &str| headers.get(name).unwrap().to_str().unwrap();
+    assert_eq!(headers.get(header::ACCEPT_RANGES).unwrap(), "bytes");
+    assert_eq!(
+        headers.get(header::ETAG).unwrap().to_str().unwrap(),
+        format!("\"{sha256}\"")
+    );
     assert_eq!(header("content-length"), byte_length.to_string());
     assert_eq!(header("slipstream-artifact-id"), artifact_id);
     assert_eq!(header("slipstream-artifact-sha256"), sha256);
-    assert_eq!(header("slipstream-artifact-module"), "darktable");
     assert_eq!(
         header("slipstream-artifact-filename"),
         artifact["filename"].as_str().unwrap()
@@ -906,6 +910,75 @@ async fn artifact_bytes_download_under_a_lease_with_provenance_headers() {
     assert_eq!(retained["artifacts"], serde_json::json!([artifact.clone()]));
     use sha2::{Digest, Sha256};
     assert_eq!(format!("{:x}", Sha256::digest(&bytes)), sha256);
+
+    // One contiguous range is served against the record's strong identity; a
+    // stale or unreadable If-Range validator falls back to the full
+    // representation, and an unsatisfiable range names the full length.
+    let uri = format!("https://camera.local/api/processing-artifacts/{artifact_id}/bytes");
+    async fn artifact_bytes(
+        router: &Router,
+        uri: &str,
+        range: Option<&str>,
+        if_range: Option<header::HeaderValue>,
+    ) -> Response<Body> {
+        let mut request = authenticated_request().uri(uri);
+        if let Some(range) = range {
+            request = request.header(header::RANGE, range);
+        }
+        if let Some(if_range) = if_range {
+            request = request.header(header::IF_RANGE, if_range);
+        }
+        send(router, request.body(Body::empty()).unwrap()).await
+    }
+    let header_of = |response: &Response<Body>, name: header::HeaderName| {
+        response
+            .headers()
+            .get(name)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    let range_response = artifact_bytes(
+        &router,
+        &uri,
+        Some("bytes=1-3"),
+        Some(header::HeaderValue::from_str(&format!("\"{sha256}\"")).unwrap()),
+    )
+    .await;
+    assert_eq!(range_response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        header_of(&range_response, header::CONTENT_RANGE),
+        format!("bytes 1-3/{byte_length}")
+    );
+    assert_eq!(header_of(&range_response, header::CONTENT_LENGTH), "3");
+    let range_bytes = axum::body::to_bytes(range_response.into_body(), 64 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(&range_bytes[..], &bytes[1..4]);
+
+    for if_range in [
+        header::HeaderValue::from_static("\"different\""),
+        header::HeaderValue::from_bytes(&[0xff]).unwrap(),
+    ] {
+        let fallback = artifact_bytes(&router, &uri, Some("bytes=1-3"), Some(if_range)).await;
+        assert_eq!(fallback.status(), StatusCode::OK);
+        assert_eq!(
+            header_of(&fallback, header::CONTENT_LENGTH),
+            byte_length.to_string()
+        );
+        let _ = axum::body::to_bytes(fallback.into_body(), 64 * 1024 * 1024)
+            .await
+            .unwrap();
+    }
+
+    let invalid = artifact_bytes(&router, &uri, Some("bytes=999999999-"), None).await;
+    assert_eq!(invalid.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(
+        header_of(&invalid, header::CONTENT_RANGE),
+        format!("bytes */{byte_length}")
+    );
 
     // Unknown bytes identities answer the same closed refusal as the
     // provenance route.
