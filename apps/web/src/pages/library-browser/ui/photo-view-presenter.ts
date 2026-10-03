@@ -232,6 +232,7 @@ export function createPhotoViewPresenter({
     resetGestures();
     canReviewRecovery = Boolean(model.photoId && model.available === false);
     title.textContent = model.sourceName;
+    currentPhotoId = model.photoId;
     photoSurface = {};
     renderPhotoFacts(model);
     renderPhotoMetadata();
