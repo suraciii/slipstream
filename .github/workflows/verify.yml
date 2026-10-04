@@ -21,6 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          submodules: recursive
           # The file-size ratchet resolves its base as HEAD^1 here, so the
           # checkout must carry the merge commit and its parents.
           fetch-depth: 2
