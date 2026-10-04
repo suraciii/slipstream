@@ -156,24 +156,34 @@ export async function collectFileSizeViolations({
   return { baseRef, violations };
 }
 
-export async function runFileSizeCheck({ repoRoot, rules, label }) {
-  const report = await collectFileSizeViolations({ repoRoot, rules });
-  if (report.violations.length === 0) return report;
-
-  console.error(`${label} file size ratchet failed (base ${report.baseRef}):`);
-  for (const violation of report.violations) {
+export function formatFileSizeRatchetFailure({ label, baseRef, violations }) {
+  const lines = [`${label} file size ratchet failed (base ${baseRef}):`];
+  for (const violation of violations) {
     const before = violation.baseLines == null ? "new" : violation.baseLines;
     const delta =
       violation.baseLines == null
         ? ""
         : ` (${violation.candidateLines - violation.baseLines >= 0 ? "+" : ""}${violation.candidateLines - violation.baseLines})`;
-    console.error(
+    lines.push(
       `- ${violation.relativePath}: ${before} -> ${violation.candidateLines}${delta} lines (allowed ${violation.limit})`,
     );
   }
-  console.error(
+  lines.push(
     "Keep new files at or below the limit; files already over it may not grow.",
   );
+  lines.push(
+    "Do not remove meaningful spacing or flatten readable code. Prefer structural fixes: extract genuinely shared helpers or fixtures, remove duplicate setup, and split only at natural boundaries.",
+  );
+  return lines;
+}
+
+export async function runFileSizeCheck({ repoRoot, rules, label }) {
+  const report = await collectFileSizeViolations({ repoRoot, rules });
+  if (report.violations.length === 0) return report;
+
+  for (const line of formatFileSizeRatchetFailure(report)) {
+    console.error(line);
+  }
   process.exitCode = 1;
   return report;
 }
