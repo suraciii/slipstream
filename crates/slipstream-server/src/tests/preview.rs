@@ -471,3 +471,88 @@ async fn no_usable_source_seed_is_short_circuited_from_published_facts() {
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
+
+#[tokio::test]
+async fn scan_repairs_missing_ready_review_derivative_without_foreground_request() {
+    let (base, config) = prepare_fixture();
+    let original = config.library_root.join("photo.jpg");
+    jpeg_fixture(&original, 90, 45, [192, 64, 32]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = authorized_router(Arc::clone(&application), config.web_root());
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .into_iter()
+        .next()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let cache_key = loop {
+        let facts =
+            PreviewFacts::from_snapshot(&application.library.snapshot().await.unwrap(), &photo_id)
+                .unwrap();
+        if let Some(ready) = application
+            .preview
+            .lookup_current(&facts, DerivativeTarget::Review2560)
+            .await
+            .unwrap()
+        {
+            break ready.cache_key;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "scan did not warm the review Preview"
+        );
+        tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let cache_path = application
+        .preview
+        .scheduler()
+        .cache()
+        .root()
+        .join("rust-vips-v2")
+        .join(format!("{cache_key}.jpg"));
+    fs::remove_file(&cache_path).unwrap();
+    assert!(!cache_path.exists());
+
+    assert_eq!(
+        send(
+            &router,
+            authenticated_request()
+                .method("POST")
+                .uri("https://camera.local/api/scan")
+                .header(header::ORIGIN, "https://camera.local")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let facts =
+            PreviewFacts::from_snapshot(&application.library.snapshot().await.unwrap(), &photo_id)
+                .unwrap();
+        if application
+            .preview
+            .lookup_current(&facts, DerivativeTarget::Review2560)
+            .await
+            .unwrap()
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "scan did not repair the missing review Preview"
+        );
+        tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}

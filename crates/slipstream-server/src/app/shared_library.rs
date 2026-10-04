@@ -126,10 +126,20 @@ impl SharedLibrary {
                                             previous_photo.preview_state,
                                             slipstream_core::PreviewState::Failed
                                         );
-                                    (source_changed || retry).then_some(ReviewWarmupRequest {
-                                        photo_id: photo.id.clone(),
-                                        retry,
-                                    })
+                                    // A Ready Photo is a cache probe on publication:
+                                    // request_with_facts returns on a complete current
+                                    // manifest/file hit and only missing bytes enter
+                                    // native work.
+                                    let cache_probe = matches!(
+                                        previous_photo.preview_state,
+                                        slipstream_core::PreviewState::Ready
+                                    );
+                                    (source_changed || retry || cache_probe).then_some(
+                                        ReviewWarmupRequest {
+                                            photo_id: photo.id.clone(),
+                                            retry,
+                                        },
+                                    )
                                 }
                                 None => Some(ReviewWarmupRequest {
                                     photo_id: photo.id.clone(),
