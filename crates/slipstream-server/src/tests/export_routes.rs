@@ -525,6 +525,7 @@ async fn xmp_snapshot_download_and_replay_do_not_need_processing_or_original() {
             request_id: "save-xmp".into(),
             expected_recipe_revision: None,
             expected_source_revision: source.clone(),
+            request_intent: None,
             recipe: intended,
             automatic_adjustment: None,
         })
@@ -610,6 +611,7 @@ async fn xmp_snapshot_download_and_replay_do_not_need_processing_or_original() {
             request_id: "save-xmp-later".into(),
             expected_recipe_revision: Some(recipe.revision.clone()),
             expected_source_revision: source,
+            request_intent: None,
             recipe: changed,
             automatic_adjustment: None,
         })

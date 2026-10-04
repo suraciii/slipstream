@@ -227,6 +227,10 @@ fn request_key(
         published_source: facts.map(PreviewFacts::request_key),
     }
 }
+
+fn should_retry(facts: &PreviewFacts, target: DerivativeTarget) -> bool {
+    target == DerivativeTarget::Review2560 && facts.photo.preview_state == PreviewState::Failed
+}
 type PreviewWaitResult = Result<PreviewRequestResult, PreviewServiceError>;
 type PreviewWaitState = (Mutex<Option<PreviewWaitResult>>, Condvar);
 
@@ -457,8 +461,7 @@ impl PreviewService {
         if let Some(ready) = self.lookup_current(&facts, target).await? {
             return Ok(PreviewRequestResult::Current(ready_result(&ready, target)));
         }
-        let retry = target == DerivativeTarget::Review2560
-            && facts.photo.preview_state == PreviewState::Failed;
+        let retry = should_retry(&facts, target);
         self.request_with_mode(facts.photo.id.clone(), target, priority, retry, Some(facts))
             .await
     }
@@ -2109,5 +2112,19 @@ mod tests {
         assert_eq!(original_snapshot(&copied_raw), copied_before);
         assert_eq!(original_snapshot(&sample), source_before);
         let _ = fs::remove_dir_all(base);
+    }
+    #[test]
+    fn review_failure_only_enables_review_retry() {
+        let fixture = fixture(Some(&jpeg(80, 40)));
+        let id = photo_id(&fixture.library);
+        let snapshot = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(fixture.library.snapshot())
+            .unwrap();
+        let mut facts = PreviewFacts::from_snapshot(&snapshot, &id).unwrap();
+        facts.photo.preview_state = PreviewState::Failed;
+
+        assert!(should_retry(&facts, DerivativeTarget::Review2560));
+        assert!(!should_retry(&facts, DerivativeTarget::Thumbnail512));
     }
 }

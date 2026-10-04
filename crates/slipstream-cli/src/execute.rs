@@ -163,6 +163,9 @@ pub(crate) async fn execute(
                 }
             },
             Command::Photos {
+                command: PhotoCommand::Edit { command },
+            } => edit::execute(&client, admission, command, publication).await,
+            Command::Photos {
                 command: PhotoCommand::ProcessingRecipe { command },
             } => {
                 development::execute_processing(
@@ -176,9 +179,6 @@ pub(crate) async fn execute(
             Command::Photos {
                 command: PhotoCommand::ProcessingPreview { photo_id, step, .. },
             } => {
-                // The staged destination was preflighted so an existing
-                // file is never replaced; a refusal or an unidentifiable
-                // response publishes nothing.
                 processing_preview_download::download(
                     &client,
                     photo_id,

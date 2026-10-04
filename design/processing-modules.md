@@ -45,6 +45,24 @@ validated byte identity. A later step binds to that artifact, not to a mutable
 "latest result" of an upstream step. Re-exporting upstream creates a new
 artifact; selecting it downstream is a separate explicit action.
 
+## Agent Stateful Surface
+
+The Agent-facing `Edit State` is a bounded projection over the current
+`Edit Recipe`: selected Processing Step, explicit input binding, qualified
+Engine Modules, product control values, and the guarded recipe revision. An
+`Engine Module` is an operation inside a peer Processing Module, addressed as
+`ENGINE.MODULE` (for example, `darktable.exposure`), not a native stack name
+or an engine-history record.
+
+Stateful edits use one canonical control grammar and the module-owned mapping.
+The current MVP qualifies only `darktable.exposure.ev` in the `0..=1` EV range.
+Discovery publishes controls with their value schema, defaults, reset values,
+readability, editability, executability, and refusal reason. A discoverable
+control is not automatically executable: white balance, color calibration,
+highlight recovery, and mutable SpektraFilm controls remain explicit
+refusals until their native mapping and qualification evidence are complete.
+An unsupported request must leave the retained Edit State unchanged.
+
 Slipstream owns Photo identity, saved intent, source guards, input leases,
 serialized heavy-work admission, cancellation, deadlines, output validation,
 and publication. A module owns only one invocation and its private intermediate

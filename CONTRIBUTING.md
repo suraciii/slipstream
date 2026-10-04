@@ -60,6 +60,19 @@ bun --version # 1.4.0
 ./scripts/prepare-worktree.sh
 ```
 
+The repository pins the standalone SpektraFilm migration at
+`third_party/spektrafilm-rs` on branch `main-0.3.4`. Initialize the submodule
+before building:
+
+```sh
+git submodule update --init --recursive
+```
+
+`bun run build` builds the Slipstream Rust workspace and the pinned SpektraFilm
+f64 CLI. The SpektraFilm build additionally requires LibRaw `>=0.22.0`,
+OpenImageIO, Exiv2, Lensfun, GLib, and their development/runtime libraries;
+the distribution `libraw-dev` package may be too old.
+
 ## Worktree setup
 
 Create Issue worktrees from a fetched `origin/main` commit to avoid an outdated
