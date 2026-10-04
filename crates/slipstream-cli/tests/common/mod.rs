@@ -60,6 +60,24 @@ pub fn cli_command() -> Command {
     command.env("SSL_CERT_FILE", test_ca_path());
     command
 }
+
+pub fn fixture_config(base: &std::path::Path, library_root: PathBuf, web_root: PathBuf) -> Config {
+    Config {
+        library_root,
+        state_directory: base.join("state"),
+        cache_directory: base.join("cache"),
+        database_basename: "library.sqlite".to_owned(),
+        host: "127.0.0.1".to_owned(),
+        public_origin: "https://localhost".to_owned(),
+        access_origins: vec!["https://localhost".to_owned()],
+        port: 0,
+        web_root: Some(web_root),
+        processing: None,
+        export_retained_output_bytes: None,
+        metadata_supervisor: None,
+    }
+}
+
 /// Complete capabilities document shared by scripted CLI services.
 #[allow(dead_code)]
 pub fn capabilities_body() -> Value {
