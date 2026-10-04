@@ -197,6 +197,9 @@ pub(crate) fn create_router_with_processing(
                 .post(crate::development_proxy::post_development_proxy)
                 .delete(crate::development_proxy::delete_development_proxy),
         )
+        .route("/api/photos/{id}/edit", get(crate::edit::get_edit))
+        .route("/api/photos/{id}/edit/set", post(crate::edit::set_edit))
+        .route("/api/photos/{id}/edit/reset", post(crate::edit::reset_edit))
         .route(
             "/api/photos/{id}/processing-recipe",
             get(crate::processing_recipe::get_composable_edit_recipe)

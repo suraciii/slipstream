@@ -904,3 +904,60 @@ fn contract_envelopes_reject_unknown_fields() {
     let extended = output.replace("\"byteSize\"", "\"unexpected\":1,\"byteSize\"");
     assert!(serde_json::from_str::<ModuleOutput>(&extended).is_err());
 }
+
+#[test]
+fn engine_catalog_is_bounded_and_marks_unqualified_modules() {
+    let registry = both_ready();
+    let darktable = registry.describe(DARKTABLE_MODULE).unwrap();
+    let exposure = darktable
+        .engine_modules
+        .iter()
+        .find(|module| module.name == "exposure")
+        .unwrap();
+    let ev = exposure
+        .controls
+        .iter()
+        .find(|control| control.name == "ev")
+        .unwrap();
+    assert!(ev.readable && ev.editable && ev.executable);
+    assert_eq!(ev.default, json!(0.0));
+    assert_eq!(ev.reset, json!(0.0));
+    assert_eq!(ev.schema["minimum"], json!(0.0));
+    assert_eq!(ev.schema["maximum"], json!(1.0));
+    let white_balance = darktable
+        .engine_modules
+        .iter()
+        .find(|module| module.name == "white-balance")
+        .unwrap();
+    assert!(!white_balance.executable);
+    assert!(white_balance.controls.is_empty());
+    assert!(white_balance.refusal_reason.is_some());
+
+    let film = registry.describe(SPEKTRAFILM_MODULE).unwrap();
+    assert!(film.engine_modules.iter().all(|module| !module.executable));
+    assert!(
+        film.engine_modules
+            .iter()
+            .all(|module| module.controls.is_empty())
+    );
+}
+
+#[test]
+fn darktable_canonical_exposure_can_set_and_reset() {
+    let tree = apply_darktable_control(None, "darktable.exposure.ev", &json!(0.5)).unwrap();
+    assert_eq!(tree["stack"][0]["params"]["exposure"], json!(0.5));
+    let reset = reset_darktable_control(Some(&tree), "darktable.exposure.ev").unwrap();
+    assert_eq!(reset["stack"][0]["params"]["exposure"], json!(0.0));
+    assert!(validate_darktable_tree(DARKTABLE_MODULE, &reset).is_ok());
+}
+
+#[test]
+fn darktable_canonical_exposure_rejects_bounds_and_unknown_controls() {
+    for value in [json!(-0.01), json!(1.01)] {
+        let error = apply_darktable_control(None, "darktable.exposure.ev", &value).unwrap_err();
+        assert_eq!(error.code, ModuleErrorCode::UnsupportedControl);
+    }
+    let error =
+        apply_darktable_control(None, "darktable.exposure.unknown", &json!(0.5)).unwrap_err();
+    assert_eq!(error.code, ModuleErrorCode::UnsupportedControl);
+}

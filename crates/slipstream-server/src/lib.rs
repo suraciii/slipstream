@@ -43,6 +43,7 @@ mod app;
 pub use access::administer_access;
 mod config;
 mod development_proxy;
+mod edit;
 mod export_manager;
 mod film_resources;
 pub(crate) mod folders;

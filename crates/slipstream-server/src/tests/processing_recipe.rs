@@ -98,6 +98,102 @@ async fn composable_recipe_route_persists_zero_and_selected_steps() {
 }
 
 #[tokio::test]
+async fn stateful_edit_route_updates_controls_replays_and_resets() {
+    let (base, config) = prepare_fixture();
+    approved_raw_fixture(&config.library_root.join("stateful.ARW"));
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = configured_router(&application, config.web_root());
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .into_iter()
+        .next()
+        .unwrap();
+    let uri = format!("/api/photos/{photo_id}/edit");
+    let (_, initial) = get_json(&router, &uri).await;
+    let body = serde_json::json!({
+        "requestId": "stateful-exposure-1",
+        "expectedEditRevision": null,
+        "target": "darktable.exposure",
+        "control": "ev",
+        "value": 0.5
+    });
+    let response = post_json(
+        &router,
+        &format!("{uri}/set"),
+        body.clone(),
+        Some("https://camera.local"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let saved = response_json(response).await;
+    assert_eq!(saved["outcome"], "saved");
+    assert_eq!(saved["edit"]["current"]["controls"]["exposure"]["ev"], 0.5);
+    let replay = post_json(
+        &router,
+        &format!("{uri}/set"),
+        body.clone(),
+        Some("https://camera.local"),
+    )
+    .await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(response_json(replay).await["outcome"], "replayed");
+
+    let revision = saved["edit"]["editRevision"].as_str().unwrap();
+    let reset_body = serde_json::json!({
+        "requestId": "stateful-exposure-reset",
+        "expectedEditRevision": revision,
+        "target": "darktable.exposure",
+        "control": "all"
+    });
+    let response = post_json(
+        &router,
+        &format!("{uri}/reset"),
+        reset_body,
+        Some("https://camera.local"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let reset = response_json(response).await;
+    assert_eq!(reset["edit"]["current"]["controls"]["exposure"]["ev"], 0.0);
+    let replay_after_change = post_json(
+        &router,
+        &format!("{uri}/set"),
+        body,
+        Some("https://camera.local"),
+    )
+    .await;
+    assert_eq!(replay_after_change.status(), StatusCode::OK);
+    let replayed = response_json(replay_after_change).await;
+    assert_eq!(replayed["outcome"], "replayed");
+    assert_eq!(
+        replayed["edit"]["current"]["controls"]["exposure"]["ev"],
+        0.5
+    );
+    let unsupported = serde_json::json!({
+        "requestId": "stateful-white-balance",
+        "expectedEditRevision": initial["editRevision"],
+        "target": "darktable.white-balance",
+        "control": "temperature",
+        "value": 6500
+    });
+    let response = post_json(
+        &router,
+        &format!("{uri}/set"),
+        unsupported,
+        Some("https://camera.local"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        response_json(response).await["error"]["code"],
+        "unsupported_control"
+    );
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
 async fn automatic_recipe_failure_leaves_the_saved_recipe_unchanged() {
     let (base, config) = prepare_fixture();
     approved_raw_fixture(&config.library_root.join("approved.ARW"));

@@ -544,6 +544,53 @@ name conflict when applicable. A name conflict includes the existing Album ID.
 No `--force`, implicit name reuse, automatic retry, or generic `undo` command
 exists.
 
+## Stateful Edit
+
+The Agent-facing stateful surface updates the current `Edit State` one
+qualified Engine Module control at a time. It does not expose the complete
+Edit Recipe tree; `photos processing-recipe` remains the advanced complete
+snapshot/composition interface.
+
+```text literal
+slipstream photos edit get PHOTO_ID
+slipstream photos edit set PHOTO_ID ENGINE.MODULE CONTROL JSON_VALUE \
+  [--from original|artifact:ARTIFACT_ID] [--revision REVISION] --request REQUEST_ID
+slipstream photos edit reset PHOTO_ID ENGINE.MODULE CONTROL|all \
+  --revision REVISION --request REQUEST_ID
+slipstream photos edit preview PHOTO_ID --file PATH
+slipstream photos edit export PHOTO_ID --revision REVISION --request REQUEST_ID
+slipstream photos edit export-status PHOTO_ID REQUEST_ID
+```
+
+`edit get` returns the Photo identity, current source availability and
+revision, nullable `editRevision` and `currentStepId`, the current selected
+Engine Module and product control values, bounded `engineModules` discovery,
+capability booleans, `requiresRebind`, Preview freshness, recent Export and
+Artifact facts, and `webUrl`. It never returns native engine history, host
+paths, or the complete parameter tree.
+
+The MVP-qualified mutation is `darktable.exposure ev`, a finite JSON number
+from `0` through `1` EV. The first `set` binds the current step to the
+Original unless `--from artifact:ARTIFACT_ID` is explicit. Repeated updates of
+the same current Engine Module preserve its input binding; an explicit input
+or a changed Engine Module creates a new current step. Every existing-state
+mutation must pass the latest `--revision`. `reset` writes the discovered
+reset value and never deletes the step. Unsupported or unqualified controls
+return a structured refusal and do not change state. SpektraFilm is exposed
+as a peer Engine Module with no mutable stateful controls until a separate
+qualification exists.
+
+Successful `set` and `reset` responses contain `outcome` (`saved`,
+`replayed`, or `unchanged`) and the resulting `edit` projection. Request
+identities are idempotent; reusing one identity with a different body
+conflicts. `edit preview` selects the current step and publishes a local file
+only after the existing Processing Preview identity checks pass. A later edit
+makes an earlier Preview stale. `edit export` submits the current step
+directly; Preview is not required. Export status remains durable and is read
+with the original Photo/request identity. Source changes, stale revisions,
+missing artifacts, and unavailable engines are explicit errors; no automatic
+retry or implicit artifact handoff occurs.
+
 ## Photo Development
 
 Camera Preview (`photos preview`) remains independent of saved editing intent.

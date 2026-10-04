@@ -133,18 +133,30 @@ Magnified Preview inspection for focus, motion, or expression. It is a Preview Z
 ## Development
 
 **Processing Module**:
-A photo-processing engine exposed through its own input, parameter, and output contracts. darktable and standalone SpektraFilm are peer modules, not a fixed ordered pair.
+A peer photo-processing capability exposed through its own input, parameter, and output contracts. In the current service contract, darktable and standalone SpektraFilm are peer Processing Modules, not a fixed ordered pair. The Agent-facing language calls each one a Processing Engine to distinguish it from the operations inside that engine.
 _Avoid_: plugin, extension, Film capability
 
+**Processing Engine**:
+The Agent-facing name for a peer Processing Module such as darktable or standalone SpektraFilm. An Engine owns its input/output contracts, admitted Engine Modules, parameter schema, and execution availability.
+_Avoid_: engine process, desktop application, catalog
+
+**Engine Module**:
+One editing operation owned by a Processing Engine. Examples include darktable's exposure, color calibration, and highlight recovery operations; another engine may expose its own modules such as film, print, camera, or scanner operations. An Engine Module owns its controls and qualification; it is not a peer Processing Module.
+_Avoid_: global control, darktable flag, stage
+
 **Processing Step**:
-One selected Processing Module, one identified input, and one captured parameter snapshot. A caller composes steps by explicitly choosing a published artifact as the next input.
+One selected Processing Engine, one identified input, and one captured parameter snapshot containing that engine's ordered Engine Modules. A caller composes steps by explicitly choosing a published artifact as the next input.
 
 **Processing Artifact**:
 An immutable image published by a completed Export, with its input, module, parameter, bundle, and image-contract provenance. It is not an Original File or a new Photo.
 
 **Edit Recipe**:
-The saved editing intent for one Photo's Processing Steps. It is independent of Selection State, Rating, and Album membership.
+The complete saved snapshot of one Photo's Edit State and Processing Steps. It is independent of Selection State, Rating, and Album membership. Agent-facing editing calls this current snapshot an Edit State; `Edit Recipe` remains the serialization and advanced composition term.
 _Avoid_: edit history, darktable sidecar
+
+**Edit State**:
+The current confirmed editing state of one Photo: its selected Processing Step, input binding, Engine Modules, control values, and revision. A small guarded edit command updates this state atomically; it does not expose engine history or create a workflow object.
+_Avoid_: session, workflow, engine history
 
 **Film Recipe**:
 A defined combination of film stock, print paper, and processing choices used to produce a simulated photograph.

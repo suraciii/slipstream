@@ -231,12 +231,11 @@ fn module_image_contract(contract: &ProcessingImageContract) -> Option<ImageCont
 }
 
 #[derive(Debug)]
-struct AdmissionError {
-    code: &'static str,
-    status: StatusCode,
-    message: String,
+pub(crate) struct AdmissionError {
+    pub(crate) code: &'static str,
+    pub(crate) status: StatusCode,
+    pub(crate) message: String,
 }
-
 impl AdmissionError {
     fn invalid(message: impl Into<String>) -> Self {
         Self {
@@ -255,7 +254,7 @@ impl AdmissionError {
     }
 }
 
-async fn validate_step_admission(
+pub(crate) async fn validate_step_admission(
     state: &HttpState,
     recipe: &ComposableEditRecipe,
 ) -> Result<(), AdmissionError> {
@@ -686,6 +685,7 @@ pub(crate) async fn post_composable_edit_recipe(
         request_id,
         expected_recipe_revision,
         expected_source_revision,
+        request_intent: None,
         recipe,
         automatic_adjustment,
     };

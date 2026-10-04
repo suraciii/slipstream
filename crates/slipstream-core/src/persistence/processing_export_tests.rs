@@ -196,6 +196,7 @@ async fn save_recipe(
         request_id: request_id.to_owned(),
         expected_recipe_revision: expected.map(str::to_owned),
         expected_source_revision: seeded.source.clone(),
+        request_intent: None,
         recipe,
         automatic_adjustment: None,
     };
@@ -244,6 +245,7 @@ async fn artifact_bound_submission_survives_unavailable_original() {
             request_id: "artifact-recipe-request".to_owned(),
             expected_recipe_revision: None,
             expected_source_revision: seeded.source.clone(),
+            request_intent: None,
             recipe,
             automatic_adjustment: None,
         })
@@ -363,6 +365,7 @@ async fn qualified_submission_refuses_when_retained_output_is_full() {
             request_id: "retained-full-recipe-request".to_owned(),
             expected_recipe_revision: None,
             expected_source_revision: seeded.source.clone(),
+            request_intent: None,
             recipe,
             automatic_adjustment: None,
         })

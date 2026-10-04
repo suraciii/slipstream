@@ -18,9 +18,7 @@ pub(crate) struct ProcessingModulesResponse {
     pub modules: Vec<ModuleDescription>,
 }
 
-pub(crate) async fn get_processing_modules(
-    State(state): State<HttpState>,
-) -> Json<ProcessingModulesResponse> {
+pub(crate) fn registry(state: &HttpState) -> ModuleRegistry {
     let processing = state.processing.as_ref();
     let exports_open = processing.is_some() && state.application.exports.is_some();
     let darktable = match processing {
@@ -30,9 +28,6 @@ pub(crate) async fn get_processing_modules(
         }
         _ => ModuleAvailability::unavailable("darktable processing runtime is not configured"),
     };
-    // SpektraFilm is a peer module, not an alias for the darktable runtime:
-    // its availability comes only from its own independently verified
-    // bundle, with the truthful reason of a missing or unverified runtime.
     let spektrafilm = match processing
         .filter(|_| exports_open)
         .and_then(|processing| processing.film.as_ref())
@@ -43,7 +38,13 @@ pub(crate) async fn get_processing_modules(
         ),
         None => ModuleAvailability::unavailable("standalone SpektraFilm runtime is not configured"),
     };
-    let registry = ModuleRegistry::new(darktable, spektrafilm);
+    ModuleRegistry::new(darktable, spektrafilm)
+}
+
+pub(crate) async fn get_processing_modules(
+    State(state): State<HttpState>,
+) -> Json<ProcessingModulesResponse> {
+    let registry = registry(&state);
     Json(ProcessingModulesResponse {
         contract_version: slipstream_processing::modules::MODULE_CONTRACT_VERSION,
         modules: registry.descriptions().to_vec(),

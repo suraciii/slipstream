@@ -22,7 +22,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use sha2::{Digest, Sha256};
-
+mod engine;
+pub use engine::*;
 mod parameters;
 use parameters::{validate_parameter_tree, validate_saved_tree, validate_spektrafilm_tree};
 #[cfg(test)]
@@ -356,12 +357,8 @@ pub struct ModuleError {
     pub message: String,
 }
 
-/// One module's bounded discovery description: pinned identity, admitted
-/// input and output contracts, the module-owned parameter schema and its
-/// versions, finite limits, and current availability with refusal reasons.
-/// A description is read-only, is not product admission, carries no engine
-/// history, catalog state, executable data, or host path, and merges nothing
-/// across modules.
+/// One module's bounded discovery description: identity, schemas, contracts,
+/// limits, availability, and qualified Engine Modules.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModuleDescription {
@@ -375,6 +372,8 @@ pub struct ModuleDescription {
     pub admitted_outputs: Vec<ImageContract>,
     pub limits: ModuleLimits,
     pub availability: ModuleAvailability,
+    #[serde(default)]
+    pub engine_modules: Vec<EngineModuleDescription>,
 }
 
 /// The peer-module registry. Each module is described, admitted, and refused
@@ -893,6 +892,7 @@ fn darktable_description(availability: ModuleAvailability) -> ModuleDescription 
             max_output_pixels: 9504 * 6336,
             deadline_millis: 180_000,
         },
+        engine_modules: engine::darktable_engine_modules(),
         availability,
     }
 }
@@ -954,6 +954,7 @@ fn spektrafilm_description(availability: ModuleAvailability) -> ModuleDescriptio
             max_output_pixels: SPEKTRAFILM_MAX_OUTPUT_PIXELS,
             deadline_millis: SPEKTRAFILM_DEADLINE_MILLIS,
         },
+        engine_modules: engine::spektrafilm_engine_modules(),
         availability,
     }
 }

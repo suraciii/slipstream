@@ -365,6 +365,12 @@ pub enum PhotoCommand {
         #[arg(long, value_enum, default_value_t = PreviewSize::Review)]
         size: PreviewSize,
     },
+    /// Read or mutate the current stateful Agent Edit State. The complete
+    /// Processing Recipe remains available through `processing-recipe`.
+    Edit {
+        #[command(subcommand)]
+        command: edit::EditCommand,
+    },
     /// Read or save one Photo's composable Processing Recipe of zero or
     /// more module-owned Processing Steps.
     ProcessingRecipe {

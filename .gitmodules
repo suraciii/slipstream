@@ -1,0 +1,4 @@
+[submodule "third_party/spektrafilm-rs"]
+	path = third_party/spektrafilm-rs
+	url = https://github.com/suraciii/spektrafilm-rs.git
+	branch = main-0.3.4

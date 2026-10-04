@@ -700,6 +700,12 @@ pub struct SaveComposableEditRecipe {
     pub request_id: String,
     pub expected_recipe_revision: Option<String>,
     pub expected_source_revision: String,
+    /// Optional stable intent for a stateful facade. When present, request
+    /// replay is keyed by this caller intent rather than a reconstructed
+    /// complete recipe, so a retry remains attributable after concurrent
+    /// state changes.
+    pub request_intent: Option<Value>,
+    /// The complete intended recipe.
     pub recipe: ComposableEditRecipe,
     /// Optional engine-owned adjustment, identified by the original request.
     pub automatic_adjustment: Option<AutomaticAdjustment>,
