@@ -297,7 +297,7 @@ fn proxy_one(stream: TcpStream, config: Arc<ServerConfig>, upstream: &str) {
     };
     let _ = service.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = service.set_write_timeout(Some(Duration::from_secs(10)));
-    let mut request = close_connection_request(&head);
+    let mut request = rewrite_proxy_host(&head);
     request.extend_from_slice(&body);
     if service.write_all(&request).is_err() {
         return;
@@ -339,7 +339,7 @@ pub fn read_http_message(stream: &mut impl Read) -> Option<(String, Vec<u8>)> {
     Some((head, body))
 }
 
-fn close_connection_request(head: &str) -> Vec<u8> {
+pub fn rewrite_proxy_host(head: &str) -> Vec<u8> {
     let head = head.strip_suffix("\r\n\r\n").unwrap_or(head);
     let mut request = head
         .lines()

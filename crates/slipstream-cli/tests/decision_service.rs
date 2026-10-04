@@ -129,7 +129,6 @@ fn fixture_with(photo_names: &[&str]) -> (PathBuf, Config) {
     };
     (base, config)
 }
-
 async fn command(server: &str, arguments: &[&str]) -> (u8, Value) {
     common::command_with_stdin(server, arguments, "").await
 }

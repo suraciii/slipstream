@@ -194,7 +194,6 @@ fn fixture() -> (PathBuf, Config) {
     };
     (base, config)
 }
-
 async fn command(server: &str, arguments: &[&str]) -> (u8, Value) {
     let server = server.to_owned();
     let arguments = arguments
@@ -223,7 +222,6 @@ async fn command(server: &str, arguments: &[&str]) -> (u8, Value) {
     .await
     .unwrap()
 }
-
 async fn post_json(server: &str, path: &str, body: Value) -> reqwest::Response {
     reqwest::Client::builder()
         .add_root_certificate(common::test_certificate())
