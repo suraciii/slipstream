@@ -35,7 +35,7 @@ use crate::{
     http::{CLI_CONTRACT_HEADER, HttpState, require_cli_contract, require_published, valid_id},
 };
 
-#[derive(Clone, Copy, Default, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum PreviewComparison {
     #[default]
@@ -90,6 +90,7 @@ struct PreviewRecord {
     recipe_revision: String,
     step_id: String,
     identity: String,
+    comparison: PreviewComparison,
 }
 
 type PreviewResultRegistry = Mutex<HashMap<String, PreviewRecord>>;
@@ -113,21 +114,24 @@ pub(crate) fn preview_status(
     let Some(record) = results.get(photo_id) else {
         return serde_json::json!({"state": "not-requested", "fresh": false});
     };
-    let fresh = record.recipe_revision == recipe.revision && record.step_id == step_id.as_str();
+    let fresh = matches!(record.comparison, PreviewComparison::Current)
+        && record.recipe_revision == recipe.revision
+        && record.step_id == step_id.as_str();
     serde_json::json!({
         "state": if fresh { "fresh" } else { "stale" },
         "fresh": fresh,
+        "comparison": record.comparison.as_str(),
         "recipeRevision": record.recipe_revision,
         "stepId": record.step_id,
         "identity": record.identity,
     })
 }
-
 fn remember_preview(
     photo_id: &str,
     recipe: &slipstream_core::ComposableEditRecipe,
     step_id: &str,
     identity: &ProcessingPreviewIdentity,
+    comparison: PreviewComparison,
 ) {
     PREVIEW_RESULTS
         .lock()
@@ -138,6 +142,7 @@ fn remember_preview(
                 recipe_revision: recipe.revision.clone(),
                 step_id: step_id.to_owned(),
                 identity: identity.digest(),
+                comparison,
             },
         );
 }
@@ -309,7 +314,7 @@ fn ready_response(
     bundle_id: &str,
     comparison: PreviewComparison,
 ) -> Response {
-    remember_preview(photo_id, recipe, step_id, identity);
+    remember_preview(photo_id, recipe, step_id, identity, comparison);
     let mut response = Response::new(Body::from(execution.bytes));
     *response.status_mut() = StatusCode::OK;
     let headers = response.headers_mut();
@@ -445,10 +450,7 @@ async fn recipe_still_current(
     {
         return false;
     }
-    if !requires_original {
-        return true;
-    }
-    state
+    if let Some(current) = state
         .application
         .library
         .edit_recipe_surface(photo_id)
@@ -456,7 +458,14 @@ async fn recipe_still_current(
         .ok()
         .flatten()
         .and_then(|(_, edit)| edit.current_source_revision)
-        .is_some_and(|current| current == source_revision)
+    {
+        if current != source_revision {
+            return false;
+        }
+    } else if requires_original {
+        return false;
+    }
+    true
 }
 
 /// `GET /api/photos/{id}/processing-preview/{step_id}`.
@@ -755,5 +764,37 @@ mod tests {
         assert!(current_preview_intent(&new_key, new_generation, &new_token));
         finish_preview_intent(&new_key, new_generation);
         finish_preview_intent(&baseline_key, baseline_generation);
+    }
+    #[test]
+    fn baseline_preview_is_not_reported_as_current_and_fresh() {
+        let recipe = slipstream_core::ComposableEditRecipe {
+            photo_id: "photo-1".into(),
+            revision: "revision-1".into(),
+            source_revision: "source-1".into(),
+            steps: Vec::new(),
+            current_step_id: Some(
+                slipstream_core::ProcessingStepId::new("step-1").expect("valid step"),
+            ),
+        };
+        PREVIEW_RESULTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(
+                "photo-1".into(),
+                PreviewRecord {
+                    recipe_revision: "revision-1".into(),
+                    step_id: "step-1".into(),
+                    identity: "identity-1".into(),
+                    comparison: PreviewComparison::Baseline,
+                },
+            );
+        let status = preview_status("photo-1", Some(&recipe));
+        assert_eq!(status["state"], "stale");
+        assert_eq!(status["fresh"], false);
+        assert_eq!(status["comparison"], "baseline");
+        PREVIEW_RESULTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove("photo-1");
     }
 }

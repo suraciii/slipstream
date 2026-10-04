@@ -18,7 +18,7 @@ use slipstream_core::{
     ProcessingParameterSnapshot, ProcessingStep, ProcessingStepId, SaveComposableEditRecipe,
 };
 use slipstream_processing::modules::{
-    DARKTABLE_MODULE, DARKTABLE_PARAMETER_VERSION, ModuleAvailability, ModuleErrorCode,
+    AvailabilityState, DARKTABLE_MODULE, DARKTABLE_PARAMETER_VERSION, ModuleErrorCode,
     ModuleRegistry, apply_darktable_control, reset_darktable_control,
 };
 
@@ -57,8 +57,8 @@ fn error(status: StatusCode, code: &'static str, message: impl Into<String>) -> 
     error_value(status, code, message, json!({}))
 }
 
-fn registry() -> ModuleRegistry {
-    ModuleRegistry::new(ModuleAvailability::ready(), ModuleAvailability::ready())
+fn registry(state: &HttpState) -> ModuleRegistry {
+    crate::processing_modules::registry(state)
 }
 
 fn catalog_json(registry: &ModuleRegistry) -> Vec<Value> {
@@ -134,8 +134,77 @@ fn current_requires_rebind(
                 || source_revision != &recipe.source_revision
                 || read.current_source_revision.as_deref() != Some(recipe.source_revision.as_str())
         }
-        ProcessingInput::Artifact { .. } => false,
+        ProcessingInput::Artifact { .. } => read
+            .current_source_revision
+            .as_deref()
+            .is_some_and(|current| current != recipe.source_revision),
     }
+}
+
+fn current_step(recipe: Option<&ComposableEditRecipe>) -> Option<&ProcessingStep> {
+    let recipe = recipe?;
+    let step_id = recipe.current_step_id.as_ref()?;
+    recipe.steps.iter().find(|step| &step.step_id == step_id)
+}
+
+fn current_module_ready(registry: &ModuleRegistry, recipe: Option<&ComposableEditRecipe>) -> bool {
+    current_step(recipe).is_some_and(|step| {
+        registry
+            .describe(step.module.as_str())
+            .is_ok_and(|description| description.availability.state == AvailabilityState::Ready)
+    })
+}
+
+fn current_can_save(
+    read: &ComposableEditRecipeRead,
+    recipe: Option<&ComposableEditRecipe>,
+) -> bool {
+    current_step(recipe).is_some_and(|step| match step.input {
+        ProcessingInput::Artifact { .. } => true,
+        ProcessingInput::Original { .. } => {
+            read.source_available && read.current_source_revision.is_some()
+        }
+    })
+}
+
+fn state_source_revision(
+    read: &ComposableEditRecipeRead,
+    recipe: Option<&ComposableEditRecipe>,
+) -> Option<String> {
+    recipe
+        .map(|recipe| recipe.source_revision.clone())
+        .or_else(|| read.current_source_revision.clone())
+}
+
+fn state_json(
+    state: &HttpState,
+    photo_id: &str,
+    read: &ComposableEditRecipeRead,
+    recipe: Option<&ComposableEditRecipe>,
+) -> Value {
+    let (current, current_step_id) = current_projection(recipe);
+    let registry = registry(state);
+    let requires_rebind = current_requires_rebind(read, recipe);
+    let can_process = current.is_some()
+        && current_module_ready(&registry, recipe)
+        && !requires_rebind
+        && (!current_requires_source(recipe) || read.source_available);
+    json!({
+        "photoId": photo_id,
+        "sourceRevision": state_source_revision(read, recipe),
+        "currentSourceRevision": read.current_source_revision,
+        "sourceAvailable": read.source_available,
+        "requiresRebind": requires_rebind,
+        "editRevision": recipe.map(|recipe| recipe.revision.as_str()),
+        "currentStepId": current_step_id,
+        "current": current,
+        "engineModules": catalog_json(&registry),
+        "canSave": current_can_save(read, recipe) && !requires_rebind,
+        "canPreview": can_process,
+        "canExport": can_process,
+        "preview": crate::processing_preview::preview_status(photo_id, recipe),
+        "recentOutputs": [],
+    })
 }
 
 fn current_requires_source(recipe: Option<&ComposableEditRecipe>) -> bool {
@@ -189,33 +258,6 @@ fn current_projection(recipe: Option<&ComposableEditRecipe>) -> (Option<Value>, 
         })),
         Some(step.step_id.as_str().to_owned()),
     )
-}
-
-fn state_json(
-    photo_id: &str,
-    read: &ComposableEditRecipeRead,
-    recipe: Option<&ComposableEditRecipe>,
-) -> Value {
-    let (current, current_step_id) = current_projection(recipe);
-    let registry = registry();
-    let requires_rebind = current_requires_rebind(read, recipe);
-    let can_process = current.is_some()
-        && !requires_rebind
-        && (!current_requires_source(recipe) || read.source_available);
-    json!({
-        "photoId": photo_id,
-        "sourceRevision": read.current_source_revision,
-        "sourceAvailable": read.source_available,
-        "editRevision": recipe.map(|recipe| recipe.revision.as_str()),
-        "currentStepId": current_step_id,
-        "current": current,
-        "engineModules": catalog_json(&registry),
-        "canSave": read.source_available && read.current_source_revision.is_some(),
-        "canPreview": can_process,
-        "canExport": can_process,
-        "preview": crate::processing_preview::preview_status(photo_id, recipe),
-        "recentOutputs": [],
-    })
 }
 
 async fn read_photo(
@@ -384,6 +426,29 @@ async fn resolve_input(
             "The processing artifact is missing or expired",
         ));
     };
+    let retention = state
+        .application
+        .library
+        .processing_artifact_retention(artifact_id.as_str())
+        .await
+        .map_err(|library_error| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "storage",
+                library_error.to_string(),
+            )
+        })?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if retention.is_none_or(|retention| now >= retention.expires_at_unix_seconds) {
+        return Err(error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "incompatible_input",
+            "The processing artifact is missing or expired",
+        ));
+    }
     if artifact.photo_id != photo_id {
         return Err(error(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -473,6 +538,14 @@ fn build_recipe(
             .as_ref()
             .and_then(|id| recipe.steps.iter().find(|step| &step.step_id == id))
     });
+    if current.is_some_and(|step| step.module.as_str() != DARKTABLE_MODULE) && !explicit_input {
+        return Err(error_value(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "incompatible_input",
+            "Switching the Engine or creating a new input binding requires explicit `from`",
+            json!({"target": target, "from": null}),
+        ));
+    }
     let same_step = current
         .filter(|step| step.module.as_str() == DARKTABLE_MODULE)
         .filter(|_| value.is_none() || !explicit_input)
@@ -607,6 +680,7 @@ async fn save(
 }
 
 fn outcome_response(
+    state: &HttpState,
     photo_id: &str,
     read: &ComposableEditRecipeRead,
     outcome: ComposableEditRecipeWriteOutcome,
@@ -614,18 +688,18 @@ fn outcome_response(
     match outcome {
         ComposableEditRecipeWriteOutcome::Saved(recipe) => (
             StatusCode::CREATED,
-            Json(json!({"outcome": "saved", "edit": state_json(photo_id, read, Some(&recipe))})),
+            Json(json!({"outcome": "saved", "edit": state_json(state, photo_id, read, Some(&recipe))})),
         )
             .into_response(),
         ComposableEditRecipeWriteOutcome::Replayed(recipe) => (
             StatusCode::OK,
-            Json(json!({"outcome": "replayed", "edit": state_json(photo_id, read, Some(&recipe))})),
+            Json(json!({"outcome": "replayed", "edit": state_json(state, photo_id, read, Some(&recipe))})),
         )
             .into_response(),
         ComposableEditRecipeWriteOutcome::Unchanged(recipe) => (
             StatusCode::OK,
             Json(
-                json!({"outcome": "unchanged", "edit": state_json(photo_id, read, Some(&recipe))}),
+                json!({"outcome": "unchanged", "edit": state_json(state, photo_id, read, Some(&recipe))}),
             ),
         )
             .into_response(),
@@ -633,13 +707,13 @@ fn outcome_response(
             StatusCode::CONFLICT,
             "edit_conflict",
             "The expected Edit revision is no longer current",
-            json!({"edit": state_json(photo_id, read, recipe.as_ref())}),
+            json!({"edit": state_json(state, photo_id, read, recipe.as_ref())}),
         ),
         ComposableEditRecipeWriteOutcome::SourceChanged(recipe) => error_value(
             StatusCode::CONFLICT,
             "source_changed",
             "The guarded source revision is no longer current",
-            json!({"edit": state_json(photo_id, read, recipe.as_ref())}),
+            json!({"edit": state_json(state, photo_id, read, recipe.as_ref())}),
         ),
         ComposableEditRecipeWriteOutcome::MissingPhoto => error(
             StatusCode::NOT_FOUND,
@@ -677,7 +751,7 @@ pub(crate) async fn get_edit(
         Ok(read) => read,
         Err(response) => return response,
     };
-    let mut projection = state_json(&photo_id, &read, read.recipe.as_ref());
+    let mut projection = state_json(&state, &photo_id, &read, read.recipe.as_ref());
     projection["recentOutputs"] = match recent_outputs(&state, &photo_id).await {
         Ok(outputs) => outputs,
         Err(response) => return response,
@@ -746,7 +820,7 @@ pub(crate) async fn set_edit(
     )
     .await
     {
-        Ok(outcome) => outcome_response(&photo_id, &read, outcome),
+        Ok(outcome) => outcome_response(&state, &photo_id, &read, outcome),
         Err(response) => response,
     }
 }
@@ -813,84 +887,10 @@ pub(crate) async fn reset_edit(
     )
     .await
     {
-        Ok(outcome) => outcome_response(&photo_id, &read, outcome),
+        Ok(outcome) => outcome_response(&state, &photo_id, &read, outcome),
         Err(response) => response,
     }
 }
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn original() -> ProcessingInput {
-        ProcessingInput::Original {
-            photo_id: "photo-1".into(),
-            source_revision: "source-1".into(),
-        }
-    }
-
-    #[test]
-    fn stateful_set_updates_the_current_step_without_replacing_its_input() {
-        let first = build_recipe(
-            "photo-1",
-            "source-1",
-            None,
-            "darktable.exposure",
-            "ev",
-            Some(&json!(0.5)),
-            original(),
-            false,
-        )
-        .expect("initial state");
-        let step_id = first.current_step_id.clone().expect("current step");
-        let updated = build_recipe(
-            "photo-1",
-            "source-1",
-            Some(&first),
-            "darktable.exposure",
-            "ev",
-            Some(&json!(0.75)),
-            original(),
-            false,
-        )
-        .expect("updated state");
-        assert_eq!(updated.steps.len(), 1);
-        assert_eq!(updated.current_step_id, Some(step_id));
-        assert_eq!(updated.steps[0].input, first.steps[0].input);
-        assert_eq!(
-            updated.steps[0].parameters.tree["stack"][0]["params"]["exposure"],
-            json!(0.75)
-        );
-    }
-
-    #[test]
-    fn reset_all_uses_the_control_reset_value() {
-        let first = build_recipe(
-            "photo-1",
-            "source-1",
-            None,
-            "darktable.exposure",
-            "ev",
-            Some(&json!(0.75)),
-            original(),
-            false,
-        )
-        .expect("initial state");
-        let reset = build_recipe(
-            "photo-1",
-            "source-1",
-            Some(&first),
-            "darktable.exposure",
-            "all",
-            None,
-            original(),
-            false,
-        )
-        .expect("reset state");
-        assert_eq!(
-            reset.steps[0].parameters.tree["stack"][0]["params"]["exposure"],
-            json!(0.0)
-        );
-    }
-}
+#[path = "edit_tests.rs"]
+mod tests;
