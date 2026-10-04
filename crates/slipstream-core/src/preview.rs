@@ -463,7 +463,8 @@ impl PreviewService {
         if let Some(ready) = self.lookup_current(&facts, target).await? {
             return Ok(PreviewRequestResult::Current(ready_result(&ready, target)));
         }
-        self.request_with_mode(facts.photo.id.clone(), target, priority, false, Some(facts))
+        let retry = facts.photo.preview_state == PreviewState::Failed;
+        self.request_with_mode(facts.photo.id.clone(), target, priority, retry, Some(facts))
             .await
     }
 
@@ -550,6 +551,18 @@ impl PreviewService {
         priority: DerivativePriority,
     ) -> Result<PreviewRequestResult, PreviewServiceError> {
         self.request_with_mode(photo_id, target, priority, true, None)
+            .await
+    }
+
+    /// Retries one published Preview identity while preserving the caller's
+    /// source-fact snapshot.
+    pub async fn retry_with_facts(
+        &self,
+        facts: PreviewFacts,
+        target: DerivativeTarget,
+        priority: DerivativePriority,
+    ) -> Result<PreviewRequestResult, PreviewServiceError> {
+        self.request_with_mode(facts.photo.id.clone(), target, priority, true, Some(facts))
             .await
     }
 

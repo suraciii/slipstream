@@ -432,11 +432,25 @@ the resulting saved position when it removes the saved Photo.
 
 ### Persistent Derivative Cache
 
-The existing cache identity and atomic publication contracts remain authoritative. Both `thumbnail-512` and `review-2560` derivatives persist in the configured cache directory and may be reused across server restart.
+The existing cache identity and atomic publication contracts remain authoritative.
+Both `thumbnail-512` and `review-2560` derivatives persist in the configured
+cache directory and may be reused across server restart.
 
-A current cache hit must not reopen or reprocess the Original File. Derivative delivery uses identity-bearing URLs and `ETag`; [Instance Access Architecture](access.md#private-content-and-transport) owns authentication, private response caching, and migration from publicly cached URLs. A changed source revision creates a different cache identity and cannot be presented as current under the previous identity.
+A current cache hit must not reopen or reprocess the Original File. Derivative
+delivery uses identity-bearing URLs and `ETag`; [Instance Access
+Architecture](access.md#private-content-and-transport) owns authentication and
+the private response cache policy. A changed source revision creates a
+different cache identity and cannot be presented as current under the previous
+identity.
 
-The cache is rebuildable and not authoritative for Selection State, Rating, membership, or saved position. Removing cache bytes may cause regeneration but must not change SQLite user state or Original Files.
+After a scan publishes a new or changed usable Photo, the server may warm its
+`review-2560` derivative at background priority. This bounded warmup must not
+delay publication or make browsing depend on completing the derivative. It
+must not backfill every existing Photo, and it does not warm `thumbnail-512`.
+
+The cache is rebuildable and not authoritative for Selection State, Rating,
+membership, or saved position. Removing cache bytes may cause regeneration but
+must not change SQLite user state or Original Files.
 
 ### Preview Scheduling
 
@@ -445,13 +459,16 @@ Scheduling priority remains:
 1. current Photo review Preview;
 2. immediately next and previous Photo review Previews;
 3. visible Grid thumbnails;
-4. bounded Grid look-ahead thumbnails.
+4. bounded Grid look-ahead thumbnails;
+5. new or changed `review-2560` warmup.
 
-Current Preview completion triggers adjacent prefetch. Prefetch is limited to immediate neighbors and remaining shared native-work capacity. Moving to a prefetched neighbor promotes that request to current priority.
+Current Preview completion triggers adjacent prefetch. Prefetch is limited to
+immediate neighbors and remaining shared native-work capacity. Moving to a
+prefetched neighbor promotes that request to current priority.
 
-Slipstream must not automatically prepare every Library Preview. Full precomputation would create unbounded storage and Original-file I/O relative to actual browsing.
-
-Duplicate requests for one cache identity share one in-flight job. Leaving Photo View may leave a nearly complete reusable job running, but queued speculative work with no consumer may be dropped.
+Duplicate requests for one cache identity share one in-flight job. Leaving
+Photo View may leave a nearly complete reusable job running, but queued
+speculative work with no consumer may be dropped.
 
 ### Filmstrip Neighbors
 

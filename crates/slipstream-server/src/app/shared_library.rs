@@ -64,14 +64,88 @@ impl SharedLibrary {
     /// transactionally, so the fresh read is the authoritative merge of
     /// scan-owned changes (availability, order, source selection, Preview
     /// invalidation for changed revisions) plus every later committed fact.
-    pub(super) async fn publish_fresh(&self, library: &Library) -> Result<(), LibraryError> {
+    pub(super) async fn publish_fresh(
+        &self,
+        library: &Library,
+    ) -> Result<Vec<ReviewWarmupRequest>, LibraryError> {
         let _publication = self.publication.lock().await;
         let persisted = library.snapshot().await?;
+        let originals_by_id = persisted
+            .originals
+            .iter()
+            .map(|original| (original.id.as_str(), original))
+            .collect::<std::collections::HashMap<_, _>>();
+        let warmup_requests = {
+            let previous = self.snapshot.read().expect("published Library poisoned");
+            persisted
+                .photos
+                .iter()
+                .filter_map(|photo| {
+                    let original = originals_by_id.get(photo.original_id.as_str()).copied()?;
+                    if !photo.available || !original.available || original.error_category.is_some()
+                    {
+                        return None;
+                    }
+                    let facts = PreviewFacts::from_records(photo.clone(), vec![original.clone()]);
+                    match previous.as_ref() {
+                        None => Some(ReviewWarmupRequest {
+                            photo_id: photo.id.clone(),
+                            retry: false,
+                        }),
+                        Some(previous) => {
+                            let previous_source = previous
+                                .photos_by_id
+                                .get(&photo.id)
+                                .copied()
+                                .and_then(|position| previous.snapshot.photos.get(position))
+                                .and_then(|previous_photo| {
+                                    previous
+                                        .originals_by_id
+                                        .get(&previous_photo.original_id)
+                                        .copied()
+                                        .and_then(|position| {
+                                            previous
+                                                .snapshot
+                                                .originals
+                                                .get(position)
+                                                .map(|original| (previous_photo, original))
+                                        })
+                                });
+                            match previous_source {
+                                Some((previous_photo, previous_original)) => {
+                                    let source_changed = !PreviewFacts::from_records(
+                                        previous_photo.clone(),
+                                        vec![previous_original.clone()],
+                                    )
+                                    .source_matches(&facts.photo, &facts.originals);
+                                    // InspectionPending is also the normal state for a
+                                    // never-requested Photo; only Failed is a durable
+                                    // warmup failure worth retrying on the next scan.
+                                    let retry = !source_changed
+                                        && matches!(
+                                            previous_photo.preview_state,
+                                            slipstream_core::PreviewState::Failed
+                                        );
+                                    (source_changed || retry).then_some(ReviewWarmupRequest {
+                                        photo_id: photo.id.clone(),
+                                        retry,
+                                    })
+                                }
+                                None => Some(ReviewWarmupRequest {
+                                    photo_id: photo.id.clone(),
+                                    retry: false,
+                                }),
+                            }
+                        }
+                    }
+                })
+                .collect()
+        };
         *self.snapshot.write().expect("published Library poisoned") =
             Some(Published::new(persisted));
         self.failed.store(false, Ordering::Relaxed);
         self.published.store(true, Ordering::Relaxed);
-        Ok(())
+        Ok(warmup_requests)
     }
 
     /// Patches one mutable Photo fact in place. Called only after the
@@ -199,7 +273,7 @@ impl SharedLibrary {
         &self,
         library: &Library,
         publish_gate: Option<oneshot::Receiver<()>>,
-    ) -> Result<(), LibraryError> {
+    ) -> Result<Vec<ReviewWarmupRequest>, LibraryError> {
         self.runs_started.fetch_add(1, Ordering::Relaxed);
         self.awaiting_scan.fetch_add(1, Ordering::Relaxed);
         let outcome = match library.scan().await {
@@ -208,7 +282,7 @@ impl SharedLibrary {
                     let _ = gate.await;
                 }
                 match self.publish_fresh(library).await {
-                    Ok(()) => Ok(()),
+                    Ok(warmup_ids) => Ok(warmup_ids),
                     Err(error) => {
                         self.failed.store(true, Ordering::Relaxed);
                         Err(error)

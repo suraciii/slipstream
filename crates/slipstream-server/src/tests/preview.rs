@@ -11,6 +11,170 @@ fn marker_complete_corrupt_jpeg(width: u16, height: u16) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn scan_warms_new_review_preview_without_foreground_request() {
+    let (base, config) = prepare_fixture();
+    let original = config.library_root.join("photo.jpg");
+    jpeg_fixture(&original, 90, 45, [192, 64, 32]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .into_iter()
+        .next()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let facts = {
+            let guard = application
+                .shared
+                .snapshot
+                .read()
+                .expect("published Library poisoned");
+            let published = guard.as_ref().expect("published Library");
+            let photo_position = published.photos_by_id[&photo_id];
+            let photo = &published.snapshot.photos[photo_position];
+            let original_position = published.originals_by_id[&photo.original_id];
+            PreviewFacts::from_records(
+                photo.clone(),
+                vec![published.snapshot.originals[original_position].clone()],
+            )
+        };
+        let cached = application
+            .preview
+            .lookup_current(&facts, DerivativeTarget::Review2560)
+            .await
+            .unwrap();
+        let summary = published_photo_summary(&application, &photo_id).await;
+        if cached.is_some() && summary.preview.state == "ready" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "scan did not warm the review Preview"
+        );
+        tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn offline_proxy_develop_returns_and_reuses_current_jpeg() {
+    use sha2::{Digest, Sha256};
+
+    let (base, mut config) = prepare_fixture();
+    let original = config.library_root.join("approved.ARW");
+    let original_bytes = approved_raw_fixture(&original);
+    config.processing = Some(ProcessingConfig {
+        instance: "f".repeat(32),
+        policy_sha256: "b".repeat(64),
+        bundle_sha256: "c".repeat(64),
+        socket_override: None,
+    });
+    config.export_retained_output_bytes = Some(1024 * 1024 * 1024);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .into_iter()
+        .next()
+        .unwrap();
+    let revision = application
+        .library
+        .edit_recipe(&photo_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .current_source_revision
+        .expect("settled scan publishes the source revision");
+    let frame = slipstream_core::derivative::development_tiff_fixture(&[0.25; 8 * 4 * 3], 8, 4);
+    let record = slipstream_core::DevelopmentProxyRecord {
+        photo_id: photo_id.clone(),
+        source_revision: revision,
+        source_relative_path: "approved.ARW".to_owned(),
+        source_sha256: format!("{:x}", Sha256::digest(&original_bytes)),
+        source_size: original_bytes.len() as u64,
+        profile_id: "sony-ilce-7rm5-arw".to_owned(),
+        pipeline_version: slipstream_core::DEVELOPMENT_PROXY_PIPELINE_VERSION.to_owned(),
+        bundle_sha256: "c".repeat(64),
+        long_edge: slipstream_core::DEVELOPMENT_PROXY_LONG_EDGE,
+        width: 8,
+        height: 4,
+        artifact_sha256: format!("{:x}", Sha256::digest(&frame)),
+        artifact_bytes: frame.len() as u64,
+        created_at: 1_700_000_000,
+    };
+    let artifact_root = config.state_directory.join("development-proxies");
+    fs::create_dir_all(&artifact_root).unwrap();
+    fs::write(
+        artifact_root.join(format!("{}.tiff", record.identity_digest())),
+        frame,
+    )
+    .unwrap();
+    assert!(
+        application
+            .library
+            .record_development_proxy(record)
+            .await
+            .unwrap()
+    );
+    fs::remove_file(&original).unwrap();
+    application.library.scan().await.unwrap();
+    assert!(
+        !application
+            .library
+            .edit_recipe(&photo_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .source_available
+    );
+    assert!(
+        application
+            .proxies
+            .as_ref()
+            .unwrap()
+            .current_record(&photo_id)
+            .await
+            .is_some()
+    );
+    let router = configured_router(&application, config.web_root());
+    let uri = format!("https://camera.local/api/photos/{photo_id}/edit-preview/develop");
+    let mut first_digest = None;
+    for _ in 0..2 {
+        let response = send(
+            &router,
+            authenticated_request()
+                .uri(&uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        if response.status() != StatusCode::OK {
+            panic!("proxy preview refused: {}", response_json(response).await);
+        }
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/jpeg");
+        assert_eq!(
+            response.headers()["slipstream-edit-preview-source"],
+            "development-proxy"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024)
+            .await
+            .unwrap();
+        let digest = Sha256::digest(&bytes);
+        assert!(bytes.starts_with(&[0xff, 0xd8]));
+        if let Some(first) = first_digest {
+            assert_eq!(first, digest);
+        } else {
+            first_digest = Some(digest);
+        }
+    }
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
 async fn proxy_removal_is_admitted_while_other_api_deletes_stay_refused() {
     let (base, mut config) = prepare_fixture();
     jpeg_fixture(
@@ -111,7 +275,11 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     .await;
     assert_eq!(derivative.status(), StatusCode::OK);
     assert_eq!(derivative.headers()[header::CONTENT_TYPE], "image/jpeg");
-    assert_eq!(derivative.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        derivative.headers()[header::CACHE_CONTROL],
+        "private, max-age=3600, must-revalidate"
+    );
+    assert_eq!(derivative.headers()[header::VARY], "Cookie, Authorization");
     assert_eq!(derivative.headers()["x-content-type-options"], "nosniff");
     let etag = derivative.headers()[header::ETAG]
         .to_str()
@@ -203,7 +371,14 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
             .unwrap(),
     )
     .await;
-    assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        not_modified.headers()[header::CACHE_CONTROL],
+        "private, max-age=3600, must-revalidate"
+    );
+    assert_eq!(
+        not_modified.headers()[header::VARY],
+        "Cookie, Authorization"
+    );
     assert_eq!(
         axum::body::to_bytes(not_modified.into_body(), 1024)
             .await

@@ -567,20 +567,6 @@ async fn response_goldens_match_real_serialized_routes() {
     )
     .await;
     let token = opened["token"].as_str().unwrap().to_owned();
-    let pending = response_json(
-        send(
-            &router,
-            authenticated_request()
-                .uri(format!(
-                    "https://camera.local/api/browse/{token}?start=0&limit=1"
-                ))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await,
-    )
-    .await;
-    assert_golden(&goldens, 0, &pending, &captures);
 
     let pair_current = response_json(
         send(
@@ -600,6 +586,20 @@ async fn response_goldens_match_real_serialized_routes() {
         "reviewUrl".to_owned(),
         pair_current["url"].as_str().unwrap().to_owned(),
     );
+    let pending = response_json(
+        send(
+            &router,
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/browse/{token}?start=0&limit=1"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_golden(&goldens, 0, &pending, &captures);
 
     let current = response_json(
         send(
@@ -909,9 +909,18 @@ async fn cache_protocol_fixtures_execute_with_declared_headers() {
             .keys()
             .map(String::as_str)
             .collect::<BTreeSet<_>>();
+        let required_headers = if vector["setup"] == "jpeg-original" {
+            BTreeSet::from([
+                "cache-control",
+                "content-type",
+                "vary",
+                "x-content-type-options",
+            ])
+        } else {
+            BTreeSet::from(["cache-control", "content-type", "x-content-type-options"])
+        };
         assert_eq!(
-            declared_headers,
-            BTreeSet::from(["cache-control", "content-type", "x-content-type-options"]),
+            declared_headers, required_headers,
             "{name} must declare the complete cache header contract"
         );
         let response = send(

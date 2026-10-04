@@ -3,6 +3,7 @@
     "photos": [
       {
         "available": true,
+        "hasSavedEdits": false,
         "id": "$photoId",
         "original": {
           "available": true,
@@ -10,10 +11,14 @@
         },
         "originalFilename": "pair.JPG",
         "preview": {
-          "state": "inspection-pending"
+          "height": 45,
+          "limitedDetail": true,
+          "source": "jpeg-original",
+          "state": "ready",
+          "url": "$reviewUrl",
+          "width": 90
         },
         "rating": 0,
-        "hasSavedEdits": false,
         "selectionState": "undecided"
       }
     ],
@@ -24,6 +29,7 @@
     "photos": [
       {
         "available": true,
+        "hasSavedEdits": false,
         "id": "$photoId",
         "original": {
           "available": true,
@@ -40,7 +46,6 @@
           "width": 90
         },
         "rating": 0,
-        "hasSavedEdits": false,
         "selectionState": "undecided"
       }
     ],
