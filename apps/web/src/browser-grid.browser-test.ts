@@ -11,8 +11,11 @@ import {
   server,
   browseIds,
   libraryPhoto,
+  post,
 } from "./browser-test-support/fixtures.js";
 import {
+  applyViewOptions,
+  openViewOptions,
   waitForGridFrame,
   waitForLoadedReviewImage,
   closePhotoTools,
@@ -176,6 +179,77 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   await expect(page.locator("[data-grid-source-progress]")).toHaveText(
     "Source progress: 0 selected · 1 rejected · 3 undecided",
   );
+});
+
+test("Selection filters keep source counts, URLs, and Photo traversal stable", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 4);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  for (const [index, selectionState] of [
+    [0, "selected"],
+    [1, "rejected"],
+    [2, "selected"],
+  ] as const) {
+    const response = await post(
+      running.url,
+      `/api/photos/${ids[index]}/state`,
+      {
+        field: "selectionState",
+        value: selectionState,
+      },
+    );
+    expect(response.ok).toBe(true);
+  }
+
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+  const opens: string[] = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/browse"
+    )
+      opens.push(request.postData() ?? "");
+  });
+
+  // Cancel is draft-only: it changes neither the URL nor the Browse Snapshot.
+  await openViewOptions(page);
+  await page.locator("[data-filter-select]").selectOption("selected");
+  await page.locator("[data-view-options-cancel]").click();
+  await expect(page.locator("[data-view-options]")).toBeHidden();
+  expect(opens).toEqual([]);
+  await expect(page).toHaveURL(running.url + "/");
+
+  // Apply evaluates one filtered Snapshot and carries its source-wide counts.
+  await openViewOptions(page);
+  await page.locator("[data-filter-select]").selectOption("selected");
+  await applyViewOptions(page);
+  await expect.poll(() => opens.length).toBe(1);
+  await expect(page).toHaveURL(/selection=selected/);
+  await expect(page.locator(".photo-cell")).toHaveCount(2);
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+    "Source progress: 2 selected · 1 rejected · 1 undecided",
+  );
+
+  // The filtered sequence owns Photo position and Previous/Next: the rejected
+  // source member is never exposed by the traversal.
+  await page.locator('[data-photo-index="0"]').click();
+  await expect(page.locator("[data-review]")).toBeVisible();
+  await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(page.locator("[data-position]")).toHaveText("2 / 2");
+  const photoAddress = page.url();
+  await page.reload();
+  await expect(page.locator("[data-position]")).toHaveText("2 / 2");
+  expect(page.url()).toBe(photoAddress);
+  await page.goBack();
+  await expect(page.locator(".photo-cell")).toHaveCount(2);
+  await page.goForward();
+  await expect(page.locator("[data-position]")).toHaveText("2 / 2");
 });
 
 test("EXIF-rotated thumbnails display the corrected orientation exactly once", async ({
