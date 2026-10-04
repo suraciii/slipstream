@@ -19,6 +19,9 @@ pub struct Config {
     pub database_basename: String,
     pub host: String,
     pub public_origin: String,
+    /// Canonical origins admitted by the HTTP access boundary. Deployment
+    /// tooling may provide this internally; the public origin is always kept.
+    pub access_origins: Vec<String>,
     pub port: u16,
     /// Tests and packaged deployments may provide a built Web directory. When
     /// absent, the binary uses the repository's conventional `apps/web/dist`.
@@ -139,6 +142,13 @@ impl Config {
             &get("SLIPSTREAM_PUBLIC_ORIGIN").unwrap_or_else(|| format!("http://localhost:{port}")),
         )
         .ok_or(ConfigError::Invalid("SLIPSTREAM_PUBLIC_ORIGIN"))?;
+        let access_origins = crate::access::access_origins(
+            get("SLIPSTREAM_ACCESS_ORIGINS").as_deref(),
+            &host,
+            port,
+            &public_origin,
+        )
+        .map_err(|_| ConfigError::Invalid("SLIPSTREAM_ACCESS_ORIGINS"))?;
         let photo_development =
             get("SLIPSTREAM_PHOTO_DEVELOPMENT").unwrap_or_else(|| "auto".to_owned());
         let film = film_bundle_config(
@@ -205,6 +215,7 @@ impl Config {
         };
         Ok(Self {
             public_origin,
+            access_origins,
             library_root,
             state_directory,
             cache_directory,

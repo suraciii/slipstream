@@ -174,6 +174,9 @@ export async function runFileSizeCheck({ repoRoot, rules, label }) {
   console.error(
     "Keep new files at or below the limit; files already over it may not grow.",
   );
+  console.error(
+    "Preserve readability and structure: do not delete meaningful spacing, compress statements, or remove useful comments to save lines. Remove duplication, reuse existing helpers or fixtures, and split by cohesive responsibilities rather than arbitrary line counts. Preserve behavior and verify the affected paths.",
+  );
   process.exitCode = 1;
   return report;
 }

@@ -60,6 +60,24 @@ pub fn cli_command() -> Command {
     command.env("SSL_CERT_FILE", test_ca_path());
     command
 }
+
+pub fn fixture_config(base: &std::path::Path, library_root: PathBuf, web_root: PathBuf) -> Config {
+    Config {
+        library_root,
+        state_directory: base.join("state"),
+        cache_directory: base.join("cache"),
+        database_basename: "library.sqlite".to_owned(),
+        host: "127.0.0.1".to_owned(),
+        public_origin: "https://localhost".to_owned(),
+        access_origins: vec!["https://localhost".to_owned()],
+        port: 0,
+        web_root: Some(web_root),
+        processing: None,
+        export_retained_output_bytes: None,
+        metadata_supervisor: None,
+    }
+}
+
 /// Complete capabilities document shared by scripted CLI services.
 #[allow(dead_code)]
 pub fn capabilities_body() -> Value {
@@ -297,7 +315,7 @@ fn proxy_one(stream: TcpStream, config: Arc<ServerConfig>, upstream: &str) {
     };
     let _ = service.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = service.set_write_timeout(Some(Duration::from_secs(10)));
-    let mut request = close_connection_request(&head);
+    let mut request = rewrite_proxy_host(&head);
     request.extend_from_slice(&body);
     if service.write_all(&request).is_err() {
         return;
@@ -339,11 +357,18 @@ pub fn read_http_message(stream: &mut impl Read) -> Option<(String, Vec<u8>)> {
     Some((head, body))
 }
 
-fn close_connection_request(head: &str) -> Vec<u8> {
+pub fn rewrite_proxy_host(head: &str) -> Vec<u8> {
     let head = head.strip_suffix("\r\n\r\n").unwrap_or(head);
     let mut request = head
         .lines()
         .filter(|line| !line.to_ascii_lowercase().starts_with("connection:"))
+        .map(|line| {
+            if line.to_ascii_lowercase().starts_with("host:") {
+                "Host: localhost"
+            } else {
+                line
+            }
+        })
         .collect::<Vec<_>>()
         .join("\r\n");
     request.push_str("\r\nConnection: close\r\n\r\n");

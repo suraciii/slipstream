@@ -17,19 +17,7 @@ fn real_service_fixture() -> (PathBuf, Config) {
     for name in ["one.JPG", "two.JPG"] {
         fs::write(originals.join("trip").join(name), jpeg_bytes()).unwrap();
     }
-    let config = Config {
-        library_root: originals,
-        state_directory: base.join("state"),
-        cache_directory: base.join("cache"),
-        database_basename: "library.sqlite".to_owned(),
-        host: "127.0.0.1".to_owned(),
-        public_origin: "https://localhost".to_owned(),
-        port: 0,
-        web_root: Some(web),
-        processing: None,
-        export_retained_output_bytes: None,
-        metadata_supervisor: None,
-    };
+    let config = common::fixture_config(&base, originals, web);
     (base, config)
 }
 

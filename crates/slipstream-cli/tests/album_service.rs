@@ -68,7 +68,6 @@ fn stub_service(reply: MutationReply) -> (String, JoinHandle<()>) {
     });
     (format!("https://127.0.0.1:{}", address.port()), handle)
 }
-
 /// Forwards requests to a real service but drops the response of the first
 /// POST, so the mutation is admitted while the caller cannot learn that.
 fn dropping_proxy(upstream: &str) -> String {
@@ -84,7 +83,7 @@ fn dropping_proxy(upstream: &str) -> String {
             let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
             let mut client = common::tls_stream(stream);
             while let Some((head, body)) = common::read_http_message(&mut client) {
-                let mut forwarded = head.clone().into_bytes();
+                let mut forwarded = common::rewrite_proxy_host(&head);
                 forwarded.extend_from_slice(&body);
                 let Ok(mut upstream_stream) = TcpStream::connect(&upstream) else {
                     return;
@@ -138,19 +137,7 @@ fn fixture_with(photo_names: &[&str]) -> (PathBuf, Config) {
     for name in photo_names {
         fs::write(originals.join("trip").join(name), format!("fixture-{name}")).unwrap();
     }
-    let config = Config {
-        library_root: originals,
-        state_directory: base.join("state"),
-        cache_directory: base.join("cache"),
-        database_basename: "library.sqlite".to_owned(),
-        host: "127.0.0.1".to_owned(),
-        public_origin: "https://localhost".to_owned(),
-        port: 0,
-        web_root: Some(web),
-        processing: None,
-        export_retained_output_bytes: None,
-        metadata_supervisor: None,
-    };
+    let config = common::fixture_config(&base, originals, web);
     (base, config)
 }
 

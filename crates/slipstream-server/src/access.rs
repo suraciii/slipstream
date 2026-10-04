@@ -24,14 +24,137 @@ pub(crate) fn canonical_origin(value: &str) -> Option<String> {
         return None;
     }
     let url = url::Url::parse(value).ok()?;
+    let authority = value.split_once("://")?.1.split('/').next()?;
+    if authority.ends_with(':') {
+        return None;
+    }
     (matches!(url.scheme(), "http" | "https")
-        && url.host_str().is_some()
+        && url.port().is_none_or(|port| port != 0)
+        && url.host_str().is_some_and(|host| !host.contains('*'))
         && url.username().is_empty()
         && url.password().is_none()
         && url.query().is_none()
         && url.fragment().is_none()
         && url.path() == "/")
         .then(|| url.origin().ascii_serialization())
+}
+
+const MAX_ACCESS_ORIGINS: usize = 64;
+
+fn validate_origins(
+    values: impl IntoIterator<Item = String>,
+    public_origin: &str,
+) -> Result<Vec<String>, ()> {
+    let mut origins = values
+        .into_iter()
+        .map(|value| canonical_origin(&value).ok_or(()))
+        .collect::<Result<Vec<_>, _>>()?;
+    if origins.is_empty() || origins.len() > MAX_ACCESS_ORIGINS {
+        return Err(());
+    }
+    origins.sort();
+    if origins.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(());
+    }
+    if !origins.iter().any(|origin| origin == public_origin) {
+        origins.push(public_origin.to_owned());
+    }
+    origins.sort();
+    (origins.len() <= MAX_ACCESS_ORIGINS)
+        .then_some(origins)
+        .ok_or(())
+}
+
+fn configured_origins(value: &str, public_origin: &str) -> Result<Vec<String>, ()> {
+    let values: Vec<String> = serde_json::from_str(value).map_err(|_| ())?;
+    validate_origins(values, public_origin)
+}
+
+pub(crate) fn access_origins(
+    internal: Option<&str>,
+    host: &str,
+    port: u16,
+    public_origin: &str,
+) -> Result<Vec<String>, ()> {
+    match internal {
+        Some(value) => configured_origins(value, public_origin),
+        None => {
+            let mut origins = derived_http_origins(host, port);
+            origins.push(public_origin.to_owned());
+            origins.sort();
+            origins.dedup();
+            validate_origins(origins, public_origin)
+        }
+    }
+}
+
+fn derived_http_origins(host: &str, port: u16) -> Vec<String> {
+    let mut hosts = Vec::new();
+    if host.eq_ignore_ascii_case("localhost")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    {
+        hosts.extend(["localhost".to_owned(), "127.0.0.1".to_owned()]);
+        if host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()) {
+            hosts.push(host.to_owned());
+        }
+    } else if host == "0.0.0.0" || host == "::" {
+        hosts.extend(["localhost".to_owned(), "127.0.0.1".to_owned()]);
+        hosts.extend(interface_addresses());
+    } else if host.parse::<IpAddr>().is_ok() {
+        hosts.push(host.to_owned());
+    }
+    hosts
+        .into_iter()
+        .filter_map(|host| {
+            let authority = if host.contains(':') {
+                format!("[{host}]")
+            } else {
+                host
+            };
+            canonical_origin(&format!("http://{authority}:{port}"))
+        })
+        .collect()
+}
+
+fn interface_addresses() -> Vec<String> {
+    let mut result = Vec::new();
+    let mut list = std::ptr::null_mut();
+    // getifaddrs returns concrete addresses only; reject the wildcard and
+    // loopback entries so wildcard listeners do not invent identities.
+    if unsafe { libc::getifaddrs(&mut list) } != 0 {
+        return result;
+    }
+    let mut current = list;
+    while !current.is_null() {
+        let address = unsafe { (*current).ifa_addr };
+        if !address.is_null() {
+            let ip = unsafe {
+                match (*address).sa_family as i32 {
+                    libc::AF_INET => {
+                        let value = *(address as *const libc::sockaddr_in);
+                        Some(IpAddr::V4(std::net::Ipv4Addr::from(u32::from_be(
+                            value.sin_addr.s_addr,
+                        ))))
+                    }
+                    libc::AF_INET6 => {
+                        let value = *(address as *const libc::sockaddr_in6);
+                        Some(IpAddr::V6(std::net::Ipv6Addr::from(
+                            value.sin6_addr.s6_addr,
+                        )))
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(ip) = ip.filter(|ip| !ip.is_loopback() && !ip.is_unspecified()) {
+                result.push(ip.to_string());
+            }
+        }
+        current = unsafe { (*current).ifa_next };
+    }
+    unsafe { libc::freeifaddrs(list) };
+    result.sort();
+    result.dedup();
+    result
 }
 fn secret() -> Result<String, ()> {
     let mut bytes = [0; 32];
@@ -266,7 +389,7 @@ impl Rate {
 pub(crate) struct Access {
     store: Mutex<Store>,
     origin: String,
-    cookie_name: &'static str,
+    origins: Vec<String>,
     rate: Mutex<Rate>,
     exchanges: tokio::sync::Semaphore,
 }
@@ -274,30 +397,113 @@ impl Access {
     pub(crate) fn open(config: &Config) -> Result<Self, ServerError> {
         let origin = canonical_origin(&config.public_origin)
             .ok_or(ConfigError::Invalid("SLIPSTREAM_PUBLIC_ORIGIN"))?;
+        let origins = if config.access_origins.is_empty() {
+            access_origins(None, &config.host, config.port, &origin)
+        } else {
+            validate_origins(config.access_origins.clone(), &origin)
+        }
+        .map_err(|_| ConfigError::Invalid("SLIPSTREAM_ACCESS_ORIGINS"))?;
         let store = Store::open(&config.library_root, &config.state_directory).map_err(|_| {
             ServerError::Join("Authentication storage is invalid or unavailable".into())
         })?;
         Ok(Self {
             store: Mutex::new(store),
-            cookie_name: if origin.starts_with("https:") {
-                COOKIE
-            } else {
-                HTTP_COOKIE
-            },
             origin,
+            origins,
             rate: Mutex::new(Rate::default()),
             exchanges: tokio::sync::Semaphore::new(4),
         })
     }
+    fn profile<'a>(&'a self, request: &Request<Body>) -> Option<&'a str> {
+        let origin_header = request.headers().contains_key(header::ORIGIN);
+        let mut origins = request.headers().get_all(header::ORIGIN).iter();
+        let requested = origins.next().and_then(|value| {
+            (origins.next().is_none())
+                .then(|| value.to_str().ok())
+                .flatten()
+                .and_then(canonical_origin)
+        });
+        if origin_header && requested.is_none() {
+            return None;
+        }
+        let host_header = request.headers().contains_key(header::HOST);
+        let mut host_values = request.headers().get_all(header::HOST).iter();
+        let host = host_values.next().and_then(|value| value.to_str().ok());
+        if host_values.next().is_some() || (host_header && host.is_none()) {
+            return None;
+        }
+        let target = request.uri().authority().map(|value| value.as_str());
+        if let (Some(host), Some(target)) = (host, target)
+            && !Self::authority_matches_authority(host, target)
+        {
+            return None;
+        }
+        let authority = host.or(target);
+        let selected = match requested {
+            Some(origin) => self.origins.iter().find(|candidate| *candidate == &origin),
+            None => authority
+                .and_then(|authority| {
+                    self.origins
+                        .iter()
+                        .filter(|origin| Self::authority_matches(origin, authority))
+                        .find(|origin| origin.starts_with("https:"))
+                        .or_else(|| {
+                            self.origins
+                                .iter()
+                                .find(|origin| Self::authority_matches(origin, authority))
+                        })
+                })
+                .or_else(|| {
+                    self.origins
+                        .iter()
+                        .find(|origin| origin.as_str() == self.origin)
+                }),
+        }?;
+        if authority.is_some_and(|authority| !Self::authority_matches(selected, authority)) {
+            return None;
+        }
+        Some(selected)
+    }
+    fn cookie_name(origin: &str) -> &'static str {
+        if origin.starts_with("https:") {
+            COOKIE
+        } else {
+            HTTP_COOKIE
+        }
+    }
     fn origin_matches(&self, request: &Request<Body>) -> bool {
-        let mut values = request.headers().get_all(header::ORIGIN).iter();
-        values
-            .next()
-            .and_then(|v| v.to_str().ok())
-            .and_then(canonical_origin)
-            .as_deref()
-            == Some(&self.origin)
-            && values.next().is_none()
+        request.headers().contains_key(header::ORIGIN) && self.profile(request).is_some()
+    }
+    fn authority_matches(origin: &str, authority: &str) -> bool {
+        let Ok(origin) = url::Url::parse(origin) else {
+            return false;
+        };
+        let Ok(request) = url::Url::parse(&format!("{}://{authority}", origin.scheme())) else {
+            return false;
+        };
+        origin.host_str() == request.host_str()
+            && request.port_or_known_default() == origin.port_or_known_default()
+            && request.path() == "/"
+            && request.query().is_none()
+            && request.fragment().is_none()
+            && request.username().is_empty()
+            && request.password().is_none()
+    }
+    fn authority_matches_authority(left: &str, right: &str) -> bool {
+        let Ok(left) = url::Url::parse(&format!("http://{left}")) else {
+            return false;
+        };
+        let Ok(right) = url::Url::parse(&format!("http://{right}")) else {
+            return false;
+        };
+        left.host_str() == right.host_str()
+            && left.port_or_known_default() == right.port_or_known_default()
+            && left.path() == "/"
+            && right.path() == "/"
+            && left.username().is_empty()
+            && right.username().is_empty()
+            && left.password().is_none()
+            && right.password().is_none()
     }
     fn session<'a>(records: &'a Records, cookie: Option<&str>, time: u64) -> Option<&'a Session> {
         let value = cookie.filter(|v| valid_secret(v))?;
@@ -323,7 +529,10 @@ impl Access {
     pub(crate) fn admit(&self, request: &Request<Body>) -> Result<(), Box<Response<Body>>> {
         let headers = request.headers();
         let bearer = headers.get(header::AUTHORIZATION);
-        let cookie = cookie(request, self.cookie_name)?;
+        let profile = self
+            .profile(request)
+            .ok_or_else(|| error(403, "access_denied"))?;
+        let cookie = cookie(request, Self::cookie_name(profile))?;
         if bearer.is_some() && cookie.is_some() {
             return Err(error(400, "invalid_request"));
         }
@@ -389,7 +598,11 @@ impl Access {
         if request.headers().contains_key(header::AUTHORIZATION) {
             return Err(error(400, "invalid_request"));
         }
-        let cookie = cookie(&request, self.cookie_name)?;
+        let origin = self
+            .profile(&request)
+            .ok_or_else(|| error(403, "access_denied"))?;
+        let cookie_name = Self::cookie_name(origin);
+        let cookie = cookie(&request, cookie_name)?;
         if request.method() != "GET" && !self.origin_matches(&request) {
             return Err(error(403, "access_denied"));
         }
@@ -457,30 +670,25 @@ impl Access {
                 ));
             }
             let value = secret().map_err(|_| error(503, "access_unavailable"))?;
-            let session = Session {
+            records.sessions.push(Session {
                 digest: digest(&value),
                 generation,
                 created: time,
                 expires: time + LIFETIME,
                 csrf: secret().map_err(|_| error(503, "access_unavailable"))?,
-            };
-            records.sessions.push(session);
+            });
             store
                 .write(&records)
                 .map_err(|_| error(503, "access_unavailable"))?;
-            return Ok(with_cookie(empty(), &value, LIFETIME, self.cookie_name));
+            return Ok(with_cookie(empty(), &value, LIFETIME, cookie_name));
         }
         let mut store = self
             .store
             .lock()
             .map_err(|_| error(503, "access_unavailable"))?;
         let mut records = store.read().map_err(|_| error(503, "access_unavailable"))?;
-        let session = Self::session(
-            &records,
-            cookie.as_deref(),
-            now().map_err(|_| error(503, "access_unavailable"))?,
-        )
-        .cloned();
+        let current = now().map_err(|_| error(503, "access_unavailable"))?;
+        let session = Self::session(&records, cookie.as_deref(), current).cloned();
         if request.method() == "DELETE" {
             if let Some(session) = session {
                 if !csrf(&request, &session) {
@@ -491,7 +699,7 @@ impl Access {
                     .write(&records)
                     .map_err(|_| error(503, "access_unavailable"))?;
             }
-            return Ok(with_cookie(empty(), "", 0, self.cookie_name));
+            return Ok(with_cookie(empty(), "", 0, cookie_name));
         }
         if let Some(session) = session {
             let expiry = time::OffsetDateTime::from_unix_timestamp(session.expires as i64)
@@ -502,7 +710,7 @@ impl Access {
         } else {
             let response = Json(serde_json::json!({"authenticated": false, "configured": records.credential.is_some()})).into_response();
             Ok(if cookie.is_some() {
-                with_cookie(response, "", 0, self.cookie_name)
+                with_cookie(response, "", 0, cookie_name)
             } else {
                 response
             })
@@ -634,6 +842,9 @@ pub(crate) async fn boundary(
 #[cfg(test)]
 pub(crate) const TEST_TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
+#[cfg(test)]
+#[path = "access_origin_tests.rs"]
+mod origin_tests;
 #[cfg(test)]
 #[path = "access_tests.rs"]
 mod tests;

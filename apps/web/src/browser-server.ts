@@ -13,6 +13,8 @@ import { join, resolve } from "node:path";
 
 export type BrowserServer = Readonly<{
   url: string;
+  /** The backend's HTTP authority, available as a same-instance alias. */
+  httpUrl: string;
   token: string;
   tokenFile: string;
   close(): Promise<void>;
@@ -71,7 +73,13 @@ export async function startBrowserServer({
       (incoming, outgoing) => {
         const upstream = httpRequest(
           `${backendUrl}${incoming.url ?? "/"}`,
-          { method: incoming.method, headers: incoming.headers, agent: false },
+          {
+            method: incoming.method,
+            // Keep the browser-visible authority. Origin/Host checks are
+            // intentionally request-scoped and must not see the backend port.
+            headers: { ...incoming.headers, host: incoming.headers.host },
+            agent: false,
+          },
           (response) => {
             outgoing.writeHead(response.statusCode ?? 502, response.headers);
             response.pipe(outgoing);
@@ -103,15 +111,15 @@ export async function startBrowserServer({
       for (const upstream of upstreams) upstream.destroy();
       await closed;
     };
-    if (transport === "https")
-      await new Promise<void>((done) => proxy.listen(0, "127.0.0.1", done));
+    await new Promise<void>((done) => proxy.listen(0, "127.0.0.1", done));
     const address = proxy.address();
-    if (transport === "https" && (!address || typeof address === "string"))
+    if (!address || typeof address === "string")
       throw new Error("HTTPS proxy address unavailable");
-    const url =
-      transport === "http"
-        ? backendUrl
-        : `https://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+    const httpsUrl = `https://127.0.0.1:${address.port}`;
+    const url = transport === "http" ? backendUrl : httpsUrl;
+    const accessOrigins = JSON.stringify(
+      transport === "http" ? [backendUrl] : [backendUrl, httpsUrl],
+    );
     const childEnvironment: NodeJS.ProcessEnv = {
       ...process.env,
       SLIPSTREAM_PROCESSING_INSTANCE: undefined,
@@ -130,6 +138,7 @@ export async function startBrowserServer({
       SLIPSTREAM_HOST: "127.0.0.1",
       SLIPSTREAM_PORT: String(port),
       SLIPSTREAM_PUBLIC_ORIGIN: url,
+      SLIPSTREAM_ACCESS_ORIGINS: accessOrigins,
     };
     for (const [key, value] of Object.entries(childEnvironment)) {
       if (value === undefined) delete childEnvironment[key];
@@ -146,16 +155,19 @@ export async function startBrowserServer({
     try {
       await waitForReady(child, backendUrl, errors);
       fixtureTokens.set(url, token);
+      fixtureTokens.set(backendUrl, token);
       let closing: Promise<void> | undefined;
       return {
         url,
+        httpUrl: backendUrl,
         token,
         tokenFile,
         close() {
           closing ??= (async () => {
             fixtureTokens.delete(url);
+            fixtureTokens.delete(backendUrl);
             try {
-              if (transport === "https") await closeProxy();
+              await closeProxy();
             } finally {
               await stop(child);
             }
@@ -165,7 +177,7 @@ export async function startBrowserServer({
       };
     } catch (error) {
       try {
-        if (transport === "https") await closeProxy();
+        await closeProxy();
       } finally {
         await stop(child);
       }

@@ -1,17 +1,48 @@
 import { test, expect } from "@playwright/test";
-import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, copyFile, rm } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtemp, mkdir, copyFile, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createConnection } from "node:net";
 import { once } from "node:events";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   startBrowserServer,
   fixtureFetch,
   type BrowserServer,
 } from "./browser-server.js";
+import { browseIds } from "./browser-test-support/fixtures.js";
+import {
+  openViewOptions,
+  applyViewOptions,
+  waitForLoadedReviewImage,
+  openPhotoToolsView,
+  closePhotoTools,
+} from "./browser-test-support/surfaces.js";
 
 let base: string;
+async function runCli(
+  args: readonly string[],
+  environment: NodeJS.ProcessEnv,
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  const child = spawn(
+    resolve(process.env.SLIPSTREAM_CLI_BINARY ?? "target/debug/slipstream"),
+    args,
+    { env: environment, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+  const [status] = (await once(child, "close")) as [
+    number | null,
+    NodeJS.Signals | null,
+  ];
+  return {
+    status,
+    stdout: Buffer.concat(stdout).toString(),
+    stderr: Buffer.concat(stderr).toString(),
+  };
+}
 let server: BrowserServer;
 test.beforeEach(async () => {
   base = await mkdtemp(join(tmpdir(), "slipstream-access-browser-"));
@@ -21,7 +52,14 @@ test.beforeEach(async () => {
     "apps/web/test-fixtures/review.jpg",
     join(root, "synthetic.jpg"),
   );
-  server = await startBrowserServer({ base, root });
+  server = await startBrowserServer({
+    base,
+    root,
+    environment: {
+      SLIPSTREAM_PHOTO_DEVELOPMENT: "disabled",
+      SLIPSTREAM_FILM_MODULE: "disabled",
+    },
+  });
   await expect
     .poll(
       async () =>
@@ -130,19 +168,11 @@ test("direct HTTP keeps access, cookie lifecycle and CLI authentication", async 
   page,
   context,
 }) => {
-  await server.close();
-  await rm(join(base, "state"), { recursive: true, force: true });
-  server = await startBrowserServer({
-    base,
-    root: join(base, "originals"),
-    transport: "http",
-  });
-  await page.goto(server.url);
+  const url = server.httpUrl;
+  await page.goto(url);
   await expect(page.getByLabel("Access Token", { exact: true })).toBeVisible();
   await expect(page.locator(".access-transport-warning")).toBeVisible();
-  expect((await context.request.get(`${server.url}/api/status`)).status()).toBe(
-    401,
-  );
+  expect((await context.request.get(`${url}/api/status`)).status()).toBe(401);
   await page.getByLabel("Access Token", { exact: true }).fill(server.token);
   await page.getByLabel("Access Token", { exact: true }).press("Enter");
   await expect(
@@ -158,24 +188,24 @@ test("direct HTTP keeps access, cookie lifecycle and CLI authentication", async 
   expect(cookie?.httpOnly).toBe(true);
   expect(cookie?.sameSite).toBe("Lax");
   const first: unknown = await (
-    await context.request.get(`${server.url}/api/access/session`)
+    await context.request.get(`${url}/api/access/session`)
   ).json();
   await page.reload();
   await expect(
     page.getByRole("navigation", { name: "Sources", includeHidden: true }),
   ).toBeAttached();
   const second: unknown = await (
-    await context.request.get(`${server.url}/api/access/session`)
+    await context.request.get(`${url}/api/access/session`)
   ).json();
   expect(second).toEqual(first);
-  const denied = await context.request.post(`${server.url}/api/albums`, {
-    headers: { Origin: server.url },
+  const denied = await context.request.post(`${url}/api/albums`, {
+    headers: { Origin: url },
     data: { name: "Denied" },
   });
   expect(denied.status()).toBe(403);
   const cli = spawnSync(
     "target/debug/slipstream",
-    ["--server", server.url, "--token-file", server.tokenFile, "status"],
+    ["--server", url, "--token-file", server.tokenFile, "status"],
     { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   );
   expect(cli.status).toBe(0);
@@ -188,10 +218,262 @@ test("direct HTTP keeps access, cookie lifecycle and CLI authentication", async 
   expect(
     (await context.cookies()).find((cookie) => cookie.name === "slipstream"),
   ).toBeUndefined();
-  expect((await context.request.get(`${server.url}/api/status`)).status()).toBe(
-    401,
-  );
+  expect((await context.request.get(`${url}/api/status`)).status()).toBe(401);
 });
+
+for (const firstTransport of ["https", "http"] as const) {
+  test(`Photo handoff across both transports, starting with ${firstTransport}`, async ({
+    page,
+    context,
+  }) => {
+    const [photoId] = await browseIds(server.url);
+    if (!photoId) throw new Error("The handoff smoke requires one Photo");
+    const current = await fixtureFetch(
+      `${server.url}/api/photos/${photoId}/processing-recipe`,
+    );
+    expect(current.status).toBe(200);
+    const source = (await current.json()) as { sourceRevision: string };
+    // Saving a recipe and exporting its XMP snapshot never executes a module.
+    const saved = await fixtureFetch(
+      `${server.url}/api/photos/${photoId}/processing-recipe`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requestId: "handoff-recipe",
+          expectedRecipeRevision: null,
+          expectedSourceRevision: source.sourceRevision,
+          currentStepId: "handoff-step",
+          steps: [
+            {
+              stepId: "handoff-step",
+              module: "darktable",
+              input: {
+                kind: "original",
+                photoId,
+                sourceRevision: source.sourceRevision,
+              },
+              parameters: {
+                schemaVersion: "darktable-params-1",
+                tree: {
+                  stack: [
+                    {
+                      operation: "exposure",
+                      multiPriority: 0,
+                      enabled: true,
+                      params: { mode: "EXPOSURE_MODE_MANUAL", exposure: 0.5 },
+                    },
+                  ],
+                },
+              },
+            },
+          ],
+        }),
+      },
+    );
+    expect(saved.status).toBe(201);
+    const origins =
+      firstTransport === "https"
+        ? [server.url, server.httpUrl]
+        : [server.httpUrl, server.url];
+    const privateOrigins: string[] = [];
+    page.on("request", (request) => {
+      const url = new URL(request.url());
+      if (url.pathname.startsWith("/api/")) privateOrigins.push(url.origin);
+    });
+    await page.setViewportSize({ width: 1000, height: 700 });
+    for (const [index, origin] of origins.entries()) {
+      await page.goto("about:blank");
+      // Cookies are host-scoped, so the two ports share a cookie jar. Clear it
+      // to prove each transport really establishes its own permitted profile.
+      await context.clearCookies();
+      const cli = await runCli(
+        [
+          "--server",
+          origin,
+          "--token-file",
+          server.tokenFile,
+          "photos",
+          "get",
+          photoId,
+        ],
+        {
+          ...process.env,
+          SSL_CERT_FILE: resolve("tools/test-tls/cert.pem"),
+        },
+      );
+      expect(cli.status, cli.stderr).toBe(0);
+      const envelope = JSON.parse(cli.stdout) as {
+        status: string;
+        data: { webUrl: string; selectionState: string };
+      };
+      expect(envelope.status).toBe("ok");
+      expect(envelope.data.selectionState).toBe(
+        index === 0 ? "undecided" : "rejected",
+      );
+      const destination = `${origin}/?photoId=${photoId}`;
+      expect(envelope.data.webUrl).toBe(destination);
+      expect(cli.stderr).not.toContain(server.token);
+      expect(cli.stderr.match(/Warning:/g)?.length ?? 0).toBe(
+        origin.startsWith("http:") ? 1 : 0,
+      );
+      privateOrigins.length = 0;
+      await page.goto(envelope.data.webUrl);
+      await expect(
+        page.getByLabel("Access Token", { exact: true }),
+      ).toBeVisible();
+      if (origin.startsWith("http:"))
+        await expect(page.locator(".access-transport-warning")).toBeVisible();
+      await page.getByLabel("Access Token", { exact: true }).fill(server.token);
+      await page.getByLabel("Access Token", { exact: true }).press("Enter");
+      await waitForLoadedReviewImage(page);
+      expect(new URL(page.url()).origin).toBe(origin);
+      expect(new URL(page.url()).searchParams.get("photoId")).toBe(photoId);
+      expect(page.url()).not.toContain(server.token);
+      if (origin.startsWith("http:"))
+        await expect(page.locator(".private-transport")).toContainText(
+          "Unencrypted HTTP",
+        );
+      const cookieName = origin.startsWith("https:")
+        ? "__Host-slipstream"
+        : "slipstream";
+      const cookie = (await context.cookies()).find(
+        (entry) => entry.name === cookieName,
+      );
+      expect(cookie).toMatchObject({
+        secure: origin.startsWith("https:"),
+        httpOnly: true,
+        sameSite: "Lax",
+        path: "/",
+      });
+      const otherCookieName = origin.startsWith("https:")
+        ? "slipstream"
+        : "__Host-slipstream";
+      expect(
+        (await context.cookies()).find(
+          (entry) => entry.name === otherCookieName,
+        ),
+      ).toBeUndefined();
+      const session = await context.request.get(`${origin}/api/access/session`);
+      expect(session.status()).toBe(200);
+      await expect(page.locator("[data-selection]")).toHaveText(
+        index === 0 ? "Undecided" : "Rejected",
+      );
+      // The second alias observes the first alias's saved Photo decision.
+      await page
+        .getByRole("button", {
+          name: index === 0 ? "Reject" : "Select",
+          exact: true,
+        })
+        .click();
+      await expect(page.locator("[data-selection]")).toHaveText(
+        index === 0 ? "Rejected" : "Selected",
+      );
+      await page.reload();
+      await waitForLoadedReviewImage(page);
+      await expect(page.locator("[data-selection]")).toHaveText(
+        index === 0 ? "Rejected" : "Selected",
+      );
+      await openPhotoToolsView(page, "edit");
+      const xmp = page.locator('[data-editor-output="xmp"]');
+      await expect(
+        xmp.getByRole("button", { name: "Export edit state", exact: true }),
+      ).toBeEnabled();
+      await xmp
+        .getByRole("button", { name: "Export edit state", exact: true })
+        .click();
+      const downloadButton = xmp.getByRole("button", {
+        name: "Download XMP",
+        exact: true,
+      });
+      await expect(downloadButton).toBeVisible();
+      const downloadPromise = page.waitForEvent("download");
+      await downloadButton.click();
+      const download = await downloadPromise;
+      expect(download.suggestedFilename()).toMatch(/\.xmp$/);
+      const path = await download.path();
+      if (!path) throw new Error("The browser did not retain the XMP download");
+      expect(await readFile(path, "utf8")).toContain("RecipeSnapshot");
+      await closePhotoTools(page);
+      await page
+        .getByRole("button", { name: "Back to Grid", exact: true })
+        .click();
+      const allPhotos = page.getByRole("link", {
+        name: /^All Photos 1 Photo$/,
+      });
+      await expect(allPhotos).toBeVisible();
+      expect(
+        new URL((await allPhotos.getAttribute("href")) ?? "", origin).origin,
+      ).toBe(origin);
+      await allPhotos.click();
+      await expect(page.locator("[data-grid-status]")).toHaveText(
+        "Ready · 1 Photo",
+      );
+      expect(new URL(page.url()).origin).toBe(origin);
+      if (index === 1) {
+        await page.goto(destination);
+        await waitForLoadedReviewImage(page);
+        await page.getByRole("button", { name: "Reject", exact: true }).click();
+        await expect(page.locator("[data-selection]")).toHaveText("Rejected");
+        await page
+          .getByRole("button", { name: "Back to Grid", exact: true })
+          .click();
+      }
+      await openViewOptions(page);
+      await page.locator("[data-filter-select]").selectOption("rejected");
+      await applyViewOptions(page);
+      await expect(page.locator("[data-grid-status]")).toHaveText(
+        "Ready · 1 Photo",
+      );
+      await page.locator("[data-removal-open]").click();
+      await expect(page.locator("[data-removal-summary]")).toHaveText(
+        /^1 Photo reviewed as Rejected\./,
+      );
+      await page.locator("[data-removal-confirm]").click();
+      await expect(page.locator("[data-removal-message]")).toHaveText(
+        /^1 Photo removed from the Library\./,
+      );
+      await page.locator("[data-removal-close]").click();
+      await page.reload();
+      await page.locator("[data-removed-open]").click();
+      const row = page.locator("[data-removed-list] .removed-item");
+      await expect(row).toHaveCount(1);
+      await row.getByRole("button", { name: "Restore", exact: true }).click();
+      await expect(page.locator("[data-removed-message]")).toHaveText(
+        /^1 Photo restored to the Library\./,
+      );
+      await page.locator("[data-removed-close]").click();
+      await page.goto(destination);
+      await waitForLoadedReviewImage(page);
+      await expect(page.locator("[data-selection]")).toHaveText("Rejected");
+      const confirmed = await runCli(
+        [
+          "--server",
+          origin,
+          "--token-file",
+          server.tokenFile,
+          "photos",
+          "get",
+          photoId,
+        ],
+        {
+          ...process.env,
+          SSL_CERT_FILE: resolve("tools/test-tls/cert.pem"),
+        },
+      );
+      expect(confirmed.status, confirmed.stderr).toBe(0);
+      expect(JSON.parse(confirmed.stdout)).toMatchObject({
+        status: "ok",
+        data: {
+          selectionState: "rejected",
+          webUrl: destination,
+          removedAtMs: null,
+        },
+      });
+      expect(new Set(privateOrigins)).toEqual(new Set([origin]));
+    }
+  });
+}
 
 test("returning to the library keeps it visible while access is checked", async ({
   page,
