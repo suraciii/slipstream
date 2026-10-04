@@ -65,17 +65,40 @@ If normalization cannot preserve a valid source profile, Slipstream must convert
 
 ## Loading and Cache Behavior
 
-Visible Grid cells may request thumbnails progressively. Grid loading must not wait for thumbnails outside the current viewport and bounded look-ahead.
+Visible Grid cells may request thumbnails progressively. Grid loading must not
+wait for thumbnails outside the current viewport and bounded look-ahead.
 
-The current Photo's review Preview has highest priority. After it is ready, the immediately next and previous Photos may load in the background. Adjacent work must not delay a newly requested current Photo.
+The current Photo's review Preview has highest priority. After it is ready, the
+immediately next and previous Photos may load in the background. Adjacent work
+must not delay a newly requested current Photo.
 
-A thumbnail may appear while the review Preview loads. Slipstream must not change Selection State because a higher-quality Preview becomes available.
+A thumbnail may appear while the review Preview loads. Slipstream must not
+change Selection State because a higher-quality Preview becomes available.
 
-A generated thumbnail or review Preview must remain in the configured derivative cache across browser reload and server restart. A current cache hit must not re-extract or reprocess the Original File. Derivative delivery must follow [Instance Access](access.md) and its private-response cache policy. Server-side cache reuse must remain available independently of browser caching.
+After a Library scan publishes a new or changed usable Photo, Slipstream must
+best-effort queue that Photo's `review-2560` Preview at background priority.
+This warmup must not block Library publication, browsing, Selection State,
+Rating, navigation, or editing. It must reuse the persistent Derivative Cache
+and the existing cache identity. The `thumbnail-512` demand path remains
+unchanged; Slipstream must not perform a full-Library warmup.
 
-Cache reuse must not present a derivative from an older version of the Original File as current. The cache remains rebuildable: deleting cached derivatives may require regeneration but must not remove Photo state or modify Original Files.
+A generated thumbnail or review Preview must remain in the configured
+derivative cache across browser reload and server restart. A current cache hit
+must not re-extract or reprocess the Original File. Derivative delivery must
+follow [Instance Access](access.md) and its private-response cache policy.
+Server-side cache reuse must remain available independently of browser caching.
 
-Slipstream must not automatically generate every Library Preview. Demand-driven generation and bounded nearby prefetch keep mounted-storage I/O, native work, and cache growth proportional to actual browsing.
+Successful private Preview derivative responses may use the standard HTTP cache
+policy `private, max-age=3600, must-revalidate`, vary by `Cookie` and
+`Authorization`, and identify the cache identity through `ETag`. Session,
+metadata, mutation, editing, and Export responses remain `no-store`.
+
+Cache reuse must not present a derivative from an older version of the Original
+File as current. The cache remains rebuildable: deleting cached derivatives may
+require regeneration but must not remove Photo state or modify Original Files.
+
+Warmup failure or interruption remains retryable through a later scan or an
+ordinary foreground request. It must not be reported as Original unreadable.
 
 ## Failure Behavior
 
