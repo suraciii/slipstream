@@ -618,32 +618,7 @@ async fn compute_automatic_adjustment(
     else {
         return Err("automaticAdjustment requires a darktable stack".to_owned());
     };
-    let mut replaced = false;
-    for entry in &mut *stack {
-        if entry.get("operation").and_then(Value::as_str) == Some(auto.operation.as_str())
-            && entry
-                .get("multiPriority")
-                .and_then(Value::as_i64)
-                .unwrap_or(0)
-                == auto.multi_priority
-        {
-            entry["params"] = params.clone();
-            replaced = true;
-            break;
-        }
-    }
-    if !replaced && matches!(auto.operation.as_str(), "exposure" | "channelmixerrgb") {
-        stack.push(json!({
-            "operation": auto.operation,
-            "multiPriority": auto.multi_priority,
-            "enabled": true,
-            "params": params,
-        }));
-        replaced = true;
-    }
-    if !replaced {
-        return Err("automaticAdjustment native entry is absent".to_owned());
-    }
+    replace_automatic_parameters(stack, &auto.operation, auto.multi_priority, params)?;
     let registry = ModuleRegistry::new(ModuleAvailability::ready(), ModuleAvailability::ready());
     registry
         .validate_saved_parameters(&Parameters {
@@ -653,6 +628,43 @@ async fn compute_automatic_adjustment(
         })
         .map_err(|error| error.message)?;
     Ok(())
+}
+
+pub(crate) fn replace_automatic_parameters(
+    stack: &mut Vec<Value>,
+    operation: &str,
+    multi_priority: i64,
+    params: Value,
+) -> Result<(), String> {
+    let mut matching_index = None;
+    for (index, entry) in stack.iter().enumerate() {
+        if entry.get("operation").and_then(Value::as_str) == Some(operation)
+            && entry
+                .get("multiPriority")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                == multi_priority
+        {
+            if matching_index.is_some() {
+                return Err("automaticAdjustment target instance is duplicated".to_owned());
+            }
+            matching_index = Some(index);
+        }
+    }
+    if let Some(index) = matching_index {
+        stack[index]["params"] = params;
+        return Ok(());
+    }
+    if matches!(operation, "exposure" | "channelmixerrgb") {
+        stack.push(json!({
+            "operation": operation,
+            "multiPriority": multi_priority,
+            "enabled": true,
+            "params": params,
+        }));
+        return Ok(());
+    }
+    Err("automaticAdjustment native entry is absent".to_owned())
 }
 
 pub(crate) async fn post_composable_edit_recipe(

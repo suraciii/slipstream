@@ -527,3 +527,29 @@ async fn recipe_read_publication_gap_keeps_saved_binding_separate_from_current_f
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
+
+#[test]
+fn automatic_adjustment_rejects_duplicate_target_instances() {
+    let mut stack = vec![
+        serde_json::json!({
+            "operation": "exposure",
+            "multiPriority": 1,
+            "params": {"exposure": 0.0}
+        }),
+        serde_json::json!({
+            "operation": "exposure",
+            "multiPriority": 1,
+            "params": {"exposure": 1.0}
+        }),
+    ];
+    let error = crate::processing_recipe::replace_automatic_parameters(
+        &mut stack,
+        "exposure",
+        1,
+        serde_json::json!({"exposure": 2.0}),
+    )
+    .unwrap_err();
+    assert_eq!(error, "automaticAdjustment target instance is duplicated");
+    assert_eq!(stack[0]["params"]["exposure"], 0.0);
+    assert_eq!(stack[1]["params"]["exposure"], 1.0);
+}

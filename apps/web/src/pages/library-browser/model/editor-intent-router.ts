@@ -67,6 +67,9 @@ export function routeEditorIntent(
     case "editor-composable-edit":
       editor.composableEditStep(intent.photoId, intent.stepId);
       return true;
+    case "editor-composable-schema":
+      editor.composableSchema(intent.photoId, intent.schemaVersion);
+      return true;
     case "editor-composable-parameters":
       editor.composableParameters(intent.photoId, intent.text);
       return true;
