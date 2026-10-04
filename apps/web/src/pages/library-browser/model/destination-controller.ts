@@ -45,7 +45,7 @@ export type SourceEstablishmentOptions = Readonly<{
 export type OpenSourceOptions = Readonly<{
   kind: "library" | "album" | "folder";
   album?: AlbumSummary;
-  preferredPhotoId?: string;
+  preferredPhotoId?: string | undefined;
   resume?: boolean;
   folder?: { location: string; name: string };
   order?: SourceViewOrder;

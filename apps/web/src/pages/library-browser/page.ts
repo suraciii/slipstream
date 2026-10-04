@@ -822,7 +822,10 @@ function mountPrivateLibraryBrowser(
       sourceGrid.selection === "all" && sourceGrid.kind !== "album",
     );
   };
-
+  const sourceAnchorPhotoId = () =>
+    (photoOwner.active ? currentPhoto()?.id : undefined) ??
+    view.captureGridRestoration()?.anchor.photoId ??
+    photoOwner.lastCurrentPhotoId;
   const openSource = async ({
     kind,
     album,
@@ -1000,10 +1003,8 @@ function mountPrivateLibraryBrowser(
     }
   }
 
-  /// Commits one View options draft. A thumbnail-size-only change never
-  /// reaches here: it is Grid presentation and keeps the open Snapshot and its
-  /// anchor. Order and filter commit together, so a combined change opens one
-  /// view with both choices and the existing identity-anchor rules.
+  /// Applies one View Options draft; size-only changes stay in the Grid.
+  /// Order and filter commit together against one identity anchor.
   const applyViewOptions = async (
     order: SourceViewOrder,
     selection: SelectionFilter,
@@ -1030,7 +1031,7 @@ function mountPrivateLibraryBrowser(
     }
     await openSourceDescriptor(
       sourceGrid.source,
-      photoOwner.lastCurrentPhotoId,
+      sourceAnchorPhotoId(),
       order,
       selection,
       { address: "replace", intent },
@@ -1043,10 +1044,8 @@ function mountPrivateLibraryBrowser(
     return "No supported Photos found. Check the Library Folder or add supported files, then run Check Library.";
   };
 
-  /// Reopens the current source with a fresh Snapshot of the same order and
-  /// filter, keeping the anchor. `reason` names why, because an expired Library
-  /// order is not the only cause: a committed removal or restore also leaves
-  /// the open Snapshot stale, and the status line must not blame the order.
+  /// Reopens the current source with a fresh Snapshot, retaining its anchor
+  /// while reporting whether the prior Snapshot expired or was replaced.
   const reopenExpired = async (
     anchorIndex: number,
     expectedGeneration = sourceGrid.generation,
@@ -1589,7 +1588,7 @@ function mountPrivateLibraryBrowser(
     );
     updateControls();
     const outcome = await admission.settlement;
-    if (outcome.kind === "detached") return;
+    if (outcome.kind === "detached") return updateControls();
     if (outcome.kind === "failed") {
       if (outcome.failure === "answered") {
         view.setPhotoStatus(
@@ -1835,6 +1834,7 @@ function mountPrivateLibraryBrowser(
         await openSource({
           kind: "album",
           album,
+          preferredPhotoId: sourceAnchorPhotoId(),
           order: sourceGrid.order,
           selection: sourceGrid.selection,
           establishment: { address: "replace", intent },
@@ -1843,7 +1843,7 @@ function mountPrivateLibraryBrowser(
     }
     await openSourceDescriptor(
       sourceGrid.source,
-      undefined,
+      sourceAnchorPhotoId(),
       sourceGrid.order,
       sourceGrid.selection,
       { address: "replace", intent },

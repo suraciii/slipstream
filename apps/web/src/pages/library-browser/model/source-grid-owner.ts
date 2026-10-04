@@ -15,6 +15,11 @@ import {
   type SourceViewOrder,
 } from "../api/source-grid.js";
 import { TaskScope } from "./async-ownership.js";
+import {
+  presentDeferredPhotoFact,
+  recordDeferredPhotoDecision,
+  type DeferredPhotoDecision,
+} from "./deferred-photo-decision.js";
 
 const WINDOW_SIZE = 60;
 const MAX_RETAINED_FACTS = WINDOW_SIZE * 3;
@@ -352,13 +357,6 @@ const freezeSource = (source: SourceGridSource): SourceGridSource =>
           publication: source.publication,
         });
 
-/// One decision the server committed for a Photo whose View was left before
-/// its write settled, so the retained window could not take the patch.
-type PhotoDecision = Readonly<{
-  selectionState?: PhotoSummary["selectionState"];
-  rating?: number;
-}>;
-
 export function createSourceGridOwner(
   fetcher: SourceGridFetch,
   releaseLease: (token: string) => Promise<void> = (token) =>
@@ -398,7 +396,7 @@ export function createSourceGridOwner(
   // writes settled. They are held until the Photo they name is resolved
   // again, so the source never presents a fact that disagrees with the
   // committed decision state.
-  const committedDecisions = new Map<string, PhotoDecision>();
+  const committedDecisions = new Map<string, DeferredPhotoDecision>();
   // Latest visible range reported through range admission. Fact eviction
   // anchors here; window requests never anchor eviction to a request-time
   // index.
@@ -941,32 +939,20 @@ export function createSourceGridOwner(
     return undefined;
   };
 
-  /// Presents one retained fact against the decision state the source already
-  /// committed for it. A write whose Photo View was left before it settled
-  /// patches no window — that would repaint the destination the browser moved
-  /// to — so the fact is revalidated when it is read again and the committed
-  /// decision becomes what the browser sees. The decision is consumed
-  /// exactly once, and the source counts move with it.
+  /// Reconciles one deferred decision when its retained fact is presented.
   const presentPhotoFact = (
     index: number,
     photo: PhotoSummary,
   ): PhotoSummary => {
-    const decision = committedDecisions.get(photo.id);
-    if (!decision) return photo;
-    const selectionState = decision.selectionState ?? photo.selectionState;
-    const rating = decision.rating ?? photo.rating;
-    committedDecisions.delete(photo.id);
-    if (selectionState === photo.selectionState && rating === photo.rating)
-      return photo;
-    if (selectionState !== photo.selectionState)
-      selectionCounts = adjustedSelectionCounts(
-        selectionCounts,
-        photo.selectionState,
-        selectionState,
-      );
-    const next = Object.freeze({ ...photo, selectionState, rating });
-    facts.set(index, next);
-    return next;
+    const presented = presentDeferredPhotoFact(
+      committedDecisions,
+      photo,
+      selectionCounts,
+    );
+    if (!presented) return photo;
+    facts.set(index, presented.photo);
+    selectionCounts = presented.counts;
+    return presented.photo;
   };
 
   const detachedPosition = (
@@ -1328,12 +1314,14 @@ export function createSourceGridOwner(
     },
     noteCommittedDecision(candidate, photoId, field, value) {
       if (closed || !isCurrent(candidate) || !photoId) return;
-      committedDecisions.set(photoId, {
-        ...committedDecisions.get(photoId),
-        ...(field === "selectionState"
-          ? { selectionState: value as PhotoSummary["selectionState"] }
-          : { rating: value as number }),
-      });
+      selectionCounts = recordDeferredPhotoDecision(
+        committedDecisions,
+        photoId,
+        field,
+        value,
+        facts.get(findPhotoIndex(photoId) ?? -1),
+        selectionCounts,
+      );
     },
     applyBatchSelection(candidate, photoId, priorValue, selectionState) {
       if (!isCurrent(candidate)) return false;

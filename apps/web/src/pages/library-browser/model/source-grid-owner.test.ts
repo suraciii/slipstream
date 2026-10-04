@@ -559,14 +559,14 @@ describe("SourceGridOwner", () => {
     await owner.loadWindow(0, { kind: "source", authority });
     expect(owner.photoAt(0)!.selectionState).toBe("undecided");
 
-    // A write that settles after the browser left its Photo patches no
-    // retained window, so the decision is recorded instead of applied.
     owner.noteCommittedDecision(
       authority,
       "photo-0",
       "selectionState",
       "selected",
     );
+    expect(owner.selectionCounts.selected).toBe(1);
+    expect(owner.selectionCounts.undecided).toBe(1);
     owner.noteCommittedDecision(authority, "photo-1", "rating", 4);
     expect(owner.photoAt(0)!.selectionState).toBe("selected");
     expect(owner.photoAt(1)!.rating).toBe(4);
