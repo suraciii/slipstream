@@ -24,6 +24,7 @@ fn real_service_fixture() -> (PathBuf, Config) {
         database_basename: "library.sqlite".to_owned(),
         host: "127.0.0.1".to_owned(),
         public_origin: "https://localhost".to_owned(),
+        access_origins: vec!["https://localhost".to_owned()],
         port: 0,
         web_root: Some(web),
         processing: None,

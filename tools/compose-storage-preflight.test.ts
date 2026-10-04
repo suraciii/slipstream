@@ -81,6 +81,11 @@ async function dockerComposeConfig(
       delete environment[key];
     }
   }
+  environment.SLIPSTREAM_ACCESS_ORIGINS = JSON.stringify([
+    publicOrigin,
+    "http://localhost:3100",
+    "http://127.0.0.2:3100",
+  ]);
 
   let child: ReturnType<typeof Bun.spawn>;
   try {
@@ -1527,6 +1532,8 @@ test("startup rejects malformed and duplicate public origins", async () => {
       ["SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com/library"],
       ["SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com?query"],
       ["SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com#fragment"],
+      ["SLIPSTREAM_PUBLIC_ORIGIN=https://0.0.0.0"],
+      ["SLIPSTREAM_PUBLIC_ORIGIN=https://[::]"],
       ["SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com:0"],
       [
         "SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com",
@@ -1622,6 +1629,10 @@ test.each([
           slipstream: {
             environment: {
               SLIPSTREAM_PUBLIC_ORIGIN: origin ?? "http://localhost:8123",
+              SLIPSTREAM_ACCESS_ORIGINS: JSON.stringify([
+                origin ?? "http://localhost:8123",
+                "http://127.0.0.2:8123",
+              ]),
             },
             ports: [{ host_ip: "127.0.0.2" }],
           },
@@ -1632,6 +1643,23 @@ test.each([
     }
   },
 );
+test("startup rejects user-declared internal access origins", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    await writeEnvironment(target, layout.sources);
+    await writeFile(
+      target.environmentFile,
+      `${await readFile(target.environmentFile, "utf8")}SLIPSTREAM_ACCESS_ORIGINS=[]\n`,
+    );
+    const result = await runCompose(target, ["up"]);
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("SLIPSTREAM_ACCESS_ORIGINS");
+    expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+  } finally {
+    await removeFixture(target);
+  }
+});
 
 test("access creation and rotation require a terminal and run a no-log admin container", async () => {
   const target = await fixture();
@@ -2123,7 +2151,15 @@ async function rawComposeConfig(
     ],
     {
       cwd: repositoryRoot,
-      env: { ...clean, ...environment },
+      env: {
+        ...clean,
+        ...environment,
+        SLIPSTREAM_ACCESS_ORIGINS: JSON.stringify([
+          publicOrigin,
+          "http://localhost:3100",
+          "http://127.0.0.2:3100",
+        ]),
+      },
       stderr: "pipe",
       stdout: "pipe",
     },

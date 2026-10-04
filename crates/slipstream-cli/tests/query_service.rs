@@ -185,6 +185,7 @@ fn fixture() -> (PathBuf, Config) {
         database_basename: "library.sqlite".to_owned(),
         host: "127.0.0.1".to_owned(),
         public_origin: "https://localhost".to_owned(),
+        access_origins: vec!["https://localhost".to_owned()],
         port: 0,
         web_root: Some(web),
         processing: None,
@@ -1137,6 +1138,7 @@ async fn executable_metadata_inspects_external_edits_and_refuses_unavailable_sav
         let response = client
             .post(format!("{upstream}/api/photos/{id}/external-metadata"))
             .bearer_auth(common::ACCESS_TOKEN)
+            .header("Host", "localhost")
             .body(body)
             .send()
             .await

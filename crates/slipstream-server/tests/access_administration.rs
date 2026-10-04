@@ -74,6 +74,7 @@ impl Fixture {
             host: "127.0.0.1".into(),
             port: 0,
             public_origin: "https://photos.example.test".into(),
+            access_origins: vec!["https://photos.example.test".into()],
             web_root: Some(self.0.join("web")),
             processing: None,
             export_retained_output_bytes: None,

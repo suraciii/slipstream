@@ -293,7 +293,7 @@ async fn bearer_access_ignores_forwarded_host_but_enforces_browser_origin() {
             .unwrap(),
     )
     .await;
-    assert_eq!(overview.status(), StatusCode::OK);
+    assert_eq!(overview.status(), StatusCode::FORBIDDEN);
 
     let mutation = send(
         &router,

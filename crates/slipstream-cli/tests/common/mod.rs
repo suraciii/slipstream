@@ -344,6 +344,13 @@ fn close_connection_request(head: &str) -> Vec<u8> {
     let mut request = head
         .lines()
         .filter(|line| !line.to_ascii_lowercase().starts_with("connection:"))
+        .map(|line| {
+            if line.to_ascii_lowercase().starts_with("host:") {
+                "Host: localhost"
+            } else {
+                line
+            }
+        })
         .collect::<Vec<_>>()
         .join("\r\n");
     request.push_str("\r\nConnection: close\r\n\r\n");

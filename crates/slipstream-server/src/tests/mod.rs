@@ -50,6 +50,7 @@ fn test_config(base: &Path, web_root: PathBuf, port: u16) -> Config {
         database_basename: "library.sqlite".to_owned(),
         host: "127.0.0.1".to_owned(),
         public_origin: "https://camera.local".to_owned(),
+        access_origins: vec!["https://camera.local".to_owned()],
         port,
         web_root: Some(web_root),
         processing: None,

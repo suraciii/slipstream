@@ -32,15 +32,11 @@ human-selected passwords. Never log credentials or place them in process
 arguments. Protect authentication state under the admitted state directory.
 
 Each Browser Session must use a separate 32-byte CSPRNG secret. Persist only its
-digest, credential generation, creation time, and absolute expiry, plus a session-bound random 32-byte CSRF secret. The browser
-receives it in a host-only cookie with HttpOnly, SameSite=Lax, Path=/, and no
-Domain. HTTPS uses `__Host-slipstream` with Secure; HTTP uses `slipstream` without
-Secure. The configured origin selects the cookie for issuance, admission, and
-expiration; forwarded headers must not select or weaken it. Its maximum age
-must not exceed server expiry. CSRF material is not an authentication credential;
-keep it in protected session storage and expose it only to the authenticated
-browser through status. Rotate it when a new session is created. Restart
-must preserve valid sessions; expiration and generation checks are server-owned.
+digest, credential generation, creation time, and absolute expiry, plus a session-bound random 32-byte CSRF secret. The browser receives it in a host-only cookie with HttpOnly, SameSite=Lax, Path=/, and no Domain.
+The deployment carries a bounded `access_origins` set of canonical HTTP or HTTPS origins. It always contains the configured public origin. The server accepts an internal JSON array from `SLIPSTREAM_ACCESS_ORIGINS`; each value is canonicalized and validated as an origin with no path, query, fragment, credentials, or whitespace. An absent internal value derives HTTP origins from the configured listener: `localhost` and `127.0.0.1` for loopback, the configured concrete IP for a concrete listener, and only reliably enumerated concrete interface IPs for a wildcard listener. Invalid, oversized, duplicate, or empty input fails startup; the public origin remains mandatory.
+The selected origin is request-scoped. A browser request with one `Origin` selects that exact allowed origin. When `Origin` is absent, the request `Host` authority (or absolute request URI authority) selects the allowed origin; if one authority maps to both transports, HTTPS is selected. A present `Host` must have the same authority as the selected origin. Missing `Host` is accepted only for synthetic/internal requests and does not grant a new network identity. Forwarded headers never participate.
+The selected origin controls browser cookie naming and transport attributes: HTTPS uses `__Host-slipstream` with `Secure`, while HTTP uses `slipstream` without `Secure`. The same session record may be presented through either explicitly allowed transport, but its cookie is admitted only under the selected profile. Origin, Host, cookie profile, and CSRF checks are applied consistently to establishment, status, private reads and writes, and logout. Bearer requests retain their no-cookie behavior and still reject a mismatched present Origin or Host.
+The selected profile controls cookie issuance, admission, and expiration; forwarded headers must not select or weaken it. Its maximum age must not exceed server expiry. CSRF material is not an authentication credential; keep it in protected session storage and expose it only to the authenticated browser through status. Rotate it when a new session is created. Restart must preserve valid sessions; expiration and generation checks are server-owned.
 Never store the Access Token in this cookie or persist either secret in
 localStorage, sessionStorage, IndexedDB, or Cache Storage.
 
@@ -205,12 +201,14 @@ to a protected image. Purge operator-controlled public caches before exposure.
 Changing response headers cannot recall bytes already cached or downloaded.
 Keep static asset caching separate from private response policy.
 
-The operator configures one canonical HTTP or HTTPS origin, containing no
-credentials, non-root path, query, or fragment. An omitted origin resolves to
-`http://localhost:<port>`; it never changes the listener's loopback default.
-An explicit listener setting is required for network exposure. Existing HTTPS
-deployments may terminate TLS at a proxy. Arbitrary forwarded headers never
-grant access or select cookie attributes. Clients verify HTTPS certificates,
+The operator configures one canonical public HTTP or HTTPS origin, containing
+no credentials, non-root path, query, or fragment. The deployment may
+internally provide additional controlled origins; users do not configure that
+set. An omitted public origin resolves to `http://localhost:<port>`; it never
+changes the listener's loopback default. An explicit listener setting is
+required for network exposure. Existing HTTPS deployments may terminate TLS
+at a proxy. Arbitrary forwarded headers never grant access or select cookie
+attributes. Clients verify HTTPS certificates,
 warn once per CLI invocation or visibly in the Web UI for HTTP, and never
 follow redirects with credentials or silently change scheme.
 

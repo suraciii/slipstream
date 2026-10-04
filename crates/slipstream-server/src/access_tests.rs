@@ -24,6 +24,7 @@ impl Fixture {
             host: "127.0.0.1".into(),
             port: 0,
             public_origin: "https://camera.local".into(),
+            access_origins: vec![],
             web_root: Some(base.join("web")),
             processing: None,
             export_retained_output_bytes: None,
@@ -74,6 +75,7 @@ fn configured_origin_is_exact_http_or_https_origin() {
         "https://a:b@camera.local",
         "https://camera.local?x",
         "https://camera.local#x",
+        "https://camera.local:",
         "https://",
     ] {
         assert!(canonical_origin(input).is_none(), "{input}");

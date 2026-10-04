@@ -91,11 +91,21 @@ from an operator-selected private file, never from a plaintext command argument,
 and must not expose it in output, links, or diagnostics. Credential-input syntax
 and error mapping belong in [CLI Reference](cli-reference.md).
 
-TLS is optional. One `SLIPSTREAM_PUBLIC_ORIGIN` selects HTTP or HTTPS; when
-omitted, it defaults to `http://localhost:<port>` with the existing loopback
-listener. Local and explicitly configured network use must not require a
-reverse proxy. HTTPS is recommended for public or untrusted networks; an
-existing deployment may use a proxy to terminate TLS.
+The deployment has a bounded set of controlled access origins. The internal
+server value is not user configuration: deployment tooling may provide a JSON
+array through `SLIPSTREAM_ACCESS_ORIGINS`, and each origin must be a canonical
+HTTP or HTTPS origin. The configured public origin is always included. Without
+that internal value, the server derives HTTP origins from its listener for
+loopback, a concrete IP, or reliably enumerated concrete interfaces when
+listening on a wildcard. No forwarded header creates an origin.
+The Photographer may use any allowed origin directly. Browser requests select
+the exact origin they present; requests without `Origin` use their Host
+authority (or absolute URI authority). A Host authority must match the selected
+origin, so one allowed address cannot be used to impersonate another. If HTTP
+and HTTPS share an authority, requests without Origin use HTTPS as the safe
+profile. The browser receives an HTTPS `__Host-slipstream` cookie with Secure
+or an HTTP `slipstream` cookie without Secure. CLI Bearer requests keep their
+existing no-cookie behavior.
 
 HTTP must show an unencrypted connection warning before browser token entry,
 keep it visible during the session, and warn once per CLI invocation. It

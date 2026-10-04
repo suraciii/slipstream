@@ -69,6 +69,23 @@ fn stub_service(reply: MutationReply) -> (String, JoinHandle<()>) {
     (format!("https://127.0.0.1:{}", address.port()), handle)
 }
 
+fn rewrite_proxy_host(head: &str) -> Vec<u8> {
+    let head = head.strip_suffix("\r\n\r\n").unwrap_or(head);
+    let mut request = head
+        .lines()
+        .map(|line| {
+            if line.to_ascii_lowercase().starts_with("host:") {
+                "Host: localhost"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    request.push_str("\r\nConnection: close\r\n\r\n");
+    request.into_bytes()
+}
+
 /// Forwards requests to a real service but drops the response of the first
 /// POST, so the mutation is admitted while the caller cannot learn that.
 fn dropping_proxy(upstream: &str) -> String {
@@ -84,7 +101,7 @@ fn dropping_proxy(upstream: &str) -> String {
             let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
             let mut client = common::tls_stream(stream);
             while let Some((head, body)) = common::read_http_message(&mut client) {
-                let mut forwarded = head.clone().into_bytes();
+                let mut forwarded = rewrite_proxy_host(&head);
                 forwarded.extend_from_slice(&body);
                 let Ok(mut upstream_stream) = TcpStream::connect(&upstream) else {
                     return;
@@ -145,6 +162,7 @@ fn fixture_with(photo_names: &[&str]) -> (PathBuf, Config) {
         database_basename: "library.sqlite".to_owned(),
         host: "127.0.0.1".to_owned(),
         public_origin: "https://localhost".to_owned(),
+        access_origins: vec!["https://localhost".to_owned()],
         port: 0,
         web_root: Some(web),
         processing: None,
