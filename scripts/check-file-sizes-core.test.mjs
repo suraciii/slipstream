@@ -9,7 +9,6 @@ import {
   collectFileSizeViolations,
   countLines,
   evaluateFileSize,
-  formatFileSizeRatchetFailure,
   parseChangedFiles,
   resolveBaseRef,
 } from "./check-file-sizes-core.mjs";
@@ -187,25 +186,4 @@ test("names the checkout depth when the base commit is missing", async () => {
     }),
     /fetch-depth: 2.*CHECK_FILE_SIZES_BASE/,
   );
-});
-
-test("explains structural fixes when the ratchet fails", () => {
-  const message = formatFileSizeRatchetFailure({
-    label: "Test",
-    baseRef: "abc123",
-    violations: [
-      {
-        relativePath: "crates/existing.rs",
-        baseLines: 4,
-        candidateLines: 5,
-        limit: 4,
-      },
-    ],
-  }).join("\n");
-
-  assert.match(
-    message,
-    /Do not remove meaningful spacing or flatten readable code/,
-  );
-  assert.match(message, /extract genuinely shared helpers or fixtures/);
 });

@@ -132,6 +132,8 @@ runtime-cycle detection, not from layer or public-API checks.
 
 `test:file-size` runs the changed-file line ratchet. It grades only the files that differ from the base commit: a new file must stay at or below 1,000 lines, and a file already above that may hold or shrink but never grow. The base is `merge-base origin/main HEAD` locally, `CHECK_FILE_SIZES_BASE` when set, and `HEAD^1` under GitHub Actions, which is why `verify.yml` checks out with `fetch-depth: 2`. Rules and their excluded prefixes live in `scripts/check-file-sizes.mjs`; `bun test scripts/check-file-sizes-core.test.mjs` covers the policy.
 
+Ratchet failures include a short guide to structural fixes that preserve readability and behavior.
+
 `test:metadata` runs the metadata supervisor recovery tests in `test:fast` and
 `verify`. Most cases require root to exercise production directory ownership;
 run the command as root in a disposable Linux container for full coverage.
