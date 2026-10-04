@@ -227,7 +227,6 @@ fn request_key(
         published_source: facts.map(PreviewFacts::request_key),
     }
 }
-
 type PreviewWaitResult = Result<PreviewRequestResult, PreviewServiceError>;
 type PreviewWaitState = (Mutex<Option<PreviewWaitResult>>, Condvar);
 
@@ -458,7 +457,8 @@ impl PreviewService {
         if let Some(ready) = self.lookup_current(&facts, target).await? {
             return Ok(PreviewRequestResult::Current(ready_result(&ready, target)));
         }
-        let retry = facts.photo.preview_state == PreviewState::Failed;
+        let retry = target == DerivativeTarget::Review2560
+            && facts.photo.preview_state == PreviewState::Failed;
         self.request_with_mode(facts.photo.id.clone(), target, priority, retry, Some(facts))
             .await
     }

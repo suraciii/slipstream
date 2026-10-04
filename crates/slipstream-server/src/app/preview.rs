@@ -14,6 +14,20 @@ pub(super) struct ReviewWarmupRequest {
     pub(super) retry: bool,
 }
 
+impl ReviewWarmupState {
+    fn add(&mut self, request: ReviewWarmupRequest) {
+        let retry = request.retry;
+        if let Some(existing) = self.queued.get_mut(&request.photo_id) {
+            // A later publication owns the current source. Its retry intent
+            // must replace, rather than merge with, an older source's intent.
+            *existing = retry;
+        } else {
+            self.pending.push_back(request.photo_id.clone());
+            self.queued.insert(request.photo_id, retry);
+        }
+    }
+}
+
 pub(super) struct ReviewWarmup;
 
 impl ReviewWarmup {
@@ -26,13 +40,7 @@ impl ReviewWarmup {
             return;
         }
         for request in requests {
-            let retry = request.retry;
-            if let Some(existing) = state.queued.get_mut(&request.photo_id) {
-                *existing |= retry;
-            } else {
-                state.pending.push_back(request.photo_id.clone());
-                state.queued.insert(request.photo_id, retry);
-            }
+            state.add(request);
         }
         if state.running || state.pending.is_empty() {
             return;
@@ -489,4 +497,25 @@ fn preview_source_revision(facts: &PreviewFacts, _source: PreviewSource) -> Opti
         original.facts.mtime_ms,
     )
     .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn newer_warmup_publication_replaces_retry_intent() {
+        let mut state = ReviewWarmupState::default();
+        state.add(ReviewWarmupRequest {
+            photo_id: "photo".to_owned(),
+            retry: true,
+        });
+        state.add(ReviewWarmupRequest {
+            photo_id: "photo".to_owned(),
+            retry: false,
+        });
+
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.queued.get("photo"), Some(&false));
+    }
 }
