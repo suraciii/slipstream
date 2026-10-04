@@ -97,6 +97,49 @@ async fn composable_recipe_route_persists_zero_and_selected_steps() {
     let _ = fs::remove_dir_all(base);
 }
 
+#[tokio::test]
+async fn automatic_recipe_failure_leaves_the_saved_recipe_unchanged() {
+    let (base, config) = prepare_fixture();
+    approved_raw_fixture(&config.library_root.join("approved.ARW"));
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = configured_router(&application, config.web_root());
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .into_iter()
+        .next()
+        .unwrap();
+    let uri = format!("/api/photos/{photo_id}/processing-recipe");
+    let (_, read) = get_json(&router, &uri).await;
+    let source = read["sourceRevision"].as_str().unwrap().to_owned();
+    let body = serde_json::json!({
+        "requestId": "automatic-failure",
+        "expectedRecipeRevision": null,
+        "expectedSourceRevision": source,
+        "currentStepId": "develop",
+        "steps": [original_step(&photo_id, &source, serde_json::json!({"stack": []}))],
+        "automaticAdjustment": {
+            "stepId": "develop",
+            "operation": "exposure",
+            "multiPriority": 0,
+            "instruction": {
+                "deflicker_percentile": 50.0,
+                "deflicker_target_level": -4.0
+            }
+        }
+    });
+    let response = post_json(&router, &uri, body, Some("https://camera.local")).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        response_json(response).await["error"]["code"],
+        "automatic_adjustment_failed"
+    );
+    let (_, after) = get_json(&router, &uri).await;
+    assert!(after["recipe"].is_null());
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
 fn original_step(photo_id: &str, source: &str, tree: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "stepId": "develop", "module": "darktable",
@@ -483,4 +526,30 @@ async fn recipe_read_publication_gap_keeps_saved_binding_separate_from_current_f
     assert_eq!(unavailable["recipe"], saved["recipe"]);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn automatic_adjustment_rejects_duplicate_target_instances() {
+    let mut stack = vec![
+        serde_json::json!({
+            "operation": "exposure",
+            "multiPriority": 1,
+            "params": {"exposure": 0.0}
+        }),
+        serde_json::json!({
+            "operation": "exposure",
+            "multiPriority": 1,
+            "params": {"exposure": 1.0}
+        }),
+    ];
+    let error = crate::processing_recipe::replace_automatic_parameters(
+        &mut stack,
+        "exposure",
+        1,
+        serde_json::json!({"exposure": 2.0}),
+    )
+    .unwrap_err();
+    assert_eq!(error, "automaticAdjustment target instance is duplicated");
+    assert_eq!(stack[0]["params"]["exposure"], 0.0);
+    assert_eq!(stack[1]["params"]["exposure"], 1.0);
 }

@@ -34,6 +34,15 @@ export type EditorController = Readonly<{
   composableSelectStep: (photoId: string, stepId: string) => void;
   composableEditStep: (photoId: string, stepId: string) => void;
   composableParameters: (photoId: string, text: string) => void;
+  composableAutomatic: (
+    photoId: string,
+    adjustment: {
+      stepId: string;
+      operation: string;
+      multiPriority: number;
+      instruction: Record<string, unknown>;
+    },
+  ) => void;
   composableSchema: (photoId: string, schemaVersion: string) => void;
   composableInput: (
     photoId: string,

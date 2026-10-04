@@ -68,6 +68,14 @@ export type EditorIntent =
       text: string;
     }>
   | Readonly<{
+      kind: "editor-composable-automatic";
+      photoId: string;
+      stepId: string;
+      operation: string;
+      multiPriority: number;
+      instruction: Record<string, unknown>;
+    }>
+  | Readonly<{
       kind: "editor-composable-schema";
       photoId: string;
       schemaVersion: string;

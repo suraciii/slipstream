@@ -13,6 +13,10 @@ fn discoverable_manual_defaults_form_an_admitted_baseline() {
     );
     let parameters = darktable_parameters(defaults.clone());
     registry.validate_saved_parameters(&parameters).unwrap();
+    assert_eq!(
+        schema["x-automatic-adjustments"].as_array().map(Vec::len),
+        Some(2)
+    );
     let mut runner = RecordingRunner::producing(development_output());
     registry
         .run(
@@ -95,5 +99,59 @@ fn retained_white_balance_requires_both_bounded_integer_components() {
                 .code,
             ModuleErrorCode::MalformedParameterTree
         );
+    }
+}
+
+#[test]
+fn automatic_modes_are_saved_but_refused_until_concrete_capture() {
+    let registry = both_ready();
+    for (operation, params) in [
+        (
+            "exposure",
+            json!({
+                "mode": "EXPOSURE_MODE_DEFLICKER",
+                "exposure": 0.0,
+                "deflicker_percentile": 50.0,
+                "deflicker_target_level": -4.0
+            }),
+        ),
+        (
+            "channelmixerrgb",
+            json!({
+                "illuminant": "DT_ILLUMINANT_DETECT_EDGES",
+                "adaptation": "DT_ADAPTATION_CAT16",
+                "x": 0.333,
+                "y": 0.333,
+                "temperature": 5003.0
+            }),
+        ),
+    ] {
+        let parameters = darktable_parameters(json!({
+            "stack": [{
+                "operation": operation,
+                "multiPriority": 0,
+                "enabled": true,
+                "params": params
+            }]
+        }));
+        registry.validate_saved_parameters(&parameters).unwrap();
+        assert_eq!(
+            registry.validate_parameters(&parameters).unwrap_err().code,
+            ModuleErrorCode::UnsupportedControl
+        );
+        let mut runner = RecordingRunner::producing(development_output());
+        assert_eq!(
+            registry
+                .run(
+                    DARKTABLE_MODULE,
+                    &arw_original_input(),
+                    &parameters,
+                    &mut runner,
+                )
+                .unwrap_err()
+                .code,
+            ModuleErrorCode::UnsupportedControl
+        );
+        assert_eq!(runner.executed(), 0);
     }
 }

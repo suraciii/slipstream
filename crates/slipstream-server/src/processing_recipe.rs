@@ -12,11 +12,13 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use slipstream_core::{
-    ComposableEditRecipe, ComposableEditRecipeWriteOutcome, LibraryError, ProcessingArtifactId,
-    ProcessingGeometry, ProcessingImageContract, ProcessingInput, ProcessingModuleId,
-    ProcessingParameterSnapshot, ProcessingStep, ProcessingStepId, RebindComposableEditRecipe,
-    SaveComposableEditRecipe,
+    AutomaticAdjustment, ComposableEditRecipe, ComposableEditRecipeWriteOutcome, LibraryError,
+    ProcessingArtifactId, ProcessingGeometry, ProcessingImageContract, ProcessingInput,
+    ProcessingModuleId, ProcessingParameterSnapshot, ProcessingStep, ProcessingStepId,
+    RebindComposableEditRecipe, SaveComposableEditRecipe,
 };
+use std::sync::{Arc, atomic::AtomicBool};
+
 use slipstream_processing::modules::{
     ImageContract, ModuleAvailability, ModuleRegistry, Parameters,
 };
@@ -31,6 +33,16 @@ pub(crate) struct SaveBody {
     expected_source_revision: String,
     current_step_id: Option<String>,
     steps: Vec<StepBody>,
+    automatic_adjustment: Option<AutomaticAdjustmentBody>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomaticAdjustmentBody {
+    step_id: String,
+    operation: String,
+    multi_priority: i64,
+    instruction: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,7 +147,10 @@ fn input(body: InputBody) -> Result<ProcessingInput, String> {
     }
 }
 
-fn recipe_from_body(photo_id: &str, body: SaveBody) -> Result<ComposableEditRecipe, String> {
+fn recipe_from_body(
+    photo_id: &str,
+    body: SaveBody,
+) -> Result<(ComposableEditRecipe, Option<AutomaticAdjustment>), String> {
     let revision = body
         .expected_recipe_revision
         .clone()
@@ -161,6 +176,28 @@ fn recipe_from_body(photo_id: &str, body: SaveBody) -> Result<ComposableEditReci
         .as_deref()
         .map(|id| ProcessingStepId::new(id).map_err(|error| error.to_string()))
         .transpose()?;
+    let automatic_adjustment = body
+        .automatic_adjustment
+        .map(|auto| {
+            if !matches!(auto.operation.as_str(), "exposure" | "channelmixerrgb") {
+                return Err("automaticAdjustment.operation is not qualified".to_owned());
+            }
+            if !(0..=128).contains(&auto.multi_priority) {
+                return Err("automaticAdjustment.multiPriority is outside 0..=128".to_owned());
+            }
+            if !auto.instruction.is_object() {
+                return Err("automaticAdjustment.instruction must be an object".to_owned());
+            }
+            let step_id =
+                ProcessingStepId::new(&auto.step_id).map_err(|error| error.to_string())?;
+            Ok::<_, String>(AutomaticAdjustment::new(
+                step_id,
+                auto.operation,
+                auto.multi_priority,
+                auto.instruction,
+            ))
+        })
+        .transpose()?;
     let recipe = ComposableEditRecipe {
         photo_id: photo_id.to_owned(),
         revision,
@@ -169,7 +206,7 @@ fn recipe_from_body(photo_id: &str, body: SaveBody) -> Result<ComposableEditReci
         steps,
     };
     recipe.validate().map_err(|error| error.to_string())?;
-    Ok(recipe)
+    Ok((recipe, automatic_adjustment))
 }
 
 fn module_image_contract(contract: &ProcessingImageContract) -> Option<ImageContract> {
@@ -516,6 +553,120 @@ pub(crate) async fn get_composable_edit_recipe(
     .into_response()
 }
 
+async fn compute_automatic_adjustment(
+    state: &HttpState,
+    mutation: &mut SaveComposableEditRecipe,
+) -> Result<(), String> {
+    let original_recipe = mutation.recipe.clone();
+    let Some(auto_request) = mutation.automatic_adjustment.as_mut() else {
+        return Ok(());
+    };
+    auto_request.original_recipe = Some(Box::new(original_recipe));
+    let auto = auto_request.clone();
+    if mutation.recipe.current_step_id.as_ref() != Some(&auto.step_id) {
+        return Err("automaticAdjustment must address the current step".to_owned());
+    }
+    let step = mutation
+        .recipe
+        .steps
+        .iter_mut()
+        .find(|step| step.step_id == auto.step_id)
+        .ok_or_else(|| "automaticAdjustment step is absent".to_owned())?;
+    let ProcessingInput::Original {
+        photo_id,
+        source_revision,
+    } = &step.input
+    else {
+        return Err("automaticAdjustment requires an Original-bound step".to_owned());
+    };
+    if step.module.as_str() != slipstream_processing::modules::DARKTABLE_MODULE
+        || photo_id != &mutation.photo_id
+        || source_revision != &mutation.expected_source_revision
+    {
+        return Err("automaticAdjustment step is not a current darktable Original".to_owned());
+    }
+    let Some(exports) = state.application.exports.as_ref() else {
+        return Err("Photo Development is unavailable".to_owned());
+    };
+    let staged = exports
+        .stage_original_for(photo_id, source_revision)
+        .await?;
+    let result = exports
+        .auto_parameters(
+            staged.path().to_path_buf(),
+            Parameters {
+                module: step.module.as_str().to_owned(),
+                version: step.parameters.schema_version.clone(),
+                tree: step.parameters.tree.clone(),
+            },
+            auto.operation.clone(),
+            auto.multi_priority,
+            auto.instruction,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await?;
+    let params = result
+        .get("params")
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or_else(|| "engine returned no concrete automatic parameters".to_owned())?;
+    let Some(stack) = step
+        .parameters
+        .tree
+        .get_mut("stack")
+        .and_then(Value::as_array_mut)
+    else {
+        return Err("automaticAdjustment requires a darktable stack".to_owned());
+    };
+    replace_automatic_parameters(stack, &auto.operation, auto.multi_priority, params)?;
+    let registry = ModuleRegistry::new(ModuleAvailability::ready(), ModuleAvailability::ready());
+    registry
+        .validate_saved_parameters(&Parameters {
+            module: step.module.as_str().to_owned(),
+            version: step.parameters.schema_version.clone(),
+            tree: step.parameters.tree.clone(),
+        })
+        .map_err(|error| error.message)?;
+    Ok(())
+}
+
+pub(crate) fn replace_automatic_parameters(
+    stack: &mut Vec<Value>,
+    operation: &str,
+    multi_priority: i64,
+    params: Value,
+) -> Result<(), String> {
+    let mut matching_index = None;
+    for (index, entry) in stack.iter().enumerate() {
+        if entry.get("operation").and_then(Value::as_str) == Some(operation)
+            && entry
+                .get("multiPriority")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                == multi_priority
+        {
+            if matching_index.is_some() {
+                return Err("automaticAdjustment target instance is duplicated".to_owned());
+            }
+            matching_index = Some(index);
+        }
+    }
+    if let Some(index) = matching_index {
+        stack[index]["params"] = params;
+        return Ok(());
+    }
+    if matches!(operation, "exposure" | "channelmixerrgb") {
+        stack.push(json!({
+            "operation": operation,
+            "multiPriority": multi_priority,
+            "enabled": true,
+            "params": params,
+        }));
+        return Ok(());
+    }
+    Err("automaticAdjustment native entry is absent".to_owned())
+}
+
 pub(crate) async fn post_composable_edit_recipe(
     State(state): State<HttpState>,
     Path(photo_id): Path<String>,
@@ -524,18 +675,19 @@ pub(crate) async fn post_composable_edit_recipe(
     let request_id = body.request_id.clone();
     let expected_recipe_revision = body.expected_recipe_revision.clone();
     let expected_source_revision = body.expected_source_revision.clone();
-    let recipe = match recipe_from_body(&photo_id, body) {
+    let (recipe, automatic_adjustment) = match recipe_from_body(&photo_id, body) {
         Ok(value) => value,
         Err(message) => {
             return error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_recipe", message);
         }
     };
-    let mutation = SaveComposableEditRecipe {
+    let mut mutation = SaveComposableEditRecipe {
         photo_id,
         request_id,
         expected_recipe_revision,
         expected_source_revision,
         recipe,
+        automatic_adjustment,
     };
     match state
         .application
@@ -555,6 +707,13 @@ pub(crate) async fn post_composable_edit_recipe(
     }
     if let Err(admission) = validate_step_admission(&state, &mutation.recipe).await {
         return error(admission.status, admission.code, admission.message);
+    }
+    if let Err(message) = compute_automatic_adjustment(&state, &mut mutation).await {
+        return error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "automatic_adjustment_failed",
+            message,
+        );
     }
     match state
         .application

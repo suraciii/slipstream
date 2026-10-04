@@ -1,10 +1,10 @@
 use crate::persistence::Persistence;
 use crate::persistence::test_support::*;
 use crate::processing::{
-    ComposableEditRecipe, ComposableEditRecipeWriteOutcome, ComposableRecipeRequestError,
-    ProcessingArtifactId, ProcessingContractError, ProcessingGeometry, ProcessingImageContract,
-    ProcessingInput, ProcessingModuleId, ProcessingParameterSnapshot, ProcessingStep,
-    ProcessingStepId, SaveComposableEditRecipe,
+    AutomaticAdjustment, ComposableEditRecipe, ComposableEditRecipeWriteOutcome,
+    ComposableRecipeRequestError, ProcessingArtifactId, ProcessingContractError,
+    ProcessingGeometry, ProcessingImageContract, ProcessingInput, ProcessingModuleId,
+    ProcessingParameterSnapshot, ProcessingStep, ProcessingStepId, SaveComposableEditRecipe,
 };
 use crate::source_revision;
 use rusqlite::Connection;
@@ -131,6 +131,7 @@ fn save(
         expected_recipe_revision: expected_recipe_revision.map(str::to_owned),
         expected_source_revision: source_revision.to_owned(),
         recipe,
+        automatic_adjustment: None,
     }
 }
 

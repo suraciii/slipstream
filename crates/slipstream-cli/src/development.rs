@@ -12,6 +12,7 @@ use url::Url;
 const MODULES_OPERATION: Operation = Operation::ProcessingModules;
 const PROCESSING_GET_OPERATION: Operation = Operation::PhotosProcessingRecipeGet;
 const PROCESSING_SAVE_OPERATION: Operation = Operation::PhotosProcessingRecipeSave;
+const PROCESSING_AUTO_OPERATION: Operation = Operation::PhotosProcessingRecipeAuto;
 const PROCESSING_REBIND_OPERATION: Operation = Operation::PhotosProcessingRecipeRebind;
 const PROCESSING_EXPORT_OPERATION: Operation = Operation::PhotosProcessingExport;
 const ARTIFACT_OPERATION: Operation = Operation::ProcessingArtifact;

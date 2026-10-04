@@ -1,8 +1,8 @@
 import {
   fetchComposableRecipe,
+  type AutomaticAdjustmentRequest,
   type ComposableRecipeRead,
 } from "../api/composable-recipe.js";
-import { createComposableAutosave } from "./composable-autosave.js";
 import {
   fetchProcessingModules,
   type ProcessingModuleDescription,
@@ -31,6 +31,7 @@ import {
   type ProcessingArtifactRecord,
 } from "./processing-artifact.js";
 import { formatByteCount } from "./editor-presentation.js";
+import { createComposableAutosave } from "./composable-autosave.js";
 import type { BrowserFetch } from "./access-session.js";
 import type { EditorControllerDependencies } from "./editor-controller-contract.js";
 import type { LibraryBrowserView } from "../ui/library-browser-view.js";
@@ -559,6 +560,41 @@ export function createEditorComposableRecipe(
     commitEditorComposableParameters(photoId);
     await autosave.flush(photoId);
   };
+  const automaticEditorAdjustment = async (
+    photoId: string,
+    adjustment: AutomaticAdjustmentRequest,
+  ): Promise<void> => {
+    if (!editorOwnsPhoto(photoId)) return;
+    const draft = editorComposableDraft;
+    const step = draft?.steps.find((item) => item.stepId === adjustment.stepId);
+    const module = step
+      ? processingModules.find((item) => item.id.name === step.module)
+      : undefined;
+    if (
+      !draft ||
+      !step ||
+      draft.currentStepId !== step.stepId ||
+      step.input.kind !== "original" ||
+      editorComposable?.sourceAvailable === false ||
+      !module?.automaticAdjustments.some(
+        (item) =>
+          item.operation === adjustment.operation &&
+          item.multiPriority === adjustment.multiPriority,
+      )
+    ) {
+      editorComposableNote =
+        "Automatic adjustment requires the current Original-bound step and an available source.";
+      renderEditor();
+      return;
+    }
+    await autosave.automatic(photoId, adjustment);
+    if (editorOwnsPhoto(photoId)) {
+      editorComposableDraft = autosave.get(photoId)?.draft;
+      syncEditing();
+      markEditorPreviewStale();
+      renderEditor();
+    }
+  };
   const discardEditorComposable = (photoId: string): void => {
     if (!editorOwnsPhoto(photoId)) return;
     if (autosave.get(photoId)?.pending) return;
@@ -691,6 +727,10 @@ export function createEditorComposableRecipe(
               artifactChoice: editorComposableArtifactChoice,
               parametersText: editorComposableParametersText,
               parametersValid: editorComposableParametersValid,
+              automaticAdjustments:
+                processingModules.find(
+                  (module) => module.id.name === editingStep.module,
+                )?.automaticAdjustments ?? [],
             }
           : null,
         artifacts: editorArtifacts.map((artifact) => {
@@ -735,6 +775,7 @@ export function createEditorComposableRecipe(
     fetchEditorArtifact,
     saveEditorComposable,
     discardEditorComposable,
+    automaticEditorAdjustment,
     loadProcessingModules,
     useEditorArtifactInput,
   };

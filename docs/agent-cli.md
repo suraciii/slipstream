@@ -76,6 +76,14 @@ grammar, input shapes, and result fields.
    `photos processing-recipe save PHOTO_ID --input FILE`. On conflict, read
    current facts and decide again. On uncertainty, retain and replay the exact
    input under the same identity before dependent writes or processing.
+
+For an admitted automatic adjustment, use
+`photos processing-recipe auto PHOTO_ID --input FILE` with the same complete
+guarded recipe plus one `automaticAdjustment` object. Its `stepId` must name
+the current Original-bound step. The instruction belongs to the native module;
+do not calculate replacement parameters in the client. Replay the exact input
+under the same request identity after an uncertain response. A stale guard,
+engine refusal, or failed detection leaves the saved Recipe unchanged.
 3. Request `photos processing-preview PHOTO_ID --step STEP_ID --file PATH`.
    Use a new destination. Inspect the returned input, parameter, bundle, and
    Preview identity. Pending work is not a downloaded image. A refusal does

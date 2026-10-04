@@ -157,6 +157,33 @@ pub(super) fn validate_darktable_tree(module: &str, tree: &Value) -> Result<(), 
                 ));
             }
         }
+        for entry in entries {
+            let operation = entry["operation"].as_str().unwrap_or_default();
+            let params = entry["params"]
+                .as_object()
+                .expect("entry checks params object");
+            if operation == "exposure"
+                && params.get("mode").and_then(Value::as_str) == Some("EXPOSURE_MODE_DEFLICKER")
+            {
+                return Err(unsupported(
+                    module,
+                    "exposure deflicker must be captured as concrete manual parameters before execution"
+                        .into(),
+                ));
+            }
+            if operation == "channelmixerrgb"
+                && matches!(
+                    params.get("illuminant").and_then(Value::as_str),
+                    Some("DT_ILLUMINANT_DETECT_EDGES") | Some("DT_ILLUMINANT_DETECT_SURFACES")
+                )
+            {
+                return Err(unsupported(
+                    module,
+                    "channelmixerrgb illuminant detection must be captured as concrete parameters before execution"
+                        .into(),
+                ));
+            }
+        }
     }
     Ok(())
 }

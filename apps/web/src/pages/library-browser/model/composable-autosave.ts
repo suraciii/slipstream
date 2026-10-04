@@ -1,9 +1,9 @@
-import type { BrowserFetch } from "./access-session.js";
 import {
   fetchComposableRecipe,
   parseComposableRecipe,
   saveComposableRecipeBody,
   type ComposableRecipeRead,
+  type AutomaticAdjustmentRequest,
 } from "../api/composable-recipe.js";
 import {
   composableDraftDiffers,
@@ -11,6 +11,7 @@ import {
   draftFromRecipe,
   type ComposableRecipeDraft,
 } from "./composable-recipe-draft.js";
+import type { BrowserFetch } from "./access-session.js";
 import { randomUuid } from "./browser-crypto.js";
 import { isRecord } from "../api/guards.js";
 
@@ -19,6 +20,7 @@ type Submission = Readonly<{
   body: string;
   draft: ComposableRecipeDraft;
   rebind: boolean;
+  automatic: boolean;
 }>;
 export type ComposableAutosaveState = {
   read: RecipeRead;
@@ -234,6 +236,7 @@ export function createComposableAutosave(
                     captureRead.recipe,
                   ),
                   rebind: pending["rebind"],
+                  automatic: isRecord(request["automaticAdjustment"]),
                 };
                 state.uncertain = true;
                 state.conflict = false;
@@ -325,18 +328,25 @@ export function createComposableAutosave(
           ? request["newSourceRevision"]
           : request["expectedSourceRevision"]) &&
       saved.sourceRevision === parsed.sourceRevision &&
-      sameSettings(saved, pending.draft)
+      (pending.automatic || sameSettings(saved, pending.draft))
     ) {
+      const superseded = !sameSettings(state.draft, pending.draft);
       state.read = { ...state.read, ...parsed };
       state.pending = undefined;
       state.uncertain = false;
       state.failure = false;
       state.recovered = false;
-      state.draft = {
-        ...state.draft,
-        steps: canonicalSettings(state.draft).steps,
-        baseRevision: saved.revision,
-      };
+      state.draft =
+        pending.automatic && !superseded
+          ? {
+              ...draftFromRecipe(photoId, parsed.sourceRevision, saved),
+              baseRevision: saved.revision,
+            }
+          : {
+              ...state.draft,
+              steps: canonicalSettings(state.draft).steps,
+              baseRevision: saved.revision,
+            };
       state.note = sameSettings(state.draft, saved)
         ? "Saved edit."
         : "Saving newer settings…";
@@ -405,6 +415,7 @@ export function createComposableAutosave(
       body: JSON.stringify(guarded.request),
       draft: structuredClone(state.draft),
       rebind: false,
+      automatic: false,
     };
     await submit(photoId, state);
   };
@@ -527,6 +538,44 @@ export function createComposableAutosave(
       }),
       draft: rebound,
       rebind: true,
+      automatic: false,
+    };
+    await submit(photoId, state);
+  };
+  const automatic = async (
+    photoId: string,
+    adjustment: AutomaticAdjustmentRequest,
+  ): Promise<void> => {
+    const state = photos.get(photoId);
+    if (
+      !state ||
+      state.pending ||
+      state.saving ||
+      state.uncertain ||
+      state.conflict
+    )
+      return;
+    const guarded = composableSaveRequest(
+      state.draft,
+      `web-automatic-${randomUuid()}`,
+    );
+    if (guarded.kind === "refused") {
+      state.failure = true;
+      state.note = guarded.note;
+      notify(photoId, state);
+      return;
+    }
+    state.undo.push(structuredClone(state.draft));
+    if (state.undo.length > 64) state.undo.shift();
+    state.redo = [];
+    state.pending = {
+      body: JSON.stringify({
+        ...guarded.request,
+        automaticAdjustment: adjustment,
+      }),
+      draft: structuredClone(state.draft),
+      rebind: false,
+      automatic: true,
     };
     await submit(photoId, state);
   };
@@ -540,5 +589,6 @@ export function createComposableAutosave(
     useSaved,
     reapply,
     rebind,
+    automatic,
   };
 }

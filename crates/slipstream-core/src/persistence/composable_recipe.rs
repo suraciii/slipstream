@@ -293,6 +293,15 @@ struct SavePayload<'a> {
     expected_source_revision: &'a str,
     steps: &'a [ComposableStepRecord],
     current_step_id: &'a Option<String>,
+    automatic_adjustment: Option<SaveAutomaticAdjustment<'a>>,
+}
+
+#[derive(Serialize)]
+struct SaveAutomaticAdjustment<'a> {
+    step_id: &'a str,
+    operation: &'a str,
+    multi_priority: i64,
+    instruction: &'a serde_json::Value,
 }
 
 /// Reads one Photo's saved composable recipe in a single serialized read.
@@ -711,13 +720,30 @@ fn save_payload_digest(
     submitted: &ComposableEditRecipe,
 ) -> Result<String, PersistenceError> {
     let record = recipe_record(submitted);
+    let digest_record = mutation
+        .automatic_adjustment
+        .as_ref()
+        .and_then(|value| value.original_recipe.as_deref())
+        .map(recipe_record)
+        .unwrap_or_else(|| record.clone());
+    let automatic_adjustment =
+        mutation
+            .automatic_adjustment
+            .as_ref()
+            .map(|value| SaveAutomaticAdjustment {
+                step_id: value.step_id.as_str(),
+                operation: &value.operation,
+                multi_priority: value.multi_priority,
+                instruction: &value.instruction,
+            });
     let payload = SavePayload {
         kind: "composable-edit-recipe-save-v1",
         photo_id: &mutation.photo_id,
         expected_recipe_revision: &mutation.expected_recipe_revision,
         expected_source_revision: &mutation.expected_source_revision,
-        steps: &record.steps,
-        current_step_id: &record.current_step_id,
+        steps: &digest_record.steps,
+        current_step_id: &digest_record.current_step_id,
+        automatic_adjustment,
     };
     let bytes = serde_json::to_vec(&payload).map_err(|_| PersistenceError::Storage)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))

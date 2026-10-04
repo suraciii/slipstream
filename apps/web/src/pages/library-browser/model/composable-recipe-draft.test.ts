@@ -334,6 +334,7 @@ describe("composableModuleChoices", () => {
           stack: { type: "array" },
         },
       },
+      automaticAdjustments: [],
       admittedInputs: [],
       admittedOutputs: [],
       limits: {

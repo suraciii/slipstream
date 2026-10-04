@@ -197,6 +197,7 @@ async fn save_recipe(
         expected_recipe_revision: expected.map(str::to_owned),
         expected_source_revision: seeded.source.clone(),
         recipe,
+        automatic_adjustment: None,
     };
     let outcome = seeded
         .persistence
@@ -244,6 +245,7 @@ async fn artifact_bound_submission_survives_unavailable_original() {
             expected_recipe_revision: None,
             expected_source_revision: seeded.source.clone(),
             recipe,
+            automatic_adjustment: None,
         })
         .unwrap()
         .await
@@ -362,6 +364,7 @@ async fn qualified_submission_refuses_when_retained_output_is_full() {
             expected_recipe_revision: None,
             expected_source_revision: seeded.source.clone(),
             recipe,
+            automatic_adjustment: None,
         })
         .unwrap()
         .await

@@ -369,3 +369,84 @@ async fn unavailable_current_capture_preserves_saved_recipe_without_observed_bin
     assert_eq!(read.current_source_revision, None);
     assert!(!read.source_available);
 }
+#[tokio::test]
+async fn automatic_save_replays_original_instruction_without_recomputing_or_partial_write() {
+    let seeded = seeded_persistence();
+    let original = recipe(
+        "raw-photo",
+        &seeded.source,
+        vec![step(
+            "original",
+            "darktable",
+            original_input("raw-photo", &seeded.source),
+        )],
+        Some("original"),
+    );
+    let mut concrete = original.clone();
+    concrete.steps[0].parameters = ProcessingParameterSnapshot::new(
+        "schema-1",
+        serde_json::json!({"stack": [{
+            "operation": "exposure",
+            "multiPriority": 0,
+            "enabled": true,
+            "params": {"mode": "EXPOSURE_MODE_MANUAL", "exposure": 0.5}
+        }]}),
+    )
+    .unwrap();
+    let mut first = save(
+        "raw-photo",
+        "automatic-save",
+        None,
+        &seeded.source,
+        concrete.clone(),
+    );
+    let mut adjustment = AutomaticAdjustment::new(
+        ProcessingStepId::new("original").unwrap(),
+        "exposure".to_owned(),
+        0,
+        serde_json::json!({"deflicker_percentile": 50.0}),
+    );
+    adjustment.original_recipe = Some(Box::new(original.clone()));
+    first.automatic_adjustment = Some(adjustment);
+    let ComposableEditRecipeWriteOutcome::Saved(committed) = save_recipe(&seeded, first).await
+    else {
+        panic!("automatic save should commit");
+    };
+
+    let mut retry = save(
+        "raw-photo",
+        "automatic-save",
+        None,
+        &seeded.source,
+        original.clone(),
+    );
+    retry.automatic_adjustment = Some(AutomaticAdjustment::new(
+        ProcessingStepId::new("original").unwrap(),
+        "exposure".to_owned(),
+        0,
+        serde_json::json!({"deflicker_percentile": 50.0}),
+    ));
+    assert_eq!(
+        save_recipe(&seeded, retry).await,
+        ComposableEditRecipeWriteOutcome::Replayed(committed.clone())
+    );
+
+    let mut stale = save(
+        "raw-photo",
+        "automatic-stale",
+        Some("stale-revision"),
+        &seeded.source,
+        original,
+    );
+    stale.automatic_adjustment = Some(AutomaticAdjustment::new(
+        ProcessingStepId::new("original").unwrap(),
+        "exposure".to_owned(),
+        0,
+        serde_json::json!({"deflicker_percentile": 75.0}),
+    ));
+    assert!(matches!(
+        save_recipe(&seeded, stale).await,
+        ComposableEditRecipeWriteOutcome::Conflict(Some(_))
+    ));
+    assert_eq!(read_recipe(&seeded, "raw-photo").await, Some(committed));
+}

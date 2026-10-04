@@ -247,6 +247,81 @@ impl PhotoExecutor {
         .map_err(|error| format!("Photo Development task failed: {error}"))?
     }
 
+    /// Runs one engine-owned automatic adjustment through the shared
+    /// serialized child boundary. The caller supplies the complete selected
+    /// step parameters and the original request instruction.
+    pub(crate) async fn auto_parameters(
+        &self,
+        input: PathBuf,
+        parameters: slipstream_processing::modules::Parameters,
+        operation: String,
+        multi_priority: i64,
+        instruction: serde_json::Value,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<serde_json::Value, String> {
+        if !self.available() {
+            return Err("Photo Development bundle is unavailable".to_owned());
+        }
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err("Photo Development is shutting down".to_owned());
+        }
+        let serial = Arc::clone(&self.serial).lock_owned().await;
+        if cancellation.load(Ordering::Acquire) {
+            return Err("Photo Development was cancelled".to_owned());
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut active = self
+                .active
+                .lock()
+                .expect("Photo executor active set is not poisoned");
+            if self.shutting_down.load(Ordering::Acquire) {
+                return Err("Photo Development is shutting down".to_owned());
+            }
+            self.running.fetch_add(1, Ordering::AcqRel);
+            active.insert(id, Arc::clone(&cancellation));
+        }
+        let work = self.root.join(format!("attempt-{id}"));
+        let engine = self.config.bundle_root.join("darktable/bin/darktable-mcp");
+        let metadata = self.config.bundle_root.join("engine-metadata.json");
+        let active = Arc::clone(&self.active);
+        let running = Arc::clone(&self.running);
+        let idle = Arc::clone(&self.idle);
+        tokio::task::spawn_blocking(move || {
+            let _serial = serial;
+            let result = (|| {
+                fs::create_dir(&work)?;
+                let mut permissions = fs::metadata(&work)?.permissions();
+                permissions.set_mode(0o700);
+                fs::set_permissions(&work, permissions)?;
+                local_photo::auto_parameters(
+                    &engine,
+                    &metadata,
+                    &work,
+                    &input,
+                    &parameters,
+                    &operation,
+                    multi_priority,
+                    &instruction,
+                    cancellation,
+                    ENGINE_TIMEOUT,
+                )
+            })()
+            .map_err(|error| error.to_string());
+            let _ = fs::remove_dir_all(&work);
+            active
+                .lock()
+                .expect("Photo executor active set is not poisoned")
+                .remove(&id);
+            if running.fetch_sub(1, Ordering::AcqRel) == 1 {
+                idle.notify_waiters();
+            }
+            result
+        })
+        .await
+        .map_err(|error| format!("Photo Development task failed: {error}"))?
+    }
+
     /// Runs one bounded selected-step Preview through the same serialized
     /// native child boundary as Export, without creating a full-resolution
     /// handoff or touching the Original.

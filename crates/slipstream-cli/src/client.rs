@@ -427,6 +427,7 @@ pub(crate) fn validated_route_failure(
                 || (matches!(
                     operation,
                     Operation::PhotosProcessingRecipeSave
+                        | Operation::PhotosProcessingRecipeAuto
                         | Operation::PhotosProcessingRecipeRebind
                         | Operation::PhotosProcessingExport
                         | Operation::PhotosProcessingExportRetry
