@@ -68,11 +68,11 @@ change, or Album membership.
 
 ### Rating
 
-Rating is an optional zero-to-five-star Photo fact. Rating bounds are inclusive
-integers from 0 through 5 in the CLI. The product must distinguish a missing
-Rating from a stored value of zero before a Web control presents them as one
-choice. Clearing Rating means zero under the existing Photo decision contract;
-it does not change Selection State.
+Rating is a zero-to-five-star Photo fact. A Photo with no assigned stars is
+represented as Rating `0`; the product does not introduce a second missing
+Rating state or a separate missing-value filter. Rating bounds are inclusive
+integers from 0 through 5 in the CLI. Clearing Rating means zero under the
+existing Photo decision contract; it does not change Selection State.
 
 ### Original Kind
 
