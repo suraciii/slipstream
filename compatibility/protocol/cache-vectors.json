@@ -10,7 +10,8 @@
       "status": 200,
       "headers": {
         "content-type": "image/jpeg",
-        "cache-control": "no-store",
+        "cache-control": "private, max-age=3600, must-revalidate",
+        "vary": "Cookie, Authorization",
         "x-content-type-options": "nosniff"
       },
       "etagPattern": "^\"[a-f0-9]{64}\"$",

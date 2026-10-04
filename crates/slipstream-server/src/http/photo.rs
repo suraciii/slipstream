@@ -295,6 +295,8 @@ pub(crate) async fn get_derivative(
     };
     let repeated = cli_preview_headers(&delivery);
     let entity_tag = format!("\"{}\"", delivery.cache_key);
+    let cache_control = "private, max-age=3600, must-revalidate";
+    let vary = "Cookie, Authorization";
     if request
         .headers()
         .get(header::IF_NONE_MATCH)
@@ -303,6 +305,8 @@ pub(crate) async fn get_derivative(
     {
         let mut response = Response::builder()
             .status(StatusCode::NOT_MODIFIED)
+            .header(header::CACHE_CONTROL, cache_control)
+            .header(header::VARY, vary)
             .header(header::ETAG, entity_tag);
         for (name, value) in &repeated {
             response = response.header(*name, value.clone());
@@ -319,7 +323,8 @@ pub(crate) async fn get_derivative(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/jpeg")
         .header(header::CONTENT_LENGTH, length)
-        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CACHE_CONTROL, cache_control)
+        .header(header::VARY, vary)
         .header(header::ETAG, entity_tag)
         .header("x-content-type-options", "nosniff");
     for (name, value) in &repeated {

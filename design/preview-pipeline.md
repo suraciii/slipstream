@@ -181,18 +181,28 @@ Derivative creation writes to a temporary cache path and publishes the completed
 
 ### Scheduling
 
-Preview work is demand-driven.
+Normal Preview work remains demand-driven. After a Library scan publishes a new
+or changed usable Photo, the existing scheduler also accepts one
+`review-2560` warmup request at `Background` priority.
 
 Priority order is:
 
 1. the current Photo in Photo View;
 2. the immediately next and previous Photos after the current Preview is ready;
 3. visible Grid View Photos;
-4. bounded Grid look-ahead work explicitly justified by measured benefit.
+4. bounded Grid look-ahead work explicitly justified by measured benefit;
+5. new or changed `review-2560` warmup.
 
-A scan does not automatically generate every `review-2560` Derivative. Duplicate requests for one cache identity share one in-flight job.
+Warmup is best effort and rebuildable. It does not block Library publication or
+create a durable task table. A current manifest and complete file is a cache
+hit; an interrupted or failed item can be retried by the next scan or an
+ordinary foreground request. The first delivery does not backfill every
+existing Photo or warm `thumbnail-512`.
 
-Leaving a Photo does not require cancelling extraction if completion is near and the result remains reusable. The scheduler may cancel queued work that has no remaining consumer.
+Duplicate requests for one cache identity share one in-flight job.
+Leaving a Photo does not require cancelling extraction if completion is near and
+the result remains reusable. The scheduler may cancel queued work that has no
+remaining consumer.
 
 ### Delivery
 
@@ -200,8 +210,12 @@ The browser requests a derivative by Photo identity and target class. It does no
 
 A current server-cache hit reads completed derivative bytes without reopening or reprocessing the Original File. Currentness is evaluated against the Published Library's selected source facts: candidate, Original Location, size, and modification time. Rescan is the invalidation boundary for those facts. Preview requests validate both the manifest and complete derivative bytes against that published bundle before returning a current result. Browse Window URL hydration may use only the bounded manifest, key, source-fact, and file-metadata checks; the subsequent Preview or derivative request remains the correctness-critical byte-validation boundary.
 
-A derivative response uses ordinary HTTP cache validation tied to the cache identity, including an immutable identity-bearing URL and `ETag`. Reconnect and reload may reuse browser-cached data when the identity remains current.
-
+A derivative response uses ordinary HTTP cache validation tied to the cache
+identity, including an immutable identity-bearing URL and `ETag`. Successful
+private derivative responses use `Cache-Control: private, max-age=3600,
+must-revalidate` and `Vary: Cookie, Authorization`; errors remain
+non-cacheable. Reconnect and reload may reuse browser-cached data when the
+identity remains current.
 The response also makes Preview Source, actual dimensions, and Preview Capability available to Photo View. These facts must not be inferred only from the derivative URL.
 
 ## Failure Behavior

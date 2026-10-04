@@ -181,13 +181,23 @@ cleanup does not grant a general request-admission bypass.
 
 ## Private Content and Transport
 
-Private API, derivative, editing, and download responses, including errors and
-conditional responses, must use `Cache-Control: no-store`. Server-side derivative
-caching and identity remain intact. Keep bounded authenticated in-memory image
-reuse; do not add private service-worker caches. Detach in-flight image sources
-and private views on access loss and reject stale asynchronous completions.
-History restoration must revalidate before attaching private content; an ordinary
-tab return retains the existing view.
+Private API, metadata, mutation, editing, and download responses, including
+errors, must use `Cache-Control: no-store`. A successfully authenticated
+immutable Camera Preview derivative may instead use:
+
+```text literal
+Cache-Control: private, max-age=3600, must-revalidate
+Vary: Cookie, Authorization
+ETag: "<cacheKey>"
+```
+
+The policy applies to its successful `200`, `304`, and `HEAD` responses.
+Authentication and currentness checks occur before file access, range handling,
+`ETag` comparison, or a `304` response. Session, metadata, mutation, editing,
+and Export responses remain `no-store`. Keep server-side derivative identity
+and cache reuse independent of browser caching; do not add private
+service-worker caches. Detach in-flight image sources and private views on
+access loss and reject stale asynchronous completions.
 
 Retire the old publicly cacheable image URL namespace. New pages must use the
 new protected namespace; old paths must not serve private content or redirect

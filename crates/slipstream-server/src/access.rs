@@ -592,7 +592,7 @@ pub(crate) async fn boundary(
     request: Request<Body>,
     next: Next,
 ) -> Response<Body> {
-    let path = request.uri().path();
+    let path = request.uri().path().to_owned();
     // Every registered route is protected by default. Only health and the
     // compiled nonprivate Web fallback are public; unknown APIs stay protected.
     let private = path == "/api"
@@ -620,7 +620,10 @@ pub(crate) async fn boundary(
     } else {
         next.run(request).await
     };
-    if private {
+    let cacheable_derivative = private
+        && path.starts_with("/api/private/derivatives/")
+        && matches!(response.status(), StatusCode::OK | StatusCode::NOT_MODIFIED);
+    if private && !cacheable_derivative {
         response
             .headers_mut()
             .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());

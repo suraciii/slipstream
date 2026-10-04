@@ -379,12 +379,10 @@ impl PreviewService {
         if options.workers == 0 || options.queue_capacity == 0 || options.waiter_capacity == 0 {
             return Err(PreviewServiceError::Saturated);
         }
-        // Library Capture inspection, Preview source inspection, and derivative
-        // processing all share this Library-owned capacity-two native budget.
         let scheduler = DerivativeScheduler::with_native_work_budget(
             cache,
             crate::DerivativeSchedulerOptions {
-                workers: 1,
+                workers: DEFAULT_PREVIEW_WORKERS,
                 ..Default::default()
             },
             library.native_work_budget(),
@@ -440,10 +438,7 @@ impl PreviewService {
             .await
     }
 
-    /// Resolves a request against one published Photo fact bundle before
-    /// admitting the normal source-inspection job. A valid current cache hit
-    /// never creates an Original capability or enters native work. Cache misses
-    /// retain the existing bounded request path.
+    /// Resolves one published Photo fact bundle before admitting source work.
     pub async fn request_with_facts(
         &self,
         facts: PreviewFacts,
@@ -463,12 +458,12 @@ impl PreviewService {
         if let Some(ready) = self.lookup_current(&facts, target).await? {
             return Ok(PreviewRequestResult::Current(ready_result(&ready, target)));
         }
-        self.request_with_mode(facts.photo.id.clone(), target, priority, false, Some(facts))
+        let retry = facts.photo.preview_state == PreviewState::Failed;
+        self.request_with_mode(facts.photo.id.clone(), target, priority, retry, Some(facts))
             .await
     }
 
     /// Looks up one current derivative under bounded cache-read admission.
-    /// This is also used while hydrating bounded Browse Windows.
     pub async fn lookup_current(
         &self,
         facts: &PreviewFacts,
@@ -495,10 +490,7 @@ impl PreviewService {
         Ok(result)
     }
 
-    /// Returns a bounded, metadata-only current cache key for Browse Window
-    /// URL hydration. The eventual Preview/derivative request validates bytes.
-    /// Hydration has one lower-priority lane so current Preview lookups retain
-    /// one of the shared capacity-two cache admissions.
+    /// Returns a bounded metadata-only cache key for Browse Window hydration.
     pub async fn lookup_current_key(
         &self,
         facts: &PreviewFacts,
@@ -540,9 +532,7 @@ impl PreviewService {
         Ok(result)
     }
 
-    /// Re-inspects a source even when the durable state says it is currently
-    /// unavailable. This is the explicit operator retry path for a source that
-    /// may have been repaired without a Library rescan.
+    /// Re-inspects a source despite durable unavailability.
     pub async fn retry(
         &self,
         photo_id: impl Into<String>,
@@ -550,6 +540,16 @@ impl PreviewService {
         priority: DerivativePriority,
     ) -> Result<PreviewRequestResult, PreviewServiceError> {
         self.request_with_mode(photo_id, target, priority, true, None)
+            .await
+    }
+
+    pub async fn retry_with_facts(
+        &self,
+        facts: PreviewFacts,
+        target: DerivativeTarget,
+        priority: DerivativePriority,
+    ) -> Result<PreviewRequestResult, PreviewServiceError> {
+        self.request_with_mode(facts.photo.id.clone(), target, priority, true, Some(facts))
             .await
     }
 

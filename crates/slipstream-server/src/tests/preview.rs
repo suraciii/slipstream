@@ -11,6 +11,55 @@ fn marker_complete_corrupt_jpeg(width: u16, height: u16) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn scan_warms_new_review_preview_without_foreground_request() {
+    let (base, config) = prepare_fixture();
+    let original = config.library_root.join("photo.jpg");
+    jpeg_fixture(&original, 90, 45, [192, 64, 32]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .into_iter()
+        .next()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let facts = {
+            let guard = application
+                .shared
+                .snapshot
+                .read()
+                .expect("published Library poisoned");
+            let published = guard.as_ref().expect("published Library");
+            let photo_position = published.photos_by_id[&photo_id];
+            let photo = &published.snapshot.photos[photo_position];
+            let original_position = published.originals_by_id[&photo.original_id];
+            PreviewFacts::from_records(
+                photo.clone(),
+                vec![published.snapshot.originals[original_position].clone()],
+            )
+        };
+        let cached = application
+            .preview
+            .lookup_current(&facts, DerivativeTarget::Review2560)
+            .await
+            .unwrap();
+        let summary = published_photo_summary(&application, &photo_id).await;
+        if cached.is_some() && summary.preview.state == "ready" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "scan did not warm the review Preview"
+        );
+        tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
 async fn proxy_removal_is_admitted_while_other_api_deletes_stay_refused() {
     let (base, mut config) = prepare_fixture();
     jpeg_fixture(
@@ -111,7 +160,11 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     .await;
     assert_eq!(derivative.status(), StatusCode::OK);
     assert_eq!(derivative.headers()[header::CONTENT_TYPE], "image/jpeg");
-    assert_eq!(derivative.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        derivative.headers()[header::CACHE_CONTROL],
+        "private, max-age=3600, must-revalidate"
+    );
+    assert_eq!(derivative.headers()[header::VARY], "Cookie, Authorization");
     assert_eq!(derivative.headers()["x-content-type-options"], "nosniff");
     let etag = derivative.headers()[header::ETAG]
         .to_str()
@@ -203,7 +256,14 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
             .unwrap(),
     )
     .await;
-    assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        not_modified.headers()[header::CACHE_CONTROL],
+        "private, max-age=3600, must-revalidate"
+    );
+    assert_eq!(
+        not_modified.headers()[header::VARY],
+        "Cookie, Authorization"
+    );
     assert_eq!(
         axum::body::to_bytes(not_modified.into_body(), 1024)
             .await

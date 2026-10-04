@@ -27,6 +27,7 @@ impl Application {
             proxies.begin_shutdown();
         }
         self.scan_cycle.wait_for_idle().await;
+        ReviewWarmup::close(self).await;
         if let Some(proxies) = &self.proxies {
             proxies.shutdown().await;
         }
