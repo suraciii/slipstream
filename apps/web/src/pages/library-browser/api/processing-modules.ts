@@ -79,10 +79,9 @@ const readDescription = (
         })
       : [];
   const parameterSchema = value["parameterSchema"];
-  const automaticAdjustments =
-    isRecord(parameterSchema)
-      ? readAutomaticAdjustments(parameterSchema["x-automatic-adjustments"])
-      : [];
+  const automaticAdjustments = isRecord(parameterSchema)
+    ? readAutomaticAdjustments(parameterSchema["x-automatic-adjustments"])
+    : [];
   return Object.freeze({
     id: Object.freeze({ name, adapterVersion }),
     parameterVersions: Object.freeze([...parameterVersions]),

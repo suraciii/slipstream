@@ -256,3 +256,4 @@ cancellation, and restart must prove unchanged Original and external XMP bytes,
 no partial recipe saves, no stale publication, and settled executor outcomes.
 The local deployment smoke must exercise the bundled engine extension.
 Synthetic TIFFs, discovery success, and a compilation pass alone are insufficient.
+```

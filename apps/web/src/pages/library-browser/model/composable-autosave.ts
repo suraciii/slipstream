@@ -547,7 +547,13 @@ export function createComposableAutosave(
     adjustment: AutomaticAdjustmentRequest,
   ): Promise<void> => {
     const state = photos.get(photoId);
-    if (!state || state.pending || state.saving || state.uncertain || state.conflict)
+    if (
+      !state ||
+      state.pending ||
+      state.saving ||
+      state.uncertain ||
+      state.conflict
+    )
       return;
     const guarded = composableSaveRequest(
       state.draft,
@@ -563,7 +569,10 @@ export function createComposableAutosave(
     if (state.undo.length > 64) state.undo.shift();
     state.redo = [];
     state.pending = {
-      body: JSON.stringify({ ...guarded.request, automaticAdjustment: adjustment }),
+      body: JSON.stringify({
+        ...guarded.request,
+        automaticAdjustment: adjustment,
+      }),
       draft: structuredClone(state.draft),
       rebind: false,
       automatic: true,
