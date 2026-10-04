@@ -94,6 +94,13 @@ Inspecting another module's result must not change the saved Edit Recipe or
 redefine another step's result. A Film Recipe remains fixed only when the
 standalone SpektraFilm module is selected; it is not a global output concept.
 
+Automatic adjustments are explicit actions on the current Processing Step.
+When a module admits one, the Photographer supplies the module's automatic
+instruction and Slipstream asks the native engine for the concrete values it
+computed. The saved step contains those concrete values; Preview and Export
+reuse them and do not independently rerun the automatic algorithm. A failed
+automatic action or a stale guarded Recipe leaves the saved step unchanged.
+
 ## Editing Workspace
 
 Photo View must offer an Edit entry point when a Processing Module admits the

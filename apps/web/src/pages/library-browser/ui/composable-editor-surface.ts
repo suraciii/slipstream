@@ -74,6 +74,12 @@ export type EditorComposableEditingView = Readonly<{
   parametersText: string;
   parametersValid: boolean;
   parameterSchema?: unknown;
+  automaticAdjustments: ReadonlyArray<{
+    operation: string;
+    label: string;
+    multiPriority: number;
+    instruction: Record<string, unknown>;
+  }>;
 }>;
 export type EditorComposableViewModel = Readonly<{
   composing: boolean;
@@ -313,6 +319,27 @@ export function createComposableEditorSurface(
       } catch {
         tree = null;
       }
+      const automaticButtons = Array.from(
+        controls.querySelectorAll<HTMLElement>("[data-automatic-adjustment]"),
+      );
+      for (const old of automaticButtons) old.remove();
+      for (const adjustment of editing.automaticAdjustments) {
+        const action = button(
+          adjustment.label,
+          () =>
+            send({
+              kind: "editor-composable-automatic",
+              photoId: next.photoId,
+              stepId: editing.stepId,
+              operation: adjustment.operation,
+              multiPriority: adjustment.multiPriority,
+              instruction: adjustment.instruction,
+            }),
+          blocked || editing.inputChoice !== "original",
+        );
+        action.dataset.automaticAdjustment = adjustment.operation;
+        controls.append(action);
+      }
       const parameterControls = moduleParameterControls(
         editing.parameterSchema,
         tree,
@@ -475,6 +502,28 @@ export function createComposableEditorSurface(
           if (input instanceof HTMLInputElement && control.kind === "boolean")
             input.checked = control.value === true;
           else if (input) input.value = String(control.value);
+        }
+      }
+      if (
+        !controls.querySelector("[data-automatic-adjustment]") &&
+        editing.automaticAdjustments.length
+      ) {
+        for (const adjustment of editing.automaticAdjustments) {
+          const action = button(
+            adjustment.label,
+            () =>
+              send({
+                kind: "editor-composable-automatic",
+                photoId: next.photoId,
+                stepId: editing.stepId,
+                operation: adjustment.operation,
+                multiPriority: adjustment.multiPriority,
+                instruction: adjustment.instruction,
+              }),
+            blocked || editing.inputChoice !== "original",
+          );
+          action.dataset.automaticAdjustment = adjustment.operation;
+          controls.append(action);
         }
       }
     } else {

@@ -4,11 +4,12 @@ pub(crate) enum Operation {
     Status,
     ProcessingModules,
     ProcessingArtifact,
+    ProcessingArtifactDownload,
     PhotosProcessingExportStatus,
     PhotosProcessingExportCancel,
-    ProcessingArtifactDownload,
     PhotosProcessingRecipeGet,
     PhotosProcessingRecipeSave,
+    PhotosProcessingRecipeAuto,
     PhotosProcessingPreview,
     PhotosProcessingExport,
     PhotosProcessingRecipeRebind,
@@ -54,9 +55,10 @@ impl Operation {
             Self::ProcessingModules => "processing-modules",
             Self::ProcessingArtifact => "processing-artifact",
             Self::ProcessingArtifactDownload => "processing-artifact-download",
+            Self::PhotosProcessingPreview => "photos-processing-preview",
             Self::PhotosProcessingRecipeGet => "photos-processing-recipe-get",
             Self::PhotosProcessingRecipeSave => "photos-processing-recipe-save",
-            Self::PhotosProcessingPreview => "photos-processing-preview",
+            Self::PhotosProcessingRecipeAuto => "photos.processing-recipe.auto",
             Self::PhotosProcessingExport => "photos-processing-export",
             Self::PhotosProcessingExportStatus => "photos-processing-export-status",
             Self::PhotosProcessingExportCancel => "photos-processing-export-cancel",
@@ -137,6 +139,9 @@ pub(crate) fn command_operation(command: &Command) -> Operation {
                 }
                 development::ProcessingRecipeCommand::Save(_) => {
                     Operation::PhotosProcessingRecipeSave
+                }
+                development::ProcessingRecipeCommand::Auto(_) => {
+                    Operation::PhotosProcessingRecipeAuto
                 }
                 development::ProcessingRecipeCommand::Rebind(_) => {
                     Operation::PhotosProcessingRecipeRebind

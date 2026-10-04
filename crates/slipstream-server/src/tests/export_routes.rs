@@ -526,6 +526,7 @@ async fn xmp_snapshot_download_and_replay_do_not_need_processing_or_original() {
             expected_recipe_revision: None,
             expected_source_revision: source.clone(),
             recipe: intended,
+            automatic_adjustment: None,
         })
         .await
         .unwrap();
@@ -610,6 +611,7 @@ async fn xmp_snapshot_download_and_replay_do_not_need_processing_or_original() {
             expected_recipe_revision: Some(recipe.revision.clone()),
             expected_source_revision: source,
             recipe: changed,
+            automatic_adjustment: None,
         })
         .await
         .unwrap();

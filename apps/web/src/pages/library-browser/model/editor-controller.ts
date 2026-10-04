@@ -341,6 +341,9 @@ export function createEditorController(
       composable.editEditorComposableParameters(id, text);
       composable.commitEditorComposableParameters(id);
     }),
+    composableAutomatic: scoped((id, adjustment) => {
+      void composable.automaticEditorAdjustment(id, adjustment);
+    }),
     composableSchema: mutate(composable.editEditorComposableSchema),
     composableInput: mutate(composable.editEditorComposableInput),
     composableArtifactFetch: scoped(composable.fetchEditorArtifact),

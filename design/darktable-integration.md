@@ -35,6 +35,20 @@ history construction, and pixelpipe execution. The engine owns the native
 algorithms and legal module ordering. A baseline policy selects technical
 processing and suppresses unrequested artistic defaults under the color spec.
 
+An automatic adjustment is a semantic request to the native engine, not a
+second implementation of its algorithm. The request names one admitted module
+operation and carries that operation's automatic instruction. The engine
+evaluates it against the isolated image-context state and returns a complete
+concrete parameter tree for that operation. Slipstream captures the returned
+tree in the guarded Recipe; subsequent Preview and Export receive that
+captured tree as ordinary intent.
+
+The first automatic mapping is darktable exposure deflicker. The bridge
+passes the native percentile and target-level controls to darktable, captures
+the computed EV as manual exposure, and preserves the qualified black and
+compensation controls. An automatic request is not a persisted engine mode:
+the persisted result is the concrete manual value.
+
 The processing bundle binds the exact engine source commit, the MCP contract,
 parameter schemas, semantic mappings, baseline policy, and color assets. A
 discovered schema is engine metadata, not permission to execute it.
@@ -66,11 +80,17 @@ sequenceDiagram
     S->>E: Captured semantic intent and staged source
     E->>D: Initialize staged image under the pinned baseline
     D-->>E: Image-context values and available module instances
-    E->>D: Apply complete captured intent and request an output
-    D-->>E: Artifact or explicit failure
-    E-->>S: Validated attempt outcome
-    Note over S: Apply source and freshness guards, then publish
-```
+    S->>E: Automatic instruction for the selected module
+    E->>D: Evaluate native automatic operation in isolated image context
+    D-->>E: Concrete module parameters
+    E-->>S: Guarded Recipe update with captured parameters
+    Note over S,D: Later Preview and Export reuse captured parameters
+
+The qualified automatic operations are exposure deflicker and
+`channelmixerrgb` illuminant detection (edges or surfaces). The former is
+captured as manual exposure; the latter is captured as custom chromaticity,
+temperature, and CAT16 adaptation. Neither detection mode is an executable
+saved parameter.
 
 The executor starts one fresh darktable-mcp child per serialized request and
 exchanges MCP messages with it over private stdio. It must use a

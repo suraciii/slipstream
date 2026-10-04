@@ -31,8 +31,19 @@ pub enum ProcessingRecipeCommand {
     /// Guarded save of the complete composable recipe with explicit
     /// revisions.
     Save(ProcessingRecipeWriteArgs),
+    /// Guarded engine-owned automatic adjustment of the selected Original-bound step.
+    Auto(ProcessingRecipeAutoArgs),
     /// Rebind retained intent to the newly observed Original revision.
     Rebind(ProcessingRecipeWriteArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ProcessingRecipeAutoArgs {
+    #[arg(value_name = "PHOTO_ID", value_parser = crate::nonempty)]
+    pub photo_id: String,
+    /// UTF-8 JSON file holding the complete guarded recipe body and automaticAdjustment.
+    #[arg(long, value_name = "FILE", value_parser = crate::nonempty)]
+    pub input: String,
 }
 
 #[derive(Debug, clap::Args)]
@@ -56,6 +67,9 @@ pub(crate) async fn prepare_processing(
         ProcessingRecipeCommand::Save(args) => Ok(Some(parse_processing_save(
             read_input_bytes(&args.input).await?,
         )?)),
+        ProcessingRecipeCommand::Auto(args) => Ok(Some(parse_processing_auto(
+            read_input_bytes(&args.input).await?,
+        )?)),
         ProcessingRecipeCommand::Rebind(args) => Ok(Some(parse_processing_rebind(
             read_input_bytes(&args.input).await?,
         )?)),
@@ -77,6 +91,27 @@ pub(super) struct SaveProcessingRecipeInput {
     pub(super) current_step_id: Option<String>,
     pub(super) steps: Vec<ProcessingStepWire>,
 }
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutomaticAdjustmentInput {
+    step_id: String,
+    operation: String,
+    multi_priority: i64,
+    instruction: Value,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AutoProcessingRecipeInput {
+    request_id: String,
+    #[serde(deserialize_with = "required_nullable_string")]
+    expected_recipe_revision: Option<String>,
+    expected_source_revision: String,
+    #[serde(deserialize_with = "required_nullable_string")]
+    current_step_id: Option<String>,
+    steps: Vec<ProcessingStepWire>,
+    automatic_adjustment: AutomaticAdjustmentInput,
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -97,6 +132,82 @@ pub(super) fn parse_processing_rebind(bytes: Vec<u8>) -> Result<Value, CommandFa
     )?;
     validate_source_revision("newSourceRevision", &input.new_source_revision)?;
     serde_json::to_value(input).map_err(|_| unusable_input())
+}
+
+pub(super) fn parse_processing_auto(bytes: Vec<u8>) -> Result<Value, CommandFailure> {
+    let input: AutoProcessingRecipeInput = serde_json::from_slice(&bytes).map_err(|_| {
+        CommandFailure::invalid(
+            "input",
+            "The input must be a complete recipe with exactly one automaticAdjustment object.",
+        )
+    })?;
+    validate_request_identity(&input.request_id)?;
+    validate_nonempty_revision(
+        "expectedRecipeRevision",
+        input.expected_recipe_revision.as_deref(),
+    )?;
+    validate_source_revision("expectedSourceRevision", &input.expected_source_revision)?;
+    validate_nonempty_revision("currentStepId", input.current_step_id.as_deref())?;
+    if !matches!(
+        input.automatic_adjustment.operation.as_str(),
+        "exposure" | "channelmixerrgb"
+    ) {
+        return Err(CommandFailure::invalid(
+            "automaticAdjustment.operation",
+            "Only exposure and channelmixerrgb automatic operations are supported.",
+        ));
+    }
+    if !(0..=128).contains(&input.automatic_adjustment.multi_priority) {
+        return Err(CommandFailure::invalid(
+            "automaticAdjustment.multiPriority",
+            "The automatic multiPriority must be an integer from 0 through 128.",
+        ));
+    }
+    if !input.automatic_adjustment.instruction.is_object()
+        || parameter_tree_depth(&input.automatic_adjustment.instruction)
+            > MAXIMUM_PARAMETER_TREE_DEPTH
+    {
+        return Err(CommandFailure::invalid(
+            "automaticAdjustment.instruction",
+            "The automatic instruction must be an object nested at most 32 levels deep.",
+        ));
+    }
+    let mut value = serde_json::to_value(&input).map_err(|_| unusable_input())?;
+    let automatic = value
+        .get("automaticAdjustment")
+        .cloned()
+        .ok_or_else(unusable_input)?;
+    {
+        let object = value.as_object_mut().ok_or_else(unusable_input)?;
+        object.remove("automaticAdjustment");
+    }
+    let _ = parse_processing_save(serde_json::to_vec(&value).map_err(|_| unusable_input())?)?;
+    let steps = value
+        .get("steps")
+        .and_then(Value::as_array)
+        .ok_or_else(unusable_input)?;
+    let current = value.get("currentStepId").and_then(Value::as_str);
+    let target = automatic.get("stepId").and_then(Value::as_str);
+    if current != target
+        || !steps.iter().any(|step| {
+            step.get("stepId").and_then(Value::as_str) == target
+                && step
+                    .get("input")
+                    .and_then(|input| input.get("kind"))
+                    .and_then(Value::as_str)
+                    == Some("original")
+        })
+    {
+        return Err(CommandFailure::invalid(
+            "automaticAdjustment.stepId",
+            "The automatic stepId must be the current Original-bound recipe step.",
+        ));
+    }
+    value
+        .as_object_mut()
+        .ok_or_else(unusable_input)?
+        .insert("automaticAdjustment".to_owned(), automatic);
+    Ok(value)
 }
 
 /// One Processing Step record: an opaque step identity unique within the
@@ -326,11 +437,15 @@ pub(crate) async fn execute_processing(
         ProcessingRecipeCommand::Get { photo_id } => processing_recipe_get(client, photo_id).await,
         ProcessingRecipeCommand::Save(args) => {
             let body = prepared.ok_or_else(unusable_input)?;
-            processing_recipe_write(client, admission, args, body, false).await
+            processing_recipe_write(client, admission, &args.photo_id, body, false, false).await
+        }
+        ProcessingRecipeCommand::Auto(args) => {
+            let body = prepared.ok_or_else(unusable_input)?;
+            processing_recipe_write(client, admission, &args.photo_id, body, false, true).await
         }
         ProcessingRecipeCommand::Rebind(args) => {
             let body = prepared.ok_or_else(unusable_input)?;
-            processing_recipe_write(client, admission, args, body, true).await
+            processing_recipe_write(client, admission, &args.photo_id, body, true, false).await
         }
     }
 }
@@ -357,9 +472,10 @@ async fn processing_recipe_get(
 async fn processing_recipe_write(
     client: &ServiceClient,
     admission: &AdmissionState,
-    args: &ProcessingRecipeWriteArgs,
+    photo_id: &str,
     body: Value,
     rebind: bool,
+    automatic: bool,
 ) -> Result<Value, CommandFailure> {
     let prepared_field = |key: &str| {
         body.get(key)
@@ -380,10 +496,12 @@ async fn processing_recipe_write(
     let identity = MutationIdentity {
         operation: if rebind {
             PROCESSING_REBIND_OPERATION
+        } else if automatic {
+            PROCESSING_AUTO_OPERATION
         } else {
             PROCESSING_SAVE_OPERATION
         },
-        photo_ids: vec![args.photo_id.clone()],
+        photo_ids: vec![photo_id.to_owned()],
         album_id: None,
         album_name: None,
         mappings: Vec::new(),
@@ -394,15 +512,9 @@ async fn processing_recipe_write(
             &identity,
             admission,
             if rebind {
-                client.endpoint(&[
-                    "api",
-                    "photos",
-                    &args.photo_id,
-                    "processing-recipe",
-                    "rebind",
-                ])
+                client.endpoint(&["api", "photos", photo_id, "processing-recipe", "rebind"])
             } else {
-                client.endpoint(&["api", "photos", &args.photo_id, "processing-recipe"])
+                client.endpoint(&["api", "photos", photo_id, "processing-recipe"])
             },
             Some(body),
             &[StatusCode::OK, StatusCode::CREATED],
@@ -412,7 +524,7 @@ async fn processing_recipe_write(
         serde_json::from_slice(&bytes).map_err(|_| CommandFailure::unknown(&identity))?;
     confirmed_processing_recipe_write(
         &identity,
-        &args.photo_id,
+        photo_id,
         &request_id,
         &submitted_source,
         status,

@@ -830,6 +830,7 @@ fn darktable_description(availability: ModuleAvailability) -> ModuleDescription 
             "additionalProperties": false,
             "default": {"stack": [entry], "output": output},
             "x-qualification": "Explicit manual baseline controls reuse the qualified native development request. Exposure is editable; mode, black and both compensation controls stay at these defaults. White balance remains as-shot. Native image-dependent defaults are not qualified defaults. Independent pixel-reference qualification covers 0 and 1 EV only; schema discovery does not grant additional control execution.",
+            "x-automatic-adjustments": [{"operation": "exposure", "label": "Auto exposure", "multiPriority": 0, "instruction": {"deflicker_percentile": 50.0, "deflicker_target_level": -4.0}}, {"operation": "channelmixerrgb", "label": "Detect illuminant", "multiPriority": 0, "instruction": {"illuminant": "DT_ILLUMINANT_DETECT_EDGES"}}],
             "properties": {
                 "stack": {
                     "type": "array",

@@ -177,6 +177,13 @@ export const fetchComposableRecipe = async (
   }
 };
 
+export type AutomaticAdjustmentRequest = Readonly<{
+  stepId: string;
+  operation: string;
+  multiPriority: number;
+  instruction: Record<string, unknown>;
+}>;
+
 export const saveComposableRecipe = async (
   fetcher: BrowserFetch,
   photoId: string,
@@ -186,6 +193,7 @@ export const saveComposableRecipe = async (
     expectedSourceRevision: string;
     currentStepId: string | null;
     steps: ReadonlyArray<ComposableProcessingStep>;
+    automaticAdjustment?: AutomaticAdjustmentRequest;
   }>,
   signal?: AbortSignal,
 ): Promise<Response> =>
@@ -193,13 +201,7 @@ export const saveComposableRecipe = async (
     method: "POST",
     headers: { "Content-Type": "application/json" },
     ...(signal ? { signal } : {}),
-    body: JSON.stringify({
-      requestId: request.requestId,
-      expectedRecipeRevision: request.expectedRecipeRevision,
-      expectedSourceRevision: request.expectedSourceRevision,
-      currentStepId: request.currentStepId,
-      steps: request.steps,
-    }),
+    body: JSON.stringify(request),
   });
 
 /** Reconciliation must replay the captured bytes, including its request identity. */

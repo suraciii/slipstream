@@ -107,6 +107,38 @@ fn composable_save_accepts_the_zero_step_and_selected_step_documents() {
 }
 
 #[test]
+fn composable_auto_requires_current_original_step_and_preserves_instruction() {
+    let mut document = serde_json::from_slice::<Value>(&composable_save_document(
+        json!([composable_step("develop-1", "darktable")]),
+        json!("develop-1"),
+    ))
+    .unwrap();
+    document["requestId"] = json!("automatic-001");
+    document["automaticAdjustment"] = json!({
+        "stepId": "develop-1",
+        "operation": "exposure",
+        "multiPriority": 0,
+        "instruction": {
+            "deflicker_percentile": 75.0,
+            "deflicker_target_level": -3.0,
+            "opaque": {"kept": true}
+        }
+    });
+    let parsed = parse_processing_auto(document.to_string().into_bytes()).unwrap();
+    assert_eq!(
+        parsed["automaticAdjustment"]["instruction"]["opaque"]["kept"],
+        json!(true)
+    );
+
+    document["automaticAdjustment"]["stepId"] = json!("missing");
+    let failure = parse_processing_auto(document.to_string().into_bytes()).unwrap_err();
+    assert_eq!(
+        failure.payload.details["argument"],
+        "automaticAdjustment.stepId"
+    );
+}
+
+#[test]
 fn composable_save_refuses_documents_outside_the_closed_shapes() {
     let step = composable_step("develop-1", "darktable");
     let with_steps = |steps: Value, current: Value| composable_save_document(steps, current);

@@ -70,8 +70,13 @@ export function routeEditorIntent(
     case "editor-composable-parameters":
       editor.composableParameters(intent.photoId, intent.text);
       return true;
-    case "editor-composable-schema":
-      editor.composableSchema(intent.photoId, intent.schemaVersion);
+    case "editor-composable-automatic":
+      editor.composableAutomatic(intent.photoId, {
+        stepId: intent.stepId,
+        operation: intent.operation,
+        multiPriority: intent.multiPriority,
+        instruction: intent.instruction,
+      });
       return true;
     case "editor-composable-input":
       editor.composableInput(

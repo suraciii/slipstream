@@ -696,17 +696,41 @@ pub struct SaveComposableEditRecipe {
     /// The Photo whose recipe is saved.
     pub photo_id: String,
     /// Stable caller-owned identity used to resolve a retry after a lost
-    /// response. It is not the recipe revision and must not be regenerated
-    /// while retrying one save.
+    /// response.
     pub request_id: String,
-    /// The recipe revision the caller observed; `None` only when the caller
-    /// observed no saved composable recipe for the Photo.
     pub expected_recipe_revision: Option<String>,
-    /// The observed source revision the save is guarded against. It must
-    /// equal [`ComposableEditRecipe::source_revision`].
     pub expected_source_revision: String,
-    /// The complete intended recipe.
     pub recipe: ComposableEditRecipe,
+    /// Optional engine-owned adjustment, identified by the original request.
+    pub automatic_adjustment: Option<AutomaticAdjustment>,
+}
+
+/// An engine-owned automatic adjustment requested as part of one atomic save.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AutomaticAdjustment {
+    pub step_id: ProcessingStepId,
+    pub operation: String,
+    pub multi_priority: i64,
+    pub instruction: Value,
+    /// Original complete recipe used for retry identity; never persisted.
+    pub original_recipe: Option<Box<ComposableEditRecipe>>,
+}
+
+impl AutomaticAdjustment {
+    pub fn new(
+        step_id: ProcessingStepId,
+        operation: String,
+        multi_priority: i64,
+        instruction: Value,
+    ) -> Self {
+        Self {
+            step_id,
+            operation,
+            multi_priority,
+            instruction,
+            original_recipe: None,
+        }
+    }
 }
 
 /// Rebinds only Original inputs under the observed recipe and source guards.

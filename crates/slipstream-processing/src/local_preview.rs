@@ -125,6 +125,29 @@ pub(crate) fn selected_step_stack(parameters: &Parameters) -> io::Result<Vec<Val
         .cloned()
         .unwrap_or_default())
 }
+
+/// Extract the selected stack for native automatic evaluation. Retained
+/// automatic modes are structurally valid editing intent; execution validation
+/// is deliberately deferred until the engine returns concrete parameters.
+pub(crate) fn automatic_step_stack(parameters: &Parameters) -> io::Result<Vec<Value>> {
+    if parameters.module != DARKTABLE_MODULE {
+        return Err(io::Error::other(
+            "selected step parameters are not the admitted darktable envelope",
+        ));
+    }
+    ModuleRegistry::new(
+        ModuleAvailability::unavailable("validation only"),
+        ModuleAvailability::unavailable("validation only"),
+    )
+    .validate_saved_parameters(parameters)
+    .map_err(|error| io::Error::other(error.message))?;
+    Ok(parameters
+        .tree
+        .get("stack")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
 /// The render tool's engine spelling for one admitted module-owned stack.
 /// The module contract uses `multiPriority`; the pinned native bridge consumes
 /// `multi_priority`. This is a wire adaptation, not a change to the captured

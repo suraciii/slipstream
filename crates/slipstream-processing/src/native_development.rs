@@ -203,6 +203,83 @@ pub(crate) fn develop_at(
     engine.shutdown()
 }
 
+/// Ask the pinned engine to evaluate one module-owned automatic instruction
+/// against the same raw-development baseline used by Preview and Export.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn auto_parameters_at(
+    engine: &Path,
+    metadata_path: &Path,
+    work: &Path,
+    input: &Path,
+    stack: &[Value],
+    operation: &str,
+    multi_priority: i64,
+    instruction: &Value,
+    client: &str,
+    guard: Guard,
+) -> io::Result<Value> {
+    let approved = approved_metadata(metadata_path)?;
+    let config = work.join("config");
+    let cache = work.join("cache");
+    let tmp = work.join("tmp");
+    let xdg = work.join("xdg");
+    let library = work.join("library.db");
+    let args: Vec<String> = [
+        "--core",
+        "--disable-opencl",
+        "--configdir",
+        strict(&config)?,
+        "--cachedir",
+        strict(&cache)?,
+        "--tmpdir",
+        strict(&tmp)?,
+        "--library",
+        strict(&library)?,
+        "--conf",
+        "plugins/darkroom/workflow=none",
+        "--conf",
+        "write_sidecar_files=never",
+        "--conf",
+        "run_crawler_on_start=FALSE",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    let env = [
+        (
+            "PATH".to_string(),
+            "/opt/darktable/bin:/usr/local/bin:/usr/bin:/bin".to_string(),
+        ),
+        ("HOME".to_string(), strict(&xdg)?.to_string()),
+        ("XDG_CONFIG_HOME".to_string(), strict(&xdg)?.to_string()),
+        ("XDG_CACHE_HOME".to_string(), strict(&cache)?.to_string()),
+        ("TMPDIR".to_string(), strict(&tmp)?.to_string()),
+        ("OMP_NUM_THREADS".to_string(), "4".to_string()),
+    ];
+    let mut engine = McpClient::spawn_guarded(
+        strict(engine)?,
+        &args,
+        &env,
+        guard.cancellation,
+        guard.deadline,
+    )?;
+    engine.initialize(client)?;
+    verify_engine_contract(&mut engine, &approved)?;
+    let result = engine.call(
+        "auto_parameters",
+        json!({
+            "input": {"path": input},
+            "baseline": "raw-development",
+            "stack": stack,
+            "operation": operation,
+            "multi_priority": multi_priority,
+            "instruction": instruction,
+        }),
+    )?;
+    engine.shutdown()?;
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

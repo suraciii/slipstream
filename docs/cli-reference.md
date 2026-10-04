@@ -555,6 +555,7 @@ slipstream processing artifact ARTIFACT_ID
 slipstream processing artifact-download ARTIFACT_ID --file PATH
 slipstream photos processing-recipe get PHOTO_ID
 slipstream photos processing-recipe save PHOTO_ID --input FILE
+slipstream photos processing-recipe auto PHOTO_ID --input FILE
 slipstream photos processing-recipe rebind PHOTO_ID --input FILE
 slipstream photos processing-preview PHOTO_ID --step STEP_ID --file PATH
 slipstream photos processing-export PHOTO_ID --input FILE
@@ -602,6 +603,66 @@ requires explicit rebind before using a changed Original.
   "steps": []
 }
 ```
+
+`processing-recipe auto` uses the same guarded complete recipe document and
+adds one engine-owned instruction:
+
+```json
+{
+  "requestId": "automatic-001",
+  "expectedRecipeRevision": "observed-recipe-revision",
+  "expectedSourceRevision": "observed-source-revision",
+  "currentStepId": "step-1",
+  "steps": [
+    {
+      "stepId": "step-1",
+      "module": "darktable",
+      "input": {
+        "kind": "original",
+        "photoId": "photo-1",
+        "sourceRevision": "observed-source-revision"
+      },
+      "parameters": {
+        "schemaVersion": "darktable-params-1",
+        "tree": {
+          "stack": [
+            {
+              "operation": "exposure",
+              "multiPriority": 0,
+              "enabled": true,
+              "params": {
+                "mode": "EXPOSURE_MODE_MANUAL",
+                "black": 0.0,
+                "exposure": 0.0,
+                "deflicker_percentile": 50.0,
+                "deflicker_target_level": -4.0,
+                "compensate_exposure_bias": false,
+                "compensate_hilite_pres": true
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "automaticAdjustment": {
+    "stepId": "step-1",
+    "operation": "exposure",
+    "multiPriority": 0,
+    "instruction": {
+      "deflicker_percentile": 50.0,
+      "deflicker_target_level": -4.0
+    }
+  }
+}
+```
+
+The instruction is evaluated by the qualified native engine and its concrete
+parameters are saved atomically. It must target the current Original-bound
+step. A replay uses the same request identity and instruction; a stale Recipe,
+source, unavailable engine, or failed detection leaves the saved Recipe
+unchanged. Supported automatic operations are `exposure` and
+`channelmixerrgb`; Preview and Export never execute their detection modes.
 
 The nullable recipe guard explicitly requires absence when null. Steps may be
 empty; otherwise `currentStepId` selects exactly one of the unique step IDs.
@@ -1018,7 +1079,8 @@ For `authentication_required`, `access_denied`, `server_busy`, `storage_failed`,
 `albums-create`, `albums-rename`, `albums-delete`, `albums-add`, `albums-remove`,
 `albums-reorder`, `processing-modules`, `processing-artifact`,
 `processing-artifact-download`, `photos-processing-recipe-get`,
-`photos-processing-recipe-save`, `photos-processing-recipe-rebind`,
+`photos-processing-recipe-save`, `photos.processing-recipe.auto`,
+`photos-processing-recipe-rebind`,
 `photos-processing-preview`, `photos-processing-export`,
 `photos-processing-export-list`, `photos-processing-export-status`,
 `photos-processing-export-cancel`, `photos-processing-export-retry`,

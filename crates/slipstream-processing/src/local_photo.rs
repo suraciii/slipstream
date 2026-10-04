@@ -69,15 +69,28 @@ fn terminated(error: io::Error, cancellation: &AtomicBool, deadline: Instant) ->
     error
 }
 
-/// Derive the engine-private tree below the caller's work directory and
-/// stage the validated output profile into it. Only the fixed skeleton is
-/// created; nothing outside `work` is written.
-fn prepare(work: &Path, profile: &Path) -> io::Result<PathBuf> {
-    for directory in ["config/color/out", "cache", "tmp", "xdg"] {
+/// Derive the engine-private runtime tree below the caller's work directory.
+fn prepare_runtime(work: &Path) -> io::Result<()> {
+    for directory in [
+        "config",
+        "config/color",
+        "config/color/out",
+        "cache",
+        "tmp",
+        "xdg",
+    ] {
         let path = work.join(directory);
         fs::create_dir_all(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
     }
+    Ok(())
+}
+
+/// Derive the engine-private tree below the caller's work directory and
+/// stage the validated output profile into it. Only the fixed skeleton is
+/// created; nothing outside `work` is written.
+fn prepare(work: &Path, profile: &Path) -> io::Result<PathBuf> {
+    prepare_runtime(work)?;
     let mut asset = File::open(profile)?;
     let metadata = asset.metadata()?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > PROFILE_BYTES_MAX {
@@ -223,6 +236,64 @@ pub fn develop_selected_step(
         width: identity.width,
         height: identity.height,
     })
+}
+
+/// Execute one native automatic adjustment and return the concrete module
+/// parameters captured by the engine. The isolated child does not publish
+/// catalog history or an output artifact.
+#[allow(clippy::too_many_arguments)]
+pub fn auto_parameters(
+    engine: &Path,
+    metadata: &Path,
+    work: &Path,
+    input: &Path,
+    parameters: &crate::modules::Parameters,
+    operation: &str,
+    multi_priority: i64,
+    instruction: &serde_json::Value,
+    cancellation: Arc<AtomicBool>,
+    timeout: Duration,
+) -> io::Result<serde_json::Value> {
+    if timeout.is_zero() {
+        return Err(io::Error::other("automatic adjustment requires a timeout"));
+    }
+    if cancellation.load(Ordering::Relaxed) {
+        return Err(cancelled());
+    }
+    let stack = crate::local_preview::automatic_step_stack(parameters)?;
+    let engine_stack = crate::local_preview::engine_stack(&stack);
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::other("automatic adjustment deadline overflow"))?;
+    prepare_runtime(work)?;
+    if cancellation.load(Ordering::Relaxed) {
+        return Err(cancelled());
+    }
+    let result = native_development::auto_parameters_at(
+        engine,
+        metadata,
+        work,
+        input,
+        &engine_stack,
+        operation,
+        multi_priority,
+        instruction,
+        CLIENT,
+        native_development::Guard {
+            cancellation: cancellation.clone(),
+            deadline,
+        },
+    )
+    .map_err(|error| terminated(error, &cancellation, deadline))?;
+    if result["operation"].as_str() != Some(operation)
+        || result["multi_priority"].as_i64() != Some(multi_priority)
+        || !result["params"].is_object()
+    {
+        return Err(io::Error::other(
+            "engine returned an invalid automatic parameter result",
+        ));
+    }
+    Ok(result)
 }
 
 /// The stack-driven form of the pinned local development sequence: the

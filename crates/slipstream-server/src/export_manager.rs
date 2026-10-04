@@ -334,6 +334,27 @@ impl ExportManager {
             .await
     }
 
+    pub(crate) async fn auto_parameters(
+        &self,
+        input: PathBuf,
+        parameters: slipstream_processing::modules::Parameters,
+        operation: String,
+        multi_priority: i64,
+        instruction: serde_json::Value,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<serde_json::Value, String> {
+        self.executor
+            .auto_parameters(
+                input,
+                parameters,
+                operation,
+                multi_priority,
+                instruction,
+                cancellation,
+            )
+            .await
+    }
+
     /// Resolves historical unfinished work without launching retired workloads.
     /// Persisted attempts retain validated publication recovery; unattempted
     /// queued records settle as interrupted.
@@ -595,7 +616,7 @@ impl ExportManager {
     /// The common staging seam used by durable Exports and preview-class
     /// attempts. The expected source revision is supplied directly so the
     /// ephemeral path never needs an Export snapshot or persistence row.
-    async fn stage_original_for(
+    pub(crate) async fn stage_original_for(
         &self,
         photo_id: &str,
         source_revision: &str,

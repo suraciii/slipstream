@@ -6,10 +6,18 @@ export type ProcessingModuleAvailability = Readonly<{
   refusalReasons: ReadonlyArray<string>;
 }>;
 
+export type AutomaticAdjustmentDescription = Readonly<{
+  operation: string;
+  label: string;
+  multiPriority: number;
+  instruction: Record<string, unknown>;
+}>;
+
 export type ProcessingModuleDescription = Readonly<{
   id: Readonly<{ name: string; adapterVersion: string }>;
   parameterVersions: ReadonlyArray<string>;
   parameterSchema: unknown;
+  automaticAdjustments: ReadonlyArray<AutomaticAdjustmentDescription>;
   admittedInputs: ReadonlyArray<Record<string, unknown>>;
   admittedOutputs: ReadonlyArray<Record<string, unknown>>;
   limits: Readonly<Record<string, number>>;
@@ -46,10 +54,40 @@ const readDescription = (
     item: unknown,
   ): ReadonlyArray<Record<string, unknown>> =>
     Array.isArray(item) && item.every(isRecord) ? item : [];
+  const readAutomaticAdjustments = (
+    item: unknown,
+  ): ReadonlyArray<AutomaticAdjustmentDescription> =>
+    Array.isArray(item)
+      ? item.flatMap((entry) => {
+          if (
+            !isRecord(entry) ||
+            typeof entry["operation"] !== "string" ||
+            typeof entry["label"] !== "string" ||
+            typeof entry["multiPriority"] !== "number" ||
+            !Number.isFinite(entry["multiPriority"]) ||
+            !isRecord(entry["instruction"])
+          )
+            return [];
+          return [
+            Object.freeze({
+              operation: entry["operation"],
+              label: entry["label"],
+              multiPriority: entry["multiPriority"],
+              instruction: Object.freeze({ ...entry["instruction"] }),
+            }),
+          ];
+        })
+      : [];
+  const parameterSchema = value["parameterSchema"];
+  const automaticAdjustments =
+    isRecord(parameterSchema)
+      ? readAutomaticAdjustments(parameterSchema["x-automatic-adjustments"])
+      : [];
   return Object.freeze({
     id: Object.freeze({ name, adapterVersion }),
     parameterVersions: Object.freeze([...parameterVersions]),
     parameterSchema: value["parameterSchema"],
+    automaticAdjustments: Object.freeze([...automaticAdjustments]),
     admittedInputs: Object.freeze(readContracts(value["admittedInputs"])),
     admittedOutputs: Object.freeze(readContracts(value["admittedOutputs"])),
     limits: Object.freeze({ ...limits } as Record<string, number>),

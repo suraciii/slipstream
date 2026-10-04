@@ -56,6 +56,36 @@ For an admitted control, the workspace must show the Photo's actual current
 setting and reset target. Camera-dependent values must come from that Photo's
 initialization, not a generic engine default or an invented camera setting.
 
+## Automatic Adjustments
+
+An admitted automatic adjustment must be an explicit action on the selected
+Processing Step. The request must identify the module operation and carry only
+the module-owned automatic instruction; it must not ask Slipstream to implement
+the correction algorithm.
+
+The native engine must evaluate the instruction against the Photo's actual
+initialized state and return the concrete parameter values that it used.
+Slipstream must capture those values in the guarded Processing Recipe before
+Preview or Export uses them. A later Preview or Export must not recompute the
+automatic correction independently.
+
+The first admitted automatic action is exposure deflicker. Its percentile and
+target level use the native exposure module's valid ranges. The captured result
+is a manual exposure value with the qualified baseline controls preserved.
+
+The qualified color-calibration action detects an illuminant through the native
+`channelmixerrgb` operation (edge or surface instruction) and captures concrete
+custom chromaticity, temperature, and CAT16 adaptation values. It is admitted
+only for the qualified RAW input and is stored as a concrete color-calibration
+entry; the detection mode itself must never reach Preview or Export.
+Automatic evaluation must be refused when the source or engine cannot produce
+a deterministic result, and refusal must leave the saved Recipe unchanged.
+
+Automatic evaluation and Recipe saving are one guarded client operation:
+stale Recipe or source revisions must reject the captured result. A failed or
+stale evaluation must not publish a Preview, Export, or partially updated
+Recipe.
+
 A deployment upgrade must not silently enable a new correction, reset saved
 settings, or reinterpret an unsupported setting as another setting. Saved
 settings must remain readable when they cannot currently be executed. The
