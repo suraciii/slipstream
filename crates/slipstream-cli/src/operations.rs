@@ -133,6 +133,15 @@ pub(crate) fn command_operation(command: &Command) -> Operation {
                     Operation::PhotosProxyRemove
                 }
             },
+            PhotoCommand::Edit { command } => match command {
+                edit::EditCommand::Get { .. } => Operation::PhotosProcessingRecipeGet,
+                edit::EditCommand::Set { .. } | edit::EditCommand::Reset { .. } => {
+                    Operation::PhotosProcessingRecipeSave
+                }
+                edit::EditCommand::Preview { .. } => Operation::PhotosProcessingPreview,
+                edit::EditCommand::Export { .. } => Operation::PhotosProcessingExport,
+                edit::EditCommand::ExportStatus { .. } => Operation::PhotosProcessingExportStatus,
+            },
             PhotoCommand::ProcessingRecipe { command } => match command {
                 development::ProcessingRecipeCommand::Get { .. } => {
                     Operation::PhotosProcessingRecipeGet

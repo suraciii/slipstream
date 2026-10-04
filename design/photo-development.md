@@ -27,6 +27,13 @@ delete a step. Recipe revisions remain independent of Rating and Selection
 State. The active browser step is a selection over this collection, not a hidden
 pipeline position.
 
+The Agent-facing stateful API calls this current projection `Edit State`: the
+selected step, input binding, Engine Modules, qualified control values, and
+revision. `Edit Recipe` remains the complete saved snapshot and advanced
+composition representation. Stateful `set` and `reset` mutations are guarded
+compare-and-set writes over that same durable recipe; they do not introduce a
+Session, Workflow, Preset, or engine-history store.
+
 A step's input binding is one of three guarded kinds: the Photo's Original
 File under its guarded source revision, one retained immutable Processing
 Artifact under its captured image contract, or — as a bounded preview

@@ -130,6 +130,7 @@ fn save(
         request_id: request_id.to_owned(),
         expected_recipe_revision: expected_recipe_revision.map(str::to_owned),
         expected_source_revision: source_revision.to_owned(),
+        request_intent: None,
         recipe,
         automatic_adjustment: None,
     }

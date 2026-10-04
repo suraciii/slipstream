@@ -23,7 +23,9 @@ editing history or save corrections to an external XMP Sidecar.
 
 The Web and CLI must use the same service-owned settings and capability
 boundaries. Neither client may bypass Slipstream by connecting directly to the
-engine. This specification does not add a public MCP interface or new CLI syntax.
+engine. The stateful CLI surface is the closed `photos edit` grammar; it does
+not add a public MCP interface, a native module browser, or arbitrary engine
+history syntax.
 
 ## Local Availability
 
@@ -43,6 +45,13 @@ Film must remain unavailable unless separately qualified and admitted.
 An engine module being installed or discoverable must not make it a supported
 Slipstream control. Only controls admitted for the deployed processing bundle,
 Photo source, and requested output may be offered as executable.
+
+The current stateful MVP qualifies `darktable.exposure.ev` from `0` through
+`1` EV. The Edit State exposes this product control and its reset target.
+White balance remains readable/saveable only where retained intent exists; its
+stateful native mapping is not qualified and therefore must be refused.
+Color calibration, highlight recovery, and arbitrary native stack controls
+remain outside the product surface.
 
 Exposure and white balance retain the semantics in
 [Development Controls](photo-development.md#development-controls). The fixed

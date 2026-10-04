@@ -6,6 +6,15 @@ Slipstream includes third-party components. Those components remain under their 
 
 [`RUST-LICENSES.html`](RUST-LICENSES.html) contains the notices and license texts for the Rust executables' locked Linux runtime dependency graph. `Cargo.lock` identifies the exact component versions.
 
+## Standalone SpektraFilm migration
+
+[`third_party/spektrafilm-rs`](third_party/spektrafilm-rs) is pinned to the
+`main-0.3.4` branch of
+[`suraciii/spektrafilm-rs`](https://github.com/suraciii/spektrafilm-rs) and
+remains a separate GPL-3.0 project. Its f64 CLI is built by `bun run build`,
+but it is not a member of Slipstream's MIT Cargo workspace and is not linked
+into the Slipstream server.
+
 ## Web application
 
 The built Web application includes Vite's module-preload helper under the following license:

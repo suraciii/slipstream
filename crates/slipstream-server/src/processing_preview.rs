@@ -85,8 +85,64 @@ fn preview_parameters<'a>(
     }
 }
 
-type PreviewIntentRegistry = Mutex<HashMap<String, (u64, Arc<AtomicBool>)>>;
+#[derive(Clone, Debug)]
+struct PreviewRecord {
+    recipe_revision: String,
+    step_id: String,
+    identity: String,
+}
 
+type PreviewResultRegistry = Mutex<HashMap<String, PreviewRecord>>;
+
+static PREVIEW_RESULTS: LazyLock<PreviewResultRegistry> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) fn preview_status(
+    photo_id: &str,
+    recipe: Option<&slipstream_core::ComposableEditRecipe>,
+) -> serde_json::Value {
+    let Some(recipe) = recipe else {
+        return serde_json::json!({"state": "not-requested", "fresh": false});
+    };
+    let Some(step_id) = recipe.current_step_id.as_ref() else {
+        return serde_json::json!({"state": "not-requested", "fresh": false});
+    };
+    let results = PREVIEW_RESULTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let Some(record) = results.get(photo_id) else {
+        return serde_json::json!({"state": "not-requested", "fresh": false});
+    };
+    let fresh = record.recipe_revision == recipe.revision && record.step_id == step_id.as_str();
+    serde_json::json!({
+        "state": if fresh { "fresh" } else { "stale" },
+        "fresh": fresh,
+        "recipeRevision": record.recipe_revision,
+        "stepId": record.step_id,
+        "identity": record.identity,
+    })
+}
+
+fn remember_preview(
+    photo_id: &str,
+    recipe: &slipstream_core::ComposableEditRecipe,
+    step_id: &str,
+    identity: &ProcessingPreviewIdentity,
+) {
+    PREVIEW_RESULTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(
+            photo_id.to_owned(),
+            PreviewRecord {
+                recipe_revision: recipe.revision.clone(),
+                step_id: step_id.to_owned(),
+                identity: identity.digest(),
+            },
+        );
+}
+
+type PreviewIntentRegistry = Mutex<HashMap<String, (u64, Arc<AtomicBool>)>>;
 static PREVIEW_INTENTS: LazyLock<PreviewIntentRegistry> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_PREVIEW_INTENT: AtomicU64 = AtomicU64::new(0);
@@ -253,6 +309,7 @@ fn ready_response(
     bundle_id: &str,
     comparison: PreviewComparison,
 ) -> Response {
+    remember_preview(photo_id, recipe, step_id, identity);
     let mut response = Response::new(Body::from(execution.bytes));
     *response.status_mut() = StatusCode::OK;
     let headers = response.headers_mut();

@@ -55,6 +55,40 @@ that historical attribution may remain unknown. A `library check` timeout does
 not stop its admitted scan; use `status` to inspect the service-owned cycle.
 Never promote a current-state guess into a claim that a lost mutation succeeded.
 
+## Stateful Agent Editing
+
+For ordinary step-by-step editing, use the small stateful surface rather than
+constructing a complete Processing Recipe:
+
+1. Run `photos edit get PHOTO_ID`. Preserve `sourceRevision`, nullable
+   `editRevision`, `currentStepId`, current controls, `engineModules`, and
+   `webUrl`. Use the discovered Engine Module/control IDs exactly; discovery
+   does not authorize arbitrary native operations.
+2. Run
+   `photos edit set PHOTO_ID darktable.exposure ev 0.5 --revision REVISION
+   --request exposure-001`. The value is JSON, so quote object/array values
+   when a qualified control accepts them. Omit `--revision` only for the
+   first state creation. Use `--from artifact:ARTIFACT_ID` only for an
+   explicit immutable artifact handoff; `Original` is the default.
+3. Re-read after each accepted mutation. A repeated request identity may be
+   replayed safely; a different body under that identity is a conflict. A
+   stale revision requires a fresh read and an explicit decision. `reset`
+   writes the control's discovered reset value and does not delete the step.
+4. Run `photos edit preview PHOTO_ID --file NEW_PATH` when a bounded current
+   rendition is needed. The command selects the current step, validates its
+   identity, and never replaces an existing path. A later edit makes the
+   previous Preview stale.
+5. Run `photos edit export PHOTO_ID --revision REVISION --request export-001`
+   directly when a full Export is requested; Preview is not a prerequisite.
+   Inspect `photos edit export-status PHOTO_ID export-001` until terminal and
+   reconcile unknown outcomes with the same request identity.
+
+The MVP currently qualifies darktable exposure `ev` from `0` through `1` EV.
+White balance, color calibration, highlight recovery, and mutable SpektraFilm
+controls remain explicit refusals until their native mappings and qualification
+evidence exist. Never substitute Camera Preview, a different Engine Module, a
+new artifact, or a guessed revision after a refusal.
+
 ## Compose Processing Steps
 
 Use a matching client and service with qualified module assets. Run commands

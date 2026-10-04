@@ -281,10 +281,9 @@ enum ComposableReceiptOutcome {
     Unchanged,
 }
 
-/// The digest payload of one save request. It covers every field the caller
-/// controls except the recipe revision, which the commit mints, so two
-/// equal intents digest equally while any changed step, module, input,
-/// parameter, current step, Photo identity, or guard digests differently.
+/// The digest payload of one complete recipe save request. It covers every
+/// field the caller controls except the recipe revision, which the commit
+/// mints.
 #[derive(Serialize)]
 struct SavePayload<'a> {
     kind: &'static str,
@@ -302,6 +301,15 @@ struct SaveAutomaticAdjustment<'a> {
     operation: &'a str,
     multi_priority: i64,
     instruction: &'a serde_json::Value,
+}
+
+/// A stateful facade's stable command intent. The complete recipe is
+/// reconstructed from mutable state and therefore cannot be the replay key.
+#[derive(Serialize)]
+struct StatefulSavePayload<'a> {
+    kind: &'static str,
+    photo_id: &'a str,
+    intent: &'a Value,
 }
 
 /// Reads one Photo's saved composable recipe in a single serialized read.
@@ -714,11 +722,21 @@ fn same_committed_content(stored: &ComposableEditRecipe, submitted: &ComposableE
 }
 
 /// The canonical payload digest of one save request, over the canonical
-/// step order.
+/// step order. Stateful facade requests use their stable command intent
+/// instead of a recipe reconstructed from mutable state.
 fn save_payload_digest(
     mutation: &SaveComposableEditRecipe,
     submitted: &ComposableEditRecipe,
 ) -> Result<String, PersistenceError> {
+    if let Some(intent) = mutation.request_intent.as_ref() {
+        let payload = StatefulSavePayload {
+            kind: "stateful-edit-save-v1",
+            photo_id: &mutation.photo_id,
+            intent,
+        };
+        let bytes = serde_json::to_vec(&payload).map_err(|_| PersistenceError::Storage)?;
+        return Ok(format!("{:x}", Sha256::digest(bytes)));
+    }
     let record = recipe_record(submitted);
     let digest_record = mutation
         .automatic_adjustment
