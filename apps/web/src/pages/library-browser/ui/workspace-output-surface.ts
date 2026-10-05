@@ -51,9 +51,9 @@ export function createWorkspaceOutputSurface(
           : "";
       if (reason)
         reason.textContent = model.xmp.isStale
-          ? "This file captures an earlier saved recipe."
+          ? "This file captures an earlier saved Edit State."
           : waiting
-            ? "Finish saving the recipe before exporting XMP."
+            ? "Finish saving the Edit State before exporting XMP."
             : "";
       if (submit) {
         submit.disabled = loading || !model.xmp.canSubmit;

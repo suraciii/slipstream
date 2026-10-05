@@ -212,20 +212,18 @@ export function createComposableEditorSurface(
     original.disabled = blocked;
     artifactInput.disabled = blocked;
     state.textContent = composable.readPending
-      ? "Reading the Processing Recipe…"
+      ? "Reading the Edit State…"
       : composable.note;
     steps.replaceChildren();
     for (const step of composable.steps) {
       const item = document.createElement("li");
       item.dataset.stepId = step.stepId;
-      const select = button(
-        `${step.stepId} — ${step.module} (${step.inputNote})`,
-        () =>
-          send({
-            kind: "editor-composable-select",
-            photoId: next.photoId,
-            stepId: step.stepId,
-          }),
+      const select = button(`${step.module} (${step.inputNote})`, () =>
+        send({
+          kind: "editor-composable-select",
+          photoId: next.photoId,
+          stepId: step.stepId,
+        }),
       );
       select.disabled = blocked;
       select.setAttribute("aria-pressed", String(step.current));
@@ -560,7 +558,7 @@ export function createComposableEditorSurface(
           !artifact.canDownload,
         ),
         button(
-          "Use as step input",
+          "Use as service input",
           () =>
             send({
               kind: "editor-artifact-use",
@@ -577,7 +575,7 @@ export function createComposableEditorSurface(
       const item = document.createElement("li");
       item.dataset.requestId = work.requestId;
       const note = document.createElement("span");
-      note.textContent = `${work.module} / ${work.stepId}: ${work.note}`;
+      note.textContent = `${work.stepId} · ${work.module}: ${work.note}`;
       item.append(
         note,
         button("Check status", () =>

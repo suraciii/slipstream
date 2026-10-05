@@ -15,7 +15,8 @@ import {
   openFirst,
   openEdit,
   navigate,
-  setExposure,
+  setAdvancedExposure,
+  openAdvancedCompatibility,
   type ProcessingExportFixture as ProcessingExportWork,
 } from "./browser-test-support/processing-fixtures.js";
 
@@ -41,6 +42,7 @@ test("retained tasks and artifacts restore after a browser reload and Photo navi
   ]);
   state.artifacts.set(photoId, [retained, expired]);
   await openFirst(page, running.url);
+  await openAdvancedCompatibility(page);
   await expect(exportRow(page, "failed-request")).toContainText(
     "The processing allowance is insufficient for this output.",
   );
@@ -69,6 +71,7 @@ test("retained tasks and artifacts restore after a browser reload and Photo navi
   await page.reload();
   await expect(page.locator("[data-review]")).toBeVisible();
   await openEdit(page);
+  await openAdvancedCompatibility(page);
   await expect(exportRow(page, "succeeded-request")).toBeVisible();
   await navigate(page, "Next");
   await expect(page.locator("[data-photo-editor-export-list] li")).toHaveCount(
@@ -82,7 +85,7 @@ test("retained tasks and artifacts restore after a browser reload and Photo navi
     3,
   );
   await expect(artifactRow(page, retained.artifactId)).toBeVisible();
-  await setExposure(page, "0.75");
+  await setAdvancedExposure(page, "0.75");
   await expect
     .poll(() => state.recipes.get(photoId)?.steps[0]?.parameters)
     .toEqual(parameters(0.75));
@@ -96,7 +99,7 @@ test("retained tasks and artifacts restore after a browser reload and Photo navi
     }),
   ).toBeEnabled();
   await artifactRow(page, retained.artifactId)
-    .getByRole("button", { name: "Use as step input" })
+    .getByRole("button", { name: "Use as service input" })
     .click();
   await expect
     .poll(() => state.recipes.get(photoId)?.steps[0]?.input)
@@ -151,7 +154,7 @@ test("retry uses captured settings despite newer edits and cancellation is avail
     );
   });
   await openFirst(page, running.url);
-  await setExposure(page, "0.8");
+  await setAdvancedExposure(page, "0.8");
   await expect
     .poll(() => state.recipes.get(photoId)?.steps[0]?.parameters)
     .toEqual(parameters(0.8));
@@ -182,7 +185,7 @@ test("a failed submission receipt retains its reason and captured retry action",
   const state = await mockEditor(page, running);
   const photoId = state.photos[0]!;
   let requestId = "";
-  await page.route("**/api/photos/*/processing-exports", (route) => {
+  await page.route("**/api/photos/*/edit/export", (route) => {
     if (route.request().method() === "GET") return route.fallback();
     const request = JSON.parse(route.request().postData()!) as {
       requestId: string;

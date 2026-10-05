@@ -17,6 +17,7 @@ import {
 import {
   startReview,
   openPhotoToolsView,
+  openPhotoEditorAdvanced,
 } from "./browser-test-support/surfaces.js";
 import { processingModuleDefaultsFixture } from "./browser-test-support/processing-fixtures.js";
 setupBrowserSmoke();
@@ -31,6 +32,7 @@ test("an empty recipe shows no processing result and keeps Camera Preview separa
     const path = new URL(request.url()).pathname;
     if (
       path.includes("processing-preview/") ||
+      path.endsWith("/edit/preview") ||
       (request.method() === "POST" && path.endsWith("processing-exports"))
     )
       work.push(path);
@@ -38,6 +40,9 @@ test("an empty recipe shows no processing result and keeps Camera Preview separa
   const running = await server(base, root);
   await startReview(page, running.url, "All Photos");
   await openPhotoToolsView(page, "edit");
+  await expect(
+    page.locator("[data-photo-editor-advanced]"),
+  ).not.toHaveAttribute("open", "");
   const reference = page.locator("[data-photo-editor-camera-reference]");
   await expect(reference).toBeEnabled();
   await expect(
@@ -55,7 +60,7 @@ test("an empty recipe shows no processing result and keeps Camera Preview separa
   expect(work).toEqual([]);
 });
 
-test("real-processing: selected-step Preview, explicit Export, retained reopen, and explicit artifact input", async ({
+test("real-processing: current Edit Preview, explicit Export, retained reopen, and explicit artifact input", async ({
   page,
 }) => {
   const missing = missingProcessingEnvironment();
@@ -119,6 +124,10 @@ test("real-processing: selected-step Preview, explicit Export, retained reopen, 
   expect(seeded.status).toBe(201);
   await startReview(page, running.url, "All Photos");
   await openPhotoToolsView(page, "edit");
+  await expect(
+    page.getByLabel("Current exposure (EV)", { exact: true }),
+  ).toBeVisible();
+  await openPhotoEditorAdvanced(page);
   await expect(
     page.locator("[data-photo-editor-composable-steps]"),
   ).toContainText("step-1");

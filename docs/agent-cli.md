@@ -57,12 +57,13 @@ Never promote a current-state guess into a claim that a lost mutation succeeded.
 
 ## Stateful Agent Editing
 
-For ordinary step-by-step editing, use the small stateful surface rather than
-constructing a complete Processing Recipe:
+For ordinary editing, use the small stateful surface around the current Edit
+State rather than constructing a complete internal snapshot:
 
 1. Run `photos edit get PHOTO_ID`. Preserve `sourceRevision`, nullable
-   `editRevision`, `currentStepId`, current controls, `engineModules`, and
-   `webUrl`. Use the discovered Engine Module/control IDs exactly; discovery
+   `editRevision`, current Engine, current controls, `engineModules`, and
+   `webUrl`. A returned `currentStepId` is diagnostic identity only. Use the
+   discovered Engine Module/control IDs exactly; discovery
    does not authorize arbitrary native operations.
 2. Run
    `photos edit set PHOTO_ID darktable.exposure ev 0.5 --revision REVISION
@@ -73,9 +74,10 @@ constructing a complete Processing Recipe:
 3. Re-read after each accepted mutation. A repeated request identity may be
    replayed safely; a different body under that identity is a conflict. A
    stale revision requires a fresh read and an explicit decision. `reset`
-   writes the control's discovered reset value and does not delete the step.
+   writes the control's discovered reset value and does not delete the saved
+   Edit State.
 4. Run `photos edit preview PHOTO_ID --file NEW_PATH` when a bounded current
-   rendition is needed. The command selects the current step, validates its
+   rendition is needed. The command reads the current Edit State, validates its
    identity, and never replaces an existing path. A later edit makes the
    previous Preview stale.
 5. Run `photos edit export PHOTO_ID --revision REVISION --request export-001`
@@ -87,66 +89,35 @@ The MVP currently qualifies darktable exposure `ev` from `0` through `1` EV.
 White balance, color calibration, highlight recovery, and mutable SpektraFilm
 controls remain explicit refusals until their native mappings and qualification
 evidence exist. Never substitute Camera Preview, a different Engine Module, a
-new artifact, or a guessed revision after a refusal.
+new Artifact, or a guessed revision after a refusal.
 
-## Compose Processing Steps
+## Artifact Handoff
 
-Use a matching client and service with qualified module assets. Run commands
-in JSON mode and inspect the exit code and envelope before using their data.
-The [CLI Reference](cli-reference.md#photo-development) owns the exact command
-grammar, input shapes, and result fields.
+The normal Agent surface is the current Edit State. Do not construct or save a
+complete Processing Recipe; that snapshot format is for compatibility and
+internal recovery.
 
-1. Run `processing modules` and `photos processing-recipe get PHOTO_ID`.
-   Preserve the observed source revision, recipe revision, and Photo Web URL.
-   Read each module's own availability, qualified parameter schema, input
-   contract, and resource limits. Module readiness does not prove that the
-   selected Photo or artifact is compatible. Library scan progress remains
-   independent; never classify a busy engine as an unreadable Original.
-2. Build a complete guarded save document with a new request identity, the
-   observed revisions, zero or more steps, and the selected current step.
-   Each step has its own module, explicit Original or artifact binding, and
-   complete versioned parameter tree. Copy admitted defaults from discovery;
-   never flatten, merge, or invent module parameters. Run
-   `photos processing-recipe save PHOTO_ID --input FILE`. On conflict, read
-   current facts and decide again. On uncertainty, retain and replay the exact
-   input under the same identity before dependent writes or processing.
+When another service needs the result:
 
-For an admitted automatic adjustment, use
-`photos processing-recipe auto PHOTO_ID --input FILE` with the same complete
-guarded recipe plus one `automaticAdjustment` object. Its `stepId` must name
-the current Original-bound step. The instruction belongs to the native module;
-do not calculate replacement parameters in the client. Replay the exact input
-under the same request identity after an uncertain response. A stale guard,
-engine refusal, or failed detection leaves the saved Recipe unchanged.
-3. Request `photos processing-preview PHOTO_ID --step STEP_ID --file PATH`.
-   Use a new destination. Inspect the returned input, parameter, bundle, and
-   Preview identity. Pending work is not a downloaded image. A refusal does
-   not permit another module or Camera Preview to stand in for the result.
-4. Submit `photos processing-export PHOTO_ID --input FILE` with a new request
-   identity and the confirmed recipe and source guards. Keep the exact input.
-   Accepted work continues under service ownership after the client exits.
-   Inspect `photos processing-export-status PHOTO_ID REQUEST_ID` until its
-   terminal outcome. A lost submission response requires replay of the exact
-   submission; absence from a list alone does not prove non-admission.
-5. Download a completed artifact with
-   `processing artifact-download ARTIFACT_ID --file PATH`. Report a local
-   download only after `fileCommitted` is true. The client verifies provenance,
-   image contract, byte length, and SHA-256 and never replaces an existing
-   destination. Independently hash and decode the file for qualification.
-6. To compose another step, explicitly select a retained compatible artifact
-   and its concrete contract as input. Exporting an upstream step again does
-   not retarget this binding. Return the Photo Web URL, confirmed step and
-   parameters, captured revisions, request identity, terminal state, artifact
-   identity, and committed local path.
+1. Read the confirmed Edit State and use the discovered Engine and Control IDs.
+2. Run photos edit export with the current edit revision and a new request ID.
+3. Inspect photos edit export-status until the request reaches a terminal state.
+4. Read the published Processing Artifact and download it with
+   processing artifact-download. Confirm fileCommitted, the byte length, digest,
+   and the image contract before handing it to the next service.
+5. Give the next service the immutable Artifact identity and its actual image
+   contract. The next service starts its own Edit State from that Artifact.
 
-Reopening a Photo restores retained tasks and artifacts from the service. A
-failed or cancelled task may be retried explicitly with a new request identity
-against its retained snapshot. A retry never captures today's recipe in place
-of that snapshot. Expired input, changed source, unavailable assets, and
-insufficient capacity require the reported recovery action.
+The Artifact carries the input identity, Engine, concrete Controls, bundle and
+schema identity, source revision, output contract, Export identity, digest, and
+retention facts. A downstream service must not ask Slipstream for an upstream
+Edit State or assume a latest result.
 
-Source replacement requires an explicit guarded rebind using both the observed
-recipe revision and newly observed source revision. Reopening or requesting a
-Preview must not rebind saved intent. Qualification remains specific to the
-module, bundle, input, parameter tree, output contract, geometry, and finite
-execution allowance exercised by the qualification evidence.
+Existing processing-recipe routes are compatibility and migration interfaces.
+They may expose complete stored parameters to an authorized advanced client, but
+they are not the normal Agent workflow and must not appear as the primary
+editing model.
+
+A changed source or stale edit revision requires a fresh Edit State read. A lost
+mutation or Export response is reconciled with the same request identity.
+Preview is optional and never a prerequisite for Export.

@@ -46,18 +46,18 @@ pub enum EditCommand {
         #[arg(long, value_name = "REQUEST_ID", value_parser = crate::nonempty)]
         request: String,
     },
-    /// Download a Preview of the current stateful edit.
+    /// Download an Edit Preview of the current Edit State.
     Preview {
         #[arg(value_parser = crate::nonempty)]
         photo_id: String,
         #[arg(long, value_name = "PATH", required = true)]
         file: PathBuf,
     },
-    /// Submit the current stateful edit for an explicit Export.
+    /// Export the current Edit State as an immutable Processing Artifact.
     Export {
         #[arg(value_parser = crate::nonempty)]
         photo_id: String,
-        #[arg(long, value_name = "REVISION", value_parser = crate::nonempty, required = true)]
+        #[arg(long, value_name = "EDIT_REVISION", value_parser = crate::nonempty, required = true)]
         revision: String,
         #[arg(long, value_name = "REQUEST_ID", value_parser = crate::nonempty)]
         request: String,
@@ -105,7 +105,7 @@ fn state_step(state: &Value) -> Result<String, CommandFailure> {
 async fn get_state(client: &ServiceClient, photo_id: &str) -> Result<Value, CommandFailure> {
     let mut state: Value = client
         .json(
-            Operation::PhotosProcessingRecipeGet,
+            Operation::PhotosEditGet,
             Method::GET,
             client.endpoint(&["api", "photos", photo_id, "edit"]),
             None,
@@ -115,13 +115,11 @@ async fn get_state(client: &ServiceClient, photo_id: &str) -> Result<Value, Comm
         || !state["sourceAvailable"].is_boolean()
         || !state["engineModules"].is_array()
     {
-        return Err(CommandFailure::transport(
-            Operation::PhotosProcessingRecipeGet,
-        ));
+        return Err(CommandFailure::transport(Operation::PhotosEditGet));
     }
     state["webUrl"] = Value::String(
         super::web_url(&client.origin, &format!("/?photoId={photo_id}"))
-            .map_err(|()| CommandFailure::transport(Operation::PhotosProcessingRecipeGet))?,
+            .map_err(|()| CommandFailure::transport(Operation::PhotosEditGet))?,
     );
     Ok(state)
 }
@@ -131,12 +129,13 @@ async fn mutate(
     admission: &AdmissionState,
     photo_id: &str,
     request: &str,
+    operation: Operation,
     endpoint: &str,
     body: Value,
 ) -> Result<Value, CommandFailure> {
     validate_request(request)?;
     let identity = MutationIdentity {
-        operation: Operation::PhotosProcessingRecipeSave,
+        operation,
         photo_ids: vec![photo_id.to_owned()],
         album_id: None,
         album_name: None,
@@ -186,6 +185,7 @@ pub(crate) async fn execute(
                 admission,
                 photo_id,
                 request,
+                Operation::PhotosEditSet,
                 "set",
                 json!({
                     "requestId": request,
@@ -210,6 +210,7 @@ pub(crate) async fn execute(
                 admission,
                 photo_id,
                 request,
+                Operation::PhotosEditReset,
                 "reset",
                 json!({
                     "requestId": request,
@@ -223,7 +224,7 @@ pub(crate) async fn execute(
         EditCommand::Preview { photo_id, .. } => {
             let state = get_state(client, photo_id).await?;
             let step_id = state_step(&state)?;
-            processing_preview_download::download(
+            processing_preview_download::download_current(
                 client,
                 photo_id,
                 &step_id,
@@ -241,27 +242,30 @@ pub(crate) async fn execute(
             let state = get_state(client, photo_id).await?;
             let step_id = state_step(&state)?;
             let source_revision = state_revision(&state, "sourceRevision")?;
-            let args = super::development::ProcessingExportArgs {
-                photo_id: photo_id.clone(),
-                input: String::new(),
-            };
-            super::development::execute_processing_export(
+            let edit_revision = revision.clone();
+            super::development::execute_edit_export(
                 client,
                 admission,
-                &args,
-                json!({
-                    "requestId": request,
-                    "stepId": step_id,
-                    "expectedRecipeRevision": revision,
-                    "expectedSourceRevision": source_revision,
-                }),
+                photo_id,
+                request,
+                &edit_revision,
+                &step_id,
+                &source_revision,
             )
             .await
         }
         EditCommand::ExportStatus {
             photo_id,
             request_id,
-        } => super::development::processing_export_status(client, photo_id, request_id).await,
+        } => {
+            super::development::processing_export_status(
+                client,
+                photo_id,
+                request_id,
+                Operation::PhotosEditExportStatus,
+            )
+            .await
+        }
     }
 }
 

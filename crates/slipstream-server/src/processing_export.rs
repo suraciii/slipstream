@@ -1,5 +1,5 @@
-//! Explicit composable Export and Processing Artifact HTTP surface
-//! (Issue #496).
+//! Explicit Processing Artifact HTTP surface and compatibility Export
+//! execution (Issue #496).
 //!
 //! `POST /api/photos/{id}/processing-exports` submits the recipe's selected
 //! current Processing Step for an explicit Export. Admission captures the
@@ -16,7 +16,9 @@
 //! explicitly selected retained Development TIFF. Every other pairing
 //! records a durable, replayable, structured refusal before execution.
 //! Historical `/exports` reads retain acknowledged records and bytes.
-//! New execution uses only the composable Processing Step surface.
+//! The primary `/edit/export` route resolves the current Edit State and
+//! delegates here; the named Processing Step surface remains compatibility
+//! only.
 //!
 //! `GET /api/photos/{id}/processing-exports/{requestId}` reads the durable
 //! work record — the committed lifecycle state a caller reconciles against
@@ -396,7 +398,7 @@ pub(crate) async fn submit_processing_export(
                 return error(
                     StatusCode::CONFLICT,
                     "step_not_current",
-                    "The recipe carries no selected current Processing Step",
+                    "The current Edit State has no selected Processing Engine",
                 );
             }
         },
@@ -404,14 +406,14 @@ pub(crate) async fn submit_processing_export(
             return error(
                 StatusCode::NOT_FOUND,
                 "missing_recipe",
-                "Save a Processing Recipe before submitting an Export",
+                "Save an Edit State before submitting an Export",
             );
         }
         Err(_) => {
             return error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "storage",
-                "The Processing Recipe could not be read",
+                "The current Edit State could not be read",
             );
         }
     };
@@ -430,7 +432,7 @@ pub(crate) async fn submit_processing_export(
         return error_details(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_settings",
-            "The selected Processing Step carries parameters its module refuses",
+            "The current Edit State carries Controls its Engine refuses",
             json!({
                 "module": selected.0,
                 "reasonCode": reason.code,
@@ -446,7 +448,7 @@ pub(crate) async fn submit_processing_export(
         return error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "unknown_module",
-            "The selected Processing Step names an unknown module",
+            "The current Edit State names an unknown Processing Engine",
         );
     };
     if selected.0 == SPEKTRAFILM_MODULE
@@ -580,13 +582,13 @@ async fn outcome_response(state: &HttpState, outcome: ProcessingExportSubmitOutc
         ProcessingExportSubmitOutcome::Refused(refusal) => error_details(
             StatusCode::SERVICE_UNAVAILABLE,
             "module_parameters_unavailable",
-            "The selected Processing Step has no qualified Export adapter in this deployment",
+            "The current Edit State has no qualified Export adapter in this deployment",
             json!({"refusal": refusal_json(&refusal), "replayed": false}),
         ),
         ProcessingExportSubmitOutcome::Replayed(refusal) => error_details(
             StatusCode::SERVICE_UNAVAILABLE,
             "module_parameters_unavailable",
-            "The selected Processing Step has no qualified Export adapter in this deployment",
+            "The current Edit State has no qualified Export adapter in this deployment",
             json!({"refusal": refusal_json(&refusal), "replayed": true}),
         ),
         ProcessingExportSubmitOutcome::Admitted(_) => error(
@@ -655,7 +657,7 @@ async fn outcome_response(state: &HttpState, outcome: ProcessingExportSubmitOutc
         ProcessingExportSubmitOutcome::RecipeConflict(recipe) => error_details(
             StatusCode::CONFLICT,
             "recipe_conflict",
-            "The expected composable recipe revision is no longer current",
+            "The expected Edit revision is no longer current",
             recipe
                 .as_ref()
                 .map(crate::processing_recipe::recipe_json)
@@ -683,12 +685,12 @@ async fn outcome_response(state: &HttpState, outcome: ProcessingExportSubmitOutc
         ProcessingExportSubmitOutcome::MissingRecipe => error(
             StatusCode::NOT_FOUND,
             "missing_recipe",
-            "Save a Processing Recipe before submitting an Export",
+            "Save an Edit State before submitting an Export",
         ),
         ProcessingExportSubmitOutcome::StepNotCurrent(_) => error(
             StatusCode::CONFLICT,
             "step_not_current",
-            "Export is bounded to the recipe's selected current step",
+            "Export is bounded to the current Edit State",
         ),
         ProcessingExportSubmitOutcome::IncompatibleInput(reason) => match reason {
             ProcessingInputHandoffError::OriginalPhotoMismatch

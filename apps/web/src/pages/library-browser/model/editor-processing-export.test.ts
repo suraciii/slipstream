@@ -10,6 +10,7 @@ import { parseProcessingExportWork } from "./processing-export.js";
 type ExportRequest = {
   requestId: string;
   stepId?: string;
+  expectedEditRevision?: string;
   expectedSourceRevision?: string;
 };
 function requestBody(body: RequestInit["body"]): string {
@@ -256,12 +257,16 @@ describe("retained Processing Exports", () => {
   });
 
   test("acceptance returns before execution completes and enables cancellation", async () => {
+    let submittedPath = "";
+    let submittedBody: ExportRequest | undefined;
     const f = fixture((_path, options) => {
       const body = JSON.parse(requestBody(options?.body)) as ExportRequest;
+      submittedPath = requestUrl(_path);
+      submittedBody = body;
       return Response.json(
         {
           outcome: "accepted",
-          receipt: work(body.requestId, "accepted", body.stepId),
+          receipt: work(body.requestId, "accepted", "current-step"),
         },
         { status: 202 },
       );
@@ -270,6 +275,8 @@ describe("retained Processing Exports", () => {
     expect(f.owner.view().state).toBe("running");
     expect(f.owner.view().canCancel).toBe(true);
     expect(f.owner.view().processingExports[0]?.state).toBe("accepted");
+    expect(submittedPath).toBe("/api/photos/photo-1/edit/export");
+    expect(submittedBody).toMatchObject({ expectedEditRevision: "recipe" });
   });
 
   test("retry of retained failed work captures the old request even when the current draft changes", async () => {
@@ -324,8 +331,8 @@ describe("retained Processing Exports", () => {
     expect(calls).toHaveLength(2);
     expect(calls[1]).toEqual(calls[0]);
     expect(
-      (JSON.parse(calls[1]!.body) as ExportRequest).expectedSourceRevision,
-    ).toBe("source\u0000revision");
+      (JSON.parse(calls[1]!.body) as ExportRequest).expectedEditRevision,
+    ).toBe("recipe");
     expect(f.owner.view().canSubmit).toBe(false);
   });
 
@@ -484,27 +491,29 @@ describe("retained Processing Exports", () => {
   });
 
   test("a retained receipt cannot resolve uncertain admission without exact-body replay", async () => {
-    let captured: { requestId: string; stepId: string } | undefined;
+    let captured:
+      | { requestId: string; expectedEditRevision: string }
+      | undefined;
     let submits = 0;
     const f = fixture((_path, options) => {
       if (options?.method === "POST") {
         submits += 1;
         captured = JSON.parse(requestBody(options.body)) as {
           requestId: string;
-          stepId: string;
+          expectedEditRevision: string;
         };
         if (submits === 1) throw new Error("response lost");
         return Response.json(
           {
             outcome: "replayed",
-            receipt: work(captured.requestId, "executing", captured.stepId),
+            receipt: work(captured.requestId, "executing", "current-step"),
           },
           { status: 202 },
         );
       }
       return Response.json({
         photoId: "photo-1",
-        exports: [work(captured!.requestId, "executing", captured!.stepId)],
+        exports: [work(captured!.requestId, "executing", "current-step")],
         artifacts: [],
       });
     });

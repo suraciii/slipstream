@@ -365,24 +365,25 @@ pub enum PhotoCommand {
         #[arg(long, value_enum, default_value_t = PreviewSize::Review)]
         size: PreviewSize,
     },
-    /// Read or mutate the current stateful Agent Edit State. The complete
-    /// Processing Recipe remains available through `processing-recipe`.
+    /// Read or mutate the current Edit State, then request an Edit Preview or
+    /// immutable Processing Artifact.
     Edit {
         #[command(subcommand)]
         command: edit::EditCommand,
     },
-    /// Read or save one Photo's composable Processing Recipe of zero or
-    /// more module-owned Processing Steps.
+    /// Advanced compatibility interface for complete processing snapshots.
+    /// Normal editing uses `photos edit` and explicit Export artifacts.
+    #[command(hide = true)]
     ProcessingRecipe {
         #[command(subcommand)]
         command: development::ProcessingRecipeCommand,
     },
-    /// Request the Preview of the recipe's selected current Processing
-    /// Step; pending admission and refusal publish no local file.
+    /// Advanced compatibility Preview for a named Processing Step; pending
+    /// admission and refusal publish no local file.
     ProcessingPreview {
         #[arg(value_parser = nonempty)]
         photo_id: String,
-        /// The recipe's selected current Processing Step ID.
+        /// Internal compatibility Processing Step ID.
         #[arg(long, value_name = "STEP_ID", value_parser = nonempty)]
         step: String,
         /// New local image path; an existing file or symbolic link is never
@@ -390,8 +391,8 @@ pub enum PhotoCommand {
         #[arg(long, value_name = "PATH", required = true)]
         file: PathBuf,
     },
-    /// Submit the recipe's selected current Processing Step for an explicit
-    /// Export. The complete guarded body travels in one `--input` document.
+    /// Advanced compatibility Export for a named Processing Step. The
+    /// complete guarded body travels in one `--input` document.
     ProcessingExport(development::ProcessingExportArgs),
     /// Read the durable work record of one submitted Processing Export.
     ProcessingExportStatus {

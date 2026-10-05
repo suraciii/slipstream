@@ -13,7 +13,7 @@ or the [release boundary](0.1-support-and-release.md).
 ## Relationship
 
 Slipstream must remain the application the Photographer uses. It must own Photos,
-saved Edit Recipes, editing conflicts, and Export outcomes. darktable must act as
+saved Edit State, editing conflicts, and Export outcomes. darktable must act as
 the development engine, not a second Photo Library or an external editing
 workspace that the Photographer must manage.
 
@@ -67,14 +67,14 @@ initialization, not a generic engine default or an invented camera setting.
 
 ## Automatic Adjustments
 
-An admitted automatic adjustment must be an explicit action on the selected
-Processing Step. The request must identify the module operation and carry only
+An admitted automatic adjustment must be an explicit action on the current
+Edit State. The request must identify the module operation and carry only
 the module-owned automatic instruction; it must not ask Slipstream to implement
 the correction algorithm.
 
 The native engine must evaluate the instruction against the Photo's actual
 initialized state and return the concrete parameter values that it used.
-Slipstream must capture those values in the guarded Processing Recipe before
+Slipstream must capture those values in the guarded Edit State before
 Preview or Export uses them. A later Preview or Export must not recompute the
 automatic correction independently.
 
@@ -88,12 +88,12 @@ custom chromaticity, temperature, and CAT16 adaptation values. It is admitted
 only for the qualified RAW input and is stored as a concrete color-calibration
 entry; the detection mode itself must never reach Preview or Export.
 Automatic evaluation must be refused when the source or engine cannot produce
-a deterministic result, and refusal must leave the saved Recipe unchanged.
+a deterministic result, and refusal must leave the saved Edit State unchanged.
 
-Automatic evaluation and Recipe saving are one guarded client operation:
-stale Recipe or source revisions must reject the captured result. A failed or
+Automatic evaluation and Edit State saving are one guarded client operation:
+stale edit or source revisions must reject the captured result. A failed or
 stale evaluation must not publish a Preview, Export, or partially updated
-Recipe.
+Edit State.
 
 A deployment upgrade must not silently enable a new correction, reset saved
 settings, or reinterpret an unsupported setting as another setting. Saved
@@ -108,7 +108,7 @@ corrections against the same processing baseline. Their resolution and display
 conversion may differ under the existing output contracts.
 
 An Export must not require a prior preview request to materialize its edits.
-Opening a Photo or requesting an output must not change its saved Edit Recipe.
+Opening a Photo or requesting an output must not change its saved Edit State.
 A result for older settings must not replace a result for newer settings.
 [Autosave and Reversible Editing](photo-development.md#autosave-and-reversible-editing)
 and the existing Export rules own save conflicts and captured Export state.
@@ -123,8 +123,8 @@ a proxy new editing capabilities.
 An invalid setting must be refused without rounding it into a different enum
 choice, truncating an integer, substituting zero, or ignoring the correction.
 The refusal must identify the affected control or unavailable capability.
-Recipe saves must remain atomic and independent from rendering. If an engine
-request fails after a save was confirmed, the confirmed Edit Recipe must remain
+Edit State saves must remain atomic and independent from rendering. If an engine
+request fails after a save was confirmed, the confirmed Edit State must remain
 saved; only the requested output fails. Rendering must not partially save,
 replace, or roll back editing intent.
 

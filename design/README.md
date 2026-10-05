@@ -6,10 +6,12 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 
 ## Photo Development
 
-- [Photo Development Architecture](photo-development.md): recipe ownership, headless processing, concurrency, export snapshots, source safety, and recovery
+- [Photo Editing Model](../docs/photo-editing-model.md): canonical product
+  vocabulary and direct Edit State to Artifact handoff
+- [Photo Development Architecture](photo-development.md): Edit State ownership, headless processing, concurrency, Export snapshots, source safety, and recovery
 - [Photo Editor Workspace](photo-editor-workspace.md): browser ownership, caller-selected module composition, freshness, conflict, and cross-step lifecycle
 - [Development Color Pipeline](development-color.md): module-owned image contracts, qualified scene-referred output, standalone simulation, display separation, and reproducibility
-- [Processing Modules](processing-modules.md): peer adapters, module discovery, explicit inputs, bounded Preview, and immutable Export artifacts
+- [Processing Modules](processing-modules.md): peer Engine adapters, module discovery, explicit inputs, bounded Preview, and immutable Export Artifacts
 - [Native darktable Integration](darktable-integration.md): private MCP interaction, complete parameter discovery, image initialization, fresh engine children, and cutover
 - [Local Photo Executor](processing-executor.md): one application container, serialized engine children, scratch lifetime, cleanup, and restart settlement
 - [Processing Memory](processing-memory.md): the shared container memory/CPU boundary, serialized execution, engine workspace planning, buffer ownership, and resource-failure recovery

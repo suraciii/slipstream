@@ -547,9 +547,13 @@ exists.
 ## Stateful Edit
 
 The Agent-facing stateful surface updates the current `Edit State` one
-qualified Engine Module control at a time. It does not expose the complete
-Edit Recipe tree; `photos processing-recipe` remains the advanced complete
-snapshot/composition interface.
+qualified Engine Module control at a time. It does not expose a complete
+parameter tree or a cross-service pipeline. A successful Export publishes an
+immutable Processing Artifact for a downstream service.
+
+The `photos processing-recipe` routes are compatibility and migration
+interfaces for existing complete snapshots. They are not the normal Agent
+workflow and must not be treated as a second current-edit object.
 
 ```text literal
 slipstream photos edit get PHOTO_ID
@@ -563,19 +567,20 @@ slipstream photos edit export-status PHOTO_ID REQUEST_ID
 ```
 
 `edit get` returns the Photo identity, current source availability and
-revision, nullable `editRevision` and `currentStepId`, the current selected
-Engine Module and product control values, bounded `engineModules` discovery,
-capability booleans, `requiresRebind`, Preview freshness, recent Export and
-Artifact facts, and `webUrl`. It never returns native engine history, host
-paths, or the complete parameter tree.
+revision, nullable `editRevision`, the current selected Engine and product
+control values, bounded `engineModules` discovery, capability booleans,
+`requiresRebind`, Preview freshness, recent Export and Artifact facts, and
+`webUrl`. A returned `currentStepId` is diagnostic identity for compatibility,
+not a second editing object. The response never returns native engine history,
+host paths, or the complete parameter tree.
 
 The MVP-qualified mutation is `darktable.exposure ev`, a finite JSON number
-from `0` through `1` EV. The first `set` binds the current step to the
-Original unless `--from artifact:ARTIFACT_ID` is explicit. Repeated updates of
-the same current Engine Module preserve its input binding; an explicit input
-or a changed Engine Module creates a new current step. Every existing-state
-mutation must pass the latest `--revision`. `reset` writes the discovered
-reset value and never deletes the step. Unsupported or unqualified controls
+from `0` through `1` EV. The first `set` binds the Edit State to the Original
+unless `--from artifact:ARTIFACT_ID` is explicit. Repeated updates of the same
+Engine Module preserve its input binding; an explicit input or a changed Engine
+Module replaces the current Edit State. Every existing-state mutation must
+pass the latest `--revision`. `reset` writes the discovered reset value and
+preserves the state. Unsupported or unqualified controls
 return a structured refusal and do not change state. SpektraFilm is exposed
 as a peer Engine Module with no mutable stateful controls until a separate
 qualification exists.
@@ -583,9 +588,9 @@ qualification exists.
 Successful `set` and `reset` responses contain `outcome` (`saved`,
 `replayed`, or `unchanged`) and the resulting `edit` projection. Request
 identities are idempotent; reusing one identity with a different body
-conflicts. `edit preview` selects the current step and publishes a local file
-only after the existing Processing Preview identity checks pass. A later edit
-makes an earlier Preview stale. `edit export` submits the current step
+conflicts. `edit preview` reads the current Edit State and publishes a local
+file only after the existing Preview identity checks pass. A later edit makes
+an earlier Preview stale. `edit export` submits the confirmed Edit State
 directly; Preview is not required. Export status remains durable and is read
 with the original Photo/request identity. Source changes, stale revisions,
 missing artifacts, and unavailable engines are explicit errors; no automatic
@@ -593,8 +598,12 @@ retry or implicit artifact handoff occurs.
 
 ## Photo Development
 
-Camera Preview (`photos preview`) remains independent of saved editing intent.
-The shared Processing Module surface uses this grammar:
+Camera Preview (`photos preview`) remains independent of the current Edit
+State. The normal editing surface is `photos edit`; a successful Export
+produces a Processing Artifact that another service can consume explicitly.
+The legacy complete-snapshot routes below remain available only for
+compatibility and migration. The shared Processing Engine surface uses this
+grammar:
 
 ```text literal
 slipstream processing modules
@@ -615,6 +624,11 @@ slipstream photos proxy get PHOTO_ID
 slipstream photos proxy create PHOTO_ID --input FILE
 slipstream photos proxy remove PHOTO_ID
 ```
+
+The `processing-recipe`, `processing-preview`, and `processing-export` commands
+in that block are legacy compatibility commands. They must remain available
+for migration and diagnostics, but primary CLI help and Agent guidance should
+lead with `photos edit` and explicit Artifact handoff.
 
 `processing modules` reads `GET /api/processing/modules`. It preserves each
 peer module's parameter schema tree, finite limits, versions, availability,
@@ -1131,9 +1145,11 @@ For `authentication_required`, `access_denied`, `server_busy`, `storage_failed`,
 `photos-processing-preview`, `photos-processing-export`,
 `photos-processing-export-list`, `photos-processing-export-status`,
 `photos-processing-export-cancel`, `photos-processing-export-retry`,
-`photos-historical-export-download`,
-`photos-proxy-get`, `photos-proxy-create`, `photos-proxy-remove`,
-`recovery-unavailable`, `recovery-propose`, or `recovery-apply`.
+`photos-historical-export-download`, `photos-edit-get`, `photos-edit-set`,
+`photos-edit-reset`, `photos-edit-preview`, `photos-edit-export`,
+`photos-edit-export-status`, `photos-proxy-get`, `photos-proxy-create`,
+`photos-proxy-remove`, `recovery-unavailable`, `recovery-propose`, or
+`recovery-apply`.
 `photoIds` in `outcome_unknown` contains all submitted
 Photo IDs in request order. The Album fields identify the submitted target when
 one exists and are null otherwise. Recipe writes, Export submission, and Recovery application can

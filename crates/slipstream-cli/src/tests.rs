@@ -495,28 +495,6 @@ fn envelopes_and_explicit_text_are_deterministic() {
 }
 
 #[test]
-fn help_and_version_are_offline_parser_results() {
-    assert_eq!(
-        Cli::try_parse_from(["slipstream", "--help"])
-            .unwrap_err()
-            .kind(),
-        clap::error::ErrorKind::DisplayHelp
-    );
-    assert_eq!(
-        Cli::try_parse_from(["slipstream", "--version"])
-            .unwrap_err()
-            .kind(),
-        clap::error::ErrorKind::DisplayVersion
-    );
-    assert_eq!(
-        Cli::try_parse_from(["slipstream", "photos", "--help"])
-            .unwrap_err()
-            .kind(),
-        clap::error::ErrorKind::DisplayHelp
-    );
-}
-
-#[test]
 fn semantic_query_validation_precedes_network_access() {
     let reversed = Cli::try_parse_from([
         "slipstream",
@@ -1051,57 +1029,6 @@ fn decision_batches_partition_from_validated_results_only() {
         assert_eq!(failure.payload.code, "outcome_unknown", "for {label}");
         assert_eq!(failure.payload.details["operation"], "photos-set");
     }
-}
-
-#[test]
-fn development_surface_refusals_map_onto_the_closed_exit_codes() {
-    let refusal = |code: &str| ErrorPayload {
-        code: code.to_owned(),
-        message: "Check the request and try again.".to_owned(),
-        effect: "none".to_owned(),
-        details: json!({}),
-    };
-    let mapped = |code: &str| {
-        validated_route_failure(refusal(code), Operation::PhotosProcessingExport, "")
-            .unwrap_or_else(|| panic!("{code} must map to a confirmed failure"))
-    };
-    assert_eq!(mapped("invalid_settings").exit_code, 2);
-    assert_eq!(mapped("invalid_recipe").exit_code, 2);
-    assert_eq!(mapped("incompatible_input").exit_code, 2);
-    assert_eq!(mapped("unsupported_photo").exit_code, 2);
-    assert_eq!(mapped("unknown_photo").exit_code, 3);
-    assert_eq!(mapped("unknown_export").exit_code, 3);
-    assert_eq!(mapped("missing_recipe").exit_code, 3);
-    assert_eq!(mapped("unknown_step").exit_code, 3);
-    assert_eq!(mapped("unknown_module").exit_code, 3);
-    assert_eq!(mapped("recipe_conflict").exit_code, 4);
-    assert_eq!(mapped("source_changed").exit_code, 4);
-    assert_eq!(mapped("requires_rebind").exit_code, 4);
-    assert_eq!(mapped("request_conflict").exit_code, 4);
-    assert_eq!(mapped("step_not_current").exit_code, 4);
-    assert_eq!(mapped("export_conflict").exit_code, 4);
-    assert_eq!(mapped("output_unavailable").exit_code, 4);
-    assert_eq!(mapped("export_expired").exit_code, 6);
-    assert_eq!(mapped("receipt_expired").exit_code, 6);
-    assert_eq!(mapped("artifact_expired").exit_code, 6);
-    assert_eq!(mapped("processing_unavailable").exit_code, 6);
-    assert_eq!(mapped("module_parameters_unavailable").exit_code, 6);
-    assert_eq!(mapped("source_unavailable").exit_code, 6);
-    assert_eq!(mapped("resource_unavailable").exit_code, 6);
-    assert_eq!(mapped("retained_output_full").exit_code, 6);
-    // A possibly admitted write keeps its unknown outcome; the mapped
-    // confirmed refusals keep the service's message and effect.
-    assert!(
-        validated_route_failure(
-            refusal("outcome_unknown"),
-            Operation::PhotosProcessingExport,
-            ""
-        )
-        .is_none()
-    );
-    let confirmed = mapped("export_conflict");
-    assert_eq!(confirmed.payload.effect, "none");
-    assert_eq!(confirmed.payload.details, json!({}));
 }
 
 mod processing;
@@ -1838,4 +1765,6 @@ async fn a_timed_out_library_check_reports_the_unknown_scan_outcome() {
     drop(listener);
 }
 
+#[path = "cli_edit_tests.rs"]
+mod cli_edit_tests;
 mod development_proxy;

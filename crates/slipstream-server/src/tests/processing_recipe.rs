@@ -170,6 +170,24 @@ async fn stateful_edit_route_updates_controls_replays_and_resets() {
         replayed["edit"]["current"]["controls"]["exposure"]["ev"],
         0.5
     );
+    let (preview_status, preview_body) = get_json(&router, &format!("{uri}/preview")).await;
+    assert_eq!(preview_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(preview_body["error"]["code"], "processing_unavailable");
+    let export = post_json(
+        &router,
+        &format!("{uri}/export"),
+        serde_json::json!({
+            "requestId": "stateful-export-1",
+            "expectedEditRevision": replayed["edit"]["editRevision"],
+        }),
+        Some("https://camera.local"),
+    )
+    .await;
+    assert_eq!(export.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response_json(export).await["error"]["code"],
+        "processing_unavailable"
+    );
     let unsupported = serde_json::json!({
         "requestId": "stateful-white-balance",
         "expectedEditRevision": initial["editRevision"],

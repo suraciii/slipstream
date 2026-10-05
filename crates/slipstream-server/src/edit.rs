@@ -1,13 +1,14 @@
 //! Agent-facing stateful Photo editing surface (GitHub Issue #509).
 //!
-//! This is a narrow projection over the durable composable recipe store: the
-//! Agent addresses one qualified Engine Module control at a time, while the
-//! complete recipe remains an internal persistence representation.
+//! The public surface owns one current Edit State. The durable complete
+//! snapshot remains an internal compatibility representation; callers do not
+//! construct Processing Steps or a cross-service recipe.
 
 use axum::{
     Json,
+    body::Body,
     extract::{Path, State},
-    http::StatusCode,
+    http::{Request, StatusCode},
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
@@ -174,6 +175,14 @@ fn state_source_revision(
     recipe
         .map(|recipe| recipe.source_revision.clone())
         .or_else(|| read.current_source_revision.clone())
+}
+
+fn current_source_revision(read: &ComposableEditRecipeRead) -> Option<String> {
+    read.current_source_revision.clone().or_else(|| {
+        read.recipe
+            .as_ref()
+            .map(|recipe| recipe.source_revision.clone())
+    })
 }
 
 fn state_json(
@@ -449,13 +458,9 @@ async fn resolve_input(
             "The processing artifact is missing or expired",
         ));
     }
-    if artifact.photo_id != photo_id {
-        return Err(error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "incompatible_input",
-            "The processing artifact belongs to a different Photo",
-        ));
-    }
+    // Artifact identity is the explicit service handoff. Its provenance may
+    // name an upstream Photo from another service; it is therefore not
+    // required to match this service's receiving Photo identity.
     Ok(ProcessingInput::Artifact {
         artifact_id,
         contract: artifact.output_contract,
@@ -759,6 +764,109 @@ pub(crate) async fn get_edit(
     Json(projection).into_response()
 }
 
+/// Resolves the current Edit State before forwarding to the bounded renderer.
+pub(crate) async fn preview_edit(
+    State(state): State<HttpState>,
+    Path(photo_id): Path<String>,
+    request: Request<Body>,
+) -> Response {
+    let read = match read_photo(&state, &photo_id).await {
+        Ok(read) => read,
+        Err(response) => return response,
+    };
+    let Some(step_id) = read
+        .recipe
+        .as_ref()
+        .and_then(|recipe| recipe.current_step_id.as_ref())
+        .map(|step_id| step_id.as_str().to_owned())
+    else {
+        return error(
+            StatusCode::NOT_FOUND,
+            "missing_edit_state",
+            "Save an Edit State before requesting an Edit Preview",
+        );
+    };
+    crate::processing_preview::get_processing_preview(
+        State(state),
+        Path((photo_id, step_id)),
+        request,
+    )
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EditExportBody {
+    request_id: String,
+    expected_edit_revision: String,
+}
+
+/// `POST /api/photos/{id}/edit/export` submits the current Edit State for an
+/// explicit Export. The compatibility exporter still owns admission and
+/// execution; this adapter only resolves the current state and translates the
+/// guarded public body into its internal request shape.
+pub(crate) async fn export_edit(
+    State(state): State<HttpState>,
+    Path(photo_id): Path<String>,
+    request: Request<Body>,
+) -> Response {
+    if request
+        .headers()
+        .contains_key(crate::http::CLI_CONTRACT_HEADER)
+        && let Err(response) = crate::http::require_cli_contract(&request)
+    {
+        return *response;
+    }
+    let cli_contract = request
+        .headers()
+        .get(crate::http::CLI_CONTRACT_HEADER)
+        .cloned();
+    let body: EditExportBody = match crate::http::read_cli_json_body(request).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let read = match read_photo(&state, &photo_id).await {
+        Ok(read) => read,
+        Err(response) => return response,
+    };
+    let Some(recipe) = read.recipe.as_ref() else {
+        return error(
+            StatusCode::NOT_FOUND,
+            "missing_edit_state",
+            "Save an Edit State before requesting an Export",
+        );
+    };
+    let Some(step_id) = recipe.current_step_id.as_ref() else {
+        return error(
+            StatusCode::CONFLICT,
+            "missing_edit_state",
+            "The Photo has no current Edit State",
+        );
+    };
+    let payload = json!({
+        "requestId": body.request_id,
+        "stepId": step_id.as_str(),
+        "expectedRecipeRevision": body.expected_edit_revision,
+        "expectedSourceRevision": recipe.source_revision,
+    });
+    let mut builder = Request::builder().method("POST").uri("/");
+    if let Some(value) = cli_contract {
+        builder = builder.header(crate::http::CLI_CONTRACT_HEADER, value);
+    }
+    let forwarded = match builder.body(Body::from(payload.to_string())) {
+        Ok(request) => request,
+        Err(_) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "storage",
+                "The Export request could not be prepared",
+            );
+        }
+    };
+    crate::processing_export::submit_processing_export(State(state), Path(photo_id), forwarded)
+        .await
+}
+
 pub(crate) async fn set_edit(
     State(state): State<HttpState>,
     Path(photo_id): Path<String>,
@@ -768,11 +876,7 @@ pub(crate) async fn set_edit(
         Ok(read) => read,
         Err(response) => return response,
     };
-    let Some(source_revision) = read.current_source_revision.clone().or_else(|| {
-        read.recipe
-            .as_ref()
-            .map(|recipe| recipe.source_revision.clone())
-    }) else {
+    let Some(source_revision) = current_source_revision(&read) else {
         return error(
             StatusCode::CONFLICT,
             "source_unavailable",
@@ -841,11 +945,7 @@ pub(crate) async fn reset_edit(
             "Reset requires the latest observed Edit revision",
         );
     }
-    let Some(source_revision) = read.current_source_revision.clone().or_else(|| {
-        read.recipe
-            .as_ref()
-            .map(|recipe| recipe.source_revision.clone())
-    }) else {
+    let Some(source_revision) = current_source_revision(&read) else {
         return error(
             StatusCode::CONFLICT,
             "source_unavailable",

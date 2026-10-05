@@ -6,7 +6,7 @@ belongs with the engine. The service must still own semantic editing intent,
 source authority, qualification, and result publication.
 
 [darktable Integration](../docs/darktable-integration.md) owns observable product
-behavior. [Photo Development Architecture](photo-development.md) owns recipes,
+behavior. [Photo Development Architecture](photo-development.md) owns Edit State snapshots,
 source guards, work admission, and publication.
 [Development Color Pipeline](development-color.md) owns the processing baseline
 and image contract. This document owns the interaction with the native engine.
@@ -14,11 +14,11 @@ and image contract. This document owns the interaction with the native engine.
 ## Model and Ownership
 
 The dependency is one-way: Slipstream calls darktable. darktable does not call the
-service to resolve Photos, save recipes, or publish results. It is an executor,
+service to resolve Photos, save Edit State or publish results. It is an executor,
 not a separate bounded context that owns product state.
 
-The Rust service owns the Edit Recipe and captured processing snapshots under
-[Processing Modules](processing-modules.md). A darktable step preserves its
+The Rust service owns the current Edit State and captured invocation snapshots under
+[Processing Modules](processing-modules.md). A darktable invocation preserves its
 admitted, complete parameter snapshot and explicit operation instances; it does
 not contain a desktop catalog image ID or ambient editing history. The native
 bridge derives private engine history from that captured intent.
@@ -40,7 +40,7 @@ second implementation of its algorithm. The request names one admitted module
 operation and carries that operation's automatic instruction. The engine
 evaluates it against the isolated image-context state and returns a complete
 concrete parameter tree for that operation. Slipstream captures the returned
-tree in the guarded Recipe; subsequent Preview and Export receive that
+tree in the guarded Edit State; subsequent Preview and Export receive that
 captured tree as ordinary intent.
 
 The first automatic mapping is darktable exposure deflicker. The bridge
@@ -83,7 +83,7 @@ sequenceDiagram
     S->>E: Automatic instruction for the selected module
     E->>D: Evaluate native automatic operation in isolated image context
     D-->>E: Concrete module parameters
-    E-->>S: Guarded Recipe update with captured parameters
+    E-->>S: Guarded Edit State update with captured parameters
     Note over S,D: Later Preview and Export reuse captured parameters
 
 The qualified automatic operations are exposure deflicker and
@@ -161,7 +161,7 @@ multiple instances and the approved request requires it. It must preserve
 instance identity and enforce darktable's legal ordering; unsupported instances
 or moves must fail. The public product does not expose arbitrary ordering.
 
-Recipe application and output generation must share one preparation path.
+Edit State application and output generation must share one preparation path.
 Export must accept the same applied intent as preview without requiring an
 intermediate PNG render or a persistent catalog commit. Output size and display
 conversion remain distinct requests, not distinct correction semantics. An
@@ -175,10 +175,10 @@ not be reused for another Photo or request.
 
 After a successful output, the attempt returns through the local executor
 contract. The service remains the only publisher and must apply the existing
-source, recipe, and attempt guards. Cancellation must terminate the engine child
+source, edit-state, and attempt guards. Cancellation must terminate the engine child
 with the attempt; process exit or EOF before a complete result is a failure, not
 an empty success. Private catalogs, histories, and blobs are discarded with the
-attempt, not synchronized into durable recipe state.
+attempt, not synchronized into the durable Edit State.
 
 ## Integration With Existing Workloads
 
@@ -253,7 +253,7 @@ Real supported RAW fixtures must qualify baseline interpretation, full-size
 float32 TIFF, exact ICC identity, orientation, negative/over-range preservation,
 and Film handoff under the color spec. Success, invalid input, engine failure,
 cancellation, and restart must prove unchanged Original and external XMP bytes,
-no partial recipe saves, no stale publication, and settled executor outcomes.
+no partial Edit State saves, no stale publication, and settled executor outcomes.
 The local deployment smoke must exercise the bundled engine extension.
 Synthetic TIFFs, discovery success, and a compilation pass alone are insufficient.
 ```

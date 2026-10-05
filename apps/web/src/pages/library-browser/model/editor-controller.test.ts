@@ -3,6 +3,23 @@ import { createEditorController } from "./editor-controller.js";
 import type { LibraryBrowserView } from "../ui/library-browser-view.js";
 import type { EditorViewModel } from "../ui/editor-view-contract.js";
 
+function requestUrl(input: RequestInfo | URL): string {
+  return typeof input === "string"
+    ? input
+    : input instanceof URL
+      ? input.href
+      : input.url;
+}
+
+function requestBody(init: RequestInit | undefined): Record<string, unknown> {
+  if (typeof init?.body !== "string")
+    throw new Error("Expected a JSON request body");
+  const value: unknown = JSON.parse(init.body);
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new Error("Expected a JSON object request body");
+  return value as Record<string, unknown>;
+}
+
 const initial = {
   photoId: "photo-1",
   revision: "r0",
@@ -82,7 +99,27 @@ for (const operation of ["undo", "redo"] as const) {
     const controller = createEditorController(
       async (input, init) => {
         const path = input instanceof Request ? input.url : input.toString();
-        if (path.includes("processing-preview")) {
+        if (path.endsWith("/edit"))
+          return Response.json({
+            photoId: "photo-1",
+            editRevision: recipe.revision,
+            sourceRevision: "source-1",
+            currentSourceRevision: "source-1",
+            sourceAvailable: true,
+            requiresRebind: false,
+            canSave: true,
+            canPreview: true,
+            canExport: true,
+            current: {
+              engine: "darktable",
+              input: recipe.steps[0]!.input,
+              controls: { exposure: { ev: 0 } },
+            },
+          });
+        if (
+          path.includes("processing-preview") ||
+          path.includes("/edit/preview")
+        ) {
           if (holdPreviews) {
             const response = Promise.withResolvers<Response>();
             if (!init?.signal)
@@ -218,6 +255,25 @@ test("XMP exports use the confirmed recipe binding while the Original observatio
   const controller = createEditorController(
     (input, init) => {
       const path = input instanceof Request ? input.url : input.toString();
+      if (path.endsWith("/edit"))
+        return Promise.resolve(
+          Response.json({
+            photoId: "photo-1",
+            editRevision: initial.revision,
+            sourceRevision: "source-1",
+            currentSourceRevision: null,
+            sourceAvailable: false,
+            requiresRebind: false,
+            canSave: false,
+            canPreview: false,
+            canExport: false,
+            current: {
+              engine: "darktable",
+              input: initial.steps[0]!.input,
+              controls: { exposure: { ev: 0 } },
+            },
+          }),
+        );
       if (path.endsWith("processing-recipe"))
         return Promise.resolve(
           Response.json({
@@ -239,7 +295,7 @@ test("XMP exports use the confirmed recipe binding while the Original observatio
           ),
         );
       }
-      if (path.includes("processing-preview"))
+      if (path.includes("processing-preview") || path.includes("/edit/preview"))
         return Promise.resolve(
           Response.json(
             { error: { code: "resource_unavailable" } },
@@ -288,6 +344,133 @@ test("XMP exports use the confirmed recipe binding while the Original observatio
         expectedSourceRevision: "source-1",
       }),
     );
+  } finally {
+    controller.leave();
+  }
+});
+
+test("ordinary exposure and reset use primary routes while advanced parameters keep recipe writes", async () => {
+  let recipe = structuredClone(initial);
+  let ev = 0;
+  let snapshot: EditorViewModel | undefined;
+  let settled = Promise.withResolvers<void>();
+  let expectedRevision = "r0";
+  const writes: { path: string; body: Record<string, unknown> }[] = [];
+  const controller = createEditorController(
+    async (input, options) => {
+      const path = requestUrl(input);
+      if (options?.method === "POST") {
+        const body = requestBody(options);
+        writes.push({ path, body });
+        recipe = { ...recipe, revision: `${recipe.revision}-next` };
+        if (path.endsWith("/edit/set")) ev = body["value"] as number;
+        if (path.endsWith("/edit/reset")) ev = 0;
+        if (path.endsWith("processing-recipe")) {
+          recipe = {
+            ...recipe,
+            steps: body["steps"] as typeof recipe.steps,
+            currentStepId: body["currentStepId"] as string,
+          };
+          return Response.json({
+            outcome: "saved",
+            sourceRevision: "source-1",
+            recipeVersion: recipe.revision,
+            recipe,
+          });
+        }
+        return Response.json({ outcome: "saved" });
+      }
+      if (path.endsWith("/edit"))
+        return Response.json({
+          photoId: "photo-1",
+          editRevision: recipe.revision,
+          sourceRevision: "source-1",
+          currentSourceRevision: "source-1",
+          sourceAvailable: true,
+          requiresRebind: false,
+          canSave: true,
+          canPreview: true,
+          canExport: true,
+          current: {
+            engine: "darktable",
+            input: recipe.steps[0]!.input,
+            controls: { exposure: { ev } },
+          },
+        });
+      if (path.endsWith("processing-recipe"))
+        return Response.json({
+          photoId: "photo-1",
+          sourceRevision: "source-1",
+          recipe,
+        });
+      if (path.includes("/edit/preview"))
+        return previewResponse(recipe.revision, "current");
+      return Response.json({ exports: [], artifacts: [] });
+    },
+    {
+      editorVisible: () => true,
+      renderEditor: (next: EditorViewModel) => {
+        snapshot = next;
+        if (
+          next.primary?.revision === expectedRevision &&
+          next.primary.canSet &&
+          !next.saving &&
+          !next.dirty
+        )
+          settled.resolve();
+      },
+      presentEditorPreview: () => {},
+      clearEditorPreview: () => {},
+    } as unknown as LibraryBrowserView,
+    {
+      isAlive: () => true,
+      isCurrentPhoto: () => true,
+      currentPhoto: () => ({
+        id: "photo-1",
+        available: true,
+        original: { kind: "raw", available: true },
+        selectionState: "undecided",
+        rating: 0,
+        hasSavedEdits: true,
+        preview: { state: "ready" },
+      }),
+    },
+  );
+  try {
+    controller.open("photo-1");
+    await settled.promise;
+    settled = Promise.withResolvers<void>();
+    expectedRevision = "r0-next";
+    controller.setExposure("photo-1", 1.25);
+    await settled.promise;
+    expect(snapshot?.primary?.exposureEv).toBe(1.25);
+    expect(writes[0]?.path).toBe("/api/photos/photo-1/edit/set");
+    expect(writes[0]?.body).toMatchObject({
+      expectedEditRevision: "r0",
+      target: "darktable.exposure",
+      control: "ev",
+      value: 1.25,
+    });
+    settled = Promise.withResolvers<void>();
+    expectedRevision = "r0-next-next";
+    controller.resetExposure("photo-1");
+    await settled.promise;
+    expect(snapshot?.primary?.exposureEv).toBe(0);
+    expect(writes[1]?.path).toBe("/api/photos/photo-1/edit/reset");
+    expect(writes[1]?.body).toMatchObject({
+      expectedEditRevision: "r0-next",
+      target: "darktable.exposure",
+      control: "ev",
+    });
+    settled = Promise.withResolvers<void>();
+    expectedRevision = "r0-next-next-next";
+    controller.composableParameters("photo-1", JSON.stringify({ exposure: 2 }));
+    await settled.promise;
+    expect(writes.map((request) => request.path)).toEqual([
+      "/api/photos/photo-1/edit/set",
+      "/api/photos/photo-1/edit/reset",
+      "/api/photos/photo-1/processing-recipe",
+    ]);
   } finally {
     controller.leave();
   }

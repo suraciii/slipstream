@@ -1,4 +1,4 @@
-import { fetchProcessingPreview } from "../api/processing-preview.js";
+import { fetchEditPreview } from "../api/processing-preview.js";
 import { isRecord } from "../api/guards.js";
 import {
   composablePreviewDigestRefusal,
@@ -77,7 +77,7 @@ export function createEditorComposablePreview(
 
     clearPresented();
   };
-  /// Poll admitted Processing Step previews within a bounded wait window.
+  /// Poll admitted Edit Previews within a bounded wait window.
   const scheduleEditorPreviewFollowUp = (photoId: string): void => {
     if (editorPreviewAttempts >= PREVIEW_POLL_LIMIT) {
       editorPreviewNote =
@@ -122,7 +122,7 @@ export function createEditorComposablePreview(
     };
     if (target.kind === "unreadable") {
       refuseComposable(
-        "The Processing Recipe could not be read, so no Preview is shown. Reload to check again.",
+        "The Edit State could not be read, so no Edit Preview is shown. Reload to check again.",
       );
       return;
     }
@@ -130,7 +130,7 @@ export function createEditorComposablePreview(
       // An empty recipe renders no processing result: the earlier selection's
       // rendition is dropped rather than kept as the empty recipe's result.
       refuseComposable(
-        "The Processing Recipe selects no Processing Step, so no processing result is shown.",
+        "The Edit State selects no Processing Engine, so no processing result is shown.",
       );
       return;
     }
@@ -172,20 +172,19 @@ export function createEditorComposablePreview(
     if (editorPreviewUrl) {
       editorPreviewStale = true;
       editorPreviewNote = composableStep
-        ? "This preview is older than the selected Processing Step."
+        ? "This Edit Preview is older than the current Edit State."
         : "This preview is older than the current settings.";
     } else {
       editorPreviewNote = composableStep
-        ? "Requesting the Preview of the selected Processing Step…"
+        ? "Requesting an Edit Preview of the current Edit State…"
         : "Updating preview…";
     }
     renderEditor();
     let response: Response;
     try {
-      response = await fetchProcessingPreview(
+      response = await fetchEditPreview(
         fetcher,
         photoId,
-        composableStep.stepId,
         controller.signal,
         comparison,
       );
@@ -279,7 +278,7 @@ export function createEditorComposablePreview(
             response.headers.get("slipstream-processing-preview-sha256"),
             bytes,
           ))
-        : "The Processing Step Preview could not be read. Refresh the preview to try again.";
+        : "The Edit Preview could not be read. Refresh the preview to try again.";
       if (generation !== editorPreviewGeneration || !editorOwnsPhoto(photoId))
         return;
       if (unread) {
@@ -313,7 +312,7 @@ export function createEditorComposablePreview(
     editorPreviewRefused = false;
     editorPreviewOutcome = "ready";
     if (composableStep) {
-      editorPreviewNote = `Preview of ${composableStep.stepId} (${composableStep.module}), ${response.headers.get("slipstream-processing-preview-width")} × ${response.headers.get("slipstream-processing-preview-height")} pixels. This bounded rendition is for color and tone; inspect a full-resolution artifact for grain and halation detail.`;
+      editorPreviewNote = `Edit Preview from ${composableStep.module}, ${response.headers.get("slipstream-processing-preview-width")} × ${response.headers.get("slipstream-processing-preview-height")} pixels. This bounded rendition is for color and tone; inspect a full-resolution artifact for grain and halation detail.`;
     }
     present(editorPreviewUrl);
     renderEditor();
