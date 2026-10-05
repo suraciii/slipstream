@@ -407,14 +407,17 @@ impl PhotoExecutor {
     ) -> Result<OutputIdentity, String> {
         self.film_available()?;
         let film = self.film().cloned().expect("film runtime verified");
+        let film_profile = film.film_profile.clone();
+        let print_profile = film.print_profile.clone();
         self.dispatch_film(
             film,
             cancellation,
-            move |engine, runner, source, work, cancellation| {
+            move |binary, data_root, work, cancellation| {
                 local_film::develop_selected_step(
-                    engine,
-                    runner,
-                    source,
+                    binary,
+                    data_root,
+                    &film_profile,
+                    &print_profile,
                     work,
                     &input,
                     &output,
@@ -442,14 +445,17 @@ impl PhotoExecutor {
     ) -> Result<slipstream_processing::local_preview::PreviewIdentity, String> {
         self.film_available()?;
         let film = self.film().cloned().expect("film runtime verified");
+        let film_profile = film.film_profile.clone();
+        let print_profile = film.print_profile.clone();
         self.dispatch_film(
             film,
             cancellation,
-            move |engine, runner, source, work, cancellation| {
+            move |binary, data_root, work, cancellation| {
                 local_film::render_selected_step(
-                    engine,
-                    runner,
-                    source,
+                    binary,
+                    data_root,
+                    &film_profile,
+                    &print_profile,
                     work,
                     &input,
                     &output,
@@ -476,9 +482,7 @@ impl PhotoExecutor {
     ) -> Result<T, String>
     where
         T: Send + 'static,
-        F: FnOnce(&Path, &Path, &Path, &Path, Arc<AtomicBool>) -> std::io::Result<T>
-            + Send
-            + 'static,
+        F: FnOnce(&Path, &Path, &Path, Arc<AtomicBool>) -> std::io::Result<T> + Send + 'static,
     {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err("Photo Development is shutting down".to_owned());
@@ -500,9 +504,8 @@ impl PhotoExecutor {
             active.insert(id, Arc::clone(&cancellation));
         }
         let work = self.root.join(format!("attempt-{id}"));
-        let engine = film.engine;
-        let runner = film.runner;
-        let source_root = film.source_root;
+        let binary = film.binary;
+        let data_root = film.data_root;
         let active = Arc::clone(&self.active);
         let running = Arc::clone(&self.running);
         let idle = Arc::clone(&self.idle);
@@ -515,7 +518,7 @@ impl PhotoExecutor {
                 let mut permissions = fs::metadata(&work)?.permissions();
                 permissions.set_mode(0o700);
                 fs::set_permissions(&work, permissions)?;
-                run(&engine, &runner, &source_root, &work, cancellation)
+                run(&binary, &data_root, &work, cancellation)
             })()
             .map_err(|error: std::io::Error| error.to_string());
             let _ = fs::remove_dir_all(&work);
@@ -608,10 +611,11 @@ mod tests {
             film: Some(crate::config::FilmConfig {
                 bundle_sha256: "c".repeat(64),
                 bundle_root: base.join("film"),
-                engine: base.join("film/runtime/bin/python"),
-                runner: base.join("film/runner.py"),
-                source_root: base.join("film/src"),
+                binary: base.join("film/spektrafilm"),
+                data_root: base.join("film/data"),
                 parameter_default: Default::default(),
+                film_profile: "kodak_portra_400".to_owned(),
+                print_profile: "kodak_portra_endura".to_owned(),
                 failure: None,
             }),
             failure: Some("darktable-disabled"),
