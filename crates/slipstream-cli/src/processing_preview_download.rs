@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
+use url::Url;
 
 const OPERATION: Operation = Operation::PhotosProcessingPreview;
 
@@ -42,6 +43,7 @@ const HEIGHT_HEADER: &str = "slipstream-processing-preview-height";
 const SHA256_HEADER: &str = "slipstream-processing-preview-sha256";
 const SOURCE_REVISION_HEADER: &str = "slipstream-processing-preview-source-revision";
 const RECIPE_REVISION_HEADER: &str = "slipstream-processing-preview-recipe-revision";
+const EDIT_REVISION_HEADER: &str = "slipstream-processing-preview-edit-revision";
 const MODULE_HEADER: &str = "slipstream-processing-preview-module";
 const ADAPTER_SCHEMA_VERSION_HEADER: &str = "slipstream-processing-preview-adapter-schema-version";
 const PARAMETER_DIGEST_HEADER: &str = "slipstream-processing-preview-parameter-digest";
@@ -170,7 +172,10 @@ fn rendition_metadata(
         return None;
     }
     let source_revision = decode_source_revision(header_value(headers, SOURCE_REVISION_HEADER)?)?;
-    let recipe_revision = bounded_text(header_value(headers, RECIPE_REVISION_HEADER)?)?;
+    let recipe_revision = bounded_text(
+        header_value(headers, EDIT_REVISION_HEADER)
+            .or_else(|| header_value(headers, RECIPE_REVISION_HEADER))?,
+    )?;
     let _module = bounded_text(header_value(headers, MODULE_HEADER)?)?;
     let _adapter_schema_version =
         bounded_text(header_value(headers, ADAPTER_SCHEMA_VERSION_HEADER)?)?;
@@ -225,9 +230,48 @@ pub(super) async fn download(
     destination: Destination,
     publication: &PublicationState,
 ) -> Result<Value, CommandFailure> {
+    download_from_endpoint(
+        client,
+        photo_id,
+        step_id,
+        client.endpoint(&["api", "photos", photo_id, "processing-preview", step_id]),
+        destination,
+        publication,
+    )
+    .await
+}
+
+/// Downloads the current Edit State Preview without exposing the internal
+/// Processing Step route in the primary CLI surface.
+pub(super) async fn download_current(
+    client: &ServiceClient,
+    photo_id: &str,
+    step_id: &str,
+    destination: Destination,
+    publication: &PublicationState,
+) -> Result<Value, CommandFailure> {
+    download_from_endpoint(
+        client,
+        photo_id,
+        step_id,
+        client.endpoint(&["api", "photos", photo_id, "edit", "preview"]),
+        destination,
+        publication,
+    )
+    .await
+}
+
+async fn download_from_endpoint(
+    client: &ServiceClient,
+    photo_id: &str,
+    step_id: &str,
+    endpoint: Url,
+    destination: Destination,
+    publication: &PublicationState,
+) -> Result<Value, CommandFailure> {
     let mut response = client
         .client
-        .get(client.endpoint(&["api", "photos", photo_id, "processing-preview", step_id]))
+        .get(endpoint)
         .header(CONTRACT_HEADER, CLI_CONTRACT_VERSION)
         .bearer_auth(&client.token)
         .send()
@@ -333,6 +377,7 @@ pub(super) async fn download(
         "stepId": step_id,
         "state": "ready",
         "sourceRevision": metadata.source_revision,
+        "editRevision": metadata.recipe_revision,
         "recipeRevision": metadata.recipe_revision,
         "comparison": "current",
         "inputSha256": metadata.input_sha256,

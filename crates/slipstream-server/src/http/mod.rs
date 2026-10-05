@@ -201,6 +201,14 @@ pub(crate) fn create_router_with_processing(
         .route("/api/photos/{id}/edit/set", post(crate::edit::set_edit))
         .route("/api/photos/{id}/edit/reset", post(crate::edit::reset_edit))
         .route(
+            "/api/photos/{id}/edit/preview",
+            get(crate::edit::preview_edit),
+        )
+        .route(
+            "/api/photos/{id}/edit/export",
+            post(crate::edit::export_edit),
+        )
+        .route(
             "/api/photos/{id}/processing-recipe",
             get(crate::processing_recipe::get_composable_edit_recipe)
                 .post(crate::processing_recipe::post_composable_edit_recipe),

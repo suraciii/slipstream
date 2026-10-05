@@ -268,6 +268,69 @@ pub(crate) async fn execute_processing_export(
     )
 }
 
+/// Submits the current Edit State through the primary `/edit/export` route.
+/// The caller supplies the state revision and the server resolves the
+/// internal current Processing Step; the step id is retained only to validate
+/// the returned receipt and artifact provenance.
+pub(crate) async fn execute_edit_export(
+    client: &ServiceClient,
+    admission: &AdmissionState,
+    photo_id: &str,
+    request_id: &str,
+    edit_revision: &str,
+    step_id: &str,
+    source_revision: &str,
+) -> Result<Value, CommandFailure> {
+    let identity = MutationIdentity {
+        operation: PROCESSING_EXPORT_OPERATION,
+        photo_ids: vec![photo_id.to_owned()],
+        album_id: None,
+        album_name: None,
+        mappings: Vec::new(),
+    };
+    validate_request_identity(request_id)?;
+    validate_nonempty_revision("expectedEditRevision", Some(edit_revision))?;
+    validate_bounded_argument("stepId", step_id, MAXIMUM_STEP_ID_BYTES)?;
+    validate_source_revision("expectedSourceRevision", source_revision)?;
+    let body = json!({
+        "requestId": request_id,
+        "expectedEditRevision": edit_revision,
+    });
+    let (status, bytes) = client
+        .mutation_statuses(
+            Method::POST,
+            &identity,
+            admission,
+            client.endpoint(&["api", "photos", photo_id, "edit", "export"]),
+            Some(body),
+            &[StatusCode::CREATED, StatusCode::ACCEPTED],
+        )
+        .await?;
+    if status == StatusCode::ACCEPTED {
+        let receipt: ProcessingExportPendingWire =
+            serde_json::from_slice(&bytes).map_err(|_| CommandFailure::unknown(&identity))?;
+        return confirmed_processing_export_pending(
+            &identity,
+            photo_id,
+            request_id,
+            step_id,
+            receipt,
+            &client.origin,
+        );
+    }
+    let result: ProcessingExportResultWire =
+        serde_json::from_slice(&bytes).map_err(|_| CommandFailure::unknown(&identity))?;
+    confirmed_processing_export(
+        &identity,
+        photo_id,
+        request_id,
+        step_id,
+        status,
+        result,
+        &client.origin,
+    )
+}
+
 /// The admission receipt of a new or replayed Processing Export.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

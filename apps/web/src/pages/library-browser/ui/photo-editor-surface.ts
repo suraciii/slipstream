@@ -116,7 +116,7 @@ export function createPhotoEditorSurfaceController({
       photoId = id;
       model = undefined;
       clearPreview();
-      text("status", "Loading Processing Recipe…");
+      text("status", "Loading Edit State…");
       root
         .querySelectorAll<HTMLButtonElement>(".photo-editor-controls button")
         .forEach((target: HTMLButtonElement) => {
@@ -146,14 +146,14 @@ export function createPhotoEditorSurfaceController({
         next.cameraReference
           ? "Camera Preview · Original reference"
           : next.comparing
-            ? "Selected step baseline comparison"
+            ? "Current Edit State baseline comparison"
             : next.previewState === "ready"
-              ? "Current step Preview"
+              ? "Current Edit Preview"
               : next.previewState === "stale"
-                ? "Previous step Preview · updating"
+                ? "Previous Edit Preview · updating"
                 : next.previewState === "failed"
-                  ? "Step Preview failed"
-                  : "Step Preview pending",
+                  ? "Edit Preview failed"
+                  : "Edit Preview pending",
       );
       text("preview-note", next.cameraReference ? "" : next.previewNote, true);
       element("preview-note").dataset.tone = next.previewStale ? "stale" : "";
@@ -182,7 +182,7 @@ export function createPhotoEditorSurfaceController({
         !busy && Boolean(next.proxy?.canRemove),
         !next.proxy?.canRemove,
       );
-      text("export-target", "selected Processing Step");
+      text("export-target", "current Edit State");
       text("export-state", next.export.note);
       button("export-submit", !next.loading && next.export.canSubmit);
       button("export-cancel", next.export.canCancel, !next.export.canCancel);

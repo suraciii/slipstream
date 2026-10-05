@@ -56,19 +56,19 @@ export const composablePreviewRefusalNote = (
 ): string | undefined => {
   switch (code) {
     case "missing_recipe":
-      return "No Processing Recipe is saved for this Photo anymore, so no Preview is shown. Reload to check again.";
+      return "No Edit State is saved for this Photo anymore, so no Edit Preview is shown. Reload to check again.";
     case "source_changed":
-      return "The saved Processing Recipe belongs to an earlier version of this Photo, so no Preview is shown. Reload to check again.";
+      return "The saved Edit State belongs to an earlier version of this Photo, so no Edit Preview is shown. Reload to check again.";
     case "step_not_current":
-      return "The selected Processing Step is no longer the recipe's current step, so no Preview is shown. Reload to check again.";
+      return "The current Edit State is no longer current, so no Edit Preview is shown. Reload to check again.";
     case "unknown_step":
-      return "The selected Processing Step is no longer part of the saved Processing Recipe, so no Preview is shown.";
+      return "The current Edit State is no longer available, so no Edit Preview is shown.";
     case "unknown_module":
-      return "The selected Processing Step names a Processing Module this deployment does not know, so no Preview is shown.";
+      return "The Edit State names a Processing Engine this deployment does not know, so no Edit Preview is shown.";
     case "incompatible_input":
-      return "The selected Processing Step's input is not admitted by its module, so no Preview is shown.";
+      return "The Edit State input is not admitted by its Processing Engine, so no Edit Preview is shown.";
     case "module_parameters_unavailable":
-      return "The selected Processing Step's parameters have no qualified rendering adapter in this deployment yet, so no Preview is shown.";
+      return "The Edit State has no qualified rendering adapter in this deployment yet, so no Edit Preview is shown.";
     default:
       return undefined;
   }
@@ -161,7 +161,7 @@ export const composablePreviewIdentityRefusal = (
   expected: ComposablePreviewIdentity,
 ): string => {
   const refusal =
-    "The Processing Step Preview could not be identified. Refresh the preview to try again.";
+    "The Edit Preview could not be identified. Refresh the preview to try again.";
   const dimension = (name: string): boolean => {
     const value = Number.parseInt(headers.get(name) ?? "", 10);
     return Number.isInteger(value) && value > 0 && value <= 65_535;
@@ -215,7 +215,7 @@ export const composablePreviewPngRefusal = (
   height: string | null,
 ): string => {
   const refusal =
-    "The Processing Step Preview could not be read. Refresh the preview to try again.";
+    "The Edit Preview could not be read. Refresh the preview to try again.";
   if (
     bytes.length < 24 ||
     !PNG_SIGNATURE.every((byte, index) => bytes[index] === byte) ||
@@ -244,7 +244,7 @@ export const composablePreviewDigestRefusal = async (
   const digest = await blobSha256Hex(new Blob([bytes])).catch(() => undefined);
   return claimed !== null && digest === claimed
     ? ""
-    : "The Processing Step Preview could not be verified. Refresh the preview to try again.";
+    : "The Edit Preview could not be verified. Refresh the preview to try again.";
 };
 
 /// Why a served step Preview cannot be presented, or `""` when it can. The
@@ -257,4 +257,4 @@ export const composablePreviewReadRefusal = (
 ): string =>
   contentType !== null && contentType.startsWith("image/") && byteLength > 0
     ? ""
-    : "The Processing Step Preview could not be read. Refresh the preview to try again.";
+    : "The Edit Preview could not be read. Refresh the preview to try again.";

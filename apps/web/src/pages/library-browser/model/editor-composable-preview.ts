@@ -122,7 +122,7 @@ export function createEditorComposablePreview(
     };
     if (target.kind === "unreadable") {
       refuseComposable(
-        "The Processing Recipe could not be read, so no Preview is shown. Reload to check again.",
+        "The Edit State could not be read, so no Edit Preview is shown. Reload to check again.",
       );
       return;
     }
@@ -130,7 +130,7 @@ export function createEditorComposablePreview(
       // An empty recipe renders no processing result: the earlier selection's
       // rendition is dropped rather than kept as the empty recipe's result.
       refuseComposable(
-        "The Processing Recipe selects no Processing Step, so no processing result is shown.",
+        "The Edit State selects no Processing Engine, so no processing result is shown.",
       );
       return;
     }
@@ -172,11 +172,11 @@ export function createEditorComposablePreview(
     if (editorPreviewUrl) {
       editorPreviewStale = true;
       editorPreviewNote = composableStep
-        ? "This preview is older than the selected Processing Step."
+        ? "This Edit Preview is older than the current Edit State."
         : "This preview is older than the current settings.";
     } else {
       editorPreviewNote = composableStep
-        ? "Requesting the Preview of the selected Processing Step…"
+        ? "Requesting an Edit Preview of the current Edit State…"
         : "Updating preview…";
     }
     renderEditor();
@@ -279,7 +279,7 @@ export function createEditorComposablePreview(
             response.headers.get("slipstream-processing-preview-sha256"),
             bytes,
           ))
-        : "The Processing Step Preview could not be read. Refresh the preview to try again.";
+        : "The Edit Preview could not be read. Refresh the preview to try again.";
       if (generation !== editorPreviewGeneration || !editorOwnsPhoto(photoId))
         return;
       if (unread) {

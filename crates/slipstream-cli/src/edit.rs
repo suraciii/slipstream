@@ -46,18 +46,18 @@ pub enum EditCommand {
         #[arg(long, value_name = "REQUEST_ID", value_parser = crate::nonempty)]
         request: String,
     },
-    /// Download a Preview of the current stateful edit.
+    /// Download an Edit Preview of the current Edit State.
     Preview {
         #[arg(value_parser = crate::nonempty)]
         photo_id: String,
         #[arg(long, value_name = "PATH", required = true)]
         file: PathBuf,
     },
-    /// Submit the current stateful edit for an explicit Export.
+    /// Export the current Edit State as an immutable Processing Artifact.
     Export {
         #[arg(value_parser = crate::nonempty)]
         photo_id: String,
-        #[arg(long, value_name = "REVISION", value_parser = crate::nonempty, required = true)]
+        #[arg(long, value_name = "EDIT_REVISION", value_parser = crate::nonempty, required = true)]
         revision: String,
         #[arg(long, value_name = "REQUEST_ID", value_parser = crate::nonempty)]
         request: String,
@@ -223,7 +223,7 @@ pub(crate) async fn execute(
         EditCommand::Preview { photo_id, .. } => {
             let state = get_state(client, photo_id).await?;
             let step_id = state_step(&state)?;
-            processing_preview_download::download(
+            processing_preview_download::download_current(
                 client,
                 photo_id,
                 &step_id,
@@ -241,20 +241,15 @@ pub(crate) async fn execute(
             let state = get_state(client, photo_id).await?;
             let step_id = state_step(&state)?;
             let source_revision = state_revision(&state, "sourceRevision")?;
-            let args = super::development::ProcessingExportArgs {
-                photo_id: photo_id.clone(),
-                input: String::new(),
-            };
-            super::development::execute_processing_export(
+            let edit_revision = revision.clone();
+            super::development::execute_edit_export(
                 client,
                 admission,
-                &args,
-                json!({
-                    "requestId": request,
-                    "stepId": step_id,
-                    "expectedRecipeRevision": revision,
-                    "expectedSourceRevision": source_revision,
-                }),
+                photo_id,
+                request,
+                &edit_revision,
+                &step_id,
+                &source_revision,
             )
             .await
         }

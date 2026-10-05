@@ -2,12 +2,13 @@ import type { BrowserFetch } from "../model/access-session.js";
 
 export const processingPreviewUri = (
   photoId: string,
-  stepId: string,
+  _stepId: string,
   comparison?: "baseline",
 ): string =>
-  `/api/photos/${encodeURIComponent(photoId)}/processing-preview/${encodeURIComponent(stepId)}${comparison === "baseline" ? "?comparison=baseline" : ""}`;
+  `/api/photos/${encodeURIComponent(photoId)}/edit/preview${comparison === "baseline" ? "?comparison=baseline" : ""}`;
 
-/** Fetches only the recipe's caller-selected current Processing Step Preview. */
+/** Fetches the current Edit State Preview. The step id remains a local
+ * identity guard for the returned rendition, not a route selector. */
 export const fetchProcessingPreview = (
   fetcher: BrowserFetch,
   photoId: string,

@@ -6,13 +6,13 @@ import {
 } from "./processing-preview.js";
 
 describe("processing preview wire contract", () => {
-  test("names exactly the selected step without selecting a predecessor", () => {
+  test("uses the current Edit State route without selecting a predecessor", () => {
     expect(processingPreviewUri("photo/one", "film-2")).toBe(
-      "/api/photos/photo%2Fone/processing-preview/film-2",
+      "/api/photos/photo%2Fone/edit/preview",
     );
   });
 
-  test("fetches only the selected step and returns the service's answer untouched", async () => {
+  test("fetches only the current Edit State and returns the service's answer untouched", async () => {
     const requests: Array<{ input: unknown; init: RequestInit | undefined }> =
       [];
     const fetcher: BrowserFetch = (input, init) => {
@@ -33,8 +33,7 @@ describe("processing preview wire contract", () => {
     );
     expect(response.status).toBe(503);
     // The client owns one route: a refusal is handed back as the service
-    // answered it, with no predecessor step, legacy Edit Preview fallback,
-    // or second request behind it.
+    // answered it, with no predecessor step, fallback, or second request.
     expect(requests.length).toBe(1);
     expect(String(requests[0]?.input)).toBe(
       processingPreviewUri("photo/one", "film-2"),

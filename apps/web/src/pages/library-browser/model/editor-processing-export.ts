@@ -142,10 +142,10 @@ export function createEditorProcessingExport(
     value.note = value.artifact
       ? describeProcessingArtifact(value.artifact, formatByteCount)
       : work.state === "failed"
-        ? `The Processing Step Export failed${work.failureReason ? `: ${work.failureReason}` : ""}.`
+        ? `The Edit State Export failed${work.failureReason ? `: ${work.failureReason}` : ""}.`
         : work.state === "cancelled"
-          ? "The Processing Step Export was cancelled."
-          : `The Processing Step Export is ${work.state}.`;
+          ? "The Edit State Export was cancelled."
+          : `The Edit State Export is ${work.state}.`;
     publish(photoId, stamp);
   };
   const schedule = (photoId: string): void => {
@@ -290,7 +290,7 @@ export function createEditorProcessingExport(
     value.pending = pending;
     value.requestId = pending.requestId;
     value.state = "submitting";
-    value.note = `Submitting Processing Step ${pending.stepId} for Export…`;
+    value.note = "Submitting the current Edit State for Export…";
     value.artifact = null;
     publish(photoId, stamp);
     try {
@@ -355,7 +355,7 @@ export function createEditorProcessingExport(
         value.note =
           typeof error?.["message"] === "string"
             ? error["message"]
-            : "The Processing Step Export was refused.";
+            : "The Edit State Export was refused.";
       } else {
         value.state = "outcome-unknown";
         value.note =
@@ -377,7 +377,7 @@ export function createEditorProcessingExport(
     const target = recipe.target();
     const read = recipe.read;
     if (target.kind !== "step" || !read?.recipe || recipe.dirty()) {
-      value.note = "Save and select a Processing Step before exporting.";
+      value.note = "Save the Edit State before exporting.";
       renderEditor();
       return;
     }
@@ -385,12 +385,10 @@ export function createEditorProcessingExport(
     await send(photoId, {
       requestId,
       stepId: target.step.stepId,
-      path: `/api/photos/${encodeURIComponent(photoId)}/processing-exports`,
+      path: `/api/photos/${encodeURIComponent(photoId)}/edit/export`,
       body: JSON.stringify({
         requestId,
-        stepId: target.step.stepId,
-        expectedRecipeRevision: read.recipe.revision,
-        expectedSourceRevision: read.sourceRevision,
+        expectedEditRevision: read.recipe.revision,
       }),
     });
   };

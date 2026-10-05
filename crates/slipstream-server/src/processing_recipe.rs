@@ -1,7 +1,9 @@
-//! Caller-controlled composable Edit Recipe HTTP surface (Issue #496).
+//! Compatibility surface for complete Edit State snapshots (Issue #496).
 //!
-//! Stores complete caller-owned Processing Steps independently of execution
+//! Stores caller-owned processing details independently of execution
 //! availability, with explicit source rebinding and no implicit conversion.
+//! The primary Agent/UI surface is `/api/photos/{id}/edit`; this module remains
+//! for migration, diagnostics, and older clients.
 
 use axum::{
     Json,

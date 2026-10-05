@@ -172,7 +172,7 @@ export function createWorkspaceOutputController(
       value.artifact = entries[0] ?? null;
       value.state = value.artifact ? "succeeded" : "idle";
       value.note = value.artifact
-        ? "Ready to download. XMP contains the selected step's parameters, not rendered pixels."
+        ? "Ready to download. XMP contains the saved Edit State, not rendered pixels."
         : "Not exported yet.";
       render(id);
     } catch {
@@ -207,7 +207,7 @@ export function createWorkspaceOutputController(
     value.submitting = true;
     value.generation++;
     value.state = "submitting";
-    value.note = "Exporting selected step parameters…";
+    value.note = "Exporting the current Edit State…";
     render(id);
     const uncertain = () => {
       value.state = "outcome-unknown";

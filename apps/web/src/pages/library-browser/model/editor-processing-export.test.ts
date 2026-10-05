@@ -10,6 +10,7 @@ import { parseProcessingExportWork } from "./processing-export.js";
 type ExportRequest = {
   requestId: string;
   stepId?: string;
+  expectedEditRevision?: string;
   expectedSourceRevision?: string;
 };
 function requestBody(body: RequestInit["body"]): string {
@@ -256,8 +257,12 @@ describe("retained Processing Exports", () => {
   });
 
   test("acceptance returns before execution completes and enables cancellation", async () => {
+    let submittedPath = "";
+    let submittedBody: ExportRequest | undefined;
     const f = fixture((_path, options) => {
       const body = JSON.parse(requestBody(options?.body)) as ExportRequest;
+      submittedPath = requestUrl(_path);
+      submittedBody = body;
       return Response.json(
         {
           outcome: "accepted",
@@ -270,6 +275,8 @@ describe("retained Processing Exports", () => {
     expect(f.owner.view().state).toBe("running");
     expect(f.owner.view().canCancel).toBe(true);
     expect(f.owner.view().processingExports[0]?.state).toBe("accepted");
+    expect(submittedPath).toBe("/api/photos/photo-1/edit/export");
+    expect(submittedBody).toMatchObject({ expectedEditRevision: "recipe" });
   });
 
   test("retry of retained failed work captures the old request even when the current draft changes", async () => {
@@ -324,8 +331,8 @@ describe("retained Processing Exports", () => {
     expect(calls).toHaveLength(2);
     expect(calls[1]).toEqual(calls[0]);
     expect(
-      (JSON.parse(calls[1]!.body) as ExportRequest).expectedSourceRevision,
-    ).toBe("source\u0000revision");
+      (JSON.parse(calls[1]!.body) as ExportRequest).expectedEditRevision,
+    ).toBe("recipe");
     expect(f.owner.view().canSubmit).toBe(false);
   });
 

@@ -24,11 +24,11 @@ export const plainEditorMessage = (message: string): string =>
       "Reading this Photo's Original File failed",
     )
     .replace(
-      "Reload the recipe to check for current source facts.",
+      "Reload the Edit State to check for current source facts.",
       "Reload to check again.",
     )
     .replace(
-      "Reload the recipe to retry once the current Library work settles.",
+      "Reload the Edit State to retry once the current Library work settles.",
       "Reload to retry.",
     )
     .replaceAll("the saved recipe", "the saved edit")

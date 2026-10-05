@@ -1,4 +1,5 @@
-//! Composable recipe intent, selected-step execution, and durable Export reconciliation.
+//! Advanced snapshot compatibility, selected-step execution, and durable
+//! Export reconciliation. Normal editing uses the Edit State facade.
 use super::{
     AdmissionState, CommandFailure, MutationIdentity, Operation, ServiceClient, read_input_bytes,
     valid_request_identity, valid_sha256, web_url,

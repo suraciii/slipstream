@@ -155,10 +155,10 @@ export function createEditorController(
     const provenanceNote = cameraReference
       ? "Original reference: the camera Preview of this Photo."
       : target.kind === "unreadable"
-        ? "The Processing Recipe could not be read. Reload to check again."
+        ? "The Edit State could not be read. Reload to check again."
         : !selected
           ? "No Processing Step is selected; no processing result is shown."
-          : `Preview of selected Processing Step ${selected.stepId} (${selected.module}).${composable.dirty() ? " Local changes are not yet confirmed." : ""}`;
+        : `Edit Preview from ${selected.module}.${composable.dirty() ? " Local changes are not yet confirmed." : ""}`;
     view.renderEditor({
       photoId,
       loading: composable.readPending,
@@ -178,7 +178,7 @@ export function createEditorController(
           : composable.read?.currentSourceRevision &&
               composable.read.currentSourceRevision !==
                 composable.read.recipe?.sourceRevision
-            ? "The Original has changed since this recipe was saved."
+            ? "The Original has changed since this Edit State was saved."
             : composable.read
               ? "Original source revision checked."
               : "Checking source…",

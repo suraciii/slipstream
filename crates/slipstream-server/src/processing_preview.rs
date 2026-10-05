@@ -1,4 +1,5 @@
-//! Bounded Preview for the selected composable Processing Step.
+//! Bounded Edit Preview execution, with a compatibility route for a selected
+//! Processing Step.
 //!
 //! The route refuses a non-current step and never walks the recipe looking
 //! for an implicitly usable predecessor. Each module executes directly at the
@@ -121,6 +122,7 @@ pub(crate) fn preview_status(
         "state": if fresh { "fresh" } else { "stale" },
         "fresh": fresh,
         "comparison": record.comparison.as_str(),
+        "editRevision": record.recipe_revision.clone(),
         "recipeRevision": record.recipe_revision,
         "stepId": record.step_id,
         "identity": record.identity,
@@ -361,6 +363,13 @@ fn ready_response(
         "slipstream-processing-preview-recipe-revision",
         recipe.revision.clone(),
     );
+    // The public Edit State surface names this guard `editRevision`. Keep the
+    // recipe header as a compatibility alias for older clients.
+    insert_header(
+        headers,
+        "slipstream-processing-preview-edit-revision",
+        recipe.revision.clone(),
+    );
     insert_header(
         headers,
         "slipstream-processing-preview-sha256",
@@ -511,14 +520,14 @@ pub(crate) async fn get_processing_preview(
             return error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "storage",
-                "The Processing Recipe could not be read",
+                "The current Edit State could not be read",
             );
         }
     }) else {
         return error(
             StatusCode::NOT_FOUND,
             "missing_recipe",
-            "Save a Processing Recipe before requesting a Preview",
+            "Save an Edit State before requesting an Edit Preview",
         );
     };
     let Some((photo, edit)) = state
@@ -541,14 +550,14 @@ pub(crate) async fn get_processing_preview(
         return error(
             StatusCode::CONFLICT,
             "source_changed",
-            "The Processing Recipe is bound to a stale source revision",
+            "The Edit State is bound to a stale source revision",
         );
     }
     if recipe.current_step_id.as_ref().map(|id| id.as_str()) != Some(step_id.as_str()) {
         return error(
             StatusCode::CONFLICT,
             "step_not_current",
-            "Preview is bounded to the recipe's selected current step",
+            "The Edit Preview is bounded to the current Edit State",
         );
     }
     let Some(step) = recipe
@@ -683,7 +692,7 @@ pub(crate) async fn get_processing_preview(
             return error(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "unknown_module",
-                "The selected Processing Step names an unknown module",
+                "The current Edit State names an unknown Processing Engine",
             );
         }
     };
@@ -710,7 +719,7 @@ pub(crate) async fn get_processing_preview(
             return error(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "invalid_settings",
-                "The selected Processing Step has no valid Preview identity",
+                "The current Edit State has no valid Edit Preview identity",
             );
         }
     };

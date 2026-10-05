@@ -244,7 +244,7 @@ export function createEditorComposableRecipe(
     if (!editorOwnsPhoto(photoId)) return;
     if (editorComposable === undefined) {
       editorComposableNote =
-        "The Processing Recipe could not be read, so composing waits. Reload to check again.";
+        "The Edit State could not be read, so editing waits. Reload to check again.";
       renderEditor();
       return;
     }
@@ -628,7 +628,7 @@ export function createEditorComposableRecipe(
     const stepId = editorComposableEditingStepId;
     if (!stepId) {
       editorComposableNote =
-        "Open one Processing Step first, then select this artifact as its input.";
+        "Open the Edit State first, then select this artifact as its input.";
       renderEditor();
       return;
     }
