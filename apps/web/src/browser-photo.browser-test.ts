@@ -68,7 +68,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   ])
     await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
   await returnToPhotoTools(page);
-  for (const name of ["Clear", "Undo"])
+  for (const name of ["Clear flag", "Undo"])
     await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
   await openRatingChoices(page);
   await expect(
@@ -77,14 +77,15 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   // The decision acts on the Photo, so both surfaces close for it.
   await closePhotoSurfaces(page);
   await openPhotoToolsView(page, "tools");
+  await page.getByRole("button", { name: "Pick", exact: true }).click();
+  await expect(page.locator("[data-selection]")).toHaveText("Picked");
+  await expect(page.getByText("1 / 2")).toBeVisible();
   await actionWithProgress(page, albumId, () =>
-    page.getByRole("button", { name: "Pick", exact: true }).click(),
+    page.getByRole("button", { name: "Next", exact: true }).click(),
   );
   await expect(page.getByText("2 / 2")).toBeVisible();
-  // The advanced Photo is the saved Album position.
-  await expect
-    .poll(async () => (await state(running.url, albumId)).position)
-    .toBe(1);
+  // More review actions change state in place; explicit Next advances the
+  // Album position that the restart below verifies.
 
   await page.goto("about:blank");
   await running.close();

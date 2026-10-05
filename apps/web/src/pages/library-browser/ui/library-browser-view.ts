@@ -578,7 +578,7 @@ export function createLibraryBrowserView(
           <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div class="photo-identity"><h2 id="photo-title" data-photo-title>Photo</h2><p class="photo-filename" data-photo-filename>—</p></div><div class="photo-header-actions"><button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false" hidden>Sources</button><p class="photo-connection" data-photo-connection role="status" hidden></p><button type="button" class="quiet" data-retry-photo hidden>Retry</button></div></header>
           <section class="preview" data-preview aria-label="Photo Preview">
             <div class="swipe-feedback reject" data-reject-feedback role="status" aria-live="polite">Previous</div>
-            <div class="image-stage" data-image-stage></div>
+            <div class="image-stage" data-stage></div>
             <div class="swipe-feedback select" data-select-feedback role="status" aria-live="polite">Next</div>
             <div class="rating-wheel" data-rating-wheel hidden role="dialog" aria-label="Rating Wheel" aria-describedby="rating-wheel-instructions">
               <p class="rating-wheel-instructions" id="rating-wheel-instructions" data-rating-wheel-instructions>Move across a Rating and release to save.</p>
@@ -588,7 +588,7 @@ export function createLibraryBrowserView(
           </section>
           <div class="photo-navigation" data-photo-navigation role="group" aria-label="Photo navigation"><button type="button" class="quiet" data-dock-previous hidden>Previous</button><p class="photo-position" data-position>0 / 0</p><button type="button" class="quiet" data-dock-next hidden>Next</button></div>
           <div class="filmstrip-host" data-filmstrip-host><div class="filmstrip" data-filmstrip role="group" aria-label="Neighbor Photos" hidden></div></div>
-          <section class="review-bar" aria-label="Photo review"><button type="button" class="selection-badge" data-selection aria-controls="photo-tools-panel" aria-expanded="false" aria-label="Selection State: Unflagged">Unflagged</button><p class="status" data-status role="status" aria-live="polite"></p></section>
+          <section class="review-bar" aria-label="Photo review"><button type="button" class="selection-badge" data-selection aria-controls="photo-tools-panel" aria-expanded="false" aria-label="Selection State: Unflagged">Unflagged</button><span data-rating hidden>No rating</span><p class="status" data-status role="status" aria-live="polite"></p></section>
           <div class="quick-action-dock" data-quick-action-dock role="toolbar" aria-label="Photo actions">
             <button type="button" class="reject-button" data-dock-reject hidden>Reject</button>
             <button type="button" class="rating-dock-button" data-dock-rating hidden aria-controls="rating-choices" aria-expanded="false">Rating</button>
