@@ -491,7 +491,9 @@ describe("retained Processing Exports", () => {
   });
 
   test("a retained receipt cannot resolve uncertain admission without exact-body replay", async () => {
-    let captured: { requestId: string; expectedEditRevision: string } | undefined;
+    let captured:
+      | { requestId: string; expectedEditRevision: string }
+      | undefined;
     let submits = 0;
     const f = fixture((_path, options) => {
       if (options?.method === "POST") {

@@ -218,14 +218,12 @@ export function createComposableEditorSurface(
     for (const step of composable.steps) {
       const item = document.createElement("li");
       item.dataset.stepId = step.stepId;
-      const select = button(
-        `${step.module} (${step.inputNote})`,
-        () =>
-          send({
-            kind: "editor-composable-select",
-            photoId: next.photoId,
-            stepId: step.stepId,
-          }),
+      const select = button(`${step.module} (${step.inputNote})`, () =>
+        send({
+          kind: "editor-composable-select",
+          photoId: next.photoId,
+          stepId: step.stepId,
+        }),
       );
       select.disabled = blocked;
       select.setAttribute("aria-pressed", String(step.current));

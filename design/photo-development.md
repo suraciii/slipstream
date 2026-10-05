@@ -537,7 +537,7 @@ A guarded save returns exactly one outcome:
 
 | Outcome            | Meaning                                                                                             |
 | ------------------ | --------------------------------------------------------------------------------------------------- |
-| `saved`            | The settings were committed as a new Edit State revision.                                               |
+| `saved`            | The settings were committed as a new Edit State revision.                                           |
 | `unchanged`        | The same caller request identity already committed these settings.                                  |
 | `unknown`          | The response was lost or the commit is unconfirmed; admission is unproven.                          |
 | `receipt_expired`  | The request identity's receipt retention has expired; see the save-receipt rules.                   |
