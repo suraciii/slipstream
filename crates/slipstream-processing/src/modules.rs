@@ -59,11 +59,18 @@ pub const DARKTABLE_PARAMETER_VERSION: &str = "darktable-params-1";
 /// The second peer module: standalone SpektraFilm, not a darktable
 /// image-operation module.
 pub const SPEKTRAFILM_MODULE: &str = "spektrafilm";
+/// The standalone SpektraFilm implementation identity for this boundary.
+pub const SPEKTRAFILM_IMPLEMENTATION: &str = "spektrafilm-rs";
+/// The checked-in fork revision accepted by bundle verification.
+pub const SPEKTRAFILM_FORK_COMMIT: &str = "9e9f04b8fb8e51a0e80f4c1e8191ebcb7aa9b686";
 /// The pinned standalone SpektraFilm adapter identity of this contract
 /// revision.
-pub const SPEKTRAFILM_ADAPTER_VERSION: &str = "spektrafilm-adapter-1";
+pub const SPEKTRAFILM_ADAPTER_VERSION: &str = "spektrafilm-rs-adapter-1";
 /// The SpektraFilm-owned parameter schema version this boundary admits.
-pub const SPEKTRAFILM_PARAMETER_VERSION: &str = "spektrafilm-params-1";
+pub const SPEKTRAFILM_PARAMETER_VERSION: &str = "spektrafilm-rs-params-1";
+/// The previous saved-tree version remains readable for historical Recipes
+/// and Artifacts, but is not emitted by discovery or new executions.
+pub const SPEKTRAFILM_LEGACY_PARAMETER_VERSION: &str = "spektrafilm-params-1";
 /// The pinned fixed-recipe identity of the standalone SpektraFilm adapter,
 /// the shared `FILM_RECIPE_SHA256` of `tools/development/film_identity.py`.
 /// The pinned runtime re-verifies the forwarded tree against this recipe;
@@ -767,7 +774,9 @@ pub fn validate_spektrafilm_parameters(parameters: &Parameters) -> Result<(), Mo
             ),
         ));
     }
-    if parameters.version != SPEKTRAFILM_PARAMETER_VERSION {
+    if parameters.version != SPEKTRAFILM_PARAMETER_VERSION
+        && parameters.version != SPEKTRAFILM_LEGACY_PARAMETER_VERSION
+    {
         return Err(refusal(
             ModuleErrorCode::UnsupportedParameterVersion,
             format!(
@@ -938,10 +947,16 @@ fn spektrafilm_description(availability: ModuleAvailability) -> ModuleDescriptio
             name: SPEKTRAFILM_MODULE.into(),
             adapter_version: SPEKTRAFILM_ADAPTER_VERSION.into(),
         },
-        parameter_versions: vec![SPEKTRAFILM_PARAMETER_VERSION.into()],
+        parameter_versions: vec![
+            SPEKTRAFILM_PARAMETER_VERSION.into(),
+            SPEKTRAFILM_LEGACY_PARAMETER_VERSION.into(),
+        ],
         parameter_schema: json!({
             "type": "object",
             "additionalProperties": false,
+            "x-implementation": SPEKTRAFILM_IMPLEMENTATION,
+            "x-fork-reference": "suraciii/spektrafilm-rs",
+            "x-legacy-parameter-version": SPEKTRAFILM_LEGACY_PARAMETER_VERSION,
             "default": pinned,
             "required": SPEKTRAFILM_GROUPS.to_vec(),
             "properties": properties

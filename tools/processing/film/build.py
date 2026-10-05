@@ -1,22 +1,13 @@
-"""Build the application image with the standalone SpektraFilm extension attached.
+"""Build the application image with the pinned spektrafilm-rs extension.
 
-The normal application runtime from the repository Dockerfile is built (or an
-already-built immutable application image is supplied with ``--app-image``)
-and then extended by ``tools/processing/film/Dockerfile`` with the pinned
-standalone SpektraFilm runtime, its local runner, the runtime-generated
-complete default parameter tree, and the deterministic bundle manifest. The
-extension installs independently of the darktable extension: the film stage
-consumes the retained linear ProPhoto Development TIFF handoff directly.
-
-The SpektraFilm source is pinned by checksum inside the Dockerfile; the
-``--spektrafilm-commit`` argument records its revision in the image labels
-and bundle manifest.
+The application runtime remains the immutable parent image. The extension
+adds the fork CLI, its profile data, a module-owned default recipe, and the
+deterministic bundle manifest. Darktable is a separate peer engine.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import subprocess
@@ -27,7 +18,7 @@ DEFAULT_APP_TAG = "slipstream:app-runtime"
 FILM_DOCKERFILE = "tools/processing/film/Dockerfile"
 SERVER_ENTRYPOINT = ["/usr/local/bin/slipstream-server"]
 ROOT = Path(__file__).resolve().parents[3]
-SPEKTRAFILM_COMMIT = "3bb2c2d2801ff68b92019cf1dbcbb133d60832bc"
+PINNED_SPEKTRAFILM_FORK_COMMIT = "9e9f04b8fb8e51a0e80f4c1e8191ebcb7aa9b686"
 
 
 def inspect(reference: str) -> dict:
@@ -36,6 +27,16 @@ def inspect(reference: str) -> dict:
 
 def repository_revision() -> str:
     return subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+def spektrafilm_fork_revision() -> str:
+    revision = subprocess.check_output(
+        ["git", "-C", str(ROOT / "third_party/spektrafilm-rs"), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    if revision != PINNED_SPEKTRAFILM_FORK_COMMIT:
+        raise SystemExit(
+            f"third_party/spektrafilm-rs is at {revision}, expected {PINNED_SPEKTRAFILM_FORK_COMMIT}"
+        )
+    return revision
 
 
 def buildkit_environment() -> dict:
@@ -60,7 +61,7 @@ def build_film(app_reference: str, tag: str, bundle: str) -> None:
         [
             "docker", "build", "--pull=false", "--progress=plain",
             "--build-arg", f"APP_IMAGE={app_reference}",
-            "--build-arg", f"SPEKTRAFILM_COMMIT={SPEKTRAFILM_COMMIT}",
+            "--build-arg", f"SPEKTRAFILM_FORK_COMMIT={spektrafilm_fork_revision()}",
             "--build-arg", f"FILM_BUNDLE={bundle}",
             "-f", FILM_DOCKERFILE, "-t", tag, ".",
         ], cwd=ROOT, env=buildkit_environment(), check=True,
@@ -114,7 +115,7 @@ def main() -> None:
             "app": app["Id"],
             "image": output["Id"],
             "bundle": bundle,
-            "spektrafilm_commit": SPEKTRAFILM_COMMIT,
+            "spektrafilm_fork_commit": spektrafilm_fork_revision(),
         },
         sort_keys=True,
     ))

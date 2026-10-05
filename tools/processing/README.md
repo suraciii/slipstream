@@ -81,68 +81,64 @@ bundle root outside the image.
 
 ## Film extension
 
-`film/build.py` attaches the standalone SpektraFilm Film stage to the
-application image. The extension adds the pinned standalone numerical
-runtime — the pinned interpreter under `/opt/python`, the locked
-environment under `/opt/runtime`, the patched pinned SpektraFilm source
-under `/opt/spektrafilm`, and the qualified fixed-recipe modules under
-`/opt/probe` — plus the local runner, the runtime-generated complete
-default parameter tree, and the deterministic bundle manifest under
-`/opt/slipstream-film`. It never invokes darktable: the film stage
-consumes the retained linear ProPhoto Development TIFF handoff directly,
-so it is installable independently of the native darktable extension:
+`film/build.py` attaches the standalone `spektrafilm-rs` fork to the
+application image. The extension adds the pinned `spektrafilm-f64` CLI, its
+profile-data tree, the module-owned default parameter tree, and the
+deterministic bundle manifest under `/opt/slipstream-film`. It never invokes
+darktable: the Film stage consumes the retained linear ProPhoto Development
+TIFF handoff directly, so it is installable independently of the native
+darktable extension:
 
 ```sh
 python3 tools/processing/film/build.py --tag slipstream:film-local
 ```
 
-Like the photo helper it first builds (or reuses via `--app-image`) the
-normal application runtime, then builds twice so the second pass pins the
-derived bundle digest in the image label, and refuses an image that does
-not extend the exact application runtime layers or that does not keep the
-Slipstream server entrypoint. It prints the explicit build artifacts —
-the application image ID, the extended image ID, the 64-character bundle
-digest, and the pinned SpektraFilm commit:
+Like the photo helper it first builds (or reuses via `--app-image`) the normal
+application runtime, then builds twice so the second pass pins the derived
+bundle digest in the image label. It prints the application image ID, extended
+image ID, bundle digest, and fork commit:
 
 ```json
 {
   "app": "sha256:…",
   "bundle": "…",
   "image": "sha256:…",
-  "spektrafilm_commit": "…"
+  "spektrafilm_fork_commit": "…"
 }
 ```
 
-The shared fixed-recipe digest covers the numerical parameters, stocks, and
-seed. It excludes only processing-bundle provenance and bounded gamut workspace
-allocation; both build assets and the recorded processing bundle remain covered
-by the exact adapter bundle digest. The runner refuses changed, missing, or
-unknown recipe fields before rendering. A build change requires a new configured
-bundle digest even when the saved fixed recipe remains identical.
+The fork CLI owns the machine-readable local contract:
 
-Deploy the extended image with the ordinary Compose command — there is no
-film-specific command or overlay — and use its immutable ID as the
-deployment's `SLIPSTREAM_IMAGE` and the bundle digest for identity
-checks. At startup the server verifies the bundle manifest identity and
-every asset it names: the runner, the generated default parameter tree
-(admitted by the module boundary's own fixed-recipe shape), the recorded
-processing-bundle identity, the locked requirements, the installed
-package list, and every file of the runtime, source, and probe trees. The
-default `SLIPSTREAM_FILM_MODULE=auto` admits the stage exactly when the
-installed assets validate; `disabled` turns it off, and an absolute
-`SLIPSTREAM_FILM_BUNDLE_DIRECTORY` points a smoke or development run at a
-bundle root outside the image. A configured but absent bundle directory
-reports `film-runtime-missing`, and a present bundle that fails
-verification reports `film-bundle-unavailable`; either way the Library,
-Photo Development, and every other operation stay available and the
-capability reports the Film stage unavailable.
+```sh
+spektrafilm-f64 describe --format json
+spektrafilm-f64 render --input INPUT.tiff --recipe RECIPE.json --output OUTPUT.jpg
+spektrafilm-f64 inspect --input OUTPUT.jpg --format json
+spektrafilm-f64 parity --corpus CORPUS.json --report REPORT.json
+```
+
+`render` refuses an existing output, uses the explicit recipe schema and
+profile data root, and writes through a private temporary file before commit.
+`inspect` is read-only. `parity` records each input/recipe/output identity and
+only reports pass when a declared reference digest matches; missing references
+remain explicitly unqualified.
+
+At startup the server verifies the format-2 manifest identity, executable fork
+binary, default parameter tree, native runtime libraries, and every profile
+data digest. Missing or invalid assets leave Library operations available and
+report the Film stage unavailable. `SLIPSTREAM_FILM_MODULE=auto` admits the
+stage only when the installed assets validate; `disabled` turns it off, and an
+absolute `SLIPSTREAM_FILM_BUNDLE_DIRECTORY` points a smoke or development run
+at a bundle root outside the image. A configured but absent directory reports
+`film-runtime-missing`; a present bundle that fails verification reports
+`film-bundle-unavailable`.
 
 Module readiness does not establish full-resolution resource admission. A new
-standalone Film Export is refused before acceptance if the known minimum live
-memory exceeds the effective finite cgroup allowance, or that allowance cannot
-be read. Bounded Preview remains separately executable. The admission and
-retained-receipt rules are owned by
-[Processing Modules](../../design/processing-modules.md#explicit-materialization).
+Film Export is refused before acceptance if the known minimum live memory
+exceeds the effective finite cgroup allowance, or that allowance cannot be
+read. Preview remains separately bounded. Historical
+`spektrafilm-params-1` trees remain readable; discovery and new fork recipes
+use `spektrafilm-rs-params-1`.
+
 
 ## Operator end-to-end acceptance
 

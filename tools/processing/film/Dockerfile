@@ -1,99 +1,55 @@
-# Standalone SpektraFilm extension of the Slipstream application image
-# (Issue #496). The normal application runtime (built from the repository
-# Dockerfile) is the parent: the extended image runs the same Slipstream
-# server entrypoint and only adds the pinned standalone numerical runtime —
-# the same pinned interpreter, locked packages, patched SpektraFilm source,
-# and bounded workspace modules the qualified development runtime uses —
-# plus the local film runner and the deterministic bundle manifest. The
-# runtime never invokes darktable: the film stage consumes the retained
-# linear ProPhoto Development TIFF handoff directly, so this extension is
-# installable independently of the darktable extension.
+# Standalone spektrafilm-rs extension of the immutable Slipstream runtime.
 ARG APP_IMAGE
+ARG SPEKTRAFILM_FORK_COMMIT
 
-FROM ghcr.io/astral-sh/uv:0.10.2@sha256:94a23af2d50e97b87b522d3cea24aaf8a1faedec1344c952767434f69585cbf9 AS uv
-
-FROM ubuntu:26.04@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78 AS film-runtime
-ENV DEBIAN_FRONTEND=noninteractive
-COPY --from=uv /uv /usr/local/bin/uv
+FROM rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS fork-build
+WORKDIR /src
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libgomp1 patch \
-    && dpkg-query -W > /opt/os-packages.txt \
+    && apt-get install --no-install-recommends --yes \
+       build-essential ca-certificates libexiv2-dev libglib2.0-dev \
+       liblensfun-dev libopenblas-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
-ENV UV_PYTHON_INSTALL_DIR=/opt/python UV_PYTHON_BIN_DIR=/usr/local/bin UV_LINK_MODE=copy
-RUN uv python install 3.13.12 && uv venv --python 3.13.12 /opt/runtime
-COPY tools/development/requirements.lock /opt/requirements.lock
-RUN uv pip sync --python /opt/runtime/bin/python --require-hashes /opt/requirements.lock
+ADD --checksum=sha256:de86b035655accff8d4010f1a221fdf50d353cb7b1422ba26f14a0db92612cfa \
+    https://www.libraw.org/data/LibRaw-0.22.2.tar.gz /tmp/libraw.tar.gz
+RUN tar -xzf /tmp/libraw.tar.gz -C /tmp \
+    && cd /tmp/LibRaw-0.22.2 \
+    && ./configure --prefix=/opt/slipstream-libraw --disable-static --disable-examples --disable-openmp --disable-lcms \
+    && make -j2 \
+    && make install \
+    && rm -rf /tmp/LibRaw-0.22.2 /tmp/libraw.tar.gz
+ENV PKG_CONFIG_PATH=/opt/slipstream-libraw/lib/pkgconfig
+COPY third_party/spektrafilm-rs /src/spektrafilm-rs
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/spektrafilm-rs/target,sharing=locked \
+    cargo build --manifest-path /src/spektrafilm-rs/Cargo.toml --locked --release \
+      --features precision-f64 -p spektrafilm-cli --bin spektrafilm-f64
+RUN mkdir -p /opt/spektrafilm-libs \
+    && ldd /src/spektrafilm-rs/target/release/spektrafilm-f64 \
+       | awk '$3 ~ /^\// {print $3}' \
+       | sort -u \
+       | xargs -r -I{} cp -L "{}" /opt/spektrafilm-libs/
 
-# Keep the original source and license notices together in the extension.
-ADD --checksum=sha256:b2aca043227bb76f7f09eef4466cd8f9410f0cd5832ae2f4d045b80cb13b328f \
-    https://codeload.github.com/andreavolpato/spektrafilm/tar.gz/3bb2c2d2801ff68b92019cf1dbcbb133d60832bc /opt/spektrafilm.tar.gz
-RUN mkdir /opt/spektrafilm \
-    && tar -xzf /opt/spektrafilm.tar.gz --strip-components=1 -C /opt/spektrafilm \
-    && rm /opt/spektrafilm.tar.gz
-COPY tools/development/patches/0001-bounded-output-gamut.patch \
-     tools/development/patches/0002-buffer-lifetimes-and-output.patch /opt/patches/
-RUN patch --batch --fuzz=0 -p1 -d /opt/spektrafilm < /opt/patches/0001-bounded-output-gamut.patch \
-    && patch --batch --fuzz=0 -p1 -d /opt/spektrafilm < /opt/patches/0002-buffer-lifetimes-and-output.patch \
+FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b AS film-bundle
+ARG SPEKTRAFILM_FORK_COMMIT
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes python3 \
     && rm -rf /var/lib/apt/lists/*
-COPY tools/development/bounded_gamut.py /opt/spektrafilm/src/spektrafilm/utils/bounded_gamut.py
-COPY tools/development/bounded_output.py /opt/spektrafilm/src/spektrafilm/utils/bounded_output.py
-# The qualified fixed-recipe modules the runner reuses: film.py builds the
-# pinned simulator, finished_jpeg.py the fixed Finished JPEG encoder, and
-# bundle.py records the numerical bundle identity this image's manifest
-# pins. probe.py, telemetry.py, and history.py stay because bundle.py's
-# recorded identity covers them.
-COPY tools/development/film.py tools/development/film_identity.py \
-     tools/development/finished_jpeg.py tools/development/bundle.py \
-     tools/development/probe.py tools/development/telemetry.py \
-     tools/development/history.py /opt/probe/
-# bundle.py's recorded identity hashes the qualified development runtime's
-# own Dockerfile bytes, so the extension carries the same pinned input.
-COPY tools/development/Dockerfile /opt/development-Dockerfile
-# The processing-bundle identity of this runtime, recorded before the
-# runner ever executes: the manifest pins its digest.
-RUN PYTHONPATH=/opt/spektrafilm/src PYTHONDONTWRITEBYTECODE=1 \
-    MPLBACKEND=Agg MPLCONFIGDIR=/tmp/matplotlib XDG_CACHE_HOME=/tmp/xdg \
-    XDG_CONFIG_HOME=/tmp/xdgconfig OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
-    NUMBA_NUM_THREADS=1 NUMEXPR_NUM_THREADS=4 \
-    /opt/runtime/bin/python /opt/probe/bundle.py
+COPY --from=fork-build /src/spektrafilm-rs/target/release/spektrafilm-f64 /opt/slipstream-film/spektrafilm-f64
+COPY --from=fork-build /opt/spektrafilm-libs /opt/slipstream-film/lib
+COPY third_party/spektrafilm-rs/data /opt/slipstream-film/data
+COPY crates/slipstream-processing/src/spektrafilm-recipe-tree.json /opt/slipstream-film/parameters-default.json
+COPY tools/processing/film/manifest.py /opt/manifest.py
+RUN SPEKTRAFILM_FORK_COMMIT="${SPEKTRAFILM_FORK_COMMIT}" python3 /opt/manifest.py
 
 FROM ${APP_IMAGE} AS film
-ARG SPEKTRAFILM_COMMIT
+ARG SPEKTRAFILM_FORK_COMMIT
 USER 0:0
-# The pinned numerical runtime keeps its qualified absolute layout: the
-# interpreter under /opt/python, the environment under /opt/runtime, the
-# patched source under /opt/spektrafilm, and the fixed-recipe modules under
-# /opt/probe. /opt/slipstream-film carries only the runner, the complete
-# default parameter tree the runtime generated, and the deterministic
-# bundle identity the server verifies at startup.
-COPY --from=film-runtime /opt/python /opt/python
-COPY --from=film-runtime /opt/runtime /opt/runtime
-COPY --from=film-runtime /opt/spektrafilm /opt/spektrafilm
-COPY --from=film-runtime /opt/probe /opt/probe
-COPY --from=film-runtime /opt/processing-bundle.json /opt/processing-bundle.json
-COPY --from=film-runtime /opt/requirements.lock /opt/requirements.lock
-COPY --from=film-runtime /opt/os-packages.txt /opt/os-packages.txt
-COPY tools/processing/film/film_runner.py /opt/slipstream-film/runner/film_runner.py
-COPY tools/processing/film/manifest.py /opt/slipstream-film/manifest.py
-# The complete default parameter tree is generated by the pinned runtime
-# itself at build time, so the tree a caller saves is exactly the pinned
-# fixed recipe the runner later re-verifies against the same runtime.
-RUN NUMBA_CACHE_DIR=/tmp/numba MPLCONFIGDIR=/tmp/matplotlib XDG_CACHE_HOME=/tmp/xdg \
-    XDG_CONFIG_HOME=/tmp/xdgconfig OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
-    NUMBA_NUM_THREADS=1 NUMEXPR_NUM_THREADS=4 PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH=/opt/spektrafilm/src \
-    /opt/runtime/bin/python /opt/slipstream-film/runner/film_runner.py \
-        --emit-default-parameters /opt/slipstream-film/parameters-default.json \
-    && rm -rf /tmp/numba /tmp/matplotlib /tmp/xdg /tmp/xdgconfig \
-    && SPEKTRAFILM_COMMIT="${SPEKTRAFILM_COMMIT}" \
-       /opt/runtime/bin/python /opt/slipstream-film/manifest.py \
-    && chown -R 1000:1000 /opt/slipstream-film \
-    && chmod 0555 /opt/slipstream-film/runner/film_runner.py
-LABEL slipstream.processing.film.spektrafilm="standalone-pinned" \
-      slipstream.processing.film.spektrafilm.commit="${SPEKTRAFILM_COMMIT}"
+COPY --from=film-bundle /opt/slipstream-film /opt/slipstream-film
+ENV SPEKTRAFILM_FORK_COMMIT="${SPEKTRAFILM_FORK_COMMIT}" \
+    LD_LIBRARY_PATH=/usr/local/lib/slipstream-film:/usr/local/lib/slipstream
+LABEL slipstream.processing.film.spektrafilm="standalone-fork" \
+      slipstream.processing.film.spektrafilm.commit="${SPEKTRAFILM_FORK_COMMIT}"
 ARG FILM_BUNDLE
 LABEL slipstream.processing.film.bundle="${FILM_BUNDLE}"
-# The extended image is the application: same server entrypoint, same user,
-# same health contract as the normal runtime parent.
 USER 1000:1000
 ENTRYPOINT ["/usr/local/bin/slipstream-server"]

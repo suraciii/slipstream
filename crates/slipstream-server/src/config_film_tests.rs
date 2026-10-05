@@ -6,24 +6,14 @@ use std::os::unix::fs::PermissionsExt;
 /// verification pins can differ between a good and a hostile bundle.
 fn write_bundle(base: &Path) -> PathBuf {
     let root = base.join("slipstream-film");
-    let runtime = base.join("runtime");
-    let source = base.join("spektrafilm/src");
-    let probe = base.join("probe");
-    std::fs::create_dir_all(root.join("runner")).unwrap();
-    std::fs::create_dir_all(runtime.join("bin")).unwrap();
-    std::fs::create_dir_all(&source).unwrap();
-    std::fs::create_dir_all(&probe).unwrap();
-    let engine = runtime.join("bin/python");
-    std::fs::write(&engine, b"#!/bin/sh\n").unwrap();
-    let mut permissions = std::fs::metadata(&engine).unwrap().permissions();
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("profile.json"), b"{\"profile\":\"fixture\"}\n").unwrap();
+    let binary = root.join("spektrafilm");
+    std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
+    let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
     permissions.set_mode(0o755);
-    std::fs::set_permissions(&engine, permissions).unwrap();
-    let runner = root.join("runner/film_runner.py");
-    std::fs::write(&runner, b"runner").unwrap();
-    let source_file = source.join("sim.py");
-    std::fs::write(&source_file, b"source").unwrap();
-    let probe_file = probe.join("film.py");
-    std::fs::write(&probe_file, b"probe").unwrap();
+    std::fs::set_permissions(&binary, permissions).unwrap();
     let parameters = root.join("parameters-default.json");
     std::fs::write(
         &parameters,
@@ -31,27 +21,23 @@ fn write_bundle(base: &Path) -> PathBuf {
     )
     .unwrap();
     let document = serde_json::json!({
-        "format": 1,
-        "spektrafilm_commit": "3bb2c2d2801ff68b92019cf1dbcbb133d60832bc",
-        "engine": engine,
-        "runner": runner,
-        "source_root": source,
-        "probe_root": probe,
-        "recipe_sha256":
-            slipstream_processing::modules::SPEKTRAFILM_RECIPE_SHA256,
-        "input_icc_sha256":
-            slipstream_processing::modules::SPEKTRAFILM_INPUT_ICC_SHA256,
-        "output_icc_sha256":
-            slipstream_processing::modules::SPEKTRAFILM_OUTPUT_ICC_SHA256,
-        "finished_jpeg_quality": 85,
-        "procedure": "film-once-empty-cache-v1",
+        "format": 2,
+        "implementation": "spektrafilm-rs",
+        "forkCommit": "9e9f04b8fb8e51a0e80f4c1e8191ebcb7aa9b686",
+        "adapterVersion": "spektrafilm-rs-adapter-1",
+        "parameterSchemaVersion": "spektrafilm-rs-params-1",
+        "binary": binary,
+        "dataRoot": data,
+        "parametersDefault": parameters,
+        "filmProfile": "kodak_portra_400",
+        "printProfile": "kodak_portra_endura",
         "files": {
-            "/opt/slipstream-film/runner/film_runner.py": digest_of(&runner),
+            "/opt/slipstream-film/spektrafilm": digest_of(&binary),
             "/opt/slipstream-film/parameters-default.json": digest_of(&parameters),
         },
-        "runtime": {"bin/python": digest_of(&engine)},
-        "source": {"sim.py": digest_of(&source_file)},
-        "probe": {"film.py": digest_of(&probe_file)},
+        "data": {
+            "profile.json": digest_of(&data.join("profile.json")),
+        },
     });
     let encoded = serde_json::to_vec(&document).unwrap();
     std::fs::write(root.join("bundle-manifest.json"), &encoded).unwrap();
@@ -86,9 +72,9 @@ fn a_truthful_bundle_verifies_and_carries_the_pinned_identity() {
     let config = config.expect("the fixture bundle verifies");
     assert!(config.ready());
     assert_eq!(config.bundle_sha256.len(), 64);
-    assert!(config.engine.ends_with("runtime/bin/python"));
-    assert!(config.runner.ends_with("runner/film_runner.py"));
-    assert!(config.source_root.ends_with("spektrafilm/src"));
+    assert!(config.binary.ends_with("slipstream-film/spektrafilm"));
+    assert!(config.data_root.ends_with("slipstream-film/data"));
+    assert_eq!(config.film_profile, "kodak_portra_400");
     assert!(config.parameter_default.is_object());
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -98,7 +84,7 @@ fn a_tampered_runtime_or_recipe_identity_is_refused() {
     let base = fresh_base();
     let root = write_bundle(&base);
     // A runtime file changed after the manifest was recorded.
-    let engine = base.join("runtime/bin/python");
+    let engine = base.join("slipstream-film/spektrafilm");
     std::fs::write(&engine, b"#!/bin/sh\ntampered").unwrap();
     let (_, failure) = verify_film_bundle(&root);
     assert_eq!(failure, Some("film-bundle-unavailable"));
@@ -109,7 +95,7 @@ fn a_tampered_runtime_or_recipe_identity_is_refused() {
         serde_json::from_slice(&std::fs::read(root2.join("bundle-manifest.json")).unwrap())
             .unwrap();
     let mut hostile = manifest.clone();
-    hostile["recipe_sha256"] = serde_json::json!("0".repeat(64));
+    hostile["forkCommit"] = serde_json::json!("0".repeat(40));
     let encoded = serde_json::to_vec(&hostile).unwrap();
     std::fs::write(root2.join("bundle-manifest.json"), &encoded).unwrap();
     std::fs::write(
