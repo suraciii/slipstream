@@ -36,7 +36,7 @@ pub async fn invoke_until(
             command: ProcessingCommand::ArtifactDownload { .. }
         }
     );
-    let command = execute(&cli, environment, &admission, &publication);
+    let command = execute(&cli, environment, &admission, &publication, deadline);
     tokio::pin!(command);
     let deadline_signal = async {
         if artifact_download {

@@ -20,13 +20,12 @@ network request. Unknown options, duplicate options, extra positional arguments,
 and invalid combinations are errors. Flags must not accept abbreviations.
 
 The service URL resolves from `--server`, then `SLIPSTREAM_SERVER_URL`, then
-an error for network commands when neither is supplied. A supplied empty or
-invalid value is an error, not a fallback. A URL must be an HTTP or HTTPS origin
+the active saved origin, then an error for network commands when none is
+supplied. A supplied empty or invalid value is an error, not a fallback. A URL
+must be an HTTP or HTTPS origin
 with no credentials, path other than `/`, query, or fragment. HTTPS uses normal
 certificate validation; there is no certificate-verification bypass. An HTTP
 origin prints one unencrypted-connection warning to stderr before any request.
-The CLI must not follow HTTP redirects. There is no profile file, automatic
-discovery, or login command.
 
 `--timeout` is an integer from 1 through 300 seconds and defaults to 30. For
 ordinary commands it bounds the whole command after argument parsing, including
@@ -56,9 +55,10 @@ No request redirect may forward the credential.
 
 A confirmed authentication rejection means the request was not admitted; the
 CLI must not retry it automatically. Transport loss after a write was sent
-retains the existing unknown-outcome rules. The token file resolves from `--token-file`, then
-`SLIPSTREAM_ACCESS_TOKEN_FILE`. Omission, an empty path, or duplicate options
-is `invalid_input` before any network request. File input is independent of
+retains the existing unknown-outcome rules. Credentials resolve from
+`--token-file`, then `SLIPSTREAM_ACCESS_TOKEN_FILE`, then the selected origin's
+saved credential. An empty path, duplicate options, or omission when no saved
+credential exists is `invalid_input` before any network request. File input is independent of
 mutation stdin. The file must be a regular nonsymlink file owned by the effective
 user with no group or other permission bits; validate and read the same opened
 file. Refuse files larger than 45 bytes. Missing or unreadable files use
@@ -76,6 +76,50 @@ is confirmed before admission. An unexpected or invalid response to a possibly
 admitted write must retain `outcome_unknown`. A token does not bypass contract
 version negotiation. HTTP and HTTPS origins use the same authentication and
 result mappings.
+
+## Local Authentication
+
+Slipstream uses one instance Access Token. `auth login` saves that existing
+token for one canonical HTTPS origin; it does not create an account, browser
+session, refresh token, or second permission model.
+
+```text literal
+slipstream --server https://photos.example.com auth login
+slipstream --server https://photos.example.com auth login --token-stdin < token.txt
+slipstream --server https://photos.example.com auth login --token-file token.txt
+slipstream auth status
+slipstream --server https://photos.example.com auth use
+slipstream --server https://photos.example.com auth logout
+```
+
+The login token source is exactly one of a hidden terminal prompt,
+`--token-stdin`, or the command-local `--token-file`. A token must never appear
+in command arguments, URLs, JSON output, logs, or diagnostics. A noninteractive
+login without an explicit source fails before any network request. Replacing an
+existing origin requires terminal confirmation or `--force`. The global
+`--token-file` override is rejected by `auth login`.
+
+Login sends one bounded, read-only `/api/capabilities` request with the CLI
+contract header and stores the token only after the service accepts it.
+Authentication rejection, incompatibility, and transport failure leave the
+previous saved credential unchanged. HTTPS port 443 and an omitted port name
+the same saved origin.
+
+The CLI uses the operating-system credential helper when available and
+otherwise stores a user-owned 0600 file under the configuration directory.
+Storage mutations and reconciliation after uncertain helper outcomes are
+bounded. A failed replacement or logout must preserve the previous visible
+credential and selection whenever restoration succeeds; storage failure must
+be reported when restoration cannot be confirmed.
+
+`auth status` never prints token material; it lists origins, active selection,
+storage kind, login times, and a selected-origin check (`valid`, `invalid`,
+`unreachable`, `incompatible`, or `not-configured`). `auth use` changes only the
+local active origin. `auth logout` removes only the local saved entry and does
+not revoke the server token. An explicit or environmental token file with an
+explicit or environmental server origin must work even when the auth store
+cannot be read. Operational HTTP and HTTPS support remains as defined above.
+
 
 ## Service and Discovery
 
@@ -1135,7 +1179,8 @@ The other codes have these required shapes:
   `write-output`, nullable local string `path`, and boolean `fileCommitted`.
 
 For `authentication_required`, `access_denied`, `server_busy`, `storage_failed`, `transport_failed`, and `outcome_unknown`,
-`operation` is one of `status`, `library-check`, `folders-list`, `albums-list`,
+`operation` is one of `auth-login`, `auth-status`, `auth-use`, `auth-logout`,
+`status`, `library-check`, `folders-list`, `albums-list`,
 `albums-get`, `photos-list`, `photos-get`, `photos-preview`, `photos-set`,
 `albums-create`, `albums-rename`, `albums-delete`, `albums-add`, `albums-remove`,
 `albums-reorder`, `processing-modules`, `processing-artifact`,

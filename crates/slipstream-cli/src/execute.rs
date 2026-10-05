@@ -4,9 +4,13 @@ pub(crate) async fn execute(
     environment: Option<&str>,
     admission: &AdmissionState,
     publication: &PublicationState,
+    deadline: tokio::time::Instant,
 ) -> Result<Value, CommandFailure> {
     let operation = command_operation(&cli.command);
     validate_command(&cli.command)?;
+    if matches!(&cli.command, Command::Auth { .. }) {
+        return auth::execute_auth(cli, environment, deadline).await;
+    }
     let preview_destination = match &cli.command {
         Command::Photos {
             command: PhotoCommand::Preview { file, .. },
@@ -34,14 +38,12 @@ pub(crate) async fn execute(
         )?),
         _ => None,
     };
-    let origin = service_origin(cli, environment)?;
+    let (origin, token) = auth::ordinary_credentials(cli, environment, operation, deadline).await?;
     if origin.scheme() == "http" {
         eprintln!(
             "Warning: the HTTP service origin is unencrypted; requests and credentials may be observed in transit."
         );
     }
-    let token_path = access_token_path(cli)?;
-    let token = read_access_token(token_path).await?;
     // The complete membership and decision documents validate before any
     // network access, so a local input failure can never depend on service
     // reachability.
@@ -146,6 +148,7 @@ pub(crate) async fn execute(
 
     let result = async {
         match &cli.command {
+            Command::Auth { .. } => unreachable!("auth commands return before service dispatch"),
             Command::Processing { command } => match command {
                 ProcessingCommand::Modules => development::modules(&client).await,
                 ProcessingCommand::Artifact { artifact_id } => {
@@ -1252,26 +1255,6 @@ pub(crate) fn validate_command(command: &Command) -> Result<(), CommandFailure> 
         }
         _ => Ok(()),
     }
-}
-
-pub(crate) fn access_token_path(cli: &Cli) -> Result<PathBuf, CommandFailure> {
-    let path = cli
-        .token_file
-        .clone()
-        .or_else(|| env::var_os("SLIPSTREAM_ACCESS_TOKEN_FILE").map(PathBuf::from));
-    let Some(path) = path else {
-        return Err(CommandFailure::invalid(
-            "token-file",
-            "Set --token-file or SLIPSTREAM_ACCESS_TOKEN_FILE.",
-        ));
-    };
-    if path.as_os_str().is_empty() {
-        return Err(CommandFailure::invalid(
-            "token-file",
-            "The credential file path must not be empty.",
-        ));
-    }
-    Ok(path)
 }
 
 pub(crate) async fn read_access_token(path: PathBuf) -> Result<String, CommandFailure> {
