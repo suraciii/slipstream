@@ -5,6 +5,8 @@ use super::{
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::collections::{HashMap, HashSet};
 
+#[path = "migrations_v14.rs"]
+mod migrations_v14;
 const SCHEMA_V1_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v1.sql");
 /// Issue #472: identifies the RAW Preview decoder generation that persists
 /// unavailable facts. An unavailable RAW Preview recorded by a previous
@@ -201,7 +203,7 @@ pub(super) fn startup_schema(
         migrate_v13(&transaction)?;
     }
     if version < 15 {
-        migrate_v14(&transaction)?;
+        migrations_v14::migrate_v14(&transaction)?;
     }
     let stored: Option<String> = transaction
         .query_row(
@@ -926,57 +928,6 @@ fn migrate_v13(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
         .map_err(|_| PersistenceError::UnsupportedSchema)
 }
 
-fn migrate_v14(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
-    validate_canonical_schema(transaction, SchemaVersion::V14)
-        .map_err(|_| PersistenceError::UnsupportedSchema)?;
-    let malformed: i64 = transaction
-        .query_row(
-            "SELECT COUNT(*) FROM photos
-             WHERE selection_state NOT IN ('undecided','selected','rejected')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    if malformed != 0 {
-        return Err(PersistenceError::InvalidLegacyData);
-    }
-    transaction
-        .execute_batch(
-            "CREATE TABLE photos_selection_v15(
-               id TEXT PRIMARY KEY,
-               original_id TEXT NOT NULL UNIQUE REFERENCES original_files(id) ON DELETE RESTRICT,
-               available INTEGER NOT NULL CHECK(available IN (0,1)),
-               preview_state TEXT NOT NULL CHECK(preview_state IN ('inspection-pending','ready','failed','unavailable')),
-               preview_source_revision TEXT,
-               preview_width INTEGER CHECK(preview_width IS NULL OR preview_width > 0),
-               preview_height INTEGER CHECK(preview_height IS NULL OR preview_height > 0),
-               cache_revision TEXT,
-               sort_path TEXT NOT NULL,
-               selection_state TEXT NOT NULL DEFAULT 'unflagged' CHECK(selection_state IN ('unflagged','picked','rejected')),
-               rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
-               removed_at_ms INTEGER CHECK(removed_at_ms IS NULL OR removed_at_ms >= 0),
-               removed_operation TEXT CHECK((removed_at_ms IS NULL) = (removed_operation IS NULL)),
-               association_generation INTEGER NOT NULL DEFAULT 1 CHECK(association_generation > 0));
-             INSERT INTO photos_selection_v15(
-               id,original_id,available,preview_state,preview_source_revision,preview_width,
-               preview_height,cache_revision,sort_path,selection_state,rating,removed_at_ms,
-               removed_operation,association_generation)
-             SELECT id,original_id,available,preview_state,preview_source_revision,preview_width,
-               preview_height,cache_revision,sort_path,
-               CASE selection_state WHEN 'undecided' THEN 'unflagged'
-                    WHEN 'selected' THEN 'picked' ELSE 'rejected' END,
-               rating,removed_at_ms,removed_operation,association_generation
-             FROM photos;
-             DROP TABLE photos;
-             ALTER TABLE photos_selection_v15 RENAME TO photos;
-             CREATE INDEX photos_original ON photos(original_id);
-             PRAGMA user_version = 15;",
-        )
-        .map_err(|_| PersistenceError::InvalidLegacyData)?;
-    validate_canonical_schema(transaction, SchemaVersion::V15)
-        .map_err(|_| PersistenceError::UnsupportedSchema)
-}
-
 struct LegacyPhotoRow {
     id: String,
     raw_original_id: Option<String>,
@@ -1182,107 +1133,7 @@ mod tests {
         expected_error: String,
     }
 
-    #[tokio::test]
-    async fn initializes_current_schema_and_runs_fifo_writes() {
-        let (_base, library, state, name, path) = fixture();
-        let persistence = Persistence::open(
-            state,
-            name,
-            library.canonical_path().to_string_lossy().into_owned(),
-        )
-        .unwrap();
-        assert_eq!(persistence.probe().await.unwrap(), 1);
-        persistence.write_probe().await.unwrap();
-        assert_eq!(persistence.probe().await.unwrap(), 3);
-        let (configuration_send, configuration_receive) = oneshot::channel();
-        persistence
-            .submit(Command::Configuration(configuration_send))
-            .unwrap();
-        assert_eq!(
-            configuration_receive.await.unwrap().unwrap(),
-            ("delete".to_owned(), 1)
-        );
-        persistence.shutdown().unwrap();
-        let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V15).unwrap();
-    }
-
-    #[tokio::test]
-    async fn v14_selection_state_migration_maps_legacy_values_to_canonical_values() {
-        let (_base, library, state, name, path) = fixture();
-        seed(
-            &path,
-            include_str!("../../../../compatibility/sqlite/schema-v14.sql"),
-        );
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute(
-                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
-                [library.canonical_path().to_str().unwrap()],
-            )
-            .unwrap();
-        connection
-            .execute_batch(
-                "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available)
-                   VALUES
-                     ('original-one','one.jpg','jpeg',1,1,1),
-                     ('original-two','two.jpg','jpeg',1,1,1),
-                     ('original-three','three.jpg','jpeg',1,1,1);
-                 INSERT INTO photos(
-                   id,original_id,available,preview_state,sort_path,selection_state,rating
-                 ) VALUES
-                   ('photo-one','original-one',1,'inspection-pending','one.jpg','undecided',1),
-                   ('photo-two','original-two',1,'inspection-pending','two.jpg','selected',2),
-                   ('photo-three','original-three',1,'inspection-pending','three.jpg','rejected',3);",
-            )
-            .unwrap();
-        drop(connection);
-
-        let persistence = Persistence::open(
-            state,
-            name,
-            library.canonical_path().to_string_lossy().into_owned(),
-        )
-        .unwrap();
-        let snapshot = persistence.snapshot().await.unwrap();
-        persistence.shutdown().unwrap();
-
-        let connection = Connection::open(&path).unwrap();
-        assert_eq!(
-            connection
-                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
-                .unwrap(),
-            15
-        );
-        validate_canonical_schema(&connection, SchemaVersion::V15).unwrap();
-        let values: Vec<(String, String)> = connection
-            .prepare("SELECT id,selection_state FROM photos ORDER BY id")
-            .unwrap()
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        assert_eq!(
-            values,
-            vec![
-                ("photo-one".to_owned(), "unflagged".to_owned()),
-                ("photo-three".to_owned(), "rejected".to_owned()),
-                ("photo-two".to_owned(), "picked".to_owned()),
-            ]
-        );
-        assert_eq!(
-            snapshot
-                .photos
-                .iter()
-                .map(|photo| photo.selection_state)
-                .collect::<Vec<_>>(),
-            vec![
-                SelectionState::Unflagged,
-                SelectionState::Rejected,
-                SelectionState::Picked,
-            ]
-        );
-    }
+    include!("migrations_v15_tests.rs");
 
     #[tokio::test]
     async fn v6_to_v7_migration_preserves_existing_library_rows() {

@@ -700,7 +700,6 @@ mod tests {
         )
         .unwrap();
         assert!(!contains_null(&contract));
-
         let photo_state_cases = contract["photoStateBatch"]
             .as_array()
             .expect("photo state batch examples");
@@ -774,7 +773,6 @@ mod tests {
             }
             assert_eq!(outcome_ids, requested_ids);
         }
-
         let album_cases = contract["albumMembership"]
             .as_array()
             .expect("Album membership examples");
