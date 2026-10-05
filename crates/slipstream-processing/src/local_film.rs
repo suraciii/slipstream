@@ -1,15 +1,13 @@
 //! Local standalone SpektraFilm execution (Issue #496).
 //!
 //! Public synchronous execution of an artifact-bound `spektrafilm` step
-//! directly in the caller's container: the pinned standalone numerical
-//! runtime runs under the application-owned process-group supervisor, with
-//! no shell, sidecar service, worker PID 1, transport socket, or
-//! Library/HTTP dependency, and it never invokes darktable. The input is
-//! the retained linear float32 ProPhoto TIFF handoff another peer exported;
-//! its closed contract is re-validated here before the engine starts, and
-//! the step's complete module-owned parameter tree is forwarded verbatim —
-//! the pinned runtime re-verifies it against the fixed recipe identity and
-//! refuses any deviation before a single pixel is rendered.
+//! directly in the caller's container: the pinned `spektrafilm-rs` fork
+//! runtime runs under the application-owned process-group supervisor, with no
+//! shell, sidecar service, worker PID 1, transport socket, or Library/HTTP
+//! dependency, and it never invokes darktable. The input is the retained
+//! linear float32 ProPhoto TIFF handoff another peer exported; its closed
+//! contract is re-validated here before the engine starts, and the module-owned
+//! parameter tree is wrapped in the fork's versioned recipe contract.
 //!
 //! One run is bounded by the caller's cancellation flag and timeout: the
 //! supervisor and engine run in their own process group, a per-call
@@ -77,110 +75,106 @@ pub fn geometry_bounded(width: u64, height: u64) -> bool {
     modules::film_geometry_bounded(width, height)
 }
 
-/// Derive the engine-private tree below the caller's work directory: a
-/// fresh empty Numba cache per attempt, the pinned deterministic runtime's
-/// scratch roots, and the frozen parameter file the engine consumes. Only
-/// this fixed skeleton is created; nothing outside `work` is written.
-fn prepare(work: &Path, parameters: &Parameters) -> io::Result<PathBuf> {
-    for directory in ["numba", "matplotlib", "xdg", "xdgconfig", "tmp"] {
-        let path = work.join(directory);
-        fs::create_dir_all(&path)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
-    }
+/// Build the fork runner's structured recipe below the caller's private
+/// workspace. The fork receives the complete module-owned tree verbatim and
+/// resolves its own profiles and image writer from the bundle data root.
+fn prepare(
+    work: &Path,
+    parameters: &Parameters,
+    film_profile: &str,
+    print_profile: &str,
+    output_format: &str,
+    max_edge: Option<u32>,
+) -> io::Result<PathBuf> {
+    fs::create_dir_all(work)?;
+    fs::set_permissions(work, fs::Permissions::from_mode(0o700))?;
     modules::validate_spektrafilm_parameters(parameters).map_err(|error| {
         io::Error::other(format!(
             "film parameters were refused: {:?} ({})",
             error.code, error.message
         ))
     })?;
-    let parameters_path = work.join("parameters.json");
+    let output = serde_json::json!({
+        "format": output_format,
+        "precisionBits": 8,
+        "colorSpace": "sRGB",
+        "transferFunction": "srgb",
+        "geometry": if output_format == "png" { "bounded" } else { "input-preserving" },
+        "encoding": if output_format == "png" { "bounded-preview" } else { "quality-85-baseline" },
+        "maxEdge": max_edge,
+    });
+    let recipe = serde_json::json!({
+        "schemaVersion": "spektrafilm-rs-params-1",
+        "filmProfile": film_profile,
+        "printProfile": print_profile,
+        "parameters": parameters.tree.clone(),
+        "output": output,
+        "seed": 0,
+    });
+    let recipe_path = work.join("recipe.json");
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(&parameters_path)?;
-    let bytes = serde_json::to_vec(&parameters.tree)
-        .map_err(|error| io::Error::other(format!("parameters are not serializable: {error}")))?;
+        .open(&recipe_path)?;
+    let bytes = serde_json::to_vec(&recipe)
+        .map_err(|error| io::Error::other(format!("recipe is not serializable: {error}")))?;
     file.write_all(&bytes)?;
     file.sync_all()?;
-    Ok(parameters_path)
+    Ok(recipe_path)
 }
 
-/// The pinned deterministic environment of the standalone runtime: the
-/// bundle's interpreter first on `PATH`, the pinned source tree, one
-/// thread for Numba, and every scratch root below the caller's private
-/// work directory.
-fn environment(
-    work: &Path,
-    engine: &Path,
-    source_root: &Path,
-) -> io::Result<Vec<(String, String)>> {
-    let runtime_bin = engine
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| io::Error::other("film engine path has no runtime root"))?
-        .join("bin");
+/// The deterministic environment for one fork attempt. The bundle owns the
+/// executable and data tree; no host path or catalog is made visible.
+fn environment(work: &Path, data_root: &Path, binary: &Path) -> io::Result<Vec<(String, String)>> {
     let value = |path: &Path| -> io::Result<String> {
         path.to_str()
             .map(str::to_owned)
-            .ok_or_else(|| io::Error::other("film runtime path is not valid UTF-8"))
+            .ok_or_else(|| io::Error::other("film attempt path is not valid UTF-8"))
     };
+    let library_root = binary
+        .parent()
+        .ok_or_else(|| io::Error::other("film binary has no bundle parent"))?
+        .join("lib");
     Ok([
-        (
-            "PATH",
-            format!("{}:/usr/local/bin:/usr/bin:/bin", value(&runtime_bin)?),
-        ),
-        ("PYTHONPATH", value(source_root)?),
-        ("PYTHONDONTWRITEBYTECODE", "1".to_owned()),
-        ("MPLBACKEND", "Agg".to_owned()),
-        ("MPLCONFIGDIR", value(&work.join("matplotlib"))?),
-        ("XDG_CACHE_HOME", value(&work.join("xdg"))?),
-        ("XDG_CONFIG_HOME", value(&work.join("xdgconfig"))?),
-        ("NUMBA_CACHE_DIR", value(&work.join("numba"))?),
+        ("HOME", value(&work.join("home"))?),
+        ("TMPDIR", value(&work.join("tmp"))?),
+        ("LD_LIBRARY_PATH", value(&library_root)?),
+        ("SPEKTRAFILM_BACKEND", "cpu".to_owned()),
+        ("SPEKTRAFILM_DATA_DIR", value(data_root)?),
         ("OMP_NUM_THREADS", "4".to_owned()),
         ("OPENBLAS_NUM_THREADS", "4".to_owned()),
-        ("NUMBA_NUM_THREADS", "1".to_owned()),
-        ("NUMEXPR_NUM_THREADS", "4".to_owned()),
-        ("HOME", value(&work.join("xdg"))?),
-        ("TMPDIR", value(&work.join("tmp"))?),
     ]
     .into_iter()
     .map(|(key, value)| (key.to_owned(), value))
     .collect())
 }
 
-/// The runner argv of one render: the pinned interpreter executes the
-/// runner directly with confined absolute paths.
+/// The fork CLI argv for one structured render.
 fn runner_arguments(
-    runner: &str,
-    command: &str,
     input: &Path,
     output: &Path,
-    parameters: &Path,
-    max_edge: Option<u32>,
+    recipe: &Path,
+    data_root: &Path,
 ) -> io::Result<Vec<String>> {
-    let mut arguments = vec![
-        runner.to_owned(),
-        command.to_owned(),
+    Ok(vec![
+        "render".to_owned(),
         "--input".to_owned(),
         confined(input)?,
+        "--recipe".to_owned(),
+        confined(recipe)?,
         "--output".to_owned(),
         confined(output)?,
-        "--parameters".to_owned(),
-        confined(parameters)?,
-    ];
-    if let Some(edge) = max_edge {
-        arguments.push("--max-edge".to_owned());
-        arguments.push(edge.to_string());
-    }
-    Ok(arguments)
+        "--data-dir".to_owned(),
+        confined(data_root)?,
+    ])
 }
 
-/// One supervised standalone runtime attempt: the pinned interpreter runs
+/// One supervised standalone fork attempt: the `spektrafilm-rs` binary runs
 /// in its own process group behind the application supervisor, stdout is
-/// discarded (the runner writes files, not protocol), and a bounded stderr
-/// log survives for the failure report. The watchdog kills the whole group
-/// on cancellation or deadline; dropping the attempt reaps the group.
+/// discarded (the CLI writes files, not protocol), and a bounded stderr log
+/// survives for the failure report. The watchdog kills the whole group on
+/// cancellation or deadline; dropping the attempt reaps the group.
 struct Attempt {
     child: std::process::Child,
     pgid: libc::pid_t,
@@ -346,13 +340,14 @@ pub fn validate_input(path: &Path) -> io::Result<local_photo::OutputIdentity> {
 /// The shared guarded-run sequence of both render modes.
 #[allow(clippy::too_many_arguments)]
 fn run(
-    engine: &Path,
-    runner: &Path,
-    source_root: &Path,
+    binary: &Path,
+    data_root: &Path,
+    film_profile: &str,
+    print_profile: &str,
     work: &Path,
     input: &Path,
     output: &Path,
-    command: &str,
+    output_format: &str,
     max_edge: Option<u32>,
     parameters: &Parameters,
     cancellation: Arc<AtomicBool>,
@@ -366,20 +361,24 @@ fn run(
     if cancellation.load(Ordering::Relaxed) {
         return Err(cancelled());
     }
-    let parameters_path = prepare(work, parameters)?;
+    let recipe_path = prepare(
+        work,
+        parameters,
+        film_profile,
+        print_profile,
+        output_format,
+        max_edge,
+    )?;
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| io::Error::other("standalone film deadline overflow"))?;
     if cancellation.load(Ordering::Relaxed) {
         return Err(cancelled());
     }
-    let runner = runner
-        .to_str()
-        .ok_or_else(|| io::Error::other("film runner path is not valid UTF-8"))?;
-    let arguments = runner_arguments(runner, command, input, output, &parameters_path, max_edge)?;
-    let env = environment(work, engine, source_root)?;
+    let arguments = runner_arguments(input, output, &recipe_path, data_root)?;
+    let env = environment(work, data_root, binary)?;
     let mut attempt = Attempt::start(
-        engine,
+        binary,
         &arguments,
         &env,
         work,
@@ -396,19 +395,16 @@ fn run(
 /// Execute one standalone Film Export of an artifact-bound step's complete
 /// module-owned parameter snapshot and return the validated identity of
 /// the written Finished JPEG.
-///
-/// `engine` is the pinned interpreter of the film bundle, `runner` its
-/// local adapter, `source_root` the pinned SpektraFilm source tree,
+/// `binary` is the pinned fork CLI, `data_root` its immutable data tree,
 /// `work` a clean private directory this call may own for the run, `input`
-/// the retained Development TIFF handoff, and `output` the path the
-/// validated Finished JPEG is written to. The run is bounded by
-/// `cancellation` and `timeout`: either kills the whole engine process
-/// group and returns an error naming the cause.
+/// the retained Development TIFF handoff, and `output` the path the validated
+/// Finished JPEG is written to.
 #[allow(clippy::too_many_arguments)]
 pub fn develop_selected_step(
-    engine: &Path,
-    runner: &Path,
-    source_root: &Path,
+    binary: &Path,
+    data_root: &Path,
+    film_profile: &str,
+    print_profile: &str,
     work: &Path,
     input: &Path,
     output: &Path,
@@ -418,13 +414,14 @@ pub fn develop_selected_step(
 ) -> io::Result<local_photo::OutputIdentity> {
     let input_identity = validate_input(input)?;
     run(
-        engine,
-        runner,
-        source_root,
+        binary,
+        data_root,
+        film_profile,
+        print_profile,
         work,
         input,
         output,
-        "produce",
+        "jpeg",
         None,
         parameters,
         cancellation,
@@ -448,15 +445,12 @@ pub fn develop_selected_step(
 /// Execute one bounded selected-step standalone Film Preview over the
 /// caller-owned paths and return the validated identity of the written
 /// PNG rendition.
-///
-/// The bounded geometry is enforced twice — the disclosed Preview long
-/// edge here, and the pinned runtime's own bounds inside the attempt —
-/// and the simulation never receives a full-resolution frame.
 #[allow(clippy::too_many_arguments)]
 pub fn render_selected_step(
-    engine: &Path,
-    runner: &Path,
-    source_root: &Path,
+    binary: &Path,
+    data_root: &Path,
+    film_profile: &str,
+    print_profile: &str,
     work: &Path,
     input: &Path,
     output: &Path,
@@ -472,13 +466,14 @@ pub fn render_selected_step(
     }
     validate_input(input)?;
     run(
-        engine,
-        runner,
-        source_root,
+        binary,
+        data_root,
+        film_profile,
+        print_profile,
         work,
         input,
         output,
-        "preview",
+        "png",
         Some(max_edge),
         parameters,
         cancellation,
@@ -588,13 +583,14 @@ mod tests {
         fs::create_dir_all(&work).unwrap();
         let cancellation = Arc::new(AtomicBool::new(true));
         let error = run(
-            Path::new("/nonexistent/python"),
-            Path::new("/nonexistent/runner.py"),
-            Path::new("/nonexistent/src"),
+            Path::new("/nonexistent/spektrafilm"),
+            Path::new("/nonexistent/data"),
+            "kodak_portra_400",
+            "kodak_portra_endura",
             &work,
             Path::new("/nonexistent/in.tif"),
             Path::new("/nonexistent/out.jpg"),
-            "produce",
+            "jpeg",
             None,
             &parameters(groups_tree()),
             cancellation,
@@ -611,13 +607,14 @@ mod tests {
             std::env::temp_dir().join(format!("slipstream-film-timeout-{}", std::process::id()));
         fs::create_dir_all(&work).unwrap();
         let error = run(
-            Path::new("/nonexistent/python"),
-            Path::new("/nonexistent/runner.py"),
-            Path::new("/nonexistent/src"),
+            Path::new("/nonexistent/spektrafilm"),
+            Path::new("/nonexistent/data"),
+            "kodak_portra_400",
+            "kodak_portra_endura",
             &work,
             Path::new("/nonexistent/in.tif"),
             Path::new("/nonexistent/out.jpg"),
-            "produce",
+            "jpeg",
             None,
             &parameters(groups_tree()),
             Arc::new(AtomicBool::new(false)),
@@ -642,7 +639,15 @@ mod tests {
                 .subsec_nanos()
         ));
         fs::create_dir_all(&work).unwrap();
-        prepare(&work, &parameters(groups_tree())).unwrap();
+        prepare(
+            &work,
+            &parameters(groups_tree()),
+            "kodak_portra_400",
+            "kodak_portra_endura",
+            "jpeg",
+            None,
+        )
+        .unwrap();
         let cancellation = Arc::new(AtomicBool::new(false));
         let deadline = Instant::now() + Duration::from_millis(150);
         let arguments = vec!["300".to_owned()];
@@ -678,7 +683,15 @@ mod tests {
                 .subsec_nanos()
         ));
         fs::create_dir_all(&work).unwrap();
-        prepare(&work, &parameters(groups_tree())).unwrap();
+        prepare(
+            &work,
+            &parameters(groups_tree()),
+            "kodak_portra_400",
+            "kodak_portra_endura",
+            "jpeg",
+            None,
+        )
+        .unwrap();
         let cancellation = Arc::new(AtomicBool::new(false));
         let mut attempt = Attempt::start(
             Path::new("/bin/sleep"),
@@ -712,7 +725,15 @@ mod tests {
                 .subsec_nanos()
         ));
         fs::create_dir_all(&work).unwrap();
-        prepare(&work, &parameters(groups_tree())).unwrap();
+        prepare(
+            &work,
+            &parameters(groups_tree()),
+            "kodak_portra_400",
+            "kodak_portra_endura",
+            "jpeg",
+            None,
+        )
+        .unwrap();
 
         let mut refusal = Attempt::start(
             Path::new("/bin/sh"),
@@ -768,10 +789,29 @@ mod tests {
         ));
         fs::create_dir_all(&work).unwrap();
         let tree = groups_tree();
-        let path = prepare(&work, &parameters(tree.clone())).unwrap();
+        let path = prepare(
+            &work,
+            &parameters(tree.clone()),
+            "kodak_portra_400",
+            "kodak_portra_endura",
+            "jpeg",
+            None,
+        )
+        .unwrap();
         let written: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(written, tree);
-        assert!(prepare(&work, &parameters(tree)).is_err());
+        assert_eq!(written["parameters"], tree);
+        assert_eq!(written["schemaVersion"], "spektrafilm-rs-params-1");
+        assert!(
+            prepare(
+                &work,
+                &parameters(tree),
+                "kodak_portra_400",
+                "kodak_portra_endura",
+                "jpeg",
+                None,
+            )
+            .is_err()
+        );
         let _ = fs::remove_dir_all(&work);
     }
 }

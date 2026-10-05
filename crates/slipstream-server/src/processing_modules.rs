@@ -61,14 +61,15 @@ mod tests {
         FilmConfig {
             bundle_sha256: "f".repeat(64),
             bundle_root: PathBuf::from("/opt/slipstream-film"),
-            engine: PathBuf::from("/opt/runtime/bin/python"),
-            runner: PathBuf::from("/opt/slipstream-film/runner/film_runner.py"),
-            source_root: PathBuf::from("/opt/spektrafilm/src"),
+            binary: PathBuf::from("/opt/slipstream-film/spektrafilm"),
+            data_root: PathBuf::from("/opt/slipstream-film/data"),
             parameter_default: serde_json::json!({
                 "camera": {}, "enlarger": {}, "scanner": {}, "io": {},
                 "settings": {}, "debug": {}, "filmRender": {},
                 "printRender": {}, "taps": {},
             }),
+            film_profile: "kodak_portra_400".to_owned(),
+            print_profile: "kodak_portra_endura".to_owned(),
             failure,
         }
     }

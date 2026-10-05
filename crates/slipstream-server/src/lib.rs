@@ -25,7 +25,7 @@ use std::{
     ffi::{CString, OsString},
     fmt, fs, io,
     os::fd::{AsRawFd, OwnedFd},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
