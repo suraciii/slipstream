@@ -1397,7 +1397,6 @@ ${RECOVERY_PANEL_TEMPLATE}
   const photoPresenter = createPhotoViewPresenter({
     root: photoView,
     zoom: zoomController,
-    renderRating: (value) => ratingControls.render(value),
     resetGestures: () => photoGestures.reset(),
     reviewRecovery: () => send({ kind: "recovery-entry" }),
   });

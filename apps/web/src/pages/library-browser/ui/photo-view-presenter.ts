@@ -89,13 +89,11 @@ export interface PhotoViewPresenter extends PhotoViewPresentation {
 export function createPhotoViewPresenter({
   root,
   zoom,
-  renderRating,
   resetGestures,
   reviewRecovery,
 }: Readonly<{
   root: HTMLElement;
   zoom: Readonly<{ resetForImage(): void; applyZoom(): void }>;
-  renderRating(rating: number): void;
   resetGestures(): void;
   reviewRecovery(): void;
 }>): PhotoViewPresenter {

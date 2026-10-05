@@ -9,7 +9,6 @@ import {
   writePhotos,
   server,
   createAlbum,
-  state,
 } from "./browser-test-support/fixtures.js";
 import {
   actionWithProgress,
