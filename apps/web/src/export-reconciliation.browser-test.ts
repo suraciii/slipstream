@@ -19,6 +19,7 @@ import {
   openEdit,
   navigate,
   setExposure,
+  openAdvancedCompatibility,
 } from "./browser-test-support/processing-fixtures.js";
 
 for (const lostResponse of [
@@ -34,7 +35,7 @@ for (const lostResponse of [
     const first = state.photos[0]!;
     const second = state.photos[1]!;
     const requests = new Map<string, string[]>();
-    await page.route("**/api/photos/*/processing-exports", async (route) => {
+    await page.route("**/api/photos/*/edit/export", async (route) => {
       if (route.request().method() === "GET") return route.fallback();
       const photoId = routePhoto(route);
       const body = route.request().postData()!;
@@ -43,10 +44,12 @@ for (const lostResponse of [
       requests.set(photoId, captured);
       const request = JSON.parse(body) as {
         requestId: string;
-        stepId: string;
-        expectedRecipeRevision: string;
-        expectedSourceRevision: string;
+        expectedEditRevision: string;
       };
+      const saved = state.recipes.get(photoId)!;
+      const step = saved.steps.find(
+        (item) => item.stepId === saved.currentStepId,
+      )!;
       if (photoId === first && captured.length === 1) {
         if (lostResponse === "connection")
           return route.abort("connectionreset");
@@ -69,10 +72,10 @@ for (const lostResponse of [
         return json(route, { artifact: retained, replayed: true }, 201);
       }
       const receipt = work(photoId, request.requestId, "accepted", {
-        recipeRevision: request.expectedRecipeRevision,
-        sourceRevision: request.expectedSourceRevision,
-        stepId: request.stepId,
-        parameters: state.recipes.get(photoId)!.steps[0]!.parameters,
+        recipeRevision: request.expectedEditRevision,
+        sourceRevision: saved.sourceRevision,
+        stepId: step.stepId,
+        parameters: step.parameters,
       });
       state.exports.set(photoId, [receipt]);
       return json(route, { outcome: "accepted", receipt }, 202);
@@ -114,9 +117,7 @@ for (const lostResponse of [
     expect(requests.get(first)).toHaveLength(2);
     expect(requests.get(first)![1]).toBe(requests.get(first)![0]);
     expect(JSON.parse(requests.get(first)![0]!)).toMatchObject({
-      stepId: "step-1",
-      expectedRecipeRevision: "recipe-1",
-      expectedSourceRevision: sourceRevision,
+      expectedEditRevision: "recipe-1",
     });
     expect(processingRequestIdFixture(requests.get(second)![0]!)).not.toBe(
       processingRequestIdFixture(requests.get(first)![0]!),
@@ -249,16 +250,26 @@ test("an explicitly chosen retained artifact becomes the new selected step's exp
   let submitted:
     | {
         requestId: string;
+        expectedEditRevision: string;
         stepId: string;
-        expectedRecipeRevision: string;
         expectedSourceRevision: string;
       }
     | undefined;
-  await page.route("**/api/photos/*/processing-exports", (route) => {
+  await page.route("**/api/photos/*/edit/export", (route) => {
     if (route.request().method() === "GET") return route.fallback();
-    submitted = JSON.parse(route.request().postData()!) as typeof submitted;
+    const body = JSON.parse(route.request().postData()!) as {
+      requestId: string;
+      expectedEditRevision: string;
+    };
     const saved = state.recipes.get(photoId)!;
-    const step = saved.steps.find((item) => item.stepId === submitted!.stepId)!;
+    const step = saved.steps.find(
+      (item) => item.stepId === saved.currentStepId,
+    )!;
+    submitted = {
+      ...body,
+      stepId: step.stepId,
+      expectedSourceRevision: saved.sourceRevision,
+    };
     const receipt = work(photoId, submitted!.requestId, "accepted", {
       stepId: step.stepId,
       recipeRevision: saved.revision,
@@ -269,6 +280,7 @@ test("an explicitly chosen retained artifact becomes the new selected step's exp
     return json(route, { outcome: "accepted", receipt }, 202);
   });
   await openFirst(page, running.url);
+  await openAdvancedCompatibility(page);
   await page
     .locator("[data-photo-editor-new-step-input]")
     .selectOption(`artifact:${retained.artifactId}`);
@@ -289,7 +301,7 @@ test("an explicitly chosen retained artifact becomes the new selected step's exp
   await expect.poll(() => submitted?.stepId).toBe(selected.stepId);
   const latest = state.recipes.get(photoId)!;
   expect(submitted).toMatchObject({
-    expectedRecipeRevision: latest.revision,
+    expectedEditRevision: latest.revision,
     expectedSourceRevision: sourceRevision,
   });
   await expect(
@@ -346,7 +358,7 @@ function previewHeaders(
   );
 }
 
-test("Original reference ignores a late selected-step preview", async ({
+test("Original reference ignores a late current Edit Preview", async ({
   page,
   running,
 }) => {
@@ -364,7 +376,7 @@ test("Original reference ignores a late selected-step preview", async ({
     "Ready · 2 Photos",
   );
   const bytes = await png(page);
-  await page.route("**/api/photos/*/processing-preview/**", async (route) => {
+  await page.route("**/api/photos/*/edit/preview", async (route) => {
     await held;
     try {
       await route.fulfill({
@@ -374,13 +386,13 @@ test("Original reference ignores a late selected-step preview", async ({
         body: bytes,
       });
     } catch {
-      // Switching to the Original may abort the selected-step fetch.
+      // Switching to the Original may abort the current Edit Preview fetch.
     } finally {
       settle();
     }
   });
   const requested = page.waitForRequest((request) =>
-    new URL(request.url()).pathname.includes("/processing-preview/"),
+    new URL(request.url()).pathname.endsWith("/edit/preview"),
   );
   try {
     await page.locator('[data-photo-index="0"]').click();
@@ -409,7 +421,7 @@ test("Original reference ignores a late selected-step preview", async ({
   }
 });
 
-test("an admitted selected-step preview can finish after fifteen seconds of polling", async ({
+test("an admitted current Edit Preview can finish after fifteen seconds of polling", async ({
   page,
   running,
 }) => {
@@ -421,7 +433,7 @@ test("an admitted selected-step preview can finish after fifteen seconds of poll
   );
   const bytes = await png(page);
   let requests = 0;
-  await page.route("**/api/photos/*/processing-preview/**", (route) => {
+  await page.route("**/api/photos/*/edit/preview", (route) => {
     requests++;
     if (requests <= 21) return json(route, { state: "running" }, 202);
     return route.fulfill({

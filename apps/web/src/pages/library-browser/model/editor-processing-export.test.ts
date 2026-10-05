@@ -266,7 +266,7 @@ describe("retained Processing Exports", () => {
       return Response.json(
         {
           outcome: "accepted",
-          receipt: work(body.requestId, "accepted", body.stepId),
+          receipt: work(body.requestId, "accepted", "current-step"),
         },
         { status: 202 },
       );
@@ -491,27 +491,27 @@ describe("retained Processing Exports", () => {
   });
 
   test("a retained receipt cannot resolve uncertain admission without exact-body replay", async () => {
-    let captured: { requestId: string; stepId: string } | undefined;
+    let captured: { requestId: string; expectedEditRevision: string } | undefined;
     let submits = 0;
     const f = fixture((_path, options) => {
       if (options?.method === "POST") {
         submits += 1;
         captured = JSON.parse(requestBody(options.body)) as {
           requestId: string;
-          stepId: string;
+          expectedEditRevision: string;
         };
         if (submits === 1) throw new Error("response lost");
         return Response.json(
           {
             outcome: "replayed",
-            receipt: work(captured.requestId, "executing", captured.stepId),
+            receipt: work(captured.requestId, "executing", "current-step"),
           },
           { status: 202 },
         );
       }
       return Response.json({
         photoId: "photo-1",
-        exports: [work(captured!.requestId, "executing", captured!.stepId)],
+        exports: [work(captured!.requestId, "executing", "current-step")],
         artifacts: [],
       });
     });

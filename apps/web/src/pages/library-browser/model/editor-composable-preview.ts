@@ -1,4 +1,4 @@
-import { fetchProcessingPreview } from "../api/processing-preview.js";
+import { fetchEditPreview } from "../api/processing-preview.js";
 import { isRecord } from "../api/guards.js";
 import {
   composablePreviewDigestRefusal,
@@ -77,7 +77,7 @@ export function createEditorComposablePreview(
 
     clearPresented();
   };
-  /// Poll admitted Processing Step previews within a bounded wait window.
+  /// Poll admitted Edit Previews within a bounded wait window.
   const scheduleEditorPreviewFollowUp = (photoId: string): void => {
     if (editorPreviewAttempts >= PREVIEW_POLL_LIMIT) {
       editorPreviewNote =
@@ -182,10 +182,9 @@ export function createEditorComposablePreview(
     renderEditor();
     let response: Response;
     try {
-      response = await fetchProcessingPreview(
+      response = await fetchEditPreview(
         fetcher,
         photoId,
-        composableStep.stepId,
         controller.signal,
         comparison,
       );
@@ -313,7 +312,7 @@ export function createEditorComposablePreview(
     editorPreviewRefused = false;
     editorPreviewOutcome = "ready";
     if (composableStep) {
-      editorPreviewNote = `Preview of ${composableStep.stepId} (${composableStep.module}), ${response.headers.get("slipstream-processing-preview-width")} × ${response.headers.get("slipstream-processing-preview-height")} pixels. This bounded rendition is for color and tone; inspect a full-resolution artifact for grain and halation detail.`;
+      editorPreviewNote = `Edit Preview from ${composableStep.module}, ${response.headers.get("slipstream-processing-preview-width")} × ${response.headers.get("slipstream-processing-preview-height")} pixels. This bounded rendition is for color and tone; inspect a full-resolution artifact for grain and halation detail.`;
     }
     present(editorPreviewUrl);
     renderEditor();

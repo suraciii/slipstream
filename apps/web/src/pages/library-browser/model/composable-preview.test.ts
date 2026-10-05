@@ -173,6 +173,14 @@ describe("composablePreviewIdentityRefusal", () => {
       "",
     );
   });
+  test("accepts the Edit State revision alias and rejects conflicting aliases", () => {
+    const headers = identityHeaders();
+    headers.delete("slipstream-processing-preview-recipe-revision");
+    headers.set("slipstream-processing-preview-edit-revision", "recipe-1");
+    expect(composablePreviewIdentityRefusal(headers, expected)).toBe("");
+    headers.set("slipstream-processing-preview-recipe-revision", "older");
+    expect(composablePreviewIdentityRefusal(headers, expected)).not.toBe("");
+  });
   test("source identity framing preserves the full separate bound and NUL", () => {
     const sourceRevision = "x".repeat(16_383) + "\u0000";
     const headers = identityHeaders();

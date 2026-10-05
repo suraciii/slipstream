@@ -82,7 +82,7 @@ for (const operation of ["undo", "redo"] as const) {
     const controller = createEditorController(
       async (input, init) => {
         const path = input instanceof Request ? input.url : input.toString();
-        if (path.includes("processing-preview")) {
+        if (path.includes("processing-preview") || path.includes("/edit/preview")) {
           if (holdPreviews) {
             const response = Promise.withResolvers<Response>();
             if (!init?.signal)
@@ -239,7 +239,7 @@ test("XMP exports use the confirmed recipe binding while the Original observatio
           ),
         );
       }
-      if (path.includes("processing-preview"))
+      if (path.includes("processing-preview") || path.includes("/edit/preview"))
         return Promise.resolve(
           Response.json(
             { error: { code: "resource_unavailable" } },

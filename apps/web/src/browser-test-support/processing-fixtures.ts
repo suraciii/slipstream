@@ -521,6 +521,15 @@ export async function mockEditor(
       503,
     ),
   );
+  await page.route("**/api/photos/*/edit/preview", (route) =>
+    json(
+      route,
+      {
+        error: { code: "module_parameters_unavailable" },
+      },
+      503,
+    ),
+  );
   return state;
 }
 
@@ -528,6 +537,16 @@ export async function openEdit(page: Page) {
   await page.locator("[data-dock-more]").click();
   await page.locator("[data-photo-tools-entry='edit']").click();
   await expect(page.locator("[data-photo-tools-view='edit']")).toBeVisible();
+}
+
+/** Opens the advanced compatibility controls for tests that exercise the
+ * legacy complete snapshot surface. */
+export async function openAdvancedCompatibility(page: Page) {
+  const details = page.locator("[data-photo-editor-advanced]");
+  await expect(details).toBeVisible();
+  if ((await details.getAttribute("open")) === null)
+    await details.locator("summary").click();
+  await expect(details).toHaveAttribute("open", "");
 }
 
 export async function openFirst(page: Page, url: string) {

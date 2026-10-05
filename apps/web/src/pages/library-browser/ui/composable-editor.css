@@ -17,6 +17,18 @@
   gap: 0.5rem;
 }
 
+.photo-editor-advanced {
+  display: grid;
+  gap: 0.5rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--border);
+}
+
+.photo-editor-advanced > summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
 .photo-editor-composable-steps,
 .photo-editor-composable-artifact-list {
   display: grid;

@@ -157,7 +157,7 @@ export function createEditorController(
       : target.kind === "unreadable"
         ? "The Edit State could not be read. Reload to check again."
         : !selected
-          ? "No Processing Step is selected; no processing result is shown."
+          ? "No Edit State is saved; no processing result is shown."
         : `Edit Preview from ${selected.module}.${composable.dirty() ? " Local changes are not yet confirmed." : ""}`;
     view.renderEditor({
       photoId,
@@ -207,7 +207,7 @@ export function createEditorController(
         ? baseline.current.outcome === "ready" && !baselineReady()
           ? "The baseline does not match this current Preview's processing provenance, so the current Preview remains shown."
           : baseline.current.note ||
-            "Preparing the selected step's baseline comparison…"
+            "Preparing the current Edit State's baseline comparison…"
         : current.note,
       previewStale: current.stale,
       saving: state?.saving ?? false,

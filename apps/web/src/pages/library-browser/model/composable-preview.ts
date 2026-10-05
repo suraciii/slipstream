@@ -94,6 +94,7 @@ const PHOTO_ID_HEADER = `${IDENTITY_HEADER_PREFIX}photo-id`;
 const STEP_ID_HEADER = `${IDENTITY_HEADER_PREFIX}step-id`;
 const SOURCE_REVISION_HEADER = `${IDENTITY_HEADER_PREFIX}source-revision`;
 const RECIPE_REVISION_HEADER = `${IDENTITY_HEADER_PREFIX}recipe-revision`;
+const EDIT_REVISION_HEADER = `${IDENTITY_HEADER_PREFIX}edit-revision`;
 const SHA256_HEADER = `${IDENTITY_HEADER_PREFIX}sha256`;
 const WIDTH_HEADER = `${IDENTITY_HEADER_PREFIX}width`;
 const HEIGHT_HEADER = `${IDENTITY_HEADER_PREFIX}height`;
@@ -109,7 +110,6 @@ const IDENTITY_HEADERS = [
   PHOTO_ID_HEADER,
   STEP_ID_HEADER,
   SOURCE_REVISION_HEADER,
-  RECIPE_REVISION_HEADER,
   SHA256_HEADER,
   WIDTH_HEADER,
   HEIGHT_HEADER,
@@ -172,11 +172,21 @@ export const composablePreviewIdentityRefusal = (
   };
   const digest = (name: string): boolean =>
     /^[0-9a-f]{64}$/.test(headers.get(name) ?? "");
+  const editRevision = headers.get(EDIT_REVISION_HEADER);
+  const recipeRevision = headers.get(RECIPE_REVISION_HEADER);
+  const revisionMatches =
+    editRevision === expected.recipeRevision ||
+    recipeRevision === expected.recipeRevision;
+  const revisionAliasesAgree =
+    editRevision === null ||
+    recipeRevision === null ||
+    editRevision === recipeRevision;
   const identified =
     IDENTITY_HEADERS.every((name) => headers.get(name) !== null) &&
     headers.get(PHOTO_ID_HEADER) === expected.photoId &&
     headers.get(STEP_ID_HEADER) === expected.stepId &&
-    headers.get(RECIPE_REVISION_HEADER) === expected.recipeRevision &&
+    revisionMatches &&
+    revisionAliasesAgree &&
     decodeHexSourceRevision(headers.get(SOURCE_REVISION_HEADER)) ===
       expected.sourceRevision &&
     (expected.comparison === undefined ||
