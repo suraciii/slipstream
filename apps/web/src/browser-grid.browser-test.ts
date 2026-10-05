@@ -17,7 +17,7 @@ import {
   applyViewOptions,
   openViewOptions,
   waitForGridFrame,
-  waitForLoadedReviewImage,
+  openPhotoToolsView,
   closePhotoTools,
   gridCellGeometry,
   expectAspectRatio,
@@ -166,8 +166,8 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   // server again after a reload.
   await cell(3).click();
   await expect(page.locator("[data-review]")).toBeVisible();
-  await waitForLoadedReviewImage(page);
-  await page.getByRole("button", { name: "Reject" }).click();
+  await openPhotoToolsView(page, "tools");
+  await page.getByRole("button", { name: "Reject", exact: true }).click();
   await expect(page.locator("[data-selection]")).toHaveText("Rejected");
   await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
@@ -240,6 +240,7 @@ test("Selection filters keep source counts, URLs, and Photo traversal stable", a
   await page.locator('[data-photo-index="0"]').click();
   await expect(page.locator("[data-review]")).toBeVisible();
   await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+  await openPhotoToolsView(page, "tools");
   await page.getByRole("button", { name: "Next", exact: true }).click();
   await expect(page.locator("[data-position]")).toHaveText("2 / 2");
   const photoAddress = page.url();

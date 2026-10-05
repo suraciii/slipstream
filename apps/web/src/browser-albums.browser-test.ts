@@ -109,7 +109,7 @@ test("the current photo joins and leaves albums from the photo view", async ({
   );
   await toggleAlbumMembership(page, "Picks");
   await firstAdd;
-  await expect(page.getByText("Added to the Album.")).toBeVisible();
+  await expect(page.locator("[data-status]")).toHaveText("Added to the Album.");
   await expect(page.getByText("Not in any Album yet")).toBeHidden();
   await expect(page.locator("[data-membership-list] li")).toHaveText(["Picks"]);
   await closePhotoTools(page);
@@ -143,11 +143,9 @@ test("the current photo joins and leaves albums from the photo view", async ({
   );
   await expect(page.locator("[data-membership-list] li")).toHaveText(["Picks"]);
   await toggleAlbumMembership(page, "Picks");
-  await expect(
-    page.getByText(
-      "Removed from the Album. It stays in this open view until reopened.",
-    ),
-  ).toBeVisible();
+  await expect(page.locator("[data-status]")).toHaveText(
+    "Removed from the Album. It stays in this open view until reopened.",
+  );
   await expect(page.getByText("1 / 1")).toBeVisible();
   await expect(page.locator("[data-membership-list] li")).toHaveCount(0);
   await closePhotoTools(page);
@@ -170,8 +168,9 @@ test("persists manual navigation and advanced current Photo across leave, reload
   let running = await server(base, root);
   const { albumId } = await createAlbum(running.url, "Progress");
   await startReview(page, running.url, "Progress", albumId);
+  await openPhotoToolsView(page, "tools");
   await actionWithProgress(page, albumId, () =>
-    page.getByRole("button", { name: "Next" }).click(),
+    page.getByRole("button", { name: "Next", exact: true }).click(),
   );
   await expect
     .poll(async () => (await state(running.url, albumId)).position)
@@ -190,8 +189,9 @@ test("persists manual navigation and advanced current Photo across leave, reload
   // The Photo address preserves the destination across a reload, so the
   // reloaded document reopens the same Photo instead of the Album Grid.
   await expect(page.getByText("2 / 3")).toBeVisible();
+  await openPhotoToolsView(page, "tools");
   await actionWithProgress(page, albumId, () =>
-    page.getByRole("button", { name: "Pick" }).click(),
+    page.getByRole("button", { name: "Next", exact: true }).click(),
   );
   await expect(page.getByText("3 / 3")).toBeVisible();
   await expect

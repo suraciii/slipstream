@@ -360,6 +360,7 @@ for (const firstTransport of ["https", "http"] as const) {
         index === 0 ? "Unflagged" : "Rejected",
       );
       // The second alias observes the first alias's saved Photo decision.
+      await openPhotoToolsView(page, "tools");
       await page
         .getByRole("button", {
           name: index === 0 ? "Reject" : "Pick",
@@ -413,7 +414,9 @@ for (const firstTransport of ["https", "http"] as const) {
       if (index === 1) {
         await page.goto(destination);
         await waitForLoadedReviewImage(page);
+        await openPhotoToolsView(page, "tools");
         await page.getByRole("button", { name: "Reject", exact: true }).click();
+        await closePhotoTools(page);
         await expect(page.locator("[data-selection]")).toHaveText("Rejected");
         await page
           .getByRole("button", { name: "Back to Grid", exact: true })
