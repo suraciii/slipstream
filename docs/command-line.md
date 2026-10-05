@@ -73,6 +73,10 @@ Preview commands.
 
 ## Starting and Discovering Capabilities
 
+Instance credentials are managed with `auth login`, `auth status`, `auth use`,
+and `auth logout`; the complete syntax and storage contract is defined in the
+[CLI Reference](cli-reference.md#local-authentication).
+
 The client must run on the machine where the Photographer or their Agent uses
 it. That machine does not need the Original Files, native Preview libraries,
 or the server's SQLite database. One invocation addresses one explicit or

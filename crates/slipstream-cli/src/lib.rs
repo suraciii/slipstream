@@ -13,6 +13,7 @@ use std::{
 };
 use url::Url;
 
+mod auth;
 mod compatibility;
 mod development;
 mod development_proxy;
@@ -46,12 +47,12 @@ mod tests;
 pub(crate) use client::*;
 pub(crate) use commands::*;
 pub use commands::{
-    AlbumCommand, AlbumListArgs, AlbumMembershipArgs, Cli, Command, FolderCommand, FolderListArgs,
-    InvocationResult, LibraryCommand, OrderArg, OriginalKindArg, OutputFormat,
-    ParseErrorPreferences, PhotoCommand, PhotoDecisionArgs, PhotoListArgs, PhotoMetadataSaveArgs,
-    PhotoRemovalArgs, PhotoRestoreArgs, PreviewSize, ProcessingCommand, RecoveryApplyArgs,
-    RecoveryCommand, RecoveryProposeArgs, RecoveryUnavailableArgs, SelectionArg, SetSelectionArg,
-    TrashCommand, TrashListArgs, TrashReviewArgs, parse_error_preferences,
+    AlbumCommand, AlbumListArgs, AlbumMembershipArgs, AuthCommand, AuthLoginArgs, Cli, Command,
+    FolderCommand, FolderListArgs, InvocationResult, LibraryCommand, OrderArg, OriginalKindArg,
+    OutputFormat, ParseErrorPreferences, PhotoCommand, PhotoDecisionArgs, PhotoListArgs,
+    PhotoMetadataSaveArgs, PhotoRemovalArgs, PhotoRestoreArgs, PreviewSize, ProcessingCommand,
+    RecoveryApplyArgs, RecoveryCommand, RecoveryProposeArgs, RecoveryUnavailableArgs, SelectionArg,
+    SetSelectionArg, TrashCommand, TrashListArgs, TrashReviewArgs, parse_error_preferences,
 };
 pub(crate) use execute::*;
 pub use execute::{invalid_invocation, invoke, invoke_until};

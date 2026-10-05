@@ -70,6 +70,11 @@ pub fn parse_error_preferences(arguments: &[OsString]) -> ParseErrorPreferences 
 pub enum Command {
     /// Inspect service compatibility and current Library status.
     Status,
+    /// Manage local instance Access Tokens.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     /// Discover admitted processing stages, source profiles, and controls.
     Processing {
         #[command(subcommand)]
@@ -105,6 +110,31 @@ pub enum Command {
         #[command(subcommand)]
         command: RecoveryCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuthCommand {
+    /// Verify and save an instance Access Token for this server origin.
+    Login(AuthLoginArgs),
+    /// List saved origins without revealing Access Tokens.
+    Status,
+    /// Select a saved server origin for commands without --server.
+    Use,
+    /// Remove the saved credential for this server origin.
+    Logout,
+}
+
+#[derive(Debug, Args)]
+pub struct AuthLoginArgs {
+    /// Read the Access Token from standard input.
+    #[arg(long, conflicts_with = "token_file")]
+    pub token_stdin: bool,
+    /// Private file containing the Access Token to import.
+    #[arg(long, value_name = "FILE", conflicts_with = "token_stdin")]
+    pub token_file: Option<PathBuf>,
+    /// Replace an existing saved credential without confirmation.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Subcommand)]

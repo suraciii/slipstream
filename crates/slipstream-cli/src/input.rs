@@ -1,19 +1,13 @@
 use super::*;
 
-pub(crate) fn service_origin(cli: &Cli, environment: Option<&str>) -> Result<Url, CommandFailure> {
-    let value = cli.server.as_deref().or(environment).ok_or_else(|| {
-        CommandFailure::invalid(
-            "server",
-            "Set --server or SLIPSTREAM_SERVER_URL to an HTTP or HTTPS service origin.",
-        )
-    })?;
+pub(crate) fn parse_service_origin(value: &str) -> Result<Url, CommandFailure> {
     if value.is_empty() {
         return Err(CommandFailure::invalid(
             "server",
             "The service URL must not be empty.",
         ));
     }
-    let url = Url::parse(value).map_err(|_| {
+    let mut url = Url::parse(value).map_err(|_| {
         CommandFailure::invalid("server", "The service URL must be an HTTP or HTTPS origin.")
     })?;
     let has_userinfo = value
@@ -39,7 +33,21 @@ pub(crate) fn service_origin(cli: &Cli, environment: Option<&str>) -> Result<Url
             "The service URL must be an HTTP or HTTPS origin without credentials, path, query, or fragment.",
         ));
     }
+    if url.scheme() == "https" && url.port() == Some(443) {
+        let _ = url.set_port(None);
+    }
     Ok(url)
+}
+
+#[cfg(test)]
+pub(crate) fn service_origin(cli: &Cli, environment: Option<&str>) -> Result<Url, CommandFailure> {
+    let value = cli.server.as_deref().or(environment).ok_or_else(|| {
+        CommandFailure::invalid(
+            "server",
+            "Set --server or SLIPSTREAM_SERVER_URL to an HTTP or HTTPS service origin.",
+        )
+    })?;
+    parse_service_origin(value)
 }
 
 pub(crate) fn web_url(origin: &Url, path: &str) -> Result<String, ()> {

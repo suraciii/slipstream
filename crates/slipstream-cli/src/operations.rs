@@ -1,6 +1,10 @@
 use super::*;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Operation {
+    AuthLogin,
+    AuthStatus,
+    AuthUse,
+    AuthLogout,
     Status,
     ProcessingModules,
     ProcessingArtifact,
@@ -58,6 +62,10 @@ impl Operation {
     pub(crate) fn wire(self) -> &'static str {
         match self {
             Self::Status => "status",
+            Self::AuthLogin => "auth-login",
+            Self::AuthStatus => "auth-status",
+            Self::AuthUse => "auth-use",
+            Self::AuthLogout => "auth-logout",
             Self::ProcessingModules => "processing-modules",
             Self::ProcessingArtifact => "processing-artifact",
             Self::ProcessingArtifactDownload => "processing-artifact-download",
@@ -115,6 +123,12 @@ impl Operation {
 pub(crate) fn command_operation(command: &Command) -> Operation {
     match command {
         Command::Status => Operation::Status,
+        Command::Auth { command } => match command {
+            AuthCommand::Login(_) => Operation::AuthLogin,
+            AuthCommand::Status => Operation::AuthStatus,
+            AuthCommand::Use => Operation::AuthUse,
+            AuthCommand::Logout => Operation::AuthLogout,
+        },
         Command::Processing { command } => match command {
             ProcessingCommand::Modules => Operation::ProcessingModules,
             ProcessingCommand::Artifact { .. } => Operation::ProcessingArtifact,
