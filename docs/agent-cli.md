@@ -7,13 +7,13 @@ does not ask a model to judge a Photo.
 
 1. Run `slipstream --help` and `slipstream status`. Check the supported CLI
    contract and `published` state before starting work.
-2. Discover an existing Album with `albums list --name NAME`. Query selected
-   Photos in that Album using `photos list --album ALBUM_ID --selection selected
---rating-min 4 --order capture-time-asc --limit 60`. Follow each
+2. Discover an existing Album with `albums list --name NAME`. Query picked
+   Photos in that Album using `photos list --album ALBUM_ID --selection picked
+   --rating-min 4 --order capture-time-asc --limit 60`. Follow each
    `nextCursor` with `photos list --cursor CURSOR` until it is `null`. Preserve
    the returned order and report the total; later Photo facts can change.
 3. Create the destination with `albums create --name NAME`. Use its returned ID
-   and current Album version. Write only explicitly selected Photo IDs in
+   and current Album version. Write only explicitly picked Photo IDs in
    bounded `{"photoIds":["PHOTO_ID"]}` input files. Call `albums add ALBUM_ID
 --input FILE --if-version VERSION` with the current version, then use the
    confirmed next version for any further batch. Never infer success from a

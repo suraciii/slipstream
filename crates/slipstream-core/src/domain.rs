@@ -60,8 +60,8 @@ pub enum PreviewState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectionState {
-    Undecided,
-    Selected,
+    Unflagged,
+    Picked,
     Rejected,
 }
 

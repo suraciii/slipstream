@@ -191,7 +191,7 @@ test("persists manual navigation and advanced current Photo across leave, reload
   // reloaded document reopens the same Photo instead of the Album Grid.
   await expect(page.getByText("2 / 3")).toBeVisible();
   await actionWithProgress(page, albumId, () =>
-    page.getByRole("button", { name: "Select" }).click(),
+    page.getByRole("button", { name: "Pick" }).click(),
   );
   await expect(page.getByText("3 / 3")).toBeVisible();
   await expect
@@ -259,10 +259,10 @@ test("a CLI-created Album opens in the Web with its ordered members and decision
     [oneId!, twoId!, threeId!, fourId!, ids[4]!, ids[5]!],
   );
   const decisions = [
-    { id: twoId, selectionState: "selected", rating: 4 },
-    { id: threeId, selectionState: "selected", rating: 5 },
-    { id: oneId, selectionState: "selected", rating: 5 },
-    { id: fourId, selectionState: "selected", rating: 4 },
+    { id: twoId, selectionState: "picked", rating: 4 },
+    { id: threeId, selectionState: "picked", rating: 5 },
+    { id: oneId, selectionState: "picked", rating: 5 },
+    { id: fourId, selectionState: "picked", rating: 4 },
     { id: ids[4], selectionState: "rejected", rating: 3 },
   ];
   for (const decision of decisions) {
@@ -285,7 +285,7 @@ test("a CLI-created Album opens in the Web with its ordered members and decision
     "--album",
     sourceAlbumId,
     "--selection",
-    "selected",
+    "picked",
     "--rating-min",
     "4",
     "--order",
@@ -338,7 +338,7 @@ test("a CLI-created Album opens in the Web with its ordered members and decision
   expect(new URL(page.url()).search).toBe(`?source=album&albumId=${album.id}`);
   const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
   for (const [index, rating] of [4, 5, 5, 4].entries()) {
-    await expect(cell(index).locator(".cell-state.selected")).toHaveText("✓");
+    await expect(cell(index).locator(".cell-state.picked")).toHaveText("✓");
     await expect(cell(index)).toHaveAttribute(
       "aria-label",
       new RegExp(`${rating} stars`),

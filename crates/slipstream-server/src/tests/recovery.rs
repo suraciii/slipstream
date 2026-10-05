@@ -376,7 +376,7 @@ async fn recovery_http_blocks_an_occupied_destination_with_user_state() {
              selection_state,rating) \
              VALUES('22222222-2222-4222-8222-222222222222',\
              '11111111-1111-4111-8111-111111111111',1,'unavailable','moved/a.JPG',\
-             'undecided',3)",
+             'unflagged',3)",
             [],
         )
         .unwrap();

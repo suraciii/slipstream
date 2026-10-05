@@ -40,7 +40,7 @@ test("rejected Photos leave the Library, return from Undo, and are restored from
   await page.keyboard.press("ArrowRight");
   await page.keyboard.press("x");
   await expect(page.locator("[data-grid-source-progress]")).toHaveText(
-    "Source progress: 0 selected · 2 rejected · 1 undecided",
+    "Source progress: 0 picked · 2 rejected · 1 unflagged",
   );
   await openViewOptions(page);
   await page.locator("[data-filter-select]").selectOption("rejected");
@@ -70,7 +70,7 @@ test("rejected Photos leave the Library, return from Undo, and are restored from
   // instead of the reopen that produced it.
   await expect(page.locator("[data-grid-status]")).toHaveText("0 Photos");
   await expect(page.locator("[data-grid-source-progress]")).toHaveText(
-    "Source progress: 0 selected · 0 rejected · 1 undecided",
+    "Source progress: 0 picked · 0 rejected · 1 unflagged",
   );
   await page.locator("[data-removal-close]").click();
   await expect(review).toBeHidden();
@@ -114,7 +114,7 @@ test("rejected Photos leave the Library, return from Undo, and are restored from
 
   // Restored Photos keep the decisions they had before the removal.
   await expect(page.locator("[data-grid-source-progress]")).toHaveText(
-    "Source progress: 0 selected · 2 rejected · 1 undecided",
+    "Source progress: 0 picked · 2 rejected · 1 unflagged",
   );
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Source reopened after the restore.",
@@ -260,7 +260,7 @@ test("Trash permanent deletion reviews the files, reports outcomes, and blocks p
       available: true,
       original: { kind: facts(photoId).kind, available: true },
       originalFilename: photoId === second ? "b.cr2" : `${photoId}.jpg`,
-      selectionState: "undecided",
+      selectionState: "unflagged",
       rating: 0,
       hasSavedEdits: false,
       preview: { state: "unavailable" },

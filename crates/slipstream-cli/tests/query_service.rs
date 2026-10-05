@@ -821,7 +821,7 @@ async fn executable_queries_the_real_service_with_fixed_multi_page_membership() 
     let response = post_json(
         &server.url,
         &format!("/api/photos/{}/state", expected_ids[1]),
-        serde_json::json!({"field": "selectionState", "value": "selected"}),
+        serde_json::json!({"field": "selectionState", "value": "picked"}),
     )
     .await;
     assert!(response.status().is_success());
@@ -834,7 +834,7 @@ async fn executable_queries_the_real_service_with_fixed_multi_page_membership() 
     assert_eq!(exit, 0);
     assert_eq!(second["data"]["items"][0]["id"], expected_ids[1]);
     assert_eq!(second["data"]["items"][0]["rating"], 4);
-    assert_eq!(second["data"]["items"][0]["selectionState"], "selected");
+    assert_eq!(second["data"]["items"][0]["selectionState"], "picked");
     assert_ne!(
         second["data"]["items"][0]["decisionVersion"],
         second_version
@@ -878,7 +878,7 @@ async fn executable_queries_the_real_service_with_fixed_multi_page_membership() 
             "--folder",
             "trip",
             "--selection",
-            "selected",
+            "picked",
             "--rating-min",
             "4",
             "--rating-max",

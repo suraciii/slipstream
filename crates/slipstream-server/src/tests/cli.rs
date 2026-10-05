@@ -295,7 +295,7 @@ async fn cli_photo_reads_keep_prior_membership_until_scan_publication() {
         .mutate_photo_state(slipstream_core::PhotoStateMutation {
             photo_id: old_id.clone(),
             field: slipstream_core::PhotoStateField::SelectionState,
-            value: slipstream_core::PhotoStateValue::Selection(SelectionState::Selected),
+            value: slipstream_core::PhotoStateValue::Selection(SelectionState::Picked),
             expected_current: None,
             album_id: None,
         })
@@ -311,7 +311,7 @@ async fn cli_photo_reads_keep_prior_membership_until_scan_publication() {
                 .uri("https://camera.local/api/photo-queries")
                 .header("Slipstream-CLI-Contract", "1")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"selection":"selected","limit":60}"#))
+                .body(Body::from(r#"{"selection":"picked","limit":60}"#))
                 .unwrap(),
         )
         .await,
@@ -481,9 +481,7 @@ async fn cli_contract_header_rejects_reused_writes_before_domain_admission() {
             .header("Slipstream-CLI-Contract", "1")
             .header("Slipstream-CLI-Contract", "1")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                r#"{"field":"selectionState","value":"selected"}"#,
-            ))
+            .body(Body::from(r#"{"field":"selectionState","value":"picked"}"#))
             .unwrap(),
     )
     .await;
@@ -932,14 +930,14 @@ async fn cli_photo_decisions_route_maps_checked_outcomes_and_partitions_batches(
     // objects and becomes visible to Web browsing.
     let initial = cli_photo_read(&router, a).await;
     let initial_version = initial["decisionVersion"].as_str().unwrap().to_owned();
-    assert_eq!(initial["selectionState"], "undecided");
+    assert_eq!(initial["selectionState"], "unflagged");
     assert_eq!(initial["rating"], 0);
     let changed = post_cli_json(
         &router,
         "/api/photo-decisions",
         serde_json::json!({
             "field": "selectionState",
-            "value": "selected",
+            "value": "picked",
             "photos": [{"photoId": a, "ifVersion": initial_version}]
         }),
     )
@@ -955,12 +953,12 @@ async fn cli_photo_decisions_route_maps_checked_outcomes_and_partitions_batches(
     assert_eq!(changed["results"][0]["outcome"], "changed");
     assert_eq!(
         changed["results"][0]["prior"],
-        serde_json::json!({"selectionState": "undecided", "rating": 0})
+        serde_json::json!({"selectionState": "unflagged", "rating": 0})
     );
     assert_eq!(
         changed["results"][0]["current"],
         serde_json::json!({
-            "selectionState": "selected",
+            "selectionState": "picked",
             "rating": 0,
             "decisionVersion": selected_version
         })
@@ -979,7 +977,7 @@ async fn cli_photo_decisions_route_maps_checked_outcomes_and_partitions_batches(
         serde_json::json!({"changed": 1, "unchanged": 0, "conflict": 0, "missing": 0})
     );
     let web_summary = published_photo_summary(&application, a).await;
-    assert_eq!(web_summary.selection_state, "selected");
+    assert_eq!(web_summary.selection_state, "picked");
     assert_eq!(web_summary.rating, 0);
 
     // A Rating change leaves Selection State untouched, and a repeated value
@@ -1004,9 +1002,9 @@ async fn cli_photo_decisions_route_maps_checked_outcomes_and_partitions_batches(
     assert_eq!(rated["results"][0]["outcome"], "changed");
     assert_eq!(
         rated["results"][0]["prior"],
-        serde_json::json!({"selectionState": "selected", "rating": 0})
+        serde_json::json!({"selectionState": "picked", "rating": 0})
     );
-    assert_eq!(rated["results"][0]["current"]["selectionState"], "selected");
+    assert_eq!(rated["results"][0]["current"]["selectionState"], "picked");
     assert_eq!(rated["results"][0]["current"]["rating"], 3);
     let no_op = response_json(
         post_cli_json(
@@ -1186,7 +1184,7 @@ async fn cli_photo_decisions_route_maps_checked_outcomes_and_partitions_batches(
         "/api/photo-decisions",
         serde_json::json!({
             "field": "selectionState",
-            "value": "selected",
+            "value": "picked",
             "photos": [{"photoId": a, "ifVersion": rated_version}]
         }),
     )
@@ -1303,7 +1301,7 @@ async fn cli_photo_decisions_route_rejects_unnegotiated_open_and_over_limit_inpu
         (
             serde_json::json!({
                 "field": "selectionState",
-                "value": "picked",
+                "value": "selected",
                 "photos": [{"photoId": photo_id, "ifVersion": version}]
             }),
             "value",

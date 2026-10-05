@@ -552,8 +552,8 @@ pub struct PhotoDecisionArgs {
 #[derive(Clone, Copy, Debug, Serialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum SetSelectionArg {
-    Undecided,
-    Selected,
+    Unflagged,
+    Picked,
     Rejected,
 }
 
@@ -601,8 +601,8 @@ pub struct PhotoListArgs {
 #[serde(rename_all = "kebab-case")]
 pub enum SelectionArg {
     All,
-    Undecided,
-    Selected,
+    Unflagged,
+    Picked,
     Rejected,
 }
 

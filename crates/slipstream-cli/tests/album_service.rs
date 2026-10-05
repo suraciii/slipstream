@@ -255,7 +255,7 @@ async fn cli_completes_the_selected_query_to_ordered_album_workflow() {
         let response = post_json(
             &server.url,
             &format!("/api/photos/{photo_id}/state"),
-            json!({"field": "selectionState", "value": "selected"}),
+            json!({"field": "selectionState", "value": "picked"}),
         )
         .await;
         assert!(response.status().is_success());
@@ -267,7 +267,7 @@ async fn cli_completes_the_selected_query_to_ordered_album_workflow() {
             "photos",
             "list",
             "--selection",
-            "selected",
+            "picked",
             "--rating-min",
             "4",
             "--limit",

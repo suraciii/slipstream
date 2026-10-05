@@ -21,7 +21,7 @@ const opened = () =>
     token: "browse-1",
     total: 3,
     position: 2,
-    selectionCounts: { selected: 0, rejected: 0, undecided: 3 },
+    selectionCounts: { picked: 0, rejected: 0, unflagged: 3 },
   });
 
 function fixture(browse: SourceGridFetch) {

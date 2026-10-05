@@ -39,14 +39,14 @@ describe("browser address decoding", () => {
     });
     expect(
       decodeAddress(
-        "?source=folder&folderPath=RAW%2F26-spring&selection=undecided",
+        "?source=folder&folderPath=RAW%2F26-spring&selection=unflagged",
       ),
     ).toEqual({
       kind: "destination",
       destination: destination({
         source: "folder",
         folderPath: "RAW/26-spring",
-        selection: "undecided",
+        selection: "unflagged",
       }),
     });
     expect(decodeAddress(`?source=album&albumId=${ALBUM}`)).toEqual({
@@ -122,7 +122,7 @@ describe("browser address decoding", () => {
     expect(decodeAddress(`?photoId=${PHOTO_A}&photoId=${PHOTO_A}`)).toEqual({
       kind: "invalid",
     });
-    expect(decodeAddress("?selection=all&selection=undecided")).toEqual({
+    expect(decodeAddress("?selection=all&selection=unflagged")).toEqual({
       kind: "invalid",
     });
   });
@@ -268,10 +268,10 @@ describe("browser address encoding", () => {
         destination({
           source: "folder",
           folderPath: "RAW/26-spring",
-          selection: "undecided",
+          selection: "unflagged",
         }),
       ),
-    ).toBe("source=folder&folderPath=RAW%2F26-spring&selection=undecided");
+    ).toBe("source=folder&folderPath=RAW%2F26-spring&selection=unflagged");
     expect(
       encodeAddress(
         destination({ source: "album", albumId: ALBUM, selection: "all" }),
@@ -312,7 +312,7 @@ describe("browser address encoding", () => {
     for (const search of [
       "",
       "?source=folder&folderPath=",
-      "?source=folder&folderPath=RAW%2F26-spring&selection=undecided",
+      "?source=folder&folderPath=RAW%2F26-spring&selection=unflagged",
       `?source=album&albumId=${ALBUM}`,
       `?source=album&albumId=${ALBUM}&photoId=${PHOTO_A}&order=capture-time-desc`,
       `?photoId=${PHOTO_B}`,
@@ -341,11 +341,11 @@ describe("browser address encoding", () => {
           source: "album",
           albumId: ALBUM,
           photoId: PHOTO_A,
-          selection: "undecided",
+          selection: "unflagged",
         }),
       ),
     ).toEqual(
-      destination({ source: "album", albumId: ALBUM, selection: "undecided" }),
+      destination({ source: "album", albumId: ALBUM, selection: "unflagged" }),
     );
   });
 
@@ -353,7 +353,7 @@ describe("browser address encoding", () => {
     const left = destination({
       source: "folder",
       folderPath: "shoot",
-      selection: "undecided",
+      selection: "unflagged",
     });
     expect(sameSourceView(left, { ...left })).toBe(true);
     expect(sameSourceView(left, { ...left, selection: "all" })).toBe(false);
@@ -364,7 +364,7 @@ describe("browser address encoding", () => {
       sameSourceView(left, {
         source: "folder",
         folderPath: "other",
-        selection: "undecided",
+        selection: "unflagged",
       }),
     ).toBe(false);
     expect(sameSourceView(left, { ...left, photoId: PHOTO_A })).toBe(true);

@@ -21,8 +21,8 @@ export type NavigationViewOrder =
 /// The Selection State filter an address may request. Omission means `all`.
 export type NavigationSelectionFilter =
   | "all"
-  | "undecided"
-  | "selected"
+  | "unflagged"
+  | "picked"
   | "rejected";
 
 /// One validated destination: a source reference, view order, Selection State
@@ -49,8 +49,8 @@ const PARAMETER_ORDER = [
 
 const SELECTION_FILTERS: ReadonlyArray<NavigationSelectionFilter> = [
   "all",
-  "undecided",
-  "selected",
+  "unflagged",
+  "picked",
   "rejected",
 ];
 

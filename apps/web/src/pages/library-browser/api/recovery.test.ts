@@ -32,7 +32,7 @@ const item = (overrides: Record<string, unknown> = {}): RecoveryItem =>
     location: "2024/travel/a.ARW",
     kind: "raw",
     rating: 3,
-    selectionState: "selected",
+    selectionState: "picked",
     fingerprintEnrolled: true,
     albumCount: 2,
     webUrl: "https://host/photos/photo-1",

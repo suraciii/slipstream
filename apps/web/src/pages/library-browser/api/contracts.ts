@@ -1,14 +1,14 @@
 export type PreviewSource = "jpeg-original" | "raw-embedded-jpeg";
-export type SelectionState = "undecided" | "selected" | "rejected";
+export type SelectionState = "unflagged" | "picked" | "rejected";
 /// One Selection State filter for an open source. `all` keeps every Photo of
 /// the source order; every other value keeps only matching Photos.
 export type SelectionFilter = "all" | SelectionState;
 /// Bounded per-state Selection counts for one open source. They describe the
 /// source order, not a filtered view of it.
 export type SelectionCounts = Readonly<{
-  selected: number;
+  picked: number;
   rejected: number;
-  undecided: number;
+  unflagged: number;
 }>;
 export type UndoDescription = Readonly<{
   photoId: string;

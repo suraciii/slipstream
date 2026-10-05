@@ -364,7 +364,7 @@ async fn removal_requires_a_rejected_snapshot_and_reports_concurrent_changes() {
     let decision = post_json(
         &router,
         &format!("/api/photos/{changed}/state"),
-        serde_json::json!({"field": "selectionState", "value": "selected"}),
+        serde_json::json!({"field": "selectionState", "value": "picked"}),
         Some("https://camera.local"),
     )
     .await;
@@ -491,7 +491,7 @@ async fn explicit_cli_removal_restore_reconciles_and_web_reads_back_the_same_sta
         post_json(
             &router,
             &format!("/api/photos/{first}/state"),
-            serde_json::json!({"field": "selectionState", "value": "selected"}),
+            serde_json::json!({"field": "selectionState", "value": "picked"}),
             Some("https://camera.local"),
         )
         .await

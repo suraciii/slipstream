@@ -6,7 +6,7 @@
 
 ### Mark Photos
 
-A Photographer may mark each Photo as `undecided`, `selected`, or `rejected`. Marking a Photo records a Selection State decision. It does not remove the Photo, change its Original File, change its Rating, or change its Album membership.
+A Photographer may mark each Photo as `unflagged`, `picked`, or `rejected`. Marking a Photo records a Selection State decision. It does not remove the Photo, change its Original File, change its Rating, or change its Album membership.
 
 The `Rejected` filter shows Photos whose current Selection State is `rejected`. The filtered result count is distinct from the source's complete Selection State counts. Marking and filtering are separate from deletion.
 
@@ -63,5 +63,5 @@ Selection State is an application-owned fact. This capability does not write it 
 ## Examples
 
 - A source contains 240 rejected Photos. The Photographer filters to `Rejected`, starts removal, reviews “240 Photos,” confirms **Remove from Library**, and receives “240 Photos removed.” The Grid then reports no rejected Photos.
-- One of 40 reviewed Photos is marked `selected` before confirmation. Slipstream removes the other 39 and reports one “changed elsewhere” outcome; it does not overwrite that Photo.
+- One of 40 reviewed Photos is marked `picked` before confirmation. Slipstream removes the other 39 and reports one “changed elsewhere” outcome; it does not overwrite that Photo.
 - Undo restores a removal batch. The restored Photos reappear with their previous Selection State, Rating, Album membership, and Photo identity. The Original Files were never changed.

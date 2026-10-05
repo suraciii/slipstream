@@ -57,8 +57,8 @@
   min-height: 0;
   display: grid;
   --source-width: 14rem;
-  /* The selection tray's fixed height while it is visible. */
-  --batch-tray-height: 6.5rem;
+  /* The compact batch result bar's fixed height while it is visible. */
+  --batch-tray-height: 4.5rem;
   grid-template-columns: var(--source-width) 0.35rem minmax(0, 1fr);
   overflow: hidden;
 }
@@ -797,17 +797,15 @@
   color: var(--text);
 }
 
-/* The batch tray is the bottom action region of Grid View. It stays visible
-   with zero selected Photos, a hidden tray leaves the layout entirely, and its
-   height is fixed while it is visible so a longer result message can never
-   change the Grid's geometry. */
+/* The batch tray is the compact result/action bar of Grid View. It stays
+   hidden until a Photo is selected or a durable result exists. */
 .grid-batch {
   min-width: 0;
   height: var(--batch-tray-height);
   display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 0.25rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
   padding: 0.3rem 0.75rem max(0.3rem, env(safe-area-inset-bottom));
   border-top: 1px solid var(--border);
   background: var(--panel);
@@ -822,6 +820,7 @@
 
 .grid-batch-result {
   min-width: 0;
+  flex: 1 1 auto;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1011,7 +1010,7 @@
   font-size: 0.7rem;
 }
 
-.cell-state.selected {
+.cell-state.picked {
   color: #dff8e6;
   background: #1f6c3b;
 }
@@ -1030,7 +1029,7 @@
   white-space: nowrap;
 }
 
-/* An undecided cell has no badge, so the caption starts the footer row. */
+/* An unflagged cell has no badge, so the caption starts the footer row. */
 .cell-caption-wide {
   grid-column: 1 / -1;
 }
@@ -1622,19 +1621,35 @@
   background: #592b26;
 }
 
-/* The primary action region: one Reject, one Rating entry with its explicit
-   current value, one Select, and More. It is the only Photo action row, on
-   every layout. */
-.quick-action-dock {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 0.3rem;
-  min-width: 0;
-  padding: 0.2rem max(0.5rem, env(safe-area-inset-left))
-    max(0.2rem, env(safe-area-inset-bottom))
-    max(0.5rem, env(safe-area-inset-right));
-  border-top: 1px solid var(--border);
+/* Photo View keeps only navigation context, the Selection State badge, and
+   More in its default chrome. The existing controls remain owned by the
+   tools surface but are not duplicate focus targets while closed. */
+.selection-badge {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0.35rem 0.7rem;
+  border-color: var(--focus);
   background: var(--panel);
+  color: var(--text);
+}
+
+.review-bar {
+  justify-content: center;
+}
+
+.review-bar .status {
+  display: none;
+}
+
+.quick-action-dock {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.photo-tools-help {
+  margin: 0.75rem 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
 }
 
 .quick-action-dock button {
@@ -2001,6 +2016,9 @@
   }
 
   .grid-batch {
+    --batch-tray-height: 6.5rem;
+    flex-direction: column;
+    align-items: stretch;
     padding: 0.25rem 0.5rem max(0.25rem, env(safe-area-inset-bottom));
   }
 

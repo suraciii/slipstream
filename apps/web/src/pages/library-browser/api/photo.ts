@@ -84,7 +84,7 @@ const validStateValue = (
   value: unknown,
 ): value is SelectionState | number =>
   field === "selectionState"
-    ? value === "undecided" || value === "selected" || value === "rejected"
+    ? value === "unflagged" || value === "picked" || value === "rejected"
     : Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 5;
 
 const validUndo = (value: unknown): value is UndoDescription =>

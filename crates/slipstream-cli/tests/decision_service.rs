@@ -211,7 +211,7 @@ async fn cli_photo_decision_forms_apply_checked_decisions_and_isolate_fields() {
             "set",
             &photos[0].0,
             "--selection",
-            "selected",
+            "picked",
             "--if-version",
             &photos[0].1,
         ],
@@ -234,9 +234,9 @@ async fn cli_photo_decision_forms_apply_checked_decisions_and_isolate_fields() {
     assert_eq!(changed["outcome"], "changed");
     assert_eq!(
         changed["prior"],
-        json!({"selectionState": "undecided", "rating": 0})
+        json!({"selectionState": "unflagged", "rating": 0})
     );
-    assert_eq!(changed["current"]["selectionState"], "selected");
+    assert_eq!(changed["current"]["selectionState"], "picked");
     assert_eq!(changed["current"]["rating"], 0);
     let selected_version = changed["current"]["decisionVersion"]
         .as_str()
@@ -253,7 +253,7 @@ async fn cli_photo_decision_forms_apply_checked_decisions_and_isolate_fields() {
             "set",
             &photos[0].0,
             "--selection",
-            "selected",
+            "picked",
             "--if-version",
             &selected_version,
         ],
@@ -294,9 +294,9 @@ async fn cli_photo_decision_forms_apply_checked_decisions_and_isolate_fields() {
     assert_eq!(rated_item["outcome"], "changed");
     assert_eq!(
         rated_item["prior"],
-        json!({"selectionState": "selected", "rating": 0})
+        json!({"selectionState": "picked", "rating": 0})
     );
-    assert_eq!(rated_item["current"]["selectionState"], "selected");
+    assert_eq!(rated_item["current"]["selectionState"], "picked");
     assert_eq!(rated_item["current"]["rating"], 4);
     let rated_version = rated_item["current"]["decisionVersion"]
         .as_str()
@@ -321,7 +321,7 @@ async fn cli_photo_decision_forms_apply_checked_decisions_and_isolate_fields() {
     assert_eq!(cleared["data"]["results"][0]["current"]["rating"], 0);
     assert_eq!(
         cleared["data"]["results"][0]["current"]["selectionState"],
-        "selected"
+        "picked"
     );
 
     // The batch form applies one field to every named Photo in order.
@@ -437,7 +437,7 @@ async fn cli_photo_batches_report_truthful_partials_and_all_failed_partitions() 
     let (exit, partial) = command_with_stdin(
         &server.url,
         &["photos", "set", "--input", "-"],
-        &decision_document("selectionState", json!("selected"), &mixed),
+        &decision_document("selectionState", json!("picked"), &mixed),
     )
     .await;
     assert_eq!(exit, 5);
@@ -483,7 +483,7 @@ async fn cli_photo_batches_report_truthful_partials_and_all_failed_partitions() 
     let (exit, unchanged_partial) = command_with_stdin(
         &server.url,
         &["photos", "set", "--input", "-"],
-        &decision_document("selectionState", json!("selected"), &no_op_and_stale),
+        &decision_document("selectionState", json!("picked"), &no_op_and_stale),
     )
     .await;
     assert_eq!(exit, 5);
@@ -587,7 +587,7 @@ async fn cli_photo_decisions_conflict_with_web_interleaving_and_restart() {
             "set",
             &photos[0].0,
             "--selection",
-            "selected",
+            "picked",
             "--if-version",
             &photos[0].1,
         ],
@@ -601,11 +601,11 @@ async fn cli_photo_decisions_conflict_with_web_interleaving_and_restart() {
     let restored = &away_and_back["data"]["results"][0];
     assert_eq!(restored["outcome"], "conflict");
     assert_eq!(restored["current"]["rating"], 0);
-    assert_eq!(restored["current"]["selectionState"], "undecided");
+    assert_eq!(restored["current"]["selectionState"], "unflagged");
     assert_ne!(restored["current"]["decisionVersion"], photos[0].1);
     let (exit, facts) = command(&server.url, &["photos", "get", &photos[0].0]).await;
     assert_eq!(exit, 0);
-    assert_eq!(facts["data"]["selectionState"], "undecided");
+    assert_eq!(facts["data"]["selectionState"], "unflagged");
     assert_eq!(facts["data"]["rating"], 0);
     let pre_restart_version = facts["data"]["decisionVersion"]
         .as_str()
@@ -627,7 +627,7 @@ async fn cli_photo_decisions_conflict_with_web_interleaving_and_restart() {
             "set",
             &photos[0].0,
             "--selection",
-            "selected",
+            "picked",
             "--if-version",
             &pre_restart_version,
         ],
@@ -646,7 +646,7 @@ async fn cli_photo_decisions_conflict_with_web_interleaving_and_restart() {
             "set",
             &photos[0].0,
             "--selection",
-            "selected",
+            "picked",
             "--if-version",
             &fresh[0].1,
         ],
@@ -656,7 +656,7 @@ async fn cli_photo_decisions_conflict_with_web_interleaving_and_restart() {
     assert_eq!(next_write["data"]["results"][0]["outcome"], "changed");
     assert_eq!(
         next_write["data"]["results"][0]["current"]["selectionState"],
-        "selected"
+        "picked"
     );
 
     server.close().await.unwrap();
@@ -824,7 +824,7 @@ async fn cli_photo_decisions_validate_input_before_any_network_mutation() {
         ("garbage.json", "\u{fffd}\u{fffd}{}", "input"),
         (
             "bad-field.json",
-            "{\"field\": \"selection\", \"value\": \"selected\", \"photos\": [{\"photoId\": \"a\", \"ifVersion\": \"v\"}]}",
+            "{\"field\": \"selection\", \"value\": \"picked\", \"photos\": [{\"photoId\": \"a\", \"ifVersion\": \"v\"}]}",
             "field",
         ),
         (
@@ -906,14 +906,14 @@ async fn cli_photo_decisions_validate_input_before_any_network_mutation() {
 
     // Incomplete single-Photo commands are refused the same way.
     for arguments in [
-        vec!["photos", "set", "p1", "--selection", "selected"],
+        vec!["photos", "set", "p1", "--selection", "picked"],
         vec!["photos", "set", "p1", "--if-version", "v"],
         vec![
             "photos",
             "set",
             "p1",
             "--selection",
-            "selected",
+            "picked",
             "--rating",
             "1",
             "--if-version",
@@ -968,7 +968,7 @@ async fn cli_photo_decisions_report_unknown_outcomes_without_retry() {
         json!({
             "photoId": id,
             "outcome": "changed",
-            "prior": {"selectionState": "undecided", "rating": 0},
+            "prior": {"selectionState": "unflagged", "rating": 0},
             "current": {"selectionState": selection, "rating": rating, "decisionVersion": "v9"}
         })
     };
@@ -977,7 +977,7 @@ async fn cli_photo_decisions_report_unknown_outcomes_without_retry() {
             "photoId": id,
             "outcome": "unchanged",
             "current": {
-                "selectionState": "undecided",
+                "selectionState": "unflagged",
                 "rating": rating,
                 "decisionVersion": "v1"
             }
@@ -988,7 +988,7 @@ async fn cli_photo_decisions_report_unknown_outcomes_without_retry() {
             "photoId": id,
             "outcome": "conflict",
             "current": {
-                "selectionState": "selected",
+                "selectionState": "picked",
                 "rating": 5,
                 "decisionVersion": "v3"
             }
@@ -998,7 +998,7 @@ async fn cli_photo_decisions_report_unknown_outcomes_without_retry() {
     let valid_counts = json!({"changed": 2, "unchanged": 0, "conflict": 0, "missing": 0});
     let selection_document = decision_document(
         "selectionState",
-        json!("selected"),
+        json!("picked"),
         &[
             (first.clone(), "v1".to_owned()),
             (second.clone(), "v2".to_owned()),
@@ -1030,8 +1030,8 @@ async fn cli_photo_decisions_report_unknown_outcomes_without_retry() {
                 200,
                 decision_reply(
                     json!([
-                        changed_item(&first, "undecided", 4),
-                        changed_item(&second, "undecided", 4)
+                        changed_item(&first, "unflagged", 4),
+                        changed_item(&second, "unflagged", 4)
                     ]),
                     json!({"changed": 1, "unchanged": 1, "conflict": 0, "missing": 0}),
                 ),
@@ -1060,8 +1060,8 @@ async fn cli_photo_decisions_report_unknown_outcomes_without_retry() {
                     json!([{
                         "photoId": first,
                         "outcome": "changed",
-                        "prior": {"selectionState": "undecided", "rating": 0},
-                        "current": {"selectionState": "undecided", "rating": 4, "decisionVersion": "v9"},
+                        "prior": {"selectionState": "unflagged", "rating": 0},
+                        "current": {"selectionState": "unflagged", "rating": 4, "decisionVersion": "v9"},
                         "unexpected": true
                     }]),
                     valid_counts.clone(),
@@ -1074,7 +1074,7 @@ async fn cli_photo_decisions_report_unknown_outcomes_without_retry() {
             MutationReply::Status(
                 200,
                 decision_reply(
-                    json!([changed_item(&first, "undecided", 4)]),
+                    json!([changed_item(&first, "unflagged", 4)]),
                     valid_counts.clone(),
                 ),
             ),
@@ -1085,7 +1085,7 @@ async fn cli_photo_decisions_report_unknown_outcomes_without_retry() {
             MutationReply::Status(
                 200,
                 decision_reply(
-                    json!([changed_item(&first, "undecided", 3), missing_item(&second)]),
+                    json!([changed_item(&first, "unflagged", 3), missing_item(&second)]),
                     json!({"changed": 1, "unchanged": 0, "conflict": 0, "missing": 1}),
                 ),
             ),
@@ -1108,8 +1108,8 @@ async fn cli_photo_decisions_report_unknown_outcomes_without_retry() {
                 200,
                 decision_reply(
                     json!([
-                        changed_item(&first, "undecided", 4),
-                        changed_item(&second, "undecided", 3)
+                        changed_item(&first, "unflagged", 4),
+                        changed_item(&second, "unflagged", 3)
                     ]),
                     json!({"changed": 2, "unchanged": 0, "conflict": 0, "missing": 0}),
                 ),
@@ -1207,9 +1207,9 @@ async fn cli_photo_decision_failures_redact_attached_data() {
                 {
                     "photoId": first,
                     "outcome": "changed",
-                    "prior": {"selectionState": "undecided", "rating": 0},
+                    "prior": {"selectionState": "unflagged", "rating": 0},
                     "current": {
-                        "selectionState": "undecided",
+                        "selectionState": "unflagged",
                         "rating": 4,
                         "decisionVersion": format!("{}-v9", common::ACCESS_TOKEN)
                     }

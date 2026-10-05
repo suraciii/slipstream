@@ -461,9 +461,9 @@ async fn fresh_capture_publication_preserves_identity_decisions_album_order_and_
         .mutate_photo_state(crate::PhotoStateMutation {
             photo_id: target_photo.id.clone(),
             field: crate::PhotoStateField::SelectionState,
-            value: crate::PhotoStateValue::Selection(crate::SelectionState::Selected),
+            value: crate::PhotoStateValue::Selection(crate::SelectionState::Picked),
             expected_current: Some(crate::PhotoStateValue::Selection(
-                crate::SelectionState::Undecided,
+                crate::SelectionState::Unflagged,
             )),
             album_id: None,
         })
@@ -539,10 +539,7 @@ async fn fresh_capture_publication_preserves_identity_decisions_album_order_and_
         target_original.relative_path
     );
     assert_eq!(current_photo.id, target_photo.id);
-    assert_eq!(
-        current_photo.selection_state,
-        crate::SelectionState::Selected
-    );
+    assert_eq!(current_photo.selection_state, crate::SelectionState::Picked);
     assert_eq!(current_photo.rating, 4);
     assert_eq!(
         current_original.capture.order_key.as_deref(),
@@ -999,7 +996,7 @@ async fn expansion_preserves_legacy_identity_and_user_state_then_discovers_sibli
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        14
+        15
     );
     assert_eq!(
         connection
@@ -1041,7 +1038,7 @@ async fn expansion_preserves_legacy_identity_and_user_state_then_discovers_sibli
             "shoot/a.ARW".to_owned(),
             "inspection-pending".to_owned(),
             5,
-            "selected".to_owned(),
+            "picked".to_owned(),
             0
         )
     );
@@ -1375,7 +1372,7 @@ async fn manual_recovery_restores_unavailable_photo_without_fingerprint() {
         .unwrap();
     assert!(photo.available);
     assert_eq!(photo.rating, 3);
-    assert_eq!(photo.selection_state, crate::SelectionState::Selected);
+    assert_eq!(photo.selection_state, crate::SelectionState::Picked);
     let original = snapshot
         .originals
         .iter()

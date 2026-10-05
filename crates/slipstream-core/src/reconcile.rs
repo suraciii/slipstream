@@ -189,7 +189,7 @@ mod tests {
             preview_height: None,
             cache_revision: None,
             sort_path: String::new(),
-            selection_state: SelectionState::Undecided,
+            selection_state: SelectionState::Unflagged,
             rating: 0,
             has_saved_edits: false,
             removed: false,

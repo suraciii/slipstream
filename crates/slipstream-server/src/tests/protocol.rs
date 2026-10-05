@@ -683,10 +683,10 @@ async fn response_goldens_match_real_serialized_routes() {
             "/api/photos/state",
             serde_json::json!({
                 "photos":[
-                    {"photoId":photo_id.clone(),"expectedCurrent":"undecided"},
-                    {"photoId":"00000000-0000-4000-8000-000000000000","expectedCurrent":"undecided"}
+                    {"photoId":photo_id.clone(),"expectedCurrent":"unflagged"},
+                    {"photoId":"00000000-0000-4000-8000-000000000000","expectedCurrent":"unflagged"}
                 ],
-                "selectionState":"selected"
+                "selectionState":"picked"
             }),
             Some("https://camera.local"),
         )
@@ -1334,7 +1334,7 @@ async fn album_and_state_protocol_persists_across_reopen() {
         post_json(
             &router,
             &format!("https://camera.local/api/photos/{}/state", ids[0]),
-            serde_json::json!({"field": "selectionState", "value": "selected", "albumId": album_a}),
+            serde_json::json!({"field": "selectionState", "value": "picked", "albumId": album_a}),
             Some("https://camera.local"),
         )
         .await,
@@ -1367,7 +1367,7 @@ async fn album_and_state_protocol_persists_across_reopen() {
         .iter()
         .find(|photo| photo.id == ids[0])
         .unwrap();
-    assert_eq!(shared.selection_state, "selected");
+    assert_eq!(shared.selection_state, "picked");
     assert_eq!(shared.rating, 4);
     assert_eq!(
         post_json(
@@ -1399,7 +1399,7 @@ async fn album_and_state_protocol_persists_across_reopen() {
             post_json(
                 &router,
                 &format!("https://camera.local/api/photos/{}/state", ids[0]),
-                serde_json::json!({"field": "selectionState", "value": "selected", "expectedCurrent": "undecided"}),
+                serde_json::json!({"field": "selectionState", "value": "picked", "expectedCurrent": "unflagged"}),
                 Some("https://camera.local"),
             )
             .await,

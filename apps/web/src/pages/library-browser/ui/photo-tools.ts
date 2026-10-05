@@ -2,12 +2,12 @@ import type { ModalSurfaces } from "./modal-surface.js";
 
 export type PhotoToolsView =
   | "tools"
+  | "rating"
   | "edit"
   | "albums"
   | "details"
   | "zoom"
   | "nearby";
-
 export interface PhotoToolsController {
   view(): PhotoToolsView;
   isNearbyOpen(): boolean;
@@ -62,15 +62,17 @@ export function createPhotoToolsController({
     photoToolsTitle.textContent =
       currentView === "tools"
         ? "Photo tools"
-        : currentView === "nearby"
-          ? "Nearby Photos"
-          : currentView === "zoom"
-            ? "Preview Zoom"
-            : currentView === "albums"
-              ? "Albums"
-              : currentView === "details"
-                ? "Details"
-                : "Edit";
+        : currentView === "rating"
+          ? "Rating"
+          : currentView === "nearby"
+            ? "Nearby Photos"
+            : currentView === "zoom"
+              ? "Preview Zoom"
+              : currentView === "albums"
+                ? "Albums"
+                : currentView === "details"
+                  ? "Details"
+                  : "Edit";
   };
 
   const onClose = (): void => {
@@ -111,6 +113,7 @@ export function createPhotoToolsController({
         return;
       }
       if (
+        entry === "rating" ||
         entry === "albums" ||
         entry === "details" ||
         entry === "zoom" ||

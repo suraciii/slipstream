@@ -39,7 +39,7 @@ type GridIntent =
       kind: "grid-photo-mutation";
       index: number;
       field: "rating" | "selectionState";
-      value: number | "selected" | "rejected" | "undecided";
+      value: number | "picked" | "rejected" | "unflagged";
     }>;
 
 export function createGridPresenter(
@@ -386,10 +386,10 @@ export function createGridPresenter(
         field === "rating"
           ? Number(event.key)
           : key === "p"
-            ? "selected"
+            ? "picked"
             : key === "x"
               ? "rejected"
-              : "undecided",
+              : "unflagged",
     });
   };
   const onResize = () => {

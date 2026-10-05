@@ -574,10 +574,10 @@ function mountPrivateLibraryBrowser(
     view.renderProgress({
       visible: sourceGrid.token !== "" || sourceGrid.total > 0,
       visibleTotal: sourceGrid.total,
-      sourceTotal: counts.selected + counts.rejected + counts.undecided,
-      selected: counts.selected,
+      sourceTotal: counts.picked + counts.rejected + counts.unflagged,
+      picked: counts.picked,
       rejected: counts.rejected,
-      undecided: counts.undecided,
+      unflagged: counts.unflagged,
     });
   };
 
@@ -598,7 +598,7 @@ function mountPrivateLibraryBrowser(
       gridEnabled,
       filmstripEnabled,
       decisionEnabled: enabled,
-      clearEnabled: enabled && photo?.selectionState !== "undecided",
+      clearEnabled: enabled && photo?.selectionState !== "unflagged",
       backEnabled: !interactionBusy,
       refreshEnabled: !interactionBusy,
       recoveryEnabled,

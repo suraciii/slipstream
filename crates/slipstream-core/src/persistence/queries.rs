@@ -515,7 +515,7 @@ mod tests {
             .mutate_photo_state(PhotoStateMutation {
                 photo_id: early_id.clone(),
                 field: PhotoStateField::SelectionState,
-                value: PhotoStateValue::Selection(SelectionState::Selected),
+                value: PhotoStateValue::Selection(SelectionState::Picked),
                 expected_current: None,
                 album_id: None,
             })
@@ -534,7 +534,7 @@ mod tests {
 
         let query = PhotoQuery {
             source: PhotoQuerySource::Folder("shoot".to_owned()),
-            selection_state: Some(SelectionState::Selected),
+            selection_state: Some(SelectionState::Picked),
             rating_minimum: Some(4),
             rating_maximum: Some(5),
             original_kind: Some(OriginalKind::Jpeg),
@@ -554,7 +554,7 @@ mod tests {
             .create_photo_query_receiver(
                 PhotoQuery {
                     source: PhotoQuerySource::AllPhotos,
-                    selection_state: Some(SelectionState::Selected),
+                    selection_state: Some(SelectionState::Picked),
                     rating_minimum: Some(4),
                     rating_maximum: None,
                     original_kind: None,

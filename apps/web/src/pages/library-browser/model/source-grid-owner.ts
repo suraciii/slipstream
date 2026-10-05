@@ -377,9 +377,9 @@ export function createSourceGridOwner(
   // The server's per-state counts for the open source. They describe the
   // source order, so a filtered view still reports source-wide progress.
   let selectionCounts: SelectionCounts = Object.freeze({
-    selected: 0,
+    picked: 0,
     rejected: 0,
-    undecided: 0,
+    unflagged: 0,
   });
   let lastSource: SourceGridSource | undefined;
   let token = "";
@@ -648,9 +648,9 @@ export function createSourceGridOwner(
       total = 0;
       gridPosition = 0;
       selectionCounts = Object.freeze({
-        selected: 0,
+        picked: 0,
         rejected: 0,
-        undecided: 0,
+        unflagged: 0,
       });
       facts = new Map();
       thumbnails = new Map();

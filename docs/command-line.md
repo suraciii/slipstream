@@ -158,7 +158,7 @@ Selection State or Rating must make an outdated write conflict, even when the
 value has changed away and back. The version covers those two decision fields;
 Preview completion and scan progress alone must not create decision conflicts.
 
-A command changes one field. Clearing Selection State means `undecided`;
+A command changes one field. Clearing Selection State means `unflagged`;
 clearing Rating means zero. Neither action changes the other field. No CLI
 Photo mutation advances a browsing position.
 
@@ -256,7 +256,7 @@ Other platforms require their own build and end-to-end evidence.
 
 ## Acceptance Scenarios
 
-- A caller finds selected Photos rated four or five, creates an Album, adds
+- A caller finds picked Photos rated four or five, creates an Album, adds
   those IDs in Capture Time order, and opens the same Album in the Web.
 - A query spanning several pages receives no new members after a rescan or
   decision change. Expiration produces a recoverable error without omissions.

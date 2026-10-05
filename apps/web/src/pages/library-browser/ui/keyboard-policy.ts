@@ -136,7 +136,7 @@ export const resolveKeyIntent = (
   if (letter === "p")
     return {
       kind: "select-photo",
-      value: "selected",
+      value: "picked",
       advance: true,
       preventDefault: false,
     };
@@ -147,10 +147,10 @@ export const resolveKeyIntent = (
       advance: true,
       preventDefault: false,
     };
-  if (letter === "u" && context.currentSelection !== "undecided")
+  if (letter === "u" && context.currentSelection !== "unflagged")
     return {
       kind: "select-photo",
-      value: "undecided",
+      value: "unflagged",
       advance: false,
       preventDefault: false,
     };

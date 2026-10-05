@@ -479,7 +479,7 @@ pub(super) fn apply_manual_relocations(
                 });
             }
             if rating != 0
-                || selection_state != "undecided"
+                || selection_state != "unflagged"
                 || has_saved_edits
                 || members != 0
                 || exports != 0
@@ -876,8 +876,8 @@ pub(super) fn parse_preview_state(value: &str) -> rusqlite::Result<PreviewState>
 
 pub(super) fn parse_selection_state(value: &str) -> rusqlite::Result<SelectionState> {
     match value {
-        "undecided" => Ok(SelectionState::Undecided),
-        "selected" => Ok(SelectionState::Selected),
+        "unflagged" => Ok(SelectionState::Unflagged),
+        "picked" => Ok(SelectionState::Picked),
         "rejected" => Ok(SelectionState::Rejected),
         _ => Err(rusqlite::Error::InvalidQuery),
     }
@@ -885,8 +885,8 @@ pub(super) fn parse_selection_state(value: &str) -> rusqlite::Result<SelectionSt
 
 pub(super) fn selection_state_value(value: SelectionState) -> &'static str {
     match value {
-        SelectionState::Undecided => "undecided",
-        SelectionState::Selected => "selected",
+        SelectionState::Unflagged => "unflagged",
+        SelectionState::Picked => "picked",
         SelectionState::Rejected => "rejected",
     }
 }

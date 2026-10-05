@@ -655,8 +655,8 @@ fn photo_decision_parser_requires_one_complete_form() {
         invocation.extend(arguments);
         Cli::try_parse_from(invocation)
     };
-    assert!(single(&["p1", "--selection", "selected", "--if-version", "v"]).is_ok());
-    assert!(single(&["p1", "--selection", "undecided", "--if-version", "v"]).is_ok());
+    assert!(single(&["p1", "--selection", "picked", "--if-version", "v"]).is_ok());
+    assert!(single(&["p1", "--selection", "unflagged", "--if-version", "v"]).is_ok());
     assert!(single(&["p1", "--rating", "3", "--if-version", "v"]).is_ok());
     assert!(single(&["p1", "--rating", "0", "--if-version", "v"]).is_ok());
     assert!(single(&["--input", "decisions.json"]).is_ok());
@@ -667,7 +667,7 @@ fn photo_decision_parser_requires_one_complete_form() {
         single(&[
             "p1",
             "--selection",
-            "selected",
+            "picked",
             "--rating",
             "3",
             "--if-version",
@@ -677,7 +677,7 @@ fn photo_decision_parser_requires_one_complete_form() {
     );
     assert!(single(&["--input", "d.json", "--if-version", "v"]).is_err());
     assert!(single(&["--input", "d.json", "p1"]).is_err());
-    assert!(single(&["--input", "d.json", "--selection", "selected"]).is_err());
+    assert!(single(&["--input", "d.json", "--selection", "picked"]).is_err());
     // Unknown values and out-of-range ratings are parser errors.
     assert!(single(&["p1", "--selection", "all", "--if-version", "v"]).is_err());
     assert!(single(&["p1", "--rating", "6", "--if-version", "v"]).is_err());
@@ -686,7 +686,7 @@ fn photo_decision_parser_requires_one_complete_form() {
     // The single-Photo forms must be complete before any network access.
     let missing_field = single(&["p1", "--if-version", "v"]).expect("the shape parses");
     assert!(validate_command(&missing_field.command).is_err());
-    let missing_version = single(&["p1", "--selection", "selected"]).expect("the shape parses");
+    let missing_version = single(&["p1", "--selection", "picked"]).expect("the shape parses");
     assert!(validate_command(&missing_version.command).is_err());
 }
 
@@ -754,8 +754,8 @@ fn decision_input_validates_the_complete_document() {
                 b"{\"field\": \"rating\", \"value\": 4, \"photos\": []} trailing".as_slice().to_vec(),
                 "input",
             ),
-            (document("selection".into(), "selected".into(), json!(items(1))), "field"),
-            (document(5.into(), "selected".into(), json!(items(1))), "input"),
+            (document("selection".into(), "picked".into(), json!(items(1))), "field"),
+            (document(5.into(), "picked".into(), json!(items(1))), "input"),
             (document("rating".into(), "4".into(), json!(items(1))), "value"),
             (document("rating".into(), 4.5.into(), json!(items(1))), "value"),
             (document("rating".into(), 6.into(), json!(items(1))), "value"),
@@ -765,7 +765,7 @@ fn decision_input_validates_the_complete_document() {
                 "value",
             ),
             (
-                document("selectionState".into(), "picked".into(), json!(items(1))),
+                document("selectionState".into(), "selected".into(), json!(items(1))),
                 "value",
             ),
             (
@@ -847,14 +847,14 @@ fn decision_batches_partition_from_validated_results_only() {
     let changed = |id: &str, version: &str| PhotoDecisionItemWire {
         photo_id: id.to_owned(),
         outcome: "changed".to_owned(),
-        prior: Some(facts("undecided", 0)),
-        current: Some(snapshot("selected", 4, version)),
+        prior: Some(facts("unflagged", 0)),
+        current: Some(snapshot("picked", 4, version)),
     };
     let unchanged = |id: &str, version: &str| PhotoDecisionItemWire {
         photo_id: id.to_owned(),
         outcome: "unchanged".to_owned(),
         prior: None,
-        current: Some(snapshot("undecided", 4, version)),
+        current: Some(snapshot("unflagged", 4, version)),
     };
     let conflict = |id: &str, version: &str| PhotoDecisionItemWire {
         photo_id: id.to_owned(),
@@ -988,7 +988,7 @@ fn decision_batches_partition_from_validated_results_only() {
                     photo_id: "a".to_owned(),
                     outcome: "changed".to_owned(),
                     prior: None,
-                    current: Some(snapshot("selected", 3, "v2")),
+                    current: Some(snapshot("picked", 3, "v2")),
                 }],
                 counts: PhotoDecisionCountsWire {
                     changed: 1,
@@ -1004,8 +1004,8 @@ fn decision_batches_partition_from_validated_results_only() {
                 vec![PhotoDecisionItemWire {
                     photo_id: "a".to_owned(),
                     outcome: "changed".to_owned(),
-                    prior: Some(facts("undecided", 0)),
-                    current: Some(snapshot("selected", 3, "v2")),
+                    prior: Some(facts("unflagged", 0)),
+                    current: Some(snapshot("picked", 3, "v2")),
                 }],
                 [1, 0, 0, 0],
             ),
@@ -1017,7 +1017,7 @@ fn decision_batches_partition_from_validated_results_only() {
                     photo_id: "a".to_owned(),
                     outcome: "unchanged".to_owned(),
                     prior: None,
-                    current: Some(snapshot("undecided", 2, "v2")),
+                    current: Some(snapshot("unflagged", 2, "v2")),
                 }],
                 [0, 1, 0, 0],
             ),
@@ -1373,7 +1373,7 @@ fn recovery_list_items_validate_against_their_closed_shapes() {
         "location": "shoot/a.JPG",
         "kind": "jpeg",
         "rating": 3,
-        "selectionState": "selected",
+        "selectionState": "picked",
         "fingerprintEnrolled": false,
         "albumCount": 1,
         "webUrl": "/?photoId=00000000-0000-4000-8000-000000000002"
@@ -1391,7 +1391,7 @@ fn recovery_list_items_validate_against_their_closed_shapes() {
         serde_json::from_value::<RecoveryItemWire>(json!({
             "state": "vanished", "originalId": "00000000-0000-4000-8000-000000000001",
             "photoId": "00000000-0000-4000-8000-000000000002", "location": "shoot/a.JPG",
-            "kind": "jpeg", "rating": 3, "selectionState": "selected",
+            "kind": "jpeg", "rating": 3, "selectionState": "picked",
             "fingerprintEnrolled": false, "albumCount": 1, "webUrl": "/?photoId=x"
         }))
         .is_err()
@@ -1400,7 +1400,7 @@ fn recovery_list_items_validate_against_their_closed_shapes() {
         serde_json::from_value::<RecoveryItemWire>(json!({
             "state": "unavailable", "originalId": "00000000-0000-4000-8000-000000000001",
             "photoId": "00000000-0000-4000-8000-000000000002", "location": "shoot/a.JPG",
-            "kind": "tiff", "rating": 3, "selectionState": "selected",
+            "kind": "tiff", "rating": 3, "selectionState": "picked",
             "fingerprintEnrolled": false, "albumCount": 1, "webUrl": "/?photoId=x"
         }))
         .is_err()
@@ -1408,7 +1408,7 @@ fn recovery_list_items_validate_against_their_closed_shapes() {
     let over_rated = serde_json::from_value::<RecoveryItemWire>(json!({
         "state": "available", "originalId": "00000000-0000-4000-8000-000000000001",
         "photoId": "00000000-0000-4000-8000-000000000002", "location": "shoot/a.JPG",
-        "kind": "raw", "rating": 6, "selectionState": "undecided",
+        "kind": "raw", "rating": 6, "selectionState": "unflagged",
         "fingerprintEnrolled": true, "albumCount": 0, "webUrl": "/?photoId=x"
     }))
     .unwrap();

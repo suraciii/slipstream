@@ -16,6 +16,7 @@ const SCHEMA_V11_MANIFEST: &str = include_str!("../../../../compatibility/sqlite
 const SCHEMA_V12_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v12.json");
 const SCHEMA_V13_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v13.json");
 const SCHEMA_V14_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v14.json");
+const SCHEMA_V15_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v15.json");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchemaVersion {
@@ -33,6 +34,7 @@ pub enum SchemaVersion {
     V12,
     V13,
     V14,
+    V15,
 }
 
 impl SchemaVersion {
@@ -52,6 +54,7 @@ impl SchemaVersion {
             Self::V12 => SCHEMA_V12_MANIFEST,
             Self::V13 => SCHEMA_V13_MANIFEST,
             Self::V14 => SCHEMA_V14_MANIFEST,
+            Self::V15 => SCHEMA_V15_MANIFEST,
         }
     }
 }
@@ -161,6 +164,7 @@ mod tests {
     const SCHEMA_V12_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v12.sql");
     const SCHEMA_V13_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v13.sql");
     const SCHEMA_V14_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v14.sql");
+    const SCHEMA_V15_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v15.sql");
 
     fn execute_fixture(sql: &str) -> Connection {
         let connection = Connection::open_in_memory().unwrap();
@@ -238,6 +242,8 @@ mod tests {
         validate_canonical_schema(&v13, SchemaVersion::V13).unwrap();
         let v14 = execute_fixture(SCHEMA_V14_SQL);
         validate_canonical_schema(&v14, SchemaVersion::V14).unwrap();
+        let v15 = execute_fixture(SCHEMA_V15_SQL);
+        validate_canonical_schema(&v15, SchemaVersion::V15).unwrap();
     }
 
     #[test]

@@ -52,7 +52,7 @@ The recognized parameters are:
 - `photoId`: optional stable Photo identity; omission means Grid;
 - `order`: `capture-time-asc` or `capture-time-desc`, with `album-order` also
   allowed for Albums; omission uses that source's default; and
-- `selection`: `all`, `undecided`, `selected`, or `rejected`; omission means
+- `selection`: `all`, `unflagged`, `picked`, or `rejected`; omission means
   `all`.
 
 IDs and Folder Locations must satisfy the existing API validators. A Location
@@ -76,7 +76,7 @@ Examples use illustrative IDs that satisfy the identifier shape:
 ```text literal
 /
 /?source=folder&folderPath=
-/?source=folder&folderPath=RAW%2F26-spring&selection=undecided
+/?source=folder&folderPath=RAW%2F26-spring&selection=unflagged
 /?source=album&albumId=00000000-0000-4000-8000-000000000001
 /?source=album&albumId=00000000-0000-4000-8000-000000000001&photoId=00000000-0000-4000-8000-000000000004&order=capture-time-desc
 /?photoId=00000000-0000-4000-8000-000000000009

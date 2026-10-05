@@ -31,7 +31,7 @@ const fact = (id: string): PhotoSummary => ({
   id,
   available: true,
   original: { kind: "jpeg", available: true },
-  selectionState: "undecided",
+  selectionState: "unflagged",
   rating: 0,
   hasSavedEdits: false,
   preview: { state: "inspection-pending" },
@@ -179,7 +179,7 @@ const batchPhotos = (source: FakeSource, ids: ReadonlyArray<string>) =>
     photoId,
     expectedCurrent:
       [...source.facts.values()].find((photo) => photo.id === photoId)
-        ?.selectionState ?? "undecided",
+        ?.selectionState ?? "unflagged",
   }));
 
 const bind = (source: FakeSource, fetcher: PhotoFetch) => {
@@ -332,7 +332,7 @@ describe("PhotoOwner", () => {
     const source = new FakeSource();
     source.facts.set(0, fact("photo-0"));
     const { owner } = bind(source, () => Promise.reject(new Error("offline")));
-    const outcome = await owner.mutate("selectionState", "selected", true)!
+    const outcome = await owner.mutate("selectionState", "picked", true)!
       .settlement;
     expect(outcome.kind).toBe("failed");
     if (outcome.kind === "failed") expect(outcome.connectivity).toBe("lost");
@@ -353,18 +353,18 @@ describe("PhotoOwner", () => {
         mutationBody({
           photoId: "photo-0",
           field: "selectionState",
-          priorValue: "undecided",
-          expectedCurrent: "selected",
+          priorValue: "unflagged",
+          expectedCurrent: "picked",
         }),
       );
     });
-    const outcome = await owner.mutate("selectionState", "selected", true)!
+    const outcome = await owner.mutate("selectionState", "picked", true)!
       .settlement;
     expect(outcome.kind).toBe("persisted");
     expect(outcome.advance).toBe(true);
     expect(owner.currentIndex).toBe(0);
     expect(owner.canUndo).toBe(true);
-    expect(source.facts.get(0)?.selectionState).toBe("selected");
+    expect(source.facts.get(0)?.selectionState).toBe("picked");
     expect(requests[0]).toContain('"albumId":"album-1"');
     owner.dispose();
   });
@@ -382,13 +382,13 @@ describe("PhotoOwner", () => {
             mutationBody({
               photoId: "photo-a",
               field: "selectionState",
-              priorValue: "undecided",
-              expectedCurrent: "selected",
+              priorValue: "unflagged",
+              expectedCurrent: "picked",
             }),
           )
         : Promise.resolve(new Response(null, { status: 204 }));
     });
-    const mutation = await owner.mutate("selectionState", "selected", true)!
+    const mutation = await owner.mutate("selectionState", "picked", true)!
       .settlement;
     expect(mutation.kind).toBe("persisted");
     const next = owner.beginOpen(1)!;
@@ -400,7 +400,7 @@ describe("PhotoOwner", () => {
     source.facts = new Map([
       [0, fact("photo-b")],
       [1, fact("photo-c")],
-      [2, { ...fact("photo-a"), selectionState: "selected" }],
+      [2, { ...fact("photo-a"), selectionState: "picked" }],
     ]);
     owner.rebindSource({
       sourceAuthority: replacementAuthority,
@@ -421,7 +421,7 @@ describe("PhotoOwner", () => {
     expect(outcome.photoId).toBe("photo-a");
     expect(owner.currentIndex).toBe(2);
     expect(owner.current?.id).toBe("photo-a");
-    expect(owner.current?.selectionState).toBe("undecided");
+    expect(owner.current?.selectionState).toBe("unflagged");
     expect(owner.canUndo).toBe(false);
     owner.dispose();
   });
@@ -440,8 +440,8 @@ describe("PhotoOwner", () => {
         mutationBody({
           photoId: "photo-2",
           field: "selectionState",
-          priorValue: "undecided",
-          expectedCurrent: "selected",
+          priorValue: "unflagged",
+          expectedCurrent: "picked",
         }),
       );
     }, source);
@@ -452,12 +452,12 @@ describe("PhotoOwner", () => {
       albumId: "album-1",
     });
 
-    const admission = gridOwner.mutateAt(2, "selectionState", "selected")!;
+    const admission = gridOwner.mutateAt(2, "selectionState", "picked")!;
     expect(gridOwner.busy).toBe(true);
     const outcome = await admission.settlement;
     expect(outcome.kind).toBe("persisted");
     expect(outcome.advance).toBe(false);
-    expect(source.facts.get(2)?.selectionState).toBe("selected");
+    expect(source.facts.get(2)?.selectionState).toBe("picked");
     // A Grid write never moves the current Photo or its Photo View position.
     expect(gridOwner.currentIndex).toBe(0);
     expect(gridOwner.undoPhotoId).toBe("photo-2");
@@ -470,7 +470,7 @@ describe("PhotoOwner", () => {
     expect(preparation).toMatchObject({ photoId: "photo-2", index: 2 });
     const undone = await gridOwner.performUndo(preparation);
     expect(undone.kind).toBe("persisted");
-    expect(source.facts.get(2)?.selectionState).toBe("undecided");
+    expect(source.facts.get(2)?.selectionState).toBe("unflagged");
     expect(gridOwner.currentIndex).toBe(2);
     gridOwner.dispose();
   });
@@ -490,7 +490,7 @@ describe("PhotoOwner", () => {
     owner.bindSource({ sourceAuthority: source.authority, total: 2, index: 0 });
 
     // Clearing an already-undecided Photo is not a change and not a write.
-    expect(owner.mutateAt(0, "selectionState", "undecided")).toBeUndefined();
+    expect(owner.mutateAt(0, "selectionState", "unflagged")).toBeUndefined();
     expect(writes).toBe(0);
     // A Grid position without a Photo is not an address.
     expect(owner.mutateAt(5, "rating", 3)).toBeUndefined();
@@ -706,13 +706,13 @@ describe("PhotoOwner", () => {
           ? mutationBody({
               photoId: "photo-0",
               field: "selectionState",
-              priorValue: "undecided",
-              expectedCurrent: "selected",
+              priorValue: "unflagged",
+              expectedCurrent: "picked",
             })
           : new Response(null, { status: 204 }),
       );
     });
-    await owner.mutate("selectionState", "selected", true)!.settlement;
+    await owner.mutate("selectionState", "picked", true)!.settlement;
     const second = owner.beginOpen(1)!;
     owner.commitOpen(second);
     owner.leave();
@@ -724,13 +724,13 @@ describe("PhotoOwner", () => {
     expect(preparation.windowAuthority).toBe(owner.windowAuthority!);
     source.facts.set(0, {
       ...fact("photo-0"),
-      selectionState: "selected",
+      selectionState: "picked",
     });
     const outcome = await owner.performUndo(preparation);
     expect(outcome.kind).toBe("persisted");
     expect(owner.currentIndex).toBe(0);
     expect(owner.canUndo).toBe(false);
-    expect(source.facts.get(0)?.selectionState).toBe("undecided");
+    expect(source.facts.get(0)?.selectionState).toBe("unflagged");
     expect(source.trimmed).toEqual([0]);
     owner.dispose();
   });
@@ -806,14 +806,14 @@ describe("PhotoOwner", () => {
     const { owner } = bind(source, () => held.promise);
     // The browser leaves the Photo while its write is still in flight, which
     // detaches the open the admitted write addresses.
-    const write = owner.mutate("selectionState", "selected", false)!;
+    const write = owner.mutate("selectionState", "picked", false)!;
     owner.dispose();
     held.resolve(
       mutationBody({
         photoId: "photo-0",
         field: "selectionState",
-        priorValue: "undecided",
-        expectedCurrent: "selected",
+        priorValue: "unflagged",
+        expectedCurrent: "picked",
       }),
     );
     expect((await write.settlement).kind).toBe("detached");
@@ -821,9 +821,9 @@ describe("PhotoOwner", () => {
     // of patching a window the browser already left.
     expect(source.decisions.get("photo-0")).toEqual({
       field: "selectionState",
-      value: "selected",
+      value: "picked",
     });
-    expect(source.facts.get(0)?.selectionState).toBe("undecided");
+    expect(source.facts.get(0)?.selectionState).toBe("unflagged");
   });
 
   test("records nothing for an answered failure the browser left behind", async () => {
@@ -833,14 +833,14 @@ describe("PhotoOwner", () => {
     const { owner } = bind(source, () => held.promise);
     // The browser leaves the Photo while the write is in flight, and the answer
     // that lands afterwards is a failure: the server never committed it.
-    const write = owner.mutate("selectionState", "selected", false)!;
+    const write = owner.mutate("selectionState", "picked", false)!;
     owner.dispose();
     held.resolve(new Response(null, { status: 404 }));
     expect((await write.settlement).kind).toBe("detached");
     // Nothing the Library never held is recorded, so the next resolution of
     // that Photo's fact presents what the server actually committed.
     expect(source.decisions.size).toBe(0);
-    expect(source.facts.get(0)?.selectionState).toBe("undecided");
+    expect(source.facts.get(0)?.selectionState).toBe("unflagged");
   });
 
   test("applies one bounded batch write and records one batch Undo", async () => {
@@ -856,7 +856,7 @@ describe("PhotoOwner", () => {
         return Promise.resolve(
           Response.json({
             applied: [
-              { photoId: "photo-0", priorValue: "undecided" },
+              { photoId: "photo-0", priorValue: "unflagged" },
               { photoId: "photo-2", priorValue: "rejected" },
             ],
             changedElsewhere: [],
@@ -874,12 +874,12 @@ describe("PhotoOwner", () => {
 
     const admission = owner.mutateBatch(
       batchPhotos(source, ["photo-0", "photo-2"]),
-      "selected",
+      "picked",
     )!;
     expect(owner.busy).toBe(true);
     // One write at a time still serializes a batch with every other write.
     expect(
-      owner.mutateBatch(batchPhotos(source, ["photo-1"]), "selected"),
+      owner.mutateBatch(batchPhotos(source, ["photo-1"]), "picked"),
     ).toBeUndefined();
     const outcome = await admission.settlement;
     expect(outcome.kind).toBe("persisted");
@@ -887,15 +887,15 @@ describe("PhotoOwner", () => {
       path: "/api/photos/state",
       body: JSON.stringify({
         photos: [
-          { photoId: "photo-0", expectedCurrent: "undecided" },
-          { photoId: "photo-2", expectedCurrent: "undecided" },
+          { photoId: "photo-0", expectedCurrent: "unflagged" },
+          { photoId: "photo-2", expectedCurrent: "unflagged" },
         ],
-        selectionState: "selected",
+        selectionState: "picked",
       }),
     });
-    expect(source.facts.get(0)?.selectionState).toBe("selected");
-    expect(source.facts.get(2)?.selectionState).toBe("selected");
-    expect(source.facts.get(1)?.selectionState).toBe("undecided");
+    expect(source.facts.get(0)?.selectionState).toBe("picked");
+    expect(source.facts.get(2)?.selectionState).toBe("picked");
+    expect(source.facts.get(1)?.selectionState).toBe("unflagged");
     expect(owner.busy).toBe(false);
     // The batch is one Undo: it replaces the single description and names no
     // one Photo.
@@ -914,7 +914,7 @@ describe("PhotoOwner", () => {
       "photo-2",
     ]);
     expect(undone.kind === "settled" && undone.restoredValues).toEqual([
-      { photoId: "photo-0", value: "undecided" },
+      { photoId: "photo-0", value: "unflagged" },
       { photoId: "photo-2", value: "rejected" },
     ]);
     expect(undone.kind === "settled" && undone.failed).toEqual([]);
@@ -924,8 +924,8 @@ describe("PhotoOwner", () => {
         path: "/api/photos/photo-0/state",
         body: JSON.stringify({
           field: "selectionState",
-          value: "undecided",
-          expectedCurrent: "selected",
+          value: "unflagged",
+          expectedCurrent: "picked",
         }),
       },
       {
@@ -933,11 +933,11 @@ describe("PhotoOwner", () => {
         body: JSON.stringify({
           field: "selectionState",
           value: "rejected",
-          expectedCurrent: "selected",
+          expectedCurrent: "picked",
         }),
       },
     ]);
-    expect(source.facts.get(0)?.selectionState).toBe("undecided");
+    expect(source.facts.get(0)?.selectionState).toBe("unflagged");
     expect(source.facts.get(2)?.selectionState).toBe("rejected");
     expect(owner.canUndo).toBe(false);
     expect(owner.undoBatch).toBe(false);
@@ -953,7 +953,7 @@ describe("PhotoOwner", () => {
       () =>
         Promise.resolve(
           Response.json({
-            applied: [{ photoId: "photo-0", priorValue: "undecided" }],
+            applied: [{ photoId: "photo-0", priorValue: "unflagged" }],
             changedElsewhere: [
               { photoId: "photo-1", currentValue: "rejected" },
             ],
@@ -966,12 +966,12 @@ describe("PhotoOwner", () => {
 
     const admission = owner.mutateBatch(
       batchPhotos(source, ["photo-0", "photo-1", "photo-2"]),
-      "selected",
+      "picked",
     )!;
     const outcome = await admission.settlement;
     expect(outcome.kind).toBe("persisted");
     expect(outcome.kind === "persisted" && outcome.applied).toEqual([
-      { photoId: "photo-0", priorValue: "undecided" },
+      { photoId: "photo-0", priorValue: "unflagged" },
     ]);
     expect(outcome.kind === "persisted" && outcome.changedElsewhere).toEqual([
       { photoId: "photo-1", currentValue: "rejected" },
@@ -981,8 +981,8 @@ describe("PhotoOwner", () => {
     ]);
     // Changed-elsewhere and missing outcomes write no local fact, so the Grid
     // keeps what it already shows for both Photos.
-    expect(source.facts.get(1)?.selectionState).toBe("undecided");
-    expect(source.facts.get(2)?.selectionState).toBe("undecided");
+    expect(source.facts.get(1)?.selectionState).toBe("unflagged");
+    expect(source.facts.get(2)?.selectionState).toBe("unflagged");
     // Only the confirmed Photo is part of the one-level Undo description.
     expect(owner.undoBatch).toBe(true);
     expect(owner.prepareBatchUndo()!.count).toBe(1);
@@ -999,15 +999,15 @@ describe("PhotoOwner", () => {
           mutationBody({
             photoId: "photo-0",
             field: "selectionState",
-            priorValue: "undecided",
-            expectedCurrent: "selected",
+            priorValue: "unflagged",
+            expectedCurrent: "picked",
           }),
         );
       return Promise.reject(new Error("offline"));
     });
 
     // A single decision records the one-level description a batch inherits.
-    const single = await owner.mutate("selectionState", "selected", false)!
+    const single = await owner.mutate("selectionState", "picked", false)!
       .settlement;
     expect(single.kind).toBe("persisted");
     expect(owner.canUndo).toBe(true);
@@ -1035,8 +1035,8 @@ describe("PhotoOwner", () => {
         return Promise.resolve(
           Response.json({
             applied: [
-              { photoId: "photo-0", priorValue: "undecided" },
-              { photoId: "photo-1", priorValue: "undecided" },
+              { photoId: "photo-0", priorValue: "unflagged" },
+              { photoId: "photo-1", priorValue: "unflagged" },
             ],
             changedElsewhere: [],
             missing: [],
@@ -1053,7 +1053,7 @@ describe("PhotoOwner", () => {
 
     await owner.mutateBatch(
       batchPhotos(source, ["photo-0", "photo-1"]),
-      "selected",
+      "picked",
     )!.settlement;
     // The first Photo changed elsewhere, so its restore retires; the second
     // answered a service failure, so it stays part of the description.
@@ -1069,7 +1069,7 @@ describe("PhotoOwner", () => {
     expect(retry.count).toBe(1);
     const second = await owner.performBatchUndo(retry);
     expect(second.kind === "settled" && second.restored).toEqual(["photo-1"]);
-    expect(source.facts.get(1)?.selectionState).toBe("undecided");
+    expect(source.facts.get(1)?.selectionState).toBe("unflagged");
     expect(owner.canUndo).toBe(false);
     owner.dispose();
   });
@@ -1085,8 +1085,8 @@ describe("PhotoOwner", () => {
         return Promise.resolve(
           Response.json({
             applied: [
-              { photoId: "photo-0", priorValue: "undecided" },
-              { photoId: "photo-1", priorValue: "undecided" },
+              { photoId: "photo-0", priorValue: "unflagged" },
+              { photoId: "photo-1", priorValue: "unflagged" },
             ],
             changedElsewhere: [],
             missing: [],
@@ -1101,7 +1101,7 @@ describe("PhotoOwner", () => {
 
     await owner.mutateBatch(
       batchPhotos(source, ["photo-0", "photo-1"]),
-      "selected",
+      "picked",
     )!.settlement;
     const outcome = await owner.performBatchUndo(owner.prepareBatchUndo()!);
     expect(outcome.kind).toBe("settled");
@@ -1126,7 +1126,7 @@ describe("PhotoOwner", () => {
       if (path === "/api/photos/state")
         return Promise.resolve(
           Response.json({
-            applied: [{ photoId: "photo-1", priorValue: "undecided" }],
+            applied: [{ photoId: "photo-1", priorValue: "unflagged" }],
             changedElsewhere: [],
             missing: [],
           }),
@@ -1151,7 +1151,7 @@ describe("PhotoOwner", () => {
     expect(owner.undoBatch).toBe(false);
     expect(owner.undoPhotoId).toBe("photo-0");
     // A batch replaces the single description.
-    await owner.mutateBatch(batchPhotos(source, ["photo-1"]), "selected")!
+    await owner.mutateBatch(batchPhotos(source, ["photo-1"]), "picked")!
       .settlement;
     expect(owner.undoBatch).toBe(true);
     expect(owner.undoPhotoId).toBeUndefined();
@@ -1176,7 +1176,7 @@ describe("PhotoOwner", () => {
       () =>
         Promise.resolve(
           Response.json({
-            applied: [{ photoId: "photo-0", priorValue: "undecided" }],
+            applied: [{ photoId: "photo-0", priorValue: "unflagged" }],
             changedElsewhere: [],
             missing: [],
           }),
@@ -1187,13 +1187,13 @@ describe("PhotoOwner", () => {
 
     const outcome = await owner.mutateBatch(
       batchPhotos(source, ["photo-0", "photo-1"]),
-      "selected",
+      "picked",
     )!.settlement;
     expect(outcome.kind).toBe("failed");
     expect(outcome.kind === "failed" && outcome.failure).toBe("malformed");
     // An unreadable answer may still have committed, so the facts are not
     // patched and no Undo is offered.
-    expect(source.facts.get(0)?.selectionState).toBe("undecided");
+    expect(source.facts.get(0)?.selectionState).toBe("unflagged");
     expect(owner.canUndo).toBe(false);
     owner.dispose();
   });
@@ -1202,14 +1202,14 @@ describe("PhotoOwner", () => {
     const malformedResponses = [
       {
         applied: [
-          { photoId: "photo-0", priorValue: "undecided" },
-          { photoId: "photo-0", priorValue: "undecided" },
+          { photoId: "photo-0", priorValue: "unflagged" },
+          { photoId: "photo-0", priorValue: "unflagged" },
         ],
         changedElsewhere: [],
         missing: [],
       },
       {
-        applied: [{ photoId: "photo-other", priorValue: "undecided" }],
+        applied: [{ photoId: "photo-other", priorValue: "unflagged" }],
         changedElsewhere: [],
         missing: [],
       },
@@ -1228,11 +1228,11 @@ describe("PhotoOwner", () => {
       });
       const outcome = await owner.mutateBatch(
         batchPhotos(source, ["photo-0"]),
-        "selected",
+        "picked",
       )!.settlement;
       expect(outcome.kind).toBe("failed");
       expect(outcome.kind === "failed" && outcome.failure).toBe("malformed");
-      expect(source.facts.get(0)?.selectionState).toBe("undecided");
+      expect(source.facts.get(0)?.selectionState).toBe("unflagged");
       expect(owner.canUndo).toBe(false);
       owner.dispose();
     }
@@ -1245,15 +1245,15 @@ describe("PhotoOwner", () => {
     const owner = createPhotoOwner(() => held.promise, source);
     owner.bindSource({ sourceAuthority: source.authority, total: 1, index: 0 });
 
-    expect(owner.mutateBatch([], "selected")).toBeUndefined();
+    expect(owner.mutateBatch([], "picked")).toBeUndefined();
     const admission = owner.mutateBatch(
       batchPhotos(source, ["photo-0"]),
-      "selected",
+      "picked",
     )!;
     owner.dispose();
     held.resolve(
       Response.json({
-        applied: [{ photoId: "photo-0", priorValue: "undecided" }],
+        applied: [{ photoId: "photo-0", priorValue: "unflagged" }],
         changedElsewhere: [],
         missing: [],
       }),

@@ -38,7 +38,7 @@ The application must restore only the removal the caller observed. If a Photo wa
 
 Pending deletion or unresolved deletion verification takes precedence over an already-removed or other no-effect classification. Restore and permanent deletion of the same removal must not both succeed: once either has taken effect or deletion is unresolved, the competing action must report the current conflict rather than claim success.
 
-Restore effects follow [Selection and Restore](library-management-trash.md#selection-and-restore), including surviving Album membership and unavailable Originals. Restore must not change a Photo to selected or undecided, recreate a deleted Album, or recreate file bytes.
+Restore effects follow [Selection and Restore](library-management-trash.md#selection-and-restore), including surviving Album membership and unavailable Originals. Restore must not change a Photo to picked or unflagged, recreate a deleted Album, or recreate file bytes.
 
 ## Outcomes and uncertainty
 
@@ -68,7 +68,7 @@ Permanent deletion remains a separate reviewed and confirmed capability. An auth
 ## Acceptance examples
 
 - Query rejected RAW Photos within a shoot period, exclude one, and remove the chosen identities in bounded groups. Other dates, JPEG siblings, excluded Photos, and unrelated rejected Photos stay unchanged. Web shows exactly the confirmed removals in Trash.
-- Change one decision to selected after querying. Its removal is refused; valid siblings produce their own outcomes.
+- Change one decision to picked after querying. Its removal is refused; valid siblings produce their own outcomes.
 - Remove a Photo, Restore it, and remove it again. An older Restore intent cannot clear the second removal; retrying the first removal attempt does not create a third removal.
 - Lose a response and restart the service. Recover that attempt's exact outcomes without repeating its effects or pretending current state is its historical result.
 - Restore a named mistaken item, then separately review the remaining authorized Originals for permanent deletion. No browser automation, direct database access, or temporary Album is needed.

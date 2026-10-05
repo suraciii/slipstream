@@ -41,7 +41,7 @@ const context = (values: Partial<KeyboardContext> = {}): KeyboardContext => ({
   gridMultiActive: false,
   zoomPresent: true,
   zoomMeasurableImage: true,
-  currentSelection: "undecided",
+  currentSelection: "unflagged",
   ...values,
 });
 
@@ -368,7 +368,7 @@ describe("photo zoom and the focused slider", () => {
       { key: "p" },
       { rangeInput: true },
       {},
-      select("selected", true),
+      select("picked", true),
     ],
   ]);
 });
@@ -389,23 +389,23 @@ describe("photo navigation, selection, and rating", () => {
       {},
       navigate("next"),
     ],
-    ["p selects and advances", { key: "p" }, {}, {}, select("selected", true)],
+    ["p picks and advances", { key: "p" }, {}, {}, select("picked", true)],
     ["x rejects and advances", { key: "x" }, {}, {}, select("rejected", true)],
     [
-      "u un-decides a selected photo without advancing",
+      "u clears the flag from a picked photo without advancing",
       { key: "u" },
       {},
-      { currentSelection: "selected" },
-      select("undecided", false),
+      { currentSelection: "picked" },
+      select("unflagged", false),
     ],
     [
-      "u un-decides a rejected photo without advancing",
+      "u clears the flag from a rejected photo without advancing",
       { key: "u" },
       {},
       { currentSelection: "rejected" },
-      select("undecided", false),
+      select("unflagged", false),
     ],
-    ["u leaves an undecided photo native", { key: "u" }, {}, {}, ignore],
+    ["u leaves an unflagged photo native", { key: "u" }, {}, {}, ignore],
     ["0 rates the photo", { key: "0" }, {}, {}, rate(0)],
     ["3 rates the photo", { key: "3" }, {}, {}, rate(3)],
     ["5 rates the photo", { key: "5" }, {}, {}, rate(5)],

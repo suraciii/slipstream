@@ -248,7 +248,7 @@ sources the values are `"capture-time-asc"` (the default when omitted) and
 rejected before any Snapshot is created.
 
 It optionally accepts one Selection State filter. The values are `"all"`
-(the default when omitted), `"undecided"`, `"selected"`, and `"rejected"`. An
+(the default when omitted), `"unflagged"`, `"picked"`, and `"rejected"`. An
 unknown value is rejected before any Snapshot is created. The filter is
 applied once, server-side, to the complete ordered source before the Snapshot
 is frozen, so a filtered Snapshot is one frozen bounded sequence with its own
@@ -359,8 +359,8 @@ Photo and one `selectionState` value:
 
 ```json
 {
-  "selectionState": "selected",
-  "photos": [{ "photoId": "photo-1", "expectedCurrent": "undecided" }]
+  "selectionState": "picked",
+  "photos": [{ "photoId": "photo-1", "expectedCurrent": "unflagged" }]
 }
 ```
 
@@ -368,9 +368,9 @@ The server accepts at most 100 unique Photo identifiers and rejects an empty,
 duplicate, over-limit, malformed, incomplete, unknown-field, or invalid-state
 request before any write, as an invalid request rather than a conflict. The
 browser mirrors that bound, so a batch it builds is always one the server can
-admit. `selectionState` is exactly `selected` or `rejected`, and every item
-has exactly `photoId` and `expectedCurrent`, with `expectedCurrent` exactly
-`undecided`, `selected`, or `rejected`. Batch Rating is not part of this
+admit. `selectionState` is exactly `picked` or `rejected`, and every item has
+exactly `photoId` and `expectedCurrent`, with `expectedCurrent` exactly
+`unflagged`, `picked`, or `rejected`. Batch Rating is not part of this
 contract, and the route carries no source, Album, or position: the browser
 names the Photos it multi-selected.
 

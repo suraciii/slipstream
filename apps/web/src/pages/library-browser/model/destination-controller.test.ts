@@ -31,7 +31,7 @@ async function fixture(reopenFailure?: "failed" | "missing" | "superseded") {
           token: "snapshot",
           total: 120,
           position: 0,
-          selectionCounts: { selected: 0, rejected: 0, undecided: 120 },
+          selectionCounts: { picked: 0, rejected: 0, unflagged: 120 },
         });
       const id = new URL(path, "http://test").searchParams.get("photoId")!;
       const response = deferred<Response>();

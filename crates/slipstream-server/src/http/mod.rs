@@ -660,8 +660,8 @@ pub(crate) fn valid_removal_markers(
 
 pub(crate) fn valid_selection(value: &Value) -> Option<SelectionState> {
     match value.as_str()? {
-        "undecided" => Some(SelectionState::Undecided),
-        "selected" => Some(SelectionState::Selected),
+        "unflagged" => Some(SelectionState::Unflagged),
+        "picked" => Some(SelectionState::Picked),
         "rejected" => Some(SelectionState::Rejected),
         _ => None,
     }
@@ -669,7 +669,7 @@ pub(crate) fn valid_selection(value: &Value) -> Option<SelectionState> {
 
 fn valid_batch_selection(value: &Value) -> Option<SelectionState> {
     match valid_selection(value) {
-        Some(SelectionState::Selected) => Some(SelectionState::Selected),
+        Some(SelectionState::Picked) => Some(SelectionState::Picked),
         Some(SelectionState::Rejected) => Some(SelectionState::Rejected),
         _ => None,
     }

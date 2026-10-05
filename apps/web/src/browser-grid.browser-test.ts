@@ -112,7 +112,7 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   const progress = page.locator("[data-grid-source-progress]");
   const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
   await expect(progress).toHaveText(
-    "Source progress: 0 selected · 0 rejected · 4 undecided",
+    "Source progress: 0 picked · 0 rejected · 4 unflagged",
   );
 
   // A Grid decision advances the source-wide counts once, and a refused
@@ -124,14 +124,14 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   await page.keyboard.press("ArrowRight");
   await expect(cell(0)).toBeEnabled();
   await page.keyboard.press("p");
-  await expect(cell(0).locator(".cell-state.selected")).toHaveText("✓");
+  await expect(cell(0).locator(".cell-state.picked")).toHaveText("✓");
   await expect(progress).toHaveText(
-    "Source progress: 1 selected · 0 rejected · 3 undecided",
+    "Source progress: 1 picked · 0 rejected · 3 unflagged",
   );
   await expect(cell(0)).toBeEnabled();
   await page.keyboard.press("p");
   await expect(progress).toHaveText(
-    "Source progress: 1 selected · 0 rejected · 3 undecided",
+    "Source progress: 1 picked · 0 rejected · 3 unflagged",
   );
 
   // A decision change moves one Photo between the counts.
@@ -139,7 +139,7 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   await page.keyboard.press("x");
   await expect(cell(0).locator(".cell-state.rejected")).toHaveText("×");
   await expect(progress).toHaveText(
-    "Source progress: 0 selected · 1 rejected · 3 undecided",
+    "Source progress: 0 picked · 1 rejected · 3 unflagged",
   );
 
   // Undo returns that decision and the counts together: the Photo holds its
@@ -149,9 +149,9 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Last change undone.",
   );
-  await expect(cell(0).locator(".cell-state.selected")).toHaveText("✓");
+  await expect(cell(0).locator(".cell-state.picked")).toHaveText("✓");
   await expect(progress).toHaveText(
-    "Source progress: 1 selected · 0 rejected · 3 undecided",
+    "Source progress: 1 picked · 0 rejected · 3 unflagged",
   );
 
   // Clearing a decision empties the counts for that Photo.
@@ -159,7 +159,7 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   await page.keyboard.press("u");
   await expect(cell(0).locator(".cell-state")).toHaveCount(0);
   await expect(progress).toHaveText(
-    "Source progress: 0 selected · 0 rejected · 4 undecided",
+    "Source progress: 0 picked · 0 rejected · 4 unflagged",
   );
 
   // Photo View decides with the same counts, and the values come from the
@@ -172,12 +172,12 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.locator("[data-grid-source-progress]")).toHaveText(
-    "Source progress: 0 selected · 1 rejected · 3 undecided",
+    "Source progress: 0 picked · 1 rejected · 3 unflagged",
   );
   await page.reload();
   await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
   await expect(page.locator("[data-grid-source-progress]")).toHaveText(
-    "Source progress: 0 selected · 1 rejected · 3 undecided",
+    "Source progress: 0 picked · 1 rejected · 3 unflagged",
   );
 });
 
@@ -189,9 +189,9 @@ test("Selection filters keep source counts, URLs, and Photo traversal stable", a
   const running = await server(base, root);
   const ids = await browseIds(running.url);
   for (const [index, selectionState] of [
-    [0, "selected"],
+    [0, "picked"],
     [1, "rejected"],
-    [2, "selected"],
+    [2, "picked"],
   ] as const) {
     const response = await post(
       running.url,
@@ -218,7 +218,7 @@ test("Selection filters keep source counts, URLs, and Photo traversal stable", a
 
   // Cancel is draft-only: it changes neither the URL nor the Browse Snapshot.
   await openViewOptions(page);
-  await page.locator("[data-filter-select]").selectOption("selected");
+  await page.locator("[data-filter-select]").selectOption("picked");
   await page.locator("[data-view-options-cancel]").click();
   await expect(page.locator("[data-view-options]")).toBeHidden();
   expect(opens).toEqual([]);
@@ -226,13 +226,13 @@ test("Selection filters keep source counts, URLs, and Photo traversal stable", a
 
   // Apply evaluates one filtered Snapshot and carries its source-wide counts.
   await openViewOptions(page);
-  await page.locator("[data-filter-select]").selectOption("selected");
+  await page.locator("[data-filter-select]").selectOption("picked");
   await applyViewOptions(page);
   await expect.poll(() => opens.length).toBe(1);
-  await expect(page).toHaveURL(/selection=selected/);
+  await expect(page).toHaveURL(/selection=picked/);
   await expect(page.locator(".photo-cell")).toHaveCount(2);
   await expect(page.locator("[data-grid-source-progress]")).toHaveText(
-    "Source progress: 2 selected · 1 rejected · 1 undecided",
+    "Source progress: 2 picked · 1 rejected · 1 unflagged",
   );
 
   // The filtered sequence owns Photo position and Previous/Next: the rejected
@@ -322,11 +322,11 @@ test("Grid batch Select decides every multi-selected Photo and Undo restores the
   await expect(count).toHaveText("3 / 100 Photos");
   await page.locator("[data-batch-select]").click();
   await expect(page.locator("[data-grid-status]")).toHaveText(
-    "3 Photos selected.",
+    "3 Photos Picked.",
   );
   await expect(page.locator("[data-batch-retained]")).toBeVisible();
   await expect(page.locator("[data-grid-batch-result-text]")).toHaveText(
-    "3 Photos selected.",
+    "3 Photos Picked.",
   );
   await expect(page.locator("[data-grid-batch-result]")).toHaveAttribute(
     "data-tone",
@@ -335,22 +335,22 @@ test("Grid batch Select decides every multi-selected Photo and Undo restores the
   expect(batchBodies).toEqual([
     {
       photos: [
-        { photoId: ids[0], expectedCurrent: "undecided" },
-        { photoId: ids[1], expectedCurrent: "undecided" },
-        { photoId: ids[2], expectedCurrent: "undecided" },
+        { photoId: ids[0], expectedCurrent: "unflagged" },
+        { photoId: ids[1], expectedCurrent: "unflagged" },
+        { photoId: ids[2], expectedCurrent: "unflagged" },
       ],
-      selectionState: "selected",
+      selectionState: "picked",
     },
   ]);
   for (const index of [0, 1, 2]) {
-    await expect(cell(index).locator(".cell-state.selected")).toHaveText("✓");
+    await expect(cell(index).locator(".cell-state.picked")).toHaveText("✓");
     expect(await libraryPhoto(running.url, index)).toMatchObject({
-      selectionState: "selected",
+      selectionState: "picked",
     });
   }
   await expect(visibleResults).toHaveText("Visible results: 4 of 4 Photos");
   await expect(progress).toHaveText(
-    "Source progress: 3 selected · 0 rejected · 1 undecided",
+    "Source progress: 3 picked · 0 rejected · 1 unflagged",
   );
   // The multi-selection stays, so the same Photos can join an Album next.
   await expect(count).toHaveText("3 / 100 Photos");
@@ -374,11 +374,11 @@ test("Grid batch Select decides every multi-selected Photo and Undo restores the
   for (const index of [0, 1, 2]) {
     await expect(cell(index).locator(".cell-state")).toHaveCount(0);
     expect(await libraryPhoto(running.url, index)).toMatchObject({
-      selectionState: "undecided",
+      selectionState: "unflagged",
     });
   }
   await expect(progress).toHaveText(
-    "Source progress: 0 selected · 0 rejected · 4 undecided",
+    "Source progress: 0 picked · 0 rejected · 4 unflagged",
   );
   await expect(page.locator("[data-review]")).toBeHidden();
 

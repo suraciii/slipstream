@@ -257,10 +257,21 @@ pub(super) fn add_recipe_test_photo(connection: &Connection, photo: RecipeTestPh
             ],
         )
         .unwrap();
+    let selection_state = if connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+        .unwrap()
+        >= 15
+    {
+        "unflagged"
+    } else {
+        "undecided"
+    };
     connection
         .execute(
-            "INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating)
-             VALUES(?,?,?,'inspection-pending',?,'undecided',0)",
+            &format!(
+                "INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating)
+                 VALUES(?,?,?,'inspection-pending',?, '{selection_state}',0)"
+            ),
             params![
                 photo.photo_id,
                 photo.original_id,

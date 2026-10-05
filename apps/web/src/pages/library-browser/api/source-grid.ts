@@ -78,10 +78,9 @@ export const validPhotoSummary = (value: unknown): value is PhotoSummary => {
       value.originalFilename,
       (item) => typeof item === "string" && item.length > 0,
     ) &&
-    (value.selectionState === "undecided" ||
-      value.selectionState === "selected" ||
+    (value.selectionState === "unflagged" ||
+      value.selectionState === "picked" ||
       value.selectionState === "rejected") &&
-    Number.isInteger(value.rating) &&
     Number(value.rating) >= 0 &&
     Number(value.rating) <= 5 &&
     typeof value.hasSavedEdits === "boolean" &&
@@ -100,7 +99,7 @@ export const validPhotoSummary = (value: unknown): value is PhotoSummary => {
 
 const validSelectionCounts = (value: unknown): value is SelectionCounts =>
   isRecord(value) &&
-  [value.selected, value.rejected, value.undecided].every(
+  [value.picked, value.rejected, value.unflagged].every(
     (count) => Number.isInteger(count) && Number(count) >= 0,
   );
 

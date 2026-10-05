@@ -369,7 +369,7 @@ pub(crate) fn parse_decision_input(bytes: Vec<u8>) -> Result<PreparedDecision, C
         DecisionField::SelectionState => document
             .value
             .as_str()
-            .is_some_and(|value| matches!(value, "undecided" | "selected" | "rejected")),
+            .is_some_and(|value| matches!(value, "unflagged" | "picked" | "rejected")),
         DecisionField::Rating => document.value.as_u64().is_some_and(|rating| rating <= 5),
     };
     if !value_matches_field {

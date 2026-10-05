@@ -1475,9 +1475,9 @@ mod tests {
             .mutate_photo_state_batch_receiver(PhotoStateBatchMutation {
                 photos: vec![PhotoStateBatchItem {
                     photo_id: photo_ids[0].clone(),
-                    expected_current: SelectionState::Undecided,
+                    expected_current: SelectionState::Unflagged,
                 }],
-                value: SelectionState::Selected,
+                value: SelectionState::Picked,
             })
             .unwrap()
             .await
