@@ -1349,27 +1349,10 @@ pub(crate) fn read_access_token_file(_path: &Path) -> Result<String, CommandFail
 
 pub(crate) fn canonical_access_token(token: &[u8]) -> bool {
     token.len() == 43
-        && token
+        && token[..42]
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        && matches!(
-            token[42],
-            b'A' | b'E'
-                | b'I'
-                | b'M'
-                | b'Q'
-                | b'U'
-                | b'Y'
-                | b'c'
-                | b'g'
-                | b'k'
-                | b'o'
-                | b's'
-                | b'w'
-                | b'0'
-                | b'4'
-                | b'8'
-        )
+        && b"AEIMQUYcgkosw048".contains(&token[42])
 }
 mod invocation;
 #[cfg(test)]

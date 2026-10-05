@@ -177,6 +177,14 @@ fn state_source_revision(
         .or_else(|| read.current_source_revision.clone())
 }
 
+fn current_source_revision(read: &ComposableEditRecipeRead) -> Option<String> {
+    read.current_source_revision.clone().or_else(|| {
+        read.recipe
+            .as_ref()
+            .map(|recipe| recipe.source_revision.clone())
+    })
+}
+
 fn state_json(
     state: &HttpState,
     photo_id: &str,
@@ -756,12 +764,7 @@ pub(crate) async fn get_edit(
     Json(projection).into_response()
 }
 
-/// `GET /api/photos/{id}/edit/preview` renders the current Edit State.
-///
-/// The selected Processing Step is an implementation detail of the stored
-/// snapshot. The public route resolves it from the current state and forwards
-/// the request to the existing bounded renderer, so callers never need to
-/// address a step identity.
+/// Resolves the current Edit State before forwarding to the bounded renderer.
 pub(crate) async fn preview_edit(
     State(state): State<HttpState>,
     Path(photo_id): Path<String>,
@@ -873,11 +876,7 @@ pub(crate) async fn set_edit(
         Ok(read) => read,
         Err(response) => return response,
     };
-    let Some(source_revision) = read.current_source_revision.clone().or_else(|| {
-        read.recipe
-            .as_ref()
-            .map(|recipe| recipe.source_revision.clone())
-    }) else {
+    let Some(source_revision) = current_source_revision(&read) else {
         return error(
             StatusCode::CONFLICT,
             "source_unavailable",
@@ -946,11 +945,7 @@ pub(crate) async fn reset_edit(
             "Reset requires the latest observed Edit revision",
         );
     }
-    let Some(source_revision) = read.current_source_revision.clone().or_else(|| {
-        read.recipe
-            .as_ref()
-            .map(|recipe| recipe.source_revision.clone())
-    }) else {
+    let Some(source_revision) = current_source_revision(&read) else {
         return error(
             StatusCode::CONFLICT,
             "source_unavailable",

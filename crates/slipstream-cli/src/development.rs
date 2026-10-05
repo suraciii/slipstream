@@ -17,7 +17,6 @@ const PROCESSING_AUTO_OPERATION: Operation = Operation::PhotosProcessingRecipeAu
 const PROCESSING_REBIND_OPERATION: Operation = Operation::PhotosProcessingRecipeRebind;
 const PROCESSING_EXPORT_OPERATION: Operation = Operation::PhotosProcessingExport;
 const ARTIFACT_OPERATION: Operation = Operation::ProcessingArtifact;
-const PROCESSING_EXPORT_STATUS_OPERATION: Operation = Operation::PhotosProcessingExportStatus;
 const PROCESSING_EXPORT_CANCEL_OPERATION: Operation = Operation::PhotosProcessingExportCancel;
 const PROCESSING_EXPORT_LIST_OPERATION: Operation = Operation::PhotosProcessingExportList;
 const PROCESSING_EXPORT_RETRY_OPERATION: Operation = Operation::PhotosProcessingExportRetry;
