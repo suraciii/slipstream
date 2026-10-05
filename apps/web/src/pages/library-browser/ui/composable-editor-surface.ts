@@ -358,7 +358,7 @@ export function createComposableEditorSurface(
         ]),
       ]);
       // Status and value updates retain the controls' focus and pointer owner.
-      if (identity !== controlsIdentity) {
+      if (identity !== controlsIdentity && !controls.querySelector(":focus")) {
         controlsIdentity = identity;
         controlsParametersText = "";
         controls.replaceChildren();
@@ -497,6 +497,7 @@ export function createComposableEditorSurface(
           const input = controls.querySelector<
             HTMLInputElement | HTMLSelectElement
           >(`#${CSS.escape(`module-control-${key}`)}`);
+          if (input === document.activeElement) continue;
           if (input instanceof HTMLInputElement && control.kind === "boolean")
             input.checked = control.value === true;
           else if (input) input.value = String(control.value);
@@ -535,6 +536,7 @@ export function createComposableEditorSurface(
       >("input, select, button")
       .forEach(
         (input: HTMLInputElement | HTMLSelectElement | HTMLButtonElement) => {
+          if (input === document.activeElement) return;
           input.disabled = blocked;
         },
       );

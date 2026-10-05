@@ -479,7 +479,12 @@ test("numeric controls reject incomplete edits and synchronize Reset while focus
   await expect
     .poll(() => state.recipes.get(photoId)?.steps[0]?.parameters)
     .toEqual(parameters(1));
+  await expect.poll(() => state.saves.length).toBeGreaterThan(0);
+  await expect(
+    page.locator("[data-photo-editor-composable-state]"),
+  ).toContainText("Saved edit.");
   await expect(exposure).toHaveValue("1");
+  await expect(exposure).toBeEnabled();
   const savedCount = state.saves.length;
   await exposure.fill("");
   await exposure.press("Tab");

@@ -429,7 +429,7 @@ test("ordinary exposure and reset use primary routes while advanced parameters k
         id: "photo-1",
         available: true,
         original: { kind: "raw", available: true },
-        selectionState: "undecided",
+        selectionState: "unflagged",
         rating: 0,
         hasSavedEdits: true,
         preview: { state: "ready" },
