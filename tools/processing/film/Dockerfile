@@ -46,7 +46,7 @@ ARG SPEKTRAFILM_FORK_COMMIT
 USER 0:0
 COPY --from=film-bundle /opt/slipstream-film /opt/slipstream-film
 ENV SPEKTRAFILM_FORK_COMMIT="${SPEKTRAFILM_FORK_COMMIT}" \
-    LD_LIBRARY_PATH=/usr/local/lib/slipstream-film:/usr/local/lib/slipstream
+    LD_LIBRARY_PATH=/opt/slipstream-film/lib:/usr/local/lib/slipstream-film:/usr/local/lib/slipstream
 LABEL slipstream.processing.film.spektrafilm="standalone-fork" \
       slipstream.processing.film.spektrafilm.commit="${SPEKTRAFILM_FORK_COMMIT}"
 ARG FILM_BUNDLE

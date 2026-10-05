@@ -126,15 +126,20 @@ fn prepare(
 
 /// The deterministic environment for one fork attempt. The bundle owns the
 /// executable and data tree; no host path or catalog is made visible.
-fn environment(work: &Path, data_root: &Path) -> io::Result<Vec<(String, String)>> {
+fn environment(work: &Path, data_root: &Path, binary: &Path) -> io::Result<Vec<(String, String)>> {
     let value = |path: &Path| -> io::Result<String> {
         path.to_str()
             .map(str::to_owned)
             .ok_or_else(|| io::Error::other("film attempt path is not valid UTF-8"))
     };
+    let library_root = binary
+        .parent()
+        .ok_or_else(|| io::Error::other("film binary has no bundle parent"))?
+        .join("lib");
     Ok([
         ("HOME", value(&work.join("home"))?),
         ("TMPDIR", value(&work.join("tmp"))?),
+        ("LD_LIBRARY_PATH", value(&library_root)?),
         ("SPEKTRAFILM_BACKEND", "cpu".to_owned()),
         ("SPEKTRAFILM_DATA_DIR", value(data_root)?),
         ("OMP_NUM_THREADS", "4".to_owned()),
@@ -371,7 +376,7 @@ fn run(
         return Err(cancelled());
     }
     let arguments = runner_arguments(input, output, &recipe_path, data_root)?;
-    let env = environment(work, data_root)?;
+    let env = environment(work, data_root, binary)?;
     let mut attempt = Attempt::start(
         binary,
         &arguments,

@@ -28,6 +28,9 @@ pub(crate) fn validate_output(
     match target {
         ExportTarget::DevelopmentTiff => validate_development_tiff(path),
         ExportTarget::FilmJpeg => validate_finished_jpeg(path),
+        ExportTarget::PreviewPng => Err(ExportError::Validation(
+            "Preview PNG is not a publishable artifact target",
+        )),
     }
 }
 

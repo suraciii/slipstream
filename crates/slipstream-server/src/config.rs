@@ -459,10 +459,10 @@ fn verify_film_bundle(root: &Path) -> (Option<FilmConfig>, Option<&'static str>)
     {
         return (None, Some(unavailable));
     }
-    let Some(binary) = absolute_manifest_path(manifest["binary"].as_str()) else {
+    let Some(binary) = bundle_manifest_path(root, manifest["binary"].as_str()) else {
         return (None, Some(unavailable));
     };
-    let Some(data_root) = absolute_manifest_path(manifest["dataRoot"].as_str()) else {
+    let Some(data_root) = bundle_manifest_path(root, manifest["dataRoot"].as_str()) else {
         return (None, Some(unavailable));
     };
     let Some(binary_metadata) = fs::metadata(&binary).ok() else {
@@ -471,15 +471,13 @@ fn verify_film_bundle(root: &Path) -> (Option<FilmConfig>, Option<&'static str>)
     if !binary_metadata.is_file() || binary_metadata.mode() & 0o111 == 0 || !data_root.is_dir() {
         return (None, Some(unavailable));
     }
-    let bundle_prefix = "/opt/slipstream-film/";
     for (key, digest) in manifest["files"].as_object().into_iter().flatten() {
         let Some(digest) = digest.as_str() else {
             return (None, Some(unavailable));
         };
-        let path = key
-            .strip_prefix(bundle_prefix)
-            .map(|relative| root.join(relative))
-            .unwrap_or_else(|| PathBuf::from(key));
+        let Some(path) = bundle_manifest_path(root, Some(key)) else {
+            return (None, Some(unavailable));
+        };
         if verify_bundle_file(&path, digest).is_none() {
             return (None, Some(unavailable));
         }
@@ -494,14 +492,14 @@ fn verify_film_bundle(root: &Path) -> (Option<FilmConfig>, Option<&'static str>)
         let Some(digest) = digest.as_str() else {
             return (None, Some(unavailable));
         };
-        let Some(path) = safe_relative_path(&data_root, relative) else {
+        let Some(path) = bundle_relative_path(&data_root, relative) else {
             return (None, Some(unavailable));
         };
         if verify_bundle_file(&path, digest).is_none() {
             return (None, Some(unavailable));
         }
     }
-    let Some(parameters_path) = absolute_manifest_path(manifest["parametersDefault"].as_str())
+    let Some(parameters_path) = bundle_manifest_path(root, manifest["parametersDefault"].as_str())
     else {
         return (None, Some(unavailable));
     };
@@ -545,9 +543,16 @@ fn verify_film_bundle(root: &Path) -> (Option<FilmConfig>, Option<&'static str>)
     )
 }
 
-fn absolute_manifest_path(value: Option<&str>) -> Option<PathBuf> {
-    let path = PathBuf::from(value?);
-    path.is_absolute().then_some(path)
+fn bundle_manifest_path(root: &Path, value: Option<&str>) -> Option<PathBuf> {
+    let relative = value?.strip_prefix("/opt/slipstream-film/")?;
+    bundle_relative_path(root, relative)
+}
+
+fn bundle_relative_path(root: &Path, value: &str) -> Option<PathBuf> {
+    let canonical_root = fs::canonicalize(root).ok()?;
+    let path = safe_relative_path(&canonical_root, value)?;
+    let canonical = fs::canonicalize(path).ok()?;
+    canonical.starts_with(&canonical_root).then_some(canonical)
 }
 fn safe_relative_path(root: &Path, value: &str) -> Option<PathBuf> {
     let path = Path::new(value);

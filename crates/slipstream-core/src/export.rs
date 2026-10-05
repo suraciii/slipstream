@@ -142,6 +142,7 @@ pub struct StagedOriginalFacts {
 pub enum ExportTarget {
     DevelopmentTiff,
     FilmJpeg,
+    PreviewPng,
 }
 
 impl ExportTarget {
@@ -149,6 +150,7 @@ impl ExportTarget {
         match self {
             Self::DevelopmentTiff => "development-tiff",
             Self::FilmJpeg => "film-jpeg",
+            Self::PreviewPng => "preview-png",
         }
     }
 
@@ -156,6 +158,7 @@ impl ExportTarget {
         match self {
             Self::DevelopmentTiff => "tiff",
             Self::FilmJpeg => "jpg",
+            Self::PreviewPng => "png",
         }
     }
 }
@@ -338,13 +341,17 @@ impl ExportWorkspace {
         self.begin_preview_artifact(attempt_key, ExportTarget::FilmJpeg)
     }
 
+    pub fn begin_preview_png(&self, attempt_key: &str) -> Result<ArtifactWriter, ExportError> {
+        self.begin_preview_artifact(attempt_key, ExportTarget::PreviewPng)
+    }
+
     /// Deletes one ephemeral preview output. Expiry and supersession are
     /// idempotent for either supported target.
     pub fn delete_preview_artifact(&self, attempt_key: &str) -> Result<(), ExportError> {
         if !valid_export_id(attempt_key) {
             return Err(ExportError::InvalidExportId);
         }
-        for extension in ["tiff", "jpg"] {
+        for extension in ["tiff", "jpg", "png"] {
             let path = self
                 .inner
                 .previews
@@ -391,6 +398,17 @@ impl ArtifactWriter {
 
     pub fn target(&self) -> ExportTarget {
         self.target
+    }
+    /// Removes the empty reservation so an external renderer can create the
+    /// output with create-new/no-replace semantics. The writer keeps ownership
+    /// of the path and validates the renderer's completed file in `publish`.
+    pub fn release_temporary_path(&self) -> Result<(), ExportError> {
+        let file = open_regular(&self.temporary_path, true)?;
+        if file.metadata()?.len() != 0 {
+            return Err(ExportError::InvalidArtifact);
+        }
+        fs::remove_file(&self.temporary_path)?;
+        Ok(())
     }
 
     /// Validates the completed output, syncs file and parent directory, then
@@ -689,6 +707,27 @@ mod tests {
         assert_eq!(published.size, 8);
         assert_eq!(fs::metadata(&published.path).unwrap().mode() & 0o777, 0o400);
         assert_eq!(fs::read(&published.path).unwrap(), b"II*\0tiff");
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn releases_empty_reservation_for_external_renderer() {
+        let (root, _library, workspace) = fixture();
+        let writer = workspace.begin_film_jpeg("request-external").unwrap();
+        let temporary = writer.temporary_path().to_owned();
+        assert!(temporary.exists());
+        writer.release_temporary_path().unwrap();
+        assert!(!temporary.exists());
+        fs::write(&temporary, b"external output").unwrap();
+        let published = writer
+            .publish(|path| {
+                assert_eq!(
+                    path.extension().and_then(|value| value.to_str()),
+                    Some("jpg")
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(fs::read(&published.path).unwrap(), b"external output");
         let _ = fs::remove_dir_all(root);
     }
 
