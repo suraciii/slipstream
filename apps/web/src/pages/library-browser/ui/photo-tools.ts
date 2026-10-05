@@ -27,6 +27,7 @@ export function createPhotoToolsController({
   syncSecondarySurface,
   openSources,
   openEditor,
+  navigate,
 }: Readonly<{
   elements: Readonly<{
     photoToolsDialog: HTMLDialogElement;
@@ -43,6 +44,7 @@ export function createPhotoToolsController({
   syncSecondarySurface: () => void;
   openSources: () => void;
   openEditor: (photoId: string) => void;
+  navigate: (direction: "previous" | "next") => void;
 }>): PhotoToolsController {
   const {
     photoToolsDialog,
@@ -101,9 +103,14 @@ export function createPhotoToolsController({
         "[data-photo-tools-entry]",
       );
       if (!button) return;
+      const entry = button.dataset.photoToolsEntry;
+      if (entry === "previous" || entry === "next") {
+        close(false);
+        navigate(entry);
+        return;
+      }
       const photoId = currentPhotoId();
       if (!photoId) return;
-      const entry = button.dataset.photoToolsEntry;
       if (entry === "sources") {
         openSources();
         return;

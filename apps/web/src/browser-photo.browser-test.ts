@@ -131,6 +131,19 @@ test("Photo View gestures navigate and cycle state while More owns one review sh
   await expect(
     page.getByRole("button", { name: "Pick", exact: true }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Previous", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Next", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(page.locator("[data-position]")).toHaveText("2 / 3");
+  await page.getByRole("button", { name: "More", exact: true }).click();
+  await page.getByRole("button", { name: "Previous", exact: true }).click();
+  await expect(page.locator("[data-position]")).toHaveText("1 / 3");
+  await page.getByRole("button", { name: "More", exact: true }).click();
+  await expect(tools).toBeVisible();
   await page.getByRole("button", { name: "Rating", exact: true }).click();
   await expect(page.locator("[data-photo-tools-view='rating']")).toBeVisible();
   await expect(

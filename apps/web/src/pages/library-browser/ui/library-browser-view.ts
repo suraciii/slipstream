@@ -601,7 +601,7 @@ export function createLibraryBrowserView(
               <div class="photo-tools-body">
                 <div class="photo-tools-view" data-photo-tools-view="tools">
                   <section class="photo-tools-review" aria-label="Review"><h3>Review</h3><div class="photo-tools-actions"><button type="button" class="select-button" data-photo-tools-pick>Pick</button><button type="button" class="reject-button" data-photo-tools-reject>Reject</button><button type="button" class="quiet" data-photo-tools-clear>Clear flag</button><button type="button" class="quiet" data-photo-tools-undo disabled>Undo</button></div></section>
-                  <div class="photo-tools-entries" data-photo-tools-entries role="group" aria-label="Photo tools"><button type="button" data-photo-tools-entry="rating">Rating</button><button type="button" data-photo-tools-entry="edit">Edit</button><button type="button" data-photo-tools-entry="albums">Albums</button><button type="button" data-photo-tools-entry="details">Capture Details / Preview Source</button><button type="button" data-photo-tools-entry="zoom">Preview Zoom</button><button type="button" data-photo-tools-entry="nearby">Nearby Photos</button><button type="button" data-photo-tools-entry="sources">Sources</button><p class="photo-tools-help">Gestures: swipe left for Next, right for Previous, up to advance Selection State, down to reverse. Keyboard alternatives: Arrow keys navigate; P Pick; X Reject; U Clear flag; 0–5 Rating.</p></div>
+                  <div class="photo-tools-entries" data-photo-tools-entries role="group" aria-label="Photo tools"><div class="photo-tools-navigation" role="group" aria-label="Photo navigation"><button type="button" data-photo-tools-entry="previous">Previous</button><button type="button" data-photo-tools-entry="next">Next</button></div><button type="button" data-photo-tools-entry="rating">Rating</button><button type="button" data-photo-tools-entry="edit">Edit</button><button type="button" data-photo-tools-entry="albums">Albums</button><button type="button" data-photo-tools-entry="details">Capture Details / Preview Source</button><button type="button" data-photo-tools-entry="zoom">Preview Zoom</button><button type="button" data-photo-tools-entry="nearby">Nearby Photos</button><button type="button" data-photo-tools-entry="sources">Sources</button><p class="photo-tools-help">Gestures: swipe left for Next, right for Previous, up to advance Selection State, down to reverse. Keyboard alternatives: Arrow keys navigate; P Pick; X Reject; U Clear flag; 0–5 Rating.</p></div>
                 </div>
                 <div class="photo-tools-view" id="photo-tools-view-rating" data-photo-tools-view="rating" hidden>
                   <header class="photo-tools-view-header"><h3>Rating</h3><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
@@ -1288,6 +1288,7 @@ ${RECOVERY_PANEL_TEMPLATE}
     syncSecondarySurface,
     openSources: () => sourceController.open(),
     openEditor: (photoId) => editorController.open(photoId),
+    navigate: (direction) => send({ kind: direction }),
   });
   const editorController = createPhotoEditorSurfaceController({
     root,
