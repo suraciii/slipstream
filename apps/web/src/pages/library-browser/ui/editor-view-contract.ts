@@ -1,3 +1,4 @@
+import type { ComposableRecipeInput } from "../api/composable-recipe.js";
 import type { WorkspaceOutputsView } from "../model/workspace-output-controller.js";
 import type { EditorProxyViewModel } from "./editor-proxy-view-model.js";
 export type {
@@ -11,6 +12,17 @@ import type {
 
 export type EditorViewModel = Readonly<{
   photoId: string;
+  primary?: Readonly<{
+    revision: string | null;
+    sourceRevision: string | null;
+    input: ComposableRecipeInput | null;
+    engine: string | null;
+    exposureEv: number | null;
+    canSet: boolean;
+    canReset: boolean;
+    ready: boolean;
+    note: string;
+  }>;
   loading: boolean;
   cameraReference: boolean;
   canCompare: boolean;
@@ -41,6 +53,8 @@ export type EditorViewModel = Readonly<{
 
 export type EditorIntent =
   | Readonly<{ kind: "editor-open" | "editor-refresh"; photoId: string }>
+  | Readonly<{ kind: "editor-exposure-set"; photoId: string; value: number }>
+  | Readonly<{ kind: "editor-exposure-reset"; photoId: string }>
   | Readonly<{
       kind: "editor-camera-reference";
       photoId: string;

@@ -373,6 +373,7 @@ pub enum PhotoCommand {
     },
     /// Advanced compatibility interface for complete processing snapshots.
     /// Normal editing uses `photos edit` and explicit Export artifacts.
+    #[command(hide = true)]
     ProcessingRecipe {
         #[command(subcommand)]
         command: development::ProcessingRecipeCommand,

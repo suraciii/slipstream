@@ -15,6 +15,12 @@ export function routeEditorIntent(
     case "editor-refresh":
       editor.refresh(intent.photoId);
       return true;
+    case "editor-exposure-set":
+      editor.setExposure(intent.photoId, intent.value);
+      return true;
+    case "editor-exposure-reset":
+      editor.resetExposure(intent.photoId);
+      return true;
     case "editor-undo":
       editor.stepHistory(intent.photoId, "undo");
       return true;

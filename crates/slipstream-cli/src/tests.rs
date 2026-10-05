@@ -1,5 +1,5 @@
 use super::*;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 #[test]
 fn metadata_read_retains_unavailable_evidence_and_reason() {
@@ -508,12 +508,100 @@ fn help_and_version_are_offline_parser_results() {
             .kind(),
         clap::error::ErrorKind::DisplayVersion
     );
+    let photo_help = Cli::command()
+        .find_subcommand_mut("photos")
+        .expect("photos command")
+        .render_help()
+        .to_string();
+    assert!(photo_help.contains("edit"));
+    assert!(!photo_help.contains("processing-recipe"));
     assert_eq!(
         Cli::try_parse_from(["slipstream", "photos", "--help"])
             .unwrap_err()
             .kind(),
         clap::error::ErrorKind::DisplayHelp
     );
+}
+
+#[test]
+fn stateful_edit_commands_use_primary_operation_identities() {
+    for (arguments, expected) in [
+        (
+            vec!["slipstream", "photos", "edit", "get", "photo-1"],
+            "photos-edit-get",
+        ),
+        (
+            vec![
+                "slipstream",
+                "photos",
+                "edit",
+                "set",
+                "photo-1",
+                "darktable.exposure",
+                "ev",
+                "0.5",
+                "--request",
+                "request-1",
+            ],
+            "photos-edit-set",
+        ),
+        (
+            vec![
+                "slipstream",
+                "photos",
+                "edit",
+                "reset",
+                "photo-1",
+                "darktable.exposure",
+                "all",
+                "--revision",
+                "r1",
+                "--request",
+                "request-2",
+            ],
+            "photos-edit-reset",
+        ),
+        (
+            vec![
+                "slipstream",
+                "photos",
+                "edit",
+                "preview",
+                "photo-1",
+                "--file",
+                "preview.png",
+            ],
+            "photos-edit-preview",
+        ),
+        (
+            vec![
+                "slipstream",
+                "photos",
+                "edit",
+                "export",
+                "photo-1",
+                "--revision",
+                "r1",
+                "--request",
+                "request-3",
+            ],
+            "photos-edit-export",
+        ),
+        (
+            vec![
+                "slipstream",
+                "photos",
+                "edit",
+                "export-status",
+                "photo-1",
+                "request-3",
+            ],
+            "photos-edit-export-status",
+        ),
+    ] {
+        let cli = Cli::try_parse_from(arguments).expect("stateful Edit command");
+        assert_eq!(command_operation(&cli.command).wire(), expected);
+    }
 }
 
 #[test]
@@ -1082,8 +1170,41 @@ fn development_surface_refusals_map_onto_the_closed_exit_codes() {
     assert_eq!(mapped("export_conflict").exit_code, 4);
     assert_eq!(mapped("output_unavailable").exit_code, 4);
     assert_eq!(mapped("export_expired").exit_code, 6);
-    assert_eq!(mapped("receipt_expired").exit_code, 6);
+    assert_eq!(mapped("receipt_expired").exit_code, 4);
     assert_eq!(mapped("artifact_expired").exit_code, 6);
+    let control_refusal = |code: &str| {
+        validated_route_failure(
+            ErrorPayload {
+                code: code.to_owned(),
+                message: "The control is not qualified.".to_owned(),
+                effect: "none".to_owned(),
+                details: json!({"target": "darktable.exposure", "control": "ev"}),
+            },
+            Operation::PhotosEditSet,
+            "",
+        )
+        .unwrap_or_else(|| panic!("{code} must map to a confirmed primary Edit refusal"))
+    };
+    assert_eq!(control_refusal("unsupported_control").exit_code, 2);
+    assert_eq!(control_refusal("invalid_value").exit_code, 2);
+    assert_eq!(
+        mapped("missing_revision").exit_code,
+        2,
+        "missing revision is a confirmed input refusal",
+    );
+    assert_eq!(mapped("invalid_edit").exit_code, 2);
+    let edit_conflict = validated_route_failure(
+        ErrorPayload {
+            code: "edit_conflict".to_owned(),
+            message: "The expected Edit revision is no longer current.".to_owned(),
+            effect: "none".to_owned(),
+            details: json!({"edit": {}}),
+        },
+        Operation::PhotosEditSet,
+        "",
+    )
+    .expect("edit conflict must remain a confirmed refusal");
+    assert_eq!(edit_conflict.exit_code, 4);
     assert_eq!(mapped("processing_unavailable").exit_code, 6);
     assert_eq!(mapped("module_parameters_unavailable").exit_code, 6);
     assert_eq!(mapped("source_unavailable").exit_code, 6);

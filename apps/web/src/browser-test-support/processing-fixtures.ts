@@ -219,6 +219,28 @@ export const parameters = (exposure = 0) => ({
   schemaVersion: "v1",
   tree: parameterTree(exposure),
 });
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function recipeExposure(recipe: ProcessingRecipeFixture): number {
+  const step = recipe.steps.find(
+    (candidate) => candidate.stepId === recipe.currentStepId,
+  );
+  const tree = step?.parameters.tree;
+  const stackValue: unknown = isRecord(tree) ? tree["stack"] : undefined;
+  if (!Array.isArray(stackValue)) return 0;
+  const stack: unknown[] = stackValue;
+  const entry = stack.find(
+    (candidate) => isRecord(candidate) && candidate["op"] === "exposure",
+  );
+  const params = isRecord(entry) ? entry["params"] : undefined;
+  const exposure = isRecord(params) ? params["exposure"] : undefined;
+  return typeof exposure === "number" && Number.isFinite(exposure)
+    ? exposure
+    : 0;
+}
 export const outputContract = {
   format: "jpeg",
   precision: "uint8",
@@ -467,6 +489,63 @@ export async function mockEditor(
       ],
     }),
   );
+  await page.route("**/api/photos/*/edit", (route) => {
+    const photoId = routePhoto(route);
+    const saved = state.recipes.get(photoId)!;
+    const step = saved.steps.find(
+      (item) => item.stepId === saved.currentStepId,
+    );
+    return json(route, {
+      photoId,
+      editRevision: saved.revision,
+      sourceRevision: saved.sourceRevision,
+      currentSourceRevision: sourceRevision,
+      sourceAvailable: true,
+      requiresRebind: false,
+      canSave: Boolean(step),
+      canPreview: Boolean(step) && options.available !== false,
+      canExport: Boolean(step) && options.available !== false,
+      current: step
+        ? {
+            engine: step.module,
+            input: step.input,
+            controls: { exposure: { ev: recipeExposure(saved) } },
+          }
+        : null,
+    });
+  });
+
+  const updateExposure = async (route: Route, reset: boolean) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    const photoId = routePhoto(route);
+    const saved = state.recipes.get(photoId)!;
+    const raw: unknown = JSON.parse(route.request().postData() ?? "{}");
+    const value = reset ? 0 : isRecord(raw) ? raw["value"] : undefined;
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return json(
+        route,
+        { error: { code: "invalid_value", message: "Invalid exposure" } },
+        422,
+      );
+    }
+    const next = {
+      ...saved,
+      revision: `${saved.revision}-stateful`,
+      steps: saved.steps.map((step) =>
+        step.stepId === saved.currentStepId
+          ? { ...step, parameters: parameters(value) }
+          : step,
+      ),
+    };
+    state.recipes.set(photoId, next);
+    await json(route, { outcome: "saved" });
+  };
+  await page.route("**/api/photos/*/edit/set", (route) =>
+    updateExposure(route, false),
+  );
+  await page.route("**/api/photos/*/edit/reset", (route) =>
+    updateExposure(route, true),
+  );
   await page.route("**/api/photos/*/processing-recipe", async (route) => {
     const photoId = routePhoto(route);
     const saved = state.recipes.get(photoId)!;
@@ -545,7 +624,7 @@ export async function openAdvancedCompatibility(page: Page) {
   const details = page.locator("[data-photo-editor-advanced]");
   await expect(details).toBeVisible();
   if ((await details.getAttribute("open")) === null)
-    await details.locator("summary").click();
+    await details.locator(":scope > summary").click();
   await expect(details).toHaveAttribute("open", "");
 }
 
@@ -556,7 +635,8 @@ export async function openFirst(page: Page, url: string) {
   );
   await page.locator('[data-photo-index="0"]').click();
   await openEdit(page);
-  await expect(page.getByLabel("Exposure (EV)", { exact: true })).toBeVisible();
+  await openAdvancedCompatibility(page);
+  await expect(page.locator("[data-photo-editor-exposure]")).toBeVisible();
 }
 
 export async function navigate(page: Page, direction: "Next" | "Previous") {
@@ -566,7 +646,20 @@ export async function navigate(page: Page, direction: "Next" | "Previous") {
 }
 
 export async function setExposure(page: Page, value: string) {
-  const input = page.getByLabel("Exposure (EV)", { exact: true });
+  const input = page.locator("[data-photo-editor-exposure]");
+  await expect(input).toBeVisible();
+  await input.fill(value);
+  await input.press("Tab");
+}
+
+export async function setAdvancedExposure(page: Page, value: string) {
+  await openAdvancedCompatibility(page);
+  const input = page
+    .locator(
+      "[data-photo-editor-composable-editor] [data-photo-editor-module-controls]",
+    )
+    .getByLabel("Exposure (EV)", { exact: true });
+  await expect(input).toBeVisible();
   await input.fill(value);
   await input.press("Tab");
 }

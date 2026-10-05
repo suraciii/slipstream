@@ -1145,9 +1145,11 @@ For `authentication_required`, `access_denied`, `server_busy`, `storage_failed`,
 `photos-processing-preview`, `photos-processing-export`,
 `photos-processing-export-list`, `photos-processing-export-status`,
 `photos-processing-export-cancel`, `photos-processing-export-retry`,
-`photos-historical-export-download`,
-`photos-proxy-get`, `photos-proxy-create`, `photos-proxy-remove`,
-`recovery-unavailable`, `recovery-propose`, or `recovery-apply`.
+`photos-historical-export-download`, `photos-edit-get`, `photos-edit-set`,
+`photos-edit-reset`, `photos-edit-preview`, `photos-edit-export`,
+`photos-edit-export-status`, `photos-proxy-get`, `photos-proxy-create`,
+`photos-proxy-remove`, `recovery-unavailable`, `recovery-propose`, or
+`recovery-apply`.
 `photoIds` in `outcome_unknown` contains all submitted
 Photo IDs in request order. The Album fields identify the submitted target when
 one exists and are null otherwise. Recipe writes, Export submission, and Recovery application can

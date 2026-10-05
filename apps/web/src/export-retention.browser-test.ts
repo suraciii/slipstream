@@ -15,7 +15,7 @@ import {
   openFirst,
   openEdit,
   navigate,
-  setExposure,
+  setAdvancedExposure,
   openAdvancedCompatibility,
   type ProcessingExportFixture as ProcessingExportWork,
 } from "./browser-test-support/processing-fixtures.js";
@@ -85,7 +85,7 @@ test("retained tasks and artifacts restore after a browser reload and Photo navi
     3,
   );
   await expect(artifactRow(page, retained.artifactId)).toBeVisible();
-  await setExposure(page, "0.75");
+  await setAdvancedExposure(page, "0.75");
   await expect
     .poll(() => state.recipes.get(photoId)?.steps[0]?.parameters)
     .toEqual(parameters(0.75));
@@ -154,7 +154,7 @@ test("retry uses captured settings despite newer edits and cancellation is avail
     );
   });
   await openFirst(page, running.url);
-  await setExposure(page, "0.8");
+  await setAdvancedExposure(page, "0.8");
   await expect
     .poll(() => state.recipes.get(photoId)?.steps[0]?.parameters)
     .toEqual(parameters(0.8));

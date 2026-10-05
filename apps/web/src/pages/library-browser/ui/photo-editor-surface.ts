@@ -68,6 +68,23 @@ export function createPhotoEditorSurfaceController({
       { signal: listeners.signal },
     );
   };
+  const exposure = element<HTMLInputElement>("exposure");
+  exposure.addEventListener(
+    "change",
+    () => {
+      if (
+        !alive ||
+        !photoId ||
+        !model?.primary?.canSet ||
+        exposure.value === ""
+      )
+        return;
+      const value = Number(exposure.value);
+      if (Number.isFinite(value))
+        send({ kind: "editor-exposure-set", photoId, value });
+    },
+    { signal: listeners.signal },
+  );
   for (const [name, kind] of [
     ["preview", "editor-preview"],
     ["undo", "editor-undo"],
@@ -84,6 +101,7 @@ export function createPhotoEditorSurfaceController({
     ["export-retry", "editor-export-retry"],
     ["export-download", "editor-export-download"],
     ["export-check", "editor-processing-export-check"],
+    ["exposure-reset", "editor-exposure-reset"],
   ] as const)
     action(name, kind);
   element<HTMLButtonElement>("camera-reference").addEventListener(
@@ -130,6 +148,28 @@ export function createPhotoEditorSurfaceController({
       if (!alive || photoId !== next.photoId) return;
       model = next;
       const busy = next.loading || next.saving;
+      const primary = next.primary;
+      text(
+        "primary-state",
+        primary
+          ? `Revision ${primary.revision ?? "unsaved"} · Source ${primary.sourceRevision ?? "unavailable"} · ${primary.ready ? "Ready" : "Not ready"}. ${primary.note}`
+          : "Checking current Edit State…",
+      );
+      text(
+        "primary-input",
+        primary?.input?.kind === "artifact"
+          ? `Input: artifact ${primary.input.artifactId}`
+          : "Input: Original of this Photo",
+      );
+      exposure.disabled = !primary?.canSet || next.mutationsBlocked;
+      exposure.value =
+        primary?.exposureEv === null || primary?.exposureEv === undefined
+          ? ""
+          : String(primary.exposureEv);
+      button(
+        "exposure-reset",
+        Boolean(primary?.canReset) && !next.mutationsBlocked,
+      );
       text("provenance", next.provenanceNote);
       text("support", next.sourceFactNote);
       text(

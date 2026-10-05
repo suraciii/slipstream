@@ -314,6 +314,13 @@ pub(crate) fn validated_route_failure(
                 && string("argument").is_some()
                 && string("reason").is_some()
         }
+        "unsupported_control" | "invalid_value" => {
+            required_keys(&["target", "control"])
+                && string("target").is_some()
+                && string("control").is_some()
+        }
+        "missing_revision" | "invalid_edit" | "receipt_expired" => details.is_empty(),
+        "edit_conflict" => details.get("edit").is_some_and(Value::is_object),
         "not_found" => {
             required_keys(&["resource", "reference"])
                 && string("resource")
@@ -378,7 +385,9 @@ pub(crate) fn validated_route_failure(
         }
         "server_busy" => {
             required_keys(&["operation", "retryAfterSeconds"])
-                && string("operation") == Some(operation.wire())
+                && (string("operation") == Some(operation.wire())
+                    || (operation == Operation::PhotosEditExport
+                        && string("operation") == Some(Operation::PhotosProcessingExport.wire())))
                 && (details["retryAfterSeconds"].is_null()
                     || details["retryAfterSeconds"].as_u64().is_some())
         }
@@ -431,7 +440,9 @@ pub(crate) fn validated_route_failure(
                         | Operation::PhotosProcessingRecipeRebind
                         | Operation::PhotosProcessingExport
                         | Operation::PhotosProcessingExportRetry
+                        | Operation::PhotosEditExport
                 ) && composable_recipe_details(details))
+                || details.get("edit").is_some_and(Value::is_object)
                 || (string("currentSourceRevision").is_some_and(|value| {
                     !value.is_empty() && value.len() <= MAXIMUM_SOURCE_REVISION_BYTES
                 }) && details.get("currentRecipeVersion").is_some_and(|value| {
@@ -458,14 +469,18 @@ pub(crate) fn validated_route_failure(
                     && details.len() == 2)
                 || (matches!(
                     operation,
-                    Operation::PhotosProcessingExport | Operation::PhotosProcessingExportRetry
+                    Operation::PhotosProcessingExport
+                        | Operation::PhotosProcessingExportRetry
+                        | Operation::PhotosEditExport
                 ) && processing_export_refusal_details(code, details))
         }
         "incompatible_input" => {
             details.is_empty()
                 || (matches!(
                     operation,
-                    Operation::PhotosProcessingExport | Operation::PhotosProcessingExportRetry
+                    Operation::PhotosProcessingExport
+                        | Operation::PhotosProcessingExportRetry
+                        | Operation::PhotosEditExport
                 ) && processing_export_refusal_details(code, details))
         }
         "invalid_settings" => {
@@ -521,7 +536,6 @@ pub(crate) fn validated_route_failure(
         | "export_conflict"
         | "output_unavailable"
         | "export_expired"
-        | "receipt_expired"
         | "artifact_expired"
         | "retained_output_full" => details.is_empty(),
         _ => return None,
@@ -535,14 +549,19 @@ pub(crate) fn validated_route_failure(
         | "limit_exceeded"
         | "invalid_settings"
         | "invalid_recipe"
+        | "invalid_edit"
+        | "invalid_value"
+        | "unsupported_control"
+        | "missing_revision"
         | "incompatible_input"
         | "unsupported_photo"
         | "recovery_scope_exceeded" => 2,
         "not_found" | "unknown_photo" | "unknown_export" | "unknown_artifact"
         | "missing_recipe" | "unknown_step" | "unknown_module" | "unknown_request" => 3,
-        "conflict" | "name_conflict" | "recipe_conflict" | "source_changed" | "requires_rebind"
-        | "request_conflict" | "export_conflict" | "output_unavailable" | "recovery_conflict"
-        | "original_required" | "step_not_current" | "export_terminal" => 4,
+        "conflict" | "name_conflict" | "recipe_conflict" | "edit_conflict" | "source_changed"
+        | "requires_rebind" | "request_conflict" | "export_conflict" | "output_unavailable"
+        | "recovery_conflict" | "original_required" | "step_not_current" | "export_terminal"
+        | "receipt_expired" => 4,
         _ => 6,
     };
     Some(CommandFailure::from_payload(exit_code, error))

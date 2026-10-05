@@ -200,7 +200,15 @@ pub(crate) async fn execute(
                         photo_id,
                         request_id,
                     },
-            } => development::processing_export_status(&client, photo_id, request_id).await,
+            } => {
+                development::processing_export_status(
+                    &client,
+                    photo_id,
+                    request_id,
+                    Operation::PhotosProcessingExportStatus,
+                )
+                .await
+            }
             Command::Photos {
                 command:
                     PhotoCommand::ProcessingExportCancel {

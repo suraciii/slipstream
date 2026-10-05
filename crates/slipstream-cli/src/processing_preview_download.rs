@@ -18,8 +18,6 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use url::Url;
 
-const OPERATION: Operation = Operation::PhotosProcessingPreview;
-
 /// The disclosed bound of one selected-step Preview rendition: the same
 /// 64 MiB bound the framed preview transfers enforce, because a Preview is
 /// a bounded display derivative, never a full-resolution Export.
@@ -234,6 +232,7 @@ pub(super) async fn download(
         client,
         photo_id,
         step_id,
+        Operation::PhotosProcessingPreview,
         client.endpoint(&["api", "photos", photo_id, "processing-preview", step_id]),
         destination,
         publication,
@@ -254,6 +253,7 @@ pub(super) async fn download_current(
         client,
         photo_id,
         step_id,
+        Operation::PhotosEditPreview,
         client.endpoint(&["api", "photos", photo_id, "edit", "preview"]),
         destination,
         publication,
@@ -265,6 +265,7 @@ async fn download_from_endpoint(
     client: &ServiceClient,
     photo_id: &str,
     step_id: &str,
+    operation: Operation,
     endpoint: Url,
     destination: Destination,
     publication: &PublicationState,
@@ -276,23 +277,23 @@ async fn download_from_endpoint(
         .bearer_auth(&client.token)
         .send()
         .await
-        .map_err(|_| CommandFailure::transport(OPERATION))?;
+        .map_err(|_| CommandFailure::transport(operation))?;
     let status = response.status();
     if status.is_redirection() {
-        return Err(CommandFailure::transport(OPERATION));
+        return Err(CommandFailure::transport(operation));
     }
-    if let Some(failure) = access_boundary_failure(status, None, &[], OPERATION) {
+    if let Some(failure) = access_boundary_failure(status, None, &[], operation) {
         return Err(failure);
     }
     if status == StatusCode::ACCEPTED {
-        let bytes = response_bytes(response, OPERATION).await?;
+        let bytes = response_bytes(response, operation).await?;
         let pending: PendingPreview =
-            serde_json::from_slice(&bytes).map_err(|_| CommandFailure::transport(OPERATION))?;
+            serde_json::from_slice(&bytes).map_err(|_| CommandFailure::transport(operation))?;
         let Some(state) = pending.validated_state(step_id) else {
-            return Err(CommandFailure::transport(OPERATION));
+            return Err(CommandFailure::transport(operation));
         };
         let web_url = web_url(&client.origin, &format!("/?photoId={photo_id}"))
-            .map_err(|_| CommandFailure::transport(OPERATION))?;
+            .map_err(|_| CommandFailure::transport(operation))?;
         let mut data = json!({
             "photoId": photo_id,
             "stepId": step_id,
@@ -304,24 +305,24 @@ async fn download_from_endpoint(
         return Ok(data);
     }
     if status != StatusCode::OK {
-        let bytes = response_bytes(response, OPERATION).await?;
-        if let Some(failure) = access_boundary_failure(status, None, &bytes, OPERATION) {
+        let bytes = response_bytes(response, operation).await?;
+        if let Some(failure) = access_boundary_failure(status, None, &bytes, operation) {
             return Err(failure);
         }
         let error = serde_json::from_slice::<ErrorResponse>(&bytes)
-            .map_err(|_| CommandFailure::transport(OPERATION))?
+            .map_err(|_| CommandFailure::transport(operation))?
             .error;
         if error.code == "outcome_unknown" {
             return Err(CommandFailure::unknown(&MutationIdentity {
-                operation: OPERATION,
+                operation,
                 photo_ids: vec![photo_id.to_owned()],
                 album_id: None,
                 album_name: None,
                 mappings: Vec::new(),
             }));
         }
-        return Err(validated_route_failure(error, OPERATION, &client.token)
-            .unwrap_or_else(|| CommandFailure::transport(OPERATION)));
+        return Err(validated_route_failure(error, operation, &client.token)
+            .unwrap_or_else(|| CommandFailure::transport(operation)));
     }
     // The route serves the bounded native render's own display rendition as
     // PNG bytes; any other medium is not the contract this client validates.
@@ -331,27 +332,27 @@ async fn download_from_endpoint(
         .and_then(|value| value.to_str().ok())
         != Some(RENDITION_CONTENT_TYPE)
     {
-        return Err(CommandFailure::transport(OPERATION));
+        return Err(CommandFailure::transport(operation));
     }
     let Some(byte_length) = response
         .content_length()
         .filter(|length| (1..=MAXIMUM_PREVIEW_BYTES).contains(length))
         .and_then(|length| usize::try_from(length).ok())
     else {
-        return Err(CommandFailure::transport(OPERATION));
+        return Err(CommandFailure::transport(operation));
     };
     let Some(metadata) = rendition_metadata(response.headers(), photo_id, step_id) else {
-        return Err(CommandFailure::transport(OPERATION));
+        return Err(CommandFailure::transport(operation));
     };
     let mut file = destination.anonymous_file()?;
     let mut bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|_| CommandFailure::transport(OPERATION))?
+        .map_err(|_| CommandFailure::transport(operation))?
     {
         if bytes.len().saturating_add(chunk.len()) > byte_length {
-            return Err(CommandFailure::transport(OPERATION));
+            return Err(CommandFailure::transport(operation));
         }
         file.write_all(&chunk)
             .await
@@ -359,19 +360,19 @@ async fn download_from_endpoint(
         bytes.extend_from_slice(&chunk);
     }
     if bytes.len() != byte_length || !digest_matches(&bytes, &metadata.sha256) {
-        return Err(CommandFailure::transport(OPERATION));
+        return Err(CommandFailure::transport(operation));
     }
     let width = metadata.width;
     let height = metadata.height;
     let complete = tokio::task::spawn_blocking(move || complete_png(&bytes, width, height))
         .await
-        .map_err(|_| CommandFailure::transport(OPERATION))?;
+        .map_err(|_| CommandFailure::transport(operation))?;
     if !complete {
-        return Err(CommandFailure::transport(OPERATION));
+        return Err(CommandFailure::transport(operation));
     }
     file.sync_all().await.map_err(|_| destination.local_io())?;
     let web_url = web_url(&client.origin, &format!("/?photoId={photo_id}"))
-        .map_err(|_| CommandFailure::transport(OPERATION))?;
+        .map_err(|_| CommandFailure::transport(operation))?;
     let mut data = json!({
         "photoId": photo_id,
         "stepId": step_id,

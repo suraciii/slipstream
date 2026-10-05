@@ -1,4 +1,5 @@
 import { createWorkspaceOutputController } from "./workspace-output-controller.js";
+import { createEditorEditState } from "./editor-edit-state.js";
 import { createEditorComposableRecipe } from "./editor-composable-recipe.js";
 import { createEditorComposablePreview } from "./editor-composable-preview.js";
 import { createEditorProxyController } from "./editor-proxy-controller.js";
@@ -34,7 +35,8 @@ export function createEditorController(
         preview.current.comparisonIdentity &&
         preview.current.comparisonIdentity ===
           baseline.current.comparisonIdentity &&
-        !composable.dirty(),
+        !composable.dirty() &&
+        !primary.blocked,
     );
   const presentSelected = (): void => {
     if (cameraReference) return;
@@ -57,9 +59,36 @@ export function createEditorController(
     view.clearEditorPreview();
   };
   const requestPreview = async (id: string): Promise<void> => {
-    if (!owns(id) || cameraReference || composable.readPending) return;
+    if (
+      !owns(id) ||
+      cameraReference ||
+      composable.readPending ||
+      primary.pending
+    )
+      return;
+    if (
+      primary.read?.editRevision !== (composable.read?.recipe?.revision ?? null)
+    )
+      await primary.load(id);
+    if (
+      primary.blocked ||
+      primary.read?.editRevision !== (composable.read?.recipe?.revision ?? null)
+    )
+      return;
     await preview.requestCurrent(id);
   };
+  const primary = createEditorEditState(fetcher, {
+    owns,
+    render: () => render(),
+    markStale: () => {
+      comparisonRequested = false;
+      preview.markStale();
+      baseline.markStale();
+    },
+    refreshCompatibility: (id) => composable.loadComposableRecipe(id),
+    requestPreview,
+    describeRefusal: describeEditRefusal,
+  });
   const composable = createEditorComposableRecipe(fetcher, {
     ...dependencies,
     editorOwnsPhoto: owns,
@@ -78,7 +107,7 @@ export function createEditorController(
   const preview = createEditorComposablePreview(fetcher, {
     cameraReference: () => cameraReference,
     read: () => composable.read,
-    isDirty: composable.dirty,
+    isDirty: () => composable.dirty() || primary.blocked,
     editorOwnsPhoto: owns,
     renderEditor: () => render(),
     present: () => presentSelected(),
@@ -89,7 +118,7 @@ export function createEditorController(
     comparison: "baseline",
     cameraReference: () => cameraReference,
     read: () => composable.read,
-    isDirty: composable.dirty,
+    isDirty: () => composable.dirty() || primary.blocked,
     editorOwnsPhoto: owns,
     renderEditor: () => render(),
     present: () => presentSelected(),
@@ -119,8 +148,8 @@ export function createEditorController(
         recipeRevision: recipe?.revision ?? null,
         sourceRevision: recipe?.sourceRevision ?? null,
         stepId: recipe?.currentStepId ?? null,
-        saving: state?.saving ?? false,
-        dirty: composable.dirty() || exports.unresolved(id),
+        saving: (state?.saving ?? false) || primary.pending,
+        dirty: composable.dirty() || primary.blocked || exports.unresolved(id),
         conflict: state?.conflict ?? false,
       };
     },
@@ -131,6 +160,9 @@ export function createEditorController(
     processingAvailable: () => {
       const target = composable.target();
       return (
+        !primary.blocked &&
+        primary.read?.canExport === true &&
+        primary.read.editRevision === composable.read?.recipe?.revision &&
         target.kind === "step" &&
         composable.modules.some(
           (module) =>
@@ -158,9 +190,34 @@ export function createEditorController(
         ? "The Edit State could not be read. Reload to check again."
         : !selected
           ? "No Edit State is saved; no processing result is shown."
-        : `Edit Preview from ${selected.module}.${composable.dirty() ? " Local changes are not yet confirmed." : ""}`;
+          : `Edit Preview from ${selected.module}.${composable.dirty() ? " Local changes are not yet confirmed." : ""}`;
     view.renderEditor({
       photoId,
+      primary: {
+        revision: primary.read?.editRevision ?? null,
+        sourceRevision: primary.read?.sourceRevision ?? null,
+        input: primary.read?.current?.input ?? null,
+        engine: primary.read?.current?.engine ?? null,
+        exposureEv: primary.read?.current?.exposureEv ?? null,
+        canSet:
+          !composable.readPending &&
+          !primary.blocked &&
+          !composable.dirty() &&
+          !primary.read?.requiresRebind &&
+          Boolean(
+            primary.read?.current
+              ? primary.read.canSave
+              : primary.read?.sourceAvailable,
+          ),
+        canReset:
+          !composable.readPending &&
+          !primary.blocked &&
+          !composable.dirty() &&
+          primary.read?.canSave === true &&
+          primary.read?.current?.engine === "darktable",
+        ready: primary.read?.canPreview === true,
+        note: primary.note,
+      },
       loading: composable.readPending,
       cameraReference,
       canCompare: Boolean(
@@ -168,6 +225,7 @@ export function createEditorController(
           current.outcome === "ready" &&
           !current.stale &&
           !composable.dirty() &&
+          !primary.blocked &&
           !cameraReference,
       ),
       comparing: comparisonRequested && baselineReady() && !cameraReference,
@@ -201,7 +259,12 @@ export function createEditorController(
                 : "ready"
               : null,
       proxy: proxy.view(photoId),
-      canPreview: Boolean(selected) && !composable.dirty() && !cameraReference,
+      canPreview:
+        Boolean(selected) &&
+        !composable.dirty() &&
+        !primary.blocked &&
+        primary.read?.canPreview === true &&
+        !cameraReference,
       previewing: current.busy,
       previewNote: comparisonRequested
         ? baseline.current.outcome === "ready" && !baselineReady()
@@ -210,10 +273,11 @@ export function createEditorController(
             "Preparing the current Edit State's baseline comparison…"
         : current.note,
       previewStale: current.stale,
-      saving: state?.saving ?? false,
-      dirty: composable.dirty(),
+      saving: (state?.saving ?? false) || primary.pending,
+      dirty: composable.dirty() || primary.blocked,
       mutationsBlocked: Boolean(
-        state?.uncertain ||
+        primary.blocked ||
+          state?.uncertain ||
           state?.conflict ||
           exports.unresolved(photoId) ||
           outputs.unresolved(photoId),
@@ -244,7 +308,7 @@ export function createEditorController(
       export: exports.view(),
       composable: recipeView,
       outputs: outputs.view(photoId),
-      status: recipeView.note,
+      status: primary.note,
       statusDetail: state?.uncertain
         ? "The save outcome is unknown. Check the saved edit before another action."
         : "",
@@ -256,11 +320,13 @@ export function createEditorController(
     proxy.leave();
     outputs.leave();
     composable.reset();
+    primary.reset();
     exports.reset();
     photoId = id;
     cameraReference = false;
     render();
     void composable.loadComposableRecipe(id);
+    void primary.load(id).then(() => requestPreview(id));
     void composable.loadProcessingModules(id);
     void proxy.read(id);
     void exports.load(id);
@@ -277,6 +343,7 @@ export function createEditorController(
     scoped((id: string, ...args: A) => {
       const state = composable.state;
       if (
+        primary.pending ||
         state?.uncertain ||
         state?.conflict ||
         exports.unresolved(id) ||
@@ -287,7 +354,16 @@ export function createEditorController(
     });
   return {
     open,
+    setExposure: mutate((id, value: number) => {
+      if (!composable.readPending && !composable.dirty())
+        return primary.setExposure(id, value);
+    }),
+    resetExposure: mutate((id) => {
+      if (!composable.readPending && !composable.dirty())
+        return primary.resetExposure(id);
+    }),
     refresh: scoped((id) => {
+      void primary.load(id).then(() => requestPreview(id));
       if (composable.state?.uncertain) void composable.saveEditorComposable(id);
       else void composable.loadComposableRecipe(id);
       void composable.loadProcessingModules(id);
@@ -365,6 +441,7 @@ export function createEditorController(
       proxy.leave();
       exports.reset();
       composable.reset();
+      primary.reset();
       clearPreview();
       cameraReference = false;
     },

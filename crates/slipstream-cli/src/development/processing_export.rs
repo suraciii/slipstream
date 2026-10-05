@@ -282,7 +282,7 @@ pub(crate) async fn execute_edit_export(
     source_revision: &str,
 ) -> Result<Value, CommandFailure> {
     let identity = MutationIdentity {
-        operation: PROCESSING_EXPORT_OPERATION,
+        operation: Operation::PhotosEditExport,
         photo_ids: vec![photo_id.to_owned()],
         album_id: None,
         album_name: None,
@@ -442,22 +442,21 @@ pub(crate) async fn processing_export_status(
     client: &ServiceClient,
     photo_id: &str,
     request_id: &str,
+    operation: Operation,
 ) -> Result<Value, CommandFailure> {
     let work: Value = client
         .json(
-            PROCESSING_EXPORT_STATUS_OPERATION,
+            operation,
             Method::GET,
             client.endpoint(&["api", "photos", photo_id, "processing-exports", request_id]),
             None,
         )
         .await?;
     if !processing_work_valid(&work, photo_id, Some(request_id)) {
-        return Err(CommandFailure::transport(
-            PROCESSING_EXPORT_STATUS_OPERATION,
-        ));
+        return Err(CommandFailure::transport(operation));
     }
     let web_url = web_url(&client.origin, &format!("/?photoId={photo_id}"))
-        .map_err(|()| CommandFailure::transport(PROCESSING_EXPORT_STATUS_OPERATION))?;
+        .map_err(|()| CommandFailure::transport(operation))?;
     let mut value = work;
     value["webUrl"] = Value::String(web_url);
     Ok(value)

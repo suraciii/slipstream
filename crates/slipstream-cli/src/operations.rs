@@ -16,6 +16,12 @@ pub(crate) enum Operation {
     PhotosProcessingExportList,
     PhotosProcessingExportRetry,
     PhotosHistoricalExportDownload,
+    PhotosEditGet,
+    PhotosEditSet,
+    PhotosEditReset,
+    PhotosEditPreview,
+    PhotosEditExport,
+    PhotosEditExportStatus,
     PhotosProxyGet,
     PhotosProxyCreate,
     PhotosProxyRemove,
@@ -66,6 +72,12 @@ impl Operation {
             Self::PhotosProcessingExportList => "photos-processing-export-list",
             Self::PhotosProcessingExportRetry => "photos-processing-export-retry",
             Self::PhotosHistoricalExportDownload => "photos-historical-export-download",
+            Self::PhotosEditGet => "photos-edit-get",
+            Self::PhotosEditSet => "photos-edit-set",
+            Self::PhotosEditReset => "photos-edit-reset",
+            Self::PhotosEditPreview => "photos-edit-preview",
+            Self::PhotosEditExport => "photos-edit-export",
+            Self::PhotosEditExportStatus => "photos-edit-export-status",
             Self::LibraryCheck => "library-check",
             Self::PhotosProxyGet => "photos-proxy-get",
             Self::PhotosProxyCreate => "photos-proxy-create",
@@ -134,13 +146,12 @@ pub(crate) fn command_operation(command: &Command) -> Operation {
                 }
             },
             PhotoCommand::Edit { command } => match command {
-                edit::EditCommand::Get { .. } => Operation::PhotosProcessingRecipeGet,
-                edit::EditCommand::Set { .. } | edit::EditCommand::Reset { .. } => {
-                    Operation::PhotosProcessingRecipeSave
-                }
-                edit::EditCommand::Preview { .. } => Operation::PhotosProcessingPreview,
-                edit::EditCommand::Export { .. } => Operation::PhotosProcessingExport,
-                edit::EditCommand::ExportStatus { .. } => Operation::PhotosProcessingExportStatus,
+                edit::EditCommand::Get { .. } => Operation::PhotosEditGet,
+                edit::EditCommand::Set { .. } => Operation::PhotosEditSet,
+                edit::EditCommand::Reset { .. } => Operation::PhotosEditReset,
+                edit::EditCommand::Preview { .. } => Operation::PhotosEditPreview,
+                edit::EditCommand::Export { .. } => Operation::PhotosEditExport,
+                edit::EditCommand::ExportStatus { .. } => Operation::PhotosEditExportStatus,
             },
             PhotoCommand::ProcessingRecipe { command } => match command {
                 development::ProcessingRecipeCommand::Get { .. } => {

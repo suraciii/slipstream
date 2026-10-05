@@ -10,14 +10,24 @@ export const PHOTO_EDITOR_TEMPLATE = `
     <p class="photo-editor-preview-note" data-photo-editor-preview-note hidden></p>
     <button type="button" class="quiet" data-photo-editor-camera-reference aria-pressed="false">Original reference</button>
     <button type="button" class="quiet" data-photo-editor-compare aria-pressed="false" disabled>Baseline comparison</button>
-    <div class="photo-editor-actions"><button type="button" class="quiet" data-photo-editor-undo disabled>Undo</button><button type="button" class="quiet" data-photo-editor-redo disabled>Redo</button><button type="button" data-photo-editor-preview disabled>Refresh preview</button><button type="button" class="quiet" data-photo-editor-rebind hidden>Keep edit for the current file</button><button type="button" class="quiet" data-photo-editor-refresh>Reload edit</button></div>
-    <p class="photo-editor-draft" data-photo-editor-draft hidden role="status"></p>
-    <div class="photo-editor-conflict" data-photo-editor-conflict hidden><p data-photo-editor-conflict-message role="alert"></p><div class="photo-editor-actions"><button type="button" data-photo-editor-use-saved>Use saved Edit State</button><button type="button" class="quiet" data-photo-editor-reapply>Reapply my changes</button><button type="button" class="quiet" data-photo-editor-discard-draft>Discard draft</button></div></div>
+    <div class="photo-editor-actions"><button type="button" data-photo-editor-preview disabled>Refresh preview</button><button type="button" class="quiet" data-photo-editor-refresh>Reload edit</button></div>
     <div class="photo-editor-composable" data-photo-editor-composable aria-label="Edit State">
       <p class="photo-editor-export-heading">Edit State</p>
-      <p class="photo-editor-composable-state" data-photo-editor-composable-state role="status"></p>
+      <div data-photo-editor-primary>
+        <p data-photo-editor-primary-state role="status"></p>
+        <p data-photo-editor-primary-input></p>
+        <label>Exposure (EV)<input type="number" step="0.1" data-photo-editor-exposure aria-label="Current exposure (EV)"></label>
+        <button type="button" class="quiet" data-photo-editor-exposure-reset>Reset exposure</button>
+      </div>
       <div data-photo-editor-composable-start hidden></div>
       <div class="photo-editor-composable-body" data-photo-editor-composable-body>
+        <details class="photo-editor-advanced" data-photo-editor-advanced>
+          <summary>Advanced compatibility</summary>
+          <p class="photo-editor-composable-state" data-photo-editor-composable-state role="status"></p>
+          <p class="photo-editor-note">Inspect or migrate the complete processing snapshot. The primary Edit State above remains the source for Preview and Export.</p>
+    <p class="photo-editor-draft" data-photo-editor-draft hidden role="status"></p>
+    <div class="photo-editor-conflict" data-photo-editor-conflict hidden><p data-photo-editor-conflict-message role="alert"></p><div class="photo-editor-actions"><button type="button" data-photo-editor-use-saved>Use saved Edit State</button><button type="button" class="quiet" data-photo-editor-reapply>Reapply my changes</button><button type="button" class="quiet" data-photo-editor-discard-draft>Discard draft</button></div></div>
+          <div class="photo-editor-actions"><button type="button" class="quiet" data-photo-editor-undo disabled>Undo</button><button type="button" class="quiet" data-photo-editor-redo disabled>Redo</button><button type="button" class="quiet" data-photo-editor-rebind hidden>Keep edit for the current file</button></div>
         <div class="photo-editor-composable-editor" data-photo-editor-composable-editor hidden>
           <p>Processing Engine <span data-photo-editor-composable-editing-module></span><span data-photo-editor-composable-editing-step hidden></span></p>
           <p>Parameter version <span data-photo-editor-composable-schema></span></p>
@@ -25,9 +35,6 @@ export const PHOTO_EDITOR_TEMPLATE = `
           <div data-photo-editor-module-controls></div>
           <p class="photo-editor-note" data-photo-editor-composable-parameters-note></p>
         </div>
-        <details class="photo-editor-advanced" data-photo-editor-advanced>
-          <summary>Advanced compatibility</summary>
-          <p class="photo-editor-note">Inspect or migrate the complete processing snapshot. The primary Edit State above remains the source for Preview and Export.</p>
           <ul class="photo-editor-composable-steps" data-photo-editor-composable-steps></ul>
           <div class="photo-editor-actions"><label for="photo-editor-composable-module">Processing Engine</label><select id="photo-editor-composable-module" data-photo-editor-composable-module></select><label for="photo-editor-new-step-input">Edit input</label><select id="photo-editor-new-step-input" data-photo-editor-new-step-input><option value="original">Original of this Photo</option></select><button type="button" data-photo-editor-composable-add>Add configuration</button></div>
           <div class="photo-editor-composable-artifacts" data-photo-editor-composable-artifacts>

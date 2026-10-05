@@ -577,7 +577,7 @@ export function createComposableEditorSurface(
       const item = document.createElement("li");
       item.dataset.requestId = work.requestId;
       const note = document.createElement("span");
-      note.textContent = `${work.module}: ${work.note}`;
+      note.textContent = `${work.stepId} · ${work.module}: ${work.note}`;
       item.append(
         note,
         button("Check status", () =>

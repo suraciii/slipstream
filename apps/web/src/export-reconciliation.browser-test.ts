@@ -19,6 +19,7 @@ import {
   openEdit,
   navigate,
   setExposure,
+  setAdvancedExposure,
   openAdvancedCompatibility,
 } from "./browser-test-support/processing-fixtures.js";
 
@@ -144,7 +145,7 @@ test("a refused recipe save blocks export until the saved recipe is chosen", asy
     },
   });
   await openFirst(page, running.url);
-  await setExposure(page, "0.5");
+  await setAdvancedExposure(page, "0.5");
   await expect(page.locator("[data-photo-editor-conflict]")).toBeVisible();
   await expect(submit(page)).toBeDisabled();
   await page.locator("[data-photo-editor-use-saved]").click();
@@ -187,7 +188,7 @@ for (const response of ["connection", "unreadable"] as const) {
       },
     });
     await openFirst(page, running.url);
-    await setExposure(page, "0.5");
+    await setAdvancedExposure(page, "0.5");
     await expect.poll(() => state.saves.length).toBe(1);
     await expect(submit(page)).toBeDisabled();
     await expect(
@@ -209,8 +210,14 @@ test("an unavailable module preserves editable intent but refuses new export", a
 }) => {
   const state = await mockEditor(page, running, { available: false });
   await openFirst(page, running.url);
-  await expect(page.getByLabel("Exposure (EV)", { exact: true })).toBeEnabled();
-  await setExposure(page, "0.5");
+  await expect(
+    page
+      .locator(
+        "[data-photo-editor-composable-editor] [data-photo-editor-module-controls]",
+      )
+      .getByLabel("Exposure (EV)", { exact: true }),
+  ).toBeEnabled();
+  await setAdvancedExposure(page, "0.5");
   await expect
     .poll(() => state.recipes.get(state.photos[0]!)?.steps[0]?.parameters)
     .toEqual(parameters(0.5));
@@ -270,7 +277,7 @@ test("an explicitly chosen retained artifact becomes the new selected step's exp
       stepId: step.stepId,
       expectedSourceRevision: saved.sourceRevision,
     };
-    const receipt = work(photoId, submitted!.requestId, "accepted", {
+    const receipt = work(photoId, submitted.requestId, "accepted", {
       stepId: step.stepId,
       recipeRevision: saved.revision,
       input: step.input,
@@ -463,8 +470,12 @@ test("numeric controls reject incomplete edits and synchronize Reset while focus
   const state = await mockEditor(page, running);
   const photoId = state.photos[0]!;
   await openFirst(page, running.url);
-  const exposure = page.getByLabel("Exposure (EV)", { exact: true });
-  await setExposure(page, "1");
+  const exposure = page
+    .locator(
+      "[data-photo-editor-composable-editor] [data-photo-editor-module-controls]",
+    )
+    .getByLabel("Exposure (EV)", { exact: true });
+  await setAdvancedExposure(page, "1");
   await expect
     .poll(() => state.recipes.get(photoId)?.steps[0]?.parameters)
     .toEqual(parameters(1));

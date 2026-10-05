@@ -105,7 +105,7 @@ fn state_step(state: &Value) -> Result<String, CommandFailure> {
 async fn get_state(client: &ServiceClient, photo_id: &str) -> Result<Value, CommandFailure> {
     let mut state: Value = client
         .json(
-            Operation::PhotosProcessingRecipeGet,
+            Operation::PhotosEditGet,
             Method::GET,
             client.endpoint(&["api", "photos", photo_id, "edit"]),
             None,
@@ -115,13 +115,11 @@ async fn get_state(client: &ServiceClient, photo_id: &str) -> Result<Value, Comm
         || !state["sourceAvailable"].is_boolean()
         || !state["engineModules"].is_array()
     {
-        return Err(CommandFailure::transport(
-            Operation::PhotosProcessingRecipeGet,
-        ));
+        return Err(CommandFailure::transport(Operation::PhotosEditGet));
     }
     state["webUrl"] = Value::String(
         super::web_url(&client.origin, &format!("/?photoId={photo_id}"))
-            .map_err(|()| CommandFailure::transport(Operation::PhotosProcessingRecipeGet))?,
+            .map_err(|()| CommandFailure::transport(Operation::PhotosEditGet))?,
     );
     Ok(state)
 }
@@ -131,12 +129,13 @@ async fn mutate(
     admission: &AdmissionState,
     photo_id: &str,
     request: &str,
+    operation: Operation,
     endpoint: &str,
     body: Value,
 ) -> Result<Value, CommandFailure> {
     validate_request(request)?;
     let identity = MutationIdentity {
-        operation: Operation::PhotosProcessingRecipeSave,
+        operation,
         photo_ids: vec![photo_id.to_owned()],
         album_id: None,
         album_name: None,
@@ -186,6 +185,7 @@ pub(crate) async fn execute(
                 admission,
                 photo_id,
                 request,
+                Operation::PhotosEditSet,
                 "set",
                 json!({
                     "requestId": request,
@@ -210,6 +210,7 @@ pub(crate) async fn execute(
                 admission,
                 photo_id,
                 request,
+                Operation::PhotosEditReset,
                 "reset",
                 json!({
                     "requestId": request,
@@ -256,7 +257,15 @@ pub(crate) async fn execute(
         EditCommand::ExportStatus {
             photo_id,
             request_id,
-        } => super::development::processing_export_status(client, photo_id, request_id).await,
+        } => {
+            super::development::processing_export_status(
+                client,
+                photo_id,
+                request_id,
+                Operation::PhotosEditExportStatus,
+            )
+            .await
+        }
     }
 }
 
