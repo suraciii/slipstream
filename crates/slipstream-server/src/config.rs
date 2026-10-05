@@ -1,6 +1,7 @@
 use super::*;
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::MetadataExt;
+use std::path::Component;
 pub const HEALTH_PATH: &str = "/healthz";
 
 pub(crate) const MAXIMUM_HEADER_BYTES: usize = 16 * 1024;
@@ -37,27 +38,24 @@ pub struct Config {
     /// the deployment supports Read Metadata and refuses Save as unavailable.
     pub metadata_supervisor: Option<PathBuf>,
 }
-
-/// The optional standalone SpektraFilm peer runtime (Issue #496). The
-/// bundle is independent of the darktable extension: it owns its pinned
-/// interpreter, runner, source tree, and complete default parameter tree,
-/// and its availability is reported separately from the darktable stage.
+/// The optional standalone SpektraFilm peer runtime. The bundle is independent
+/// of the darktable extension: it owns the pinned `spektrafilm-rs` binary,
+/// profile-data tree, default parameter tree, and deterministic manifest.
 /// `failure` is the truthful unavailable reason a deployment reports when
 /// the configured runtime is missing or fails verification.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FilmConfig {
     pub(crate) bundle_sha256: String,
     pub(crate) bundle_root: PathBuf,
-    /// The pinned interpreter the manifest names (`engine`).
-    pub(crate) engine: PathBuf,
-    /// The local film runner the manifest names (`runner`).
-    pub(crate) runner: PathBuf,
-    /// The pinned SpektraFilm source tree the manifest names
-    /// (`source_root`).
-    pub(crate) source_root: PathBuf,
+    /// The pinned `spektrafilm` executable named by the fork manifest.
+    pub(crate) binary: PathBuf,
+    /// The fork data directory containing profiles, LUTs, and ICC assets.
+    pub(crate) data_root: PathBuf,
     /// The runtime-generated complete default parameter tree, verified
     /// against the module boundary's own admission shape at startup.
     pub(crate) parameter_default: serde_json::Value,
+    pub(crate) film_profile: String,
+    pub(crate) print_profile: String,
     pub(crate) failure: Option<&'static str>,
 }
 
@@ -403,10 +401,11 @@ fn film_bundle_config(
         return Ok(Some(FilmConfig {
             bundle_sha256: String::new(),
             bundle_root,
-            engine: PathBuf::new(),
-            runner: PathBuf::new(),
-            source_root: PathBuf::new(),
+            binary: PathBuf::new(),
+            data_root: PathBuf::new(),
             parameter_default: serde_json::Value::Null,
+            film_profile: String::new(),
+            print_profile: String::new(),
             failure: Some("film-runtime-missing"),
         }));
     }
@@ -419,10 +418,11 @@ fn film_bundle_config(
         None => FilmConfig {
             bundle_sha256: String::new(),
             bundle_root,
-            engine: PathBuf::new(),
-            runner: PathBuf::new(),
-            source_root: PathBuf::new(),
+            binary: PathBuf::new(),
+            data_root: PathBuf::new(),
             parameter_default: serde_json::Value::Null,
+            film_profile: String::new(),
+            print_profile: String::new(),
             failure,
         },
     }))
@@ -446,42 +446,31 @@ fn verify_film_bundle(root: &Path) -> (Option<FilmConfig>, Option<&'static str>)
     };
     let digest_matches = read_bounded_bytes(&manifest_path, FILM_MANIFEST_BYTES_MAX)
         .is_some_and(|bytes| format!("{:x}", Sha256::digest(&bytes)) == bundle);
-    if !digest_matches {
-        return (None, Some(unavailable));
-    }
-    if manifest["format"].as_u64() != Some(1)
-        || !is_lower_hex(
-            manifest["spektrafilm_commit"].as_str().unwrap_or_default(),
-            40,
-        )
-        || manifest["recipe_sha256"].as_str()
-            != Some(slipstream_processing::modules::SPEKTRAFILM_RECIPE_SHA256)
-        || manifest["input_icc_sha256"].as_str()
-            != Some(slipstream_processing::modules::SPEKTRAFILM_INPUT_ICC_SHA256)
-        || manifest["output_icc_sha256"].as_str()
-            != Some(slipstream_processing::modules::SPEKTRAFILM_OUTPUT_ICC_SHA256)
-        || manifest["finished_jpeg_quality"].as_u64() != Some(85)
+    if !digest_matches
+        || manifest["format"].as_u64() != Some(2)
+        || manifest["implementation"].as_str()
+            != Some(slipstream_processing::modules::SPEKTRAFILM_IMPLEMENTATION)
+        || manifest["forkCommit"].as_str()
+            != Some(slipstream_processing::modules::SPEKTRAFILM_FORK_COMMIT)
+        || manifest["adapterVersion"].as_str()
+            != Some(slipstream_processing::modules::SPEKTRAFILM_ADAPTER_VERSION)
+        || manifest["parameterSchemaVersion"].as_str()
+            != Some(slipstream_processing::modules::SPEKTRAFILM_PARAMETER_VERSION)
     {
         return (None, Some(unavailable));
     }
-    let Some(engine) = absolute_manifest_path(manifest["engine"].as_str()) else {
+    let Some(binary) = absolute_manifest_path(manifest["binary"].as_str()) else {
         return (None, Some(unavailable));
     };
-    let Some(runner) = absolute_manifest_path(manifest["runner"].as_str()) else {
+    let Some(data_root) = absolute_manifest_path(manifest["dataRoot"].as_str()) else {
         return (None, Some(unavailable));
     };
-    let Some(source_root) = absolute_manifest_path(manifest["source_root"].as_str()) else {
+    let Some(binary_metadata) = fs::metadata(&binary).ok() else {
         return (None, Some(unavailable));
     };
-    let Some(engine_metadata) = fs::metadata(&engine).ok() else {
-        return (None, Some(unavailable));
-    };
-    if !engine_metadata.is_file() || engine_metadata.mode() & 0o111 == 0 {
+    if !binary_metadata.is_file() || binary_metadata.mode() & 0o111 == 0 || !data_root.is_dir() {
         return (None, Some(unavailable));
     }
-    // Every named asset digest verifies: the bundle's own files, the
-    // pinned runtime tree, the patched source tree, and the qualified
-    // fixed-recipe modules the runner reuses.
     let bundle_prefix = "/opt/slipstream-film/";
     for (key, digest) in manifest["files"].as_object().into_iter().flatten() {
         let Some(digest) = digest.as_str() else {
@@ -495,48 +484,25 @@ fn verify_film_bundle(root: &Path) -> (Option<FilmConfig>, Option<&'static str>)
             return (None, Some(unavailable));
         }
     }
-    // The tree roots come from the manifest itself — the pinned runtime
-    // root behind the engine, the source root, and the qualified probe
-    // modules root — so verification never assumes a host layout.
-    let Some(probe_root) = absolute_manifest_path(manifest["probe_root"].as_str()) else {
+    let Some(data_entries) = manifest["data"]
+        .as_object()
+        .filter(|entries| !entries.is_empty())
+    else {
         return (None, Some(unavailable));
     };
-    let Some(runtime_root) = engine.parent().and_then(Path::parent) else {
-        return (None, Some(unavailable));
-    };
-    for (tree_root, tree) in [
-        (runtime_root, "runtime"),
-        (source_root.as_path(), "source"),
-        (probe_root.as_path(), "probe"),
-    ] {
-        for (name, digest) in manifest[tree].as_object().into_iter().flatten() {
-            if Path::new(name)
-                .components()
-                .any(|part| !matches!(part, Component::Normal(_)))
-            {
-                return (None, Some(unavailable));
-            }
-            if verify_bundle_file(&tree_root.join(name), digest.as_str().unwrap_or_default())
-                .is_none()
-            {
-                return (None, Some(unavailable));
-            }
+    for (relative, digest) in data_entries {
+        let Some(digest) = digest.as_str() else {
+            return (None, Some(unavailable));
+        };
+        let Some(path) = safe_relative_path(&data_root, relative) else {
+            return (None, Some(unavailable));
+        };
+        if verify_bundle_file(&path, digest).is_none() {
+            return (None, Some(unavailable));
         }
     }
-    // The complete default parameter tree is the runtime's own fixed
-    // recipe, bounded and admitted by the module boundary itself.
-    let parameters_path = manifest["files"]
-        .as_object()
-        .and_then(|files| {
-            files
-                .keys()
-                .find(|key| key.ends_with("parameters-default.json"))
-        })
-        .map(|key| {
-            key.strip_prefix(bundle_prefix)
-                .map_or_else(|| PathBuf::from(key), |relative| root.join(relative))
-        });
-    let Some(parameters_path) = parameters_path else {
+    let Some(parameters_path) = absolute_manifest_path(manifest["parametersDefault"].as_str())
+    else {
         return (None, Some(unavailable));
     };
     let Some(parameter_default) = read_bounded_json(&parameters_path, 1024 * 1024) else {
@@ -552,14 +518,27 @@ fn verify_film_bundle(root: &Path) -> (Option<FilmConfig>, Option<&'static str>)
     if admitted.is_err() {
         return (None, Some(unavailable));
     }
+    let Some(film_profile) = manifest["filmProfile"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    else {
+        return (None, Some(unavailable));
+    };
+    let Some(print_profile) = manifest["printProfile"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    else {
+        return (None, Some(unavailable));
+    };
     (
         Some(FilmConfig {
             bundle_sha256: bundle,
             bundle_root: root.to_path_buf(),
-            engine,
-            runner,
-            source_root,
+            binary,
+            data_root,
             parameter_default,
+            film_profile: film_profile.to_owned(),
+            print_profile: print_profile.to_owned(),
             failure: None,
         }),
         None,
@@ -569,6 +548,18 @@ fn verify_film_bundle(root: &Path) -> (Option<FilmConfig>, Option<&'static str>)
 fn absolute_manifest_path(value: Option<&str>) -> Option<PathBuf> {
     let path = PathBuf::from(value?);
     path.is_absolute().then_some(path)
+}
+fn safe_relative_path(root: &Path, value: &str) -> Option<PathBuf> {
+    let path = Path::new(value);
+    if value.is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return None;
+    }
+    Some(root.join(path))
 }
 
 fn read_bounded_json(path: &Path, maximum: u64) -> Option<serde_json::Value> {
