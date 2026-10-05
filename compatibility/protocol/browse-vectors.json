@@ -44,8 +44,8 @@
         "position": 0,
         "selectionCounts": {
           "rejected": 0,
-          "selected": 0,
-          "undecided": 3
+          "picked": 0,
+          "unflagged": 3
         },
         "token": "$token",
         "total": 3
@@ -88,7 +88,7 @@
             },
             "rating": 0,
             "hasSavedEdits": false,
-            "selectionState": "undecided"
+            "selectionState": "unflagged"
           },
           {
             "available": true,
@@ -109,7 +109,7 @@
             },
             "rating": 0,
             "hasSavedEdits": false,
-            "selectionState": "undecided"
+            "selectionState": "unflagged"
           },
           {
             "available": true,
@@ -124,7 +124,7 @@
             },
             "rating": 0,
             "hasSavedEdits": false,
-            "selectionState": "undecided"
+            "selectionState": "unflagged"
           }
         ],
         "start": 0,
@@ -155,7 +155,7 @@
             },
             "rating": 0,
             "hasSavedEdits": false,
-            "selectionState": "undecided"
+            "selectionState": "unflagged"
           }
         ],
         "start": 2,
@@ -460,8 +460,8 @@
         "position": 0,
         "selectionCounts": {
           "rejected": 0,
-          "selected": 0,
-          "undecided": 3
+          "picked": 0,
+          "unflagged": 3
         },
         "token": "$token",
         "total": 3
@@ -554,8 +554,8 @@
         "position": 0,
         "selectionCounts": {
           "rejected": 0,
-          "selected": 0,
-          "undecided": 3
+          "picked": 0,
+          "unflagged": 3
         },
         "token": "$token",
         "total": 3
@@ -599,7 +599,7 @@
             },
             "rating": 0,
             "hasSavedEdits": false,
-            "selectionState": "undecided"
+            "selectionState": "unflagged"
           },
           {
             "available": true,
@@ -620,7 +620,7 @@
             },
             "rating": 0,
             "hasSavedEdits": false,
-            "selectionState": "undecided"
+            "selectionState": "unflagged"
           },
           {
             "available": true,
@@ -635,7 +635,7 @@
             },
             "rating": 0,
             "hasSavedEdits": false,
-            "selectionState": "undecided"
+            "selectionState": "unflagged"
           }
         ],
         "start": 0,
@@ -720,18 +720,18 @@
         "position": 0,
         "selectionCounts": {
           "rejected": 0,
-          "selected": 0,
-          "undecided": 3
+          "picked": 0,
+          "unflagged": 3
         },
         "token": "$token",
         "total": 0
       },
       "status": 200
     },
-    "name": "browse-open-library-selection-selected",
+    "name": "browse-open-library-selection-picked",
     "request": {
       "body": {
-        "selection": "selected",
+        "selection": "picked",
         "source": "library"
       },
       "headers": {
@@ -748,8 +748,8 @@
         "position": 0,
         "selectionCounts": {
           "rejected": 0,
-          "selected": 0,
-          "undecided": 3
+          "picked": 0,
+          "unflagged": 3
         },
         "token": "$token",
         "total": 3
@@ -823,7 +823,7 @@
         "applied": [],
         "changedElsewhere": [
           {
-            "currentValue": "undecided",
+            "currentValue": "unflagged",
             "photoId": "$photoId"
           }
         ],
@@ -840,15 +840,15 @@
       "body": {
         "photos": [
           {
-            "expectedCurrent": "selected",
+            "expectedCurrent": "picked",
             "photoId": "$photoId"
           },
           {
-            "expectedCurrent": "undecided",
+            "expectedCurrent": "unflagged",
             "photoId": "00000000-0000-4000-8000-000000000000"
           }
         ],
-        "selectionState": "selected"
+        "selectionState": "picked"
       },
       "headers": {
         "content-type": "application/json",
@@ -870,15 +870,15 @@
       "body": {
         "photos": [
           {
-            "expectedCurrent": "undecided",
+            "expectedCurrent": "unflagged",
             "photoId": "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255"
           },
           {
-            "expectedCurrent": "undecided",
+            "expectedCurrent": "unflagged",
             "photoId": "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255"
           }
         ],
-        "selectionState": "selected"
+        "selectionState": "picked"
       },
       "headers": {
         "content-type": "application/json",
@@ -894,8 +894,8 @@
         "position": 0,
         "selectionCounts": {
           "rejected": 0,
-          "selected": 0,
-          "undecided": 3
+          "picked": 0,
+          "unflagged": 3
         },
         "token": "$token",
         "total": 3
@@ -948,8 +948,8 @@
         "position": 0,
         "selectionCounts": {
           "rejected": 0,
-          "selected": 0,
-          "undecided": 2
+          "picked": 0,
+          "unflagged": 2
         },
         "token": "$token",
         "total": 2
@@ -993,7 +993,7 @@
             },
             "rating": 0,
             "hasSavedEdits": false,
-            "selectionState": "undecided"
+            "selectionState": "unflagged"
           },
           {
             "available": true,
@@ -1014,7 +1014,7 @@
             },
             "rating": 0,
             "hasSavedEdits": false,
-            "selectionState": "undecided"
+            "selectionState": "unflagged"
           }
         ],
         "start": 0,

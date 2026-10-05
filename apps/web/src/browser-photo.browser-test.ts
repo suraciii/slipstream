@@ -9,7 +9,6 @@ import {
   writePhotos,
   server,
   createAlbum,
-  state,
 } from "./browser-test-support/fixtures.js";
 import {
   actionWithProgress,
@@ -43,14 +42,13 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   const { albumId } = await createAlbum(running.url, "Picks");
   await startReview(page, running.url, "Picks", albumId);
   await expect(page.getByText("1 / 2")).toBeVisible();
-  await expect(page.locator("[data-selection]")).toHaveText("Undecided");
-  await expect(page.getByText("No rating", { exact: true })).toBeVisible();
-  // Limited detail rides with the Preview fact, not a fact row of its own.
-  await expect(page.locator("[data-limited]")).toHaveCount(0);
-  // The primary actions and navigation are the visible Photo controls; every
-  // supporting action moved into a real modal and stays reachable there.
-  for (const name of ["Select", "Reject", "Previous", "Next"])
-    await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
+  await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
+  await expect(
+    page.getByRole("button", { name: "Back to Grid", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "More", exact: true }),
+  ).toBeVisible();
   await openPhotoToolsView(page, "details");
   await expect(
     page.getByText("JPEG · limited detail", { exact: true }),
@@ -69,7 +67,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   ])
     await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
   await returnToPhotoTools(page);
-  for (const name of ["Clear", "Undo"])
+  for (const name of ["Clear flag", "Undo"])
     await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
   await openRatingChoices(page);
   await expect(
@@ -77,14 +75,16 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   ).toBeVisible();
   // The decision acts on the Photo, so both surfaces close for it.
   await closePhotoSurfaces(page);
+  await openPhotoToolsView(page, "tools");
+  await page.getByRole("button", { name: "Pick", exact: true }).click();
+  await expect(page.locator("[data-selection]")).toHaveText("Picked");
+  await expect(page.getByText("1 / 2")).toBeVisible();
   await actionWithProgress(page, albumId, () =>
-    page.getByRole("button", { name: "Select" }).click(),
+    page.getByRole("button", { name: "Next", exact: true }).click(),
   );
   await expect(page.getByText("2 / 2")).toBeVisible();
-  // The advanced Photo is the saved Album position.
-  await expect
-    .poll(async () => (await state(running.url, albumId)).position)
-    .toBe(1);
+  // More review actions change state in place; explicit Next advances the
+  // Album position that the restart below verifies.
 
   await page.goto("about:blank");
   await running.close();
@@ -100,9 +100,88 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   );
   await expect(page.getByText("2 / 2")).toBeVisible();
   await actionWithProgress(page, albumId, () =>
-    page.getByRole("button", { name: "Previous" }).click(),
+    page.keyboard.press("ArrowLeft"),
   );
-  await expect(page.locator("[data-selection]")).toHaveText("Selected");
+  await expect(page.locator("[data-selection]")).toHaveText("Picked");
+});
+
+test("Photo View gestures navigate and cycle state while More owns one review sheet", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 3);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+
+  for (const selector of [
+    "[data-dock-select]",
+    "[data-dock-reject]",
+    "[data-dock-rating]",
+    "[data-dock-previous]",
+    "[data-dock-next]",
+  ])
+    await expect(page.locator(selector)).toBeHidden();
+  await expect(
+    page.getByRole("button", { name: "Back to Grid" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "More", exact: true }).click();
+  const tools = page.locator("[data-photo-tools]");
+  await expect(tools).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Pick", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Previous", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Next", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(page.locator("[data-position]")).toHaveText("2 / 3");
+  await page.getByRole("button", { name: "More", exact: true }).click();
+  await page.getByRole("button", { name: "Previous", exact: true }).click();
+  await expect(page.locator("[data-position]")).toHaveText("1 / 3");
+  await page.getByRole("button", { name: "More", exact: true }).click();
+  await expect(tools).toBeVisible();
+  await page.getByRole("button", { name: "Rating", exact: true }).click();
+  await expect(page.locator("[data-photo-tools-view='rating']")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Rate 5 stars", exact: true }),
+  ).toBeVisible();
+  await expect(page.locator("[data-rating-choices]")).toHaveCount(0);
+  await returnToPhotoTools(page);
+  await closePhotoTools(page);
+
+  const swipe = async (dx: number, dy: number) => {
+    const box = await page.locator("[data-preview]").boundingBox();
+    if (!box) throw new Error("Preview has no geometry");
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + dx, y + dy, { steps: 4 });
+    await page.mouse.up();
+  };
+
+  await swipe(-140, 0);
+  await expect(page.locator("[data-position]")).toHaveText("2 / 3");
+  const picked = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      /\/state(?:\?|$)/.test(new URL(response.url()).pathname),
+  );
+  await swipe(0, -140);
+  await picked;
+  await expect(page.locator("[data-selection]")).toHaveText("Picked");
+  const cleared = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      /\/state(?:\?|$)/.test(new URL(response.url()).pathname),
+  );
+  await swipe(0, 140);
+  await cleared;
+  await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
 });
 
 test("Preview zoom is explicit, bounded, and never records a decision", async ({
@@ -259,7 +338,7 @@ test("Preview zoom is explicit, bounded, and never records a decision", async ({
   // Changing Photo resets the zoom state to Fit. Navigating is a background
   // action, so the disclosure closes for it.
   await closePhotoTools(page);
-  await page.getByRole("button", { name: "Next" }).click();
+  await page.keyboard.press("ArrowRight");
   await expect(page.getByText("2 / 2")).toBeVisible();
   await waitForLoadedReviewImage(page);
   await expect(preview).toHaveAttribute("data-zoom-state", "fit");
@@ -340,7 +419,7 @@ test("Photo View shows a bounded filmstrip of neighbors and navigates through it
   expect(windows.requested).toEqual([]);
   await expect(page.locator("[data-photo-filename]")).toHaveText("004.jpg");
   await waitForLoadedReviewImage(page);
-  await expect(page.locator("[data-selection]")).toHaveText("Undecided");
+  await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
   await expect(page.locator("[data-preview]")).toHaveAttribute(
     "data-zoom-state",
     "fit",

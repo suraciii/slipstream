@@ -50,9 +50,10 @@ function fixture() {
   let surface = {};
   let enabled = true;
   let manual = false;
+  let selectionState: "unflagged" | "picked" | "rejected" = "unflagged";
+  let candidate: number | undefined = 4;
   let pinch = false;
   let wheel = false;
-  let candidate: number | undefined = 4;
   let panX = 0;
   const pointers = new Set<number>();
   const writes: LibraryBrowserIntent[] = [];
@@ -105,6 +106,7 @@ function fixture() {
     rating,
     isAlive: () => true,
     currentPhotoId: () => photoId,
+    currentSelectionState: () => selectionState,
     currentSurface: () => surface,
     decisionEnabled: () => enabled,
     send: (intent) => writes.push(intent),
@@ -152,6 +154,9 @@ function fixture() {
     manual() {
       manual = true;
     },
+    setSelection(value: "unflagged" | "picked" | "rejected") {
+      selectionState = value;
+    },
     noCandidate() {
       candidate = undefined;
     },
@@ -184,7 +189,7 @@ test("Rating hold boundary and release submit exactly once", () => {
   }
 });
 
-test("movement beyond the hold boundary hands equal-axis motion to native scrolling", () => {
+test("equal-axis vertical swipe cycles the current Selection State", () => {
   const f = fixture();
   try {
     f.pointer("pointerdown", 0);
@@ -194,13 +199,20 @@ test("movement beyond the hold boundary hands equal-axis motion to native scroll
     f.pointer("pointerup", 90, 90);
     expect(f.wheel).toBe(false);
     expect(f.stage.style.transform).toBe("");
-    expect(f.writes).toEqual([]);
+    expect(f.writes).toEqual([
+      {
+        kind: "photo-mutation",
+        field: "selectionState",
+        value: "rejected",
+        advance: false,
+      },
+    ]);
   } finally {
     f.dispose();
   }
 });
 
-test("below-threshold swipe returns to origin; committed swipe records one decision", () => {
+test("below-threshold swipe returns to origin; committed swipe navigates", () => {
   const f = fixture();
   try {
     f.pointer("pointerdown", 0);
@@ -210,18 +222,39 @@ test("below-threshold swipe returns to origin; committed swipe records one decis
     expect(f.writes).toEqual([]);
     expect(f.stage.style.transform).toBe("");
     f.pointer("pointerdown", 0);
-    f.pointer("pointermove", 80);
+    f.pointer("pointermove", -80);
     f.advance(500);
-    f.pointer("pointerup", 80);
-    f.pointer("pointerup", 80);
+    f.pointer("pointerup", -80);
+    expect(f.writes).toEqual([{ kind: "next" }]);
+  } finally {
+    f.dispose();
+  }
+});
+
+test("vertical swipe cycles Selection State on the current Photo", () => {
+  const f = fixture();
+  try {
+    f.pointer("pointerdown", 100, 120);
+    f.pointer("pointermove", 100, 40);
+    f.pointer("pointerup", 100, 40);
     expect(f.writes).toEqual([
       {
         kind: "photo-mutation",
         field: "selectionState",
-        value: "selected",
-        advance: true,
+        value: "picked",
+        advance: false,
       },
     ]);
+    f.setSelection("picked");
+    f.pointer("pointerdown", 100, 40);
+    f.pointer("pointermove", 100, 120);
+    f.pointer("pointerup", 100, 120);
+    expect(f.writes.at(-1)).toEqual({
+      kind: "photo-mutation",
+      field: "selectionState",
+      value: "unflagged",
+      advance: false,
+    });
   } finally {
     f.dispose();
   }

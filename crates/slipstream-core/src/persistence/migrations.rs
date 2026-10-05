@@ -5,6 +5,8 @@ use super::{
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::collections::{HashMap, HashSet};
 
+#[path = "migrations_v14.rs"]
+mod migrations_v14;
 const SCHEMA_V1_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v1.sql");
 /// Issue #472: identifies the RAW Preview decoder generation that persists
 /// unavailable facts. An unavailable RAW Preview recorded by a previous
@@ -18,7 +20,7 @@ pub(super) fn preflight_schema(
     connection: &Connection,
     canonical_root: &str,
 ) -> Result<(), PersistenceError> {
-    preflight_schema_for_max_version(connection, canonical_root, 14)
+    preflight_schema_for_max_version(connection, canonical_root, 15)
 }
 
 pub(super) fn preflight_schema_for_max_version(
@@ -64,6 +66,8 @@ pub(super) fn preflight_schema_for_max_version(
             .map_err(|_| PersistenceError::UnsupportedSchema),
         14 => validate_canonical_schema(connection, SchemaVersion::V14)
             .map_err(|_| PersistenceError::UnsupportedSchema),
+        15 => validate_canonical_schema(connection, SchemaVersion::V15)
+            .map_err(|_| PersistenceError::UnsupportedSchema),
         _ => unreachable!(),
     }
 }
@@ -100,11 +104,17 @@ pub(super) fn startup_schema(
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| PersistenceError::Storage)?;
-    if version > 14 {
+    if version > 15 {
         return Err(PersistenceError::NewerSchema);
     }
     validate_root_binding(connection, canonical_root)?;
     state.admit_sidecars(database_name)?;
+    let rebuild_selection_state = version < 15;
+    if rebuild_selection_state {
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .map_err(|_| PersistenceError::Storage)?;
+    }
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| PersistenceError::Storage)?;
@@ -161,6 +171,8 @@ pub(super) fn startup_schema(
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
         14 => validate_canonical_schema(&transaction, SchemaVersion::V14)
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
+        15 => validate_canonical_schema(&transaction, SchemaVersion::V15)
+            .map_err(|_| PersistenceError::UnsupportedSchema)?,
         _ => unreachable!(),
     }
     if version < 6 {
@@ -189,6 +201,9 @@ pub(super) fn startup_schema(
     }
     if version < 14 {
         migrate_v13(&transaction)?;
+    }
+    if version < 15 {
+        migrations_v14::migrate_v14(&transaction)?;
     }
     let stored: Option<String> = transaction
         .query_row(
@@ -241,9 +256,17 @@ pub(super) fn startup_schema(
     }
     super::composable_recipe::migrate_legacy_recipes(&transaction)?;
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V14)
+    validate_canonical_schema(&transaction, SchemaVersion::V15)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
-    transaction.commit().map_err(|_| PersistenceError::Storage)
+    transaction
+        .commit()
+        .map_err(|_| PersistenceError::Storage)?;
+    if rebuild_selection_state {
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .map_err(|_| PersistenceError::Storage)?;
+    }
+    Ok(())
 }
 
 fn migrate_v0(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
@@ -1110,30 +1133,7 @@ mod tests {
         expected_error: String,
     }
 
-    #[tokio::test]
-    async fn initializes_current_schema_and_runs_fifo_writes() {
-        let (_base, library, state, name, path) = fixture();
-        let persistence = Persistence::open(
-            state,
-            name,
-            library.canonical_path().to_string_lossy().into_owned(),
-        )
-        .unwrap();
-        assert_eq!(persistence.probe().await.unwrap(), 1);
-        persistence.write_probe().await.unwrap();
-        assert_eq!(persistence.probe().await.unwrap(), 3);
-        let (configuration_send, configuration_receive) = oneshot::channel();
-        persistence
-            .submit(Command::Configuration(configuration_send))
-            .unwrap();
-        assert_eq!(
-            configuration_receive.await.unwrap().unwrap(),
-            ("delete".to_owned(), 1)
-        );
-        persistence.shutdown().unwrap();
-        let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V14).unwrap();
-    }
+    include!("migrations_v15_tests.rs");
 
     #[tokio::test]
     async fn v6_to_v7_migration_preserves_existing_library_rows() {
@@ -1203,7 +1203,7 @@ mod tests {
         assert_eq!(snapshot.originals[0].facts.size, 17);
         assert_eq!(snapshot.photos.len(), 1);
         assert_eq!(snapshot.photos[0].id, "raw-photo");
-        assert_eq!(snapshot.photos[0].selection_state, SelectionState::Selected);
+        assert_eq!(snapshot.photos[0].selection_state, SelectionState::Picked);
         assert_eq!(snapshot.photos[0].rating, 4);
         assert!(!snapshot.photos[0].has_saved_edits);
         assert_eq!(
@@ -1212,12 +1212,12 @@ mod tests {
         );
         persistence.shutdown().unwrap();
         let connection = Connection::open(&path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V14).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V15).unwrap();
         assert_eq!(
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            14
+            15
         );
         assert_eq!(
             connection
@@ -1338,9 +1338,9 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            14
+            15
         );
-        validate_canonical_schema(&connection, SchemaVersion::V14).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V15).unwrap();
         // The legacy photo-set tables are gone rather than left as aliases.
         for legacy in ["photo_sets", "photo_set_members", "review_progress"] {
             assert!(!table_exists(&connection, legacy).unwrap(), "{legacy}");
@@ -1349,15 +1349,15 @@ mod tests {
     // album-language-legacy:end v4-migration-test
 
     #[test]
-    fn newer_v15_database_is_rejected_without_changes() {
+    fn newer_v16_database_is_rejected_without_changes() {
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
-            include_str!("../../../../compatibility/sqlite/schema-v5.sql"),
+            include_str!("../../../../compatibility/sqlite/schema-v15.sql"),
         );
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 15)
+            .pragma_update(None, "user_version", 16)
             .unwrap();
         let before = fs::read(&path).unwrap();
         assert!(matches!(
@@ -1430,8 +1430,8 @@ mod tests {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
-        validate_canonical_schema(&connection, SchemaVersion::V14).unwrap();
+        assert_eq!(version, 15);
+        validate_canonical_schema(&connection, SchemaVersion::V15).unwrap();
         let (state, order_key, source_revision, identity_state, make, model): (
             String,
             String,
@@ -1503,10 +1503,10 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            14
+            15
         );
         assert!(table_exists(&connection, "development_proxies").unwrap());
-        validate_canonical_schema(&connection, SchemaVersion::V14).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V15).unwrap();
     }
 
     #[test]
@@ -1587,7 +1587,7 @@ mod tests {
                 None,
                 None,
                 None,
-                "selected".to_owned(),
+                "picked".to_owned(),
                 4
             )
         );
@@ -1711,7 +1711,7 @@ mod tests {
             .unwrap();
             persistence.shutdown().unwrap();
             let connection = Connection::open(&path).unwrap();
-            validate_canonical_schema(&connection, SchemaVersion::V14).unwrap();
+            validate_canonical_schema(&connection, SchemaVersion::V15).unwrap();
         }
         let (_base, library, state, name, path) = fixture();
         seed(
@@ -1849,7 +1849,7 @@ mod tests {
         assert_eq!(photo.preview_height, Some(4));
         assert_eq!(photo.cache_revision.as_deref(), Some("cache-revision"));
         assert_eq!(photo.sort_path, "shoot/A.JPG");
-        assert_eq!(photo.selection_state, SelectionState::Selected);
+        assert_eq!(photo.selection_state, SelectionState::Picked);
         assert_eq!(photo.rating, 5);
         let original = &snapshot.originals[0];
         assert_eq!(original.id, original_id);
@@ -1878,12 +1878,12 @@ mod tests {
         assert_eq!(album.members[0].photo_id, photo_id);
         assert_eq!(album.members[0].position, 0);
         assert!(album.members[0].available);
-        assert_eq!(album.members[0].selection_state, SelectionState::Selected);
+        assert_eq!(album.members[0].selection_state, SelectionState::Picked);
         assert_eq!(album.members[0].rating, 5);
         assert_eq!(album.last_reviewed_photo_id.as_deref(), Some(photo_id));
         persistence.shutdown().unwrap();
         let connection = Connection::open(&path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V14).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V15).unwrap();
     }
     // album-language-legacy:end v3-migration-test
 
@@ -2155,7 +2155,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(snapshot.photos[0].id, "stable-photo");
-        assert_eq!(snapshot.photos[0].selection_state, SelectionState::Selected);
+        assert_eq!(snapshot.photos[0].selection_state, SelectionState::Picked);
         assert_eq!(snapshot.photos[0].rating, 5);
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
@@ -2241,7 +2241,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            14
+            15
         );
         assert_eq!(
             connection
@@ -2324,9 +2324,9 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            14
+            15
         );
-        validate_canonical_schema(&connection, SchemaVersion::V14).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V15).unwrap();
         assert_eq!(
             connection
                 .query_row(
@@ -2388,7 +2388,7 @@ mod tests {
             (
                 "raw-photo".to_owned(),
                 "shoot/one.ARW".to_owned(),
-                "selected".to_owned(),
+                "picked".to_owned(),
                 4,
                 1,
             )

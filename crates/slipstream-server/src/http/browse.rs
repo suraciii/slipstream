@@ -94,8 +94,8 @@ pub(crate) async fn open_browse(
     };
     let selection = match body.selection.as_deref() {
         None | Some("all") => BrowseSelectionFilter::All,
-        Some("undecided") => BrowseSelectionFilter::Undecided,
-        Some("selected") => BrowseSelectionFilter::Selected,
+        Some("unflagged") => BrowseSelectionFilter::Unflagged,
+        Some("picked") => BrowseSelectionFilter::Picked,
         Some("rejected") => BrowseSelectionFilter::Rejected,
         Some(_) => return api_error(StatusCode::BAD_REQUEST, "Invalid browse selection"),
     };

@@ -2,12 +2,12 @@ import type { ModalSurfaces } from "./modal-surface.js";
 
 export type PhotoToolsView =
   | "tools"
+  | "rating"
   | "edit"
   | "albums"
   | "details"
   | "zoom"
   | "nearby";
-
 export interface PhotoToolsController {
   view(): PhotoToolsView;
   isNearbyOpen(): boolean;
@@ -27,6 +27,7 @@ export function createPhotoToolsController({
   syncSecondarySurface,
   openSources,
   openEditor,
+  navigate,
 }: Readonly<{
   elements: Readonly<{
     photoToolsDialog: HTMLDialogElement;
@@ -43,6 +44,7 @@ export function createPhotoToolsController({
   syncSecondarySurface: () => void;
   openSources: () => void;
   openEditor: (photoId: string) => void;
+  navigate: (direction: "previous" | "next") => void;
 }>): PhotoToolsController {
   const {
     photoToolsDialog,
@@ -62,15 +64,17 @@ export function createPhotoToolsController({
     photoToolsTitle.textContent =
       currentView === "tools"
         ? "Photo tools"
-        : currentView === "nearby"
-          ? "Nearby Photos"
-          : currentView === "zoom"
-            ? "Preview Zoom"
-            : currentView === "albums"
-              ? "Albums"
-              : currentView === "details"
-                ? "Details"
-                : "Edit";
+        : currentView === "rating"
+          ? "Rating"
+          : currentView === "nearby"
+            ? "Nearby Photos"
+            : currentView === "zoom"
+              ? "Preview Zoom"
+              : currentView === "albums"
+                ? "Albums"
+                : currentView === "details"
+                  ? "Details"
+                  : "Edit";
   };
 
   const onClose = (): void => {
@@ -99,9 +103,14 @@ export function createPhotoToolsController({
         "[data-photo-tools-entry]",
       );
       if (!button) return;
+      const entry = button.dataset.photoToolsEntry;
+      if (entry === "previous" || entry === "next") {
+        close(false);
+        navigate(entry);
+        return;
+      }
       const photoId = currentPhotoId();
       if (!photoId) return;
-      const entry = button.dataset.photoToolsEntry;
       if (entry === "sources") {
         openSources();
         return;
@@ -111,6 +120,7 @@ export function createPhotoToolsController({
         return;
       }
       if (
+        entry === "rating" ||
         entry === "albums" ||
         entry === "details" ||
         entry === "zoom" ||

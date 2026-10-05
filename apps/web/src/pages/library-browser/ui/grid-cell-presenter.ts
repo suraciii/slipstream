@@ -1,4 +1,4 @@
-export type GridSelectionState = "undecided" | "selected" | "rejected";
+export type GridSelectionState = "unflagged" | "picked" | "rejected";
 
 export type GridPhotoPreview = Readonly<{
   state: "inspection-pending" | "ready" | "unavailable" | "failed";
@@ -60,11 +60,11 @@ const GRID_CELL_GAP_X = 10;
 const LOADING_CELL_SIGNATURE = "loading";
 
 function selectionLabel(value: GridSelectionState): string {
-  return value === "selected"
-    ? "Selected"
+  return value === "picked"
+    ? "Picked"
     : value === "rejected"
       ? "Rejected"
-      : "Undecided";
+      : "Unflagged";
 }
 
 function gridPhotoFacts(
@@ -237,13 +237,13 @@ export function createGridCellPresenter(options: GridCellPresenterOptions) {
     presentFacts();
     rendered.signature = gridCellSignature(index, photo, false);
 
-    if (photo.selectionState === "undecided") {
+    if (photo.selectionState === "unflagged") {
       caption.classList.add("cell-caption-wide");
       footer.append(caption, facts);
     } else {
       const badge = document.createElement("span");
       badge.className = `cell-state ${photo.selectionState}`;
-      badge.textContent = photo.selectionState === "selected" ? "✓" : "×";
+      badge.textContent = photo.selectionState === "picked" ? "✓" : "×";
       footer.append(badge, caption, facts);
     }
     cell.append(media, footer);

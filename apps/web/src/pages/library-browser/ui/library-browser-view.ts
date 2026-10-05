@@ -56,7 +56,7 @@ import {
   addressFor,
   type NavigationGridRestoration,
 } from "../model/browser-navigation.js";
-import { PHOTO_EDITOR_TEMPLATE } from "./photo-editor-template.js";
+import { PHOTO_TOOLS_TEMPLATE } from "./photo-tools-template.js";
 import type { EditorIntent, EditorViewModel } from "./editor-view-contract.js";
 import type { RecoveryApplyMapping } from "../model/recovery-review.js";
 export type {
@@ -77,7 +77,7 @@ export type {
   RecoveryPagingViewModel,
 } from "./recovery-view-models.js";
 
-export type ViewSelectionState = "undecided" | "selected" | "rejected";
+export type ViewSelectionState = "unflagged" | "picked" | "rejected";
 type SourceReference =
   | Readonly<{ kind: "library" }>
   | Readonly<{ kind: "album"; id: string }>
@@ -122,9 +122,9 @@ export type GridProgressViewModel = Readonly<{
   visible: boolean;
   visibleTotal: number;
   sourceTotal: number;
-  selected: number;
+  picked: number;
   rejected: number;
-  undecided: number;
+  unflagged: number;
 }>;
 
 export type {
@@ -572,72 +572,30 @@ export function createLibraryBrowserView(
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
           <header class="grid-header"><div class="grid-header-row"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false"><span class="source-toggle-name" data-grid-compact-title>All Photos</span><span class="source-toggle-indicator" aria-hidden="true">▾</span></button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-connection" data-grid-connection role="status" hidden></p><div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options>Options</button><span class="options-flag" data-view-options-flag hidden></span><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button><button type="button" class="quiet" data-removal-open hidden>Remove rejected Photos</button><button type="button" class="quiet" data-removed-open>Trash</button></div><div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
-          <div class="grid-batch" data-grid-batch hidden><div class="grid-batch-result" data-grid-batch-result hidden><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-select>Select</button><button type="button" data-batch-reject>Reject</button><label for="batch-album-select">Add to</label><select id="batch-album-select" data-batch-album-select></select><button type="button" data-batch-album-add>Add to Album</button></div></div>
+          <div class="grid-batch" data-grid-batch hidden><div class="grid-batch-result" data-grid-batch-result hidden><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-select>Pick</button><button type="button" data-batch-reject>Reject</button><label for="batch-album-select">Add to</label><select id="batch-album-select" data-batch-album-select></select><button type="button" data-batch-album-add>Add to Album</button></div></div>
         </section>
         <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
-          <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div class="photo-identity"><h2 id="photo-title" data-photo-title>Photo</h2><p class="photo-filename" data-photo-filename>—</p></div><div class="photo-header-actions"><button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><p class="photo-connection" data-photo-connection role="status" hidden></p><button type="button" class="quiet" data-retry-photo hidden>Retry</button></div></header>
+          <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div class="photo-identity"><h2 id="photo-title" data-photo-title>Photo</h2><p class="photo-filename" data-photo-filename>—</p></div><div class="photo-header-actions"><button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false" hidden>Sources</button><p class="photo-connection" data-photo-connection role="status" hidden></p><button type="button" class="quiet" data-retry-photo hidden>Retry</button></div></header>
           <section class="preview" data-preview aria-label="Photo Preview">
-            <div class="swipe-feedback reject" data-reject-feedback>Reject</div>
-            <div class="image-stage" data-stage><p>Loading Preview…</p></div>
-            <div class="swipe-feedback select" data-select-feedback>Select</div>
+            <div class="swipe-feedback reject" data-reject-feedback role="status" aria-live="polite">Previous</div>
+            <div class="image-stage" data-stage></div>
+            <div class="swipe-feedback select" data-select-feedback role="status" aria-live="polite">Next</div>
             <div class="rating-wheel" data-rating-wheel hidden role="dialog" aria-label="Rating Wheel" aria-describedby="rating-wheel-instructions">
               <p class="rating-wheel-instructions" id="rating-wheel-instructions" data-rating-wheel-instructions>Move across a Rating and release to save.</p>
               <p class="rating-wheel-status" data-rating-wheel-status role="status" aria-live="polite"></p>
               <div class="rating-wheel-options" data-rating-wheel-options role="group" aria-label="Rating choices"></div>
             </div>
           </section>
-          <div class="photo-navigation" data-photo-navigation role="group" aria-label="Photo navigation"><button type="button" class="quiet" data-dock-previous>Previous</button><p class="photo-position" data-position>0 / 0</p><button type="button" class="quiet" data-dock-next>Next</button></div>
+          <div class="photo-navigation" data-photo-navigation role="group" aria-label="Photo navigation"><button type="button" class="quiet" data-dock-previous hidden>Previous</button><p class="photo-position" data-position>0 / 0</p><button type="button" class="quiet" data-dock-next hidden>Next</button></div>
           <div class="filmstrip-host" data-filmstrip-host><div class="filmstrip" data-filmstrip role="group" aria-label="Neighbor Photos" hidden></div></div>
-          <section class="review-bar" aria-label="Photo review"><div class="review-state"><dl class="facts"><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>No rating</dd></div></dl><p class="status" data-status role="status" aria-live="polite"></p></div></section>
-          <div class="quick-action-dock" data-quick-action-dock role="toolbar" aria-label="Quick Photo actions">
-            <button type="button" class="reject-button" data-dock-reject>Reject</button>
-            <button type="button" class="rating-dock-button" data-dock-rating aria-controls="rating-choices" aria-expanded="false">Rating</button>
-            <button type="button" class="select-button" data-dock-select>Select</button>
+          <section class="review-bar" aria-label="Photo review"><button type="button" class="selection-badge" data-selection aria-controls="photo-tools-panel" aria-expanded="false" aria-label="Selection State: Unflagged">Unflagged</button><span data-rating hidden>No rating</span><p class="status" data-status role="status" aria-live="polite"></p></section>
+          <div class="quick-action-dock" data-quick-action-dock role="toolbar" aria-label="Photo actions">
+            <button type="button" class="reject-button" data-dock-reject hidden>Reject</button>
+            <button type="button" class="rating-dock-button" data-dock-rating hidden aria-controls="rating-choices" aria-expanded="false">Rating</button>
+            <button type="button" class="select-button" data-dock-select hidden>Pick</button>
             <button type="button" class="quiet" data-dock-more aria-controls="photo-tools-panel" aria-expanded="false">More</button>
           </div>
-          <dialog class="photo-tools-dialog" data-photo-tools aria-labelledby="photo-tools-title">
-            <div class="photo-tools-sheet" id="photo-tools-panel">
-              <header class="photo-tools-header"><h2 id="photo-tools-title" data-photo-tools-title>Photo tools</h2><button type="button" class="quiet" data-photo-tools-close>Close</button></header>
-              <div class="photo-tools-body">
-                <div class="photo-tools-view" data-photo-tools-view="tools">
-                  <div class="photo-tools-actions" aria-label="Photo actions"><button type="button" class="quiet" data-photo-tools-clear>Clear</button><button type="button" class="quiet" data-photo-tools-undo disabled>Undo</button></div>
-                  <div class="photo-tools-entries" data-photo-tools-entries role="group" aria-label="Photo tools"><button type="button" data-photo-tools-entry="edit">Edit</button><button type="button" data-photo-tools-entry="albums">Albums</button><button type="button" data-photo-tools-entry="details">Details</button><button type="button" data-photo-tools-entry="zoom">Preview Zoom</button><button type="button" data-photo-tools-entry="nearby">Nearby Photos</button><button type="button" data-photo-tools-entry="sources">Sources</button></div>
-                </div>
-${PHOTO_EDITOR_TEMPLATE}
-                <div class="photo-tools-view" id="photo-tools-view-albums" data-photo-tools-view="albums" hidden>
-                  <header class="photo-tools-view-header"><h3>Albums</h3><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
-                  <div class="membership" data-membership aria-label="Album membership"><div class="membership-facts"><p class="membership-heading">Albums</p><p class="membership-status" data-membership-status role="status">Loading Albums…</p><ul class="membership-list" data-membership-list hidden></ul><p class="membership-message" data-membership-message role="alert" hidden></p><div class="membership-actions"><button type="button" class="quiet" data-membership-manage aria-expanded="false" aria-controls="membership-panel">Manage</button><button type="button" data-membership-retry hidden>Retry Albums</button></div></div><div class="membership-panel" id="membership-panel" data-membership-panel hidden><div class="membership-options" data-membership-options></div></div></div>
-                </div>
-                <div class="photo-tools-view" id="photo-tools-view-details" data-photo-tools-view="details" hidden>
-                  <header class="photo-tools-view-header"><h3>Details</h3><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
-                  <div class="photo-tools-facts" data-metadata aria-label="Capture details"><strong>Capture Details</strong><dl><div><dt>Captured</dt><dd data-metadata-capture-time>—</dd></div><div><dt>Aperture</dt><dd data-metadata-aperture>—</dd></div><div><dt>ISO</dt><dd data-metadata-iso>—</dd></div><div><dt>Shutter</dt><dd data-metadata-shutter-speed>—</dd></div><div><dt>Focal Length</dt><dd data-metadata-focal-length>—</dd></div></dl></div>
-                  <p class="photo-tools-preview"><span class="photo-tools-preview-label">Preview Source</span><span data-source>—</span><span class="photo-tools-detail-limit" data-detail-limit hidden>Limited by camera Preview resolution</span></p>
-                  <div class="external-metadata" data-external-metadata aria-label="External Metadata"></div>
-                </div>
-                <div class="photo-tools-view" id="photo-tools-view-zoom" data-photo-tools-view="zoom" hidden>
-                  <header class="photo-tools-view-header"><h3>Preview Zoom</h3><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
-                  <div class="photo-tools-zoom" data-zoom-controls role="group" aria-label="Preview zoom">
-                    <button type="button" class="zoom-control" data-zoom-fit aria-pressed="true" aria-label="Fit Window">Fit Window</button>
-                    <button type="button" class="zoom-control zoom-step" data-zoom-out aria-label="Zoom out">−</button>
-                    <input class="zoom-slider" type="range" data-zoom-slider min="10" max="800" step="1" value="100" aria-label="Zoom percentage" />
-                    <button type="button" class="zoom-control zoom-step" data-zoom-in aria-label="Zoom in">+</button>
-                    <span class="zoom-level" data-zoom-level>—</span>
-                    <button type="button" class="zoom-control" data-zoom-100 aria-label="Zoom to 100 percent">100%</button>
-                  </div>
-                </div>
-                <div class="photo-tools-view" id="photo-tools-view-nearby" data-photo-tools-view="nearby" hidden>
-                  <header class="photo-tools-view-header"><h3>Nearby Photos</h3><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
-                  <div class="filmstrip-tools" data-filmstrip-tools></div>
-                </div>
-              </div>
-            </div>
-          </dialog>
-          <dialog class="rating-dialog" id="rating-choices" data-rating-choices aria-labelledby="rating-choices-title">
-            <div class="rating-sheet">
-              <header class="rating-header"><h2 id="rating-choices-title">Rating</h2><button type="button" class="quiet" data-rating-choices-close>Close</button></header>
-              <fieldset class="rating-controls"><legend>Rating</legend><div data-ratings></div></fieldset>
-            </div>
-          </dialog>
+${PHOTO_TOOLS_TEMPLATE}
         </section>
         <dialog class="options-dialog" data-view-options aria-labelledby="view-options-title">
           <div class="options-sheet">
@@ -1028,6 +986,7 @@ ${RECOVERY_PANEL_TEMPLATE}
   const filmstripTools = required<HTMLElement>(root, "[data-filmstrip-tools]");
   const rating = required<HTMLElement>(root, "[data-rating]");
   const retryPhoto = required<HTMLButtonElement>(root, "[data-retry-photo]");
+  const selectionBadge = required<HTMLButtonElement>(root, "[data-selection]");
   const back = required<HTMLButtonElement>(root, "[data-back]");
   const dockPrevious = required<HTMLButtonElement>(
     root,
@@ -1058,6 +1017,14 @@ ${RECOVERY_PANEL_TEMPLATE}
     root,
     "[data-photo-tools-undo]",
   );
+  const photoToolsPick = required<HTMLButtonElement>(
+    root,
+    "[data-photo-tools-pick]",
+  );
+  const photoToolsReject = required<HTMLButtonElement>(
+    root,
+    "[data-photo-tools-reject]",
+  );
   const photoToolsEntries = required<HTMLElement>(
     root,
     "[data-photo-tools-entries]",
@@ -1067,14 +1034,6 @@ ${RECOVERY_PANEL_TEMPLATE}
   );
   const photoToolsReturnButtons = Array.from(
     root.querySelectorAll<HTMLButtonElement>("[data-photo-tools-return]"),
-  );
-  const ratingDialog = required<HTMLDialogElement>(
-    root,
-    "[data-rating-choices]",
-  );
-  const ratingChoicesClose = required<HTMLButtonElement>(
-    root,
-    "[data-rating-choices-close]",
   );
   const ratings = required<HTMLElement>(root, "[data-ratings]");
   const selectFeedback = required<HTMLElement>(root, "[data-select-feedback]");
@@ -1115,14 +1074,10 @@ ${RECOVERY_PANEL_TEMPLATE}
   /// The disclosure state of the two Photo View entries mirrors the active
   /// surface, so every supporting-surface transition updates both controls.
   const syncSecondarySurface = () => {
-    dockMore.setAttribute(
-      "aria-expanded",
-      String(surfaces.isActive("photo-tools")),
-    );
-    dockRating.setAttribute(
-      "aria-expanded",
-      String(surfaces.isActive("rating")),
-    );
+    const toolsOpen = surfaces.isActive("photo-tools");
+    dockMore.setAttribute("aria-expanded", String(toolsOpen));
+    selectionBadge.setAttribute("aria-expanded", String(toolsOpen));
+    dockRating.setAttribute("aria-expanded", String(toolsOpen));
   };
   const recoveryPanelController = createRecoveryPanel({
     elements: recoveryPanelElements(root),
@@ -1263,17 +1218,15 @@ ${RECOVERY_PANEL_TEMPLATE}
     send,
     applyMultiSelection: () => gridPresenter.applyMulti(),
   });
-  /// Opens the explicit Rating choices. Only this surface or the Rating entry
-  /// owns explicit Rating interaction at one time; the Rating Wheel stays the
-  /// touch accelerator on the Preview.
+  /// Opens the Rating view inside the single Photo tools sheet. The Rating
+  /// Wheel remains the touch accelerator on the Preview.
   const openRatingChoices = () => {
     if (!alive || photoView.hidden) return;
-    resetGestures();
-    ratingControls.openChoices();
+    photoToolsController.open("rating");
   };
   const closeRatingChoices = (restoreFocus = true) => {
     if (!alive) return;
-    ratingControls.closeChoices(restoreFocus);
+    photoToolsController.close(restoreFocus);
   };
   const setGridThumbnailSize = (size: "small" | "medium" | "large") =>
     gridPresenter.setSize(size);
@@ -1295,6 +1248,7 @@ ${RECOVERY_PANEL_TEMPLATE}
     syncSecondarySurface,
     openSources: () => sourceController.open(),
     openEditor: (photoId) => editorController.open(photoId),
+    navigate: (direction) => send({ kind: direction }),
   });
   const editorController = createPhotoEditorSurfaceController({
     root,
@@ -1307,8 +1261,6 @@ ${RECOVERY_PANEL_TEMPLATE}
   });
   const ratingControls = createRatingControls({
     elements: {
-      ratingDialog,
-      ratingChoicesClose,
       ratings,
       ratingWheel,
       ratingWheelInstructions,
@@ -1318,9 +1270,7 @@ ${RECOVERY_PANEL_TEMPLATE}
       rating,
       dockRating,
     },
-    surfaces,
     send,
-    onSurfaceChange: syncSecondarySurface,
   });
   const sourceController = createSourceSurfaceController({
     elements: {
@@ -1447,7 +1397,6 @@ ${RECOVERY_PANEL_TEMPLATE}
   const photoPresenter = createPhotoViewPresenter({
     root: photoView,
     zoom: zoomController,
-    renderRating: (value) => ratingControls.render(value),
     resetGestures: () => photoGestures.reset(),
     reviewRecovery: () => send({ kind: "recovery-entry" }),
   });
@@ -1460,6 +1409,7 @@ ${RECOVERY_PANEL_TEMPLATE}
     rating: ratingControls,
     isAlive: () => alive,
     currentPhotoId: () => photoPresenter.currentPhotoId,
+    currentSelectionState: () => photoPresenter.currentSelection,
     currentSurface: () => photoPresenter.photoSurface,
     decisionEnabled: () => decisionInteractionEnabled,
     send,
@@ -1589,6 +1539,7 @@ ${RECOVERY_PANEL_TEMPLATE}
   retry.addEventListener("click", () => send({ kind: "retry-source" }));
   signOut.addEventListener("click", () => send({ kind: "sign-out" }));
   retryPhoto.addEventListener("click", () => send({ kind: "retry-photo" }));
+  selectionBadge.addEventListener("click", () => photoToolsController.open());
   dockPrevious.addEventListener("click", () => send({ kind: "previous" }));
   dockNext.addEventListener("click", () => send({ kind: "next" }));
   dockRating.addEventListener("click", () => openRatingChoices());
@@ -1601,7 +1552,23 @@ ${RECOVERY_PANEL_TEMPLATE}
     send({
       kind: "photo-mutation",
       field: "selectionState",
-      value: "undecided",
+      value: "unflagged",
+      advance: false,
+    }),
+  );
+  photoToolsPick.addEventListener("click", () =>
+    send({
+      kind: "photo-mutation",
+      field: "selectionState",
+      value: "picked",
+      advance: false,
+    }),
+  );
+  photoToolsReject.addEventListener("click", () =>
+    send({
+      kind: "photo-mutation",
+      field: "selectionState",
+      value: "rejected",
       advance: false,
     }),
   );
@@ -1609,7 +1576,7 @@ ${RECOVERY_PANEL_TEMPLATE}
     send({
       kind: "photo-mutation",
       field: "selectionState",
-      value: "selected",
+      value: "picked",
       advance: true,
     }),
   );
@@ -1739,8 +1706,9 @@ ${RECOVERY_PANEL_TEMPLATE}
       ratingControls.setDecisionEnabled(model.decisionEnabled);
       dockSelect.disabled = !model.decisionEnabled;
       dockReject.disabled = !model.decisionEnabled;
+      photoToolsPick.disabled = !model.decisionEnabled;
+      photoToolsReject.disabled = !model.decisionEnabled;
       photoToolsClear.disabled = !model.clearEnabled;
-      back.disabled = !model.backEnabled;
       refresh.disabled = !model.refreshEnabled;
       retry.disabled = !model.recoveryEnabled;
       retryPhoto.disabled = !model.recoveryEnabled;
@@ -1996,9 +1964,9 @@ function required<T extends Element>(root: ParentNode, selector: string): T {
 }
 
 function selectionLabel(value?: ViewSelectionState): string {
-  return value === "selected"
-    ? "Selected"
+  return value === "picked"
+    ? "Picked"
     : value === "rejected"
       ? "Rejected"
-      : "Undecided";
+      : "Unflagged";
 }

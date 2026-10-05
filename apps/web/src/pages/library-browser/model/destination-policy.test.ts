@@ -108,12 +108,12 @@ describe("live destination", () => {
           publication: "pub",
         },
         order: "source-default",
-        selection: "undecided",
+        selection: "unflagged",
       }),
     ).toEqual({
       source: "folder",
       folderPath: "shoot",
-      selection: "undecided",
+      selection: "unflagged",
     });
   });
 

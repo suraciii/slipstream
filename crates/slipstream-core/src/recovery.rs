@@ -732,7 +732,7 @@ fn evaluate_candidate(
                 Some(photo)
                     if !photo.removed
                         && photo.rating == 0
-                        && photo.selection_state == crate::SelectionState::Undecided
+                        && photo.selection_state == crate::SelectionState::Unflagged
                         && !referenced.contains(&photo.id) =>
                 {
                     Some(RetireSummary {

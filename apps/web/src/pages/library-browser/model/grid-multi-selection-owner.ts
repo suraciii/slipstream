@@ -322,7 +322,7 @@ export function createGridMultiSelectionOwner(
       multiMissingIds.add(entry.photoId);
       multiExpectedSelection.delete(entry.photoId);
     }
-    const decision = value === "selected" ? "selected" : "rejected";
+    const decision = value === "picked" ? "Picked" : "Rejected";
     const resumeMessage =
       sourceGrid.kind === "album" ? " Album resume point unchanged." : "";
     for (const entry of persisted.applied)

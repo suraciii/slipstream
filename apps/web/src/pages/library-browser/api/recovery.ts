@@ -19,7 +19,7 @@ export type RecoveryItem = Readonly<{
   location: string;
   kind: "raw" | "jpeg";
   rating: number;
-  selectionState: "undecided" | "selected" | "rejected";
+  selectionState: "unflagged" | "picked" | "rejected";
   fingerprintEnrolled: boolean;
   albumCount: number;
   webUrl: string;
@@ -134,8 +134,8 @@ const validKind = (value: unknown): value is "raw" | "jpeg" =>
 
 const validSelection = (
   value: unknown,
-): value is "undecided" | "selected" | "rejected" =>
-  value === "undecided" || value === "selected" || value === "rejected";
+): value is "unflagged" | "picked" | "rejected" =>
+  value === "unflagged" || value === "picked" || value === "rejected";
 
 const validState = (value: unknown): value is RecoveryItemState =>
   value === "unavailable" ||

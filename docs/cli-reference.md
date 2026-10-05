@@ -155,7 +155,7 @@ cursor kind.
 
 ```text literal
 slipstream photos list [--album ALBUM_ID | --folder LOCATION]
-  [--selection all|undecided|selected|rejected]
+  [--selection all|unflagged|picked|rejected]
   [--rating-min N] [--rating-max N] [--kind raw|jpeg]
   [--available true|false] [--captured-from LOCAL_TIME]
   [--captured-before LOCAL_TIME]
@@ -366,7 +366,7 @@ operation.
 ## Photo Decisions
 
 ```text literal
-slipstream photos set PHOTO_ID --selection undecided|selected|rejected --if-version VERSION
+slipstream photos set PHOTO_ID --selection unflagged|picked|rejected --if-version VERSION
 slipstream photos set PHOTO_ID --rating N --if-version VERSION
 slipstream photos set --input FILE
 ```
@@ -378,7 +378,7 @@ and `photos`; each item has exactly `photoId` and `ifVersion`.
 ```json
 {
   "field": "selectionState",
-  "value": "selected",
+  "value": "picked",
   "photos": [
     {
       "photoId": "00000000-0000-4000-8000-000000000001",
@@ -975,7 +975,7 @@ They are null when no current derivative facts exist. `PhotoItem` contains
 string `id` and `filename`, string `originalId` with the associated Original
 File identity, string `location` with that Original's current Library-relative
 Location, `originalKind` of `raw` or `jpeg`, boolean
-`originalAvailable`, `selectionState` of `undecided`, `selected`, or `rejected`,
+`originalAvailable`, `selectionState` of `unflagged`, `picked`, or `rejected`,
 integer `rating` from 0 through 5, opaque string `decisionVersion`, nullable
 nonnegative integer `removedAtMs`, nullable camera-local string `captureTime`,
 `preview: PreviewFacts`, and absolute HTTP or HTTPS string `webUrl`. A Photo
@@ -1048,8 +1048,8 @@ observed version.
 `RecoveryItem` contains `state` of `unavailable`, `available`, `removed`, or
 `missing`, string `originalId` and `photoId`, string `location` with the
 remembered Library-relative Original Location, `kind` of `raw` or `jpeg`,
-integer `rating` from 0 through 5, `selectionState` of `undecided`, `selected`,
-or `rejected`, boolean `fingerprintEnrolled`, count `albumCount`, and absolute
+`selectionState` of `unflagged`, `picked`, or `rejected`, boolean
+`fingerprintEnrolled`, count `albumCount`, and absolute
 HTTP or HTTPS string `webUrl`. A `missing` item retains the last reviewed
 facts. `fingerprintEnrolled` reports persisted content evidence, and a missing
 fingerprint is never presented as a content match.
@@ -1217,7 +1217,7 @@ IDs and versions and inspects every command result before its dependent step.
 ```sh
 slipstream status
 slipstream albums list --name '26春节'
-slipstream photos list --album 00000000-0000-4000-8000-000000000010 --selection selected --rating-min 4 --order capture-time-asc --limit 60
+slipstream photos list --album 00000000-0000-4000-8000-000000000010 --selection picked --rating-min 4 --order capture-time-asc --limit 60
 slipstream albums create --name '春节精选'
 ```
 

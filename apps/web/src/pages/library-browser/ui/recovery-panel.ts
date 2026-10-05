@@ -99,7 +99,7 @@ export function createRecoveryPanel({
   elements: RecoveryPanelElements;
   send: (intent: RecoveryPanelIntent) => void;
   surfaces: ModalSurfaces;
-  selectionLabel: (value: "undecided" | "selected" | "rejected") => string;
+  selectionLabel: (value: "unflagged" | "picked" | "rejected") => string;
 }>): RecoveryPanel {
   const {
     recoveryNotice,

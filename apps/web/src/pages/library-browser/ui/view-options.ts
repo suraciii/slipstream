@@ -40,8 +40,8 @@ const SORT_OPTIONS: Record<
 
 const FILTER_OPTIONS: ReadonlyArray<ViewOption<ViewSelectionFilter>> = [
   { value: "all", label: "All" },
-  { value: "undecided", label: "Undecided" },
-  { value: "selected", label: "Selected" },
+  { value: "unflagged", label: "Unflagged" },
+  { value: "picked", label: "Picked" },
   { value: "rejected", label: "Rejected" },
 ];
 
@@ -271,7 +271,7 @@ export function createViewOptions({
           : "";
       const sourceText =
         model.visible && model.sourceTotal > 0
-          ? `Source progress: ${model.selected.toLocaleString()} selected · ${model.rejected.toLocaleString()} rejected · ${model.undecided.toLocaleString()} undecided`
+          ? `Source progress: ${model.picked.toLocaleString()} picked · ${model.rejected.toLocaleString()} rejected · ${model.unflagged.toLocaleString()} unflagged`
           : "";
       if (
         visibleText === renderedProgressText &&

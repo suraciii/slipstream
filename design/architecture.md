@@ -175,7 +175,7 @@ The first implementation proves this complete path:
 5. Display all three Photos in a progressively loaded Grid without a complete-Library response.
 6. Display the JPEG Original's own Preview in Photo View.
 7. Extract and display the largest usable embedded JPEG for each RAW Photo.
-8. Right-swipe one Photo to `selected` and left-swipe another to `rejected`.
+8. Swipe up on one Photo to `picked` and down on another to `rejected`.
 9. Set one Rating and undo one decision.
 10. Restart the server and restore cached Previews, the Album, decisions, Rating, and saved position.
 11. Prove that Original File bytes and metadata are unchanged.

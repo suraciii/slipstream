@@ -935,12 +935,12 @@ export function createPhotoOwner(
       if (!record || closed || owner.busy) return undefined;
       const photo = source.photoAt(record.sourceAuthority, index);
       if (!photo) return undefined;
-      // Clearing an already-undecided Photo is not a change. Refusing it keeps
+      // Clearing an already-unflagged Photo is not a change. Refusing it keeps
       // the one-level Undo description on the last real change.
       if (
         field === "selectionState" &&
-        value === "undecided" &&
-        photo.selectionState === "undecided"
+        value === "unflagged" &&
+        photo.selectionState === "unflagged"
       )
         return undefined;
       return admitStateWrite(record, index, photo, field, value, false);

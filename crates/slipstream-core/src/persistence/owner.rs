@@ -229,7 +229,7 @@ fn normalize_checked_photo_decision_mutation(
     if std::mem::discriminant(&mutation.value)
         != match mutation.field {
             PhotoStateField::SelectionState => {
-                std::mem::discriminant(&PhotoStateValue::Selection(SelectionState::Undecided))
+                std::mem::discriminant(&PhotoStateValue::Selection(SelectionState::Unflagged))
             }
             PhotoStateField::Rating => std::mem::discriminant(&PhotoStateValue::Rating(0)),
         }
@@ -278,7 +278,7 @@ fn validate_photo_state_mutation(mutation: &PhotoStateMutation) -> Result<(), Mu
 pub(super) fn validate_photo_state_batch_mutation(
     mutation: &PhotoStateBatchMutation,
 ) -> Result<(), MutationError> {
-    if mutation.value == SelectionState::Undecided
+    if mutation.value == SelectionState::Unflagged
         || mutation.photos.is_empty()
         || mutation.photos.len() > crate::PHOTO_STATE_BATCH_MAX
         || mutation

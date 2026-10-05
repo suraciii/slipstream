@@ -715,8 +715,8 @@ pub(crate) enum OriginalKind {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum SelectionState {
-    Undecided,
-    Selected,
+    Unflagged,
+    Picked,
     Rejected,
 }
 

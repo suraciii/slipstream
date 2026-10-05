@@ -258,12 +258,10 @@ export async function expectConnection(
 /// a disclosure in the background becomes reachable again. A native modal makes
 /// the rest of the document inert while it is open.
 export async function closePhotoSurfaces(page: Page) {
-  for (const selector of ["[data-photo-tools]", "[data-rating-choices]"]) {
-    const surface = page.locator(selector);
-    if (!(await surface.isVisible())) continue;
-    await page.keyboard.press("Escape");
-    await expect(surface).toBeHidden();
-  }
+  const surface = page.locator("[data-photo-tools]");
+  if (!(await surface.isVisible())) return;
+  await page.keyboard.press("Escape");
+  await expect(surface).toBeHidden();
 }
 
 export async function openSources(page: Page) {
@@ -304,13 +302,6 @@ export async function openSources(page: Page) {
 export async function openPhotoTools(page: Page) {
   const surface = page.locator("[data-photo-tools]");
   if (await surface.isVisible()) return;
-  // At most one supporting surface is active, so the Rating surface closes
-  // before the More entry becomes reachable.
-  const rating = page.locator("[data-rating-choices]");
-  if (await rating.isVisible()) {
-    await page.keyboard.press("Escape");
-    await expect(rating).toBeHidden();
-  }
   await page.locator("[data-dock-more]").click();
   await expect(surface).toBeVisible();
   await expect(page.locator("[data-photo-tools-view='tools']")).toBeVisible();
@@ -355,20 +346,9 @@ export async function closePhotoTools(page: Page) {
   await expect(surface).toBeHidden();
 }
 
-/// Opens the explicit Rating choices. Only this surface or its Rating entry
-/// owns explicit Rating interaction at one time.
+/// Opens the explicit Rating view inside the single Photo tools sheet.
 export async function openRatingChoices(page: Page) {
-  const surface = page.locator("[data-rating-choices]");
-  if (await surface.isVisible()) return;
-  // The Rating entry is a background control, so a supporting surface that
-  // covers it closes first, exactly as it must for the entry to be reachable.
-  const tools = page.locator("[data-photo-tools]");
-  if (await tools.isVisible()) {
-    await page.locator("[data-photo-tools-close]").click();
-    await expect(tools).toBeHidden();
-  }
-  await page.locator("[data-dock-rating]").click();
-  await expect(surface).toBeVisible();
+  await openPhotoToolsView(page, "rating");
 }
 
 /// Opens View options, which owns the Selection State filter, the source

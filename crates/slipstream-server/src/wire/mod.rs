@@ -111,23 +111,23 @@ pub struct BrowseOpenResponse {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SelectionCountsWire {
-    pub selected: usize,
+    pub picked: usize,
     pub rejected: usize,
-    pub undecided: usize,
+    pub unflagged: usize,
 }
 
 impl SelectionCountsWire {
     pub(crate) fn from_selection_states(states: impl Iterator<Item = SelectionState>) -> Self {
         let mut counts = Self {
-            selected: 0,
+            picked: 0,
             rejected: 0,
-            undecided: 0,
+            unflagged: 0,
         };
         for state in states {
             match state {
-                SelectionState::Selected => counts.selected += 1,
+                SelectionState::Picked => counts.picked += 1,
                 SelectionState::Rejected => counts.rejected += 1,
-                SelectionState::Undecided => counts.undecided += 1,
+                SelectionState::Unflagged => counts.unflagged += 1,
             }
         }
         counts
@@ -349,8 +349,8 @@ pub enum BrowseViewOrder {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BrowseSelectionFilter {
     All,
-    Undecided,
-    Selected,
+    Unflagged,
+    Picked,
     Rejected,
 }
 
@@ -358,8 +358,8 @@ impl BrowseSelectionFilter {
     pub(crate) fn matches(self, state: SelectionState) -> bool {
         match self {
             Self::All => true,
-            Self::Undecided => state == SelectionState::Undecided,
-            Self::Selected => state == SelectionState::Selected,
+            Self::Unflagged => state == SelectionState::Unflagged,
+            Self::Picked => state == SelectionState::Picked,
             Self::Rejected => state == SelectionState::Rejected,
         }
     }
@@ -600,8 +600,8 @@ pub(crate) fn album_summary(summary: slipstream_core::AlbumSummary) -> AlbumSumm
 
 pub(crate) fn selection_state(state: SelectionState) -> &'static str {
     match state {
-        SelectionState::Undecided => "undecided",
-        SelectionState::Selected => "selected",
+        SelectionState::Unflagged => "unflagged",
+        SelectionState::Picked => "picked",
         SelectionState::Rejected => "rejected",
     }
 }

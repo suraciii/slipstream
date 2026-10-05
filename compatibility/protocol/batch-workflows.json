@@ -6,11 +6,11 @@
         "method": "POST",
         "path": "/api/photos/state",
         "body": {
-          "selectionState": "selected",
+          "selectionState": "picked",
           "photos": [
             {
               "photoId": "$photoId",
-              "expectedCurrent": "undecided"
+              "expectedCurrent": "unflagged"
             },
             {
               "photoId": "$secondPhotoId",
@@ -23,7 +23,7 @@
         "applied": [
           {
             "photoId": "$photoId",
-            "priorValue": "undecided"
+            "priorValue": "unflagged"
           },
           {
             "photoId": "$secondPhotoId",
@@ -44,15 +44,15 @@
           "photos": [
             {
               "photoId": "$photoId",
-              "expectedCurrent": "undecided"
+              "expectedCurrent": "unflagged"
             },
             {
               "photoId": "$secondPhotoId",
-              "expectedCurrent": "undecided"
+              "expectedCurrent": "unflagged"
             },
             {
               "photoId": "$missingPhotoId",
-              "expectedCurrent": "selected"
+              "expectedCurrent": "picked"
             }
           ]
         }
@@ -61,7 +61,7 @@
         "applied": [
           {
             "photoId": "$photoId",
-            "priorValue": "undecided"
+            "priorValue": "unflagged"
           }
         ],
         "changedElsewhere": [
@@ -131,7 +131,7 @@
       "name": "photo-state-batch-missing-expected-current",
       "route": "/api/photos/state",
       "body": {
-        "selectionState": "selected",
+        "selectionState": "picked",
         "photos": [
           {
             "photoId": "$photoId"
@@ -144,29 +144,29 @@
       "name": "photo-state-batch-duplicate-photo",
       "route": "/api/photos/state",
       "body": {
-        "selectionState": "selected",
+        "selectionState": "picked",
         "photos": [
           {
             "photoId": "$photoId",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "$photoId",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           }
         ]
       },
       "error": "Invalid Photo state batch"
     },
     {
-      "name": "photo-state-batch-undecided-state",
+      "name": "photo-state-batch-unflagged-state",
       "route": "/api/photos/state",
       "body": {
-        "selectionState": "undecided",
+        "selectionState": "unflagged",
         "photos": [
           {
             "photoId": "$photoId",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           }
         ]
       },
@@ -184,7 +184,7 @@
       "name": "photo-state-batch-empty",
       "route": "/api/photos/state",
       "body": {
-        "selectionState": "selected",
+        "selectionState": "picked",
         "photos": []
       },
       "error": "Invalid Photo state batch"
@@ -193,411 +193,411 @@
       "name": "photo-state-batch-over-limit",
       "route": "/api/photos/state",
       "body": {
-        "selectionState": "selected",
+        "selectionState": "picked",
         "photos": [
           {
             "photoId": "00000000-0000-4000-8000-000000000001",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000002",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000003",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000004",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000005",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000006",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000007",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000008",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000009",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000010",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000011",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000012",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000013",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000014",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000015",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000016",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000017",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000018",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000019",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000020",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000021",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000022",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000023",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000024",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000025",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000026",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000027",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000028",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000029",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000030",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000031",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000032",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000033",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000034",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000035",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000036",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000037",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000038",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000039",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000040",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000041",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000042",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000043",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000044",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000045",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000046",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000047",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000048",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000049",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000050",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000051",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000052",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000053",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000054",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000055",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000056",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000057",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000058",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000059",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000060",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000061",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000062",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000063",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000064",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000065",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000066",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000067",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000068",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000069",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000070",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000071",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000072",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000073",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000074",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000075",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000076",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000077",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000078",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000079",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000080",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000081",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000082",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000083",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000084",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000085",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000086",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000087",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000088",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000089",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000090",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000091",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000092",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000093",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000094",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000095",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000096",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000097",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000098",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000099",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000100",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           },
           {
             "photoId": "00000000-0000-4000-8000-000000000101",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           }
         ]
       },
@@ -611,7 +611,7 @@
         "photos": [
           {
             "photoId": "$photoId",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "unflagged"
           }
         ]
       },
@@ -621,11 +621,11 @@
       "name": "photo-state-batch-unknown-field",
       "route": "/api/photos/state",
       "body": {
-        "selectionState": "selected",
+        "selectionState": "picked",
         "photos": [
           {
             "photoId": "$photoId",
-            "expectedCurrent": "undecided",
+            "expectedCurrent": "unflagged",
             "unexpected": true
           }
         ]
@@ -672,11 +672,11 @@
         "applied": [
           {
             "photoId": "$photoId",
-            "priorValue": "undecided"
+            "priorValue": "unflagged"
           },
           {
             "photoId": "$photoId",
-            "priorValue": "undecided"
+            "priorValue": "unflagged"
           }
         ],
         "changedElsewhere": [],
@@ -691,7 +691,7 @@
         "applied": [
           {
             "photoId": "$unrequestedPhotoId",
-            "priorValue": "undecided"
+            "priorValue": "unflagged"
           }
         ],
         "changedElsewhere": [],
@@ -706,7 +706,7 @@
         "applied": [
           {
             "photoId": "$photoId",
-            "priorValue": "undecided",
+            "priorValue": "unflagged",
             "unexpected": true
           }
         ],
@@ -722,7 +722,7 @@
         "applied": [
           {
             "photoId": "$photoId",
-            "priorValue": "undecided"
+            "priorValue": "unflagged"
           }
         ],
         "changedElsewhere": [],

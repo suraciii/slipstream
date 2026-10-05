@@ -114,7 +114,7 @@ The progressively loaded thumbnail view of the current `All Photos`, Original Fo
 The focused view of one Photo with Preview, zoom, navigation, Selection State, Rating, and Album membership controls.
 
 **Selection State**:
-The keep decision for a Photo: `undecided`, `selected`, or `rejected`. Selection State is independent of Rating and is not inferred from Sidecar Metadata in the current product boundary.
+The keep decision for a Photo: `unflagged`, `picked`, or `rejected`. `Unflagged` means no Pick or Reject flag is recorded; `Picked` and `Rejected` are mutually exclusive review decisions. Selection State is independent of Rating and is not inferred from Sidecar Metadata in the current product boundary.
 
 **Rating**:
 An optional zero-to-five-star assessment owned by a Photo. Rating is separate from Selection State and may have a Sidecar Metadata representation.

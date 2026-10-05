@@ -570,8 +570,8 @@ pub(crate) async fn create_photo_query(
     }
     let selection = match body.selection.as_deref() {
         None | Some("all") => None,
-        Some("undecided") => Some(SelectionState::Undecided),
-        Some("selected") => Some(SelectionState::Selected),
+        Some("unflagged") => Some(SelectionState::Unflagged),
+        Some("picked") => Some(SelectionState::Picked),
         Some("rejected") => Some(SelectionState::Rejected),
         Some(_) => return invalid_cli("selection", "The Selection State filter is invalid."),
     };

@@ -641,7 +641,10 @@ export async function openFirst(page: Page, url: string) {
 
 export async function navigate(page: Page, direction: "Next" | "Previous") {
   await page.locator("[data-photo-tools-close]").click();
-  await page.getByRole("button", { name: direction, exact: true }).click();
+  await page.locator("[data-dock-more]").click();
+  await page
+    .locator(`[data-photo-tools-entry='${direction.toLowerCase()}']`)
+    .click();
   await openEdit(page);
 }
 

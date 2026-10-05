@@ -3,7 +3,7 @@ export type FilmstripPhotoViewModel = Readonly<{
   available: boolean;
   original: Readonly<{ kind: "raw" | "jpeg"; available: boolean }>;
   originalFilename?: string;
-  selectionState: "undecided" | "selected" | "rejected";
+  selectionState: "unflagged" | "picked" | "rejected";
   rating: number;
   hasSavedEdits: boolean;
   preview: Readonly<{
@@ -202,10 +202,10 @@ export function createFilmstripPresenter(
     image.draggable = false;
     image.className = "thumbnail";
     button.append(image);
-    if (photo.selectionState !== "undecided") {
+    if (photo.selectionState !== "unflagged") {
       const badge = document.createElement("span");
       badge.className = `cell-state ${photo.selectionState}`;
-      badge.textContent = photo.selectionState === "selected" ? "✓" : "×";
+      badge.textContent = photo.selectionState === "picked" ? "✓" : "×";
       button.append(badge);
     }
     if (cell.current) button.setAttribute("aria-current", "true");
@@ -356,7 +356,7 @@ export function createFilmstripPresenter(
 function selectionLabel(
   state: FilmstripPhotoViewModel["selectionState"],
 ): string {
-  if (state === "selected") return "Selected";
+  if (state === "picked") return "Picked";
   if (state === "rejected") return "Rejected";
-  return "Undecided";
+  return "Unflagged";
 }

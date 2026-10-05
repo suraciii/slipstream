@@ -15,9 +15,9 @@ failures, and Undo. Moving a control must preserve those rules.
 ```text diagram
 Library Browser
 ├── Grid: Sources · View options (incl. Album Resume) · Select mode
-│   └── Select mode: count · Done / Select · Reject · Add to Album
-├── Photo: source return / Preview / Previous · position · Next
-│   └── Quick Action Dock: Reject · Rating · Select · More
+│   └── Select mode: count · Done / Pick · Reject · Add to Album
+├── Photo: Back · Preview · position/state badge · More
+│   └── Gestures: left/right navigate · up/down cycle Selection State
 └── One supporting surface: Sources, options, Rating, tools, or recovery
 ```
 
@@ -98,11 +98,10 @@ multi-selection and leaves Select mode without changing a Photo decision.
 Escape has the same effect. Source changes and source reopening retain their
 existing clear behavior.
 
-The selection tray must occupy a bottom action region with Select, Reject,
-and Add to Album. It remains visible with zero selected Photos, and its batch
-actions are unavailable while nothing is selected. The normal View controls must not remain stacked
-above the tray. Desktop modifier selection must show this same selection
-surface whenever the multi-selection is nonempty.
+The selection tray occupies a bottom action region with Pick, Reject, and Add
+to Album. It appears only while the Grid multi-selection is nonempty. Desktop
+modifier selection must show this same selection surface whenever the
+multi-selection is nonempty.
 
 A completed batch must retain the selection and the visible indication
 Selection remains active. Partial, uncertain, changed-elsewhere, and missing
@@ -115,38 +114,29 @@ modal. The existing single live-region announcement rule remains in force.
 
 ## Photo View
 
-Photo View must contain a compact source-return and filename row, the Preview,
-and a primary action region. It must communicate current position, Selection
-State, and Rating without requiring Photo tools to be open. The primary
-region must present one Reject action, one Rating entry with an explicit
-current value including zero, one Select action, and More.
+Photo View's default surface is compact: Back, the Preview, a position/state
+badge, and More. Back returns directly to the originating Grid destination.
+The position/state badge communicates the current position and Selection State
+without requiring Photo tools to open.
 
-Previous and Next must remain visible in a separate navigation group with the
-position and total. They must not share an activation target with Select or
-Reject. Portrait layouts may place navigation immediately above the main
-actions; short landscape must consolidate them without shrinking touch
-targets. There must be only one visible Previous/Next pair.
+On touch input, left and right gestures navigate to the previous and next Photo.
+Up and down gestures cycle the Selection State through Unflagged, Picked, and
+Rejected. These gestures change only the current Photo decision or navigation
+position; they do not change Rating.
+
+More opens the supporting action groups:
+
+- **Review:** Pick, Reject, and Clear flag, with their existing availability rules;
+- **Rating:** explicit 0–5 Rating choices;
+- **Photo:** Album membership, Capture Details, Preview Source, Preview Zoom,
+  and Nearby Photos;
+- **Help:** the combined Preview detail-limit explanation and gesture guidance.
 
 The Preview must fit its complete composition. Empty space caused by image
-aspect ratio is acceptable. Persistent zoom controls, capture facts, and Album
-management must not cover the mobile Preview or consume closed-panel space.
-A manual zoom must expose its current percentage and a direct Fit return.
-
-Wide Photo View may show its bounded neighbor strip. Narrow and short layouts
-must move that strip behind a Nearby Photos entry in Photo tools. This is the
-same bounded navigation surface, not a second timeline. Hiding it must release
-its image demand under the existing bounded neighbor-strip lifecycle. The explicit
-Previous/Next pair remains available when the strip is closed.
-
-The mobile Quick Action Dock consists of Reject, Rating, Select, and More.
-Its closed Photo tools surface must occupy no space and expose no focusable
-controls. More opens these supporting actions:
-
-- Clear and Undo, with their existing availability rules;
-- Photo Album membership and management;
-- Capture Details, Preview Source, and the combined detail-limit explanation;
-- the complete Preview Zoom controls; and
-- Nearby Photos and Sources.
+aspect ratio is acceptable. Closed supporting groups must occupy no space and
+expose no focusable controls. The bounded neighbor strip remains available
+through Photo > Nearby Photos, following the existing lifecycle and source
+order. Rating saves keep the current Photo open.
 
 Rating opens a focused set of explicit 0–5 choices, rather than exposing every
 Photo tool. Only the entry or its active choice surface owns explicit Rating

@@ -1886,7 +1886,7 @@ mod tests {
             preview_height: Some(2),
             cache_revision: Some(cache_key.clone()),
             sort_path: "one.ARW".to_owned(),
-            selection_state: crate::SelectionState::Undecided,
+            selection_state: crate::SelectionState::Unflagged,
             rating: 0,
             has_saved_edits: false,
             removed: false,

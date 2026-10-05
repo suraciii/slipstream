@@ -467,6 +467,8 @@ mod tests {
             "sqlite/schema-v13.sql",
             "sqlite/schema-v14.json",
             "sqlite/schema-v14.sql",
+            "sqlite/schema-v15.json",
+            "sqlite/schema-v15.sql",
             "sqlite/v0.sql",
             "sqlite/v1.sql",
             "startup/vectors.json",
@@ -552,7 +554,7 @@ mod tests {
                 "{file} lost its executing consumer {source}"
             );
         }
-        for version in 1..=14 {
+        for version in 1..=15 {
             let schema = fs::read_to_string(
                 repository.join("crates/slipstream-core/src/persistence/schema.rs"),
             )
@@ -698,7 +700,6 @@ mod tests {
         )
         .unwrap();
         assert!(!contains_null(&contract));
-
         let photo_state_cases = contract["photoStateBatch"]
             .as_array()
             .expect("photo state batch examples");
@@ -718,7 +719,7 @@ mod tests {
             );
             assert!(matches!(
                 request["body"]["selectionState"].as_str(),
-                Some("selected" | "rejected")
+                Some("picked" | "rejected")
             ));
             let photos = request["body"]["photos"]
                 .as_array()
@@ -733,7 +734,7 @@ mod tests {
                 assert!(requested_ids.insert(photo["photoId"].as_str().unwrap()));
                 assert!(matches!(
                     photo["expectedCurrent"].as_str(),
-                    Some("undecided" | "selected" | "rejected")
+                    Some("unflagged" | "picked" | "rejected")
                 ));
             }
 
@@ -752,7 +753,7 @@ mod tests {
                 assert!(outcome_ids.insert(item["photoId"].as_str().unwrap()));
                 assert!(matches!(
                     item["priorValue"].as_str(),
-                    Some("undecided" | "selected" | "rejected")
+                    Some("unflagged" | "picked" | "rejected")
                 ));
             }
             for item in changed {
@@ -763,7 +764,7 @@ mod tests {
                 assert!(outcome_ids.insert(item["photoId"].as_str().unwrap()));
                 assert!(matches!(
                     item["currentValue"].as_str(),
-                    Some("undecided" | "selected" | "rejected")
+                    Some("unflagged" | "picked" | "rejected")
                 ));
             }
             for item in missing {
@@ -772,7 +773,6 @@ mod tests {
             }
             assert_eq!(outcome_ids, requested_ids);
         }
-
         let album_cases = contract["albumMembership"]
             .as_array()
             .expect("Album membership examples");

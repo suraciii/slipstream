@@ -694,7 +694,7 @@ async fn explicit_removal_and_restore_replay_stale_evidence_and_restart_safe_rec
         .mutate_photo_state(PhotoStateMutation {
             photo_id: "photo-1".to_owned(),
             field: PhotoStateField::SelectionState,
-            value: PhotoStateValue::Selection(SelectionState::Selected),
+            value: PhotoStateValue::Selection(SelectionState::Picked),
             expected_current: Some(PhotoStateValue::Selection(SelectionState::Rejected)),
             album_id: None,
         })
@@ -705,7 +705,7 @@ async fn explicit_removal_and_restore_replay_stale_evidence_and_restart_safe_rec
             photo_id: "photo-1".to_owned(),
             field: PhotoStateField::SelectionState,
             value: PhotoStateValue::Selection(SelectionState::Rejected),
-            expected_current: Some(PhotoStateValue::Selection(SelectionState::Selected)),
+            expected_current: Some(PhotoStateValue::Selection(SelectionState::Picked)),
             album_id: None,
         })
         .await

@@ -248,7 +248,7 @@ async fn publication_preserves_facts_committed_between_scan_and_publication() {
         post_json(
             &router,
             &format!("https://camera.local/api/photos/{}/state", ids[0]),
-            serde_json::json!({"field": "selectionState", "value": "selected"}),
+            serde_json::json!({"field": "selectionState", "value": "picked"}),
             Some("https://camera.local"),
         )
         .await
@@ -280,7 +280,7 @@ async fn publication_preserves_facts_committed_between_scan_and_publication() {
         .iter()
         .find(|photo| photo.id == ids[0])
         .unwrap();
-    assert_eq!(first.selection_state, "selected");
+    assert_eq!(first.selection_state, "picked");
     assert_eq!(first.preview.state, "ready");
     assert_eq!(first.preview.width, Some(8));
     assert_eq!(first.preview.height, Some(4));
@@ -304,7 +304,7 @@ async fn publication_keeps_scan_owned_invalidation_availability_and_user_state()
             .mutate_photo_state(slipstream_core::PhotoStateMutation {
                 photo_id: ids[0].clone(),
                 field: slipstream_core::PhotoStateField::SelectionState,
-                value: slipstream_core::PhotoStateValue::Selection(SelectionState::Selected),
+                value: slipstream_core::PhotoStateValue::Selection(SelectionState::Picked),
                 expected_current: None,
                 album_id: None,
             })
@@ -340,7 +340,7 @@ async fn publication_keeps_scan_owned_invalidation_availability_and_user_state()
         .iter()
         .find(|photo| photo.id == ids[0])
         .unwrap();
-    assert_eq!(first.selection_state, "selected");
+    assert_eq!(first.selection_state, "picked");
     assert_eq!(first.preview.state, "inspection-pending");
     assert_eq!(first.preview.source, None);
     assert_eq!(first.preview.width, None);
@@ -1027,7 +1027,7 @@ async fn recovery_http_restores_unavailable_photo_without_fingerprint() {
     assert_eq!(record["location"], "shoot/a.JPG");
     assert_eq!(record["kind"], "jpeg");
     assert_eq!(record["rating"], 3);
-    assert_eq!(record["selectionState"], "selected");
+    assert_eq!(record["selectionState"], "picked");
     assert_eq!(record["fingerprintEnrolled"], false);
     assert_eq!(record["albumCount"], 1);
 
@@ -1072,7 +1072,7 @@ async fn recovery_http_restores_unavailable_photo_without_fingerprint() {
     assert_eq!(photo["available"], true);
     assert_eq!(photo["originalFilename"], "a.JPG");
     assert_eq!(photo["rating"], 3);
-    assert_eq!(photo["selectionState"], "selected");
+    assert_eq!(photo["selectionState"], "picked");
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
@@ -1153,7 +1153,7 @@ async fn recovery_http_retires_discovered_destination_photo() {
     let photo = &window["photos"][0];
     assert_eq!(photo["id"], "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
     assert_eq!(photo["rating"], 3);
-    assert_eq!(photo["selectionState"], "selected");
+    assert_eq!(photo["selectionState"], "picked");
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);

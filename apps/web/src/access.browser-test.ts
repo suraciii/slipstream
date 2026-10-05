@@ -85,7 +85,7 @@ for (const viewport of [
     context,
   }) => {
     await page.setViewportSize(viewport);
-    const destination = `${server.url}/?selection=selected`;
+    const destination = `${server.url}/?selection=picked`;
     await page.goto(destination);
     await expect(
       page.getByLabel("Access Token", { exact: true }),
@@ -111,7 +111,7 @@ for (const viewport of [
       page.getByRole("navigation", { name: "Sources", includeHidden: true }),
     ).toBeAttached();
     expect(new URL(page.url()).origin).toBe(server.url);
-    expect(new URL(page.url()).searchParams.get("selection")).toBe("selected");
+    expect(new URL(page.url()).searchParams.get("selection")).toBe("picked");
     expect(page.url()).not.toContain(server.token);
     expect(
       await page.evaluate(() => ({
@@ -309,7 +309,7 @@ for (const firstTransport of ["https", "http"] as const) {
       };
       expect(envelope.status).toBe("ok");
       expect(envelope.data.selectionState).toBe(
-        index === 0 ? "undecided" : "rejected",
+        index === 0 ? "unflagged" : "rejected",
       );
       const destination = `${origin}/?photoId=${photoId}`;
       expect(envelope.data.webUrl).toBe(destination);
@@ -357,22 +357,23 @@ for (const firstTransport of ["https", "http"] as const) {
       const session = await context.request.get(`${origin}/api/access/session`);
       expect(session.status()).toBe(200);
       await expect(page.locator("[data-selection]")).toHaveText(
-        index === 0 ? "Undecided" : "Rejected",
+        index === 0 ? "Unflagged" : "Rejected",
       );
       // The second alias observes the first alias's saved Photo decision.
+      await openPhotoToolsView(page, "tools");
       await page
         .getByRole("button", {
-          name: index === 0 ? "Reject" : "Select",
+          name: index === 0 ? "Reject" : "Pick",
           exact: true,
         })
         .click();
       await expect(page.locator("[data-selection]")).toHaveText(
-        index === 0 ? "Rejected" : "Selected",
+        index === 0 ? "Rejected" : "Picked",
       );
       await page.reload();
       await waitForLoadedReviewImage(page);
       await expect(page.locator("[data-selection]")).toHaveText(
-        index === 0 ? "Rejected" : "Selected",
+        index === 0 ? "Rejected" : "Picked",
       );
       await openPhotoToolsView(page, "edit");
       const xmp = page.locator('[data-editor-output="xmp"]');
@@ -413,7 +414,9 @@ for (const firstTransport of ["https", "http"] as const) {
       if (index === 1) {
         await page.goto(destination);
         await waitForLoadedReviewImage(page);
+        await openPhotoToolsView(page, "tools");
         await page.getByRole("button", { name: "Reject", exact: true }).click();
+        await closePhotoTools(page);
         await expect(page.locator("[data-selection]")).toHaveText("Rejected");
         await page
           .getByRole("button", { name: "Back to Grid", exact: true })

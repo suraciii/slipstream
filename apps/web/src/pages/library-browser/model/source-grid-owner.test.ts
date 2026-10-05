@@ -19,10 +19,10 @@ const opened = (
   total = 180,
   position = 0,
   selectionCounts: Readonly<{
-    selected: number;
+    picked: number;
     rejected: number;
-    undecided: number;
-  }> = { selected: 0, rejected: 0, undecided: total },
+    unflagged: number;
+  }> = { picked: 0, rejected: 0, unflagged: total },
 ) =>
   new Response(JSON.stringify({ token, total, position, selectionCounts }), {
     status: 200,
@@ -32,7 +32,7 @@ const photo = (id: string) => ({
   id,
   available: true,
   original: { kind: "jpeg" as const, available: true },
-  selectionState: "undecided" as const,
+  selectionState: "unflagged" as const,
   rating: 0,
   hasSavedEdits: false,
   preview: { state: "inspection-pending" as const },
@@ -244,9 +244,9 @@ describe("SourceGridOwner", () => {
         bodies.push(JSON.parse(init.body) as Record<string, unknown>);
         return Promise.resolve(
           opened(`browse-${bodies.length}`, 180, 0, {
-            selected: 5,
+            picked: 5,
             rejected: 2,
-            undecided: 173,
+            unflagged: 173,
           }),
         );
       }
@@ -254,18 +254,18 @@ describe("SourceGridOwner", () => {
     });
     expect(owner.selection).toBe("all");
     expect(owner.selectionCounts).toEqual({
-      selected: 0,
+      picked: 0,
       rejected: 0,
-      undecided: 0,
+      unflagged: 0,
     });
     await owner.open({ kind: "library" });
     // The default filter is the server's own default, so it stays off the wire.
     expect(bodies[0]).toEqual({ source: "library" });
     expect(owner.selection).toBe("all");
     expect(owner.selectionCounts).toEqual({
-      selected: 5,
+      picked: 5,
       rejected: 2,
-      undecided: 173,
+      unflagged: 173,
     });
 
     await owner.open(
@@ -282,16 +282,16 @@ describe("SourceGridOwner", () => {
     // A replace open reports no counts until its own response arrives.
     const replacement = owner.open({ kind: "library" });
     expect(owner.selectionCounts).toEqual({
-      selected: 0,
+      picked: 0,
       rejected: 0,
-      undecided: 0,
+      unflagged: 0,
     });
     await replacement;
     expect(owner.selection).toBe("all");
     expect(owner.selectionCounts).toEqual({
-      selected: 5,
+      picked: 5,
       rejected: 2,
-      undecided: 173,
+      unflagged: 173,
     });
   });
 
@@ -302,7 +302,7 @@ describe("SourceGridOwner", () => {
         return Promise.resolve(new Response(null, { status: 204 }));
       if (url.pathname === "/api/browse" && init?.method === "POST")
         return Promise.resolve(
-          opened("browse-1", 10, 0, { selected: 3, rejected: 1, undecided: 6 }),
+          opened("browse-1", 10, 0, { picked: 3, rejected: 1, unflagged: 6 }),
         );
       if (url.pathname === "/api/browse/browse-1")
         return Promise.resolve(windowResponse(0, 10, 10));
@@ -313,53 +313,53 @@ describe("SourceGridOwner", () => {
     const loaded = await owner.loadWindow(0, { kind: "source", authority });
     expect(loaded.kind).toBe("loaded");
     const [first] = [owner.photoAt(0)!];
-    expect(first?.selectionState).toBe("undecided");
+    expect(first?.selectionState).toBe("unflagged");
 
-    // One confirmed transition carries the source counts with it: selected
+    // One confirmed transition carries the source counts with it: picked
     // becomes rejected, and neither count is re-derived from loaded windows.
-    expect(owner.setPhotoSelection(authority, 0, first.id, "selected")).toBe(
+    expect(owner.setPhotoSelection(authority, 0, first.id, "picked")).toBe(
       true,
     );
     expect(owner.selectionCounts).toEqual({
-      selected: 4,
+      picked: 4,
       rejected: 1,
-      undecided: 5,
+      unflagged: 5,
     });
-    expect(owner.photoAt(0)?.selectionState).toBe("selected");
+    expect(owner.photoAt(0)?.selectionState).toBe("picked");
     expect(owner.setPhotoSelection(authority, 0, first.id, "rejected")).toBe(
       true,
     );
     expect(owner.selectionCounts).toEqual({
-      selected: 3,
+      picked: 3,
       rejected: 2,
-      undecided: 5,
+      unflagged: 5,
     });
     expect(owner.setPhotoSelection(authority, 0, first.id, "rejected")).toBe(
       true,
     );
     expect(owner.selectionCounts).toEqual({
-      selected: 3,
+      picked: 3,
       rejected: 2,
-      undecided: 5,
+      unflagged: 5,
     });
 
     // A patch that does not address the retained Photo changes nothing, and a
     // patch outside the open source authority is refused.
-    expect(
-      owner.setPhotoSelection(authority, 0, "other-photo", "selected"),
-    ).toBe(false);
+    expect(owner.setPhotoSelection(authority, 0, "other-photo", "picked")).toBe(
+      false,
+    );
     expect(owner.selectionCounts).toEqual({
-      selected: 3,
+      picked: 3,
       rejected: 2,
-      undecided: 5,
+      unflagged: 5,
     });
     const stale = owner.authority;
     await owner.open({ kind: "library" });
-    expect(owner.setPhotoSelection(stale, 0, first.id, "selected")).toBe(false);
+    expect(owner.setPhotoSelection(stale, 0, first.id, "picked")).toBe(false);
     expect(owner.selectionCounts).toEqual({
-      selected: 3,
+      picked: 3,
       rejected: 1,
-      undecided: 6,
+      unflagged: 6,
     });
   });
 
@@ -368,7 +368,7 @@ describe("SourceGridOwner", () => {
       const url = requestUrl(input);
       if (url.pathname === "/api/browse" && init?.method === "POST")
         return Promise.resolve(
-          opened("browse-1", 10, 0, { selected: 3, rejected: 1, undecided: 6 }),
+          opened("browse-1", 10, 0, { picked: 3, rejected: 1, unflagged: 6 }),
         );
       if (url.pathname === "/api/browse/browse-1")
         return Promise.resolve(windowResponse(0, 10, 10));
@@ -384,13 +384,13 @@ describe("SourceGridOwner", () => {
     // A loaded Photo is patched and moves the counts by the state the Grid
     // believed, whatever prior the server reported for it.
     expect(
-      owner.applyBatchSelection(authority, first.id, "rejected", "selected"),
+      owner.applyBatchSelection(authority, first.id, "rejected", "picked"),
     ).toBe(true);
-    expect(owner.photoAt(0)?.selectionState).toBe("selected");
+    expect(owner.photoAt(0)?.selectionState).toBe("picked");
     expect(owner.selectionCounts).toEqual({
-      selected: 4,
+      picked: 4,
       rejected: 1,
-      undecided: 5,
+      unflagged: 5,
     });
     // A Photo the Grid no longer holds still moves the counts once, by the
     // server's own prior value.
@@ -398,44 +398,44 @@ describe("SourceGridOwner", () => {
       owner.applyBatchSelection(
         authority,
         "evicted-photo",
-        "undecided",
-        "selected",
+        "unflagged",
+        "picked",
       ),
     ).toBe(true);
     expect(owner.selectionCounts).toEqual({
-      selected: 5,
+      picked: 5,
       rejected: 1,
-      undecided: 4,
+      unflagged: 4,
     });
     // A confirmed outcome moves a loaded fact and its counts once; applying
     // the same outcome again changes nothing.
     expect(
-      owner.applyBatchSelection(authority, second.id, "undecided", "selected"),
+      owner.applyBatchSelection(authority, second.id, "unflagged", "picked"),
     ).toBe(true);
-    expect(owner.photoAt(1)?.selectionState).toBe("selected");
+    expect(owner.photoAt(1)?.selectionState).toBe("picked");
     expect(owner.selectionCounts).toEqual({
-      selected: 6,
+      picked: 6,
       rejected: 1,
-      undecided: 3,
+      unflagged: 3,
     });
     expect(
-      owner.applyBatchSelection(authority, second.id, "undecided", "selected"),
+      owner.applyBatchSelection(authority, second.id, "unflagged", "picked"),
     ).toBe(true);
     expect(owner.selectionCounts).toEqual({
-      selected: 6,
+      picked: 6,
       rejected: 1,
-      undecided: 3,
+      unflagged: 3,
     });
     // A batch outcome outside the open source authority is refused.
     const stale = owner.authority;
     await owner.open({ kind: "library" });
     expect(
-      owner.applyBatchSelection(stale, first.id, "undecided", "selected"),
+      owner.applyBatchSelection(stale, first.id, "unflagged", "picked"),
     ).toBe(false);
     expect(owner.selectionCounts).toEqual({
-      selected: 3,
+      picked: 3,
       rejected: 1,
-      undecided: 6,
+      unflagged: 6,
     });
   });
 
@@ -444,7 +444,7 @@ describe("SourceGridOwner", () => {
       const url = requestUrl(input);
       if (url.pathname === "/api/browse" && init?.method === "POST")
         return Promise.resolve(
-          opened("browse-1", 10, 0, { selected: 3, rejected: 1, undecided: 6 }),
+          opened("browse-1", 10, 0, { picked: 3, rejected: 1, unflagged: 6 }),
         );
       if (url.pathname === "/api/browse/browse-1") {
         const photos = Array.from({ length: 10 }, (_, index) =>
@@ -467,21 +467,21 @@ describe("SourceGridOwner", () => {
     ).toBe("loaded");
     const first = owner.photoAt(0)!;
     expect(first.selectionState).toBe("rejected");
-    // The open counts still contain the browser's prior undecided belief. A
+    // The open counts still contain the browser's prior unflagged belief. A
     // Review refresh reconciles that one contribution to the observed fact.
     expect(
       owner.reconcilePhotoSelection(
         authority,
         0,
         first.id,
-        "undecided",
+        "unflagged",
         "rejected",
       ),
     ).toBe(true);
     expect(owner.selectionCounts).toEqual({
-      selected: 3,
+      picked: 3,
       rejected: 2,
-      undecided: 5,
+      unflagged: 5,
     });
     const stale = owner.authority;
     await owner.open({ kind: "library" });
@@ -490,7 +490,7 @@ describe("SourceGridOwner", () => {
         stale,
         0,
         first.id,
-        "undecided",
+        "unflagged",
         "rejected",
       ),
     ).toBe(false);
@@ -501,7 +501,7 @@ describe("SourceGridOwner", () => {
       const url = requestUrl(input);
       if (url.pathname === "/api/browse" && init?.method === "POST")
         return Promise.resolve(
-          opened("browse-1", 1, 0, { selected: 0, rejected: 1, undecided: 0 }),
+          opened("browse-1", 1, 0, { picked: 0, rejected: 1, unflagged: 0 }),
         );
       if (url.pathname === "/api/browse/browse-1")
         return Promise.resolve(
@@ -524,14 +524,14 @@ describe("SourceGridOwner", () => {
         authority,
         0,
         "photo-0",
-        "selected",
+        "picked",
         "rejected",
       ),
     ).toBe(true);
     expect(owner.selectionCounts).toEqual({
-      selected: 0,
+      picked: 0,
       rejected: 2,
-      undecided: 0,
+      unflagged: 0,
     });
   });
 
@@ -540,7 +540,7 @@ describe("SourceGridOwner", () => {
       const url = requestUrl(input);
       if (url.pathname === "/api/browse" && init?.method === "POST")
         return Promise.resolve(
-          opened("browse-1", 2, 0, { selected: 0, rejected: 0, undecided: 2 }),
+          opened("browse-1", 2, 0, { picked: 0, rejected: 0, unflagged: 2 }),
         );
       if (url.pathname === "/api/browse/browse-1")
         return Promise.resolve(
@@ -557,32 +557,32 @@ describe("SourceGridOwner", () => {
     });
     const authority = await openLibrary(owner, "browse-1");
     await owner.loadWindow(0, { kind: "source", authority });
-    expect(owner.photoAt(0)!.selectionState).toBe("undecided");
+    expect(owner.photoAt(0)!.selectionState).toBe("unflagged");
 
     owner.noteCommittedDecision(
       authority,
       "photo-0",
       "selectionState",
-      "selected",
+      "picked",
     );
-    expect(owner.selectionCounts.selected).toBe(1);
-    expect(owner.selectionCounts.undecided).toBe(1);
+    expect(owner.selectionCounts.picked).toBe(1);
+    expect(owner.selectionCounts.unflagged).toBe(1);
     owner.noteCommittedDecision(authority, "photo-1", "rating", 4);
-    expect(owner.photoAt(0)!.selectionState).toBe("selected");
+    expect(owner.photoAt(0)!.selectionState).toBe("picked");
     expect(owner.photoAt(1)!.rating).toBe(4);
     expect(owner.selectionCounts).toEqual({
-      selected: 1,
+      picked: 1,
       rejected: 0,
-      undecided: 1,
+      unflagged: 1,
     });
     // The decision is consumed exactly once: the second read is the fact that
     // was committed, and no count moves a second time.
-    expect(owner.photoAt(0)!.selectionState).toBe("selected");
+    expect(owner.photoAt(0)!.selectionState).toBe("picked");
     expect(owner.photoAt(1)!.rating).toBe(4);
     expect(owner.selectionCounts).toEqual({
-      selected: 1,
+      picked: 1,
       rejected: 0,
-      undecided: 1,
+      unflagged: 1,
     });
 
     // A stale source records nothing, and a replacement source holds no
@@ -594,7 +594,7 @@ describe("SourceGridOwner", () => {
     owner.noteCommittedDecision(stale, "photo-0", "rating", 5);
     // The two guarded calls recorded nothing, so the replacement source
     // presents the Library's own facts rather than a decision it cannot hold.
-    expect(owner.photoAt(0)!.selectionState).toBe("undecided");
+    expect(owner.photoAt(0)!.selectionState).toBe("unflagged");
     expect(owner.photoAt(0)!.rating).toBe(0);
     owner.dispose();
     owner.noteCommittedDecision(owner.authority, "photo-0", "rating", 5);
@@ -686,13 +686,13 @@ describe("SourceGridOwner", () => {
       authority,
       "photo-0",
       "selectionState",
-      "selected",
+      "picked",
     );
     owner.noteCommittedDecision(
       authority,
       "photo-170",
       "selectionState",
-      "selected",
+      "picked",
     );
     // The next window settles three windows away from index 0, which evicts
     // that Photo's fact and keeps the one at 170.
@@ -707,10 +707,10 @@ describe("SourceGridOwner", () => {
     expect(
       await owner.loadWindow(0, { kind: "source", authority }),
     ).toMatchObject({ kind: "loaded" });
-    expect(owner.photoAt(0)!.selectionState).toBe("undecided");
+    expect(owner.photoAt(0)!.selectionState).toBe("unflagged");
     // The decision whose Photo's fact survived the trim is still held and is
     // presented when that fact is read.
-    expect(owner.photoAt(170)!.selectionState).toBe("selected");
+    expect(owner.photoAt(170)!.selectionState).toBe("picked");
   });
 
   test("retains Photo, Original kind, and Preview facts in a bounded window", async () => {
@@ -979,7 +979,7 @@ describe("SourceGridOwner", () => {
         return Promise.resolve(
           mode === "malformed-open"
             ? new Response(
-                '{"token":"","total":60,"position":0,"selectionCounts":{"selected":0,"rejected":0,"undecided":60}}',
+                '{"token":"","total":60,"position":0,"selectionCounts":{"picked":0,"rejected":0,"unflagged":60}}',
                 {
                   status: 200,
                 },
@@ -1180,9 +1180,9 @@ describe("SourceGridOwner", () => {
       authority: replacement.authority,
     });
 
-    expect(
-      owner.setPhotoSelection(first.authority, 0, "old-0", "selected"),
-    ).toBe(false);
+    expect(owner.setPhotoSelection(first.authority, 0, "old-0", "picked")).toBe(
+      false,
+    );
     expect(
       owner.setPhotoPreview(replacement.authority, 0, "old-0", {
         state: "ready",
@@ -1190,7 +1190,7 @@ describe("SourceGridOwner", () => {
       }),
     ).toBe(false);
     expect(owner.photoAt(0)?.id).toBe("current-0");
-    expect(owner.photoAt(0)?.selectionState).toBe("undecided");
+    expect(owner.photoAt(0)?.selectionState).toBe("unflagged");
 
     for (const index of [60, 120, 180])
       await owner.loadWindow(index, {

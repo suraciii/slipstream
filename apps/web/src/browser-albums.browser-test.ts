@@ -109,7 +109,7 @@ test("the current photo joins and leaves albums from the photo view", async ({
   );
   await toggleAlbumMembership(page, "Picks");
   await firstAdd;
-  await expect(page.getByText("Added to the Album.")).toBeVisible();
+  await expect(page.locator("[data-status]")).toHaveText("Added to the Album.");
   await expect(page.getByText("Not in any Album yet")).toBeHidden();
   await expect(page.locator("[data-membership-list] li")).toHaveText(["Picks"]);
   await closePhotoTools(page);
@@ -143,11 +143,9 @@ test("the current photo joins and leaves albums from the photo view", async ({
   );
   await expect(page.locator("[data-membership-list] li")).toHaveText(["Picks"]);
   await toggleAlbumMembership(page, "Picks");
-  await expect(
-    page.getByText(
-      "Removed from the Album. It stays in this open view until reopened.",
-    ),
-  ).toBeVisible();
+  await expect(page.locator("[data-status]")).toHaveText(
+    "Removed from the Album. It stays in this open view until reopened.",
+  );
   await expect(page.getByText("1 / 1")).toBeVisible();
   await expect(page.locator("[data-membership-list] li")).toHaveCount(0);
   await closePhotoTools(page);
@@ -170,8 +168,9 @@ test("persists manual navigation and advanced current Photo across leave, reload
   let running = await server(base, root);
   const { albumId } = await createAlbum(running.url, "Progress");
   await startReview(page, running.url, "Progress", albumId);
+  await openPhotoToolsView(page, "tools");
   await actionWithProgress(page, albumId, () =>
-    page.getByRole("button", { name: "Next" }).click(),
+    page.getByRole("button", { name: "Next", exact: true }).click(),
   );
   await expect
     .poll(async () => (await state(running.url, albumId)).position)
@@ -190,8 +189,9 @@ test("persists manual navigation and advanced current Photo across leave, reload
   // The Photo address preserves the destination across a reload, so the
   // reloaded document reopens the same Photo instead of the Album Grid.
   await expect(page.getByText("2 / 3")).toBeVisible();
+  await openPhotoToolsView(page, "tools");
   await actionWithProgress(page, albumId, () =>
-    page.getByRole("button", { name: "Select" }).click(),
+    page.getByRole("button", { name: "Next", exact: true }).click(),
   );
   await expect(page.getByText("3 / 3")).toBeVisible();
   await expect
@@ -259,10 +259,10 @@ test("a CLI-created Album opens in the Web with its ordered members and decision
     [oneId!, twoId!, threeId!, fourId!, ids[4]!, ids[5]!],
   );
   const decisions = [
-    { id: twoId, selectionState: "selected", rating: 4 },
-    { id: threeId, selectionState: "selected", rating: 5 },
-    { id: oneId, selectionState: "selected", rating: 5 },
-    { id: fourId, selectionState: "selected", rating: 4 },
+    { id: twoId, selectionState: "picked", rating: 4 },
+    { id: threeId, selectionState: "picked", rating: 5 },
+    { id: oneId, selectionState: "picked", rating: 5 },
+    { id: fourId, selectionState: "picked", rating: 4 },
     { id: ids[4], selectionState: "rejected", rating: 3 },
   ];
   for (const decision of decisions) {
@@ -285,7 +285,7 @@ test("a CLI-created Album opens in the Web with its ordered members and decision
     "--album",
     sourceAlbumId,
     "--selection",
-    "selected",
+    "picked",
     "--rating-min",
     "4",
     "--order",
@@ -338,7 +338,7 @@ test("a CLI-created Album opens in the Web with its ordered members and decision
   expect(new URL(page.url()).search).toBe(`?source=album&albumId=${album.id}`);
   const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
   for (const [index, rating] of [4, 5, 5, 4].entries()) {
-    await expect(cell(index).locator(".cell-state.selected")).toHaveText("✓");
+    await expect(cell(index).locator(".cell-state.picked")).toHaveText("✓");
     await expect(cell(index)).toHaveAttribute(
       "aria-label",
       new RegExp(`${rating} stars`),

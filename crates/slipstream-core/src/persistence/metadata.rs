@@ -274,8 +274,8 @@ mod tests {
         seed(&path, "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state)
              VALUES('original','dir/photo.JPG','jpeg',1,1,1,'pending'),('other-original','other.JPG','jpeg',1,1,1,'pending');
              INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating)
-             VALUES('photo','original',1,'inspection-pending','dir/photo.JPG','undecided',0),
-             ('other','other-original',1,'inspection-pending','other.JPG','undecided',0);");
+             VALUES('photo','original',1,'inspection-pending','dir/photo.JPG','unflagged',0),
+             ('other','other-original',1,'inspection-pending','other.JPG','unflagged',0);");
         (base, persistence, path)
     }
 
@@ -410,8 +410,8 @@ mod tests {
              VALUES('raw-original','dir/photo.ARW','raw',1,1,1,'pending'),
                    ('raw-twin-original','dir/photo.CR2','raw',1,1,1,'pending');
              INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating)
-             VALUES('raw-photo','raw-original',1,'inspection-pending','dir/photo.ARW','undecided',0),
-                   ('raw-twin','raw-twin-original',1,'inspection-pending','dir/photo.CR2','undecided',0);",
+             VALUES('raw-photo','raw-original',1,'inspection-pending','dir/photo.ARW','unflagged',0),
+                   ('raw-twin','raw-twin-original',1,'inspection-pending','dir/photo.CR2','unflagged',0);",
         );
         persistence
             .with_metadata_receiver("photo".into(), |context| {
@@ -495,7 +495,7 @@ mod tests {
             "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state)
              VALUES('raw-original','dir/photo.ARW','raw',1,1,1,'pending');
              INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating)
-             VALUES('raw-photo','raw-original',1,'inspection-pending','dir/photo.ARW','undecided',0);",
+             VALUES('raw-photo','raw-original',1,'inspection-pending','dir/photo.ARW','unflagged',0);",
         );
         persistence
             .with_metadata_receiver("raw-photo".into(), |context| {
@@ -559,7 +559,7 @@ mod tests {
             "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state)
              VALUES('raw-original','dir/photo.ARW','raw',1,1,1,'pending');
              INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating)
-             VALUES('raw-photo','raw-original',1,'inspection-pending','dir/photo.ARW','undecided',0);",
+             VALUES('raw-photo','raw-original',1,'inspection-pending','dir/photo.ARW','unflagged',0);",
         );
         persistence
             .with_metadata_receiver("photo".into(), |context| {

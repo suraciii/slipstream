@@ -6,7 +6,7 @@ import type {
 type GridBatchResultViewModel = NonNullable<GridViewModel["multi"]["result"]>;
 
 type BatchIntent =
-  | Readonly<{ kind: "grid-batch-mutation"; value: "selected" | "rejected" }>
+  | Readonly<{ kind: "grid-batch-mutation"; value: "picked" | "rejected" }>
   | Readonly<{ kind: "grid-batch-album-add"; albumId: string }>
   | Readonly<{ kind: "grid-batch-album-remove" }>
   | Readonly<{ kind: "grid-batch-review" }>;
@@ -87,7 +87,7 @@ export const createGridBatchPresenter = (
     renderTray();
   };
   const renderTray = () => {
-    const visible = mode || count > 0;
+    const visible = count > 0 || result !== undefined;
     e.gridBatch.hidden = !visible;
     e.gridSelectMode.setAttribute("aria-pressed", String(mode));
     const toolsFocus = e.gridTools.contains(document.activeElement),
@@ -183,7 +183,7 @@ export const createGridBatchPresenter = (
   };
   const onSelect = () => {
     if (!options.alive() || e.batchSelect.disabled) return;
-    options.send({ kind: "grid-batch-mutation", value: "selected" });
+    options.send({ kind: "grid-batch-mutation", value: "picked" });
   };
   const onReject = () => {
     if (!options.alive() || e.batchReject.disabled) return;

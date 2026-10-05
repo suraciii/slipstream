@@ -1553,7 +1553,7 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
     )
     .await;
     let token = opened["token"].as_str().unwrap().to_owned();
-    assert_eq!(opened["selectionCounts"]["undecided"], 3);
+    assert_eq!(opened["selectionCounts"]["unflagged"], 3);
 
     let applied = response_json(
         post_json(
@@ -1562,7 +1562,7 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
             serde_json::json!({
                 "photos": ids
                     .iter()
-                    .map(|photo_id| serde_json::json!({"photoId": photo_id, "expectedCurrent": "undecided"}))
+                    .map(|photo_id| serde_json::json!({"photoId": photo_id, "expectedCurrent": "unflagged"}))
                     .collect::<Vec<_>>(),
                 "selectionState": "rejected"
             }),
@@ -1577,7 +1577,7 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
     assert_eq!(entries.len(), 3);
     for (entry, id) in entries.iter().zip(&ids) {
         assert_eq!(entry["photoId"], *id);
-        assert_eq!(entry["priorValue"], "undecided");
+        assert_eq!(entry["priorValue"], "unflagged");
     }
 
     // The open Snapshot presents the confirmed states without a reload.
@@ -1610,7 +1610,7 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
             &format!("/api/photos/{}/state", ids[0]),
             serde_json::json!({
                 "field": "selectionState",
-                "value": "selected",
+                "value": "picked",
                 "expectedCurrent": "rejected"
             }),
             Some("https://camera.local"),
@@ -1638,7 +1638,7 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
     assert_eq!(photos.len(), ids.len());
     for photo in photos {
         let expected = if photo["id"] == ids[0] {
-            "selected"
+            "picked"
         } else {
             "rejected"
         };
@@ -1653,7 +1653,7 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
                     .iter()
                     .map(|photo_id| serde_json::json!({"photoId": photo_id, "expectedCurrent": "rejected"}))
                     .collect::<Vec<_>>(),
-                "selectionState": "selected"
+                "selectionState": "picked"
             }),
             Some("https://camera.local"),
         )
@@ -1662,7 +1662,7 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
     .await;
     assert_eq!(
         changed["changedElsewhere"],
-        serde_json::json!([{"photoId": ids[0], "currentValue": "selected"}])
+        serde_json::json!([{"photoId": ids[0], "currentValue": "picked"}])
     );
     assert_eq!(changed["applied"].as_array().unwrap().len(), 2);
     assert!(changed["missing"].as_array().unwrap().is_empty());
@@ -1684,7 +1684,7 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|photo| photo["selectionState"] == "selected")
+            .all(|photo| photo["selectionState"] == "picked")
     );
 
     // Repeating the now-confirmed state is idempotent: every Photo reports the
@@ -1696,9 +1696,9 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
             serde_json::json!({
                 "photos": ids
                     .iter()
-                    .map(|photo_id| serde_json::json!({"photoId": photo_id, "expectedCurrent": "selected"}))
+                    .map(|photo_id| serde_json::json!({"photoId": photo_id, "expectedCurrent": "picked"}))
                     .collect::<Vec<_>>(),
-                "selectionState": "selected"
+                "selectionState": "picked"
             }),
             Some("https://camera.local"),
         )
@@ -1710,7 +1710,7 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|entry| entry["priorValue"] == "selected")
+            .all(|entry| entry["priorValue"] == "picked")
     );
     let reopened = response_json(
         post_json(
@@ -1722,9 +1722,9 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
         .await,
     )
     .await;
-    assert_eq!(reopened["selectionCounts"]["selected"], 3);
+    assert_eq!(reopened["selectionCounts"]["picked"], 3);
     assert_eq!(reopened["selectionCounts"]["rejected"], 0);
-    assert_eq!(reopened["selectionCounts"]["undecided"], 0);
+    assert_eq!(reopened["selectionCounts"]["unflagged"], 0);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -1749,11 +1749,11 @@ async fn batch_photo_state_reports_a_missing_photo_without_blocking_the_rest() {
             "/api/photos/state",
             serde_json::json!({
                 "photos": [
-                    {"photoId": ids[0], "expectedCurrent": "undecided"},
-                    {"photoId": missing, "expectedCurrent": "undecided"},
-                    {"photoId": ids[1], "expectedCurrent": "undecided"}
+                    {"photoId": ids[0], "expectedCurrent": "unflagged"},
+                    {"photoId": missing, "expectedCurrent": "unflagged"},
+                    {"photoId": ids[1], "expectedCurrent": "unflagged"}
                 ],
-                "selectionState": "selected"
+                "selectionState": "picked"
             }),
             Some("https://camera.local"),
         )
@@ -1786,8 +1786,8 @@ async fn batch_photo_state_reports_a_missing_photo_without_blocking_the_rest() {
         .await,
     )
     .await;
-    assert_eq!(reopened["selectionCounts"]["selected"], 2);
-    assert_eq!(reopened["selectionCounts"]["undecided"], 0);
+    assert_eq!(reopened["selectionCounts"]["picked"], 2);
+    assert_eq!(reopened["selectionCounts"]["unflagged"], 0);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -1809,7 +1809,7 @@ async fn batch_photo_state_rejects_over_limit_duplicate_and_unknown_requests() {
     let valid_items = || {
         ids.iter()
             .map(
-                |photo_id| serde_json::json!({"photoId": photo_id, "expectedCurrent": "undecided"}),
+                |photo_id| serde_json::json!({"photoId": photo_id, "expectedCurrent": "unflagged"}),
             )
             .collect::<Vec<_>>()
     };
@@ -1817,36 +1817,36 @@ async fn batch_photo_state_rejects_over_limit_duplicate_and_unknown_requests() {
         serde_json::json!({
             "photos": over_limit
                 .into_iter()
-                .map(|photo_id| serde_json::json!({"photoId": photo_id, "expectedCurrent": "undecided"}))
+                .map(|photo_id| serde_json::json!({"photoId": photo_id, "expectedCurrent": "unflagged"}))
                 .collect::<Vec<_>>(),
-            "selectionState": "selected"
+            "selectionState": "picked"
         }),
         serde_json::json!({
             "photos": [
-                {"photoId": ids[0], "expectedCurrent": "undecided"},
-                {"photoId": ids[0], "expectedCurrent": "undecided"}
+                {"photoId": ids[0], "expectedCurrent": "unflagged"},
+                {"photoId": ids[0], "expectedCurrent": "unflagged"}
             ],
-            "selectionState": "selected"
+            "selectionState": "picked"
         }),
-        serde_json::json!({"photos": [], "selectionState": "selected"}),
-        serde_json::json!({"photos": valid_items(), "selectionState": "undecided"}),
+        serde_json::json!({"photos": [], "selectionState": "picked"}),
+        serde_json::json!({"photos": valid_items(), "selectionState": "unflagged"}),
         serde_json::json!({"photos": valid_items(), "selectionState": "maybe"}),
         serde_json::json!({"photos": valid_items(), "rating": 3}),
         serde_json::json!({
             "photos": [{"photoId": ids[0]}],
-            "selectionState": "selected"
+            "selectionState": "picked"
         }),
         serde_json::json!({
             "photos": [{
                 "photoId": ids[0],
-                "expectedCurrent": "undecided",
+                "expectedCurrent": "unflagged",
                 "unexpected": true
             }],
-            "selectionState": "selected"
+            "selectionState": "picked"
         }),
         serde_json::json!({
-            "photos": [{"photoId": "NOT-A-PHOTO-ID", "expectedCurrent": "undecided"}],
-            "selectionState": "selected"
+            "photos": [{"photoId": "NOT-A-PHOTO-ID", "expectedCurrent": "unflagged"}],
+            "selectionState": "picked"
         }),
     ] {
         assert_eq!(
@@ -1873,8 +1873,8 @@ async fn batch_photo_state_rejects_over_limit_duplicate_and_unknown_requests() {
         .await,
     )
     .await;
-    assert_eq!(reopened["selectionCounts"]["undecided"], 1);
-    assert_eq!(reopened["selectionCounts"]["selected"], 0);
+    assert_eq!(reopened["selectionCounts"]["unflagged"], 1);
+    assert_eq!(reopened["selectionCounts"]["picked"], 0);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -1943,8 +1943,8 @@ async fn browse_selection_filter_selects_from_the_source_order_with_source_count
     let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
     let by_location = photo_ids_by_location(&application, &ids).await;
     for (name, value) in [
-        ("a.jpg", "selected"),
-        ("c.jpg", "selected"),
+        ("a.jpg", "picked"),
+        ("c.jpg", "picked"),
         ("b.jpg", "rejected"),
     ] {
         assert_eq!(
@@ -1958,9 +1958,9 @@ async fn browse_selection_filter_selects_from_the_source_order_with_source_count
     // sequence keeps Capture Time order and the counts stay source-wide.
     for (selection, expected_locations) in [
         (BrowseSelectionFilter::All, vec!["a", "b", "c", "d", "e"]),
-        (BrowseSelectionFilter::Selected, vec!["a", "c"]),
+        (BrowseSelectionFilter::Picked, vec!["a", "c"]),
         (BrowseSelectionFilter::Rejected, vec!["b"]),
-        (BrowseSelectionFilter::Undecided, vec!["d", "e"]),
+        (BrowseSelectionFilter::Unflagged, vec!["d", "e"]),
     ] {
         let (opened, photos) =
             browse_filtered_summaries(&application, BrowseSourceRequest::Library, selection).await;
@@ -1987,9 +1987,9 @@ async fn browse_selection_filter_selects_from_the_source_order_with_source_count
         assert_eq!(
             opened.selection_counts,
             SelectionCountsWire {
-                selected: 2,
+                picked: 2,
                 rejected: 1,
-                undecided: 2,
+                unflagged: 2,
             },
             "counts describe the source for {selection:?}"
         );
@@ -2001,7 +2001,7 @@ async fn browse_selection_filter_selects_from_the_source_order_with_source_count
         .browse_open(
             BrowseSourceRequest::Library,
             BrowseViewOrder::CaptureTimeAscending,
-            BrowseSelectionFilter::Selected,
+            BrowseSelectionFilter::Picked,
             Some(&by_location["c.jpg"]),
         )
         .await
@@ -2016,7 +2016,7 @@ async fn browse_selection_filter_selects_from_the_source_order_with_source_count
         .browse_open(
             BrowseSourceRequest::Library,
             BrowseViewOrder::CaptureTimeAscending,
-            BrowseSelectionFilter::Selected,
+            BrowseSelectionFilter::Picked,
             Some(&by_location["b.jpg"]),
         )
         .await
@@ -2052,7 +2052,7 @@ async fn browse_selection_filter_selects_from_the_source_order_with_source_count
     assert_eq!(routed["total"], 1);
     assert_eq!(
         routed["selectionCounts"],
-        serde_json::json!({"selected": 2, "rejected": 1, "undecided": 2})
+        serde_json::json!({"picked": 2, "rejected": 1, "unflagged": 2})
     );
     let routed_token = routed["token"].as_str().unwrap().to_owned();
     let routed_window = response_json(
@@ -2116,7 +2116,7 @@ async fn browse_selection_filter_projects_album_and_folder_sources_without_write
         .await
         .unwrap();
     assert_eq!(
-        decide_selection(&router, &by_location["shoot/p1.jpg"], "selected").await,
+        decide_selection(&router, &by_location["shoot/p1.jpg"], "picked").await,
         StatusCode::OK
     );
     assert_eq!(
@@ -2129,7 +2129,7 @@ async fn browse_selection_filter_projects_album_and_folder_sources_without_write
     let (opened, photos) = browse_filtered_summaries(
         &application,
         BrowseSourceRequest::Album(album_id.clone()),
-        BrowseSelectionFilter::Selected,
+        BrowseSelectionFilter::Picked,
     )
     .await;
     assert_eq!(opened.total, 1);
@@ -2137,9 +2137,9 @@ async fn browse_selection_filter_projects_album_and_folder_sources_without_write
     assert_eq!(
         opened.selection_counts,
         SelectionCountsWire {
-            selected: 1,
+            picked: 1,
             rejected: 1,
-            undecided: 1,
+            unflagged: 1,
         }
     );
     let (all_members, _) = browse_filtered_summaries(
@@ -2173,7 +2173,7 @@ async fn browse_selection_filter_projects_album_and_folder_sources_without_write
     // outside the Folder never appear in it: a matching Photo elsewhere in
     // the Library must not leak into the Folder view or its counts.
     assert_eq!(
-        decide_selection(&router, &by_location["outside.jpg"], "selected").await,
+        decide_selection(&router, &by_location["outside.jpg"], "picked").await,
         StatusCode::OK
     );
     let publication = {
@@ -2186,16 +2186,16 @@ async fn browse_selection_filter_projects_album_and_folder_sources_without_write
             location: "shoot".to_owned(),
             publication,
         },
-        BrowseSelectionFilter::Selected,
+        BrowseSelectionFilter::Picked,
     )
     .await;
     assert_eq!(folder_opened.total, 1);
     assert_eq!(folder_photos[0].id, by_location["shoot/p1.jpg"]);
     // The Folder's counts stay scoped to the Folder: `outside.jpg` is selected
     // in the Library but is not part of this source.
-    assert_eq!(folder_opened.selection_counts.selected, 1);
+    assert_eq!(folder_opened.selection_counts.picked, 1);
     assert_eq!(folder_opened.selection_counts.rejected, 1);
-    assert_eq!(folder_opened.selection_counts.undecided, 1);
+    assert_eq!(folder_opened.selection_counts.unflagged, 1);
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
@@ -2246,11 +2246,11 @@ async fn album_view_change_anchors_the_current_photo_instead_of_the_saved_positi
         .await
         .unwrap();
     assert_eq!(
-        decide_selection(&router, &b, "selected").await,
+        decide_selection(&router, &b, "picked").await,
         StatusCode::OK
     );
     assert_eq!(
-        decide_selection(&router, &c, "selected").await,
+        decide_selection(&router, &c, "picked").await,
         StatusCode::OK
     );
 
@@ -2261,7 +2261,7 @@ async fn album_view_change_anchors_the_current_photo_instead_of_the_saved_positi
         .browse_open(
             BrowseSourceRequest::Album(album.clone()),
             BrowseViewOrder::AlbumOrder,
-            BrowseSelectionFilter::Selected,
+            BrowseSelectionFilter::Picked,
             Some(&a),
         )
         .await
@@ -2281,7 +2281,7 @@ async fn album_view_change_anchors_the_current_photo_instead_of_the_saved_positi
         .browse_open(
             BrowseSourceRequest::Album(album.clone()),
             BrowseViewOrder::AlbumOrder,
-            BrowseSelectionFilter::Selected,
+            BrowseSelectionFilter::Picked,
             Some(&c),
         )
         .await
@@ -2292,7 +2292,7 @@ async fn album_view_change_anchors_the_current_photo_instead_of_the_saved_positi
         .browse_open(
             BrowseSourceRequest::Album(album),
             BrowseViewOrder::AlbumOrder,
-            BrowseSelectionFilter::Selected,
+            BrowseSelectionFilter::Picked,
             None,
         )
         .await
@@ -2317,20 +2317,20 @@ async fn browse_selection_filter_membership_is_frozen_until_the_source_reopens()
     let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
     let by_location = photo_ids_by_location(&application, &ids).await;
     assert_eq!(
-        decide_selection(&router, &by_location["a.jpg"], "selected").await,
+        decide_selection(&router, &by_location["a.jpg"], "picked").await,
         StatusCode::OK
     );
     let opened = application
         .browse_open(
             BrowseSourceRequest::Library,
             BrowseViewOrder::CaptureTimeAscending,
-            BrowseSelectionFilter::Selected,
+            BrowseSelectionFilter::Picked,
             None,
         )
         .await
         .unwrap();
     assert_eq!(opened.total, 1);
-    assert_eq!(opened.selection_counts.selected, 1);
+    assert_eq!(opened.selection_counts.picked, 1);
 
     // A decision cannot change an open Snapshot's membership: the frozen
     // view still lists the Photo, and only reopening applies the filter to
@@ -2351,7 +2351,7 @@ async fn browse_selection_filter_membership_is_frozen_until_the_source_reopens()
         .browse_open(
             BrowseSourceRequest::Library,
             BrowseViewOrder::CaptureTimeAscending,
-            BrowseSelectionFilter::Selected,
+            BrowseSelectionFilter::Picked,
             Some(&by_location["a.jpg"]),
         )
         .await
@@ -2363,9 +2363,9 @@ async fn browse_selection_filter_membership_is_frozen_until_the_source_reopens()
     assert_eq!(
         reopened.selection_counts,
         SelectionCountsWire {
-            selected: 0,
+            picked: 0,
             rejected: 1,
-            undecided: 1,
+            unflagged: 1,
         }
     );
     application.browse_close(&opened.token);

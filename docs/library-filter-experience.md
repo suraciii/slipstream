@@ -56,9 +56,9 @@ destinations, not ordinary Library filter sources.
 
 ### Selection State
 
-Selection State is the keep decision: `undecided`, `selected`, or `rejected`.
+Selection State is the keep decision: `unflagged`, `picked`, or `rejected`.
 The `all` value means that no Selection State restriction is applied. Web
-View options must provide All, Undecided, Selected, and Rejected. The CLI
+View options must provide All, Unflagged, Picked, and Rejected. The CLI
 uses the same values with `photos list --selection`.
 
 Selection State is independent of Rating, Album membership, and Original
@@ -149,7 +149,7 @@ Rejected is the first complete end-to-end filter workflow:
 1. Choose All Photos, an Original Folder, or an Album.
 2. Apply the Rejected Selection State filter and inspect the result count,
    source progress, Preview, and Photo facts.
-3. Correct an accidental rejection to Selected or Undecided, or leave it
+3. Correct an accidental rejection to Picked or Unflagged, or leave it
    Rejected. The open filtered sequence remains stable until refresh.
 4. If cleanup is intended, start the explicit **Remove Rejected Photos** review
    from the current source and filtered sequence. The review represents the
@@ -173,7 +173,7 @@ syntax and result envelope. The query contract is:
 
 ```text literal
 slipstream photos list [--album ALBUM_ID | --folder LOCATION]
-  [--selection all|undecided|selected|rejected]
+  [--selection all|unflagged|picked|rejected]
   [--rating-min N] [--rating-max N] [--kind raw|jpeg]
   [--available true|false] [--captured-from LOCAL_TIME]
   [--captured-before LOCAL_TIME]
@@ -187,7 +187,7 @@ evidence; they must not accept a live filter expression as an implicit write
 target. A lost response is an unknown outcome that requires inspection, not an
 automatic retry.
 
-An Agent may use a CLI query to inspect rejected, selected high-rated, RAW-only,
+An Agent may use a CLI query to inspect rejected, picked high-rated, RAW-only,
 unavailable, or date-bounded Photos. It may then use explicit mark, Album,
 Remove, or Restore operations. The Agent must report the query conditions,
 Photo IDs, confirmed effects, conflicts, missing items, and unresolved work.
@@ -209,15 +209,15 @@ they reopen the same destination or create a new evaluated result.
 
 ## Examples
 
-The Photographer filters Undecided Photos in an Album, reviews them in Photo
-View, and marks the usable ones Selected. The source and filtered sequence do
-not jump after each decision; Refresh shows the new Undecided result.
+The Photographer filters Unflagged Photos in an Album, reviews them in Photo
+View, and marks the usable ones Picked. The source and filtered sequence do
+not jump after each decision; Refresh shows the new Unflagged result.
 
 The Photographer filters Rejected Photos in a Folder, reviews all 240 matches,
 removes them from the Library, and sees 240 confirmed Trash entries. A stale
-Photo that became Selected is reported separately and remains in the Library.
+Photo that became Picked is reported separately and remains in the Library.
 
-An Agent queries `selected` Photos with Rating 4 or 5, groups explicit IDs into
+An Agent queries `picked` Photos with Rating 4 or 5, groups explicit IDs into
 bounded Album operations, and opens the resulting Album in Web. It does not
 claim that the original CLI Rating condition is still active in the Album URL.
 

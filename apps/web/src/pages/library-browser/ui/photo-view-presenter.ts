@@ -89,13 +89,11 @@ export interface PhotoViewPresenter extends PhotoViewPresentation {
 export function createPhotoViewPresenter({
   root,
   zoom,
-  renderRating,
   resetGestures,
   reviewRecovery,
 }: Readonly<{
   root: HTMLElement;
   zoom: Readonly<{ resetForImage(): void; applyZoom(): void }>;
-  renderRating(rating: number): void;
   resetGestures(): void;
   reviewRecovery(): void;
 }>): PhotoViewPresenter {
@@ -123,7 +121,7 @@ export function createPhotoViewPresenter({
   );
   let alive = true;
   let currentPhotoId: string | undefined;
-  let currentSelection: ViewSelectionState = "undecided";
+  let currentSelection: ViewSelectionState = "unflagged";
   let photoSurface: object = {};
   let photoStatusSurface: object = {};
   let canReviewRecovery = false;
@@ -133,9 +131,12 @@ export function createPhotoViewPresenter({
     position.textContent = `${model.index + 1} / ${model.total}`;
     filename.textContent = model.originalFilename ?? "—";
     filename.title = model.originalFilename ?? "";
-    currentSelection = model.selectionState ?? "undecided";
+    currentSelection = model.selectionState ?? "unflagged";
     selection.textContent = selectionLabel(currentSelection);
-    renderRating(model.rating ?? 0);
+    selection.setAttribute(
+      "aria-label",
+      `Selection State: ${selectionLabel(currentSelection)}`,
+    );
   };
   const renderPhotoMetadata = (model: PhotoMetadataViewModel = {}) => {
     if (!alive) return;
@@ -328,11 +329,11 @@ function paragraph(text: string): HTMLParagraphElement {
 }
 
 function selectionLabel(value: ViewSelectionState): string {
-  return value === "selected"
-    ? "Selected"
+  return value === "picked"
+    ? "Picked"
     : value === "rejected"
       ? "Rejected"
-      : "Undecided";
+      : "Unflagged";
 }
 
 function sourceLabel(source?: ViewPreviewSource): string {

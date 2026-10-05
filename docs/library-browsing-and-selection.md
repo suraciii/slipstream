@@ -45,8 +45,8 @@ Slipstream follows this familiar Library-browser shape without adding desktop ed
 [Library Browser Experience](library-browser-experience.md) owns responsive
 screen composition, control placement, modal behavior, space budgets, and
 browser navigation. The action semantics below apply regardless of where a
-control is presented. Clear is unavailable while the current Photo is already
-`undecided`; Undo is unavailable until the current source has an undoable
+control is presented. Clear flag is unavailable while the current Photo is already
+`unflagged`; Undo is unavailable until the current source has an undoable
 Selection State or Rating change.
 
 ## Mobile Photo View Quick Actions
@@ -177,7 +177,7 @@ The Original filename is the basename of the Photo's ordering Original Location
 defined under Source Order. A Grid cell must keep the position number visible
 and must truncate a long filename instead of breaking the cell layout.
 
-A Grid cell must carry a Selection State badge only while that Photo is `selected` or `rejected`. An `undecided` Photo must show no badge, so the badge always marks a recorded decision.
+A Grid cell must carry a Selection State badge only while that Photo is `picked` or `rejected`. An `unflagged` Photo must show no badge, so the badge always marks a recorded decision.
 
 Thumbnail completion must not change source order, Selection State, Rating, or saved Album position.
 
@@ -238,7 +238,7 @@ placement defined by [Library Browser Experience](library-browser-experience.md#
 - Rating;
 - Preview Source;
 - the Albums that contain the current Photo;
-- controls for select, reject, clear, undo, and Rating;
+- controls for pick, reject, clear flag, undo, and Rating;
 - previous and next navigation;
 - whether Preview detail is limited; and
 - review-relevant capture metadata when available: Capture Time, Aperture,
@@ -410,19 +410,19 @@ be discarded.
 
 Each Photo has exactly one Selection State:
 
-- `undecided`;
-- `selected`;
+- `unflagged`;
+- `picked`;
 - `rejected`.
 
-Selecting a rejected Photo changes it to `selected`. Rejecting a selected Photo changes it to `rejected`. Clearing either state changes it to `undecided`.
+Picking a rejected Photo changes it to `picked`. Rejecting a picked Photo changes it to `rejected`. Clearing either state changes it to `unflagged`.
 
-A selection action must persist before Slipstream treats navigation caused by that action as safely completed. The interface may animate immediately, but a persistence failure must restore or retain the prior visible state and keep the affected Photo recoverable.
+A review action must persist before Slipstream treats navigation caused by that action as safely completed. The interface may animate immediately, but a persistence failure must restore or retain the prior visible state and keep the affected Photo recoverable.
 
 ## Selection Filter and Progress
 
 A second reviewing pass works on one Selection State at a time: the
-Photographer re-checks rejects, then finishes the undecided Photos. Grid View
-must therefore offer an `All`, `Undecided`, `Selected`, or `Rejected` view of
+Photographer re-checks rejects, then finishes the unflagged Photos. Grid View
+must therefore offer an `All`, `Unflagged`, `Picked`, or `Rejected` view of
 the open source, and must show how much of that source is decided.
 
 The filter is a view option of the open source. It must not create a source or
@@ -465,8 +465,7 @@ the source is final.
 
 While the Preview zoom state is Fit:
 
-- a committed right swipe must set `selected`;
-- a committed left swipe must set `rejected`;
+- a committed right swipe must set `picked`;
 - a drag below the commit threshold must return the Photo to its starting position without changing state; and
 - the surface must show the pending direction before release.
 
@@ -521,7 +520,7 @@ Before the 450-millisecond threshold, once movement exceeds 12 CSS pixels, the
 larger absolute axis delta owns the gesture:
 
 - a horizontal-dominant movement cancels the candidate and gives the gesture
-  to the existing Select / Reject swipe;
+  to the existing Pick / Reject swipe;
 - a vertical-dominant movement cancels the candidate and gives the gesture to
   natural Photo View scrolling;
 - an equal-axis movement cancels the candidate and gives the gesture to
@@ -612,7 +611,7 @@ centered.
 
 Zoom and pan must never record a Selection State or Rating. While the zoom
 state is manual, one-finger dragging pans the Preview and swipe decisions are
-unavailable; explicit Select and Reject controls stay available. In Fit,
+unavailable; explicit Pick and Reject controls stay available. In Fit,
 horizontal dragging keeps the decision gesture and vertical dragging scrolls
 a short Photo View naturally.
 
@@ -630,7 +629,7 @@ must not suggest the source contains detail beyond the Preview derivative.
 
 A Photo has a Rating from zero through five stars. Zero means no Rating.
 
-Changing Rating must not change Selection State. Selecting or rejecting a Photo must not change Rating.
+Changing Rating must not change Selection State. Picking or rejecting a Photo must not change Rating.
 
 The Photographer must be able to set Rating through visible controls. Keyboard shortcuts `0` through `5` may provide the same behavior on devices with keyboards.
 
@@ -661,7 +660,7 @@ On a device with a keyboard, Photo View provides:
 
 - Right Arrow moves to the next Photo without changing it.
 - Left Arrow moves to the previous Photo without changing it.
-- `P` selects the current Photo.
+- `P` picks the current Photo.
 - `X` rejects the current Photo.
 - `U` clears the current Photo's Selection State.
 - `0` through `5` set Rating.
@@ -678,7 +677,7 @@ Grid View must be operable from a keyboard without opening Photo View.
 - While the focused Photo's bounded window is loading, the Grid keeps keyboard focus and returns it to the cell once that cell renders.
 - The focused cell must keep its visible focus ring when a window replacement or a merged render rebuilds it.
 - `Enter` opens the focused Photo in Photo View.
-- `P`, `X`, `U`, and `0` through `5` apply to the focused Photo, with the same persistence and undo rules as their Photo View equivalents. A decision must not move cell focus, and `U` must perform no write while the focused Photo is already `undecided`.
+- `P`, `X`, `U`, and `0` through `5` apply to the focused Photo, with the same persistence and undo rules as their Photo View equivalents. A decision must not move cell focus, and `U` must perform no write while the focused Photo is already `unflagged`.
 - A failed Grid decision must report on the Grid's status line and must keep the affected Photo recoverable. It must not open Photo View.
 - Grid keys must act only while the Grid owns keyboard focus. Another surface with focus, such as an Album name input, must receive its own keys unchanged.
 
@@ -722,13 +721,13 @@ that are actually selected.
 
 While the multi-selection is not empty, the Grid must show its count, one
 clear exit that empties the multi-selection and leaves **Select** mode, and the
-batch actions **Select**, **Reject**, and **Add to Album**. Multi-selection
-must read differently from the single open target and must not depend on color
+batch actions **Pick**, **Reject**, and **Add to Album**. Multi-selection must
+read differently from the single open target and must not depend on color
 alone; a multi-selected Grid cell must expose that state to assistive
 technology.
 
-Batch **Select** and **Reject** apply one Selection State to every selected
-Photo through the same persistence rules as a single decision, as one bounded
+Batch **Pick** and **Reject** apply one Selection State to every selected Photo
+through the same persistence rules as a single decision, as one bounded
 operation. Each selected Photo carries the last Selection State the browser
 confirmed for it. A Photo whose current Selection State differs from that
 expected value is reported as changed elsewhere and is not overwritten. A
@@ -737,9 +736,8 @@ block the other Photos. A confirmed Photo moves the decision progress once.
 `Review N` also reconciles each refreshed Photo from the state contribution the
 source counts already held to the observed state, so a retry does not move its
 progress twice. A batch carries no Album position write even in an open Album:
-it moves no
-browsing position. A failed or partial operation must leave every affected
-Photo recoverable and must not present the batch as complete.
+it moves no browsing position. A failed or partial operation must leave every
+affected Photo recoverable and must not present the batch as complete.
 
 The Grid must report applied, changed-elsewhere, and missing Photos separately.
 A changed-elsewhere Photo remains selected for review or retry. The result must
@@ -845,7 +843,7 @@ A rescan discovers 100 new Photos while the Photographer is viewing the Library.
 
 The Photographer opens Photo 100. Slipstream prepares its review Preview first, then prepares Photos 101 and 99 with lower priority. Moving to Photo 101 normally reuses the completed cache entry.
 
-The Photographer drags a Photo to the right. A selected indicator grows with the drag. The Photographer releases after the commit threshold. Slipstream records `selected` and advances to the next Photo.
+The Photographer drags a Photo to the right. A picked indicator grows with the drag. The Photographer releases after the commit threshold. Slipstream records `picked` and advances to the next Photo.
 
 On a Fit Preview, the Photographer holds a touch pointer still for 450
 milliseconds, slides to `4`, and releases. Slipstream saves exactly Rating `4`,

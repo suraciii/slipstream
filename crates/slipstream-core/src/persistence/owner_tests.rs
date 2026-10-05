@@ -52,7 +52,7 @@ async fn effective_writers_advance_versions_while_noops_and_progress_do_not() {
         .mutate_photo_state(PhotoStateMutation {
             photo_id: photo_id.clone(),
             field: PhotoStateField::SelectionState,
-            value: PhotoStateValue::Selection(SelectionState::Selected),
+            value: PhotoStateValue::Selection(SelectionState::Picked),
             expected_current: None,
             album_id: None,
         })
@@ -64,9 +64,9 @@ async fn effective_writers_advance_versions_while_noops_and_progress_do_not() {
         .mutate_photo_state_batch_receiver(PhotoStateBatchMutation {
             photos: vec![PhotoStateBatchItem {
                 photo_id: photo_id.clone(),
-                expected_current: SelectionState::Selected,
+                expected_current: SelectionState::Picked,
             }],
-            value: SelectionState::Selected,
+            value: SelectionState::Picked,
         })
         .unwrap()
         .await
@@ -79,7 +79,7 @@ async fn effective_writers_advance_versions_while_noops_and_progress_do_not() {
                 photo_id: photo_id.clone(),
                 field: PhotoStateField::SelectionState,
                 value: PhotoStateValue::Selection(SelectionState::Rejected),
-                expected_current: Some(PhotoStateValue::Selection(SelectionState::Undecided)),
+                expected_current: Some(PhotoStateValue::Selection(SelectionState::Unflagged)),
                 album_id: None,
             })
             .await
@@ -90,8 +90,8 @@ async fn effective_writers_advance_versions_while_noops_and_progress_do_not() {
         .mutate_photo_state(PhotoStateMutation {
             photo_id: photo_id.clone(),
             field: PhotoStateField::SelectionState,
-            value: PhotoStateValue::Selection(SelectionState::Undecided),
-            expected_current: Some(PhotoStateValue::Selection(SelectionState::Selected)),
+            value: PhotoStateValue::Selection(SelectionState::Unflagged),
+            expected_current: Some(PhotoStateValue::Selection(SelectionState::Picked)),
             album_id: None,
         })
         .await

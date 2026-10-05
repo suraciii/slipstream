@@ -1,6 +1,4 @@
 import type { LibraryBrowserIntent } from "./library-browser-view.js";
-import type { ModalSurfaces } from "./modal-surface.js";
-
 type RatingIntent = Extract<LibraryBrowserIntent, { kind: "photo-mutation" }>;
 
 const RATING_WHEEL_RADIUS = 78;
@@ -21,13 +19,9 @@ export interface RatingControls {
 
 export function createRatingControls({
   elements,
-  surfaces,
   send,
-  onSurfaceChange,
 }: Readonly<{
   elements: Readonly<{
-    ratingDialog: HTMLDialogElement;
-    ratingChoicesClose: HTMLButtonElement;
     ratings: HTMLElement;
     ratingWheel: HTMLElement;
     ratingWheelInstructions: HTMLElement;
@@ -37,13 +31,9 @@ export function createRatingControls({
     rating: HTMLElement;
     dockRating: HTMLButtonElement;
   }>;
-  surfaces: ModalSurfaces;
   send: (intent: RatingIntent) => void;
-  onSurfaceChange: () => void;
 }>): RatingControls {
   const {
-    ratingDialog,
-    ratingChoicesClose,
     ratings,
     ratingWheel,
     ratingWheelInstructions,
@@ -163,12 +153,6 @@ export function createRatingControls({
     setRatingWheelCandidate(value);
   };
 
-  surfaces.register("rating", {
-    dialog: ratingDialog,
-    modal: () => true,
-    onOpen: onSurfaceChange,
-  });
-
   for (let value = 0; value <= 5; value += 1) {
     const button = document.createElement("button");
     button.type = "button";
@@ -219,18 +203,6 @@ export function createRatingControls({
     },
     { signal: listeners.signal },
   );
-  ratingChoicesClose.addEventListener("click", () => closeChoices(), {
-    signal: listeners.signal,
-  });
-  ratingDialog.addEventListener("close", onSurfaceChange, {
-    signal: listeners.signal,
-  });
-
-  const closeChoices = (restoreFocus = true): void => {
-    if (!alive) return;
-    surfaces.close("rating", restoreFocus);
-    onSurfaceChange();
-  };
 
   return {
     render(value) {
@@ -258,19 +230,15 @@ export function createRatingControls({
     },
     openChoices() {
       if (!alive) return;
-      surfaces.open(
-        "rating",
-        document.activeElement instanceof HTMLElement
-          ? document.activeElement
-          : undefined,
-      );
-      onSurfaceChange();
       const current = ratings.querySelector<HTMLButtonElement>(
         `[data-rating-value="${currentRating}"]`,
       );
       (current ?? ratings.querySelector<HTMLButtonElement>("button"))?.focus();
     },
-    closeChoices,
+    closeChoices() {
+      // Rating choices live in the Photo tools sheet; its controller owns
+      // opening, closing, and focus restoration.
+    },
     openWheel: openRatingWheel,
     updateWheel: updateRatingWheel,
     closeWheel: closeRatingWheel,

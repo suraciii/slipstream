@@ -101,8 +101,8 @@ fn expand_library_command_updates_binding_and_location_then_scans() {
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
         // Schema v12 publishes camera identity; v13 adds Development Proxies;
-        // v14 adds durable XMP snapshot exports.
-        14
+        // v14 adds durable XMP snapshot exports; v15 canonicalizes Selection State.
+        15
     );
     assert_eq!(
         connection
@@ -139,7 +139,7 @@ fn expand_library_command_updates_binding_and_location_then_scans() {
                 },
             )
             .unwrap(),
-        ("selected".to_owned(), 4, 123, "prior-operation".to_owned())
+        ("picked".to_owned(), 4, 123, "prior-operation".to_owned())
     );
     assert_eq!(
         connection

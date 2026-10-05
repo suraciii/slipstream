@@ -339,11 +339,11 @@ mod tests {
     fn batch_photo_state_validation_classifies_malformed_requests_as_invalid() {
         let item = |photo_id: &str| crate::PhotoStateBatchItem {
             photo_id: photo_id.to_owned(),
-            expected_current: SelectionState::Undecided,
+            expected_current: SelectionState::Unflagged,
         };
         let valid = PhotoStateBatchMutation {
             photos: vec![item("one"), item("two")],
-            value: SelectionState::Selected,
+            value: SelectionState::Picked,
         };
         assert_eq!(validate_photo_state_batch_mutation(&valid), Ok(()));
         let malformed = [
@@ -357,13 +357,13 @@ mod tests {
             },
             PhotoStateBatchMutation {
                 photos: vec![item("one")],
-                value: SelectionState::Undecided,
+                value: SelectionState::Unflagged,
             },
             PhotoStateBatchMutation {
                 photos: (0..=crate::PHOTO_STATE_BATCH_MAX)
                     .map(|index| item(&format!("photo-{index}")))
                     .collect(),
-                value: SelectionState::Selected,
+                value: SelectionState::Picked,
             },
         ];
         for mutation in malformed {
@@ -398,8 +398,8 @@ mod tests {
             .mutate_photo_state(PhotoStateMutation {
                 photo_id: ids[0].clone(),
                 field: PhotoStateField::SelectionState,
-                value: PhotoStateValue::Selection(SelectionState::Selected),
-                expected_current: Some(PhotoStateValue::Selection(SelectionState::Undecided)),
+                value: PhotoStateValue::Selection(SelectionState::Picked),
+                expected_current: Some(PhotoStateValue::Selection(SelectionState::Unflagged)),
                 album_id: None,
             })
             .await
@@ -410,15 +410,15 @@ mod tests {
                 photos: vec![
                     PhotoStateBatchItem {
                         photo_id: ids[0].clone(),
-                        expected_current: SelectionState::Undecided,
+                        expected_current: SelectionState::Unflagged,
                     },
                     PhotoStateBatchItem {
                         photo_id: ids[1].clone(),
-                        expected_current: SelectionState::Undecided,
+                        expected_current: SelectionState::Unflagged,
                     },
                     PhotoStateBatchItem {
                         photo_id: "missing-photo".to_owned(),
-                        expected_current: SelectionState::Undecided,
+                        expected_current: SelectionState::Unflagged,
                     },
                 ],
                 value: SelectionState::Rejected,
@@ -431,14 +431,14 @@ mod tests {
             result.applied,
             vec![PhotoStateBatchApplied {
                 photo_id: ids[1].clone(),
-                prior_value: SelectionState::Undecided,
+                prior_value: SelectionState::Unflagged,
             }]
         );
         assert_eq!(
             result.changed_elsewhere,
             vec![PhotoStateBatchChangedElsewhere {
                 photo_id: ids[0].clone(),
-                current_value: SelectionState::Selected,
+                current_value: SelectionState::Picked,
             }]
         );
         assert_eq!(
@@ -454,7 +454,7 @@ mod tests {
                 .iter()
                 .map(|photo| photo.selection_state)
                 .collect::<Vec<_>>(),
-            vec![SelectionState::Selected, SelectionState::Rejected]
+            vec![SelectionState::Picked, SelectionState::Rejected]
         );
         persistence.shutdown().unwrap();
     }
@@ -493,10 +493,10 @@ mod tests {
                     .iter()
                     .map(|photo_id| PhotoStateBatchItem {
                         photo_id: photo_id.clone(),
-                        expected_current: SelectionState::Undecided,
+                        expected_current: SelectionState::Unflagged,
                     })
                     .collect(),
-                value: SelectionState::Selected,
+                value: SelectionState::Picked,
             })
             .unwrap()
             .await
@@ -507,7 +507,7 @@ mod tests {
             after
                 .photos
                 .iter()
-                .all(|photo| photo.selection_state == SelectionState::Undecided)
+                .all(|photo| photo.selection_state == SelectionState::Unflagged)
         );
         persistence.shutdown().unwrap();
     }
@@ -548,7 +548,7 @@ mod tests {
         let changed = persistence
             .mutate_photo_decision_checked(CheckedPhotoDecisionMutation {
                 field: PhotoStateField::SelectionState,
-                value: PhotoStateValue::Selection(SelectionState::Selected),
+                value: PhotoStateValue::Selection(SelectionState::Picked),
                 photos: vec![CheckedPhotoDecisionItem {
                     photo_id: ids[0].clone(),
                     expected_version: initial.decision_version.clone(),
@@ -566,11 +566,11 @@ mod tests {
                 photo_id: ids[0].clone(),
                 outcome: CheckedPhotoDecisionOutcome::Changed {
                     prior: PhotoDecisionFacts {
-                        selection_state: SelectionState::Undecided,
+                        selection_state: SelectionState::Unflagged,
                         rating: 0,
                     },
                     current: PhotoDecisionSnapshot {
-                        selection_state: SelectionState::Selected,
+                        selection_state: SelectionState::Picked,
                         rating: 0,
                         decision_version: read_photo(ids[0].clone()).await.decision_version,
                     },
@@ -578,7 +578,7 @@ mod tests {
             }]
         );
         let observed = read_photo(ids[0].clone()).await;
-        assert_eq!(observed.selection_state, SelectionState::Selected);
+        assert_eq!(observed.selection_state, SelectionState::Picked);
         assert_eq!(observed.rating, 0);
         let selected_version = observed.decision_version;
         assert_ne!(selected_version, initial.decision_version);
@@ -590,20 +590,20 @@ mod tests {
             .mutate_photo_state(PhotoStateMutation {
                 photo_id: ids[0].clone(),
                 field: PhotoStateField::SelectionState,
-                value: PhotoStateValue::Selection(SelectionState::Undecided),
-                expected_current: Some(PhotoStateValue::Selection(SelectionState::Selected)),
+                value: PhotoStateValue::Selection(SelectionState::Unflagged),
+                expected_current: Some(PhotoStateValue::Selection(SelectionState::Picked)),
                 album_id: None,
             })
             .await
             .unwrap();
         let undone = read_photo(ids[0].clone()).await;
-        assert_eq!(undone.selection_state, SelectionState::Undecided);
+        assert_eq!(undone.selection_state, SelectionState::Unflagged);
         let away_and_back_version = undone.decision_version.clone();
         assert_ne!(away_and_back_version, selected_version);
         let away_and_back = persistence
             .mutate_photo_decision_checked(CheckedPhotoDecisionMutation {
                 field: PhotoStateField::SelectionState,
-                value: PhotoStateValue::Selection(SelectionState::Undecided),
+                value: PhotoStateValue::Selection(SelectionState::Unflagged),
                 photos: vec![CheckedPhotoDecisionItem {
                     photo_id: ids[0].clone(),
                     expected_version: selected_version.clone(),
@@ -617,7 +617,7 @@ mod tests {
                 photo_id: ids[0].clone(),
                 outcome: CheckedPhotoDecisionOutcome::Conflict {
                     current: PhotoDecisionSnapshot {
-                        selection_state: SelectionState::Undecided,
+                        selection_state: SelectionState::Unflagged,
                         rating: 0,
                         decision_version: away_and_back_version.clone(),
                     },
@@ -648,7 +648,7 @@ mod tests {
             .mutate_photo_state(PhotoStateMutation {
                 photo_id: ids[2].clone(),
                 field: PhotoStateField::SelectionState,
-                value: PhotoStateValue::Selection(SelectionState::Selected),
+                value: PhotoStateValue::Selection(SelectionState::Picked),
                 expected_current: None,
                 album_id: None,
             })
@@ -710,7 +710,7 @@ mod tests {
             mixed.results[1].outcome,
             CheckedPhotoDecisionOutcome::Conflict {
                 current: PhotoDecisionSnapshot {
-                    selection_state: SelectionState::Selected,
+                    selection_state: SelectionState::Picked,
                     rating: 0,
                     decision_version: photo_three.decision_version.clone(),
                 },
@@ -724,7 +724,7 @@ mod tests {
             mixed.results[3].outcome,
             CheckedPhotoDecisionOutcome::Unchanged {
                 current: PhotoDecisionSnapshot {
-                    selection_state: SelectionState::Undecided,
+                    selection_state: SelectionState::Unflagged,
                     rating: 4,
                     decision_version: photo_two.decision_version.clone(),
                 },
@@ -738,7 +738,7 @@ mod tests {
         );
         let after_three = read_photo(ids[2].clone()).await;
         assert_eq!(after_three.rating, 0);
-        assert_eq!(after_three.selection_state, SelectionState::Selected);
+        assert_eq!(after_three.selection_state, SelectionState::Picked);
 
         // Restart issues a fresh process epoch: the old token conflicts, and
         // a fresh read allows one explicit next write.
@@ -947,7 +947,7 @@ mod tests {
         assert_eq!(changed.counts.changed, 1);
         let after_photo = read_photo(ids[0].clone()).await;
         assert_eq!(after_photo.rating, 3);
-        assert_eq!(after_photo.selection_state, SelectionState::Undecided);
+        assert_eq!(after_photo.selection_state, SelectionState::Unflagged);
         let after_album = persistence
             .album_receiver(&album_id)
             .unwrap()
@@ -1006,7 +1006,7 @@ mod tests {
             persistence
                 .mutate_photo_decision_checked(CheckedPhotoDecisionMutation {
                     field: PhotoStateField::SelectionState,
-                    value: PhotoStateValue::Selection(SelectionState::Selected),
+                    value: PhotoStateValue::Selection(SelectionState::Picked),
                     photos: vec![
                         CheckedPhotoDecisionItem {
                             photo_id: ids[0].clone(),
@@ -1025,8 +1025,8 @@ mod tests {
         // rollback; the next explicit write still uses the observed version.
         let after_first = read_photo(ids[0].clone()).await;
         let after_second = read_photo(ids[1].clone()).await;
-        assert_eq!(after_first.selection_state, SelectionState::Undecided);
-        assert_eq!(after_second.selection_state, SelectionState::Undecided);
+        assert_eq!(after_first.selection_state, SelectionState::Unflagged);
+        assert_eq!(after_second.selection_state, SelectionState::Unflagged);
         assert_eq!(after_first.decision_version, first.decision_version);
         assert_eq!(after_second.decision_version, second.decision_version);
         let recovered = persistence
@@ -1108,27 +1108,21 @@ mod tests {
             .mutate_photo_state(PhotoStateMutation {
                 photo_id: ids[0].clone(),
                 field: PhotoStateField::SelectionState,
-                value: PhotoStateValue::Selection(SelectionState::Selected),
-                expected_current: Some(PhotoStateValue::Selection(SelectionState::Undecided)),
+                value: PhotoStateValue::Selection(SelectionState::Picked),
+                expected_current: Some(PhotoStateValue::Selection(SelectionState::Unflagged)),
                 album_id: Some(album_b.clone()),
             })
             .await
             .unwrap();
         assert_eq!(
             result.undo.prior_value,
-            PhotoStateValue::Selection(SelectionState::Undecided)
+            PhotoStateValue::Selection(SelectionState::Unflagged)
         );
         let albums = persistence.list_albums().await.unwrap();
         let current_a = albums.iter().find(|album| album.id == album_a).unwrap();
         let current_b = albums.iter().find(|album| album.id == album_b).unwrap();
-        assert_eq!(
-            current_a.members[0].selection_state,
-            SelectionState::Selected
-        );
-        assert_eq!(
-            current_b.members[0].selection_state,
-            SelectionState::Selected
-        );
+        assert_eq!(current_a.members[0].selection_state, SelectionState::Picked);
+        assert_eq!(current_b.members[0].selection_state, SelectionState::Picked);
         assert_eq!(
             current_b.last_reviewed_photo_id.as_deref(),
             Some(ids[0].as_str())
@@ -1139,7 +1133,7 @@ mod tests {
                     photo_id: ids[0].clone(),
                     field: PhotoStateField::SelectionState,
                     value: result.undo.prior_value,
-                    expected_current: Some(PhotoStateValue::Selection(SelectionState::Undecided)),
+                    expected_current: Some(PhotoStateValue::Selection(SelectionState::Unflagged)),
                     album_id: None,
                 })
                 .await,

@@ -355,8 +355,8 @@ impl CliPhotoDecisionBody {
                 .value
                 .as_str()
                 .and_then(|value| match value {
-                    "undecided" => Some(SelectionState::Undecided),
-                    "selected" => Some(SelectionState::Selected),
+                    "unflagged" => Some(SelectionState::Unflagged),
+                    "picked" => Some(SelectionState::Picked),
                     "rejected" => Some(SelectionState::Rejected),
                     _ => None,
                 })
