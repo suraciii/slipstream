@@ -133,55 +133,64 @@ Magnified Preview inspection for focus, motion, or expression. It is a Preview Z
 ## Development
 
 **Processing Module**:
-A peer photo-processing capability exposed through its own input, parameter, and output contracts. In the current service contract, darktable and standalone SpektraFilm are peer Processing Modules, not a fixed ordered pair. The Agent-facing language calls each one a Processing Engine to distinguish it from the operations inside that engine.
+A service-internal integration boundary for one photo-processing capability and its input, parameter, and output contracts. Product and Agent language use **Processing Engine** for the capability at this boundary.
 _Avoid_: plugin, extension, Film capability
 
 **Processing Engine**:
-The Agent-facing name for a peer Processing Module such as darktable or standalone SpektraFilm. An Engine owns its input/output contracts, admitted Engine Modules, parameter schema, and execution availability.
-_Avoid_: engine process, desktop application, catalog
+A photo-processing capability such as darktable or standalone SpektraFilm, with admitted inputs, controls, outputs, and availability.
+_Avoid_: Processing Module in product copy, engine process, desktop application, catalog
 
 **Engine Module**:
-One editing operation owned by a Processing Engine. Examples include darktable's exposure, color calibration, and highlight recovery operations; another engine may expose its own modules such as film, print, camera, or scanner operations. An Engine Module owns its controls and qualification; it is not a peer Processing Module.
+An addressable editing operation inside a Processing Engine, such as darktable exposure or a SpektraFilm film operation. It owns the controls and qualification for that operation; it is not a separate Processing Engine.
 _Avoid_: global control, darktable flag, stage
 
+**Control**:
+A product-defined value owned by an Engine Module, with a defined meaning, value rules, and reset behavior.
+_Avoid_: native parameter, arbitrary module field
+
 **Processing Step**:
-One selected Processing Engine, one identified input, and one captured parameter snapshot containing that engine's ordered Engine Modules. A caller composes steps by explicitly choosing a published artifact as the next input.
+An internal record of one selected Processing Engine invocation, with an explicit input and captured Engine Module controls. It is not a user-visible workflow stage or a cross-service pipeline object.
+_Avoid_: workflow node, pipeline stage, latest result
 
 **Processing Artifact**:
-An immutable image published by a completed Export, with its input, module, parameter, bundle, and image-contract provenance. It is not an Original File or a new Photo.
+The immutable provenance-bearing result of a completed Export that another service may consume as an explicit input. It is not an Original File or a new Photo.
+_Avoid_: latest result, temporary Preview
 
 **Edit Recipe**:
-The complete saved snapshot of one Photo's Edit State and Processing Steps. It is independent of Selection State, Rating, and Album membership. Agent-facing editing calls this current snapshot an Edit State; `Edit Recipe` remains the serialization and advanced composition term.
-_Avoid_: edit history, darktable sidecar
+The internal complete snapshot of one Photo's current Edit State and captured processing invocation, used for persistence and replay. It is not a cross-service plan or the Agent's daily editing object.
+_Avoid_: edit history, pipeline, Preset, darktable sidecar
 
 **Edit State**:
-The current confirmed editing state of one Photo: its selected Processing Step, input binding, Engine Modules, control values, and revision. A small guarded edit command updates this state atomically; it does not expose engine history or create a workflow object.
-_Avoid_: session, workflow, engine history
+The current confirmed editing state of one Photo: its selected Processing Engine, input binding, controls, and revision. It is the Agent's daily editing object.
+_Avoid_: recipe, session, workflow, engine history
 
 **Film Recipe**:
-A defined combination of film stock, print paper, and processing choices used to produce a simulated photograph.
-_Avoid_: filter, film name as complete recipe
+A standalone SpektraFilm configuration that combines film stock, print paper, and processing choices. It is scoped to that engine and is not the whole Photo's Edit State.
+_Avoid_: filter, film name as complete recipe, Photo recipe
 
 A **Development Result**:
-A scene-referred image produced by an admitted Processing Module under a
-module-owned input, parameter, and output contract. The term describes the
-result's image contract; it does not require a later Film step or define a
+A scene-referred image produced by an admitted Processing Engine under an
+Engine-owned input, Control, and output contract. The term describes the
+result's image contract; it does not require a later Film invocation or define a
 universal product output.
 _Avoid_: Preview, developed Original
 
 A **Film Result**:
-A simulated photograph produced by an admitted standalone SpektraFilm step
-from an input artifact that meets that step's captured input contract. It is
+A simulated photograph produced by an admitted standalone SpektraFilm
+invocation from an input Artifact that meets that invocation's captured input
+contract. It is
 not a required successor to a Development Result.
 _Avoid_: camera Preview, film Original
 
 **Edit Preview**:
-A bounded rendition of the current Processing Step's result for editing and comparison. It is separate from the camera-produced Preview and is not a Processing Artifact.
+A bounded rendition of the current Edit State's processing result for editing and comparison. It is separate from the camera-produced Preview and is not a Processing Artifact.
 _Avoid_: Preview when the kind is unclear
 
 **Development Proxy**:
 A service-owned, bounded scene-linear Development Result derived from a validated Original and retained as a rebuildable stand-in while that Original is unavailable. It carries the source revision, staged-byte evidence, approved profile, processing bundle, pipeline identity, and artifact identity. It is never an Original, a new Photo, or an Export source.
 
 **Export**:
-A separate explicit execution that produces a downloadable Processing Artifact from a captured Processing Step, together with its completion outcome. It does not create or modify an Original File.
+A separate explicit execution that produces a downloadable Processing Artifact
+from the confirmed Edit State, together with its completion outcome. It does
+not create or modify an Original File.
 _Avoid_: save Original, imported Photo
