@@ -14,8 +14,7 @@ import unittest
 import unittest.mock
 from contextlib import redirect_stdout
 from pathlib import Path
-
-FORK_COMMIT = "9e9f04b8fb8e51a0e80f4c1e8191ebcb7aa9b686"
+FORK_COMMIT = "21f4788f42055fbc1b354acf00e0cbfeaa855af7"
 
 
 def load(name: str) -> types.ModuleType:
