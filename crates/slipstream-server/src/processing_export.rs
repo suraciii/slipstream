@@ -44,10 +44,10 @@ use slipstream_core::{
     ProcessingExportSubmitOutcome, ProcessingInput, ProcessingInputHandoffError,
     SubmitProcessingExport,
 };
-use slipstream_processing::modules::{
-    DARKTABLE_MODULE, ModuleAvailability, ModuleRegistry, Parameters, SPEKTRAFILM_MODULE,
-};
+use slipstream_processing::modules::{DARKTABLE_MODULE, Parameters, SPEKTRAFILM_MODULE};
 use std::sync::Arc;
+
+use crate::processing_policy::{NO_QUALIFIED_ADAPTER, ProcessingModulePolicy};
 
 use crate::http::{
     CLI_CONTRACT_HEADER, HttpState, require_cli_contract, require_published, valid_id,
@@ -62,10 +62,6 @@ pub(crate) use download::get_processing_artifact_bytes;
 mod retained;
 use retained::{artifact_timestamp, retained_artifact_json};
 pub(crate) use retained::{list_processing_exports, retry_processing_export};
-
-/// The closed reason code recorded when the deployment's adapter boundary
-/// refuses a selected module's complete parameter tree.
-const NO_QUALIFIED_ADAPTER: &str = "module_parameters_unavailable";
 
 /// The closed terminal failure reason recorded when the deployment's
 /// confined workload could not execute an admitted qualified step.
@@ -144,42 +140,6 @@ fn valid_export_request_id(request_id: &str) -> bool {
         && request_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-}
-
-/// The deployment's adapter qualification for one selected step. Each peer
-/// is qualified independently: darktable consumes an explicit Original,
-/// while SpektraFilm consumes an explicit retained Development TIFF artifact.
-fn adapter_decision(
-    module: &str,
-    input: &slipstream_core::ProcessingInput,
-    film_ready: bool,
-) -> Option<slipstream_core::ProcessingExportAdapterDecision> {
-    match (module, input) {
-        (DARKTABLE_MODULE, slipstream_core::ProcessingInput::Original { .. }) => Some(
-            slipstream_core::ProcessingExportAdapterDecision::Qualified {
-                adapter_version: slipstream_processing::modules::DARKTABLE_ADAPTER_VERSION
-                    .to_owned(),
-                parameter_schema_version:
-                    slipstream_processing::modules::DARKTABLE_PARAMETER_VERSION.to_owned(),
-            },
-        ),
-        (SPEKTRAFILM_MODULE, slipstream_core::ProcessingInput::Artifact { .. }) if film_ready => {
-            Some(
-                slipstream_core::ProcessingExportAdapterDecision::Qualified {
-                    adapter_version: slipstream_processing::modules::SPEKTRAFILM_ADAPTER_VERSION
-                        .to_owned(),
-                    parameter_schema_version:
-                        slipstream_processing::modules::SPEKTRAFILM_PARAMETER_VERSION.to_owned(),
-                },
-            )
-        }
-        (DARKTABLE_MODULE | SPEKTRAFILM_MODULE, _) => Some(
-            slipstream_core::ProcessingExportAdapterDecision::NoQualifiedAdapter {
-                reason_code: NO_QUALIFIED_ADAPTER.to_owned(),
-            },
-        ),
-        _ => None,
-    }
 }
 
 fn input_json(input: &ProcessingInput) -> Value {
@@ -425,8 +385,8 @@ pub(crate) async fn submit_processing_export(
             json!({"reasonCode": reason, "reason": "The configured darktable module failed availability verification"}),
         );
     }
-    let registry = ModuleRegistry::new(ModuleAvailability::ready(), ModuleAvailability::ready());
-    if let Err(reason) = registry.validate_parameters(&selected.2) {
+    let policy = ProcessingModulePolicy::new(processing);
+    if let Err(reason) = policy.validate_parameters(&selected.2) {
         return error_details(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_settings",
@@ -438,43 +398,37 @@ pub(crate) async fn submit_processing_export(
             }),
         );
     }
-    let film_ready = processing
-        .film
-        .as_ref()
-        .is_some_and(crate::config::FilmConfig::ready);
-    let Some(adapter) = adapter_decision(&selected.0, &selected.1, film_ready) else {
+    let Some(adapter) = policy.adapter_decision(&selected.0, &selected.1) else {
         return error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "unknown_module",
             "The selected Processing Step names an unknown module",
         );
     };
-    if selected.0 == SPEKTRAFILM_MODULE
-        && film_ready
-        && let ProcessingInput::Artifact { contract, .. } = &selected.1
-    {
-        let required = crate::film_resources::minimum_live_bytes(
-            contract.geometry.width,
-            contract.geometry.height,
-        );
-        let limit = match crate::film_resources::effective_memory_limit() {
-            Ok(limit) => limit,
-            Err(_) => {
-                return error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "resource_unavailable",
-                    "A finite Film processing memory allowance could not be verified",
-                );
-            }
-        };
-        if required > limit {
+    match policy.film_memory_requirement(&selected.0, &selected.1) {
+        Err(_) => {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "resource_unavailable",
+                "A finite Film processing memory allowance could not be verified",
+            );
+        }
+        Ok(Some(requirement))
+            if requirement.minimum_live_bytes > requirement.memory_limit_bytes =>
+        {
             return error_details(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "resource_unavailable",
                 "The processing memory allowance cannot contain this full-resolution Film Export",
-                json!({"operation": "photos-processing-export", "module": SPEKTRAFILM_MODULE, "minimumLiveBytes": required, "memoryLimitBytes": limit}),
+                json!({
+                    "operation": "photos-processing-export",
+                    "module": SPEKTRAFILM_MODULE,
+                    "minimumLiveBytes": requirement.minimum_live_bytes,
+                    "memoryLimitBytes": requirement.memory_limit_bytes,
+                }),
             );
         }
+        Ok(Some(_)) | Ok(None) => {}
     }
     let mutation = SubmitProcessingExport {
         photo_id,
@@ -482,18 +436,7 @@ pub(crate) async fn submit_processing_export(
         step_id,
         expected_recipe_revision: body.expected_recipe_revision,
         expected_source_revision: body.expected_source_revision,
-        bundle_id: if selected.0 == SPEKTRAFILM_MODULE {
-            processing
-                .film
-                .as_ref()
-                .filter(|film| film.ready())
-                .map_or_else(
-                    || processing.bundle_sha256.clone(),
-                    |film| film.bundle_sha256.clone(),
-                )
-        } else {
-            processing.bundle_sha256.clone()
-        },
+        bundle_id: policy.bundle_id(&selected.0),
         retained_output_bytes_max: state
             .application
             .exports

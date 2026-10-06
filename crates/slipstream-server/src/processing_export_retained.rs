@@ -163,8 +163,8 @@ pub(crate) async fn retry_processing_export(
             json!({"reasonCode": reason, "reason": "The configured darktable module failed availability verification"}),
         );
     }
-    let registry = ModuleRegistry::new(ModuleAvailability::ready(), ModuleAvailability::ready());
-    if let Err(reason) = registry.validate_parameters(&Parameters {
+    let policy = ProcessingModulePolicy::new(processing);
+    if let Err(reason) = policy.validate_parameters(&Parameters {
         module: captured.module.as_str().to_owned(),
         version: captured.parameters.schema_version.clone(),
         tree: captured.parameters.tree.clone(),
@@ -176,29 +176,14 @@ pub(crate) async fn retry_processing_export(
             json!({"reasonCode": reason.code, "reason": reason.message}),
         );
     }
-    let film_ready = processing
-        .film
-        .as_ref()
-        .is_some_and(crate::config::FilmConfig::ready);
-    let Some(adapter) = adapter_decision(captured.module.as_str(), &captured.input, film_ready)
-    else {
+    let Some(adapter) = policy.adapter_decision(captured.module.as_str(), &captured.input) else {
         return error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "unknown_module",
             "The captured module is unknown",
         );
     };
-    let adapter_available = match &adapter {
-        slipstream_core::ProcessingExportAdapterDecision::Qualified {
-            adapter_version,
-            parameter_schema_version,
-        } => {
-            format!("{adapter_version}:{parameter_schema_version}")
-                == captured.adapter_schema_version
-        }
-        _ => false,
-    };
-    if !adapter_available {
+    if !policy.adapter_matches(&adapter, &captured.adapter_schema_version) {
         return error_details(
             StatusCode::SERVICE_UNAVAILABLE,
             "module_parameters_unavailable",
@@ -206,43 +191,26 @@ pub(crate) async fn retry_processing_export(
             json!({"reasonCode": "captured_adapter_unavailable", "reason": "The captured adapter and parameter schema are unavailable"}),
         );
     }
-    if captured.module.as_str() == SPEKTRAFILM_MODULE
-        && let ProcessingInput::Artifact { contract, .. } = &captured.input
-    {
-        let required = crate::film_resources::minimum_live_bytes(
-            contract.geometry.width,
-            contract.geometry.height,
-        );
-        let limit = match crate::film_resources::effective_memory_limit() {
-            Ok(limit) => limit,
-            Err(_) => {
-                return error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "resource_unavailable",
-                    "A finite processing memory allowance could not be verified",
-                );
-            }
-        };
-        if required > limit {
+    match policy.film_memory_requirement(captured.module.as_str(), &captured.input) {
+        Err(_) => {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "resource_unavailable",
+                "A finite processing memory allowance could not be verified",
+            );
+        }
+        Ok(Some(requirement))
+            if requirement.minimum_live_bytes > requirement.memory_limit_bytes =>
+        {
             return error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "resource_unavailable",
                 "The memory allowance cannot contain the captured Export",
             );
         }
+        Ok(Some(_)) | Ok(None) => {}
     }
-    let bundle_id = if captured.module.as_str() == SPEKTRAFILM_MODULE {
-        processing
-            .film
-            .as_ref()
-            .filter(|film| film.ready())
-            .map_or_else(
-                || processing.bundle_sha256.clone(),
-                |film| film.bundle_sha256.clone(),
-            )
-    } else {
-        processing.bundle_sha256.clone()
-    };
+    let bundle_id = policy.bundle_id(captured.module.as_str());
     if bundle_id != captured.bundle_id {
         return error_details(
             StatusCode::SERVICE_UNAVAILABLE,

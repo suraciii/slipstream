@@ -58,7 +58,6 @@ pub const DARKTABLE_ADAPTER_VERSION: &str = "darktable-adapter-1";
 /// The darktable-owned parameter schema version this boundary admits.
 pub const DARKTABLE_PARAMETER_VERSION: &str = "darktable-params-1";
 
-
 /// The ordered-operation bound of one darktable stack. The serialized
 /// envelope bound also limits the bytes; this keeps the forwarded array
 /// explicitly finite per operation.

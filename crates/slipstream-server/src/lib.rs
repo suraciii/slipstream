@@ -55,6 +55,7 @@ mod photo_executor;
 mod preview_render;
 mod processing_export;
 mod processing_modules;
+mod processing_policy;
 mod processing_preview;
 mod processing_recipe;
 mod queries;
