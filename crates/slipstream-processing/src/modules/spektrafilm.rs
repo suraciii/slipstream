@@ -6,7 +6,7 @@ pub const SPEKTRAFILM_MODULE: &str = "spektrafilm";
 /// The standalone SpektraFilm implementation identity for this boundary.
 pub const SPEKTRAFILM_IMPLEMENTATION: &str = "spektrafilm-rs";
 /// The checked-in fork revision accepted by bundle verification.
-pub const SPEKTRAFILM_FORK_COMMIT: &str = "e449ddba9bd137d8769388d1d1954736b56f2db3";
+pub const SPEKTRAFILM_FORK_COMMIT: &str = "5c6958a33fc5f2a41b31e724146334d59a950f0e";
 /// The pinned standalone SpektraFilm adapter identity of this contract
 /// revision.
 pub const SPEKTRAFILM_ADAPTER_VERSION: &str = "spektrafilm-rs-adapter-1";
