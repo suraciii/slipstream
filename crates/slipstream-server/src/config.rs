@@ -471,6 +471,7 @@ fn verify_film_bundle(root: &Path) -> (Option<FilmConfig>, Option<&'static str>)
     if !binary_metadata.is_file() || binary_metadata.mode() & 0o111 == 0 || !data_root.is_dir() {
         return (None, Some(unavailable));
     }
+
     for (key, digest) in manifest["files"].as_object().into_iter().flatten() {
         let Some(digest) = digest.as_str() else {
             return (None, Some(unavailable));

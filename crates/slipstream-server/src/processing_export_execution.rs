@@ -1,6 +1,7 @@
 //! Service-owned execution and durable settlement of admitted exports.
 
 use super::*;
+use crate::processing_policy::ProcessingModulePolicy;
 
 /// Executes one admitted qualified export through the deployment's
 /// confined development workload. The durable attempt begins before the
@@ -81,16 +82,8 @@ pub(super) async fn execute_admitted_export(
             return fail_admitted_export(state, &request_id, EXECUTION_FAILED).await;
         }
     };
-    let bundle_id = if admission.module.as_str() == SPEKTRAFILM_MODULE {
-        processing
-            .film
-            .as_ref()
-            .map(|film| film.bundle_sha256.as_str())
-            .unwrap_or_default()
-    } else {
-        processing.bundle_sha256.as_str()
-    };
-    let artifact = match processing_artifact_of(&admission, &executed, bundle_id) {
+    let bundle_id = ProcessingModulePolicy::new(processing).bundle_id(admission.module.as_str());
+    let artifact = match processing_artifact_of(&admission, &executed, &bundle_id) {
         Ok(artifact) => artifact,
         Err(_) => {
             // This execution's freshly minted bytes are definitively

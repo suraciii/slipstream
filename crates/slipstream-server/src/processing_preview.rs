@@ -31,6 +31,7 @@ use std::{
     },
 };
 
+use crate::processing_policy::ProcessingModulePolicy;
 use crate::{
     export_manager::ProcessingPreviewExecution,
     http::{CLI_CONTRACT_HEADER, HttpState, require_cli_contract, require_published, valid_id},
@@ -683,8 +684,9 @@ pub(crate) async fn get_processing_preview(
             let bundle_id = state
                 .processing
                 .as_ref()
-                .and_then(|processing| processing.film.as_ref())
-                .map(|film| film.bundle_sha256.clone())
+                .map(|processing| {
+                    ProcessingModulePolicy::new(processing).bundle_id(SPEKTRAFILM_MODULE)
+                })
                 .unwrap_or_default();
             (execution, bundle_id)
         }

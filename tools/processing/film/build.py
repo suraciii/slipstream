@@ -18,7 +18,7 @@ DEFAULT_APP_TAG = "slipstream:app-runtime"
 FILM_DOCKERFILE = "tools/processing/film/Dockerfile"
 SERVER_ENTRYPOINT = ["/usr/local/bin/slipstream-server"]
 ROOT = Path(__file__).resolve().parents[3]
-PINNED_SPEKTRAFILM_FORK_COMMIT = "34f9399cd657d48f7eb4b07f9a1b1a3ce2e4d2e3"
+PINNED_SPEKTRAFILM_FORK_COMMIT = "5c6958a33fc5f2a41b31e724146334d59a950f0e"
 
 
 def inspect(reference: str) -> dict:
