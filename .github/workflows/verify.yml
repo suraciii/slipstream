@@ -48,7 +48,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes \
             build-essential ca-certificates curl libexiv2-dev libglib2.0-dev \
-            libjpeg-dev liblcms2-dev liblensfun-dev libopenblas-dev libvips-dev \
+            libjpeg-dev liblcms2-dev liblensfun-dev libopenblas-dev \
+            libopenimageio-dev libvips-dev \
             pkg-config
           prefix="$RUNNER_TEMP/libraw-022"
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/LibRaw-0.22.2.tar.gz" \
