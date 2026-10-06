@@ -41,7 +41,38 @@ jobs:
           key: cargo-verify-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             cargo-verify-${{ runner.os }}-
-      - run: sudo apt-get update && sudo apt-get install --yes libraw-dev libjpeg-dev libvips-dev liblcms2-dev pkg-config
+      - name: Install native dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential ca-certificates curl libexiv2-dev libglib2.0-dev \
+            libjpeg-dev liblcms2-dev liblensfun-dev libopenblas-dev \
+            libopenimageio-dev libvips-dev \
+            pkg-config
+          prefix="$RUNNER_TEMP/libraw-022"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/LibRaw-0.22.2.tar.gz" \
+            https://www.libraw.org/data/LibRaw-0.22.2.tar.gz
+          echo "de86b035655accff8d4010f1a221fdf50d353cb7b1422ba26f14a0db92612cfa  $RUNNER_TEMP/LibRaw-0.22.2.tar.gz" \
+            | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/LibRaw-0.22.2.tar.gz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/LibRaw-0.22.2"
+          ./configure \
+            --prefix="$prefix" \
+            --disable-static \
+            --disable-examples \
+            --disable-openmp \
+            --disable-lcms
+          make -j"$(nproc)"
+          make install
+          export PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          export LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          pkg-config --atleast-version=0.22.0 libraw libraw_r
+          {
+            printf 'PKG_CONFIG_PATH=%s\n' "$PKG_CONFIG_PATH"
+            printf 'LD_LIBRARY_PATH=%s\n' "$LD_LIBRARY_PATH"
+          } >> "$GITHUB_ENV"
       - run: bun install --frozen-lockfile
       - run: bun x playwright install --with-deps chromium
       - name: Verify Docker Compose config capability
