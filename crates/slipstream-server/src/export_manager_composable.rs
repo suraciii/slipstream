@@ -401,9 +401,12 @@ impl ExportManager {
         )?;
         let attempt_key = processing_preview_id();
         let writer = self
-            .begin_preview_output(&attempt_key, ExportTarget::DevelopmentTiff)
+            .begin_preview_output(&attempt_key, ExportTarget::PreviewPng)
             .map_err(|error| format!("preview output staging failed: {error}"))?;
         let output = writer.temporary_path().to_path_buf();
+        writer
+            .release_temporary_path()
+            .map_err(|error| format!("preview output reservation failed: {error}"))?;
         let rendered = self
             .executor
             .render_film_selected_step(
@@ -646,6 +649,9 @@ impl ExportManager {
             .begin_artifact(&artifact_id, target)
             .map_err(|error| format!("output staging failed: {error}"))?;
         let output_path = writer.temporary_path().to_path_buf();
+        writer
+            .release_temporary_path()
+            .map_err(|error| format!("output reservation failed: {error}"))?;
 
         let cancellation = self.begin_running(request_id);
         let developed = self

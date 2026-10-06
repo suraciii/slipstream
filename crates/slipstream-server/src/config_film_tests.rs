@@ -23,12 +23,12 @@ fn write_bundle(base: &Path) -> PathBuf {
     let document = serde_json::json!({
         "format": 2,
         "implementation": "spektrafilm-rs",
-        "forkCommit": "21f4788f42055fbc1b354acf00e0cbfeaa855af7",
+        "forkCommit": slipstream_processing::modules::SPEKTRAFILM_FORK_COMMIT,
         "adapterVersion": "spektrafilm-rs-adapter-1",
         "parameterSchemaVersion": "spektrafilm-rs-params-1",
-        "binary": binary,
-        "dataRoot": data,
-        "parametersDefault": parameters,
+        "binary": "/opt/slipstream-film/spektrafilm",
+        "dataRoot": "/opt/slipstream-film/data",
+        "parametersDefault": "/opt/slipstream-film/parameters-default.json",
         "filmProfile": "kodak_portra_400",
         "printProfile": "kodak_portra_endura",
         "files": {
@@ -107,6 +107,31 @@ fn a_tampered_runtime_or_recipe_identity_is_refused() {
     assert_eq!(failure, Some("film-bundle-unavailable"));
     let _ = std::fs::remove_dir_all(&base);
     let _ = std::fs::remove_dir_all(&base2);
+}
+
+#[test]
+fn manifest_paths_must_resolve_inside_the_bundle_root() {
+    let base = fresh_base();
+    let root = write_bundle(&base);
+    let outside = base.join("outside-engine");
+    std::fs::write(&outside, b"#!/bin/sh\n").unwrap();
+    let mut permissions = std::fs::metadata(&outside).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&outside, permissions).unwrap();
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("bundle-manifest.json")).unwrap()).unwrap();
+    manifest["binary"] = serde_json::json!(outside);
+    let encoded = serde_json::to_vec(&manifest).unwrap();
+    std::fs::write(root.join("bundle-manifest.json"), &encoded).unwrap();
+    std::fs::write(
+        root.join("bundle"),
+        format!("{:x}", Sha256::digest(&encoded)),
+    )
+    .unwrap();
+
+    let (_, failure) = verify_film_bundle(&root);
+    assert_eq!(failure, Some("film-bundle-unavailable"));
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
