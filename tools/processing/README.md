@@ -139,7 +139,6 @@ read. Preview remains separately bounded. Historical
 `spektrafilm-params-1` trees remain readable; discovery and new fork recipes
 use `spektrafilm-rs-params-1`.
 
-
 ## Operator end-to-end acceptance
 
 `acceptance.py` drives a dedicated deployment through the selected-step HTTP
