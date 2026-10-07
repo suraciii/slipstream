@@ -33,6 +33,13 @@ catalog, or external XMP. Ambient presets, sidecars, and crawler initialization
 are disabled. Each module admits only its qualified parameter combinations under
 [Processing Modules](processing-modules.md).
 
+Darktable Development, selected-step Export, automatic adjustment, and Preview
+use the private `PhotoExecutor::dispatch_darktable` lifecycle boundary. Callers
+retain their native operations, arguments, and error labels; dispatch owns
+admission, private scratch, cancellation registration, and idle accounting.
+Standalone Film keeps its separate dispatcher and shares only the processing
+slot and shutdown state.
+
 The processing lock remains held through engine termination and scratch cleanup.
 Private stdio carries bounded MCP JSON-RPC values; malformed, oversized,
 truncated, or incompatible responses fail the operation. A deadline bounds all

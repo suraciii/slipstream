@@ -106,69 +106,25 @@ impl PhotoExecutor {
         exposure_milli_ev: i64,
         cancellation: Arc<AtomicBool>,
     ) -> Result<OutputIdentity, String> {
-        if !self.available() {
-            return Err("Photo Development bundle is unavailable".to_owned());
-        }
-        if self.shutting_down.load(Ordering::Acquire) {
-            return Err("Photo Development is shutting down".to_owned());
-        }
-        let serial = Arc::clone(&self.serial).lock_owned().await;
-        if cancellation.load(Ordering::Acquire) {
-            return Err("Photo Development was cancelled".to_owned());
-        }
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        {
-            let mut active = self
-                .active
-                .lock()
-                .expect("Photo executor active set is not poisoned");
-            if self.shutting_down.load(Ordering::Acquire) {
-                return Err("Photo Development is shutting down".to_owned());
-            }
-            self.running.fetch_add(1, Ordering::AcqRel);
-            active.insert(id, Arc::clone(&cancellation));
-        }
-        let work = self.root.join(format!("attempt-{id}"));
-        let engine = self.config.bundle_root.join("darktable/bin/darktable-mcp");
-        let metadata = self.config.bundle_root.join("engine-metadata.json");
-        let profile = self.config.bundle_root.join("icc/LargeRGB-elle-V2-g10.icc");
-        let active = Arc::clone(&self.active);
-        let running = Arc::clone(&self.running);
-        let idle = Arc::clone(&self.idle);
-        tokio::task::spawn_blocking(move || {
-            // A dropped async waiter cannot release the slot while its child
-            // still runs; blocking execution owns it through cleanup.
-            let _serial = serial;
-            let result = (|| {
-                fs::create_dir(&work)?;
-                let mut permissions = fs::metadata(&work)?.permissions();
-                permissions.set_mode(0o700);
-                fs::set_permissions(&work, permissions)?;
+        self.dispatch_darktable(
+            cancellation,
+            "Photo Development was cancelled",
+            "Photo Development task failed",
+            move |engine, metadata, profile, work, cancellation| {
                 local_photo::develop(
-                    &engine,
-                    &metadata,
-                    &profile,
-                    &work,
+                    engine,
+                    metadata,
+                    profile,
+                    work,
                     &input,
                     &output,
                     exposure_milli_ev,
                     cancellation,
                     ENGINE_TIMEOUT,
                 )
-            })()
-            .map_err(|error| error.to_string());
-            let _ = fs::remove_dir_all(&work);
-            active
-                .lock()
-                .expect("Photo executor active set is not poisoned")
-                .remove(&id);
-            if running.fetch_sub(1, Ordering::AcqRel) == 1 {
-                idle.notify_waiters();
-            }
-            result
-        })
+            },
+        )
         .await
-        .map_err(|error| format!("Photo Development task failed: {error}"))?
     }
 
     /// Runs one serialized local development of a selected composable
@@ -182,69 +138,25 @@ impl PhotoExecutor {
         parameters: slipstream_processing::modules::Parameters,
         cancellation: Arc<AtomicBool>,
     ) -> Result<OutputIdentity, String> {
-        if !self.available() {
-            return Err("Photo Development bundle is unavailable".to_owned());
-        }
-        if self.shutting_down.load(Ordering::Acquire) {
-            return Err("Photo Development is shutting down".to_owned());
-        }
-        let serial = Arc::clone(&self.serial).lock_owned().await;
-        if cancellation.load(Ordering::Acquire) {
-            return Err("Photo Development was cancelled".to_owned());
-        }
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        {
-            let mut active = self
-                .active
-                .lock()
-                .expect("Photo executor active set is not poisoned");
-            if self.shutting_down.load(Ordering::Acquire) {
-                return Err("Photo Development is shutting down".to_owned());
-            }
-            self.running.fetch_add(1, Ordering::AcqRel);
-            active.insert(id, Arc::clone(&cancellation));
-        }
-        let work = self.root.join(format!("attempt-{id}"));
-        let engine = self.config.bundle_root.join("darktable/bin/darktable-mcp");
-        let metadata = self.config.bundle_root.join("engine-metadata.json");
-        let profile = self.config.bundle_root.join("icc/LargeRGB-elle-V2-g10.icc");
-        let active = Arc::clone(&self.active);
-        let running = Arc::clone(&self.running);
-        let idle = Arc::clone(&self.idle);
-        tokio::task::spawn_blocking(move || {
-            // A dropped async waiter cannot release the slot while its child
-            // still runs; blocking execution owns it through cleanup.
-            let _serial = serial;
-            let result = (|| {
-                fs::create_dir(&work)?;
-                let mut permissions = fs::metadata(&work)?.permissions();
-                permissions.set_mode(0o700);
-                fs::set_permissions(&work, permissions)?;
+        self.dispatch_darktable(
+            cancellation,
+            "Photo Development was cancelled",
+            "Photo Development task failed",
+            move |engine, metadata, profile, work, cancellation| {
                 local_photo::develop_selected_step(
-                    &engine,
-                    &metadata,
-                    &profile,
-                    &work,
+                    engine,
+                    metadata,
+                    profile,
+                    work,
                     &input,
                     &output,
                     &parameters,
                     cancellation,
                     ENGINE_TIMEOUT,
                 )
-            })()
-            .map_err(|error| error.to_string());
-            let _ = fs::remove_dir_all(&work);
-            active
-                .lock()
-                .expect("Photo executor active set is not poisoned")
-                .remove(&id);
-            if running.fetch_sub(1, Ordering::AcqRel) == 1 {
-                idle.notify_waiters();
-            }
-            result
-        })
+            },
+        )
         .await
-        .map_err(|error| format!("Photo Development task failed: {error}"))?
     }
 
     /// Runs one engine-owned automatic adjustment through the shared
@@ -259,45 +171,15 @@ impl PhotoExecutor {
         instruction: serde_json::Value,
         cancellation: Arc<AtomicBool>,
     ) -> Result<serde_json::Value, String> {
-        if !self.available() {
-            return Err("Photo Development bundle is unavailable".to_owned());
-        }
-        if self.shutting_down.load(Ordering::Acquire) {
-            return Err("Photo Development is shutting down".to_owned());
-        }
-        let serial = Arc::clone(&self.serial).lock_owned().await;
-        if cancellation.load(Ordering::Acquire) {
-            return Err("Photo Development was cancelled".to_owned());
-        }
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        {
-            let mut active = self
-                .active
-                .lock()
-                .expect("Photo executor active set is not poisoned");
-            if self.shutting_down.load(Ordering::Acquire) {
-                return Err("Photo Development is shutting down".to_owned());
-            }
-            self.running.fetch_add(1, Ordering::AcqRel);
-            active.insert(id, Arc::clone(&cancellation));
-        }
-        let work = self.root.join(format!("attempt-{id}"));
-        let engine = self.config.bundle_root.join("darktable/bin/darktable-mcp");
-        let metadata = self.config.bundle_root.join("engine-metadata.json");
-        let active = Arc::clone(&self.active);
-        let running = Arc::clone(&self.running);
-        let idle = Arc::clone(&self.idle);
-        tokio::task::spawn_blocking(move || {
-            let _serial = serial;
-            let result = (|| {
-                fs::create_dir(&work)?;
-                let mut permissions = fs::metadata(&work)?.permissions();
-                permissions.set_mode(0o700);
-                fs::set_permissions(&work, permissions)?;
+        self.dispatch_darktable(
+            cancellation,
+            "Photo Development was cancelled",
+            "Photo Development task failed",
+            move |engine, metadata, _profile, work, cancellation| {
                 local_photo::auto_parameters(
-                    &engine,
-                    &metadata,
-                    &work,
+                    engine,
+                    metadata,
+                    work,
                     &input,
                     &parameters,
                     &operation,
@@ -306,20 +188,9 @@ impl PhotoExecutor {
                     cancellation,
                     ENGINE_TIMEOUT,
                 )
-            })()
-            .map_err(|error| error.to_string());
-            let _ = fs::remove_dir_all(&work);
-            active
-                .lock()
-                .expect("Photo executor active set is not poisoned")
-                .remove(&id);
-            if running.fetch_sub(1, Ordering::AcqRel) == 1 {
-                idle.notify_waiters();
-            }
-            result
-        })
+            },
+        )
         .await
-        .map_err(|error| format!("Photo Development task failed: {error}"))?
     }
 
     /// Runs one bounded selected-step Preview through the same serialized
@@ -332,6 +203,43 @@ impl PhotoExecutor {
         parameters: slipstream_processing::modules::Parameters,
         cancellation: Arc<AtomicBool>,
     ) -> Result<slipstream_processing::local_preview::PreviewIdentity, String> {
+        self.dispatch_darktable(
+            cancellation,
+            "Photo Preview was cancelled",
+            "Photo Preview task failed",
+            move |engine, metadata, _profile, work, cancellation| {
+                slipstream_processing::local_preview::render_selected_step(
+                    engine,
+                    metadata,
+                    work,
+                    &input,
+                    &output,
+                    &parameters,
+                    cancellation,
+                    ENGINE_TIMEOUT,
+                )
+            },
+        )
+        .await
+    }
+
+    /// Runs one serialized darktable attempt through the shared native child
+    /// boundary. Operation-specific callers provide only the native invocation;
+    /// this helper owns admission, scratch, cancellation registration, cleanup,
+    /// and shutdown accounting.
+    async fn dispatch_darktable<T, F>(
+        &self,
+        cancellation: Arc<AtomicBool>,
+        cancellation_message: &'static str,
+        task_failure_message: &'static str,
+        run: F,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Path, &Path, &Path, &Path, Arc<AtomicBool>) -> std::io::Result<T>
+            + Send
+            + 'static,
+    {
         if !self.available() {
             return Err("Photo Development bundle is unavailable".to_owned());
         }
@@ -340,7 +248,7 @@ impl PhotoExecutor {
         }
         let serial = Arc::clone(&self.serial).lock_owned().await;
         if cancellation.load(Ordering::Acquire) {
-            return Err("Photo Preview was cancelled".to_owned());
+            return Err(cancellation_message.to_owned());
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         {
@@ -357,26 +265,20 @@ impl PhotoExecutor {
         let work = self.root.join(format!("attempt-{id}"));
         let engine = self.config.bundle_root.join("darktable/bin/darktable-mcp");
         let metadata = self.config.bundle_root.join("engine-metadata.json");
+        let profile = self.config.bundle_root.join("icc/LargeRGB-elle-V2-g10.icc");
         let active = Arc::clone(&self.active);
         let running = Arc::clone(&self.running);
         let idle = Arc::clone(&self.idle);
         tokio::task::spawn_blocking(move || {
+            // A dropped async waiter cannot release the slot while its child
+            // still runs; blocking execution owns it through cleanup.
             let _serial = serial;
             let result = (|| {
                 fs::create_dir(&work)?;
                 let mut permissions = fs::metadata(&work)?.permissions();
                 permissions.set_mode(0o700);
                 fs::set_permissions(&work, permissions)?;
-                slipstream_processing::local_preview::render_selected_step(
-                    &engine,
-                    &metadata,
-                    &work,
-                    &input,
-                    &output,
-                    &parameters,
-                    cancellation,
-                    ENGINE_TIMEOUT,
-                )
+                run(&engine, &metadata, &profile, &work, cancellation)
             })()
             .map_err(|error| error.to_string());
             let _ = fs::remove_dir_all(&work);
@@ -390,7 +292,7 @@ impl PhotoExecutor {
             result
         })
         .await
-        .map_err(|error| format!("Photo Preview task failed: {error}"))?
+        .map_err(|error| format!("{task_failure_message}: {error}"))?
     }
 
     /// Runs one serialized standalone SpektraFilm Export of an
@@ -563,7 +465,7 @@ impl PhotoExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::AtomicUsize;
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -627,5 +529,169 @@ mod tests {
         assert!(executor.film_available().is_ok());
         drop(executor);
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn darktable_dispatch_cleans_attempts_and_preserves_native_errors() {
+        let base = std::env::temp_dir().join(format!(
+            "slipstream-photo-dispatch-{}-{}",
+            std::process::id(),
+            NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let state = base.join("state");
+        let config = ProcessingConfig {
+            policy_sha256: "a".repeat(64),
+            bundle_sha256: "b".repeat(64),
+            bundle_root: base.join("bundle"),
+            film: None,
+            failure: None,
+        };
+        let executor = PhotoExecutor::open(&config, &state).unwrap();
+
+        let result = executor
+            .dispatch_darktable(
+                Arc::new(AtomicBool::new(false)),
+                "Photo Development was cancelled",
+                "Photo Development task failed",
+                move |_engine, _metadata, _profile, work, _cancellation| {
+                    assert_eq!(
+                        fs::metadata(work).unwrap().permissions().mode() & 0o777,
+                        0o700
+                    );
+                    fs::write(work.join("result"), b"done")?;
+                    Ok::<_, std::io::Error>(17_u32)
+                },
+            )
+            .await;
+        assert_eq!(result, Ok(17));
+        assert_eq!(executor.running.load(Ordering::Acquire), 0);
+        assert!(executor.active.lock().unwrap().is_empty());
+        assert!(fs::read_dir(&executor.root).unwrap().next().is_none());
+
+        let result = executor
+            .dispatch_darktable(
+                Arc::new(AtomicBool::new(false)),
+                "Photo Development was cancelled",
+                "Photo Development task failed",
+                |_engine, _metadata, _profile, _work, _cancellation| {
+                    Err::<(), _>(std::io::Error::other("native failure"))
+                },
+            )
+            .await;
+        assert_eq!(result, Err("native failure".to_owned()));
+        assert_eq!(executor.running.load(Ordering::Acquire), 0);
+        assert!(executor.active.lock().unwrap().is_empty());
+        assert!(fs::read_dir(&executor.root).unwrap().next().is_none());
+
+        executor.shutdown().await;
+        assert!(!executor.root.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn darktable_dispatch_serializes_children_and_shutdown_waits_for_cleanup() {
+        let base = std::env::temp_dir().join(format!(
+            "slipstream-photo-dispatch-{}-{}",
+            std::process::id(),
+            NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let state = base.join("state");
+        let config = ProcessingConfig {
+            policy_sha256: "a".repeat(64),
+            bundle_sha256: "b".repeat(64),
+            bundle_root: base.join("bundle"),
+            film: None,
+            failure: None,
+        };
+        let executor = PhotoExecutor::open(&config, &state).unwrap();
+        let current = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+
+        let first = {
+            let current = Arc::clone(&current);
+            let maximum = Arc::clone(&maximum);
+            let executor = executor.clone();
+            tokio::spawn(async move {
+                executor
+                    .dispatch_darktable(
+                        Arc::new(AtomicBool::new(false)),
+                        "cancelled",
+                        "failed",
+                        move |_engine, _metadata, _profile, _work, _cancellation| {
+                            let active = current.fetch_add(1, Ordering::AcqRel) + 1;
+                            maximum.fetch_max(active, Ordering::AcqRel);
+                            std::thread::sleep(Duration::from_millis(25));
+                            current.fetch_sub(1, Ordering::AcqRel);
+                            Ok::<_, std::io::Error>(())
+                        },
+                    )
+                    .await
+            })
+        };
+        let second = {
+            let current = Arc::clone(&current);
+            let maximum = Arc::clone(&maximum);
+            let executor = executor.clone();
+            tokio::spawn(async move {
+                executor
+                    .dispatch_darktable(
+                        Arc::new(AtomicBool::new(false)),
+                        "cancelled",
+                        "failed",
+                        move |_engine, _metadata, _profile, _work, _cancellation| {
+                            let active = current.fetch_add(1, Ordering::AcqRel) + 1;
+                            maximum.fetch_max(active, Ordering::AcqRel);
+                            std::thread::sleep(Duration::from_millis(25));
+                            current.fetch_sub(1, Ordering::AcqRel);
+                            Ok::<_, std::io::Error>(())
+                        },
+                    )
+                    .await
+            })
+        };
+        assert_eq!(first.await.unwrap(), Ok(()));
+        assert_eq!(second.await.unwrap(), Ok(()));
+        assert_eq!(maximum.load(Ordering::Acquire), 1);
+
+        executor.shutdown().await;
+        assert!(!executor.root.exists());
+        fs::remove_dir_all(base).unwrap();
+
+        let base = std::env::temp_dir().join(format!(
+            "slipstream-photo-dispatch-shutdown-{}-{}",
+            std::process::id(),
+            NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let state = base.join("state");
+        let executor = PhotoExecutor::open(&config, &state).unwrap();
+        let started = Arc::new(Notify::new());
+        let started_wait = started.notified();
+        let started_for_task = Arc::clone(&started);
+        let task = {
+            let executor = executor.clone();
+            tokio::spawn(async move {
+                executor
+                    .dispatch_darktable(
+                        Arc::new(AtomicBool::new(false)),
+                        "Photo Development was cancelled",
+                        "Photo Development task failed",
+                        move |_engine, _metadata, _profile, _work, cancellation| {
+                            started_for_task.notify_one();
+                            while !cancellation.load(Ordering::Acquire) {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                            Err::<(), _>(std::io::Error::other("cancelled"))
+                        },
+                    )
+                    .await
+            })
+        };
+        started_wait.await;
+        executor.shutdown().await;
+        assert_eq!(task.await.unwrap(), Err("cancelled".to_owned()));
+        assert_eq!(executor.running.load(Ordering::Acquire), 0);
+        assert!(executor.active.lock().unwrap().is_empty());
+        assert!(!executor.root.exists());
+        fs::remove_dir_all(base).unwrap();
     }
 }
