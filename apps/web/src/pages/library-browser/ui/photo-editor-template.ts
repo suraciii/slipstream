@@ -1,5 +1,3 @@
-import { WORKSPACE_OUTPUT_TEMPLATE } from "./workspace-output-surface.js";
-
 export const PHOTO_EDITOR_TEMPLATE = `
 <div class="photo-tools-view photo-editor-workspace" id="photo-tools-view-edit" data-photo-tools-view="edit" hidden>
   <header class="photo-tools-view-header"><h3>Edit workspace</h3><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
@@ -7,56 +5,24 @@ export const PHOTO_EDITOR_TEMPLATE = `
     <section class="photo-editor-image-region" aria-label="Edit image and reference">
       <p class="photo-editor-preview-note" data-photo-editor-render-status role="status"></p>
       <div class="photo-editor-image-frame">
-        <img class="photo-editor-preview-image" data-photo-editor-preview-image alt="Current Edit Preview" hidden>
-        <img class="photo-editor-reference-image" data-photo-editor-reference-image alt="Original reference · camera Preview" hidden>
-        <p class="photo-editor-image-empty" data-photo-editor-image-empty>No Edit State yet. Choose an available Processing Engine to start, or inspect the Original reference.</p>
+        <img class="photo-editor-preview-image" data-photo-editor-preview-image alt="Selected workspace preview" hidden>
+        <img class="photo-editor-reference-image" data-photo-editor-reference-image alt="Camera Preview · Original reference" hidden>
+        <p class="photo-editor-image-empty" data-photo-editor-image-empty>No Edit Preview is available yet. Refresh the preview when processing is ready.</p>
       </div>
-      <div class="photo-editor-view-actions"><button type="button" class="quiet" data-photo-editor-current>Current edit</button><button type="button" class="quiet" data-photo-editor-camera-reference aria-pressed="false">Original reference</button><button type="button" class="quiet" data-photo-editor-compare aria-pressed="false" disabled>Baseline comparison</button></div>
-      <p class="photo-editor-preview-note" data-photo-editor-preview-note hidden></p>
+      <div class="photo-editor-view-actions"><button type="button" class="quiet" data-photo-editor-current>Current edit</button><button type="button" class="quiet" data-photo-editor-camera-reference aria-pressed="false">Camera reference</button><button type="button" class="quiet" data-photo-editor-compare aria-pressed="false">Baseline comparison</button></div>
     </section>
-    <div class="photo-editor-controls" aria-label="Photo edit controls" tabindex="0">
-      <p class="photo-editor-status" data-photo-editor-status role="status" aria-live="polite"></p>
-      <p class="photo-editor-note" data-photo-editor-engine-state role="status"></p>
-      <p class="photo-editor-draft" data-photo-editor-draft hidden role="status"></p>
-      <div class="photo-editor-actions"><button type="button" class="quiet" data-photo-editor-undo disabled>Undo</button><button type="button" class="quiet" data-photo-editor-redo disabled>Redo</button><button type="button" class="quiet" data-photo-editor-rebind hidden>Keep edit for the current file</button></div>
-      <div class="photo-editor-conflict" data-photo-editor-conflict hidden><p data-photo-editor-conflict-message role="alert"></p><div class="photo-editor-actions"><button type="button" data-photo-editor-use-saved>Use saved Edit State</button><button type="button" class="quiet" data-photo-editor-reapply>Reapply my changes</button><button type="button" class="quiet" data-photo-editor-discard-draft>Discard draft</button></div></div>
-      <div class="photo-editor-composable" data-photo-editor-composable aria-label="Edit State">
-        <div data-photo-editor-primary>
-          <p data-photo-editor-primary-state role="status"></p>
-          <p data-photo-editor-primary-input></p>
-          <label class="photo-editor-exposure">Exposure (EV)<input type="number" step="0.1" data-photo-editor-exposure aria-label="Current exposure (EV)"></label>
-          <button type="button" class="quiet" data-photo-editor-exposure-reset>Reset exposure</button>
-        </div>
-        <div data-photo-editor-composable-start>
-          <p class="photo-editor-note" data-photo-editor-start-note></p>
-          <div class="photo-editor-actions"><label for="photo-editor-composable-module">Processing Engine</label><select id="photo-editor-composable-module" data-photo-editor-composable-module></select><label for="photo-editor-new-step-input">Edit input</label><select id="photo-editor-new-step-input" data-photo-editor-new-step-input><option value="original">Original of this Photo</option></select><button type="button" data-photo-editor-composable-add>Start editing</button></div>
-        </div>
-        <div class="photo-editor-composable-body" data-photo-editor-composable-body>
-          <details class="photo-editor-advanced" data-photo-editor-advanced>
-            <summary>Advanced compatibility</summary>
-            <p class="photo-editor-composable-state" data-photo-editor-composable-state role="status"></p>
-            <p class="photo-editor-note">Inspect or migrate the complete processing snapshot. The current Edit State remains the source for Preview and Export.</p>
-            <div class="photo-editor-composable-editor" data-photo-editor-composable-editor hidden>
-              <p>Processing Engine <span data-photo-editor-composable-editing-module></span><span data-photo-editor-composable-editing-step hidden></span></p>
-              <details><summary>Parameter details</summary><p>Parameter version <span data-photo-editor-composable-schema></span></p></details>
-              <fieldset class="photo-editor-composable-input"><legend>Edit input</legend><label><input type="radio" name="photo-editor-composable-input" data-photo-editor-composable-input-original> The guarded Original of this Photo</label><label><input type="radio" name="photo-editor-composable-input" data-photo-editor-composable-input-artifact> One retained Processing Artifact</label><select data-photo-editor-composable-artifact aria-label="Retained Processing Artifacts"></select></fieldset>
-              <div data-photo-editor-module-controls></div>
-              <p class="photo-editor-note" data-photo-editor-composable-parameters-note></p>
-            </div>
-            <ul class="photo-editor-composable-steps" data-photo-editor-composable-steps></ul>
-            <div class="photo-editor-composable-artifacts" data-photo-editor-composable-artifacts>
-              <p class="photo-editor-export-heading">Retained outputs and tasks</p>
-              <ul class="photo-editor-composable-artifact-list" data-photo-editor-composable-artifact-list></ul>
-              <ul class="photo-editor-composable-artifact-list" data-photo-editor-export-list></ul>
-              <div class="photo-editor-actions"><label for="photo-editor-composable-artifact-id">Artifact identity</label><input id="photo-editor-composable-artifact-id" data-photo-editor-composable-artifact-id type="text" autocomplete="off"><button type="button" class="quiet" data-photo-editor-composable-artifact-fetch>Read artifact</button></div>
-            </div>
-          </details>
-        </div>
-      </div>
-      <div class="photo-editor-actions"><button type="button" data-photo-editor-preview disabled>Refresh preview</button><button type="button" class="quiet" data-photo-editor-refresh>Reload edit</button></div>
-      <div class="photo-editor-export" aria-label="Export"><p class="photo-editor-export-heading">Export <span data-photo-editor-export-target></span></p><p data-photo-editor-export-state role="status"></p><p data-photo-editor-export-output role="status" hidden></p><div class="photo-editor-actions"><button type="button" data-photo-editor-export-submit>Export</button><button type="button" class="quiet" data-photo-editor-export-check hidden>Check status</button><button type="button" class="quiet" data-photo-editor-export-cancel hidden>Cancel</button><button type="button" class="quiet" data-photo-editor-export-retry hidden>Retry</button><button type="button" class="quiet" data-photo-editor-export-download hidden>Download</button></div><details data-photo-editor-export-details hidden><summary>Output details</summary><p data-photo-editor-export-evidence></p></details></div>
-      ${WORKSPACE_OUTPUT_TEMPLATE}
-      <details class="photo-editor-details"><summary>Details</summary><p data-photo-editor-primary-detail></p><p data-photo-editor-provenance></p><p data-photo-editor-detail hidden></p><p data-photo-editor-capability hidden></p><p data-photo-editor-support></p><p data-photo-editor-proxy-state></p><div class="photo-editor-actions"><button type="button" class="quiet" data-photo-editor-proxy-create>Create Development Proxy</button><button type="button" class="quiet" data-photo-editor-proxy-remove hidden>Remove Development Proxy</button></div></details>
+    <div class="photo-editor-controls workspace-editor" aria-label="Photo edit controls" tabindex="0">
+      <p data-photo-editor-status role="status" aria-live="polite">Preparing input</p>
+      <p data-photo-editor-input></p>
+      <div data-workspace-editor-actions class="photo-editor-actions"></div>
+      <div data-workspace-error role="alert" hidden></div>
+      <section data-workspace-selection aria-label="Editing input and saved edits"></section>
+      <section data-workspace-controls aria-label="Tool settings"></section>
+      <section data-workspace-jobs aria-label="Processing jobs"></section>
+      <details data-workspace-files><summary>Files</summary><div data-workspace-file-groups></div><div data-workspace-file-inspection></div></details>
+      <section data-workspace-film aria-label="Continue processing"></section>
+      <section data-workspace-catalog aria-label="Resources, presets and styles"></section>
+      <details><summary>Details</summary><pre data-workspace-details></pre></details>
     </div>
   </div>
 </div>`;

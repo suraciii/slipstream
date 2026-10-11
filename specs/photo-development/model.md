@@ -1,66 +1,55 @@
 # Photo Editing Model
 
-A Photographer or Agent needs to adjust one Photo, inspect the current result, and request an output that another service can consume. The model must make that path direct: one current editing state, guarded changes, bounded Preview, and an immutable Export output.
+A Photographer or Agent needs to open a Photo's persistent directory, adjust its files with independent tools, inspect completed previews, and export a file for download or another compatible tool. The model must make that path direct without transferring every edit or keeping competing parameter stores.
+
+[Photo Workspace](workspace/spec.md) owns observable directory behavior. [Directory Photo Workspace](workspace/design.md) owns preparation, reconciliation, containment, retention, and migration. [Headless darktable Editing](darktable/editing.md) owns general editing capabilities; [darktable CLI](darktable/cli.md) owns standalone and optional supervised grammar.
 
 ## Model
 
-**Edit State** is the one current confirmed editing state for a Photo. It contains the selected Processing Engine, its product Controls, the bound input identity, and the current edit revision.
+A **Photo Workspace** is one persistent real directory associated with a Photo. It contains protected input snapshots, tool-owned editing state, completed previews and outputs. A Photo and its Library decisions remain independent of these files.
 
-An Edit State is the object used by the Web and the Agent. A successful control change replaces the current state atomically and creates a new revision. The state is independent of Selection State, Rating, Album membership, and camera Preview.
+An **Edit State** is the current confirmed editing state owned by one independent tool in its supplied state directory. It contains its Processing Engine, explicit input binding, Engine Module Controls, instances, masks, resources, output settings, and saved revision. Web controls, standalone calls, and optional Slipstream integration read and mutate that same canonical state. Separate edits may coexist without a second service parameter store.
 
-A **Processing Engine** is a service capability such as darktable. An **Engine Module** is an addressable operation inside that engine. A **Control** is a product-defined value owned by an Engine Module, with a defined meaning, validation, and reset behavior.
+A **Processing Engine** is a capability such as darktable or standalone SpektraFilm. An **Engine Module** is an addressable operation inside that engine. A **Control** has a defined meaning, validation, and reset behavior. Readable, writable, and executable capability facts remain separate; discovery does not qualify every input or operation.
 
-A **Processing Artifact** is the immutable result of a completed Export. It is the handoff object between services. A downstream service may consume the Artifact as input and owns its own Edit State. Slipstream does not create or manage a cross-service editing pipeline.
+A **Workspace Artifact** is a completed contained file with a checked content revision. A **Processing Artifact** is its narrower provenance-bearing case: a validated completed Export with exact input, state, bundle, and image-contract evidence. Ordinary compatible files remain useful without invented producing parameters or successful Export attribution.
 
-Edit Recipe, Processing Step, and native parameter tree are implementation or compatibility terms. They are not additional user or Agent objects. A saved internal snapshot may be used to persist and replay the current Edit State, but it must not become a second daily editing model.
+Edit Recipe and Processing Step name internal snapshots and invocation records, not additional daily editing objects or a workflow graph. Native parameter layouts, blobs, catalogs, and handles remain private to the independent tool and engine. Slipstream owns Photo identity, workspace association, contained-file discovery, delivery, access, and optional supervised execution.
 
 ## Behavior
 
 The normal editing flow is:
 
-1. Read the Photo and current Edit State.
-2. Change one admitted Control with the observed edit revision.
-3. Read the confirmed state after the mutation.
-4. Request an Edit Preview when a bounded rendition is needed.
-5. Export the confirmed state when an output is requested.
-6. Inspect and download the resulting Processing Artifact.
+1. Open or reopen the Photo Workspace and obtain its real directory and execution/access facts.
+2. Select an available tool and explicit protected input, or resume its matching saved state.
+3. Inspect Controls and change settings under the observed saved revision.
+4. Read the confirmed tool state after an atomic mutation.
+5. Request a bounded Edit Preview when needed; the tool finishes its file in the workspace.
+6. Export the captured confirmed state directly, without a prior Preview.
+7. Download the exact completed file or explicitly select it for another compatible tool.
 
-The Agent does not construct a complete engine parameter tree, access a host path, operate an engine catalog, or call a private engine process.
+Only initial preparation or explicit source refresh reads the live Original. Subsequent edits and renders reuse the protected input. A missing or changed live Original does not invalidate intact workspace input, saved state, or completed files. Refresh creates or reuses verified bytes without retargeting existing state.
 
-A Preview reads the current Edit State and is marked stale after a later accepted edit. Preview bytes are display renditions and cannot become the input of another service.
+A direct Agent may invoke the independent file/state tool using paths accessible in its execution environment. Optional Slipstream integration resolves authorized Photo/edit identities to those same paths and state. A remote server pathname never implies local client access. The Agent does not reconstruct engine blobs or use a private native protocol.
 
-An Export captures the confirmed Edit State, input identity, Engine, concrete controls, bundle/schema identity, output contract, and request identity. A successful Export publishes one immutable Processing Artifact. It does not change the Original File or create a new Photo.
+Preview captures input, saved revision, resources, bundle, geometry, and display conversion. A later accepted edit makes it stale; late completion cannot replace a newer current preview. Preview files are viewable and downloadable, but must not masquerade as full-resolution scene-linear inputs.
 
-A downstream service starts its own Edit State from the explicitly supplied Artifact. It does not read or modify the upstream Photo's Edit State. An upstream edit does not silently retarget an existing downstream Artifact.
+Export captures confirmed state and exact input/resources before execution. The tool validates its actual output contract and atomically finishes a unique file without replacement. File discovery requires no upload, registration, callback, or commit operation. Processing success and indexing readiness are separate facts.
 
-## Failure behavior
+Darktable and standalone SpektraFilm are peer tools. A caller explicitly selects a completed compatible file for another invocation; actual precision, color, transfer, and geometry determine compatibility. No implicit conversion, upstream rerun, or automatic pipeline follows from file arrival or an earlier edit. Each tool owns its own state, and upstream changes never retarget downstream input.
 
-A missing or unqualified Control, changed source, stale edit revision, incompatible Artifact, unavailable Engine, or failed Export is explicit. The confirmed Edit State and earlier Artifacts remain unchanged.
+## Failure and Retention
 
-A lost mutation or Export response is reconciled with the same request identity. The client does not infer success or start a second operation from the absence of a response.
+A stale revision, incompatible input, unavailable capability, missing resource, capacity refusal, or failed render must preserve previous confirmed state and completed files. Saving succeeds independently of a subsequent rendering failure. Uncertain writes replay the exact original request identity; current-value equality or a newly observed file does not prove that an uncertain request succeeded.
 
-The service never silently substitutes Camera Preview, another Engine, a different Artifact, or a default value for a refused operation.
+Independent command lifetime belongs to its process. Optional supervised work may remain queryable after a client departs; neither mode invents surviving computation after machine restart. Reconciliation discovers completed files after missed notifications and does not adopt unknown independent output as a successful supervised job.
 
-## Scope
+Tools own supported persistent history, resources, Presets, and Styles under their specialist contracts. Restore and composite mutations use the same guarded state boundary. Unsupported historical intent remains inspectable with exact missing or incompatible dependencies disclosed; migration never silently resets it.
 
-The current product does not add Preset, persistent editing History, Snapshot, virtual copy, batch edit, or a user-visible pipeline. Preset may be added later only for a demonstrated need to reuse Controls across Photos.
-
-The current product does not expose processing-recipe as a primary command. Existing storage or compatibility routes may retain the internal snapshot format during migration, but new product guidance uses Edit State, Control, Processing Engine, Edit Preview, Export, and Processing Artifact.
+Inputs, confirmed state, required resources, and kept outputs persist until explicit dependency-safe removal. Receipt or cache expiry must not erase them. Removing the default input does not recreate it on reopen. Whole-workspace deletion requires its reviewed complete loss inventory and exclusion of active or unknown use. Original Files and external XMP Sidecars remain unchanged.
 
 ## Terminology
 
-Use:
+Use Edit State for tool-owned saved intent, Processing Engine for a capability, Engine Module and Control for qualified operations and values, Edit Preview for a bounded rendition, Export for explicit materialization, and Workspace Artifact or Processing Artifact according to the evidence actually available.
 
-- Edit State for the current saved editing state of one Photo.
-- Control for a product-defined editable value.
-- Processing Engine for a service capability.
-- Edit Preview for a bounded rendition of the current state.
-- Export for the explicit materialization operation.
-- Processing Artifact for an immutable, provenance-bearing output used in service handoff.
-
-Avoid:
-
-- Edit Recipe as a second current-edit object.
-- Processing Step as a user-visible workflow stage.
-- Recipe as a synonym for Preset, History, Snapshot, or Artifact.
-- Latest result as an input identity.
+Avoid Edit Recipe as a second parameter owner, Processing Step as a user-visible workflow stage, native blobs as public state, and latest result as an input identity. The [canonical glossary](../../CONTEXT.md) owns domain definitions.

@@ -110,7 +110,11 @@ impl ProcessingExportAdmission {
         validate_bounded_name(&self.request_id, MAXIMUM_EXPORT_REQUEST_ID_BYTES)?;
         validate_digest(&self.payload_digest)?;
         validate_bounded_name(&self.recipe_revision, MAXIMUM_REVISION_BYTES)?;
-        validate_source_revision(&self.source_revision)?;
+        if matches!(self.input, ProcessingInput::Original { .. }) {
+            validate_source_revision(&self.source_revision)?;
+        } else {
+            validate_contextual_source_revision(&self.source_revision)?;
+        }
         validate_bounded_name(&self.adapter_schema_version, MAXIMUM_CONTRACT_NAME_BYTES)?;
         self.parameters.validate()?;
         self.input.validate()?;
@@ -229,7 +233,11 @@ impl ProcessingExportRefusal {
         validate_bounded_name(&self.request_id, MAXIMUM_EXPORT_REQUEST_ID_BYTES)?;
         validate_digest(&self.payload_digest)?;
         validate_bounded_name(&self.recipe_revision, MAXIMUM_REVISION_BYTES)?;
-        validate_source_revision(&self.source_revision)?;
+        if matches!(self.input, ProcessingInput::Original { .. }) {
+            validate_source_revision(&self.source_revision)?;
+        } else {
+            validate_contextual_source_revision(&self.source_revision)?;
+        }
         validate_bounded_name(&self.parameter_schema_version, MAXIMUM_CONTRACT_NAME_BYTES)?;
         validate_digest(&self.parameter_digest)?;
         self.input.validate()?;
@@ -387,7 +395,7 @@ pub struct ProcessingArtifact {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProcessingArtifactRetention {
     pub published_at_unix_seconds: u64,
-    pub expires_at_unix_seconds: u64,
+    pub expires_at_unix_seconds: Option<u64>,
 }
 
 impl ProcessingArtifact {

@@ -132,6 +132,13 @@ Magnified Preview inspection for focus, motion, or expression. It is a Preview Z
 
 ## Development
 
+**Photo Workspace**:
+A persistent directory associated with one Photo that holds its protected input snapshots, tool editing state, and processing files. Tools read and write files there; the Web Edit view presents that same directory.
+_Avoid_: workspace as a second Photo Library, checkout, virtual artifact store
+
+**Workspace Artifact**:
+A completed file in a Photo Workspace, identified by its path and checked content revision. It may be an input snapshot, resource, Edit Preview, or output; its presence alone does not establish processing provenance or input compatibility.
+
 **Processing Module**:
 A service-internal integration boundary for one photo-processing capability and its input, parameter, and output contracts. Product and Agent language use **Processing Engine** for the capability at this boundary.
 _Avoid_: plugin, extension, Film capability
@@ -149,20 +156,28 @@ A product-defined value owned by an Engine Module, with a defined meaning, value
 _Avoid_: native parameter, arbitrary module field
 
 **Processing Step**:
-An internal record of one selected Processing Engine invocation, with an explicit input and captured Engine Module controls. It is not a user-visible workflow stage or a cross-service pipeline object.
+An internal record of one selected Processing Engine invocation, one identified input file revision, and captured Engine Module Controls. A caller composes invocations by explicitly choosing a completed compatible file as the next input; it is not a user-visible pipeline stage.
 _Avoid_: workflow node, pipeline stage, latest result
 
 **Processing Artifact**:
-The immutable provenance-bearing result of a completed Export that another service may consume as an explicit input. It is not an Original File or a new Photo.
-_Avoid_: latest result, temporary Preview
+An immutable output image in a Photo Workspace with validated input, module, parameter, bundle, and image-contract provenance. It is one kind of Workspace Artifact, not an Original File or a new Photo.
 
 **Edit Recipe**:
-The internal complete snapshot of one Photo's current Edit State and captured processing invocation, used for persistence and replay. It is not a cross-service plan or the Agent's daily editing object.
+The internal complete snapshot of a tool's Edit State and captured processing invocation, used for persistence and replay. It is represented by the tool-owned state, independent of Selection State, Rating, and Album membership, and is not a second parameter store or daily editing object.
 _Avoid_: edit history, pipeline, Preset, darktable sidecar
 
 **Edit State**:
-The current confirmed editing state of one Photo: its selected Processing Engine, input binding, controls, and revision. It is the Agent's daily editing object.
+The current confirmed editing intent owned by one tool for an identified input in a Photo Workspace: its selected Processing Engine, input binding, Engine Module Controls, operation instances, masks, resources, output settings, and revision. Web, independent calls, and optional Slipstream integration use that same saved state.
 _Avoid_: recipe, session, workflow, engine history
+
+**Operation Instance**:
+One identified occurrence of a processing operation inside a Processing Step, with its settings, enabled state, ordering, and any blending or mask references. Several instances may use the same operation.
+
+**Module Preset**:
+A reusable selection of settings for one processing operation. Its application scope distinguishes fixed values from settings initialized for the target Photo.
+
+**Style**:
+A reusable selection of operation instances and their relationships for one Processing Module. Applying a Style changes an Edit State without changing Photo identity or creating a Processing Artifact.
 
 **Film Recipe**:
 A standalone SpektraFilm configuration that combines film stock, print paper, and processing choices. It is scoped to that engine and is not the whole Photo's Edit State.
@@ -183,7 +198,7 @@ not a required successor to a Development Result.
 _Avoid_: camera Preview, film Original
 
 **Edit Preview**:
-A bounded rendition of the current Edit State's processing result for editing and comparison. It is separate from the camera-produced Preview and is not a Processing Artifact.
+A bounded rendition of an identified Processing Step revision for editing and comparison. Its completed file is a Workspace Artifact, separate from the camera-produced Preview and from a full-resolution Processing Artifact.
 _Avoid_: Preview when the kind is unclear
 
 **Development Proxy**:

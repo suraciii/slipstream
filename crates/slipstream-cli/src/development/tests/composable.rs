@@ -107,7 +107,7 @@ fn composable_save_accepts_the_zero_step_and_selected_step_documents() {
 }
 
 #[test]
-fn composable_auto_requires_current_original_step_and_preserves_instruction() {
+fn composable_auto_requires_current_step_and_preserves_instruction() {
     let mut document = serde_json::from_slice::<Value>(&composable_save_document(
         json!([composable_step("develop-1", "darktable")]),
         json!("develop-1"),
@@ -503,10 +503,17 @@ fn source_revision_limits_apply_to_save_guards_original_bindings_and_exports() {
         let mut save: Value =
             serde_json::from_slice(&composable_save_document(json!([]), Value::Null)).unwrap();
         save["expectedSourceRevision"] = json!(source);
-        refuses(
-            parse_processing_save(serde_json::to_vec(&save).unwrap()).unwrap_err(),
-            "expectedSourceRevision",
-        );
+        if source.is_empty() {
+            assert_eq!(
+                parse_processing_save(serde_json::to_vec(&save).unwrap()).unwrap(),
+                save
+            );
+        } else {
+            refuses(
+                parse_processing_save(serde_json::to_vec(&save).unwrap()).unwrap_err(),
+                "expectedSourceRevision",
+            );
+        }
 
         let mut step = composable_step("develop-1", "darktable");
         step["input"]["sourceRevision"] = json!(source);
@@ -517,10 +524,17 @@ fn source_revision_limits_apply_to_save_guards_original_bindings_and_exports() {
         );
 
         let export = json!({"requestId": "export-1", "stepId": "develop-1", "expectedRecipeRevision": "recipe-9", "expectedSourceRevision": source});
-        refuses(
-            parse_processing_export(serde_json::to_vec(&export).unwrap()).unwrap_err(),
-            "expectedSourceRevision",
-        );
+        if source.is_empty() {
+            assert_eq!(
+                parse_processing_export(serde_json::to_vec(&export).unwrap()).unwrap(),
+                export
+            );
+        } else {
+            refuses(
+                parse_processing_export(serde_json::to_vec(&export).unwrap()).unwrap_err(),
+                "expectedSourceRevision",
+            );
+        }
     }
     let mut recipe = composable_recipe_fixture();
     let source = format!("opaque\0{}", "é".repeat(300));
@@ -586,4 +600,205 @@ fn retained_work_and_artifact_validate_opaque_source_bytes_independently_of_reci
         invalid["input"]["binding"]["sourceRevision"] = json!(invalid_source);
         assert!(!processing_artifact_valid(&invalid, "p1"));
     }
+}
+
+fn workspace_binding_fixture() -> Value {
+    json!({
+        "kind": "workspace-artifact",
+        "workspaceId": "workspace-1",
+        "artifactId": "workspace-image-1",
+        "revision": "image-revision-1",
+        "contract": {
+            "format": "image/tiff", "precision": "float32",
+            "colorSpace": "prophoto-rgb", "transfer": "linear",
+            "geometry": {"width": 8, "height": 4}, "encoding": "none",
+        },
+    })
+}
+
+#[test]
+fn workspace_binding_round_trips_save_read_and_write_with_empty_context() {
+    let mut step = composable_step("film-1", "spektrafilm");
+    step["input"] = workspace_binding_fixture();
+    let mut save: Value = serde_json::from_slice(&composable_save_document(
+        json!([step.clone()]),
+        json!("film-1"),
+    ))
+    .unwrap();
+    save["expectedSourceRevision"] = json!("");
+    assert_eq!(
+        parse_processing_save(serde_json::to_vec(&save).unwrap()).unwrap(),
+        save
+    );
+    let recipe = json!({
+        "photoId": "p1", "revision": "recipe-10", "sourceRevision": "",
+        "currentStepId": "film-1", "steps": [step],
+    });
+    let read = serde_json::from_value(json!({
+        "photoId": "p1", "sourceRevision": "", "recipe": recipe.clone(),
+    }))
+    .unwrap();
+    let inspected = validated_processing_recipe_read(read, "p1", &origin()).unwrap();
+    assert_eq!(inspected["recipe"], recipe);
+    let identity = MutationIdentity {
+        operation: PROCESSING_SAVE_OPERATION,
+        photo_ids: vec!["p1".to_owned()],
+        album_id: None,
+        album_name: None,
+        mappings: Vec::new(),
+    };
+    let result = serde_json::from_value(json!({
+        "outcome": "saved", "recipe": recipe.clone(),
+        "recipeVersion": "recipe-10", "sourceRevision": "",
+    }))
+    .unwrap();
+    let confirmed = confirmed_processing_recipe_write(
+        &identity,
+        "p1",
+        "composable-001",
+        "",
+        StatusCode::CREATED,
+        result,
+        &origin(),
+    )
+    .unwrap();
+    assert_eq!(confirmed["recipe"], recipe);
+    assert_eq!(confirmed["sourceRevision"], "");
+}
+
+#[test]
+fn workspace_binding_requires_exact_fields_and_bounded_image_evidence() {
+    let binding = workspace_binding_fixture();
+    for field in ["workspaceId", "artifactId", "revision", "contract"] {
+        let mut missing = binding.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<ProcessingInputWire>(missing).is_err(),
+            "{field}"
+        );
+    }
+    let mut extra = binding.clone();
+    extra["path"] = json!("image.tif");
+    assert!(serde_json::from_value::<ProcessingInputWire>(extra).is_err());
+    let duplicate = r#"{"kind":"workspace-artifact","workspaceId":"a","workspaceId":"b","artifactId":"x","revision":"r","contract":{"format":"tiff","precision":"float32","colorSpace":"rgb","transfer":"linear","geometry":{"width":8,"height":4},"encoding":"none"}}"#;
+    assert!(serde_json::from_str::<ProcessingInputWire>(duplicate).is_err());
+    for field in ["workspaceId", "artifactId", "revision"] {
+        for value in [
+            "".to_owned(),
+            "x".repeat(129),
+            " bad ".to_owned(),
+            "bad\n".to_owned(),
+        ] {
+            let mut step = composable_step("film-1", "spektrafilm");
+            step["input"] = binding.clone();
+            step["input"][field] = json!(value);
+            assert!(
+                parse_processing_save(composable_save_document(
+                    json!([step.clone()]),
+                    json!("film-1")
+                ))
+                .is_err()
+            );
+            let recipe = serde_json::from_value(json!({
+                "photoId":"p1", "revision":"r", "sourceRevision":"",
+                "currentStepId":"film-1", "steps":[step],
+            }))
+            .unwrap();
+            assert!(!processing_recipe_valid(&recipe, "p1"));
+        }
+    }
+    for edge in [0, 65_537] {
+        let mut step = composable_step("film-1", "spektrafilm");
+        step["input"] = binding.clone();
+        step["input"]["contract"]["geometry"]["width"] = json!(edge);
+        assert!(
+            parse_processing_save(composable_save_document(json!([step]), json!("film-1")))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn workspace_work_and_artifact_keep_completed_binding_and_empty_source() {
+    let binding = workspace_binding_fixture();
+    let parameters = json!({"schemaVersion":"film-1", "tree":{"opaque":true}});
+    let work = json!({
+        "photoId":"p1", "requestId":"export-1", "stepId":"film-1",
+        "module":"spektrafilm", "recipeRevision":"r", "sourceRevision":"",
+        "adapterSchemaVersion":"film-adapter-1", "parameters":parameters,
+        "input":binding, "bundleId":"bundle-1", "state":"accepted",
+        "acceptedAt":20, "attempt":null, "artifactId":null,
+        "failureReason":null, "terminalAt":null, "retainUntil":null,
+    });
+    assert!(processing_work_valid(&work, "p1", Some("export-1")));
+    let artifact = json!({
+        "artifactId":"processing-artifact-1", "photoId":"p1", "stepId":"film-1",
+        "module":"spektrafilm", "adapterSchemaVersion":"film-adapter-1",
+        "parameters":parameters, "input":{"binding":binding, "sha256":"a".repeat(64), "byteLength":24},
+        "outputContract":binding["contract"], "bundleId":"bundle-1", "filename":"image.tif",
+        "publishedAt":"2026-10-02T12:00:00Z", "expiresAt":null,
+        "sha256":"b".repeat(64), "byteLength":96,
+    });
+    assert!(processing_artifact_valid(&artifact, "p1"));
+    for field in ["workspaceId", "artifactId", "revision"] {
+        let mut invalid_work = work.clone();
+        invalid_work["input"][field] = json!("");
+        assert!(!processing_work_valid(
+            &invalid_work,
+            "p1",
+            Some("export-1")
+        ));
+        let mut invalid_artifact = artifact.clone();
+        invalid_artifact["input"]["binding"][field] = json!("");
+        assert!(!processing_artifact_valid(&invalid_artifact, "p1"));
+    }
+}
+
+#[test]
+fn adapter_auto_accepts_workspace_context_and_leaves_action_admission_to_service() {
+    let mut step = composable_step("film-1", "spektrafilm");
+    step["input"] = workspace_binding_fixture();
+    let mut save: Value =
+        serde_json::from_slice(&composable_save_document(json!([step]), json!("film-1"))).unwrap();
+    save["expectedSourceRevision"] = json!("");
+    save["automaticAdjustment"] = json!({
+        "stepId":"film-1", "operation":"adapter-action", "multiPriority":0, "instruction":{},
+    });
+    assert_eq!(
+        parse_processing_auto(serde_json::to_vec(&save).unwrap()).unwrap(),
+        save
+    );
+}
+
+#[test]
+fn artifact_only_recipe_accepts_empty_context_without_relaxing_original_binding() {
+    let mut binding = workspace_binding_fixture();
+    binding["kind"] = json!("artifact");
+    binding.as_object_mut().unwrap().remove("workspaceId");
+    binding.as_object_mut().unwrap().remove("revision");
+    let mut step = composable_step("film-1", "spektrafilm");
+    step["input"] = binding;
+    let mut save: Value = serde_json::from_slice(&composable_save_document(
+        json!([step.clone()]),
+        json!("film-1"),
+    ))
+    .unwrap();
+    save["expectedSourceRevision"] = json!("");
+    assert_eq!(
+        parse_processing_save(serde_json::to_vec(&save).unwrap()).unwrap(),
+        save
+    );
+    let mut recipe = json!({
+        "photoId":"p1", "revision":"r", "sourceRevision":"",
+        "currentStepId":"film-1", "steps":[step],
+    });
+    assert!(processing_recipe_valid(
+        &serde_json::from_value(recipe.clone()).unwrap(),
+        "p1"
+    ));
+    recipe["steps"][0]["input"] = json!({"kind":"original", "photoId":"p1", "sourceRevision":""});
+    assert!(!processing_recipe_valid(
+        &serde_json::from_value(recipe).unwrap(),
+        "p1"
+    ));
 }

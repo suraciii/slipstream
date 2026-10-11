@@ -529,10 +529,11 @@ a superseded presentation workflow.
   request. If still current, it renders facts and starts current Preview. It
   sends saved position only while still current immediately before send; once
   sent, that write always settles.
-- Opening a Photo's Develop surface starts the Photo-owned Edit Recipe read and
-  starts no processing. Each settled gesture sends one guarded save through the
-  per-Photo queue; a preview refresh starts only for the committed revision and
-  only while the Photo scope and that revision remain current.
+- Opening a Photo's Edit surface opens or resumes its Photo Workspace and reads
+  the selected tool's canonical file state. It starts no rendering. Each settled
+  gesture sends one guarded tool mutation through the per-edit queue; a preview
+  refresh starts only for the committed revision and only while the Photo scope,
+  selected edit, and that revision remain current.
 - Submitting an Export is the admitted submission followed, while the Photo
   scope and the captured identity remain current, by inspection polling until a
   terminal state. Cancelling replaces inspection for that Export only.

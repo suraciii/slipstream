@@ -195,6 +195,7 @@ pub(super) fn query_token(application: &Application, kind: RetainedKind) -> Stri
         RetainedKind::Browse => 'b',
         RetainedKind::RecoveryUnavailable => 'u',
         RetainedKind::RecoveryMappings => 'm',
+        RetainedKind::WorkspaceFiles => 'w',
     };
     format!(
         "{prefix}{:032x}{:016x}",

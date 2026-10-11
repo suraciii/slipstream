@@ -1,480 +1,177 @@
-import { createWorkspaceOutputController } from "./workspace-output-controller.js";
-import { createEditorEditState } from "./editor-edit-state.js";
-import { createEditorComposableRecipe } from "./editor-composable-recipe.js";
-import { createEditorComposablePreview } from "./editor-composable-preview.js";
-import { createEditorProxyController } from "./editor-proxy-controller.js";
-import { createEditorProcessingExport } from "./editor-processing-export.js";
-import {
-  describePreviewRefusal,
-  describeEditRefusal,
-} from "./editor-refusals.js";
 import type { BrowserFetch } from "./access-session.js";
 import type { LibraryBrowserView } from "../ui/library-browser-view.js";
 import type {
   EditorController,
   EditorControllerDependencies,
 } from "./editor-controller-contract.js";
+import {
+  createWorkspaceEditOwner,
+  type WorkspaceEditOwner,
+} from "./workspace-edit-owner.js";
+import {
+  createWorkspaceFilmSurface,
+  type WorkspaceFilmSurface,
+} from "../ui/workspace-film-surface.js";
+import { isRecord } from "../api/guards.js";
+import { workspacePath, workspaceRequest } from "../api/workspace-edit.js";
+import {
+  createWorkspaceCatalogSurface,
+  type WorkspaceCatalogSurface,
+} from "../ui/workspace-catalog-surface.js";
+import { fetchWorkspaceFilmModules } from "../api/workspace-film.js";
 export type { EditorController } from "./editor-controller-contract.js";
-
 export function createEditorController(
   fetcher: BrowserFetch,
   view: LibraryBrowserView,
   dependencies: EditorControllerDependencies,
 ): EditorController {
-  let photoId: string | undefined;
-  let cameraReference = false;
-  let comparisonRequested = false;
-  const baselineReady = (): boolean =>
-    Boolean(
-      preview.current.url &&
-        baseline.current.url &&
-        preview.current.outcome === "ready" &&
-        baseline.current.outcome === "ready" &&
-        !preview.current.stale &&
-        !baseline.current.stale &&
-        preview.current.comparisonIdentity &&
-        preview.current.comparisonIdentity ===
-          baseline.current.comparisonIdentity &&
-        !composable.dirty() &&
-        !primary.blocked,
-    );
-  const presentSelected = (): void => {
-    if (cameraReference) return;
-    const url =
-      comparisonRequested && baselineReady()
-        ? baseline.current.url
-        : preview.current.url;
-    if (url) view.presentEditorPreview(url);
-  };
-  const owns = (id: string): boolean =>
-    photoId === id &&
+  const owners = new Map<string, WorkspaceEditOwner>();
+  const filmSurfaces = new Map<string, WorkspaceFilmSurface>();
+  const catalogSurfaces = new Map<string, WorkspaceCatalogSurface>();
+  let selected: string | undefined;
+  const owns = (photoId: string) =>
+    selected === photoId &&
     dependencies.isAlive() &&
-    view.editorVisible() &&
-    dependencies.isCurrentPhoto(id) &&
-    dependencies.currentPhoto()?.id === id;
-  const clearPreview = (): void => {
-    comparisonRequested = false;
-    preview.clear();
-    baseline.clear();
-    view.clearEditorPreview();
-  };
-  const markPreviewStale = (): void => {
-    comparisonRequested = false;
-    preview.markStale();
-    baseline.markStale();
-    presentSelected();
-  };
-  const requestPreview = async (id: string): Promise<void> => {
-    if (!owns(id) || composable.readPending || composable.state?.saving) return;
-    if (
-      primary.blocked ||
-      primary.read?.editRevision !== (composable.read?.recipe?.revision ?? null)
-    )
-      await primary.load(id);
-    if (
-      primary.blocked ||
-      primary.read?.editRevision !== (composable.read?.recipe?.revision ?? null)
-    )
+    dependencies.isCurrentPhoto(photoId) &&
+    view.editorVisible();
+  const open = (photoId: string) => {
+    if (!dependencies.isAlive() || !dependencies.isCurrentPhoto(photoId))
       return;
-    if (cameraReference) return;
-    await preview.requestCurrent(id);
-  };
-  const primary = createEditorEditState(fetcher, {
-    owns,
-    render: () => render(),
-  });
-  const composable = createEditorComposableRecipe(fetcher, {
-    ...dependencies,
-    editorOwnsPhoto: owns,
-    renderEditor: () => render(),
-    previewSelection: () => preview.selection,
-    clearEditorPreview: clearPreview,
-    requestEditorPreview: requestPreview,
-    markEditorPreviewStale: markPreviewStale,
-    describeEditRefusal,
-  });
-  const preview = createEditorComposablePreview(fetcher, {
-    cameraReference: () => cameraReference,
-    read: () => composable.read,
-    isDirty: () => composable.dirty() || primary.blocked,
-    editorOwnsPhoto: owns,
-    renderEditor: () => render(),
-    present: () => presentSelected(),
-    clearPresented: () => view.clearEditorPreview(),
-    describePreviewRefusal,
-  });
-  const baseline = createEditorComposablePreview(fetcher, {
-    comparison: "baseline",
-    cameraReference: () => cameraReference,
-    read: () => composable.read,
-    isDirty: () => composable.dirty() || primary.blocked,
-    editorOwnsPhoto: owns,
-    renderEditor: () => render(),
-    present: () => presentSelected(),
-    clearPresented: () => presentSelected(),
-    describePreviewRefusal,
-  });
-  const proxy = createEditorProxyController(fetcher, {
-    sourceRevision: (id) =>
-      owns(id) && composable.read?.sourceAvailable !== false
-        ? (composable.read?.currentSourceRevision ??
-          composable.read?.sourceRevision)
-        : undefined,
-    editorOwnsPhoto: owns,
-    renderEditor: () => render(),
-    refreshSource: (id) => {
-      void composable.loadComposableRecipe(id);
-    },
-  });
-  const outputs = createWorkspaceOutputController(fetcher, {
-    owns,
-    render: () => render(),
-    facts: (id) => {
-      if (!owns(id)) return undefined;
-      const state = composable.state;
-      const recipe = composable.read?.recipe;
-      return {
-        recipeRevision: recipe?.revision ?? null,
-        sourceRevision: recipe?.sourceRevision ?? null,
-        stepId: recipe?.currentStepId ?? null,
-        saving: state?.saving ?? false,
-        dirty: composable.dirty() || primary.blocked || exports.unresolved(id),
-        conflict: state?.conflict ?? false,
-      };
-    },
-  });
-  const exports = createEditorProcessingExport(fetcher, composable, {
-    editorOwnsPhoto: owns,
-    renderEditor: () => render(),
-    processingAvailable: () => {
-      const target = composable.target();
-      return (
-        !primary.blocked &&
-        primary.read?.canExport === true &&
-        primary.read.editRevision === composable.read?.recipe?.revision &&
-        target.kind === "step" &&
-        composable.modules.some(
-          (module) =>
-            module.id.name === target.step.module &&
-            module.availability.state === "ready",
-        ) &&
-        !(photoId && outputs.unresolved(photoId))
+    selected = photoId;
+    let owner = owners.get(photoId);
+    if (!owner) {
+      owner = createWorkspaceEditOwner(fetcher, photoId, (model) => {
+        if (!owns(photoId)) return;
+        if (model.edit) {
+          const details = Object.fromEntries(
+            model.edit.instances.items.map((instance) => [
+              instance.instanceId,
+              {
+                ...model.instanceDetails[instance.instanceId],
+                descriptor: model.descriptions[instance.moduleId],
+              },
+            ]),
+          );
+          catalogSurfaces
+            .get(photoId)
+            ?.bind(
+              model.edit,
+              model.edit.instances.items,
+              details,
+              model.resourceKinds,
+            );
+        }
+        view.renderEditor(model);
+        if (model.preview && !model.cameraReference)
+          view.presentEditorPreview(
+            model.comparing && model.preview.comparisonUrl
+              ? model.preview.comparisonUrl
+              : model.preview.url,
+          );
+      });
+      owners.set(photoId, owner);
+      if (typeof document !== "undefined") {
+        const film = createWorkspaceFilmSurface(fetcher, photoId, () => {
+          void owners.get(photoId)?.refresh();
+        });
+        owner.model.filmElement = film.element;
+        filmSurfaces.set(photoId, film);
+        const catalog = createWorkspaceCatalogSurface(
+          fetcher,
+          photoId,
+          async () => {
+            const current = owners.get(photoId);
+            await current?.refresh();
+            await current?.act("preview");
+          },
+          async () => (await owners.get(photoId)?.settle()) ?? false,
+        );
+        owner.model.catalogElement = catalog.element;
+        catalogSurfaces.set(photoId, catalog);
+        void fetchWorkspaceFilmModules(
+          fetcher,
+          new AbortController().signal,
+        ).then((modules) => {
+          if (modules) owner!.model.filmModules = modules;
+          if (owns(photoId)) view.renderEditor(owner!.model);
+        });
+      }
+    }
+    view.renderEditor(owner.model);
+    void owner.refresh().then(async () => {
+      if (typeof window === "undefined" || !owns(photoId)) return;
+      const addressed = new URLSearchParams(window.location.search).get(
+        "editId",
       );
-    },
-    describeEditRefusal,
-  });
-  const render = (): void => {
-    if (!photoId || !owns(photoId)) return;
-    const recipeView = composable.view();
-    const state = composable.state;
-    const target = composable.target();
-    const current = preview.current;
-    const selected = target.kind === "step" ? target.step : undefined;
-    const module = selected
-      ? composable.modules.find((entry) => entry.id.name === selected.module)
-      : undefined;
-    const provenanceNote = cameraReference
-      ? "Original reference: the camera Preview of this Photo."
-      : target.kind === "unreadable"
-        ? "The Edit State could not be read. Reload to check again."
-        : !selected
-          ? "No Edit State is saved; no processing result is shown."
-          : `Edit Preview from ${selected.module}.${composable.dirty() ? " Local changes are not yet confirmed." : ""}`;
-    view.renderEditor({
-      photoId,
-      primary: {
-        revision: primary.read?.editRevision ?? null,
-        sourceRevision: primary.read?.sourceRevision ?? null,
-        input: primary.read?.current?.input ?? null,
-        engine: primary.read?.current?.engine ?? null,
-        exposureEv: primary.read?.current?.exposureEv ?? null,
-        saveState: state?.uncertain
-          ? "unknown"
-          : state?.conflict
-            ? "conflict"
-            : state?.saving
-              ? "saving"
-              : state?.failure
-                ? "failed"
-                : composable.dirty()
-                  ? "draft"
-                  : primary.read?.current
-                    ? "saved"
-                    : "none",
-        canSet:
-          !composable.readPending &&
-          !primary.blocked &&
-          !composable.dirty() &&
-          !primary.read?.requiresRebind &&
-          Boolean(
-            primary.read?.current
-              ? primary.read.canSave
-              : primary.read?.sourceAvailable,
-          ),
-        canReset:
-          !composable.readPending &&
-          !primary.blocked &&
-          !composable.dirty() &&
-          primary.read?.canSave === true &&
-          primary.read?.current?.engine === "darktable",
-        ready: primary.read?.canPreview === true,
-        note: state?.note || primary.note,
-      },
-      loading: composable.readPending,
-      cameraReference,
-      canCompare: Boolean(
-        current.url &&
-          current.outcome === "ready" &&
-          !current.stale &&
-          !composable.dirty() &&
-          !primary.blocked &&
-          !cameraReference,
-      ),
-      comparing: comparisonRequested && baselineReady() && !cameraReference,
-      provenanceNote,
-      sourceFactNote:
-        composable.read?.sourceAvailable === false
-          ? "The Original source is unavailable."
-          : composable.read?.recipe &&
-              composable.read.currentSourceRevision &&
-              composable.read.currentSourceRevision !==
-                composable.read.recipe?.sourceRevision
-            ? "The Original has changed since this Edit State was saved."
-            : composable.read
-              ? "Original source revision checked."
-              : "Checking source…",
-      processingReadiness: !selected
-        ? "unavailable"
-        : !module
-          ? "checking"
-          : module.availability.state === "ready"
-            ? "ready"
-            : "unavailable",
-      previewState: cameraReference
-        ? null
-        : current.busy || current.pending
-          ? "pending"
-          : selected && (current.outcome === "failed" || current.refused)
-            ? "failed"
-            : current.url
-              ? current.stale
-                ? "stale"
-                : "ready"
-              : null,
-      proxy: proxy.view(photoId),
-      canPreview:
-        Boolean(selected) &&
-        !composable.dirty() &&
-        !primary.blocked &&
-        primary.read?.canPreview === true &&
-        !cameraReference,
-      previewing: current.busy,
-      previewNote: !selected
-        ? "Choose exposure settings to create an Edit State before requesting an Edit Preview."
-        : comparisonRequested
-          ? baseline.current.outcome === "ready" && !baselineReady()
-            ? "The baseline does not match this current Preview's processing provenance, so the current Preview remains shown."
-            : baseline.current.note ||
-              "Preparing the current Edit State's baseline comparison…"
-          : current.note,
-      previewStale: current.stale,
-      saving: state?.saving ?? false,
-      dirty: composable.dirty() || primary.blocked,
-      mutationsBlocked: Boolean(
-        primary.blocked ||
-          state?.uncertain ||
-          state?.conflict ||
-          exports.unresolved(photoId) ||
-          outputs.unresolved(photoId),
-      ),
-      rebindAvailable: Boolean(
-        composable.read?.recipe &&
-          composable.read.sourceAvailable !== false &&
-          composable.read.currentSourceRevision &&
-          composable.read.currentSourceRevision !==
-            composable.read.recipe.sourceRevision,
-      ),
-      canUndo:
-        Boolean(state?.undo.length) &&
-        !state?.saving &&
-        !state?.pending &&
-        !state?.uncertain &&
-        !state?.conflict &&
-        !exports.unresolved(photoId) &&
-        !outputs.unresolved(photoId),
-      canRedo:
-        Boolean(state?.redo.length) &&
-        !state?.saving &&
-        !state?.pending &&
-        !state?.uncertain &&
-        !state?.conflict &&
-        !exports.unresolved(photoId) &&
-        !outputs.unresolved(photoId),
-      conflict: state?.conflict ? { message: state.note } : null,
-      draftNote: state
-        ? `${state.recovered ? state.note : ""}${state.recoveryAvailable ? "" : " Local settings remain in this session; browser reload recovery is unavailable."}`
-        : "",
-      export: exports.view(),
-      composable: recipeView,
-      outputs: outputs.view(photoId),
-      status: state?.note || primary.note,
-      statusDetail: state?.uncertain
-        ? "The save outcome is unknown. Check the saved edit before another action."
-        : "",
-    });
-  };
-  const open = (id: string): void => {
-    if (!id || !dependencies.isCurrentPhoto(id)) return;
-    clearPreview();
-    proxy.leave();
-    outputs.leave();
-    composable.reset();
-    primary.reset();
-    exports.reset();
-    photoId = id;
-    cameraReference = false;
-    render();
-    void composable.loadComposableRecipe(id);
-    void primary.load(id).then(() => requestPreview(id));
-    void composable.loadProcessingModules(id);
-    void proxy.read(id);
-    void exports.load(id);
-    outputs.open(id);
-  };
-  const scoped =
-    <A extends unknown[]>(action: (id: string, ...args: A) => unknown) =>
-    (id: string, ...args: A): void => {
-      if (owns(id)) void action(id, ...args);
-    };
-  const mutate = <A extends unknown[]>(
-    action: (id: string, ...args: A) => unknown,
-  ) =>
-    scoped((id: string, ...args: A) => {
-      const state = composable.state;
       if (
-        state?.saving ||
-        state?.uncertain ||
-        state?.conflict ||
-        exports.unresolved(id) ||
-        outputs.unresolved(id)
+        addressed &&
+        owner.model.edit?.editId !== addressed &&
+        owner.model.workspace?.edits.some((edit) => edit.editId === addressed)
       )
-        return;
-      return action(id, ...args);
+        await owner.act("edit-select", { editId: addressed });
     });
+  };
   return {
     open,
-    setExposure: mutate((id, value: number) => {
-      if (
-        Number.isFinite(value) &&
-        !composable.readPending &&
-        !composable.dirty() &&
-        !primary.blocked &&
-        !primary.read?.requiresRebind &&
-        (primary.read?.current
-          ? primary.read.canSave
-          : primary.read?.sourceAvailable)
-      ) {
-        primary.invalidate();
-        markPreviewStale();
-        return composable.setExposure(id, value);
-      }
-    }),
-    resetExposure: mutate((id) => {
-      if (
-        !composable.readPending &&
-        !composable.dirty() &&
-        !primary.blocked &&
-        !primary.read?.requiresRebind &&
-        primary.read?.canSave &&
-        primary.read.current?.engine === "darktable"
-      ) {
-        primary.invalidate();
-        markPreviewStale();
-        return composable.resetExposure(id);
-      }
-    }),
-    refresh: scoped((id) => {
-      void primary.load(id).then(() => requestPreview(id));
-      if (composable.state?.uncertain) void composable.saveEditorComposable(id);
-      else void composable.loadComposableRecipe(id);
-      void composable.loadProcessingModules(id);
-      void proxy.read(id);
-      void exports.load(id);
-      void outputs.refresh(id);
-    }),
-    stepHistory: mutate((id, operation: "undo" | "redo") => {
-      markPreviewStale();
-      if (operation === "undo") void composable.undo(id);
-      else void composable.redo(id);
-    }),
-    requestPreview: scoped(requestPreview),
-    setCameraReference: scoped((id, pressed: boolean) => {
-      cameraReference = pressed;
-      render();
-      if (pressed) view.clearEditorPreview();
-      else {
-        presentSelected();
-        if (!preview.current.url || preview.current.stale)
-          void requestPreview(id);
-      }
-    }),
-    setComparison: scoped((id, pressed: boolean) => {
-      if (
-        pressed &&
-        (cameraReference ||
-          composable.dirty() ||
-          preview.current.stale ||
-          preview.current.outcome !== "ready" ||
-          !preview.current.url)
-      )
+    refresh(photoId) {
+      if (owns(photoId)) void owners.get(photoId)?.refresh();
+    },
+    act(photoId, action, args) {
+      if (!owns(photoId)) return;
+      const owner = owners.get(photoId);
+      if (action === "continue-film" && owner?.model.workspace) {
+        const workspaceId = owner.model.workspace.workspaceId;
+        const file = owner.model.files.find(
+          (item) =>
+            item.artifactId === args.artifactId &&
+            item.revision === args.revision,
+        );
+        if (
+          !file ||
+          file.kind !== "output" ||
+          file.state !== "ready" ||
+          !file.revision
+        )
+          return;
+        const revision = file.revision;
+        void workspaceRequest(
+          fetcher,
+          `${workspacePath(workspaceId)}/files/${encodeURIComponent(file.artifactId)}`,
+        )
+          .then(async (inspected) => {
+            if (
+              !owns(photoId) ||
+              inspected.revision !== file.revision ||
+              !isRecord(inspected.imageContract)
+            )
+              return;
+            await filmSurfaces.get(photoId)?.open({
+              workspaceId,
+              artifactId: file.artifactId,
+              revision,
+              imageContract: inspected.imageContract,
+              relativePath: file.relativePath,
+            });
+          })
+          .catch((error) => {
+            owner.model.status = `Continue processing failed: ${String(error instanceof Error ? error.message : error)}`;
+            if (owns(photoId)) view.renderEditor(owner.model);
+          });
         return;
-      comparisonRequested = pressed;
-      render();
-      presentSelected();
-      if (pressed && !baselineReady()) void baseline.requestCurrent(id);
-    }),
-    useSaved: scoped(composable.useSaved),
-    reapplyLocal: scoped(composable.reapplyLocal),
-    discardDraft: scoped(composable.discardEditorComposable),
-    rebind: scoped(composable.rebind),
-    createProxy: scoped(proxy.create),
-    removeProxy: scoped(proxy.remove),
-    compose: mutate(composable.composeEditorSteps),
-    composableAddStep: mutate(composable.addEditorComposableStep),
-    composableRemoveStep: mutate(composable.removeEditorComposableStep),
-    composableSelectStep: mutate(composable.selectEditorComposableStep),
-    composableEditStep: scoped(composable.editEditorComposableStep),
-    composableParameters: mutate((id, text: string) => {
-      composable.editEditorComposableParameters(id, text);
-      composable.commitEditorComposableParameters(id);
-    }),
-    composableAutomatic: scoped((id, adjustment) => {
-      void composable.automaticEditorAdjustment(id, adjustment);
-    }),
-    composableSchema: mutate(composable.editEditorComposableSchema),
-    composableInput: mutate(composable.editEditorComposableInput),
-    composableArtifactFetch: scoped(composable.fetchEditorArtifact),
-    composableSave: scoped(composable.saveEditorComposable),
-    composableDiscard: scoped(composable.discardEditorComposable),
-    checkProcessingExport: scoped(exports.check),
-    downloadArtifact: scoped(exports.downloadArtifact),
-    downloadHistorical: scoped(exports.downloadHistorical),
-    useArtifactInput: mutate(composable.useEditorArtifactInput),
-    submitXmp: scoped(outputs.submit),
-    downloadXmp: scoped(outputs.download),
-    submitExport: scoped(exports.submit),
-    cancelExport: scoped(exports.cancel),
-    retryExport: scoped(exports.retry),
-    downloadExport: scoped(exports.download),
-    leave: () => {
-      photoId = undefined;
-      outputs.leave();
-      proxy.leave();
-      exports.reset();
-      composable.reset();
-      primary.reset();
-      clearPreview();
-      cameraReference = false;
+      }
+      void owner?.act(action, args);
+    },
+    leave() {
+      selected = undefined;
+      view.clearEditorPreview();
+      if (!dependencies.isAlive()) {
+        for (const owner of owners.values()) owner.dispose();
+        for (const film of filmSurfaces.values()) film.dispose();
+        for (const catalog of catalogSurfaces.values()) catalog.dispose();
+        owners.clear();
+        filmSurfaces.clear();
+        catalogSurfaces.clear();
+      }
     },
   };
 }

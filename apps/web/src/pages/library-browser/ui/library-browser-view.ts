@@ -1,7 +1,6 @@
 import "./library-browser.css";
 import "./recovery-panel.css";
 import "./removed-panels.css";
-import "./photo-editor.css";
 import "./external-metadata.css";
 
 import { createModalSurfaces } from "./modal-surface.js";
@@ -132,11 +131,7 @@ export type GridProgressViewModel = Readonly<{
   unflagged: number;
 }>;
 
-export type {
-  EditorComposableViewModel,
-  EditorExportViewModel,
-  EditorViewModel,
-} from "./editor-view-contract.js";
+export type { EditorViewModel } from "./editor-view-contract.js";
 
 export type LibraryBrowserIntent =
   | EditorIntent
@@ -1201,11 +1196,6 @@ ${REMOVED_PANELS_TEMPLATE}
       surfaces.isActive("photo-tools") &&
       photoToolsController.view() === "edit",
     openEditorSurface: () => photoToolsController.open("edit"),
-    getCameraReferenceUrl: (photoId) => {
-      if (photoPresenter.currentPhotoId !== photoId) return undefined;
-      const image = stage.querySelector<HTMLImageElement>("img");
-      return image?.getAttribute("src") || undefined;
-    },
   });
   const ratingControls = createRatingControls({
     elements: {

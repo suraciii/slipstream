@@ -10,6 +10,10 @@ use sha2::{Digest, Sha256};
 pub(crate) fn write_development_tiff(path: &Path, payload: &[u8]) {
     let icc: &[u8] =
         include_bytes!("../../slipstream-core/assets/prophoto-linear-g10-darktable.icc");
+    write_development_tiff_with_icc(path, payload, icc);
+}
+
+fn write_development_tiff_with_icc(path: &Path, payload: &[u8], icc: &[u8]) {
     let mut bytes = b"II\x2a\x00\x08\x00\x00\x00".to_vec();
     bytes.extend_from_slice(&14_u16.to_le_bytes());
     let mut externals: Vec<u8> = Vec::new();
@@ -196,6 +200,20 @@ fn publication_requires_a_developed_payload_that_really_inflates() {
         good_facts.profile_identity,
         format!("{:x}", Sha256::digest(icc))
     );
+    let canonical_path = base.join("canonical-profile.tif");
+    let canonical_icc = include_bytes!("../../slipstream-core/assets/prophoto-linear-g10.icc");
+    write_development_tiff_with_icc(&canonical_path, &stored_zlib(&pixels), canonical_icc);
+    let canonical_facts = validate_development_tiff(&canonical_path).unwrap();
+    assert_eq!(
+        canonical_facts.profile_identity,
+        photo_files::image::tiff::CANONICAL_ICC_SHA256
+    );
+    assert_eq!((canonical_facts.width, canonical_facts.height), (2, 1));
+    let mut unknown_icc = canonical_icc.to_vec();
+    *unknown_icc.last_mut().unwrap() ^= 1;
+    let unknown_path = base.join("unknown-profile.tif");
+    write_development_tiff_with_icc(&unknown_path, &stored_zlib(&pixels), &unknown_icc);
+    assert!(validate_development_tiff(&unknown_path).is_err());
     let writer = workspace.begin_development_tiff("exp-good").unwrap();
     fs::copy(&good_path, writer.temporary_path()).unwrap();
     let published = writer

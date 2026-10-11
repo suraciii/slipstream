@@ -87,69 +87,6 @@ fn preview_parameters<'a>(
     }
 }
 
-#[derive(Clone, Debug)]
-struct PreviewRecord {
-    recipe_revision: String,
-    step_id: String,
-    identity: String,
-    comparison: PreviewComparison,
-}
-
-type PreviewResultRegistry = Mutex<HashMap<String, PreviewRecord>>;
-
-static PREVIEW_RESULTS: LazyLock<PreviewResultRegistry> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-pub(crate) fn preview_status(
-    photo_id: &str,
-    recipe: Option<&slipstream_core::ComposableEditRecipe>,
-) -> serde_json::Value {
-    let Some(recipe) = recipe else {
-        return serde_json::json!({"state": "not-requested", "fresh": false});
-    };
-    let Some(step_id) = recipe.current_step_id.as_ref() else {
-        return serde_json::json!({"state": "not-requested", "fresh": false});
-    };
-    let results = PREVIEW_RESULTS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let Some(record) = results.get(photo_id) else {
-        return serde_json::json!({"state": "not-requested", "fresh": false});
-    };
-    let fresh = matches!(record.comparison, PreviewComparison::Current)
-        && record.recipe_revision == recipe.revision
-        && record.step_id == step_id.as_str();
-    serde_json::json!({
-        "state": if fresh { "fresh" } else { "stale" },
-        "fresh": fresh,
-        "comparison": record.comparison.as_str(),
-        "editRevision": record.recipe_revision.clone(),
-        "recipeRevision": record.recipe_revision,
-        "stepId": record.step_id,
-        "identity": record.identity,
-    })
-}
-fn remember_preview(
-    photo_id: &str,
-    recipe: &slipstream_core::ComposableEditRecipe,
-    step_id: &str,
-    identity: &ProcessingPreviewIdentity,
-    comparison: PreviewComparison,
-) {
-    PREVIEW_RESULTS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .insert(
-            photo_id.to_owned(),
-            PreviewRecord {
-                recipe_revision: recipe.revision.clone(),
-                step_id: step_id.to_owned(),
-                identity: identity.digest(),
-                comparison,
-            },
-        );
-}
-
 type PreviewIntentRegistry = Mutex<HashMap<String, (u64, Arc<AtomicBool>)>>;
 static PREVIEW_INTENTS: LazyLock<PreviewIntentRegistry> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -247,7 +184,11 @@ fn output_contract(
         format!("uint{}", output.precision_bits)
     };
     let geometry = match (&step.input, module) {
-        (ProcessingInput::Artifact { contract, .. }, SPEKTRAFILM_MODULE) => contract.geometry,
+        (
+            ProcessingInput::Artifact { contract, .. }
+            | ProcessingInput::WorkspaceArtifact { contract, .. },
+            SPEKTRAFILM_MODULE,
+        ) => contract.geometry,
         _ => ProcessingGeometry::new(
             u32::try_from(output.width)
                 .map_err(|_| "module output width is too large".to_owned())?,
@@ -317,7 +258,6 @@ fn ready_response(
     bundle_id: &str,
     comparison: PreviewComparison,
 ) -> Response {
-    remember_preview(photo_id, recipe, step_id, identity, comparison);
     let mut response = Response::new(Body::from(execution.bytes));
     *response.status_mut() = StatusCode::OK;
     let headers = response.headers_mut();
@@ -441,13 +381,11 @@ async fn recipe_still_current(
     requires_original: bool,
     source_revision: &str,
 ) -> bool {
-    let Some(current_recipe) = state
-        .application
-        .library
-        .composable_edit_recipe(photo_id)
+    let Some(current_recipe) = crate::processing_recipe::read_recipe(state, photo_id)
         .await
         .ok()
         .flatten()
+        .and_then(|read| read.recipe)
     else {
         return false;
     };
@@ -460,20 +398,16 @@ async fn recipe_still_current(
     {
         return false;
     }
-    if let Some(current) = state
-        .application
-        .library
-        .edit_recipe_surface(photo_id)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|(_, edit)| edit.current_source_revision)
-    {
-        if current != source_revision {
-            return false;
-        }
-    } else if requires_original {
-        return false;
+    if requires_original {
+        return state
+            .application
+            .library
+            .edit_recipe_surface(photo_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|(_, edit)| edit.current_source_revision)
+            .is_some_and(|current| current == source_revision);
     }
     true
 }
@@ -510,13 +444,8 @@ pub(crate) async fn get_processing_preview(
             "The Photo is unknown",
         );
     }
-    let Some(recipe) = (match state
-        .application
-        .library
-        .composable_edit_recipe(&photo_id)
-        .await
-    {
-        Ok(recipe) => recipe,
+    let Some(recipe) = (match crate::processing_recipe::read_recipe(&state, &photo_id).await {
+        Ok(read) => read.and_then(|read| read.recipe),
         Err(_) => {
             return error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -531,29 +460,6 @@ pub(crate) async fn get_processing_preview(
             "Save an Edit State before requesting an Edit Preview",
         );
     };
-    let Some((photo, edit)) = state
-        .application
-        .library
-        .edit_recipe_surface(&photo_id)
-        .await
-        .ok()
-        .flatten()
-    else {
-        return error(
-            StatusCode::NOT_FOUND,
-            "unknown_photo",
-            "The Photo is not part of the persisted Library",
-        );
-    };
-    if let Some(current_source_revision) = edit.current_source_revision.as_deref()
-        && current_source_revision != recipe.source_revision
-    {
-        return error(
-            StatusCode::CONFLICT,
-            "source_changed",
-            "The Edit State is bound to a stale source revision",
-        );
-    }
     if recipe.current_step_id.as_ref().map(|id| id.as_str()) != Some(step_id.as_str()) {
         return error(
             StatusCode::CONFLICT,
@@ -572,6 +478,13 @@ pub(crate) async fn get_processing_preview(
             "The Processing Step is unknown",
         );
     };
+    if step.module.as_str() == DARKTABLE_MODULE {
+        return error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "use_darktable_namespace",
+            "Use the darktable namespace to execute darktable state",
+        );
+    }
     let requires_original = matches!(step.input, ProcessingInput::Original { .. });
     let Some(exports) = state.application.exports.as_ref().cloned() else {
         return error(
@@ -592,73 +505,7 @@ pub(crate) async fn get_processing_preview(
     };
 
     let (execution, bundle_id) = match step.module.as_str() {
-        DARKTABLE_MODULE => {
-            let ProcessingInput::Original {
-                photo_id: input_photo_id,
-                source_revision: input_revision,
-            } = &step.input
-            else {
-                return error(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "incompatible_input",
-                    "darktable Preview requires its explicitly bound Original input",
-                );
-            };
-            let Some(current_source_revision) = edit.current_source_revision.as_deref() else {
-                return error(
-                    StatusCode::CONFLICT,
-                    "source_changed",
-                    "The Photo's current source revision is unavailable",
-                );
-            };
-            if input_photo_id != &photo.id
-                || input_revision != current_source_revision
-                || input_revision != &recipe.source_revision
-            {
-                return error(
-                    StatusCode::CONFLICT,
-                    "source_changed",
-                    "The selected Original input is stale",
-                );
-            }
-            let parameters = Parameters {
-                module: step.module.as_str().to_owned(),
-                version: preview_parameters.schema_version.clone(),
-                tree: preview_parameters.tree.clone(),
-            };
-            let (intent_key, generation, cancellation) =
-                begin_preview_intent(&photo_id, &step_id, comparison);
-            let rendered = exports
-                .render_selected_preview(
-                    &photo_id,
-                    current_source_revision,
-                    photo.original_kind,
-                    &photo.filename,
-                    parameters,
-                    cancellation.clone(),
-                )
-                .await;
-            let current = current_preview_intent(&intent_key, generation, &cancellation);
-            finish_preview_intent(&intent_key, generation);
-            let execution = match rendered {
-                Ok(execution) if current => execution,
-                Ok(_) => return preview_failure(false),
-                Err(_) => return preview_failure(current),
-            };
-            (execution, exports.bundle_sha256().to_owned())
-        }
         SPEKTRAFILM_MODULE => {
-            let ProcessingInput::Artifact {
-                artifact_id,
-                contract,
-            } = &step.input
-            else {
-                return error(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "incompatible_input",
-                    "SpektraFilm Preview requires its explicitly selected artifact input",
-                );
-            };
             let parameters = Parameters {
                 module: step.module.as_str().to_owned(),
                 version: preview_parameters.schema_version.clone(),
@@ -667,12 +514,7 @@ pub(crate) async fn get_processing_preview(
             let (intent_key, generation, cancellation) =
                 begin_preview_intent(&photo_id, &step_id, comparison);
             let rendered = exports
-                .render_film_preview(
-                    artifact_id.as_str(),
-                    contract,
-                    parameters,
-                    cancellation.clone(),
-                )
+                .render_film_preview(&step.input, parameters, cancellation.clone())
                 .await;
             let current = current_preview_intent(&intent_key, generation, &cancellation);
             finish_preview_intent(&intent_key, generation);
@@ -725,6 +567,41 @@ pub(crate) async fn get_processing_preview(
             );
         }
     };
+    let workspace_id = match &step.input {
+        ProcessingInput::WorkspaceArtifact { workspace_id, .. } => Some(workspace_id.clone()),
+        _ => state
+            .application
+            .workspaces
+            .lookup_photo(&photo_id)
+            .ok()
+            .flatten()
+            .map(|workspace| workspace.id),
+    };
+    if let Some(workspace_id) = workspace_id {
+        let provenance = serde_json::json!({
+            "kind": "preview",
+            "handle": {"photoId":photo_id,"stepId":step_id,"recipeRevision":recipe.revision,"identity":identity.digest()},
+            "input": crate::processing_export::input_json(&step.input),
+            "module": step.module.as_str(), "adapterSchemaVersion":identity.adapter_schema_version,
+            "bundleId":bundle_id,"parameterDigest":identity.parameter_digest,
+            "sha256":execution.rendition.sha256,"byteLength":execution.bytes.len(),
+            "outputContract":{"format":"image/png","precision":"uint8","colorSpace":"srgb","transfer":"srgb","geometry":{"width":execution.rendition.width,"height":execution.rendition.height},"encoding":"deflate"},
+            "detail":{"fullResolution":false,"scale":f64::from(execution.rendition.width)/f64::from(identity.output_contract.geometry.width)},
+            "inputSha256":identity.input.sha256,"inputByteLength":identity.input.byte_length,
+            "comparison":comparison.as_str(),"displayConversion":identity.display_conversion,
+        });
+        if exports
+            .retain_processing_preview(&workspace_id, &execution.bytes, provenance)
+            .await
+            .is_err()
+        {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "output_unavailable",
+                "The captured Preview could not be retained in its Workspace",
+            );
+        }
+    }
     ready_response(
         execution, &identity, &photo_id, &step_id, &recipe, &bundle_id, comparison,
     )
@@ -775,37 +652,5 @@ mod tests {
         assert!(current_preview_intent(&new_key, new_generation, &new_token));
         finish_preview_intent(&new_key, new_generation);
         finish_preview_intent(&baseline_key, baseline_generation);
-    }
-    #[test]
-    fn baseline_preview_is_not_reported_as_current_and_fresh() {
-        let recipe = slipstream_core::ComposableEditRecipe {
-            photo_id: "photo-1".into(),
-            revision: "revision-1".into(),
-            source_revision: "source-1".into(),
-            steps: Vec::new(),
-            current_step_id: Some(
-                slipstream_core::ProcessingStepId::new("step-1").expect("valid step"),
-            ),
-        };
-        PREVIEW_RESULTS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(
-                "photo-1".into(),
-                PreviewRecord {
-                    recipe_revision: "revision-1".into(),
-                    step_id: "step-1".into(),
-                    identity: "identity-1".into(),
-                    comparison: PreviewComparison::Baseline,
-                },
-            );
-        let status = preview_status("photo-1", Some(&recipe));
-        assert_eq!(status["state"], "stale");
-        assert_eq!(status["fresh"], false);
-        assert_eq!(status["comparison"], "baseline");
-        PREVIEW_RESULTS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove("photo-1");
     }
 }

@@ -59,6 +59,9 @@ impl ServiceClient {
             .request(method, url)
             .header(CONTRACT_HEADER, CLI_CONTRACT_VERSION)
             .bearer_auth(&self.token);
+        if matches!(operation, Operation::Workspace(_) | Operation::Darktable(_)) {
+            request = request.timeout(self.control_timeout);
+        }
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -125,6 +128,9 @@ impl ServiceClient {
             .request(method, url)
             .header(CONTRACT_HEADER, CLI_CONTRACT_VERSION)
             .bearer_auth(&self.token);
+        if matches!(operation, Operation::Workspace(_) | Operation::Darktable(_)) {
+            request = request.timeout(self.control_timeout);
+        }
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -299,6 +305,143 @@ pub(crate) fn validated_route_failure(
     if error.effect != "none" || error.message.is_empty() {
         return None;
     }
+    if matches!(operation, Operation::Workspace(_) | Operation::Darktable(_)) {
+        let details = error.details.as_object()?;
+        let code = error.code.as_str();
+        let exit = match code {
+            "invalid_command" | "schema_unsupported" | "invalid_reference" | "invalid_order" => 2,
+            "target_not_found" | "parameter_not_found" | "capture_not_found" => 3,
+            "input_binding_conflict" | "frame_incompatible" | "engine_incompatible" => 4,
+            "state_unavailable"
+            | "file_error"
+            | "migration_unavailable"
+            | "initialization_unavailable"
+            | "module_unavailable" => 6,
+            "invalid_input"
+            | "invalid_settings"
+            | "invalid_value"
+            | "invalid_changes"
+            | "invalid_mapping"
+            | "unsupported_schema"
+            | "limit_exceeded"
+            | "invalid_request"
+            | "invalid_definition"
+            | "definition_too_large"
+            | "resource_too_large"
+            | "state_guard_required" => 2,
+            "not_found"
+            | "state_not_found"
+            | "instance_not_found"
+            | "mask_not_found"
+            | "module_not_found"
+            | "action_not_found"
+            | "resource_not_found"
+            | "catalog_not_found"
+            | "catalog_record_not_found"
+            | "revision_not_found"
+            | "file_not_found"
+            | "request_not_found"
+            | "workspace_not_found"
+            | "artifact_not_found" => 3,
+            "state_conflict"
+            | "input_changed"
+            | "edit_ambiguous"
+            | "request_conflict"
+            | "resource_referenced"
+            | "artifact_changed"
+            | "artifact_referenced"
+            | "output_incompatible"
+            | "destination_exists"
+            | "state_busy"
+            | "workspace_busy"
+            | "workspace_changed"
+            | "workspace_referenced"
+            | "export_terminal"
+            | "resource_in_use"
+            | "incompatible_geometry"
+            | "incompatible_definition"
+            | "cursor_expired"
+            | "catalog_changed"
+            | "file_exists" => 4,
+            "engine_unavailable"
+            | "resource_unavailable"
+            | "dependency_unavailable"
+            | "receipt_expired"
+            | "revision_expired"
+            | "disk_full"
+            | "wait_timeout"
+            | "execution_failed"
+            | "server_busy"
+            | "storage_failed"
+            | "access_unavailable"
+            | "access_unconfigured"
+            | "catalog_io"
+            | "resource_corrupt"
+            | "native_failure"
+            | "local_io_failed" => 6,
+            _ => return None,
+        };
+        if matches!(code, "artifact_changed")
+            && ![
+                "workspaceId",
+                "artifactId",
+                "expectedRevision",
+                "currentRevision",
+            ]
+            .iter()
+            .all(|key| details.contains_key(*key))
+        {
+            return None;
+        }
+        if code == "artifact_referenced" && !details.get("blockers").is_some_and(Value::is_array) {
+            return None;
+        }
+        if code == "workspace_referenced" {
+            let workspace_valid = details
+                .get("workspaceId")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty());
+            let blockers_valid = details
+                .get("blockers")
+                .and_then(Value::as_array)
+                .is_some_and(|blockers| {
+                    !blockers.is_empty()
+                        && blockers.iter().all(|blocker| {
+                            let Some(blocker) = blocker.as_object() else {
+                                return false;
+                            };
+                            blocker
+                                .get("kind")
+                                .and_then(Value::as_str)
+                                .is_some_and(|kind| {
+                                    matches!(
+                                        kind,
+                                        "state"
+                                            | "job"
+                                            | "output"
+                                            | "dependency"
+                                            | "active-use"
+                                            | "unverified-use"
+                                    )
+                                })
+                                && blocker
+                                    .get("id")
+                                    .is_some_and(|id| id.is_null() || id.is_string())
+                                && ["name", "action"].iter().all(|key| {
+                                    blocker
+                                        .get(*key)
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|value| !value.is_empty())
+                                })
+                        })
+                });
+            if !workspace_valid || !blockers_valid {
+                return None;
+            }
+        }
+        redact_error(&mut error, secret);
+        return Some(CommandFailure::from_payload(exit, error));
+    }
     let details = error.details.as_object()?;
     let string = |name: &str| {
         details
@@ -328,10 +471,19 @@ pub(crate) fn validated_route_failure(
                 && string("reference").is_some()
         }
         "conflict" => {
-            required_keys(&["resource", "reference", "currentVersion"])
+            (required_keys(&["resource", "reference", "currentVersion"])
                 && string("resource").is_some_and(|value| matches!(value, "photo" | "album"))
                 && string("reference").is_some()
-                && string("currentVersion").is_some()
+                && string("currentVersion").is_some())
+                || (matches!(
+                    operation,
+                    Operation::PhotosProcessingRecipeSave
+                        | Operation::PhotosProcessingRecipeAuto
+                        | Operation::PhotosProcessingRecipeRebind
+                ) && required_keys(&["currentRecipeVersion", "currentSourceRevision"])
+                    && ["currentRecipeVersion", "currentSourceRevision"]
+                        .iter()
+                        .all(|key| details[*key].is_null() || details[*key].is_string()))
         }
         "name_conflict" => {
             required_keys(&["name", "albumId"])
@@ -385,9 +537,7 @@ pub(crate) fn validated_route_failure(
         }
         "server_busy" => {
             required_keys(&["operation", "retryAfterSeconds"])
-                && (string("operation") == Some(operation.wire())
-                    || (operation == Operation::PhotosEditExport
-                        && string("operation") == Some(Operation::PhotosProcessingExport.wire())))
+                && string("operation") == Some(operation.wire())
                 && (details["retryAfterSeconds"].is_null()
                     || details["retryAfterSeconds"].as_u64().is_some())
         }
@@ -431,6 +581,22 @@ pub(crate) fn validated_route_failure(
         // Development routes carry structured recovery facts. A missing or
         // malformed conflict guard is not evidence of a confirmed refusal.
         // The composable surfaces carry the retained recipe itself.
+        "workspace_unavailable"
+        | "state_unavailable"
+        | "state_conflict"
+        | "unsupported_state"
+        | "unsupported_action"
+        | "use_darktable_namespace" => {
+            matches!(
+                operation,
+                Operation::PhotosProcessingRecipeSave
+                    | Operation::PhotosProcessingRecipeAuto
+                    | Operation::PhotosProcessingRecipeRebind
+                    | Operation::PhotosProcessingPreview
+                    | Operation::PhotosProcessingExport
+                    | Operation::PhotosProcessingExportRetry
+            ) && details.is_empty()
+        }
         "recipe_conflict" | "source_changed" | "requires_rebind" => {
             details.is_empty()
                 || (matches!(
@@ -440,7 +606,6 @@ pub(crate) fn validated_route_failure(
                         | Operation::PhotosProcessingRecipeRebind
                         | Operation::PhotosProcessingExport
                         | Operation::PhotosProcessingExportRetry
-                        | Operation::PhotosEditExport
                 ) && composable_recipe_details(details))
                 || details.get("edit").is_some_and(Value::is_object)
                 || (string("currentSourceRevision").is_some_and(|value| {
@@ -469,18 +634,14 @@ pub(crate) fn validated_route_failure(
                     && details.len() == 2)
                 || (matches!(
                     operation,
-                    Operation::PhotosProcessingExport
-                        | Operation::PhotosProcessingExportRetry
-                        | Operation::PhotosEditExport
+                    Operation::PhotosProcessingExport | Operation::PhotosProcessingExportRetry
                 ) && processing_export_refusal_details(code, details))
         }
         "incompatible_input" => {
             details.is_empty()
                 || (matches!(
                     operation,
-                    Operation::PhotosProcessingExport
-                        | Operation::PhotosProcessingExportRetry
-                        | Operation::PhotosEditExport
+                    Operation::PhotosProcessingExport | Operation::PhotosProcessingExportRetry
                 ) && processing_export_refusal_details(code, details))
         }
         "invalid_settings" => {
@@ -545,6 +706,8 @@ pub(crate) fn validated_route_failure(
     }
     redact_error(&mut error, secret);
     let exit_code = match error.code.as_str() {
+        "unsupported_state" | "unsupported_action" | "use_darktable_namespace" => 2,
+        "workspace_unavailable" | "state_conflict" => 4,
         "invalid_input"
         | "limit_exceeded"
         | "invalid_settings"
@@ -585,7 +748,7 @@ fn composable_recipe_details(details: &serde_json::Map<String, Value>) -> bool {
     string("photoId").is_some_and(|value| !value.is_empty())
         && string("revision").is_some_and(|value| !value.is_empty() && value.len() <= 128)
         && string("sourceRevision")
-            .is_some_and(|value| !value.is_empty() && value.len() <= MAXIMUM_SOURCE_REVISION_BYTES)
+            .is_some_and(|value| value.len() <= MAXIMUM_SOURCE_REVISION_BYTES)
         && step_ids.len() == steps.len()
         && step_ids.iter().all(|id| !id.is_empty())
         && match details.get("currentStepId") {

@@ -52,16 +52,8 @@ pub(super) async fn execute_admitted_export(
         tree: admission.parameters.tree.clone(),
     };
     let executed = match (admission.module.as_str(), &admission.input) {
-        (
-            DARKTABLE_MODULE,
-            slipstream_core::ProcessingInput::Original {
-                photo_id: input_photo,
-                source_revision,
-            },
-        ) => {
-            exports
-                .run_processing_export(&request_id, input_photo, source_revision, parameters)
-                .await
+        (DARKTABLE_MODULE, _) => {
+            Err("Use the darktable namespace to execute darktable state".to_owned())
         }
         (
             SPEKTRAFILM_MODULE,
@@ -72,6 +64,28 @@ pub(super) async fn execute_admitted_export(
         ) => {
             exports
                 .run_film_export(&request_id, artifact_id.as_str(), contract, parameters)
+                .await
+        }
+        (
+            SPEKTRAFILM_MODULE,
+            slipstream_core::ProcessingInput::WorkspaceArtifact {
+                workspace_id,
+                artifact_id,
+                revision,
+                contract,
+            },
+        ) => {
+            exports
+                .execute_processing_export(
+                    &request_id,
+                    crate::export_manager::ProcessingExportInput::WorkspaceArtifact {
+                        workspace_id: workspace_id.clone(),
+                        artifact_id: artifact_id.clone(),
+                        revision: revision.clone(),
+                        contract: contract.clone(),
+                    },
+                    parameters,
+                )
                 .await
         }
         _ => Err(NO_QUALIFIED_ADAPTER.to_owned()),
@@ -96,6 +110,31 @@ pub(super) async fn execute_admitted_export(
             return fail_admitted_export(state, &request_id, RECORD_FORMATION_FAILED).await;
         }
     };
+    let workspace_id = match &admission.input {
+        ProcessingInput::WorkspaceArtifact { workspace_id, .. } => Some(workspace_id.clone()),
+        _ => state
+            .application
+            .workspaces
+            .lookup_photo(&admission.photo_id)
+            .ok()
+            .flatten()
+            .map(|workspace| workspace.id),
+    };
+    if workspace_id.is_some()
+        && state
+            .application
+            .library
+            .retain_processing_artifact_in_workspace(&executed.artifact_id, unix_seconds_now())
+            .await
+            .is_err()
+    {
+        executed.publication.release().await;
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "outcome_unknown",
+            "Workspace output retention could not be confirmed",
+        );
+    }
     match state
         .application
         .library
@@ -107,15 +146,50 @@ pub(super) async fn execute_admitted_export(
         )
         .await
     {
-        Ok(slipstream_core::ProcessingExportSettlement::Settled(_)) => {
+        Ok(settlement @ slipstream_core::ProcessingExportSettlement::Settled(_))
+        | Ok(settlement @ slipstream_core::ProcessingExportSettlement::Replayed(_)) => {
+            let replayed = matches!(
+                settlement,
+                slipstream_core::ProcessingExportSettlement::Replayed(_)
+            );
+            if let Some(workspace_id) = workspace_id {
+                let manager = Arc::clone(&state.application.workspaces);
+                let legacy_id = executed.artifact_id.clone();
+                let path = exports
+                    .artifact_path_for_module(&legacy_id, admission.module.as_str())
+                    .expect("published output path");
+                let provenance = artifact_json(&artifact);
+                if !matches!(
+                    tokio::task::spawn_blocking(move || manager.adopt_output(
+                        &workspace_id,
+                        &legacy_id,
+                        &path,
+                        &provenance
+                    ))
+                    .await,
+                    Ok(Ok(_))
+                ) {
+                    executed.publication.release().await;
+                    return error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "outcome_unknown",
+                        "The completed workspace publication could not be confirmed",
+                    );
+                }
+            }
+            if release_export_dependency(state, &format!("processing-export:{request_id}"))
+                .await
+                .is_err()
+            {
+                executed.publication.release().await;
+                return error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "outcome_unknown",
+                    "The settled Export input pin could not be released",
+                );
+            }
             executed.publication.release().await;
-            artifact_created_response(state, &artifact, false).await
-        }
-        Ok(slipstream_core::ProcessingExportSettlement::Replayed(_)) => {
-            executed.publication.release().await;
-            // The committed publication owns this identity and identical
-            // bytes already sit under it; the retained file stays.
-            artifact_created_response(state, &artifact, true).await
+            artifact_created_response(state, &artifact, replayed).await
         }
         Ok(slipstream_core::ProcessingExportSettlement::Terminal(work)) => {
             // The first terminal decision won while this attempt executed
@@ -189,6 +263,23 @@ pub(super) async fn terminal_work_response(
     state: &HttpState,
     work: slipstream_core::ProcessingExportWork,
 ) -> Response {
+    if matches!(
+        work.state,
+        slipstream_core::ProcessingExportWorkState::Failed
+            | slipstream_core::ProcessingExportWorkState::Cancelled
+    ) && release_export_dependency(
+        state,
+        &format!("processing-export:{}", work.admission.request_id),
+    )
+    .await
+    .is_err()
+    {
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "outcome_unknown",
+            "The terminal Export input pin could not be released",
+        );
+    }
     match work.state {
         slipstream_core::ProcessingExportWorkState::Succeeded => {
             let Some(artifact_id) = work.artifact_id.as_ref() else {

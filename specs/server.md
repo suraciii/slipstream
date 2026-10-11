@@ -22,7 +22,7 @@ The Rust service is one modular monolith with these boundaries:
 - **Preview and Native** own bounded JPEG Original reads and a narrow C/C++ LibRaw plus libjpeg shim. The shim accepts an already-confined descriptor adapter, enumerates embedded JPEG candidates, fully validates JPEG bytes, and exposes no sensor unpack or RAW development operation.
 - **Derivative and Cache** own orientation, color, resize, encoding, scheduling, identity, atomic publication, stale fallback, and immutable delivery facts.
 
-The modules exchange domain values and typed failures. HTTP types do not enter Persistence or Native modules. Native error text and filesystem paths do not cross the protocol boundary.
+The modules exchange domain values and typed failures. HTTP types do not enter Persistence or Native modules. Native error text and Library filesystem paths do not cross the protocol boundary. Authorized [Photo Workspace](photo-development/workspace/design.md) responses expose the workspace's execution path and namespace for independent tools, without granting arbitrary server-path access.
 
 Persistence uses one private typed enqueue path for commands whose replies
 carry `PersistenceError`. That path creates the reply channel and submits
@@ -144,4 +144,4 @@ The checked-in compatibility suite covers representative v0/v1/v2 state migratio
 
 ## Photo Development Processes
 
-The Rust service retains all Photo, persistence, protocol, and lifecycle ownership when its in-process PhotoExecutor starts native development children or a Python simulation adapter. [Photo Development Architecture](photo-development/design.md) defines that subordinate process boundary inside the one application container. Python must not become a second HTTP or Library owner.
+The Rust service retains Photo, protocol, workspace-index, and supervised-run ownership. Independent editing tools own their canonical on-disk Edit State and native child lifetime. [Photo Development Architecture](photo-development/design.md) defines how the service resolves workspace paths and supervises that same tool inside the application container. A standalone tool must not depend on the service or become another HTTP or Library owner.

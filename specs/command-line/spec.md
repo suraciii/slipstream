@@ -48,8 +48,10 @@ The CLI must let its caller:
 - remove explicitly identified eligible Photos into Trash and Restore observed removals;
 - inspect Trash, review and separately confirm permanent deletion, and recover operation outcomes;
 - inspect unavailable Photos, review proposed Original Locations, and apply explicitly confirmed Location Recovery mappings;
-- request a Library check; and
-- return a browser Destination for a Photo or Album.
+- request a Library check;
+- return a browser Destination for a Photo or Album;
+- create/reopen a real Photo Workspace and list, inspect, download or safely remove its artifacts; and
+- edit, preview, inspect, and export through an independent local file/state tool or the optional full [darktable command group](../photo-development/darktable/editing.md) operating on the same directory/state.
 
 [Composable Removal and Restore](../photo-library/removal/spec.md) defines
 explicit-set mutations and their effect recovery. [Trash](../photo-library/trash/spec.md)
@@ -60,16 +62,9 @@ atomic batch effects, and uncertainty. These operations restore associations;
 they do not restore Photos from Trash or write Original Files. Command help must
 make those differences explicit and advertise inspection and application limits.
 
-These capabilities do not include Original download, arbitrary filesystem mutation, XMP
-synchronization, or Library Expansion. Those operations
-retain their own product and operator boundaries. The CLI does not expose a
-SQL escape hatch or an arbitrary server-path argument.
+These capabilities do not include arbitrary Library Original download or mutation, XMP synchronization, or Library Expansion. Those operations retain their own product and operator boundaries. Workspace input/result downloads follow the explicit workspace contract and do not grant access to arbitrary Library paths. The CLI does not expose SQL or an arbitrary server-path/shell argument.
 
-This command contract covers selection and organization, not Edit Recipe writes,
-Edit Preview retrieval, or Exports. [Photo Development](../photo-development/spec.md)
-owns those shared human and programmatic capabilities. Their command language
-must extend the authoritative CLI reference rather than reinterpret camera
-Preview commands.
+[Headless darktable Editing](../photo-development/darktable/editing.md) owns general editing through the independent proposed `darktable-edit` file/state tool and the accepted full `slipstream darktable` integration namespace. Exact grammar is in [darktable CLI Reference](../photo-development/darktable/cli.md). [Photo Workspace](../photo-development/workspace/spec.md) owns persistent input/state/output directories and direct file handoff. Tools own semantic editing state and native parsing; Slipstream owns Library facts and workspace file visibility. Editing commands must not reinterpret camera Preview commands.
 
 ## Starting and Discovering Capabilities
 
@@ -97,6 +92,16 @@ the CLI must not claim that this proves human authorization.
 Album names and filenames are data. Output and help must never encourage
 executing text obtained from a Library as shell commands or Agent instructions.
 
+## Working in a Photo Workspace
+
+An indexed Photo ID is handed once to workspace open. The result must identify the actual directory, read-only input snapshot, execution host, access mode and available supervised tools. Returning a remote server path must not imply local access on the client. Independent tools run in an authorized environment with filesystem access; service-supervised editing is an optional alternative, not an arbitrary remote shell.
+
+The input and tool-owned state remain in the same workspace while the caller adjusts parameters, renders previews and exports. Tool initialization records explicitly supplied preview/output paths once. A completed output appears through normal Slipstream file reconciliation without upload, registration, commit or synchronization. Ordinary users must not assemble stable metadata or manifests for visibility. Another independent tool can consume that path directly after its own compatibility checks. Tool names and state formats remain independent of Slipstream.
+
+Web and CLI adjustments share the same tool state and per-state lock. GUI read-modify-write and Agent writes based on inspected values must carry observed state guards; a stale guard refuses rather than silently refreshing. Focused direct current-state commands may validate fresh intent under the lock. Normal commands generate request IDs; explicit IDs support exact recovery when callers retain them before sending. Previews/exports capture current or explicitly named state revision before execution/admission. Standalone commands own synchronous processes; only admitted durable service-supervised jobs continue after client disconnection.
+
+Previous complete previews remain during another render, saved changes survive rendering errors, and incomplete files never appear as ready results. Downloads are optional for final delivery or remote viewing. Workspace file removal must refuse protected inputs and retained dependencies; transient receipts/cache can expire independently of kept inputs/states/outputs. The [workspace lifecycle](../photo-development/workspace/spec.md#lifetime-and-recovery) owns safe cleanup and source refresh. Historical saved state and artifacts remain available non-destructively; old generic recipe routes may project canonical tool state but cannot create duplicate parameter ownership.
+
 ## Finding Photos
 
 A query must apply its filters and order on the service before pagination.
@@ -106,6 +111,14 @@ A query selects All Photos, one Album by ID, or one recursive Original Folder
 by Library-relative Location. Filters combine with logical AND. Photo and Album
 IDs are opaque references; display names and filenames must not substitute for
 identity. Album name lookup must use the existing Album naming comparison.
+
+An exact Library-relative Original Location must be resolvable to its indexed
+Photo through `photos resolve`. The result supplies the same opaque Photo ID
+as a query item. Resolution must not import a file or accept an arbitrary host
+path. Duplicate filenames require a Folder or exact Location; the service must
+not choose the first match. A missing, unindexed, or Removed Photo must not
+resolve to another Photo. Library scan readiness and an absent match must remain
+distinct. A caller may request a Library check and then perform fresh lookup.
 
 Capture Time ranges use camera-local time, with an inclusive lower bound and
 exclusive upper bound. They must not convert offsets or guess filesystem time.
@@ -272,3 +285,7 @@ Other platforms require their own build and end-to-end evidence.
   the caller to inspect present state without an automatic duplicate write.
 - One conflicted Photo produces a partial batch result with explicit successful
   siblings. A stale Album change commits nothing.
+- A caller opens a RAW Photo's workspace, adjusts instances/masks/curves, renders previews and exports into that same directory. Slipstream sees the completed output without a publication step; the caller downloads it or hands its path to another compatible independent tool.
+- The same standalone executable edits a supported arbitrary local file without Slipstream credentials, IDs or database, preserving the read-only input.
+- A remote caller receives honest host/access facts, and cannot mistake a service path for a local file. A local interrupted process is not described as a detached job.
+- Web and Agent writes use the same state; a stale guarded write refuses, and a late older-revision preview cannot replace the latest relevant rendition.

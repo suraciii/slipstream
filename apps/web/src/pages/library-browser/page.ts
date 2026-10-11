@@ -31,7 +31,7 @@ import {
   createSourceOpenOwner,
   type SourceLifecycleOwner,
 } from "./model/source-open-owner.js";
-import { releaseBrowse, type SourceViewOrder } from "./api/source-grid.js";
+import type { SourceViewOrder } from "./api/source-grid.js";
 import { createRemovalOwner } from "./model/removal-owner.js";
 import { createRemovedListingOwner } from "./model/removed-listing-owner.js";
 import { createGridMultiSelectionOwner } from "./model/grid-multi-selection-owner.js";
@@ -72,7 +72,7 @@ import {
   type SourceListViewModel,
 } from "./ui/library-browser-view.js";
 import { formatPhotoCount } from "./ui/photo-count.js";
-import { mountAccessBoundary } from "./ui/access-boundary.js";
+import { mountLibraryBrowserAccess } from "./ui/library-browser-access.js";
 import type { BrowserFetch } from "./model/access-session.js";
 
 const SOURCE_ESTABLISHED = { kind: "established" } as const;
@@ -83,17 +83,7 @@ export function mountLibraryBrowser(
   root: HTMLElement,
   fetcher: BrowserFetch = fetch,
 ): () => void {
-  return mountAccessBoundary(
-    root,
-    fetcher,
-    (privateRoot, privateFetcher, signOut, cleanupFetcher) =>
-      mountPrivateLibraryBrowser(
-        privateRoot,
-        privateFetcher,
-        signOut,
-        (token) => releaseBrowse(cleanupFetcher, token),
-      ),
-  );
+  return mountLibraryBrowserAccess(root, fetcher, mountPrivateLibraryBrowser);
 }
 
 function mountPrivateLibraryBrowser(
@@ -289,6 +279,15 @@ function mountPrivateLibraryBrowser(
             undefined,
             fileLocations.publication,
           );
+        if (
+          established &&
+          destination.photoId &&
+          new URLSearchParams(window.location.search).get("edit") === "1"
+        ) {
+          root
+            .querySelector<HTMLButtonElement>('[data-photo-tools-entry="edit"]')
+            ?.click();
+        }
         return;
       }
       const remembered =

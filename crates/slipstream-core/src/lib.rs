@@ -94,7 +94,10 @@ pub use native::{
     extract_embedded_jpeg, inspect_matching_jpeg, inspect_preview_source,
 };
 pub use native_work::{NativeWorkBudget, NativeWorkPermit};
-pub use persistence::{AlbumWriteError, MutationError, PhotoDecisionWriteError};
+pub use persistence::{
+    AlbumWriteError, MutationError, PhotoDecisionWriteError, processing_recipe_decode,
+    processing_recipe_encode,
+};
 pub use preview::{
     DEFAULT_PREVIEW_QUEUE_CAPACITY, DEFAULT_PREVIEW_WAITER_CAPACITY, DEFAULT_PREVIEW_WORKERS,
     PreviewFacts, PreviewFailure, PreviewFailureKind, PreviewReady, PreviewRequestResult,
@@ -130,4 +133,4 @@ pub use recovery::{
     count_prefix_scope, digest_bytes, evaluate_relocation, evidence_original_ids,
     parse_location_prefix, plan_manual_relocations, plan_recovery, plan_single_relocation,
 };
-pub use xmp::{XMP_CONTENT_TYPE, XMP_RETENTION_SECONDS, XmpCreateOutcome, XmpExportRecord};
+pub use xmp::{XMP_CONTENT_TYPE, XMP_RETENTION_SECONDS, XmpExportRecord};

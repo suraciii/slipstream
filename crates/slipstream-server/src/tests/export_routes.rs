@@ -494,243 +494,34 @@ async fn export_download_holds_its_lease_until_the_body_drains() {
     let _ = fs::remove_dir_all(base);
 }
 #[tokio::test]
-async fn xmp_snapshot_download_and_replay_do_not_need_processing_or_original() {
+async fn historical_xmp_download_preserves_bytes_without_original_or_processing() {
     let (base, config) = prepare_populated_fixture();
-    raw_fixture_with_camera(
-        &config.library_root.join("pair.ARW"),
-        b"SONY\0",
-        b"ILCE-7RM5\0\0\0",
-    );
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
     let source = current_source_revision(&application, &photo_id).await;
-    let step_id = slipstream_core::ProcessingStepId::new("xmp-step").unwrap();
-    let intended = slipstream_core::ComposableEditRecipe {
-        photo_id: photo_id.clone(), revision: "draft".into(), source_revision: source.clone(),
-        current_step_id: Some(step_id.clone()),
-        steps: vec![slipstream_core::ProcessingStep {
-            step_id,
-            module: slipstream_core::ProcessingModuleId::new("darktable").unwrap(),
-            input: slipstream_core::ProcessingInput::Original { photo_id: photo_id.clone(), source_revision: source.clone() },
-            parameters: slipstream_core::ProcessingParameterSnapshot::new("darktable-params-1", serde_json::json!({"stack":[
-                {"operation":"exposure","multiPriority":0,"enabled":true,"params":{"mode":"EXPOSURE_MODE_MANUAL","exposure":0.5}},
-                {"operation":"temperature","multiPriority":0,"enabled":true,"params":{"temperatureKelvin":6500,"tintMilli":-12}}
-            ]})).unwrap(),
-        }],
-    };
-    let outcome = application
-        .library
-        .save_composable_edit_recipe(slipstream_core::SaveComposableEditRecipe {
-            photo_id: photo_id.clone(),
-            request_id: "save-xmp".into(),
-            expected_recipe_revision: None,
-            expected_source_revision: source.clone(),
-            request_intent: None,
-            recipe: intended,
-            automatic_adjustment: None,
-        })
-        .await
-        .unwrap();
-    let slipstream_core::ComposableEditRecipeWriteOutcome::Saved(recipe) = outcome else {
-        panic!("XMP recipe not saved: {outcome:?}")
-    };
-    let uri = format!("https://camera.local/api/photos/{photo_id}/edit-state-exports");
-    let body = serde_json::json!({"requestId":"xmp-snapshot", "expectedRecipeVersion":recipe.revision, "expectedSourceRevision":recipe.source_revision});
-    let created = post_export_body(&router, uri.clone(), body.clone()).await;
-    assert_eq!(created.status(), StatusCode::CREATED);
-    let created = response_json(created).await;
-    assert_eq!(
-        created["parameterSupport"]["standard"],
-        serde_json::json!(["Exposure2012"])
-    );
-    assert_eq!(
-        created["parameterSupport"]["unsupported"],
-        serde_json::json!(["Arbitrary darktable controls"])
-    );
-    assert!(
-        created["parameterSupport"]["slipstream"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|name| name == "RecipeSnapshot")
-    );
-    assert!(
-        created["parameterSupport"]["slipstream"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|name| name == "RecipeSnapshotEncoding")
-    );
-    let export_id = created["exportId"].as_str().unwrap().to_owned();
-    let artifact_uri = format!("{uri}/{export_id}/artifact");
-    let download = send(
-        &router,
-        authenticated_request()
-            .uri(&artifact_uri)
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(download.status(), StatusCode::OK);
-    assert_eq!(download.headers()["content-type"], "application/rdf+xml");
-    assert_eq!(
-        download.headers()["slipstream-artifact-filename"],
-        created["artifact"]["filename"].as_str().unwrap()
-    );
-    assert_eq!(
-        download.headers()["slipstream-artifact-sha256"],
-        created["artifact"]["sha256"].as_str().unwrap()
-    );
-    let bytes = axum::body::to_bytes(download.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    assert_eq!(
-        bytes.len() as u64,
-        created["artifact"]["byteLength"].as_u64().unwrap()
-    );
-    assert_eq!(
-        format!("{:x}", Sha256::digest(&bytes)),
-        created["artifact"]["sha256"].as_str().unwrap()
-    );
-    assert!(
-        std::str::from_utf8(&bytes)
-            .unwrap()
-            .contains("<crs:Exposure2012>0.5</crs:Exposure2012>")
-    );
-    let mut changed = recipe.clone();
-    changed.steps[0].module = slipstream_core::ProcessingModuleId::new("spektrafilm").unwrap();
-    changed.steps[0].parameters = slipstream_core::ProcessingParameterSnapshot::new(
-        "spektrafilm-params-1",
-        serde_json::json!({}),
-    )
-    .unwrap();
-    let changed = application
-        .library
-        .save_composable_edit_recipe(slipstream_core::SaveComposableEditRecipe {
-            photo_id: photo_id.clone(),
-            request_id: "save-xmp-later".into(),
-            expected_recipe_revision: Some(recipe.revision.clone()),
-            expected_source_revision: source,
-            request_intent: None,
-            recipe: changed,
-            automatic_adjustment: None,
-        })
-        .await
-        .unwrap();
-    let slipstream_core::ComposableEditRecipeWriteOutcome::Saved(changed) = changed else {
-        panic!("changed XMP recipe not saved")
-    };
-    let refused = post_export_body(
-        &router,
-        uri.clone(),
-        serde_json::json!({
-            "requestId":"xmp-wrong-module", "expectedRecipeVersion":changed.revision,
-            "expectedSourceRevision":changed.source_revision
-        }),
-    )
-    .await;
-    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
-        error_code(&response_json(refused).await),
-        "unsupported_module"
-    );
-    fs::remove_file(config.library_root.join("pair.ARW")).unwrap();
-    let replay = post_export_body(&router, uri.clone(), body.clone()).await;
-    assert_eq!(replay.status(), StatusCode::OK);
-    assert_eq!(response_json(replay).await, created);
-    let listed = response_json(
-        send(
-            &router,
-            authenticated_request()
-                .uri(&uri)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await,
-    )
-    .await;
-    assert_eq!(listed["exports"], serde_json::json!([created]));
-    let retained_download = send(
-        &router,
-        authenticated_request()
-            .uri(&artifact_uri)
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(retained_download.status(), StatusCode::OK);
-    assert_eq!(
-        axum::body::to_bytes(retained_download.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-        bytes
-    );
-    let mut conflicting = body.clone();
-    conflicting["expectedRecipeVersion"] = serde_json::json!("different");
-    let conflict = post_export_body(&router, uri.clone(), conflicting).await;
-    assert_eq!(conflict.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        error_code(&response_json(conflict).await),
-        "export_conflict"
-    );
-    for request_id in ["contains space", "bad/slash", "nonascii-ñ"] {
-        let mut invalid = body.clone();
-        invalid["requestId"] = serde_json::json!(request_id);
-        assert_eq!(
-            post_export_body(&router, uri.clone(), invalid)
-                .await
-                .status(),
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
-    }
-    let mut stale = body.clone();
-    stale["requestId"] = serde_json::json!("new-request");
-    assert_eq!(
-        post_export_body(&router, uri.clone(), stale).await.status(),
-        StatusCode::CONFLICT
-    );
-    // Earlier acknowledged XMP bytes carry no complete recipe snapshot.
-    // Reads and replays must not advertise a newer generator's properties.
-    let mut historical = std::str::from_utf8(&bytes).unwrap().to_owned();
-    let start = historical.find("<slip:RecipeSnapshot>").unwrap();
-    let end = historical.find("</slip:RecipeSnapshot>").unwrap() + "</slip:RecipeSnapshot>".len();
-    historical.replace_range(start..end, "");
-    historical = historical.replace(
-        "<slip:RecipeSnapshotEncoding>json-utf8</slip:RecipeSnapshotEncoding>",
-        "",
-    );
-    let historical_digest = format!("{:x}", Sha256::digest(historical.as_bytes()));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    // The retained generator's namespace is part of the historical contract.
+    let document = b"<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description rdf:about=\"\"><slip:StepId xmlns:slip=\"https://slipstream.app/ns/edit-state/1.0/\">historical-step</slip:StepId></rdf:Description></rdf:RDF></x:xmpmeta>";
+    let digest = format!("{:x}", Sha256::digest(document));
     let connection =
         rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
-    connection
-        .execute(
-            "UPDATE xmp_exports SET document=?,byte_length=?,sha256=? WHERE id=?",
-            rusqlite::params![
-                historical.as_bytes(),
-                historical.len() as i64,
-                historical_digest,
-                export_id
-            ],
-        )
-        .unwrap();
-    drop(connection);
-    let replay = post_export_body(&router, uri.clone(), body.clone()).await;
-    assert_eq!(replay.status(), StatusCode::OK);
-    let historical_record = response_json(replay).await;
-    let support = historical_record["parameterSupport"]["slipstream"]
-        .as_array()
-        .unwrap();
-    assert!(!support.iter().any(|name| name == "RecipeSnapshot"));
-    assert!(!support.iter().any(|name| name == "RecipeSnapshotEncoding"));
-    assert!(support.iter().any(|name| name == "StepId"));
-    assert_eq!(historical_record["artifact"]["sha256"], historical_digest);
-    let (status, listed) = get_json(
-        &router,
-        &format!("/api/photos/{photo_id}/edit-state-exports"),
-    )
-    .await;
+    connection.execute(
+        "INSERT INTO xmp_exports(id,photo_id,request_id,payload_digest,recipe_revision,source_revision,exposure_ev,white_balance_mode,temperature_kelvin,tint_milli,created_at,expires_at,filename,document,byte_length,sha256) VALUES(?1,?2,'historical-request',?3,'historical-recipe',?4,0.5,'as-shot',NULL,NULL,?5,?6,'historical.xmp',?7,?8,?9)",
+        rusqlite::params!["historical-xmp", photo_id, "0".repeat(64), source, now, now + 3600, document.as_slice(), document.len() as i64, digest],
+    ).unwrap();
+    fs::remove_file(config.library_root.join("pair.ARW")).unwrap();
+    let uri = format!("/api/photos/{photo_id}/edit-state-exports");
+    let artifact_uri = format!("{uri}/historical-xmp/artifact");
+    let (status, listed) = get_json(&router, &uri).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(listed["exports"], serde_json::json!([historical_record]));
+    assert_eq!(listed["exports"][0]["artifact"]["sha256"], digest);
+    assert_eq!(
+        listed["exports"][0]["parameterSupport"]["slipstream"],
+        serde_json::json!(["StepId"])
+    );
     let download = send(
         &router,
         authenticated_request()
@@ -740,41 +531,38 @@ async fn xmp_snapshot_download_and_replay_do_not_need_processing_or_original() {
     )
     .await;
     assert_eq!(download.status(), StatusCode::OK);
-    assert_eq!(
-        download.headers()["slipstream-artifact-sha256"],
-        historical_digest
-    );
+    assert_eq!(download.headers()["slipstream-artifact-sha256"], digest);
     assert_eq!(
         axum::body::to_bytes(download.into_body(), usize::MAX)
             .await
             .unwrap()
             .as_ref(),
-        historical.as_bytes()
+        document
     );
-    let connection =
-        rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+    let retired = post_export_body(
+        &router,
+        format!("https://camera.local{uri}"),
+        serde_json::json!({"requestId":"new-xmp"}),
+    )
+    .await;
+    assert_eq!(retired.status(), StatusCode::METHOD_NOT_ALLOWED);
     connection
         .execute(
-            "UPDATE xmp_exports SET expires_at=created_at WHERE id=?",
-            [&export_id],
+            "UPDATE xmp_exports SET expires_at=created_at WHERE id='historical-xmp'",
+            [],
         )
         .unwrap();
-    drop(connection);
-    let expired = post_export_body(&router, uri, body).await;
+    let expired = send(
+        &router,
+        authenticated_request()
+            .uri(&artifact_uri)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
     assert_eq!(expired.status(), StatusCode::GONE);
     assert_eq!(error_code(&response_json(expired).await), "export_expired");
-    assert_eq!(
-        send(
-            &router,
-            authenticated_request()
-                .uri(&artifact_uri)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .status(),
-        StatusCode::GONE
-    );
+    drop(connection);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }

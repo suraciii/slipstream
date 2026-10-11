@@ -17,6 +17,7 @@ mod lifecycle;
 mod metadata;
 mod preview;
 mod processing_export;
+mod processing_film_workspace;
 mod processing_preview;
 mod processing_recipe;
 mod protocol;
@@ -552,29 +553,6 @@ impl FakePhotoEngine {
         fs::write(self.bundle_root.join("fixture-output.tif"), bytes).unwrap();
     }
 
-    /// Scripts one engine run (1-based; 0 means every run) to refuse the
-    /// development with an engine error naming `reason`.
-    pub(super) fn fail_attempt(&self, run: u64, reason: &str) {
-        fs::write(
-            self.bundle_root.join("script-fail"),
-            format!("{run}\0{reason}"),
-        )
-        .unwrap();
-    }
-
-    /// Scripts one engine run (1-based; 0 means every run) to hold the
-    /// attempt open until [`release`](Self::release) removes the marker.
-    pub(super) fn hang_attempt(&self, run: u64) {
-        fs::write(self.bundle_root.join("script-hang"), run.to_string()).unwrap();
-    }
-
-    /// Releases a hung attempt and clears every scripted failure mode.
-    pub(super) fn release(&self) {
-        for marker in ["script-hang", "script-fail", "script-corrupt", "script-die"] {
-            let _ = fs::remove_file(self.bundle_root.join(marker));
-        }
-    }
-
     /// How many engine processes this bundle has run: one per local
     /// development attempt.
     pub(super) fn runs(&self) -> u64 {
@@ -582,22 +560,6 @@ impl FakePhotoEngine {
             .ok()
             .and_then(|value| value.trim().parse().ok())
             .unwrap_or(0)
-    }
-
-    /// Waits until the bundle has run `count` engine processes.
-    pub(super) async fn wait_for_runs(&self, count: u64) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            let observed = self.runs();
-            if observed >= count {
-                return;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "the engine must run {count} attempts, observed {observed}"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
     }
 }
 

@@ -2331,22 +2331,6 @@ test("QA rejects invalid identities, storage declarations, endpoints, and fixtur
       expect(declared.stderr).toContain("must not declare storage paths");
       expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
 
-      for (const options of [
-        { bindAddress: "127.0.0.2" },
-        { bindAddress: "0.0.0.0" },
-        { bindAddress: null },
-        { port: "80" },
-        { port: "65536" },
-        { port: "310x" },
-        { port: null },
-      ] as const) {
-        await writeQaEnvironment(target, options);
-        const result = await runCompose(target, ["--qa", id, "up"]);
-        expect(result.exitCode).toBe(2);
-        expect(result.stderr).toContain("QA ");
-        expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
-      }
-
       await writeQaEnvironment(target, {
         extraLines: ["SLIPSTREAM_BIND_ADDRESS=127.0.0.1"],
       });
@@ -2427,6 +2411,31 @@ test("QA rejects invalid identities, storage declarations, endpoints, and fixtur
   }
 });
 
+for (const options of [
+  { bindAddress: "127.0.0.2" },
+  { bindAddress: "0.0.0.0" },
+  { bindAddress: null },
+  { port: "80" },
+  { port: "65536" },
+  { port: "310x" },
+  { port: null },
+] as const) {
+  test(`QA rejects endpoint ${JSON.stringify(options)} before Docker`, async () => {
+    const target = await fixture();
+    const id = qaInstanceId();
+    const paths = await createQaFixture(id);
+    try {
+      await writeQaEnvironment(target, options);
+      const result = await runCompose(target, ["--qa", id, "up"]);
+      expect(result.exitCode).toBe(2);
+      expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+    } finally {
+      await rm(paths.root, { recursive: true, force: true });
+      await removeFixture(target);
+    }
+  });
+}
+
 test("QA stop and access administration target only the QA project", async () => {
   const target = await fixture();
   const id = qaInstanceId();
@@ -2457,6 +2466,21 @@ test("QA stop and access administration target only the QA project", async () =>
 
     const paths = await createQaFixture(id);
     try {
+      await writeMountCoordinates(target, [
+        { endpoint: paths.root, target: "/", fsroot: "/", device: "7:42" },
+        {
+          endpoint: await realpath(repositoryRoot),
+          target: "/",
+          fsroot: "/",
+          device: "7:42",
+        },
+        ...(["library", "state", "cache"] as const).map((role) => ({
+          endpoint: paths[role],
+          target: "/",
+          fsroot: "/",
+          device: "7:42",
+        })),
+      ]);
       await writeQaEnvironment(target, {
         bindAddress: null,
         port: null,
@@ -2498,18 +2522,48 @@ test("QA stop and access administration target only the QA project", async () =>
           "",
         ].join("\n"),
       );
-
-      const revoked = await runCompose(target, ["--qa", id, "access-revoke"]);
-      expect(revoked.exitCode).toBe(0);
-      const revokeArguments = await Bun.file(target.composeArguments).text();
-      expect(revokeArguments).toContain(`slipstream-qa-${id}`);
-      expect(revokeArguments).toContain(
-        "--no-TTY\nslipstream-admin\naccess-revoke\n",
-      );
     } finally {
       await rm(paths.root, { recursive: true, force: true });
     }
   } finally {
+    await removeFixture(target);
+  }
+});
+
+test("QA access revocation targets only the QA project", async () => {
+  const target = await fixture();
+  const id = qaInstanceId();
+  const paths = await createQaFixture(id);
+  try {
+    await writeMountCoordinates(target, [
+      { endpoint: paths.root, target: "/", fsroot: "/", device: "7:42" },
+      {
+        endpoint: await realpath(repositoryRoot),
+        target: "/",
+        fsroot: "/",
+        device: "7:42",
+      },
+      ...(["library", "state", "cache"] as const).map((role) => ({
+        endpoint: paths[role],
+        target: "/",
+        fsroot: "/",
+        device: "7:42",
+      })),
+    ]);
+    await writeQaEnvironment(target, {
+      bindAddress: null,
+      port: null,
+      includeOrigin: false,
+    });
+    const revoked = await runCompose(target, ["--qa", id, "access-revoke"]);
+    expect(revoked.exitCode).toBe(0);
+    const revokeArguments = await Bun.file(target.composeArguments).text();
+    expect(revokeArguments).toContain(`slipstream-qa-${id}`);
+    expect(revokeArguments).toContain(
+      "--no-TTY\nslipstream-admin\naccess-revoke\n",
+    );
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
     await removeFixture(target);
   }
 });

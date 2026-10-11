@@ -6,8 +6,6 @@ pub mod local_preview;
 mod mcp_client;
 pub mod modules;
 mod native_development;
-mod photo_jpeg;
 pub mod photo_profile;
-mod photo_tiff;
 
 pub use mcp_client::run_supervisor;

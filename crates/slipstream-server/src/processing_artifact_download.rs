@@ -72,6 +72,17 @@ pub(crate) async fn get_processing_artifact_bytes(
             let _ = library.release_processing_artifact_lease(&lease_id).await;
         }
     };
+    if reconcile_workspace_artifact(&state, &artifact)
+        .await
+        .is_err()
+    {
+        release_lease.await;
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "outcome_unknown",
+            "The retained workspace output publication could not be reconciled",
+        );
+    }
     let output_format = artifact
         .output_contract
         .format
@@ -98,6 +109,51 @@ pub(crate) async fn get_processing_artifact_bytes(
         .application
         .export_artifacts_directory
         .join(format!("{artifact_id}.{extension}"));
+    let manager = Arc::clone(&state.application.workspaces);
+    let legacy_id = artifact_id.clone();
+    let workspace_download = match tokio::task::spawn_blocking(move || {
+        let Some(alias) = manager
+            .resolve_artifact_alias(&legacy_id)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        let workspace = alias["workspaceId"]
+            .as_str()
+            .ok_or("Invalid artifact workspace alias")?;
+        let artifact = alias["artifactId"]
+            .as_str()
+            .ok_or("Invalid artifact file alias")?;
+        let revision = alias["revision"]
+            .as_str()
+            .ok_or("Invalid artifact revision alias")?;
+        manager
+            .download(workspace, artifact, Some(revision))
+            .map(Some)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    {
+        Ok(Ok(download)) => download,
+        _ => {
+            release_lease.await;
+            return error(
+                StatusCode::CONFLICT,
+                "output_unavailable",
+                "The workspace artifact bytes are unavailable",
+            );
+        }
+    };
+    if workspace_download.as_ref().is_some_and(|download| {
+        download.sha256 != artifact.sha256 || download.byte_length != artifact.byte_length
+    }) {
+        release_lease.await;
+        return error(
+            StatusCode::CONFLICT,
+            "output_unavailable",
+            "The workspace artifact bytes no longer match their retained provenance",
+        );
+    }
     let retention = match library.processing_artifact_retention(&artifact_id).await {
         Ok(Some(retention)) => retention,
         _ => {
@@ -159,7 +215,15 @@ pub(crate) async fn get_processing_artifact_bytes(
     let (stream_start, stream_length, status) = range
         .map(|(start, end)| (start, end - start + 1, StatusCode::PARTIAL_CONTENT))
         .unwrap_or((0, artifact.byte_length, StatusCode::OK));
-    let mut file = match tokio::fs::File::open(&path).await {
+    let (workspace_leases, workspace_file) = match workspace_download {
+        Some(download) => (download.leases, Some(download.file)),
+        None => (Vec::new(), None),
+    };
+    let opened = match workspace_file {
+        Some(file) => Ok(tokio::fs::File::from_std(file)),
+        None => tokio::fs::File::open(&path).await,
+    };
+    let mut file = match opened {
         Ok(file) => file,
         Err(_) => {
             release_lease.await;
@@ -224,6 +288,7 @@ pub(crate) async fn get_processing_artifact_bytes(
         let renewer = renewer;
         let mut remaining = stream_length;
         tokio::spawn(async move {
+            let _workspace_leases = workspace_leases;
             use tokio::io::AsyncReadExt as _;
             let mut file = file;
             let mut buffer = vec![0_u8; 512 * 1024];
@@ -279,7 +344,10 @@ pub(crate) async fn get_processing_artifact_bytes(
         )
         .header(
             "slipstream-artifact-expires-at",
-            artifact_timestamp(retention.expires_at_unix_seconds),
+            retention
+                .expires_at_unix_seconds
+                .map(artifact_timestamp)
+                .unwrap_or_else(|| "null".to_owned()),
         )
         .header("slipstream-artifact-orientation", "top-left")
         .header("slipstream-artifact-icc-embedded", "true")

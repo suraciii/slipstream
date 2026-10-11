@@ -137,6 +137,10 @@ def main() -> None:
                     {"name": "module_schema", "arguments": {"operation": entry["operation"]}},
                 )
                 schemas[entry["operation"]] = decoded_tool_payload(schema_result, "module_schema")
+        edit_result = request(process, selector, 10000, "tools/call", {"name": "edit_discover", "arguments": {}})
+        discovery = decoded_tool_payload(edit_result, "edit_discover")
+        if not isinstance(discovery, dict):
+            raise RuntimeError("darktable-mcp edit_discover returned no semantic contract")
         document = {
             "protocol": initialize["protocolVersion"],
             "binary": str(binary),
@@ -144,6 +148,7 @@ def main() -> None:
             "modules": normalized_modules,
             "operations": sorted(entry["operation"] for entry in normalized_modules),
             "schemas": schemas,
+            "discovery": discovery,
         }
         metadata.parent.mkdir(parents=True, exist_ok=True)
         metadata.write_text(json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n")

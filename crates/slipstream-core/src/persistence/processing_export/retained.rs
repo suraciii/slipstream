@@ -7,7 +7,8 @@ fn validate_replay(request: &ReplayProcessingExport) -> Result<(), ProcessingExp
         .map_err(contract)?;
     validate_bounded_name(&request.expected_recipe_revision, MAXIMUM_REVISION_BYTES)
         .map_err(contract)?;
-    validate_source_revision(&request.expected_source_revision).map_err(contract)
+    crate::processing::validate_contextual_source_revision(&request.expected_source_revision)
+        .map_err(contract)
 }
 
 /// Resolve retained caller intent before consulting any mutable recipe or engine.
@@ -97,6 +98,12 @@ pub(in crate::persistence) fn list_processing_exports(
             return Err(PersistenceError::Storage);
         }
         if artifact.photo_id != photo_id {
+            continue;
+        }
+        if let Some(published_at) =
+            workspace_artifact_published_at(connection, artifact.artifact_id.as_str())?
+        {
+            artifacts.push((published_at, artifact));
             continue;
         }
         let Some(retention) =
@@ -262,6 +269,7 @@ pub(in crate::persistence) fn retry_processing_export(
                 };
                 if read_processing_artifact_retention_record(transaction, artifact_id.as_str())?
                     .is_some_and(|record| now >= record.retain_until)
+                    && workspace_artifact_published_at(transaction, artifact_id.as_str())?.is_none()
                 {
                     return Ok(ProcessingExportSubmitOutcome::IncompatibleInput(
                         ProcessingInputHandoffError::ArtifactMissing,
@@ -273,6 +281,8 @@ pub(in crate::persistence) fn retry_processing_export(
                     ));
                 }
             }
+            // The workspace adapter verifies its protected capture on retry.
+            ProcessingInput::WorkspaceArtifact { .. } => {}
         }
         if live_processing_export_count(transaction)? >= MAXIMUM_LIVE_PROCESSING_EXPORTS {
             return Ok(ProcessingExportSubmitOutcome::ReservationFull);
@@ -316,13 +326,19 @@ pub(in crate::persistence) fn read_processing_artifact_retention(
     connection: &Connection,
     artifact_id: &str,
 ) -> Result<Option<crate::processing::ProcessingArtifactRetention>, PersistenceError> {
+    if let Some(published_at) = workspace_artifact_published_at(connection, artifact_id)? {
+        return Ok(Some(crate::processing::ProcessingArtifactRetention {
+            published_at_unix_seconds: published_at,
+            expires_at_unix_seconds: None,
+        }));
+    }
     Ok(
         read_processing_artifact_retention_record(connection, artifact_id)?.map(|record| {
             crate::processing::ProcessingArtifactRetention {
                 published_at_unix_seconds: record
                     .retain_until
                     .saturating_sub(PROCESSING_ARTIFACT_RETENTION_SECONDS),
-                expires_at_unix_seconds: record.retain_until,
+                expires_at_unix_seconds: Some(record.retain_until),
             }
         }),
     )

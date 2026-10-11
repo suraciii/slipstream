@@ -166,6 +166,12 @@ test("Photo View gestures navigate and cycle state while More owns one review sh
 
   await swipe(-140, 0);
   await expect(page.locator("[data-position]")).toHaveText("2 / 3");
+  // Position text updates when navigation commits, while the destination
+  // Preview and decision admission settle afterward. Wait for both before
+  // sending a vertical decision gesture; otherwise the gesture is correctly
+  // ignored during the transition and no state request can be observed.
+  await waitForLoadedReviewImage(page);
+  await expect(page.locator("[data-dock-select]")).toBeEnabled();
   const picked = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" &&

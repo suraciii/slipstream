@@ -12,9 +12,9 @@ desktop editing application, either directly or through their own Agent, while
 seeing trustworthy Photos and being able to inspect and correct the result.
 
 Slipstream reduces the cost of finding, comparing, grouping, and deciding what
-to keep. Its focused development capability extends that work through exposure
-and white-balance correction, an interoperable TIFF handoff, and a fixed film
-simulation. It does not promise a general desktop editing suite.
+to keep. Its [Photo Workspace](photo-development/workspace/spec.md) provides a persistent directory
+where independent tools read protected inputs and write previews and finished
+files. Photographers can download a result or choose it for further processing.
 
 ## Human and Machine Use
 
@@ -59,6 +59,8 @@ The product supports a complete path through these capabilities:
    decisions merely because membership changes.
 8. Inspect results and continue across the CLI and Web using stable identities
    and addressable destinations.
+9. Open a Photo Workspace, use independent editing tools, inspect their files,
+   and download or continue processing a selected result.
 
 The Web remains a progressively loaded Library Browser with Grid and Photo
 views, touch gestures, visible controls, keyboard access, and Album Resume.
@@ -96,11 +98,14 @@ Edit Preview and Export contracts are in [Photo Development](photo-development/s
 
 ## Product Boundaries
 
-Slipstream supports the bounded RAW development path in
-[Photo Development](photo-development/spec.md), without a general RAW module editor.
-It offers one fixed Film Recipe, not general color-grading or retouching controls.
-It is not a cloud backup service or multi-user digital asset management system,
-and does not promise parity with a desktop photo editor.
+Slipstream provides the [Photo Workspace](photo-development/workspace/spec.md) directory and file
+delivery boundary. It integrates general headless darktable editing through
+[Headless darktable Editing](photo-development/darktable/editing.md), while the independent editor
+can operate without Slipstream. [Photo Development](photo-development/spec.md) owns
+shared processing behavior and the separate fixed standalone Film Recipe. The
+product must report the deployed engine's supported operations and limitations;
+it does not promise every desktop GUI feature. It is not a cloud backup service
+or multi-user digital asset management system.
 
 It does not provide a built-in Agent, automatic aesthetic scoring, face
 recognition, a semantic index, or a workflow engine. External Agents may combine

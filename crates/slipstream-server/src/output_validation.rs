@@ -251,10 +251,6 @@ pub(crate) fn validate_development_tiff(path: &Path) -> Result<DevelopmentTiffFa
     {
         return Err(invalid!());
     }
-    // The engine's published artifact is the normalized darktable profile,
-    // not the source profile used to decode the RAW.
-    const OUTPUT_ICC_SHA256: &str =
-        "7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe";
     let Some((offset, size)) = icc else {
         return Err(invalid!());
     };
@@ -302,13 +298,14 @@ pub(crate) fn validate_development_tiff(path: &Path) -> Result<DevelopmentTiffFa
         hasher.update(&buffer[..chunk]);
         remaining -= chunk;
     }
-    if format!("{:x}", hasher.finalize()) != OUTPUT_ICC_SHA256 {
+    let profile_identity = format!("{:x}", hasher.finalize());
+    if !photo_files::image::tiff::is_qualified_profile(&profile_identity) {
         return Err(invalid!());
     }
     Ok(DevelopmentTiffFacts {
         width,
         height,
-        profile_identity: OUTPUT_ICC_SHA256.to_owned(),
+        profile_identity,
     })
 }
 

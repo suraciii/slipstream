@@ -11,7 +11,8 @@ pub(super) fn validate_submit_request(
     validate_bounded_name(&mutation.photo_id, MAXIMUM_PHOTO_ID_BYTES).map_err(contract)?;
     validate_bounded_name(&mutation.expected_recipe_revision, MAXIMUM_REVISION_BYTES)
         .map_err(contract)?;
-    validate_source_revision(&mutation.expected_source_revision).map_err(contract)?;
+    crate::processing::validate_contextual_source_revision(&mutation.expected_source_revision)
+        .map_err(contract)?;
     validate_bounded_name(
         &mutation.bundle_id,
         crate::processing::MAXIMUM_CONTRACT_NAME_BYTES,
@@ -455,6 +456,17 @@ pub(super) fn input_record(input: &ProcessingInput) -> InputRecord {
             artifact_id: artifact_id.as_str().to_owned(),
             contract: contract_record(contract),
         }),
+        ProcessingInput::WorkspaceArtifact {
+            workspace_id,
+            artifact_id,
+            revision,
+            contract,
+        } => InputRecord::WorkspaceArtifact(WorkspaceArtifactRecord {
+            workspace_id: workspace_id.clone(),
+            artifact_id: artifact_id.clone(),
+            revision: revision.clone(),
+            contract: contract_record(contract),
+        }),
     }
 }
 
@@ -467,6 +479,12 @@ pub(super) fn parse_input_record(record: InputRecord) -> Result<ProcessingInput,
         InputRecord::Artifact(record) => ProcessingInput::Artifact {
             artifact_id: ProcessingArtifactId::new(&record.artifact_id)
                 .map_err(|_| PersistenceError::Storage)?,
+            contract: parse_contract_record(record.contract)?,
+        },
+        InputRecord::WorkspaceArtifact(record) => ProcessingInput::WorkspaceArtifact {
+            workspace_id: record.workspace_id,
+            artifact_id: record.artifact_id,
+            revision: record.revision,
             contract: parse_contract_record(record.contract)?,
         },
     };
@@ -494,6 +512,19 @@ pub(super) fn evidence_record(evidence: &ProcessingInputEvidence) -> EvidenceRec
             sha256: evidence.sha256.clone(),
             byte_length: evidence.byte_length,
         }),
+        ProcessingInput::WorkspaceArtifact {
+            workspace_id,
+            artifact_id,
+            revision,
+            contract,
+        } => EvidenceRecord::WorkspaceArtifact(WorkspaceArtifactEvidenceRecord {
+            workspace_id: workspace_id.clone(),
+            artifact_id: artifact_id.clone(),
+            revision: revision.clone(),
+            contract: contract_record(contract),
+            sha256: evidence.sha256.clone(),
+            byte_length: evidence.byte_length,
+        }),
     }
 }
 
@@ -514,6 +545,17 @@ pub(super) fn parse_evidence_record(
             ProcessingInput::Artifact {
                 artifact_id: ProcessingArtifactId::new(&record.artifact_id)
                     .map_err(|_| PersistenceError::Storage)?,
+                contract: parse_contract_record(record.contract)?,
+            },
+            &record.sha256,
+            record.byte_length,
+        )
+        .map_err(|_| PersistenceError::Storage)?,
+        EvidenceRecord::WorkspaceArtifact(record) => ProcessingInputEvidence::new(
+            ProcessingInput::WorkspaceArtifact {
+                workspace_id: record.workspace_id,
+                artifact_id: record.artifact_id,
+                revision: record.revision,
                 contract: parse_contract_record(record.contract)?,
             },
             &record.sha256,

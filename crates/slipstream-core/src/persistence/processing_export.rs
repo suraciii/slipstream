@@ -45,7 +45,6 @@ use crate::processing::{
     ProcessingExportWorkState, ProcessingGeometry, ProcessingImageContract, ProcessingInput,
     ProcessingInputEvidence, ProcessingInputHandoffError, ProcessingModuleId,
     ProcessingParameterSnapshot, ProcessingStepId, SubmitProcessingExport, validate_bounded_name,
-    validate_source_revision,
 };
 use crate::processing::{ProcessingExportList, ReplayProcessingExport, RetryProcessingExport};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -129,6 +128,7 @@ struct ProcessingArtifactRecord {
 enum EvidenceRecord {
     Original(OriginalEvidenceRecord),
     Artifact(ArtifactEvidenceRecord),
+    WorkspaceArtifact(WorkspaceArtifactEvidenceRecord),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -149,12 +149,24 @@ struct ArtifactEvidenceRecord {
     byte_length: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceArtifactEvidenceRecord {
+    workspace_id: String,
+    artifact_id: String,
+    revision: String,
+    contract: ContractRecord,
+    sha256: String,
+    byte_length: u64,
+}
+
 /// The stored input binding of one refusal record, domain-separated per
 /// variant exactly like [`ProcessingInput`].
 #[derive(Clone, Debug, Deserialize, Serialize)]
 enum InputRecord {
     Original(OriginalRecord),
     Artifact(ArtifactRecord),
+    WorkspaceArtifact(WorkspaceArtifactRecord),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -168,6 +180,15 @@ struct OriginalRecord {
 #[serde(deny_unknown_fields)]
 struct ArtifactRecord {
     artifact_id: String,
+    contract: ContractRecord,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceArtifactRecord {
+    workspace_id: String,
+    artifact_id: String,
+    revision: String,
     contract: ContractRecord,
 }
 
@@ -369,6 +390,17 @@ pub(super) fn submit_processing_export(
     mutation: SubmitProcessingExport,
     now: u64,
 ) -> Result<ProcessingExportSubmitOutcome, PersistenceError> {
+    submit_processing_export_with_recipe(state, database_name, connection, mutation, None, now)
+}
+
+pub(super) fn submit_processing_export_with_recipe(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    mutation: SubmitProcessingExport,
+    captured_recipe: Option<crate::processing::ComposableEditRecipe>,
+    now: u64,
+) -> Result<ProcessingExportSubmitOutcome, PersistenceError> {
     if let Err(error) = validate_submit_request(&mutation) {
         return Ok(ProcessingExportSubmitOutcome::Invalid(error));
     }
@@ -440,20 +472,32 @@ pub(super) fn submit_processing_export(
         // handoff below come from the same committed state, so no scan
         // publication or concurrent publication can change them
         // mid-submission.
-        let Some(facts) = read_edit_recipe(transaction, &mutation.photo_id)? else {
+        let photo_exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM photos WHERE id=?)",
+                [&mutation.photo_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| PersistenceError::Storage)?;
+        if !photo_exists {
             return Ok(ProcessingExportSubmitOutcome::MissingPhoto);
-        };
-        let Some(stored) = read_composable_edit_recipe(transaction, &mutation.photo_id)? else {
-            return Ok(ProcessingExportSubmitOutcome::MissingRecipe);
-        };
-        if stored.source_revision != mutation.expected_source_revision {
-            return Ok(ProcessingExportSubmitOutcome::SourceChanged(Some(stored)));
         }
-        if let Some(current_source_revision) = facts.current_source_revision.as_deref()
-            && current_source_revision != mutation.expected_source_revision
-        {
-            return Ok(ProcessingExportSubmitOutcome::SourceChanged(Some(stored)));
-        }
+        let stored = match captured_recipe {
+            Some(recipe) => {
+                recipe.validate().map_err(|_| PersistenceError::Storage)?;
+                if recipe.photo_id != mutation.photo_id {
+                    return Err(PersistenceError::Storage);
+                }
+                recipe
+            }
+            None => {
+                let Some(recipe) = read_composable_edit_recipe(transaction, &mutation.photo_id)?
+                else {
+                    return Ok(ProcessingExportSubmitOutcome::MissingRecipe);
+                };
+                recipe
+            }
+        };
         if stored.revision != mutation.expected_recipe_revision {
             return Ok(ProcessingExportSubmitOutcome::RecipeConflict(Some(stored)));
         }
@@ -476,8 +520,17 @@ pub(super) fn submit_processing_export(
                 photo_id,
                 source_revision,
             } => {
+                let Some(facts) = read_edit_recipe(transaction, &mutation.photo_id)? else {
+                    return Ok(ProcessingExportSubmitOutcome::MissingPhoto);
+                };
                 if !facts.source_available || facts.current_source_revision.is_none() {
                     return Ok(ProcessingExportSubmitOutcome::Unavailable);
+                }
+                if stored.source_revision != mutation.expected_source_revision
+                    || facts.current_source_revision.as_deref()
+                        != Some(mutation.expected_source_revision.as_str())
+                {
+                    return Ok(ProcessingExportSubmitOutcome::SourceChanged(Some(stored)));
                 }
                 if photo_id != &mutation.photo_id {
                     return Ok(ProcessingExportSubmitOutcome::IncompatibleInput(
@@ -502,6 +555,7 @@ pub(super) fn submit_processing_export(
                 };
                 if read_processing_artifact_retention_record(transaction, artifact_id.as_str())?
                     .is_some_and(|retention| now >= retention.retain_until)
+                    && workspace_artifact_published_at(transaction, artifact_id.as_str())?.is_none()
                 {
                     return Ok(ProcessingExportSubmitOutcome::IncompatibleInput(
                         ProcessingInputHandoffError::ArtifactMissing,
@@ -513,6 +567,8 @@ pub(super) fn submit_processing_export(
                     ));
                 }
             }
+            // Workspace containment and immutable capture are verified by the file adapter.
+            ProcessingInput::WorkspaceArtifact { .. } => {}
         }
         match &mutation.adapter {
             ProcessingExportAdapterDecision::NoQualifiedAdapter { reason_code } => {
@@ -522,7 +578,7 @@ pub(super) fn submit_processing_export(
                     payload_digest,
                     step_id: mutation.step_id.as_str().to_owned(),
                     recipe_revision: stored.revision.clone(),
-                    source_revision: stored.source_revision.clone(),
+                    source_revision: mutation.expected_source_revision.clone(),
                     module: step.module.as_str().to_owned(),
                     parameter_schema_version: step.parameters.schema_version.clone(),
                     parameter_digest: step.parameters.canonical_digest(),
@@ -562,7 +618,7 @@ pub(super) fn submit_processing_export(
                     payload_digest,
                     step_id: mutation.step_id.clone(),
                     recipe_revision: stored.revision.clone(),
-                    source_revision: stored.source_revision.clone(),
+                    source_revision: mutation.expected_source_revision.clone(),
                     module: step.module.clone(),
                     adapter_schema_version: format!("{adapter_version}:{parameter_schema_version}"),
                     parameters: step.parameters.clone(),

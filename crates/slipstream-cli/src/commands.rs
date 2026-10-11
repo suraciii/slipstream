@@ -68,6 +68,13 @@ pub fn parse_error_preferences(arguments: &[OsString]) -> ParseErrorPreferences 
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Manage real Photo workspace directories and their completed files.
+    Workspace {
+        #[command(subcommand)]
+        command: workspace::WorkspaceCommand,
+    },
+    /// Discover, edit and render semantic darktable state on the service host.
+    Darktable(darktable::DarktableArgs),
     /// Inspect service compatibility and current Library status.
     Status,
     /// Manage local instance Access Tokens.
@@ -395,14 +402,7 @@ pub enum PhotoCommand {
         #[arg(long, value_enum, default_value_t = PreviewSize::Review)]
         size: PreviewSize,
     },
-    /// Read or mutate the current Edit State, then request an Edit Preview or
-    /// immutable Processing Artifact.
-    Edit {
-        #[command(subcommand)]
-        command: edit::EditCommand,
-    },
-    /// Advanced compatibility interface for complete processing snapshots.
-    /// Normal editing uses `photos edit` and explicit Export artifacts.
+    /// Compatibility interface for qualified non-darktable processing snapshots.
     #[command(hide = true)]
     ProcessingRecipe {
         #[command(subcommand)]

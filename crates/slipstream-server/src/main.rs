@@ -5,6 +5,26 @@ async fn main() {
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
     let command = arguments.next();
+    if command.as_deref() == Some(std::ffi::OsStr::new("__restore-rebase")) {
+        let args: Vec<_> = arguments.collect();
+        if args.len() != 4 || args[0] != "--state" || args[2] != "--manifest" {
+            eprintln!(
+                "Use __restore-rebase --state ABSOLUTE_RESTORED_STATE --manifest RESTORE_MANIFEST"
+            );
+            std::process::exit(1);
+        }
+        match slipstream_server::offline_rebase_restore(
+            std::path::Path::new(&args[1]),
+            std::path::Path::new(&args[3]),
+        ) {
+            Ok(result) => println!("{result}"),
+            Err(error) => {
+                eprintln!("Slipstream restore failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if arguments.next().is_some() {
         eprintln!("Slipstream startup failed: unexpected command arguments");
         std::process::exit(1);

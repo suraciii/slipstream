@@ -23,8 +23,8 @@ WORKDIR /src/darktable
 RUN test -n "$DARKTABLE_COMMIT" \
     && printf '%s\n' "$DARKTABLE_COMMIT" > /src/darktable-commit
 RUN cmake -S . -B build -G Ninja \
-      -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/darktable \
-      -DBINARY_PACKAGE_BUILD=ON -DUSE_SDL2=OFF -DBUILD_CMSTEST=OFF \
+      -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/darktable-edit/native -DCMAKE_INSTALL_LIBDIR=lib \
+      -DBUILD_GUI=OFF -DBINARY_PACKAGE_BUILD=ON -DUSE_SDL2=OFF -DBUILD_CMSTEST=OFF \
       -DUSE_MCP=ON -DUSE_OPENCL=OFF -DUSE_LUA=OFF -DUSE_COLORD=OFF \
       -DUSE_GMIC=OFF -DUSE_GRAPHICSMAGICK=OFF -DUSE_MAP=OFF \
       -DBUILD_RS_IDENTIFY=OFF -DBUILD_TESTING=OFF -DVALIDATE_APPDATA_FILE=OFF \
@@ -45,15 +45,28 @@ RUN apt-get update \
        liblensfun1 libjpeg-turbo8 libtiff6 liblcms2-2 libxml2-16 libxslt1.1 librsvg2-2 zlib1g \
     && dpkg-query -W > /opt/os-packages.txt \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=darktable-build /opt/darktable-root/opt/darktable /opt/darktable
+COPY --from=darktable-build /opt/darktable-root/opt/darktable-edit/native /opt/darktable-source
+COPY tools/processing/photo/icc/LargeRGB-elle-V2-g10.icc /opt/darktable-source/share/darktable/color/out/LargeRGB-elle-V2-g10.icc
+COPY crates/slipstream-core/assets/srgb-iec61966-2-1.icc /opt/darktable-source/share/darktable/color/out/srgb-iec61966-2-1.icc
 COPY --from=darktable-build /src/darktable/LICENSE /usr/share/doc/slipstream/darktable-LICENSE
 COPY --from=darktable-build /src/darktable-commit /opt/slipstream-photo/darktable-commit
 COPY tools/processing/photo/discover.py tools/processing/photo/manifest.py /opt/slipstream-photo/
 COPY tools/processing/photo/icc/LargeRGB-elle-V2-g10.icc /opt/slipstream-photo/icc/LargeRGB-elle-V2-g10.icc
-RUN ln -s /opt/darktable /opt/slipstream-photo/darktable \
+COPY tools/processing/photo/edit_manifest.py tools/processing/photo/runtime_libs.py /opt/slipstream-photo/
+RUN mkdir -p /opt/darktable-edit/native \
+    && cp -aL /opt/darktable-source/. /opt/darktable-edit/native/ \
+    && cp -aL /opt/darktable-source /opt/darktable \
+    && rm -rf /opt/darktable-source \
+    && ln -s /opt/darktable /opt/slipstream-photo/darktable \
     && cp /opt/os-packages.txt /opt/slipstream-photo/os-packages.txt \
-    && python3 /opt/slipstream-photo/discover.py /opt/darktable/bin/darktable-mcp \
+    && python3 /opt/slipstream-photo/runtime_libs.py \
+    && LD_LIBRARY_PATH=/opt/darktable-edit/lib python3 /opt/slipstream-photo/discover.py /opt/darktable/bin/darktable-mcp \
+    && ENGINE_METADATA=/opt/darktable-edit/engine-metadata.json LD_LIBRARY_PATH=/opt/darktable-edit/lib python3 /opt/slipstream-photo/discover.py /opt/darktable-edit/native/bin/darktable-mcp \
+    && cp /opt/os-packages.txt /opt/darktable-edit/os-packages.txt \
+    && DARKTABLE_COMMIT="$DARKTABLE_COMMIT" python3 /opt/slipstream-photo/edit_manifest.py \
+    && test -s /opt/darktable-edit/edit-manifest.json \
     && DARKTABLE_COMMIT="$DARKTABLE_COMMIT" python3 /opt/slipstream-photo/manifest.py \
+    && test ! -e /opt/darktable-edit/native/bin/darktable \
     && rm -rf /work/config
 LABEL slipstream.processing.photo.darktable="native-mcp" \
       slipstream.processing.photo.darktable.commit="${DARKTABLE_COMMIT}"

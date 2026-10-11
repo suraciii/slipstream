@@ -176,6 +176,8 @@ def main() -> None:
     if not args.app_image:
         build_app(args.app_tag)
     app = inspect(app_reference)
+    if args.app_image and args.app_image != app["Id"] and "@sha256:" not in args.app_image:
+        raise SystemExit("--app-image must be an immutable image ID or digest reference")
 
     build_photo(app_reference, source, args.darktable_commit, args.tag, "unresolved")
     bundle = read_bundle(args.tag)
@@ -193,6 +195,9 @@ def main() -> None:
             "image": output["Id"],
             "bundle": bundle,
             "darktable_commit": args.darktable_commit,
+            "edit_bundle": subprocess.check_output(
+                ["docker", "run", "--rm", "--entrypoint", "cat", args.tag, "/opt/darktable-edit/bundle"], text=True
+            ).strip(),
         },
         sort_keys=True,
     ))

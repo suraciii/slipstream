@@ -16,7 +16,12 @@ impl ServiceClient {
         &self,
         operation: Operation,
     ) -> Result<AdvertisedLimits, CommandFailure> {
-        if operation == Operation::ProcessingArtifactDownload {
+        if matches!(
+            operation,
+            Operation::ProcessingArtifactDownload
+                | Operation::Workspace(_)
+                | Operation::Darktable(_)
+        ) {
             tokio::time::timeout(self.control_timeout, self.capabilities_unbounded(operation))
                 .await
                 .map_err(|_| CommandFailure::transport(operation))?

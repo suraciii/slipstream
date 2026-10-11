@@ -17,7 +17,8 @@
 
 use crate::mcp_client::{Watchdog, supervisor_path};
 use crate::modules::{self, Parameters};
-use crate::{local_photo, local_preview, photo_jpeg, photo_tiff};
+use crate::{local_photo, local_preview};
+use photo_files::image::{jpeg as photo_jpeg, tiff as photo_tiff};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},

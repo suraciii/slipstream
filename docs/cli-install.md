@@ -58,6 +58,60 @@ Use a client and service built from the same candidate source revision. A
 contract-1 response can still be incomplete: `incompatible_server` preserves
 the advertised versions and identifies a missing or invalid capability field.
 Install the matching service candidate before retrying; do not bypass this
-check. For photo processing, also inspect `processing modules` and follow
-the [Agent workflow](agent-cli.md#stateful-agent-editing). A working
-client/service pair does not qualify its native modules or parameter combinations.
+check. For darktable, inspect `slipstream darktable --help`, Photo-scoped
+capabilities, and the [darktable Agent workflow](agent-cli.md#find-and-edit-a-photo-with-darktable).
+The [darktable CLI Reference](../specs/photo-development/darktable/cli.md) specifies the target, rather than
+claiming every candidate contains it. An absent command or unavailable capability
+must not trigger a generic processing alias or bypass. A working client/service
+pair does not qualify native modules, RAW encodings, resources, or output
+combinations. Other peer Processing Modules use the
+[composition workflow](agent-cli.md#compose-other-processing-modules).
+
+The independent `darktable-edit` executable is shipped in a dedicated archive
+when packaging an immutable photo image:
+
+```sh
+python3 scripts/package-cli.py --darktable-image sha256:IMAGE_DIGEST
+sha256sum -c dist/darktable-edit-VERSION-gCOMMIT-linux-amd64.tar.gz.sha256
+tar -xzf dist/darktable-edit-VERSION-gCOMMIT-linux-amd64.tar.gz
+./darktable-edit-VERSION-gCOMMIT-linux-amd64/run-darktable-edit --help
+```
+
+The archive contains the independent binary and its supervisor, the complete
+native installed tree, the resolved runtime shared libraries, exact discovery,
+source revision, OS package inventory, and digest manifest. The wrapper selects
+the adjacent bundle; direct invocation may instead set `DARKTABLE_EDIT_BUNDLE`
+to its absolute `bundle/` path. This is distinct from official `darktable-cli`.
+It requires Linux amd64 with the image's compatible glibc loader; an Ubuntu
+26.04 execution host or the original immutable image supplies that environment.
+It needs no Slipstream service, database, token, or desktop darktable catalog.
+
+Run `slipstream workspace open PHOTO_ID` once. The result discloses the execution
+host, access mode, input path, and preview/output directories. Server paths are
+accessible on that host or through an explicitly mounted authorized environment;
+a remote client's filesystem does not acquire them merely by reading a reply.
+On the execution host the simple standalone flow is:
+
+```sh
+darktable-edit open INPUT_PATH --state STATE_DIR --preview-directory PREVIEW_DIR --output-directory OUTPUT_DIR
+darktable-edit edit show STATE_DIR
+darktable-edit edit set STATE_DIR INSTANCE_ID PARAMETER_ID --value 0.5
+darktable-edit export create STATE_DIR
+darktable-edit preview render STATE_DIR
+slipstream workspace files WORKSPACE_ID
+```
+
+Choose instance and parameter IDs through discovery. Guard read-dependent edits
+with the returned `--if-state` token. Export uses saved output settings and works
+before any preview. Completed paths can be read directly by another tool on the
+same host; reconciliation discovers them without a registration step. To process
+an arbitrary local file, use a private state directory outside Slipstream.
+
+Catalog commands disclose edit-local versus user/configured scope. They do not
+use the desktop application's catalog or search another scope after a miss.
+Workspace inputs, edits, history, catalogs and final files survive service startup
+and remain until explicit reviewed removal; transient receipt retention is
+separate. Preserve the full workspace and state roots when backing up; see
+[processing backup and acceptance](../tools/processing/README.md).
+See the [standalone grammar](../specs/photo-development/darktable/cli.md#grammar-and-identity)
+and [Photo Workspace](../specs/photo-development/workspace/spec.md).

@@ -13,7 +13,8 @@
 //! kills the whole group on expiry, and parent death signals the supervisor,
 //! which kills the group.
 
-use crate::{native_development, photo_tiff};
+use crate::native_development;
+use photo_files::image::tiff as photo_tiff;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},

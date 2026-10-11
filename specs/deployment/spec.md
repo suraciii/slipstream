@@ -182,9 +182,24 @@ it. The Compose file fixes the documented shared container bounds — 8 GiB
 memory, 4 CPUs, 512 PIDs, and 4 engine OpenMP threads — and mounts no Docker
 socket.
 
+Photo Workspace directories are durable state under the configured state
+storage, outside disposable cache and native scratch. [Backup](#backup) owns
+their consistent capture and recovery. Receipt expiry must not remove these
+files. Operators must include their disk usage in capacity checks; an exhausted
+allowance refuses new preparation or output without deleting old work.
+[Photo Workspace](../photo-development/workspace/spec.md) owns file lifetime and recovery.
+
+Workspace paths identify the actual execution namespace. Independent tools must
+run in the disclosed host/container or use authorized filesystem access with
+explicit path mapping. A remote API client cannot treat the returned server path
+as local. Optional `slipstream darktable` supervision runs the independent tool
+against that same directory; no per-edit checkout or synchronization is needed.
+
 The one container's finite memory and CPU allocation is shared by the Web
-service and the engine. Development requests are serialized: at most one runs
-at a time, and a second request queues behind it. There is no per-attempt
+service and the engine. Service-supervised development requests are serialized:
+at most one runs at a time, and a second request queues behind it. Independent
+CLI execution must obey its own disclosed resource bounds; the service queue
+does not serialize processes launched outside it. There is no per-attempt
 isolation domain; an engine failure can therefore stop the whole application,
 and the ordinary restart path recovers. This trade-off fits the personal
 single-machine deployment and is not
@@ -566,17 +581,42 @@ advisory review.
 
 ## Backup
 
-The deployment precondition for image cutover, expansion, and any state
-recovery is a transactionally consistent backup of both the Library state
-database and the Access database. Stop the service first so the two SQLite
-stores share one quiescent recovery point. Use SQLite's backup API (or a
-filesystem snapshot with equivalently proven consistency), and verify that
-both databases can be restored together without losing the credential.
-Retained Export artifacts are not reconstructible from these databases; an
-operator backup that excludes them must refuse while any are retained.
-Restore into a proven isolated copy, never over live state. The 0.1 support
-boundary, rollback criteria, and rollback-artifact retirement rules are defined
-in [`0.1-support-and-release.md`](support.md).
+Image cutover, expansion, and state recovery require one consistent recovery
+point covering the Library database, Access database, workspace identity and
+provenance records, protected input snapshots, canonical tool state, required
+resources, and kept outputs. Required resources outside the workspace must be
+included or retained immutably with verified recovery access. Retained Export
+artifacts cannot be reconstructed from SQLite; a backup excluding required
+state or bytes must not be accepted as a recovery backup.
+
+For a file-copy backup, stop the service and establish quiescence for every
+writer of the captured directories and dependencies, including independent CLI
+processes and shared-filesystem writers. Prevent new writes until the complete
+copy finishes. Stopping Slipstream alone or observing an idle service queue is
+insufficient. If this exclusion cannot be established, refuse the backup with
+the unresolved writer or storage scope and a recovery action. Do not kill a
+render or discard saved work merely to obtain a backup.
+
+An alternative is a proven consistent filesystem snapshot covering the same
+database, file, and dependency recovery point. Separate live copies or snapshots
+of different volumes do not establish that guarantee. SQLite's backup API
+preserves each database, but cannot by itself coordinate changing tool files.
+Per-file atomic rename likewise does not make a multi-file backup consistent.
+
+Verify recovery in an isolated copy before accepting the backup. Both databases
+must open together without losing the credential. Enumerate saved edit revisions
+and check their recorded input/resource availability, retained output bytes,
+and engine identities. Where an executable saved edit exists, reopen one with
+its masks and resources and inspect a kept output without reading the live
+Library Original or substituting defaults. A dependency that was available at
+capture must remain available after restore. Pre-existing missing dependencies
+or incompatible historical state must retain their exact intent and disclosed
+limitations; preserving them does not establish executable recovery. Newly
+missing bytes, altered revisions, or silent default substitution fail recovery
+verification with the affected identities.
+Restore must never overwrite live state. The 0.1 support boundary, rollback
+criteria, and rollback-artifact retirement rules remain in
+[`0.1-support-and-release.md`](support.md).
 
 ## Library Expansion
 

@@ -42,8 +42,8 @@ mod access;
 mod app;
 pub use access::administer_access;
 mod config;
+mod darktable_service;
 mod development_proxy;
-mod edit;
 mod export_manager;
 mod film_resources;
 pub(crate) mod folders;
@@ -61,6 +61,13 @@ mod processing_recipe;
 mod queries;
 mod recovery_review;
 mod wire;
+mod workspace;
+mod workspace_http;
+
+/// Rebase checked observations in a newly extracted, verified isolated backup.
+pub fn offline_rebase_restore(state: &Path, manifest: &Path) -> Result<Value, String> {
+    workspace::restore_verified(state, manifest).map_err(|error| error.to_string())
+}
 
 pub use app::Application;
 pub use config::{

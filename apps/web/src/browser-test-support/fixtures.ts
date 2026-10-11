@@ -22,12 +22,14 @@ import {
 } from "../browser-server.js";
 
 export const sample = process.env.SLIPSTREAM_RAW_SAMPLE;
-/// The optional native Photo bundle used by the local single-container smoke.
-/// The scenario stays skipped unless an operator supplies the bundle directory
-/// built by tools/processing/photo/build.py.
+// Native editing smoke uses the independent tool and its qualified bundle.
+const editBinary = process.env.DARKTABLE_EDIT_BINARY?.trim();
+const editBundle = process.env.DARKTABLE_EDIT_BUNDLE?.trim();
 const photoBundleDirectory =
   process.env.SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY?.trim();
 export const processingEnvironmentOverrides = {
+  DARKTABLE_EDIT_BINARY: editBinary,
+  DARKTABLE_EDIT_BUNDLE: editBundle,
   SLIPSTREAM_PHOTO_DEVELOPMENT: photoBundleDirectory ? "enabled" : undefined,
   SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY: photoBundleDirectory,
   SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES:
@@ -38,15 +40,8 @@ const noProcessingEnvironment = Object.fromEntries(
 );
 const processingEnvironment = [
   ["SLIPSTREAM_RAW_SAMPLE", sample],
-  [
-    "SLIPSTREAM_PHOTO_DEVELOPMENT",
-    processingEnvironmentOverrides.SLIPSTREAM_PHOTO_DEVELOPMENT,
-  ],
-  ["SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY", photoBundleDirectory],
-  [
-    "SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES",
-    processingEnvironmentOverrides.SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES,
-  ],
+  ["DARKTABLE_EDIT_BINARY", editBinary],
+  ["DARKTABLE_EDIT_BUNDLE", editBundle],
 ] as const;
 export const missingProcessingEnvironment = () =>
   processingEnvironment

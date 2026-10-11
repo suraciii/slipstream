@@ -106,6 +106,113 @@ fn artifact() -> ProcessingArtifact {
 }
 
 #[test]
+fn workspace_binding_and_verified_evidence_roundtrip_strict_records() {
+    let binding = ProcessingInput::WorkspaceArtifact {
+        workspace_id: "workspace-1".into(),
+        artifact_id: "protected/image.tif".into(),
+        revision: "bytes-1".into(),
+        contract: artifact().output_contract,
+    };
+    let record = input_record(&binding);
+    let bytes = serde_json::to_string(&record).unwrap();
+    assert_eq!(
+        parse_input_record(serde_json::from_str(&bytes).unwrap()).unwrap(),
+        binding
+    );
+    let evidence = ProcessingInputEvidence::new(binding, &"a".repeat(64), 1234).unwrap();
+    let bytes = serde_json::to_string(&evidence_record(&evidence)).unwrap();
+    assert_eq!(
+        parse_evidence_record(serde_json::from_str(&bytes).unwrap()).unwrap(),
+        evidence
+    );
+    let mut malformed: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+    malformed["WorkspaceArtifact"]["revision"] = "".into();
+    assert!(parse_evidence_record(serde_json::from_value(malformed).unwrap()).is_err());
+}
+
+#[test]
+fn historical_binding_record_bytes_keep_the_existing_shape() {
+    let input = original_step_input("raw-photo", "source-1");
+    assert_eq!(
+        serde_json::to_string(&input_record(&input)).unwrap(),
+        r#"{"Original":{"photo_id":"raw-photo","source_revision":"source-1"}}"#
+    );
+    let evidence = ProcessingInputEvidence::new(input, &"a".repeat(64), 1234).unwrap();
+    assert_eq!(
+        serde_json::to_string(&evidence_record(&evidence)).unwrap(),
+        format!(
+            r#"{{"Original":{{"photo_id":"raw-photo","source_revision":"source-1","sha256":"{}","byte_length":1234}}}}"#,
+            "a".repeat(64)
+        )
+    );
+}
+
+#[tokio::test]
+async fn workspace_snapshot_admission_needs_no_db_recipe_or_original_evidence() {
+    let seeded = seeded();
+    Connection::open(&seeded.path)
+        .unwrap()
+        .execute(
+            "UPDATE original_files SET available=0 WHERE id='raw-original'",
+            [],
+        )
+        .unwrap();
+    let input = ProcessingInput::WorkspaceArtifact {
+        workspace_id: "workspace-1".into(),
+        artifact_id: "capture/input.tif".into(),
+        revision: "capture-1".into(),
+        contract: artifact().output_contract,
+    };
+    let step_id = ProcessingStepId::new("film").unwrap();
+    let captured = ComposableEditRecipe {
+        photo_id: "raw-photo".into(),
+        revision: "canonical-file-1".into(),
+        source_revision: "".into(),
+        current_step_id: Some(step_id.clone()),
+        steps: vec![ProcessingStep {
+            step_id: step_id.clone(),
+            module: ProcessingModuleId::new("spektrafilm").unwrap(),
+            input: input.clone(),
+            parameters: ProcessingParameterSnapshot::new("film-1", serde_json::json!({"tone": 1}))
+                .unwrap(),
+        }],
+    };
+    let request = SubmitProcessingExport {
+        photo_id: "raw-photo".into(),
+        request_id: "workspace-snapshot".into(),
+        step_id,
+        expected_recipe_revision: captured.revision.clone(),
+        expected_source_revision: "".into(),
+        bundle_id: "b".repeat(64),
+        retained_output_bytes_max: u64::MAX,
+        adapter: ProcessingExportAdapterDecision::Qualified {
+            adapter_version: "film-adapter-1".into(),
+            parameter_schema_version: "film-1".into(),
+        },
+    };
+    let outcome = seeded
+        .persistence
+        .submit_processing_export_with_recipe_receiver(request.clone(), captured.clone(), 1000)
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    let ProcessingExportSubmitOutcome::Admitted(admission) = outcome else {
+        panic!("workspace capture must admit: {outcome:?}")
+    };
+    assert_eq!(admission.input, input);
+    assert!(admission.source_revision.is_empty());
+    let replay = seeded
+        .persistence
+        .submit_processing_export_with_recipe_receiver(request, captured, 1001)
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay, ProcessingExportSubmitOutcome::Pending(admission));
+}
+
+#[test]
 fn artifact_filenames_use_module_format_and_safe_step_identity() {
     let mut output = artifact();
     output.step_id = ProcessingStepId::new("develop / first").unwrap();
@@ -285,7 +392,7 @@ async fn artifact_bound_submission_survives_unavailable_original() {
 }
 
 #[tokio::test]
-async fn artifact_export_cannot_implicitly_rebind_saved_recipe_to_observed_source() {
+async fn artifact_export_captures_context_without_rebinding_after_original_changes() {
     let seeded = seeded();
     let upstream = artifact();
     publish(&seeded, upstream.clone()).await;
@@ -311,17 +418,17 @@ async fn artifact_export_cannot_implicitly_rebind_saved_recipe_to_observed_sourc
             request_id: "implicit-rebind-export".to_owned(),
             step_id: ProcessingStepId::new("develop-1").unwrap(),
             expected_recipe_revision: revision,
-            expected_source_revision: observed,
+            expected_source_revision: observed.clone(),
             bundle_id: "b".repeat(64),
             retained_output_bytes_max: u64::MAX,
             adapter: no_adapter_decision(),
         },
     )
     .await;
-    let ProcessingExportSubmitOutcome::SourceChanged(Some(saved)) = outcome else {
-        panic!("a newly observed source cannot replace the saved recipe binding: {outcome:?}");
+    let ProcessingExportSubmitOutcome::Refused(refusal) = outcome else {
+        panic!("artifact submission must ignore unrelated live source change: {outcome:?}");
     };
-    assert_eq!(saved.source_revision, seeded.source);
+    assert_eq!(refusal.source_revision, observed);
     assert!(
         seeded
             .persistence

@@ -98,7 +98,13 @@ esac
   await run("git", ["config", "user.email", "preflight@example.test"], root);
   await run("git", ["config", "user.name", "Preflight Test"], root);
   await run("git", ["add", "."], root);
-  await run("git", ["commit", "--quiet", "-m", "fixture"], root);
+  const committed = await run(
+    "git",
+    ["commit", "--quiet", "--signoff", "-m", "fixture"],
+    root,
+  );
+  if (committed.exitCode !== 0)
+    throw new Error(`Fixture commit failed: ${committed.output}`);
 
   await Bun.write(
     join(bin, "bun"),

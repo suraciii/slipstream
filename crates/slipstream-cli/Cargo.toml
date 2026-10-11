@@ -11,7 +11,9 @@ name = "slipstream"
 path = "src/main.rs"
 
 [dependencies]
-clap.workspace = true
+clap = { workspace = true, features = ["string"] }
+darktable-edit = { path = "../darktable-edit", default-features = false }
+photo-files = { path = "../photo-files" }
 libc.workspace = true
 reqwest.workspace = true
 serde.workspace = true

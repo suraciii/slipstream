@@ -22,9 +22,13 @@ The image retains upstream source and license notices. It installs numerical
 dependencies without the GUI application dependencies.
 
 Both writers use the pinned linear ProPhoto ICC asset from that source archive.
-The probe checks exact input and output hashes, primaries, white point and linear
-TRCs. darktable's LittleCMS reader normalizes the legacy description tag, so its
-serialized output has a separate pinned hash. Its color tags remain unchanged.
+The probe checks exact input hashes, primaries, white point and linear TRCs.
+Film input accepts only the canonical asset digest `df7b2c677645f1ca5364b52e62f8db04ca61f80163792942f3e409a84a6b12ed`
+and historical LittleCMS digest `7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe`.
+The historical profile differs only in its normalized description tag; its
+color tags remain unchanged. Observations retain the actual embedded digest.
+Native photo qualification requires new output to preserve the canonical asset
+bytes. Historical recipe and receipt profile identities remain unchanged.
 The probe does not use darktable's generated profile, whose header changes
 between invocations.
 

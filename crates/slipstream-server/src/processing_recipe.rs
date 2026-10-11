@@ -1,9 +1,4 @@
-//! Compatibility surface for complete Edit State snapshots (Issue #496).
-//!
-//! Stores caller-owned processing details independently of execution
-//! availability, with explicit source rebinding and no implicit conversion.
-//! The primary Agent/UI surface is `/api/photos/{id}/edit`; this module remains
-//! for migration, diagnostics, and older clients.
+//! Retained non-darktable adapters project canonical workspace tool state.
 
 use axum::{
     Json,
@@ -14,18 +9,114 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use slipstream_core::{
-    AutomaticAdjustment, ComposableEditRecipe, ComposableEditRecipeWriteOutcome, LibraryError,
+    AutomaticAdjustment, ComposableEditRecipe, ComposableEditRecipeWriteOutcome,
     ProcessingArtifactId, ProcessingGeometry, ProcessingImageContract, ProcessingInput,
     ProcessingModuleId, ProcessingParameterSnapshot, ProcessingStep, ProcessingStepId,
-    RebindComposableEditRecipe, SaveComposableEditRecipe,
+    SaveComposableEditRecipe,
 };
-use std::sync::{Arc, atomic::AtomicBool};
 
 use slipstream_processing::modules::{
     ImageContract, ModuleAvailability, ModuleRegistry, Parameters,
 };
 
 use crate::http::HttpState;
+#[path = "processing_recipe_admission.rs"]
+mod admission;
+#[path = "processing_recipe_state.rs"]
+mod film_state;
+pub(crate) use admission::validate_step_admission;
+
+pub(crate) fn inspect_film_state(path: &std::path::Path) -> Result<Value, String> {
+    film_state::inspect(path)
+}
+
+pub(crate) async fn read_recipe(
+    state: &HttpState,
+    photo_id: &str,
+) -> Result<Option<slipstream_core::ComposableEditRecipeRead>, String> {
+    let mut read = state
+        .application
+        .library
+        .composable_edit_recipe_read(photo_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(read) = read.as_mut()
+        && !read.source_available
+    {
+        // Library facts retain the last location revision for historical identity.
+        // Adapter reads disclose only currently available live source evidence;
+        // the saved recipe and its captured input guard remain untouched.
+        read.current_source_revision = None;
+    }
+    if let Some(read) = read.as_mut()
+        && let Some(workspace) = state
+            .application
+            .workspaces
+            .lookup_photo(photo_id)
+            .map_err(|e| e.to_string())?
+    {
+        let directory = state
+            .application
+            .workspaces
+            .directory(&workspace.id)
+            .map_err(|e| e.to_string())?;
+        match directory.child(".edits/spektrafilm/adapter") {
+            Ok(_) => {
+                let owner = film_state::FilmState::open(&directory)?;
+                if let Some(recipe) = owner.recipe()? {
+                    read.recipe = Some(recipe);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(read)
+}
+
+/// Resolves historical intent only against its exact already protected source.
+/// The versioned tool importer owns conversion; retained database bytes stay intact.
+pub(crate) async fn legacy_darktable_input(
+    state: &HttpState,
+    photo_id: &str,
+    step_id: &str,
+) -> Result<(Value, Value), String> {
+    let read = state
+        .application
+        .library
+        .composable_edit_recipe_read(photo_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "The Photo is not part of the Library".to_owned())?;
+    let recipe = read
+        .recipe
+        .ok_or_else(|| "No retained processing recipe exists".to_owned())?;
+    let step = recipe
+        .steps
+        .iter()
+        .find(|s| s.step_id.as_str() == step_id)
+        .ok_or_else(|| "The retained step is missing".to_owned())?;
+    if step.module.as_str() != slipstream_processing::modules::DARKTABLE_MODULE {
+        return Err("The retained step is not darktable".into());
+    }
+    let ProcessingInput::Original {
+        photo_id: bound_photo,
+        source_revision,
+    } = &step.input
+    else {
+        return Err("Legacy darktable migration requires its captured Original identity; select and review an explicit input through the darktable namespace".into());
+    };
+    if bound_photo != photo_id || source_revision.is_empty() {
+        return Err("Legacy darktable source identity is invalid".into());
+    }
+    let input = state
+        .application
+        .workspaces
+        .prepared_input(photo_id, source_revision)
+        .map_err(|e| format!("The exact historical Original capture is unavailable: {e}"))?;
+    let legacy = json!({"module":step.module.as_str(),"schemaVersion":step.parameters.schema_version,"tree":step.parameters.tree,"stepId":step.step_id.as_str(),"sourceRevision":source_revision,"recipeRevision":recipe.revision});
+    Ok((input, legacy))
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -84,6 +175,13 @@ enum InputBody {
         artifact_id: String,
         contract: ImageContractBody,
     },
+    #[serde(rename_all = "camelCase")]
+    WorkspaceArtifact {
+        workspace_id: String,
+        artifact_id: String,
+        revision: String,
+        contract: ImageContractBody,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,8 +207,7 @@ struct GeometryBody {
 struct RecipeResponse {
     photo_id: String,
     source_revision: String,
-    current_source_revision: Option<String>,
-    source_available: bool,
+    web_url: String,
     recipe: Option<Value>,
 }
 
@@ -144,6 +241,17 @@ fn input(body: InputBody) -> Result<ProcessingInput, String> {
         } => Ok(ProcessingInput::Artifact {
             artifact_id: ProcessingArtifactId::new(&artifact_id)
                 .map_err(|error| error.to_string())?,
+            contract: contract(image)?,
+        }),
+        InputBody::WorkspaceArtifact {
+            workspace_id,
+            artifact_id,
+            revision,
+            contract: image,
+        } => Ok(ProcessingInput::WorkspaceArtifact {
+            workspace_id,
+            artifact_id,
+            revision,
             contract: contract(image)?,
         }),
     }
@@ -211,152 +319,6 @@ fn recipe_from_body(
     Ok((recipe, automatic_adjustment))
 }
 
-fn module_image_contract(contract: &ProcessingImageContract) -> Option<ImageContract> {
-    let format = contract
-        .format
-        .strip_prefix("image/")
-        .unwrap_or(&contract.format)
-        .to_owned();
-    let precision_bits = contract
-        .precision
-        .strip_prefix("uint")
-        .or_else(|| contract.precision.strip_prefix("float"))
-        .and_then(|value| value.parse::<u8>().ok())?;
-    Some(ImageContract {
-        format,
-        color_space: contract.color_space.clone(),
-        transfer_function: contract.transfer.clone(),
-        precision_bits,
-        width: u64::from(contract.geometry.width),
-        height: u64::from(contract.geometry.height),
-    })
-}
-
-#[derive(Debug)]
-pub(crate) struct AdmissionError {
-    pub(crate) code: &'static str,
-    pub(crate) status: StatusCode,
-    pub(crate) message: String,
-}
-impl AdmissionError {
-    fn invalid(message: impl Into<String>) -> Self {
-        Self {
-            code: "incompatible_input",
-            status: StatusCode::UNPROCESSABLE_ENTITY,
-            message: message.into(),
-        }
-    }
-
-    fn source_changed(message: impl Into<String>) -> Self {
-        Self {
-            code: "source_changed",
-            status: StatusCode::CONFLICT,
-            message: message.into(),
-        }
-    }
-}
-
-pub(crate) async fn validate_step_admission(
-    state: &HttpState,
-    recipe: &ComposableEditRecipe,
-) -> Result<(), AdmissionError> {
-    let Some(read) = state
-        .application
-        .library
-        .composable_edit_recipe_read(&recipe.photo_id)
-        .await
-        .map_err(|error| AdmissionError::invalid(error.to_string()))?
-    else {
-        return Err(AdmissionError::invalid(
-            "The Photo is not part of the persisted Library",
-        ));
-    };
-    let current_source_revision = read.current_source_revision.as_deref();
-    let requires_original = recipe
-        .steps
-        .iter()
-        .any(|step| matches!(step.input, ProcessingInput::Original { .. }));
-    if requires_original && current_source_revision.is_none() {
-        return Err(AdmissionError::source_changed(
-            "the selected Original input's source revision is unavailable",
-        ));
-    }
-    if let Some(current_source_revision) = current_source_revision
-        && recipe.source_revision != current_source_revision
-    {
-        return Err(AdmissionError::source_changed(
-            "the expected source revision is no longer current",
-        ));
-    }
-    // Parameter shape is a module contract, not a product-availability fact:
-    // an unavailable runtime can still validate a saved caller-owned recipe.
-    let registry = ModuleRegistry::new(ModuleAvailability::ready(), ModuleAvailability::ready());
-    for step in &recipe.steps {
-        let parameters = Parameters {
-            module: step.module.as_str().to_owned(),
-            version: step.parameters.schema_version.clone(),
-            tree: step.parameters.tree.clone(),
-        };
-        registry
-            .validate_saved_parameters(&parameters)
-            .map_err(|error| AdmissionError::invalid(error.message))?;
-        match &step.input {
-            ProcessingInput::Original {
-                photo_id,
-                source_revision,
-            } => {
-                if photo_id != &recipe.photo_id
-                    || source_revision != &recipe.source_revision
-                    || current_source_revision != Some(recipe.source_revision.as_str())
-                {
-                    return Err(AdmissionError::source_changed(
-                        "an Original input is bound to a stale Photo or source revision",
-                    ));
-                }
-                if step.module.as_str() != slipstream_processing::modules::DARKTABLE_MODULE {
-                    return Err(AdmissionError::invalid(
-                        "standalone SpektraFilm requires an explicitly selected compatible artifact input",
-                    ));
-                }
-            }
-            ProcessingInput::Artifact {
-                artifact_id,
-                contract,
-            } => {
-                let Some(core_contract) = module_image_contract(contract) else {
-                    return Err(AdmissionError::invalid(
-                        "artifact image precision is not admitted",
-                    ));
-                };
-                // An artifact binding resolves only against the immutable
-                // Processing Artifact store: the legacy Export records are
-                // a fixed single-module surface that must never stand in
-                // for a selected composable step's artifact.
-                let Some(published) = state
-                    .application
-                    .library
-                    .processing_artifact(artifact_id.as_str())
-                    .await
-                    .map_err(|error| AdmissionError::invalid(error.to_string()))?
-                else {
-                    return Err(AdmissionError::invalid(
-                        "processing artifact is missing or expired",
-                    ));
-                };
-                if &published.output_contract != contract {
-                    return Err(AdmissionError::source_changed(
-                        "processing artifact image contract is stale",
-                    ));
-                }
-                registry
-                    .admit_input_contract(step.module.as_str(), &core_contract)
-                    .map_err(|error| AdmissionError::invalid(error.message))?;
-            }
-        }
-    }
-    Ok(())
-}
-
 fn input_json(input: &ProcessingInput) -> Value {
     match input {
         ProcessingInput::Original {
@@ -375,6 +337,14 @@ fn input_json(input: &ProcessingInput) -> Value {
             "artifactId": artifact_id.as_str(),
             "contract": contract_json(contract),
         }),
+        ProcessingInput::WorkspaceArtifact {
+            workspace_id,
+            artifact_id,
+            revision,
+            contract,
+        } => {
+            json!({"kind":"workspace-artifact","workspaceId":workspace_id,"artifactId":artifact_id,"revision":revision,"contract":contract_json(contract)})
+        }
     }
 }
 
@@ -398,6 +368,9 @@ pub(crate) fn recipe_json(recipe: &ComposableEditRecipe) -> Value {
         .steps
         .iter()
         .filter_map(|step| {
+            if step.module.as_str()==slipstream_processing::modules::DARKTABLE_MODULE {
+                return Some(json!({"stepId":step.step_id.as_str(),"code":"unsupported_state","message":"Retained darktable state remains readable; review and migrate through the full darktable namespace to execute it"}));
+            }
             let parameters = Parameters {
                 module: step.module.as_str().to_owned(),
                 version: step.parameters.schema_version.clone(),
@@ -447,43 +420,58 @@ fn error(status: StatusCode, code: &'static str, message: impl Into<String>) -> 
     error_value(status, code, message, None)
 }
 
-fn outcome_response(outcome: ComposableEditRecipeWriteOutcome) -> Response {
+fn outcome_response(
+    outcome: ComposableEditRecipeWriteOutcome,
+    request_id: &str,
+    source_observation: &str,
+) -> Response {
     match outcome {
         ComposableEditRecipeWriteOutcome::Saved(recipe) => (
             StatusCode::CREATED,
             Json(json!({
+                "photoId": recipe.photo_id,
+                "requestId": request_id,
+                "webUrl": format!("/photos/{}/edit",recipe.photo_id),
                 "outcome": "saved",
                 "recipe": recipe_json(&recipe),
                 "recipeVersion": recipe.revision,
-                "sourceRevision": recipe.source_revision,
+                "sourceRevision": source_observation,
             })),
         )
             .into_response(),
         ComposableEditRecipeWriteOutcome::Replayed(recipe) => (
             StatusCode::OK,
             Json(json!({
+                "photoId": recipe.photo_id,
+                "requestId": request_id,
+                "webUrl": format!("/photos/{}/edit",recipe.photo_id),
                 "outcome": "replayed",
                 "recipe": recipe_json(&recipe),
                 "recipeVersion": recipe.revision,
-                "sourceRevision": recipe.source_revision,
+                "sourceRevision": source_observation,
             })),
         )
             .into_response(),
         ComposableEditRecipeWriteOutcome::Unchanged(recipe) => (
             StatusCode::OK,
             Json(json!({
+                "photoId": recipe.photo_id,
+                "requestId": request_id,
+                "webUrl": format!("/photos/{}/edit",recipe.photo_id),
                 "outcome": "unchanged",
                 "recipe": recipe_json(&recipe),
                 "recipeVersion": recipe.revision,
-                "sourceRevision": recipe.source_revision,
+                "sourceRevision": source_observation,
             })),
         )
             .into_response(),
         ComposableEditRecipeWriteOutcome::Conflict(recipe) => error_value(
             StatusCode::CONFLICT,
-            "recipe_conflict",
+            "conflict",
             "The expected composable recipe revision is no longer current",
-            recipe.map(|value| recipe_json(&value)),
+            Some(
+                json!({"currentRecipeVersion":recipe.as_ref().map(|r|&r.revision),"currentSourceRevision":recipe.as_ref().map(|r|&r.source_revision)}),
+            ),
         ),
         ComposableEditRecipeWriteOutcome::SourceChanged(recipe) => error_value(
             StatusCode::CONFLICT,
@@ -523,12 +511,7 @@ pub(crate) async fn get_composable_edit_recipe(
     State(state): State<HttpState>,
     Path(photo_id): Path<String>,
 ) -> Response {
-    let Some(read) = (match state
-        .application
-        .library
-        .composable_edit_recipe_read(&photo_id)
-        .await
-    {
+    let Some(read) = (match read_recipe(&state, &photo_id).await {
         Ok(value) => value,
         Err(library_error) => {
             return error(
@@ -545,133 +528,27 @@ pub(crate) async fn get_composable_edit_recipe(
         );
     };
     Json(RecipeResponse {
-        photo_id,
+        photo_id: photo_id.clone(),
         source_revision: read.current_source_revision.clone().unwrap_or_default(),
-        current_source_revision: read.current_source_revision,
-        source_available: read.source_available,
+        web_url: format!("/photos/{photo_id}/edit"),
         recipe: read.recipe.as_ref().map(recipe_json),
     })
     .into_response()
-}
-
-async fn compute_automatic_adjustment(
-    state: &HttpState,
-    mutation: &mut SaveComposableEditRecipe,
-) -> Result<(), String> {
-    let original_recipe = mutation.recipe.clone();
-    let Some(auto_request) = mutation.automatic_adjustment.as_mut() else {
-        return Ok(());
-    };
-    auto_request.original_recipe = Some(Box::new(original_recipe));
-    let auto = auto_request.clone();
-    if mutation.recipe.current_step_id.as_ref() != Some(&auto.step_id) {
-        return Err("automaticAdjustment must address the current step".to_owned());
-    }
-    let step = mutation
-        .recipe
-        .steps
-        .iter_mut()
-        .find(|step| step.step_id == auto.step_id)
-        .ok_or_else(|| "automaticAdjustment step is absent".to_owned())?;
-    let ProcessingInput::Original {
-        photo_id,
-        source_revision,
-    } = &step.input
-    else {
-        return Err("automaticAdjustment requires an Original-bound step".to_owned());
-    };
-    if step.module.as_str() != slipstream_processing::modules::DARKTABLE_MODULE
-        || photo_id != &mutation.photo_id
-        || source_revision != &mutation.expected_source_revision
-    {
-        return Err("automaticAdjustment step is not a current darktable Original".to_owned());
-    }
-    let Some(exports) = state.application.exports.as_ref() else {
-        return Err("Photo Development is unavailable".to_owned());
-    };
-    let staged = exports
-        .stage_original_for(photo_id, source_revision)
-        .await?;
-    let result = exports
-        .auto_parameters(
-            staged.path().to_path_buf(),
-            Parameters {
-                module: step.module.as_str().to_owned(),
-                version: step.parameters.schema_version.clone(),
-                tree: step.parameters.tree.clone(),
-            },
-            auto.operation.clone(),
-            auto.multi_priority,
-            auto.instruction,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await?;
-    let params = result
-        .get("params")
-        .filter(|value| value.is_object())
-        .cloned()
-        .ok_or_else(|| "engine returned no concrete automatic parameters".to_owned())?;
-    let Some(stack) = step
-        .parameters
-        .tree
-        .get_mut("stack")
-        .and_then(Value::as_array_mut)
-    else {
-        return Err("automaticAdjustment requires a darktable stack".to_owned());
-    };
-    replace_automatic_parameters(stack, &auto.operation, auto.multi_priority, params)?;
-    let registry = ModuleRegistry::new(ModuleAvailability::ready(), ModuleAvailability::ready());
-    registry
-        .validate_saved_parameters(&Parameters {
-            module: step.module.as_str().to_owned(),
-            version: step.parameters.schema_version.clone(),
-            tree: step.parameters.tree.clone(),
-        })
-        .map_err(|error| error.message)?;
-    Ok(())
-}
-
-pub(crate) fn replace_automatic_parameters(
-    stack: &mut Vec<Value>,
-    operation: &str,
-    multi_priority: i64,
-    params: Value,
-) -> Result<(), String> {
-    let mut matching_index = None;
-    for (index, entry) in stack.iter().enumerate() {
-        if entry.get("operation").and_then(Value::as_str) == Some(operation)
-            && entry
-                .get("multiPriority")
-                .and_then(Value::as_i64)
-                .unwrap_or(0)
-                == multi_priority
-        {
-            if matching_index.is_some() {
-                return Err("automaticAdjustment target instance is duplicated".to_owned());
-            }
-            matching_index = Some(index);
-        }
-    }
-    if let Some(index) = matching_index {
-        stack[index]["params"] = params;
-        return Ok(());
-    }
-    if matches!(operation, "exposure" | "channelmixerrgb") {
-        stack.push(json!({
-            "operation": operation,
-            "multiPriority": multi_priority,
-            "enabled": true,
-            "params": params,
-        }));
-        return Ok(());
-    }
-    Err("automaticAdjustment native entry is absent".to_owned())
 }
 
 pub(crate) async fn post_composable_edit_recipe(
     State(state): State<HttpState>,
     Path(photo_id): Path<String>,
     Json(body): Json<SaveBody>,
+) -> Response {
+    save_body(state, photo_id, body, None).await
+}
+
+async fn save_body(
+    state: HttpState,
+    photo_id: String,
+    body: SaveBody,
+    request_intent: Option<Value>,
 ) -> Response {
     let request_id = body.request_id.clone();
     let expected_recipe_revision = body.expected_recipe_revision.clone();
@@ -697,43 +574,216 @@ pub(crate) async fn post_composable_edit_recipe(
         .replay_composable_edit_recipe(mutation.clone())
         .await
     {
-        Ok(Some(outcome)) => return outcome_response(outcome),
-        Ok(None) => {}
-        Err(library_error) => {
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "storage",
-                library_error.to_string(),
+        Ok(Some(outcome)) => {
+            return outcome_response(
+                outcome,
+                &mutation.request_id,
+                &mutation.expected_source_revision,
             );
         }
+        Ok(None) => (),
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, "storage", e.to_string()),
     }
-    if let Err(admission) = validate_step_admission(&state, &mutation.recipe).await {
-        return error(admission.status, admission.code, admission.message);
-    }
-    if let Err(message) = compute_automatic_adjustment(&state, &mut mutation).await {
+    if mutation.automatic_adjustment.is_some() {
         return error(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "automatic_adjustment_failed",
-            message,
+            "unsupported_action",
+            "Generic automatic actions are unavailable for this adapter; use the full darktable namespace for darktable actions",
         );
     }
-    match state
+    if mutation.request_id.is_empty()
+        || mutation.request_id.len() > 128
+        || !mutation
+            .request_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Request identity is invalid",
+        );
+    }
+    let read = match state
         .application
         .library
-        .save_composable_edit_recipe(mutation)
+        .composable_edit_recipe_read(&mutation.photo_id)
         .await
     {
-        Ok(outcome) => outcome_response(outcome),
-        Err(LibraryError::Persistence(storage_error)) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "storage",
-            storage_error.to_string(),
+        Ok(Some(read)) => read,
+        Ok(None) => {
+            return error(
+                StatusCode::NOT_FOUND,
+                "unknown_photo",
+                "The Photo is not part of the Library",
+            );
+        }
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, "storage", e.to_string()),
+    };
+    let workspace = match state
+        .application
+        .workspaces
+        .lookup_photo(&mutation.photo_id)
+    {
+        Ok(Some(workspace)) => workspace,
+        Ok(None) => {
+            return error(
+                StatusCode::CONFLICT,
+                "workspace_unavailable",
+                "Open the Photo Workspace before saving an edit",
+            );
+        }
+        Err(e) => return error(StatusCode::CONFLICT, "workspace_unavailable", e.to_string()),
+    };
+    let directory = match state.application.workspaces.directory(&workspace.id) {
+        Ok(d) => d,
+        Err(e) => return error(StatusCode::CONFLICT, "workspace_unavailable", e.to_string()),
+    };
+    let mut owner = match film_state::FilmState::open(&directory) {
+        Ok(s) => s,
+        Err(e) => return error(StatusCode::CONFLICT, "state_unavailable", e),
+    };
+    let intent=request_intent.unwrap_or_else(||json!({"kind":"save","expectedRecipeRevision":mutation.expected_recipe_revision,"expectedSourceRevision":mutation.expected_source_revision,"recipe":recipe_json(&mutation.recipe)}));
+    match owner.replay(&mutation.request_id, &intent) {
+        Ok(Some(outcome)) => {
+            return outcome_response(
+                outcome,
+                &mutation.request_id,
+                &mutation.expected_source_revision,
+            );
+        }
+        Ok(None) => (),
+        Err(e) => return error(StatusCode::CONFLICT, "state_unavailable", e),
+    };
+    let current = match owner.recipe() {
+        Ok(Some(recipe)) => Some(recipe),
+        Ok(None) => read.recipe,
+        Err(e) => return error(StatusCode::CONFLICT, "state_unavailable", e),
+    };
+    if mutation.expected_recipe_revision.as_deref() != current.as_ref().map(|r| r.revision.as_str())
+    {
+        return outcome_response(
+            ComposableEditRecipeWriteOutcome::Conflict(current),
+            &mutation.request_id,
+            &mutation.expected_source_revision,
+        );
+    }
+    if let Err(e) = film_state::preserve_retained(current.as_ref(), &mutation.recipe) {
+        return error(StatusCode::UNPROCESSABLE_ENTITY, "unsupported_state", e);
+    }
+    if mutation
+        .recipe
+        .current_step()
+        .is_some_and(|s| s.module.as_str() == slipstream_processing::modules::DARKTABLE_MODULE)
+        && current.as_ref().and_then(|r| r.current_step_id.as_ref())
+            != mutation.recipe.current_step_id.as_ref()
+    {
+        return error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unsupported_state",
+            "Generic writes cannot change darktable selection; use the full darktable namespace",
+        );
+    }
+    let mut supported = mutation.recipe.clone();
+    supported.steps.retain(|s| {
+        s.module.as_str() == slipstream_processing::modules::SPEKTRAFILM_MODULE
+            && current
+                .as_ref()
+                .and_then(|r| r.steps.iter().find(|old| old.step_id == s.step_id))
+                != Some(s)
+    });
+    let mut input_leases = Vec::new();
+    for step in &mut supported.steps {
+        if let ProcessingInput::WorkspaceArtifact {
+            workspace_id,
+            artifact_id,
+            revision,
+            ..
+        } = &step.input
+        {
+            if workspace_id != &workspace.id {
+                return error(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "incompatible_input",
+                    "Film input must be selected from the same Photo Workspace",
+                );
+            }
+            let (lease, admitted) =
+                match state
+                    .application
+                    .workspaces
+                    .lease_input(workspace_id, artifact_id, revision)
+                {
+                    Ok(value) => value,
+                    Err(e) => {
+                        return error(StatusCode::CONFLICT, "artifact_changed", e.to_string());
+                    }
+                };
+            let actual: ImageContractBody =
+                match serde_json::from_value(admitted["imageContract"].clone()) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        return error(
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            "incompatible_input",
+                            e.to_string(),
+                        );
+                    }
+                };
+            let actual = match contract(actual) {
+                Ok(value) => value,
+                Err(e) => return error(StatusCode::UNPROCESSABLE_ENTITY, "incompatible_input", e),
+            };
+            let identity = |field: &str| {
+                admitted[field]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            };
+            let (Some(captured_workspace), Some(captured_artifact), Some(captured_revision)) = (
+                identity("workspaceId"),
+                identity("artifactId"),
+                identity("revision"),
+            ) else {
+                return error(
+                    StatusCode::CONFLICT,
+                    "artifact_changed",
+                    "Protected input admission has no complete binding",
+                );
+            };
+            if captured_workspace != workspace.id {
+                return error(
+                    StatusCode::CONFLICT,
+                    "artifact_changed",
+                    "Protected input admission changed the workspace",
+                );
+            }
+            step.input = ProcessingInput::WorkspaceArtifact {
+                workspace_id: captured_workspace,
+                artifact_id: captured_artifact,
+                revision: captured_revision,
+                contract: actual,
+            };
+            mutation
+                .recipe
+                .steps
+                .iter_mut()
+                .find(|saved| saved.step_id == step.step_id)
+                .expect("supported step belongs to submitted recipe")
+                .input = step.input.clone();
+            input_leases.push(lease);
+        }
+    }
+    if let Err(admission) = validate_step_admission(&state, &supported).await {
+        return error(admission.status, admission.code, admission.message);
+    }
+    match owner.settle(&mutation, current, intent) {
+        Ok(outcome) => outcome_response(
+            outcome,
+            &mutation.request_id,
+            &mutation.expected_source_revision,
         ),
-        Err(library_error) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "processing_recipe",
-            library_error.to_string(),
-        ),
+        Err(e) => error(StatusCode::CONFLICT, "state_conflict", e),
     }
 }
 
@@ -742,23 +792,130 @@ pub(crate) async fn post_composable_edit_recipe_rebind(
     Path(photo_id): Path<String>,
     Json(body): Json<RebindBody>,
 ) -> Response {
-    let mutation = RebindComposableEditRecipe {
-        photo_id,
-        request_id: body.request_id,
-        expected_recipe_revision: body.expected_recipe_revision,
-        new_source_revision: body.new_source_revision,
+    let historical = slipstream_core::RebindComposableEditRecipe {
+        photo_id: photo_id.clone(),
+        request_id: body.request_id.clone(),
+        expected_recipe_revision: body.expected_recipe_revision.clone(),
+        new_source_revision: body.new_source_revision.clone(),
     };
     match state
         .application
         .library
-        .rebind_composable_edit_recipe(mutation)
+        .replay_composable_edit_recipe_rebind(historical)
         .await
     {
-        Ok(outcome) => outcome_response(outcome),
-        Err(library_error) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "storage",
-            library_error.to_string(),
-        ),
+        Ok(Some(outcome)) => {
+            return outcome_response(outcome, &body.request_id, &body.new_source_revision);
+        }
+        Ok(None) => (),
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, "storage", e.to_string()),
     }
+    let intent = json!({"kind":"rebind","expectedRecipeRevision":body.expected_recipe_revision,"newSourceRevision":body.new_source_revision});
+    match state.application.workspaces.lookup_photo(&photo_id) {
+        Ok(Some(workspace)) => {
+            let directory = match state.application.workspaces.directory(&workspace.id) {
+                Ok(v) => v,
+                Err(e) => {
+                    return error(StatusCode::CONFLICT, "workspace_unavailable", e.to_string());
+                }
+            };
+            let owner = match film_state::FilmState::open(&directory) {
+                Ok(v) => v,
+                Err(e) => return error(StatusCode::CONFLICT, "state_unavailable", e),
+            };
+            match owner.replay(&body.request_id, &intent) {
+                Ok(Some(outcome)) => {
+                    return outcome_response(outcome, &body.request_id, &body.new_source_revision);
+                }
+                Ok(None) => (),
+                Err(e) => return error(StatusCode::CONFLICT, "state_unavailable", e),
+            };
+        }
+        Ok(None) => (),
+        Err(e) => return error(StatusCode::CONFLICT, "workspace_unavailable", e.to_string()),
+    }
+    let read = match read_recipe(&state, &photo_id).await {
+        Ok(Some(read)) => read,
+        Ok(None) => {
+            return error(
+                StatusCode::NOT_FOUND,
+                "unknown_photo",
+                "The Photo is not part of the Library",
+            );
+        }
+        Err(e) => return error(StatusCode::CONFLICT, "state_unavailable", e),
+    };
+    let Some(mut recipe) = read.recipe else {
+        return error(
+            StatusCode::CONFLICT,
+            "recipe_conflict",
+            "No saved recipe is available",
+        );
+    };
+    if recipe.revision != body.expected_recipe_revision {
+        return outcome_response(
+            ComposableEditRecipeWriteOutcome::Conflict(Some(recipe)),
+            &body.request_id,
+            &body.new_source_revision,
+        );
+    }
+    if !recipe.steps.iter().any(|s| {
+        s.module.as_str() == slipstream_processing::modules::SPEKTRAFILM_MODULE
+            && matches!(s.input, ProcessingInput::Original { .. })
+    }) {
+        return error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unsupported_state",
+            "No supported Original-bound state is eligible; darktable rebinding uses the full darktable namespace",
+        );
+    }
+    let admitted = match state
+        .application
+        .workspaces
+        .prepared_input(&photo_id, &body.new_source_revision)
+    {
+        Ok(v) => v,
+        Err(e) => return error(StatusCode::CONFLICT, "source_unavailable", e.to_string()),
+    };
+    let parsed: ImageContractBody = match serde_json::from_value(admitted["imageContract"].clone())
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "incompatible_input",
+                e.to_string(),
+            );
+        }
+    };
+    let image = match contract(parsed) {
+        Ok(v) => v,
+        Err(e) => return error(StatusCode::UNPROCESSABLE_ENTITY, "incompatible_input", e),
+    };
+    for step in &mut recipe.steps {
+        if step.module.as_str() == slipstream_processing::modules::SPEKTRAFILM_MODULE
+            && matches!(step.input, ProcessingInput::Original { .. })
+        {
+            step.input = ProcessingInput::WorkspaceArtifact {
+                workspace_id: admitted["workspaceId"].as_str().unwrap_or_default().into(),
+                artifact_id: admitted["artifactId"].as_str().unwrap_or_default().into(),
+                revision: admitted["revision"].as_str().unwrap_or_default().into(),
+                contract: image.clone(),
+            };
+        }
+    }
+    let wire = recipe_json(&recipe);
+    let body: SaveBody = match serde_json::from_value(
+        json!({"requestId":body.request_id,"expectedRecipeRevision":body.expected_recipe_revision,"expectedSourceRevision":body.new_source_revision,"currentStepId":wire["currentStepId"],"steps":wire["steps"]}),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_recipe",
+                e.to_string(),
+            );
+        }
+    };
+    save_body(state, photo_id, body, Some(intent)).await
 }

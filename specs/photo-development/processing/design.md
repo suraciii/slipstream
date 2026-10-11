@@ -1,189 +1,206 @@
 # Photo Processing Modules
 
-An Edit Preview and a materialized image serve different purposes. Slipstream
-must run exactly the selected Processing Engine against the selected input and
-publish only validated Export output. This boundary is about one invocation
-and Artifact transfer; it does not create a user-visible processing pipeline.
+An independently usable photo tool must own its editing state and native engine
+contract. Slipstream should discover completed files and optionally invoke that
+tool, rather than become its parameter database or impose a pipeline. A bounded
+Preview and a full-resolution materialized output remain different requests.
 
-[Photo Development](../spec.md) owns user-visible behavior.
-[Photo Development Architecture](../design.md) owns guarded editing,
-source resolution, Export lifecycle, and publication.
-[Local Photo Executor](execution.md) owns execution containment and
-settlement. This document owns the Engine boundary. Discovery does not widen
-the qualified input, Control, output, or resource combinations admitted by a
-verified bundle.
+[Photo Workspace](../workspace/design.md) owns the real directory and generic file
+index. [Photo Development Architecture](../design.md) owns integration,
+cutover and supervised work. [Local Photo Executor](execution.md) owns
+execution lifetime. This document owns tool invocation and explicit composition;
+[darktable CLI](../darktable/cli.md) owns exact command grammar.
 
 ## Model and Ownership
 
-A Processing Module is the service-internal adapter boundary for one Processing
-Engine. darktable and standalone SpektraFilm are peer Engines. SpektraFilm here
-means the standalone runtime, not a darktable image-operation module.
+A Processing Module is the service-internal integration boundary for one
+independent Processing Engine and its input, persistent state, semantic schema,
+resources, and output contract. darktable and standalone SpektraFilm are peer
+tools; SpektraFilm is not a required darktable operation or pipeline suffix.
+A tool may be used without Slipstream. A Processing Step is the internal record
+of one captured tool invocation against an identified file and state revision,
+not a required centralized database parameter record or user-visible stage.
 
-An Edit State contains the current Engine, explicit input identity, qualified
-Controls, and guarded edit revision. A service may persist a complete internal
-snapshot of that state for recovery and replay. It must not expose that
-snapshot as a second daily editing object.
+Tool-owned Edit State directories retain complete editing intent and revisions.
+Slipstream indexes their pointers and observed availability without duplicating
+mutable parameters. Separate state directories represent independent edits.
+The browser selects one edit/input; changing selection does not rewrite state.
+A compatible existing recipe surface may project these facts. Unsupported
+historical intent remains inspectable under the cutover contract rather than
+being coerced into a runnable new state.
 
-One invocation selects one Engine, one input, and one captured set of Controls.
-The Engine owns its parameter mapping and private intermediate state. Slipstream
-owns Photo identity, saved Edit State, source guards, input leases, serialized
-heavy-work admission, cancellation, deadlines, output validation, and
-publication. The Engine cannot resolve Library paths, choose another Engine,
-publish an Export, change an Original, or schedule a dependent invocation.
+The retained Film adapter owns `.edits/spektrafilm/adapter/state.json` inside
+the Photo Workspace. It atomically stores the recipe and exact request replay
+receipts, while the compatibility recipe response projects a content-derived
+revision. External state changes therefore invalidate stale guards. Saves do
+not duplicate mutable parameters into Library metadata. Historical darktable
+and unsupported steps must be echoed unchanged; omissions and generic writes
+to those steps are refused. Explicit darktable migration reviews the complete
+retained parameter tree against its exact protected Original capture through
+the versioned tool importer, preserving historical identifiers and bytes.
 
-A Processing Artifact is an immutable Export result. Its provenance identifies
-the input, Engine, concrete Controls, bundle/schema, output contract, and
-validated byte identity. Another service may consume the Artifact as an
-explicit input and owns its own Edit State. A later Export creates a new
-Artifact; no mutable latest-result relationship is implied.
+A Workspace Artifact is a completed file with observed content evidence. A
+Processing Artifact additionally has verified invocation provenance and actual
+image-contract facts. Folder names and file extensions cannot prove it. A later
+tool binds explicitly to one completed input revision, never an upstream
+"latest result". Changed upstream edits and new exports leave that binding intact.
 
-## Agent Stateful Surface
-
-The Agent-facing Edit State is the current service state, not a projection over
-a complete parameter snapshot. Stateful edits use one canonical Control grammar
-and the Engine-owned mapping. The current MVP qualifies only
-darktable.exposure.ev in the 0..=1 EV range.
-
-Discovery publishes Controls with their value schema, defaults, reset values,
-readability, editability, executability, and refusal reason. A discoverable
-Control is not automatically executable: white balance, color calibration,
-highlight recovery, and mutable SpektraFilm Controls remain explicit refusals
-until their native mapping and qualification evidence are complete. An
-unsupported request leaves the retained Edit State unchanged.
-
-Complete native parameter trees, compatibility snapshots, and legacy
-processing-recipe routes remain outside the normal Agent surface. They may be
-retained during migration, but they do not define the product model.
+The tool owns schema validation, local state locks/revisions, native defaults,
+resource versions, child lifetime and filesystem completion. Slipstream owns
+Photo/workspace resolution, indexing, access and admission/receipts for runs it
+starts. No tool callback, registration SDK, Slipstream crate or HTTP dependency
+is needed to write a file that becomes visible in a workspace.
 
 ## Interface and Discovery
 
-The module boundary has one execution operation and one discovery operation:
+The durable boundary is file-based: inspect a tool and selected input/state,
+mutate its persistent state, or render a captured state into the workspace.
+Exact command carriers are owned by the tool's grammar. Slipstream invokes a
+permitted executable with an argument vector, accessible absolute paths and
+bounded structured results. It does not expose arbitrary shell execution.
+Standalone invocation accepts caller-owned accessible paths and requires no
+Photo IDs or server task lifecycle.
 
-```text literal
-run(module, input, parameters) -> result | error
-describe(module) -> module-description | error
-```
+Read-only discovery reports the tool/bundle/schema identity, input/output
+contracts, finite limits, image-context initialization requirements, capability
+availability and refusal reasons. Missing tools are independent: failure of
+SpektraFilm does not disable darktable or browsing. Readable, writable and
+executable capabilities are separate. Introspection alone grants no execution
+qualification. Actual input, parameter, output and resource combinations must
+match the qualified bundle.
 
-`describe` is read-only. It returns only the selected module's bounded
-description: admitted input and output contracts, the module-owned parameter
-schema and versions, finite limits, and current availability/refusal reasons.
-It does not return engine history, catalog state, executable data, or a host
-path. A description is not product admission; the requested invocation must still
-pass the service's source, bundle, qualification, and resource guards.
-
-`run` selects one module and one input. The input is the confined read-only input
-provided by Slipstream, with its verified identity and concrete image contract;
-it is not an arbitrary client pathname. `parameters` is the selected module's
-complete, bounded, versioned parameter tree. Output format, precision, color
-space, transfer function, geometry, and encoding options are ordinary parameters
-of that tree. There is no additional output argument or host-wide image-option
-schema. `result` identifies one private completed output and its actual image
-facts, or a module-specific refusal/failure. It is not a published artifact.
-Slipstream validates it before delivery or publication.
-
-Discovery describes each module's supported inputs, outputs, parameter schema,
-defaults, versions, finite limits, and availability with refusal reasons.
-Availability belongs to each module: for example, darktable may be ready while
-SpektraFilm is unavailable. There is no separate Film capability. Input support,
-qualified parameter combinations, and current resource admission are distinct
-from engine availability; a ready module does not imply that every Photo or
-invocation is admitted.
-
-The host must preserve module-owned trees, not flatten them into a shared map,
-merge schemas across modules, or discard unknown fields to obtain a runnable
-request. The adapter validates its own schema and the complete combination
-before computation. Unknown or unsupported versions and combinations fail
-explicitly. A discoverable engine control does not grant product admission:
-Slipstream admits only the input, parameter, output, and resource combinations
-qualified for the selected bundle. Neither discovery nor dynamic parameters
-permit arbitrary engine history, catalog access, commands, or executable data.
-Discovery and execution use the same pinned adapter/schema identity; a changed
-bundle requires a fresh availability and admission check.
+State and resources use tool-owned versioned semantic schemas. No shared flat
+parameter map, merged module schema or generic output-options language is
+introduced. Unsupported fields or versions must be preserved for inspection
+and refused for execution, not dropped to make a request runnable. A changed
+engine/schema requires fresh qualification; it cannot reinterpret an old revision.
 
 ### Concrete Module Shapes
 
-For darktable, ordered image-operation instances remain an ordered stack.
-An entry preserves `operation`, `multi_priority`, `enabled`, and structured
-`params` or a versioned parameter blob. Parameter version and explicit
-`before`/`after` ordering constraints remain module-owned when supported.
-Repeated operations must not collapse into one key. Native introspection may
-describe recursive structs, arrays, enums, and scalars without making every
-operation or blob admissible. The native integration boundary selects the
-qualified subset; this module contract does not expose catalog or history tools.
+Darktable state retains ordered Operation Instances with stable edit-local IDs,
+native operation/version, enabled state, recursive parameters, legal order and
+blend/mask references. Native stack indexes and `multi_priority` are not public
+identity. Arrays, structures, strings, curves, geometry, masks, actions and
+output profile/precision/encoding remain complete schema values. C layouts and
+engine history stay private to the native bridge. General editing is not reduced
+to exposure and as-shot WB; custom camera WB remains independently qualified.
 
-Standalone SpektraFilm retains its runtime's grouped parameters, including
-camera, enlarger, scanner, film/print rendering, and input/output settings.
-Those groups are not darktable stack entries. The adapter uses the pinned
-standalone simulation API and validates its own input/output encoding and
-spatial/stochastic behavior. No darktable operation is inserted to emulate
-standalone SpektraFilm.
+Read-only inspection can initialize a prospective baseline in private engine
+state without saving an edit. Explicit open/create atomically installs an
+input-bound baseline; partial mutations preserve omitted settings and validate
+complete resulting relationships. Multiple states require an explicit target;
+no newest-edit, newest-artifact or unrelated Web selection default is inferred.
+Tool-local history and exact replay own state recovery, shared by Web and CLI.
 
-The fixed standalone Film adapter publishes every complete configuration group as a
-required property with its pinned `const` value in `parameterSchema`. Callers
-construct the executable default tree from those values. Missing required groups
-are structurally invalid; execution with changed recipe values is refused before
-engine work. Structurally valid unqualified values remain saved intent. Bundle
-verification also compares the runtime-emitted defaults with that same
-pinned tree. Film input admission uses the concrete linear ProPhoto float32 TIFF
-contract and the runtime's geometry bounds, including portrait handoffs, rather
-than requiring the dimensions of a discovery example. Its advertised 900,000 ms
-deadline is the same bound enforced for both Preview and Export; explicit caller
-cancellation remains available.
+Presets/Styles have immutable versions, explicit fixed versus target-initialized
+scope and merge/update versus replace semantics. Application materializes
+edit-local instances and masks with typed reference mappings. ICC/LUT/raster-mask
+resources have immutable typed versions, bounded import validation and content
+identities. Retained state/work protects dependencies. Missing external bytes
+remain disclosed; resource staging and semantic validation belong to the tool.
+[darktable Editing](../darktable/editing.md) owns the capability details.
 
-These shapes are examples of module-owned schemas, not a second universal
-parameter language. Module versions and qualified mappings belong to their
-adapters and bundles.
+Standalone SpektraFilm retains its grouped camera, enlarger, scanner, film/print
+and input/output settings. Its fixed qualified configuration retains the pinned
+complete required parameter groups: missing groups are structurally invalid and
+changed fixed recipe values are refused for execution. Unsupported saved intent
+is preserved, not substituted. Runtime-emitted defaults must match the pinned
+tree. Admission uses actual linear ProPhoto float32 TIFF and qualified geometry,
+including portrait inputs, rather than discovery-example dimensions. Its
+advertised 900,000 ms deadline applies to Preview and Export with explicit
+cancellation. These are concrete tool contracts, not a universal parameter DSL.
 
 ## Preview and Export
 
-### Bounded Edit Preview
+### Bounded Current-Step Preview
 
-An Edit Preview executes exactly one current Edit State invocation against its
-captured input and Controls. It must not invoke another Engine, prepare an
-upstream input, or produce a full-resolution handoff. A missing compatible
-input is a refusal. Camera Preview cannot substitute for the requested result.
+Preview executes only the selected edit and captured revision with its explicit
+input. It never runs another tool to prepare input, performs a hidden full-size
+handoff, or substitutes the Camera Preview. Missing compatible input is a refusal.
+The geometry is finite and qualified; full-source decoding memory is admitted
+separately. Temporary intermediates remain private and bounded.
 
-The Preview has a finite geometry and resource bound. The adapter computes the
-selected Engine's result at that admitted geometry and may apply a separately
-identified display conversion for delivery. It must not silently change
-precision, processing quality, effects, randomness policy, or encoding
-defaults. A Preview does not establish full-resolution output equivalence.
+State captures intended Export settings; Preview records its exact qualified
+geometry/display derivation without altering saved precision, effects, quality,
+randomness policy or output intent. Reduced simulation does not claim spatial
+pixel equivalence to a downsampled full-size result. Comparison fixes input,
+tool, geometry, bundle and display conversion while selecting initialized
+baseline or retained revision operands; unavailable defaults refuse comparison.
 
-Preview identity covers the input identity, Engine, Control values, rendition
-geometry, bundle, schema, and display conversion. Preview output is ephemeral:
-it cannot become a later service input, an Export, or a downloadable
-full-resolution handoff. A later accepted edit makes the previous Preview
-stale. Late, cancelled, or obsolete results must not replace the current view.
+A completed Preview is an ordinary viewable/downloadable workspace image with
+its rendition provenance. Downloadability does not establish high-precision,
+full-resolution or scene-linear downstream compatibility. Continue Processing
+is offered only under the workspace compatibility contract; an explicitly
+accepted reduced-quality image flow must disclose those limits. A completed
+Export may supply an exact matching bounded display rendition without another
+engine invocation. The camera Preview remains a separate reference.
 
-### Explicit Export
+The standalone Film adapter's completed Preview receipt establishes its bounded
+PNG display contract after exact byte and decoded geometry checks; generic PNG
+discovery alone does not establish color or downstream compatibility. Its
+Finished JPEG additionally requires the pinned embedded sRGB profile. Workspace
+publication retains the adapter's exact output contract, including writer
+encoding, rather than substituting generic file-discovery encoding labels.
 
-Export is a separate explicit execution of the current Edit State. Acceptance
-captures the confirmed input identity, Engine, concrete Controls, processing
-bundle, and intended output contract. It does not capture whichever settings
-happen to be current when queued work starts.
+### Explicit Materialization
 
-The Engine reruns the captured invocation with the admitted output contract.
-Slipstream validates actual type, geometry, precision, color and transfer
-contract, metadata, byte size, and content digest before publishing one
-immutable Processing Artifact. Only a complete validated Artifact can be
-handed to another service. Export must not upscale a Preview, reuse display
-bytes as a scene-referred input, invoke another Engine, or silently reduce
-output dimensions to fit.
+Export captures confirmed input byte identity, canonical state revision/parameter
+digest, bundle/schema, resources and intended output contract. Later mutations
+cannot alter it. Standalone Export is a synchronous local process; Web may queue
+and supervise that same executable with its own run receipt. A bounded Preview
+success is not proof of full-resolution qualification or capacity.
 
-The Artifact provenance identifies the input identity, Engine, Controls,
-bundle/schema, output contract, request identity, and validated byte identity.
-The receiving service validates the concrete image contract before creating its
-own Edit State. It does not read or mutate the upstream Edit State.
+The tool revalidates input stability and full-size resource admission, processes
+the selected state, then validates actual output type, dimensions, precision,
+color/transfer, metadata, bytes and digest. It writes a unique private temporary
+file, closes it and atomically installs the final path without overwrite under
+[Photo Development Architecture](../design.md#export-execution-and-recovery).
+Cancellation or failure offers no partial output and preserves earlier files.
+No callback/manifest/commit is required for generic workspace discovery. Verified
+structured completion may enrich the index with Processing Artifact provenance.
 
-Export state is queued, running, succeeded, failed, or cancelled. Accepted
-work survives browser departure and restart under the existing durable
-settlement rules. A lost response is an uncertain outcome; the client replays
-the exact request identity and does not start a second invocation.
+For standalone Film, known minimum live processing memory above the effective
+finite allowance refuses admission before expensive work. Missing/unbounded
+allowance also refuses. Passing this lower bound does not establish complete
+resource qualification. Already completed files and retained receipts remain
+inspectable after resource policy changes.
 
-A module that does not admit the input's actual contract must refuse it.
-Slipstream must not insert an implicit conversion, silently reinterpret samples,
-or use a latest result in place of an explicit Artifact. Module failure leaves
-the confirmed Edit State and earlier Artifacts unchanged.
+## Identity, Compatibility, and Failure
+
+Identity includes captured input content evidence, edit revision and complete
+parameter digest, tool/bundle/schema, resource versions, exact invocation
+geometry/settings and display transform. Photo identity/source revision are
+provenance of the initial snapshot, not a live dependency once stable bytes have
+been installed. Original refresh never retargets an existing state.
+
+Browser canvas ownership compares full identity rather than completion order.
+Old revisions become stale, not relabeled current. Independent completed files
+can coexist, including same-directory concurrent outputs. Only exact validated
+invocation/file evidence can settle a supervised run; an unmanifested external
+output is a generic file and cannot be attributed by timestamp or newest name.
+
+Compatibility checks actual color/profile, transfer, precision, geometry and
+qualified settings, not extension alone. [Development Color Pipeline](color.md)
+owns the concrete contracts. The service inserts no implicit conversion or
+upstream rerun. The caller may explicitly render a compatible conversion/output
+and select that completed file as a new input. Changed input bytes invalidate
+old evidence and require explicit rebind; no implicit copy each iteration.
+
+Every invocation preserves read-only Original/XMP and bound input, finite
+memory/CPU/threads/disk, deadlines and cancellation. Uncertain local actions
+are reconciled through exact request replay, not guessed from visible settings.
+Service restart reconciles its own runs; independent CLI processes retain their
+own lifetime and effects. Workspace reconciliation discovers their completed
+files without inventing server task state.
+
+## Example
+
+One explicit composition is: workspace RAW snapshot -> darktable preview and
+Export -> completed scene-linear TIFF -> explicitly selected SpektraFilm input
+-> SpektraFilm preview and Export. All completed files remain in the workspace.
+The user can download any completed image, stop after darktable, select another
+compatible tool, or create another state directory. Changing darktable state
+later does not change the selected TIFF or the Film state.
 
 ## Options
 
@@ -195,37 +212,27 @@ requiring a workflow engine or cross-service recipe.
 
 ### Rejected: Persistent Cross-Service Composition
 
-A cross-service chain would make Slipstream own downstream dependencies,
-branching, reruns, and migration of a plan that the product does not promise.
-The Artifact contract already transfers the materialized result.
+Tool-owned file state and completed inputs make independent execution,
+composition and failure ownership clear. Slipstream can supervise the same tool
+without an additional editing store or per-iteration transfer.
 
 ### Rejected: Fixed darktable-to-SpektraFilm Pipeline
 
-A fixed pair invokes work the caller did not select and makes one service own
-another service's lifecycle. Each service must remain independently callable.
+A fixed pair invokes unselected work and makes interactive editing depend on a
+full-size upstream handoff. It cannot represent independent or repeated tools.
 
 ### Rejected: Workflow DSL and Implicit Conversion Registry
 
-A graph planner adds ordering, conversion, partial-execution, and recovery
-semantics not needed for caller-selected invocations. A common raster hierarchy
-would also obscure the concrete color and precision contracts already required.
+A scheduler/plugin framework adds planning, registration and recovery semantics
+unneeded for explicit file selections. A universal raster/parameter schema also
+obscures concrete color and native version contracts.
 
 ## Verification
 
-Module implementations must exercise these consumer-visible boundaries:
-
-- discovery preserves each module's schema and reports independent availability;
-- described but unqualified controls cannot cross product admission;
-- unsupported input/parameter/output combinations fail before computation;
-- bounded Preview invokes one module and produces no full-size handoff;
-- Export is separately admitted and publishes only validated complete output;
-- explicit Artifact transfer preserves the receiving service's input contract;
-- changed input, parameters, geometry, bundle, or display conversion changes
-  Preview identity, and out-of-order completions never replace current output;
-- upstream edits preserve completed Artifact bindings and earlier Exports; and
-- Original invariance, deadlines, cancel/complete races, uncertain outcomes,
-  finite resource rejection, and publication recovery hold for every invocation.
-
-Example and contract review do not qualify a module or change deployment
-admission. Real-engine evidence remains scoped to the tested module, bundle,
-input class, parameters, geometry, output contract, and execution environment.
+Future implementation evidence must show independent file/state invocation,
+same-state supervised Web/CLI effects, complete general edits and bounded
+single-tool Preview versus separately admitted full-resolution Export. Cover
+schema/refusal honesty, resource versions, exact replay, stable identities,
+input changes, no-overwrite completion, partial output, concurrent provenance,
+and explicit compatible file handoff. Discovery or a synthetic small image
+cannot qualify real-engine color, full-size processing or resource limits.

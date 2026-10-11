@@ -49,7 +49,8 @@ COPY crates crates
 COPY compatibility compatibility
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release --locked -p slipstream-server \
-    && cargo build --release --locked -p slipstream-processing --bin slipstream-mcp-supervisor
+    && cargo build --release --locked -p slipstream-processing --bin slipstream-mcp-supervisor \
+    && cargo build --release --locked -p darktable-edit --bins
 
 FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b AS runtime-rootfs
 
@@ -72,6 +73,8 @@ RUN --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
 
 COPY --from=rust-build /src/target/release/slipstream-server /usr/local/bin/slipstream-server
 COPY --from=rust-build /src/target/release/slipstream-mcp-supervisor /usr/local/bin/slipstream-mcp-supervisor
+COPY --from=rust-build /src/target/release/darktable-edit /usr/local/bin/darktable-edit
+COPY --from=rust-build /src/target/release/darktable-edit-supervisor /usr/local/bin/darktable-edit-supervisor
 COPY --from=rust-build /opt/slipstream-libraw/lib/libraw_r.so.25.0.0 /usr/local/lib/slipstream/libraw_r.so.25
 COPY --from=rust-build /opt/slipstream-libraw/share/doc/libraw/ /usr/share/doc/slipstream-libraw/
 COPY --from=web-build /src/apps/web/dist /app/web
@@ -92,6 +95,7 @@ ENV SLIPSTREAM_LIBRARY_ROOT=/originals \
     SLIPSTREAM_STATE_DIRECTORY=/state \
     SLIPSTREAM_CACHE_DIRECTORY=/cache \
     SLIPSTREAM_WEB_ROOT=/app/web \
+    DARKTABLE_EDIT_BUNDLE=/opt/darktable-edit \
     SLIPSTREAM_HOST=0.0.0.0 \
     SLIPSTREAM_PORT=3000 \
     LD_LIBRARY_PATH=/usr/local/lib/slipstream \

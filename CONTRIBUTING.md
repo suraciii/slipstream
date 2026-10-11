@@ -146,6 +146,11 @@ Its `test:fast` stage includes the shared static checks, Web unit tests, all
 repository tooling and Rust checks, RAW discovery, and the browser suite. The
 browser stage owns the production build; the gate does not build again after it.
 
+The GitHub Actions gate runs as the runner user in a systemd scope with a 6 GiB
+memory limit. Film admission requires this verifiable finite environment; an
+unbounded host refuses processing. For local processing checks, run the gate in
+a finite container or systemd scope sized for the qualified fixture.
+
 `check:fsd` parses the Web TypeScript project and enforces the current FSD
 boundary: app and page public APIs, downward dependencies, slice and segment
 ownership, resolvable internal imports, and runtime-cycle freedom. `test:fsd`
@@ -255,26 +260,42 @@ SLIPSTREAM_ILCE7CM2_SAMPLE=/absolute/path/to/_DSC1891.ARW \
 This test checks the configured sample digest, derived JPEG dimensions, and
 unchanged Original bytes and filesystem metadata. It does not ship the photo.
 
-The opt-in processing smoke needs the sample and the shared local Photo
-Development inputs, so it runs outside `test:raw` and skips with the
-missing-variable reason wherever the host has an incomplete configuration:
+The opt-in processing smoke needs the explicit RAW sample and the independent
+darktable tool installed beside its supervisor with a qualified native bundle.
+It runs outside `test:raw` and skips with the missing-variable reason when the
+host has incomplete configuration. Build both executables from the same checkout:
+
+```sh
+cargo build --locked -p darktable-edit --bins
+```
+
+The service selects `DARKTABLE_EDIT_BINARY` explicitly or finds the executable
+beside the server, then on `PATH`. Its supervisor must remain beside the tool.
+`DARKTABLE_EDIT_BUNDLE` points to the qualified independent `edit-manifest.json`
+bundle root, such as `/opt/darktable-edit` in the built photo image. The native
+editing smoke requires only the RAW sample and these two tool environment values.
+For a local native installation, install the pinned [output ICC assets](tools/processing/README.md#build)
+before discovery/manifest generation so discovery and rendering use identical
+deterministic profile bytes.
 
 ```sh
 SLIPSTREAM_RAW_SAMPLE=/absolute/path/to/sample.ARW \
-SLIPSTREAM_PHOTO_DEVELOPMENT=enabled \
-SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY=/absolute/path/to/photo-bundle \
-SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES=<finite Development TIFF allowance> \
+DARKTABLE_EDIT_BINARY="$PWD/target/debug/darktable-edit" \
+DARKTABLE_EDIT_BUNDLE=/absolute/path/to/independent-darktable-bundle \
 bun x playwright test --grep real-processing --workers=1
 ```
 
-It carries the sample through a selected darktable Processing Step in the real
-browser: a completed exposure action is autosaved, an explicit float32 linear
-ProPhoto TIFF Export is settled and downloaded, and reopening restores the
-confirmed recipe and retained output. A second client conflict is recovered
-with `Use saved recipe`. It checks the sample, its isolated Library copy, and
-the exercised same-basename external XMP sidecar for unchanged digests and
-metadata. Qualification of a later standalone SpektraFilm step requires an
-explicit retained artifact input and its own finite resource evidence.
+It opens the Photo Workspace in the real browser and explicitly starts darktable
+editing against its retained input. A native-discovered numeric control saves
+canonical tool state; explicit Preview and Export use that saved edit and expose
+completed workspace files. Reloading preserves the selected edit and retained
+output. It checks the isolated Library Original and same-basename external XMP
+sidecar for unchanged digests and metadata. This smoke does not establish general
+editing or conflict coverage. The independent CLI workspace acceptance separately
+exercises export before preview and arbitrary local-file execution; complete Issue
+#509 acceptance requires the recorded general editing and restore evidence.
+Qualifying a subsequent SpektraFilm stage requires an explicitly selected completed
+workspace TIFF with a compatible inspected contract and its own finite resources.
 
 The opt-in [development qualification harness](tools/development/README.md)
 exercises pinned darktable and Spektrafilm processes in an isolated CPU container.
