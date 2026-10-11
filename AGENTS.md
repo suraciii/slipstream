@@ -21,7 +21,7 @@
 
 - Read this file first, then [`CONTEXT.md`](CONTEXT.md).
 - Before implementing or reviewing a behavior change, read the governing Issue and use the [`specs/` index](specs/README.md) to find and read the affected behavior contracts.
-- When work changes boundaries, ownership, lifecycle, data contracts, ordering, or failure behavior, also read the affected design and named specialist contracts linked from the index and capability documents.
+- When work changes boundaries, ownership, lifecycle, data contracts, ordering, or failure behavior, also read the affected design and named specialist contracts linked from the index and owning contracts.
 - Before creating or changing a contract, follow [`specs/AGENTS.md`](specs/AGENTS.md). Before changing usage or installation guidance, follow [`docs/AGENTS.md`](docs/AGENTS.md).
 - Follow [Language and Writing](CONTRIBUTING.md#language-and-writing) for project artifacts, including Issues, pull requests, and commits.
 - Keep this file limited to repository-wide rules. Put scoped guidance beside the files it governs.
