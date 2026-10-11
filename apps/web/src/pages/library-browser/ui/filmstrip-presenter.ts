@@ -1,3 +1,5 @@
+import "./thumbnail-placeholder.css";
+
 export type FilmstripPhotoViewModel = Readonly<{
   id: string;
   available: boolean;
@@ -196,12 +198,42 @@ export function createFilmstripPresenter(
     }
     const image = document.createElement("img");
     image.alt = "";
-    image.loading = "lazy";
+    image.loading = "eager";
     image.fetchPriority = "low";
     image.decoding = "async";
     image.draggable = false;
     image.className = "thumbnail";
-    button.append(image);
+    image.hidden = true;
+    const placeholder = document.createElement("span");
+    placeholder.className = "thumbnail-placeholder";
+    placeholder.setAttribute("aria-hidden", "true");
+    button.append(image, placeholder);
+    let thumbnailState: "unavailable" | "failed" | undefined;
+    const presentThumbnail = (): void => {
+      placeholder.hidden = !image.hidden;
+      const status = result.deliveryFailed
+        ? "Thumbnail delivery failed"
+        : thumbnailState === "failed"
+          ? "Thumbnail failed"
+          : thumbnailState === "unavailable"
+            ? "Thumbnail unavailable"
+            : photo.preview.state === "failed"
+              ? "Preview failed"
+              : photo.preview.state === "unavailable"
+                ? "Preview unavailable"
+                : photo.preview.state === "inspection-pending"
+                  ? "Inspection pending"
+                  : "Loading thumbnail…";
+      placeholder.textContent = status;
+      button.setAttribute(
+        "aria-label",
+        [
+          `Photo ${cell.index + 1} of ${total}`,
+          ...(photo.originalFilename ? [photo.originalFilename] : []),
+          ...(image.hidden ? [status] : []),
+        ].join(" — "),
+      );
+    };
     if (photo.selectionState !== "unflagged") {
       const badge = document.createElement("span");
       badge.className = `cell-state ${photo.selectionState}`;
@@ -209,13 +241,7 @@ export function createFilmstripPresenter(
       button.append(badge);
     }
     if (cell.current) button.setAttribute("aria-current", "true");
-    button.setAttribute(
-      "aria-label",
-      [
-        `Photo ${cell.index + 1} of ${total}`,
-        ...(photo.originalFilename ? [photo.originalFilename] : []),
-      ].join(" — "),
-    );
+    presentThumbnail();
     button.title = [
       selectionLabel(photo.selectionState),
       photo.rating === 1 ? "1 star" : `${photo.rating} stars`,
@@ -232,18 +258,22 @@ export function createFilmstripPresenter(
           image,
           (failed) => {
             result.deliveryFailed = failed;
+            if (!failed) thumbnailState = undefined;
             result.signature = cellSignature(cell, total, failed);
+            presentThumbnail();
           },
-          () => {
+          (state) => {
+            thumbnailState = state;
             result.deliveryFailed = false;
             result.signature = cellSignature(cell, total, false);
+            presentThumbnail();
           },
         ),
       };
       result.thumbnail = binding;
       thumbnails.bind(binding);
     }
-    result.signature = cellSignature(cell, total, false);
+    result.signature = cellSignature(cell, total, result.deliveryFailed);
     return result;
   };
 

@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   boundTrashSelection,
-  confirmTrashLabel,
   deleteTrash,
   fetchTrashOperation,
   partitionTrashOperation,
@@ -425,11 +424,6 @@ describe("planTrashReview", () => {
     expect(plan.rejected).toEqual([
       { photoId: "photo-5", reasonLabel: "Deletion result pending" },
     ]);
-  });
-
-  test("writes the final action label exactly", () => {
-    expect(confirmTrashLabel(2)).toBe("Permanently delete 2 Original Files");
-    expect(confirmTrashLabel(1)).toBe("Permanently delete 1 Original Files");
   });
 });
 

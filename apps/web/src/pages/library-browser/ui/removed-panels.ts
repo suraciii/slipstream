@@ -132,6 +132,7 @@ export type TrashOutcomeViewModel =
 /// the facts the Grid and Photo View already present, so the Photographer
 /// recognizes what is recoverable before restoring it.
 export type RemovedPanelViewModel = Readonly<{
+  status: "loading" | "ready" | "failed";
   start: number;
   total: number;
   limit: number;
@@ -238,6 +239,7 @@ export type RemovedPanelsOptions = Readonly<{
   gridThumbnailTarget: (
     image: HTMLImageElement,
     setDeliveryFailed: (failed: boolean) => void,
+    setThumbnailState?: (state: "unavailable" | "failed") => void,
   ) => GridThumbnailTarget;
 }>;
 
@@ -566,14 +568,22 @@ export function createRemovedPanels({
   };
   const presentRemovedPanel = (model: RemovedPanelViewModel) => {
     releaseRemovedRows();
+    const ready = model.status === "ready";
     const shown = Math.min(model.total, model.start + model.items.length);
     removedStatus.textContent =
-      model.total === 0
-        ? "Trash is empty."
-        : `${formatPhotoCount(model.total)} in Trash. Showing ${(
-            model.start + 1
-          ).toLocaleString()}–${shown.toLocaleString()}.`;
-    const rows = model.items.map((item) => {
+      model.status === "loading"
+        ? "Loading Trash…"
+        : model.status === "failed"
+          ? "Trash could not be loaded."
+          : model.total === 0
+            ? "Trash is empty."
+            : model.items.length === 0
+              ? `${formatPhotoCount(model.total)} in Trash.`
+              : `${formatPhotoCount(model.total)} in Trash. Showing ${(
+                  model.start + 1
+                ).toLocaleString()}–${shown.toLocaleString()}.`;
+    removedList.setAttribute("aria-busy", String(model.status === "loading"));
+    const rows = (ready ? model.items : []).map((item) => {
       const row = document.createElement("li");
       row.className = "removed-item";
       const pending = item.pendingVerificationOperationId !== null;
@@ -583,7 +593,7 @@ export function createRemovedPanels({
       const select = document.createElement("input");
       select.type = "checkbox";
       select.checked = item.selected;
-      select.ariaLabel = `Select ${item.filename} for permanent deletion`;
+      select.ariaLabel = `Select ${item.filename}`;
       select.disabled = model.pending || model.deleting || pending;
       select.addEventListener("change", () =>
         send({
@@ -592,17 +602,33 @@ export function createRemovedPanels({
           selected: select.checked,
         }),
       );
+      const thumbnail = document.createElement("div");
+      thumbnail.className = "removed-thumbnail";
       const image = document.createElement("img");
       image.className = "removed-thumb";
       image.alt = "";
+      image.hidden = true;
+      const placeholder = document.createElement("span");
+      placeholder.className = "removed-thumbnail-placeholder";
+      placeholder.dataset.removedThumbnailPlaceholder = "";
+      placeholder.textContent =
+        item.preview.state === "unavailable"
+          ? "Thumbnail unavailable"
+          : item.preview.state === "failed"
+            ? "Thumbnail failed"
+            : "Thumbnail loading";
+      thumbnail.append(image, placeholder);
       const facts = document.createElement("div");
       facts.className = "removed-facts";
       const name = document.createElement("p");
       name.className = "removed-name";
       name.textContent = item.filename;
+      const location = document.createElement("p");
+      location.className = "removed-location";
+      location.textContent = item.originalLocation;
       const details = document.createElement("p");
       details.className = "removed-when";
-      details.textContent = `${item.originalKind.toUpperCase()} · ${item.originalLocation} · ${
+      details.textContent = `${item.originalKind.toUpperCase()} · ${
         item.originalSize === null
           ? "Size unavailable"
           : `${item.originalSize.toLocaleString()} bytes`
@@ -610,10 +636,10 @@ export function createRemovedPanels({
       const when = document.createElement("p");
       when.className = "removed-when";
       when.textContent = `Removed ${removalTimestamp(item.removedAtMs)}`;
-      facts.append(name, details, when);
+      facts.append(name, location, details, when);
       const restore = document.createElement("button");
       restore.type = "button";
-      restore.className = "quiet";
+      restore.className = "removed-restore";
       const restoring = model.restoringPhotoId === item.photoId;
       restore.textContent = restoring ? "Restoring…" : "Restore";
       restore.disabled =
@@ -629,7 +655,7 @@ export function createRemovedPanels({
           removedAtMs: item.removedAtMs,
         }),
       );
-      row.append(select, image, facts, restore);
+      row.append(select, thumbnail, facts, restore);
       if (pending) {
         // The item's permanent-deletion outcome is not settled. Its row
         // names the pending state and offers the recovery that names the
@@ -665,9 +691,20 @@ export function createRemovedPanels({
       const binding: GridThumbnailBinding = {
         photoId: item.photoId,
         preview: item.preview,
-        target: gridThumbnailTarget(image, (failed) => {
-          image.classList.toggle("delivery-failed", failed);
-        }),
+        target: gridThumbnailTarget(
+          image,
+          (failed) => {
+            placeholder.hidden = !failed && !image.hidden;
+            if (failed) placeholder.textContent = "Thumbnail failed";
+          },
+          (state) => {
+            placeholder.hidden = false;
+            placeholder.textContent =
+              state === "unavailable"
+                ? "Thumbnail unavailable"
+                : "Thumbnail failed";
+          },
+        ),
       };
       // The listing presents the same Photo facts the Grid does, so it uses
       // the page's one image-delivery path. A delivery the page drops because
@@ -678,15 +715,17 @@ export function createRemovedPanels({
     });
     removedListBindings = rows.map((entry) => entry.binding);
     removedList.replaceChildren(...rows.map((entry) => entry.row));
-    removedSelectionCount.textContent =
-      model.selectionCount === 0
+    removedSelectionCount.textContent = !ready
+      ? ""
+      : model.selectionCount === 0
         ? "Nothing selected."
         : `${model.selectionCount.toLocaleString()} selected.`;
     removedSelectAll.disabled =
-      model.pending || model.deleting || model.total === 0;
+      !ready || model.pending || model.deleting || model.total === 0;
     removedClearSelection.disabled =
-      model.pending || model.deleting || model.selectionCount === 0;
+      !ready || model.pending || model.deleting || model.selectionCount === 0;
     removedRestoreSelection.disabled =
+      !ready ||
       model.pending ||
       model.deleting ||
       model.restoringSelection ||
@@ -695,26 +734,28 @@ export function createRemovedPanels({
       ? "Restoring selected…"
       : "Restore selected";
     removedDelete.disabled =
+      !ready ||
       model.pending ||
       model.deleting ||
       model.restoringSelection ||
       !model.canDelete;
-    removedDelete.textContent = model.deleting
-      ? "Permanently deleting…"
-      : "Permanently delete selected Originals";
+    removedDelete.textContent = "Review permanent deletion";
     const shownEnd = shown >= model.total;
-    removedPrevious.disabled = model.pending || model.start === 0;
-    removedNext.disabled = model.pending || shownEnd;
-    removedRetry.hidden = !model.canRetry;
+    removedPrevious.hidden = !ready || model.total === 0;
+    removedNext.hidden = !ready || model.total === 0;
+    removedPrevious.disabled = !ready || model.pending || model.start === 0;
+    removedNext.disabled = !ready || model.pending || shownEnd;
+    removedRetry.hidden = model.status !== "failed" || !model.canRetry;
     removedRetry.disabled = model.pending;
-    removedUndo.hidden = model.undo === undefined;
-    removedUndo.disabled = model.pending;
+    removedUndo.hidden =
+      !ready || model.undo === undefined || model.undo.removed === 0;
+    removedUndo.disabled = !ready || model.pending || model.deleting;
     removedUndo.textContent =
       model.undo === undefined
         ? "Undo the last removal"
         : `Undo the last removal (${model.undo.removed.toLocaleString()})`;
     removedPage.textContent =
-      model.total === 0
+      !ready || model.total === 0
         ? ""
         : `Page ${(
             Math.floor(model.start / model.limit) + 1
@@ -796,3 +837,57 @@ export function createRemovedPanels({
 function removalTimestamp(removedAtMs: number): string {
   return new Date(removedAtMs).toLocaleString();
 }
+
+export const REMOVED_PANELS_TEMPLATE = `
+        <dialog class="removal-dialog" data-removal-review aria-labelledby="removal-title">
+          <div class="removal-sheet">
+            <header class="removal-header"><h3 id="removal-title">Remove rejected Photos</h3><button type="button" class="quiet" data-removal-close>Close</button></header>
+            <div class="removal-body">
+              <p class="removal-summary" data-removal-summary></p>
+              <p class="removal-message" data-removal-message role="alert" hidden></p>
+            </div>
+            <footer class="removal-actions"><button type="button" data-removal-confirm>Remove from Library</button><button type="button" class="quiet" data-removal-undo hidden>Undo</button></footer>
+          </div>
+        </dialog>
+        <dialog class="removed-dialog" data-removed-panel aria-labelledby="removed-title">
+          <div class="removed-sheet">
+            <header class="removed-header"><h3 id="removed-title">Trash</h3><button type="button" class="quiet" data-removed-close>Close</button></header>
+            <p class="removed-status" data-removed-status role="status"></p>
+            <div class="removed-selection" data-removed-selection>
+              <button type="button" class="quiet" data-removed-select-all>Select all Trash</button>
+              <button type="button" class="quiet" data-removed-clear-selection>Clear selection</button>
+              <span data-removed-selection-count></span>
+              <button type="button" class="removed-restore-selection" data-removed-restore-selection>Restore selected</button>
+              <button type="button" class="quiet removed-delete-review" data-removed-delete>Review permanent deletion</button>
+            </div>
+            <div class="removed-scroll">
+            <ul class="removed-list" data-removed-list></ul>
+            <section class="trash-outcome" data-trash-outcome hidden>
+              <p class="trash-outcome-title" data-trash-outcome-title role="status"></p>
+              <p class="trash-outcome-counts" data-trash-outcome-counts hidden><span data-trash-outcome-deleted></span> <span data-trash-outcome-changed></span> <span data-trash-outcome-missing></span> <span data-trash-outcome-failed></span> <span data-trash-outcome-pending></span></p>
+              <p class="trash-outcome-bytes" data-trash-outcome-bytes hidden></p>
+              <ul class="trash-outcome-items" data-trash-outcome-items></ul>
+              <div class="trash-outcome-actions" data-trash-outcome-actions hidden><button type="button" class="quiet" data-trash-check-result>Check result</button><button type="button" class="quiet" data-trash-retry-delete>Retry</button></div>
+            </section>
+            </div>
+            <p class="removed-message" data-removed-message role="alert" hidden></p>
+            <footer class="removed-pager"><button type="button" class="quiet" data-removed-previous>Previous</button><span data-removed-page></span><button type="button" class="quiet" data-removed-next>Next</button><button type="button" data-removed-retry hidden>Retry</button></footer><footer class="removed-actions"><button type="button" class="quiet" data-removed-undo hidden>Undo the last removal</button></footer>
+          </div>
+        </dialog>
+        <dialog class="removal-dialog trash-review-dialog" data-trash-review aria-labelledby="trash-review-title">
+          <div class="removal-sheet">
+            <header class="removal-header"><h3 id="trash-review-title">Permanently delete from Trash</h3><button type="button" class="quiet" data-trash-review-close>Close</button></header>
+            <div class="removal-body">
+              <p class="removal-summary" data-trash-review-summary></p>
+              <p class="removal-message trash-review-warning">Permanently deletes the selected Original Files from disk and removes each Photo from every Album that contains it. Slipstream cannot undo it.</p>
+              <p class="removal-summary" data-trash-review-albums></p>
+              <ul class="trash-review-items" data-trash-review-items></ul>
+              <div class="trash-review-rejected" data-trash-review-rejected hidden>
+                <p class="removal-summary" data-trash-review-rejected-heading></p>
+                <ul class="trash-review-rejected-list" data-trash-review-rejected-list></ul>
+              </div>
+            </div>
+            <footer class="removal-actions"><button type="button" class="trash-confirm-danger" data-trash-confirm hidden></button><button type="button" class="quiet" data-trash-cancel>Cancel</button></footer>
+          </div>
+        </dialog>
+`;

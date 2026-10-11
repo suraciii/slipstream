@@ -1,0 +1,392 @@
+/* The removal review names the count that would leave the Library before its
+   one explicit confirmation, and reports the outcome beside the Undo the
+   removal leaves. */
+.removed-header,
+.removal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.removed-header h3,
+.removal-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  min-width: 0;
+}
+
+.removed-dialog button,
+.trash-review-dialog button {
+  font-size: 0.82rem;
+}
+
+.removal-body {
+  min-height: 0;
+  display: grid;
+  gap: 0.5rem;
+  align-content: start;
+}
+
+.removal-summary,
+.removal-message {
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.removal-message {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.removal-message[data-tone="success"] {
+  color: var(--text);
+}
+
+.removal-message[data-tone="warning"],
+.removal-message[data-tone="failure"] {
+  color: var(--warning);
+}
+
+.removal-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.removal-actions button {
+  flex: 1 1 0;
+  min-height: 2.75rem;
+}
+
+.removal-actions .quiet {
+  flex: 0 0 auto;
+}
+
+/* The Removed Photos listing is the recovery path: one bounded page of rows,
+   each presenting the Photo facts the Grid presents and its own Restore. */
+.removed-dialog .removed-sheet {
+  display: flex;
+  flex-direction: column;
+  height: min(88dvh, 44rem);
+  min-width: 0;
+}
+
+.removed-dialog .removed-sheet > :not(.removed-scroll) {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+.removed-dialog .removed-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.removed-dialog button,
+.trash-review-dialog button {
+  min-height: 2.75rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.removed-header > button,
+.removal-header > button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+.removed-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.removed-selection {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.removed-selection [data-removed-selection-count] {
+  flex: 1 0 100%;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.removed-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+  font-size: 0.88rem;
+}
+
+.removed-item {
+  display: grid;
+  grid-template-columns: 2.75rem 3.5rem minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.5rem;
+  padding-block: 0.65rem;
+  border-bottom: 1px solid var(--border-strong);
+}
+
+.removed-item > input[type="checkbox"] {
+  width: 2.75rem;
+  height: 2.75rem;
+  margin: 0;
+}
+
+.removed-thumbnail {
+  position: relative;
+  width: 3.5rem;
+  height: 3.5rem;
+  border-radius: 0.35rem;
+  background: var(--raised);
+  overflow: hidden;
+}
+
+.removed-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.removed-thumbnail-placeholder {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: 0.2rem;
+  color: var(--muted);
+  font-size: 0.65rem;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.removed-thumbnail [hidden] {
+  display: none;
+}
+
+.removed-facts {
+  min-width: 0;
+}
+
+.removed-name {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-weight: 650;
+}
+
+.removed-location {
+  margin: 0.2rem 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.removed-when {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.removed-message {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--warning);
+}
+
+/* The permanent-deletion review names the reviewed files before the one
+   confirmation that cannot be undone. */
+.trash-review-dialog .removal-sheet {
+  width: 100%;
+}
+
+.trash-review-dialog .removal-body {
+  overflow-y: auto;
+}
+
+.trash-review-warning {
+  padding: 0.65rem;
+  border: 1px solid var(--warning);
+  border-radius: 0.35rem;
+  line-height: 1.5;
+}
+
+.trash-review-dialog .trash-confirm-danger {
+  background: #b42318;
+  border-color: #b42318;
+  color: #fff;
+}
+
+.trash-review-dialog .trash-confirm-danger:not(:disabled):hover {
+  background: #912018;
+  border-color: #912018;
+}
+
+.trash-review-items,
+.trash-review-rejected-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+}
+
+.trash-review-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.3rem 0.6rem;
+  align-items: baseline;
+  padding-block: 0.5rem;
+  border-bottom: 1px solid var(--border-strong);
+}
+
+.trash-review-location,
+.trash-review-albums {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+
+.trash-review-kind,
+.trash-review-size {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.trash-review-albums {
+  color: var(--muted);
+}
+
+.trash-review-rejected-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.25rem;
+  overflow-wrap: anywhere;
+  color: var(--warning);
+}
+
+/* The Trash deletion outcome: one partition of the operation's items, the
+   logical bytes of the confirmed deletions only, and the recovery actions a
+   lost response offers. */
+.trash-outcome {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.5rem;
+  border: 1px solid var(--raised);
+  border-radius: 0.4rem;
+  font-size: 0.8rem;
+}
+
+.trash-outcome-title {
+  margin: 0;
+}
+
+.trash-outcome-counts,
+.trash-outcome-bytes {
+  margin: 0;
+  color: var(--muted);
+}
+
+.trash-outcome-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.trash-outcome-item {
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+
+.trash-outcome-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* One listing item whose permanent-deletion outcome is not settled yet. */
+.removed-pending {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 0.3rem;
+  justify-items: start;
+}
+
+.removed-pending-marker {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--warning);
+}
+
+.removed-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.removed-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.removed-pager span {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+@media (max-width: 760px) {
+  .removed-item {
+    grid-template-columns: 2.75rem 3.5rem minmax(0, 1fr);
+  }
+
+  .removed-item > .removed-restore {
+    grid-column: 3;
+    justify-self: start;
+    min-width: 6rem;
+  }
+
+  .removed-selection > button {
+    flex: 1 1 calc(50% - 0.5rem);
+    min-width: 0;
+  }
+
+  .removed-selection [data-removed-selection-count] {
+    order: -1;
+  }
+
+  .trash-review-dialog .removal-actions {
+    flex-direction: column;
+  }
+}
+
+@media (min-width: 761px) {
+  .removed-dialog .removed-sheet {
+    height: min(85dvh, 44rem);
+  }
+}
+
+@media (max-height: 480px) {
+  .removed-dialog .removed-sheet {
+    overflow-y: auto;
+  }
+
+  .removed-dialog .removed-scroll {
+    flex: 0 0 auto;
+    max-height: 50dvh;
+  }
+}
