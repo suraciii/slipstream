@@ -11,7 +11,7 @@ with the deployment, not in this repository.
 
 The default read-only Compose Library supports Read Metadata, not Save. Save
 requires the exclusive deployment described in
-[Standard Metadata design](../metadata/design.md#supported-deployment-shape).
+[Standard Metadata design](../photo-library/metadata/design.md#supported-deployment-shape).
 The host supervisor is a trusted root component; the Web service must receive
 only its private Unix socket and a read-only bind of the Library Folder. It
 must not receive the backing tree directly, host root privilege, the systemd
@@ -189,7 +189,7 @@ isolation domain; an engine failure can therefore stop the whole application,
 and the ordinary restart path recovers. This trade-off fits the personal
 single-machine deployment and is not
 a multi-user service boundary.
-[Processing Memory](../processing-memory/design.md) owns the details. Legacy
+[Processing Memory](../photo-development/processing/memory.md) owns the details. Legacy
 `SLIPSTREAM_PROCESSING_INSTANCE`, `SLIPSTREAM_PROCESSING_SOCKET`,
 `SLIPSTREAM_PROCESSING_POLICY_SHA256`, and `SLIPSTREAM_PROCESSING_BUNDLE_SHA256`
 declarations are rejected by the Compose entry point; the retired launcher
@@ -253,7 +253,7 @@ defaults to `http://localhost:3000` and needs no certificate, domain, or reverse
 proxy. Direct HTTP on an explicitly configured network interface is also
 supported; the browser and CLI warn that network observers can read photos and
 credentials. HTTPS is recommended for public or untrusted networks. Installation
-has the secure-context requirements in [Installed Web Application](../installed-web-app/spec.md).
+has the secure-context requirements in [Installed Web Application](../web-application/installation/spec.md).
 
 Create an environment file outside the repository:
 
@@ -525,7 +525,7 @@ non-scratch base image by digest. Its Ubuntu build and runtime inputs use the
 official snapshot and direct package locks in [`../docker/apt/`](../../docker/apt/).
 The RAW decoder uses the upstream LibRaw `0.22.2` archive with its SHA-256
 verified during the image build; the image's isolated library must match its
-build headers. The [container input design](../container-inputs/design.md)
+build headers. The [container input design](container-inputs.md)
 defines ownership and update rules.
 
 Use the explicit `docker buildx build --platform linux/amd64` command above
@@ -576,7 +576,7 @@ Retained Export artifacts are not reconstructible from these databases; an
 operator backup that excludes them must refuse while any are retained.
 Restore into a proven isolated copy, never over live state. The 0.1 support
 boundary, rollback criteria, and rollback-artifact retirement rules are defined
-in [`0.1-support-and-release.md`](../support-and-release/spec.md).
+in [`0.1-support-and-release.md`](support.md).
 
 ## Library Expansion
 

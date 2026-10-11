@@ -3,7 +3,7 @@
 //! Processing Step may select from it, and the field-for-field check an
 //! artifact bytes download must pass before the browser is offered the file.
 //!
-//! [Composable Photo Processing Modules](../../../../../../specs/processing-modules/design.md)
+//! [Composable Photo Processing Modules](../../../../../../specs/photo-development/processing/design.md)
 //! keeps an artifact immutable: its provenance identifies its input, module,
 //! complete parameter snapshot, bundle, output contract, and validated byte
 //! identity. A downstream step binds to that record explicitly; nothing here

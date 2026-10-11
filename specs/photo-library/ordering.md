@@ -124,7 +124,7 @@ A per-file capture failure does not abort valid sibling Photos. A root-level sca
 
 An open Browse Snapshot keeps its ordered Photo-ID sequence. Availability, Selection State, Rating, and Preview facts may refresh, but a rescan does not insert, remove, or reorder that Snapshot. Reopening `All Photos` may observe the newly published order.
 
-When explicit Album Resume resolves an unavailable saved Photo, Slipstream searches later members and then wraps once for an available member. If every member is unavailable, it remains at the saved member. Browse creation without a saved position still resolves its initial position to the first available member or, if none are available, the first member. That value is advisory for Snapshot creation: it is not written as the Album's durable saved position, and Resume availability follows only the durable position. It does not force a Grid destination into Photo View. Grid entry and Resume presentation follow [Library Browser Experience](../library-browser/spec.md#destinations-and-browser-history). A disconnected Album keeps mutation controls disabled until its required current facts and saved position are confirmed. `All Photos` and Original Folder sources have no durable position and reconnect through their current bounded windows.
+When explicit Album Resume resolves an unavailable saved Photo, Slipstream searches later members and then wraps once for an available member. If every member is unavailable, it remains at the saved member. Browse creation without a saved position still resolves its initial position to the first available member or, if none are available, the first member. That value is advisory for Snapshot creation: it is not written as the Album's durable saved position, and Resume availability follows only the durable position. It does not force a Grid destination into Photo View. Grid entry and Resume presentation follow [Library Browser Experience](../library-browser/experience/spec.md#destinations-and-browser-history). A disconnected Album keeps mutation controls disabled until its required current facts and saved position are confirmed. `All Photos` and Original Folder sources have no durable position and reconnect through their current bounded windows.
 
 ## Persistence
 
@@ -164,10 +164,10 @@ Rollback stops the v3 process and restores the pre-upgrade v2 backup. There is n
 
 ## Protocol
 
-The browser obtains deterministic order through the hidden bounded Browse Snapshot protocol in [Scalable Library Browsing](../library-browsing/design.md). The protocol must not expose one unbounded complete-Library response. Library and Original Folder Snapshots use Capture Time order; an Album Snapshot uses explicit membership position.
+The browser obtains deterministic order through the hidden bounded Browse Snapshot protocol in [Scalable Library Browsing](../library-browser/design.md). The protocol must not expose one unbounded complete-Library response. Library and Original Folder Snapshots use Capture Time order; an Album Snapshot uses explicit membership position.
 
 Browse Windows do not expose Capture Time, offset, or inspection state in every Grid item. Photo View may request the bounded review
-metadata view defined by [Scalable Library Browsing](../library-browsing/design.md),
+metadata view defined by [Scalable Library Browsing](../library-browser/design.md),
 which exposes Capture Time for the current Photo when available. Capture
 failures must not disable selection, Rating, navigation, or Preview behavior.
 

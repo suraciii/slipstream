@@ -75,7 +75,7 @@ Recovery must search only supported descendants of the admitted Library Folder. 
 
 ## Manual Recovery
 
-Every unavailable Original File belonging to an active Photo must remain listed with its remembered Location, filename, kind, Rating, Selection State, Album count, and whether a fingerprint exists. Removed Photos remain in [Trash](../trash/spec.md); Location Recovery must not restore them or reverse Permanent Deletion.
+Every unavailable Original File belonging to an active Photo must remain listed with its remembered Location, filename, kind, Rating, Selection State, Album count, and whether a fingerprint exists. Removed Photos remain in [Trash](trash/spec.md); Location Recovery must not restore them or reverse Permanent Deletion.
 
 The Photographer must be able to review unavailable Originals and propose new Locations through one bounded `Review unavailable originals` entry from the scan result or an affected Photo.
 
@@ -167,14 +167,14 @@ permitted retirement.
 
 Recovery changes an association; it must not move, rename, overwrite, upload, or
 delete file bytes. A successful mapping is not proof that missing bytes were
-recreated. The [Preview](../previews/spec.md) must belong to the recovered Original;
+recreated. The [Preview](previews/spec.md) must belong to the recovered Original;
 cached content from the old Location must not masquerade as current evidence.
 Existing [Edit Recipe and Export source rules](../photo-development/spec.md) still
 apply. Location Recovery must not silently rebind an Edit Recipe or recapture
 an existing Export's source or settings.
 
 A changed Original Location must invalidate earlier metadata read evidence
-under [Sidecar Association](../metadata/spec.md#sources-and-association).
+under [Sidecar Association](metadata/spec.md#sources-and-association).
 The caller must inspect metadata again before Save. Recovery must not relocate
 the old XMP Sidecar, copy its values to a new one, or apply its external Rating
 to the Library Rating.

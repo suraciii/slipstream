@@ -3,7 +3,7 @@
 //! The local executor validates its own engine result before reporting it:
 //! IEEE float32 RGB samples, Deflate compression, full
 //! geometry, no orientation surprise, and the exact pinned embedded linear
-//! ProPhoto ICC bytes (`specs/development-color/design.md`). The pinned profile
+//! ProPhoto ICC bytes (`specs/photo-development/processing/color.md`). The pinned profile
 //! hash is byte identity; a profile name or appearance is not evidence.
 
 use sha2::{Digest, Sha256};
