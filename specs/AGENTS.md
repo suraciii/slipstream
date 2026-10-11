@@ -1,13 +1,14 @@
 # Agents: Writing Contracts
 
-`specs/` defines Slipstream's durable product behavior, design decisions, and implementation contracts. Use the [index](README.md) to find the affected capability and its related contracts. Follow the repository-wide context and artifact rules in [`../AGENTS.md`](../AGENTS.md).
+`specs/` defines Slipstream's durable product behavior, design decisions, and implementation contracts. Use the [index](README.md) to find the affected feature and its contracts. Follow the repository-wide context and artifact rules in [`../AGENTS.md`](../AGENTS.md).
 
-## Capability Ownership
+## Feature Organization
 
-- Organize contracts by capability in a shallow `specs/<capability>/` directory. Keep related behavior and design together rather than separating them into product and architecture trees.
-- Use `spec.md` for observable product behavior and `design.md` for durable technical decisions. A capability may have only one when only behavior or design needs a contract. Create documents for actual contracts, not empty counterparts.
-- Use a parent directory only when it owns a real shared contract needed by its children. Keep independent capabilities as peers.
-- Give specialist contracts descriptive names, such as `identity.md`, `ordering.md`, or `workspace.md`. The capability owns them and links to them from its relevant behavior or design contract. List every contract in the index with its scope.
+- Organize contracts under `specs/<feature>/` by default.
+- Add `specs/<feature>/<capability>/` only when the feature's contracts become too large to read and maintain clearly in one or two files.
+- Each level may own `spec.md` for observable behavior, `design.md` for technical decisions, or both. Create only files with substantive contracts.
+- Parent contracts own shared rules; child contracts own their specific rules and link to the parent. Read applicable parent contracts when working on a child capability.
+- Keep specialist references beside their owning contracts and link to them. List every contract in the index with its scope.
 - Before implementation, update affected behavior contracts. Also update design contracts when work changes boundaries, ownership, lifecycle, data contracts, ordering, failure behavior, or other durable technical decisions. Resolve decisions in the governing Issue and contracts before editing implementation code.
 
 ## Common Writing Rules

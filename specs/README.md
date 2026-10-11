@@ -2,7 +2,7 @@
 
 `specs/` is the authority for Slipstream's durable product behavior, design decisions, and implementation contracts. [`CONTEXT.md`](../CONTEXT.md) defines domain vocabulary. [Usage and installation guides](../docs/README.md) explain how to use the product. Follow [contract writing rules](AGENTS.md) when changing specifications.
 
-Before implementing or reviewing a behavior change, read the affected capability's behavior contract. For changes to boundaries, ownership, lifecycle, data, ordering, or failures, also read its design and named specialist contracts. Follow links between capabilities when the change crosses their shared boundaries.
+Use this index to locate the affected feature's contracts. Follow the [context-reading rules](../AGENTS.md#context-management) and [feature organization rules](AGENTS.md#feature-organization).
 
 ## Product and Access
 
