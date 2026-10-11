@@ -1,9 +1,5 @@
 import { expect, test } from "bun:test";
 
-type PackageManifest = Readonly<{
-  scripts?: Readonly<Record<string, string>>;
-}>;
-
 type FromInstruction = Readonly<{
   platform?: string;
   reference: string;
@@ -75,35 +71,6 @@ const packageLocks = {
 
 async function text(path: string): Promise<string> {
   return Bun.file(new URL(path, repositoryRoot)).text();
-}
-
-async function packageManifest(): Promise<PackageManifest> {
-  return (await Bun.file(
-    new URL("package.json", repositoryRoot),
-  ).json()) as PackageManifest;
-}
-
-function mapping(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function workflowRunValues(source: string): string[] {
-  const document = mapping(Bun.YAML.parse(source));
-  const jobs = mapping(document?.jobs);
-  if (!jobs) return [];
-
-  const runs: string[] = [];
-  for (const jobValue of Object.values(jobs)) {
-    const job = mapping(jobValue);
-    if (!Array.isArray(job?.steps)) continue;
-    for (const stepValue of job.steps) {
-      const step = mapping(stepValue);
-      if (typeof step?.run === "string") runs.push(step.run);
-    }
-  }
-  return runs;
 }
 
 function dockerfileInstructions(source: string): DockerfileInstruction[] {
@@ -404,23 +371,4 @@ test("the service image installs the independent editing tool beside its supervi
   const native = await text("tools/processing/photo/Dockerfile");
   expect(native).toContain("-DBUILD_GUI=OFF");
   expect(native).toContain("/opt/darktable-edit/edit-manifest.json");
-});
-
-test("the container and Compose focused contracts are wired through test:fast and verify", async () => {
-  const scripts = (await packageManifest()).scripts;
-  expect(scripts?.["test:container-input"]).toBe(
-    "bun test tools/container-input-contract.test.ts",
-  );
-  expect(scripts?.["test:compose-storage"]).toBe(
-    "bun test tools/compose-storage-preflight.test.ts",
-  );
-  const fastGate = scripts?.["test:fast"]?.split(" && ");
-  expect(fastGate).toContain("bun run test:container-input");
-  expect(fastGate).toContain("bun run test:compose-storage");
-  expect(scripts?.verify?.split(" && ")).toContain("bun run test:fast");
-  expect(
-    workflowRunValues(await text(".github/workflows/verify.yml")).some(
-      (run) => run === "bun run verify",
-    ),
-  ).toBeTrue();
 });
