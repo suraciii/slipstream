@@ -79,7 +79,13 @@ jobs:
         run: |
           timeout -k 10s 30s docker compose version
           timeout -k 10s 30s docker compose config --help | grep -Fq -- "--format"
-      - run: bun run verify
+      - name: Run verification with finite processing memory
+        run: |
+          sudo systemd-run --scope --quiet -p MemoryMax=6G \
+            sudo -u "$(id -un)" env "PATH=$PATH" \
+            "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" \
+            CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+            CARGO_INCREMENTAL=0 CI=true GITHUB_ACTIONS=true bun run verify
       - name: Preserve browser failure evidence
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

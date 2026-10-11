@@ -146,6 +146,11 @@ Its `test:fast` stage includes the shared static checks, Web unit tests, all
 repository tooling and Rust checks, RAW discovery, and the browser suite. The
 browser stage owns the production build; the gate does not build again after it.
 
+The GitHub Actions gate runs as the runner user in a systemd scope with a 6 GiB
+memory limit. Film admission requires this verifiable finite environment; an
+unbounded host refuses processing. For local processing checks, run the gate in
+a finite container or systemd scope sized for the qualified fixture.
+
 `check:fsd` parses the Web TypeScript project and enforces the current FSD
 boundary: app and page public APIs, downward dependencies, slice and segment
 ownership, resolvable internal imports, and runtime-cycle freedom. `test:fsd`
