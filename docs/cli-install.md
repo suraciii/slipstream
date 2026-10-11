@@ -28,7 +28,8 @@ archive includes this installation guide, the Agent guide, the complete
 specification index and contracts, shared vocabulary, contributor guidance,
 and license notices. Contract links remain local. Links to repository-only
 instructions, source files, and directories open GitHub at the candidate's
-exact commit. Help and version require no service, token, or native server
+exact commit. Submodule links use the recorded submodule commit in its own
+repository. Help and version require no service, token, or native server
 libraries. The client needs a Linux amd64 host with a compatible glibc
 runtime. Other systems are not qualified by this candidate.
 

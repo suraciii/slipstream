@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build a non-published, source-bound Linux amd64 CLI candidate."""
 
+import configparser
 import gzip
 import hashlib
 import io
@@ -37,7 +38,20 @@ def archive_files():
     return files
 
 
-def archive_markdown(source, member, files, commit):
+def submodule_links(commit):
+    config = configparser.ConfigParser()
+    config.read(ROOT / ".gitmodules")
+    links = {}
+    for section in config.sections():
+        path = config[section]["path"]
+        entry = run("git", "ls-tree", commit, "--", path).split()
+        if entry and entry[0] == "160000":
+            repository = config[section]["url"].removesuffix(".git")
+            links[path] = f"{repository}/tree/{entry[2]}"
+    return links
+
+
+def archive_markdown(source, member, files, commit, submodules):
     """Keep shipped links local and pin source-only links to the candidate commit."""
     text = source.read_text(encoding="utf-8")
 
@@ -52,7 +66,9 @@ def archive_markdown(source, member, files, commit):
         if path in files.values():
             return match.group(0)
         kind = "tree" if (ROOT / path).is_dir() else "blob"
-        url = f"https://github.com/suraciii/slipstream/{kind}/{commit}/{quote(path, safe='/')}"
+        url = submodules.get(path) or (
+            f"https://github.com/suraciii/slipstream/{kind}/{commit}/{quote(path, safe='/')}"
+        )
         if parsed.query:
             url += f"?{parsed.query}"
         if parsed.fragment:
@@ -113,6 +129,7 @@ def main():
     archive = output / f"{name}.tar.gz"
     with archive.open("xb") as stream:
         files = archive_files()
+        submodules = submodule_links(commit)
         with gzip.GzipFile(fileobj=stream, mode="wb", filename="", mtime=0) as compressed:
             with tarfile.open(fileobj=compressed, mode="w") as tar:
                 sources = [(binary, "slipstream")]
@@ -120,7 +137,7 @@ def main():
                 for source, member in sources:
                     info = file_info(source, f"{name}/{member}")
                     if source.suffix == ".md":
-                        data = archive_markdown(source, member, files, commit)
+                        data = archive_markdown(source, member, files, commit, submodules)
                         info.size = len(data)
                         tar.addfile(info, io.BytesIO(data))
                     else:

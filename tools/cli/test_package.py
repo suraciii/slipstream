@@ -42,6 +42,15 @@ class CandidateArchiveTests(unittest.TestCase):
         (self.root / "docs" / "agent-cli.md").write_text(
             "[Reference](../specs/command-line/reference.md)\n", encoding="ascii"
         )
+        (self.root / ".gitmodules").write_text(
+            '[submodule "third_party/spektrafilm-rs"]\n'
+            'path = third_party/spektrafilm-rs\n'
+            'url = https://github.com/suraciii/spektrafilm-rs.git\n',
+            encoding="ascii",
+        )
+        (self.root / "THIRD-PARTY-NOTICES.md").write_text(
+            "[SpektraFilm](third_party/spektrafilm-rs)\n", encoding="ascii"
+        )
         self.root_patch = patch.object(package_cli, "ROOT", self.root)
         self.root_patch.start()
         self.addCleanup(self.root_patch.stop)
@@ -51,6 +60,8 @@ class CandidateArchiveTests(unittest.TestCase):
             return ""
         if args[:2] == ("git", "rev-parse"):
             return "a" * 40
+        if args == ("git", "ls-tree", "a" * 40, "--", "third_party/spektrafilm-rs"):
+            return f"160000 commit {'b' * 40}\tthird_party/spektrafilm-rs"
         if args[:2] == ("cargo", "metadata"):
             return '{"packages":[{"name":"slipstream-cli","version":"0.0.0"}]}'
         if args[:2] == ("cargo", "build"):
@@ -93,6 +104,11 @@ class CandidateArchiveTests(unittest.TestCase):
             source_url = "https://github.com/suraciii/slipstream/"
             self.assertIn(f"[Source]({source_url}blob/{'a' * 40}/tools/processing/runner.py#main)", reference)
             self.assertIn(f"[Locks]({source_url}tree/{'a' * 40}/docker/apt)", reference)
+            notices = tar.extractfile(f"{name}/THIRD-PARTY-NOTICES.md").read().decode()
+            self.assertEqual(
+                notices,
+                f"[SpektraFilm](https://github.com/suraciii/spektrafilm-rs/tree/{'b' * 40})\n",
+            )
 
     def test_platform_and_commit_guards_run_before_creating_output(self):
         with patch.object(package_cli.platform, "system", return_value="Darwin"):
