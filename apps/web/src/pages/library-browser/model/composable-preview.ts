@@ -2,7 +2,7 @@
 //! Step the workspace may request, and how the route's refusals are said in
 //! the workspace's words.
 //!
-//! [Composable Photo Processing Modules](../../../../../../specs/processing-modules/design.md)
+//! [Composable Photo Processing Modules](../../../../../../specs/photo-development/processing/design.md)
 //! bounds the Preview to the recipe's caller-selected current Processing
 //! Step. Selection and refusal facts live here, independently of DOM and
 //! network work; an empty recipe has no processing result.

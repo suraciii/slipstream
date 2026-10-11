@@ -1,0 +1,147 @@
+# Rust Server Architecture
+
+Slipstream needs one production server that keeps Original Files read-only while it owns indexing, durable Library and selection state, Preview generation, and browser delivery. The production server is Rust. Bun and TypeScript own the Web application, browser tests, and repository tooling only.
+
+This decision corrects an earlier language-boundary drift. Selecting Bun for Web tooling did not select TypeScript as the production server language.
+
+## Design Drivers
+
+- Original Files are irreplaceable and require descriptor-confined access.
+- Existing SQLite Library, Album, Selection State, Rating, and saved-position behavior must remain stable through the required v5-to-v6 independent-Photo migration.
+- LibRaw and image processing are blocking native work and must remain bounded.
+- One Photographer and one Photo Library do not justify distributed services, an ORM, or an actor framework.
+- The service must support operator-controlled restart and rollback without modifying Original Files.
+
+## Ownership Model
+
+The Rust service is one modular monolith with these boundaries:
+
+- **Application and HTTP** own configuration, listener startup order, request limits, protocol mapping, static Web delivery, readiness, and graceful shutdown.
+- **Library and Confinement** own the current Library Folder descriptor, deterministic traversal, Original capabilities, stable persisted identity, Original Locations, content fingerprints, Location Recovery, and revision facts. Paths do not confer authority or identity.
+- **Persistence** owns one SQLite connection on one dedicated thread with a bounded typed command queue. It owns schema validation, migration, sidecar admission, transactions, and durable state.
+- **Preview and Native** own bounded JPEG Original reads and a narrow C/C++ LibRaw plus libjpeg shim. The shim accepts an already-confined descriptor adapter, enumerates embedded JPEG candidates, fully validates JPEG bytes, and exposes no sensor unpack or RAW development operation.
+- **Derivative and Cache** own orientation, color, resize, encoding, scheduling, identity, atomic publication, stale fallback, and immutable delivery facts.
+
+The modules exchange domain values and typed failures. HTTP types do not enter Persistence or Native modules. Native error text and filesystem paths do not cross the protocol boundary.
+
+Persistence uses one private typed enqueue path for commands whose replies
+carry `PersistenceError`. That path creates the reply channel and submits
+through the existing bounded owner lifecycle; callers keep validation and
+concrete command construction. Domain-specific mutation and metadata errors
+retain their separate typed paths. Reply sharing does not introduce a second
+queue, dynamic command dispatch or a different shutdown policy.
+
+## Lifecycle
+
+Startup proceeds in one direction:
+
+1. Parse and validate configuration.
+2. Open the canonical Library Folder, state directory, and cache directory.
+3. Admit and open SQLite, validate or migrate it, and start its bounded owner thread.
+4. Load the last complete Published Library when one exists.
+5. Start bounded Preview workers.
+6. Bind HTTP and expose Library Overview and Loading Status.
+7. Run an ordinary rescan in the background; a new state store remains initializing until its first complete scan publishes the Library.
+
+The Rust server exposes `GET /healthz` for deployment health checks. It returns `200` with the exact path-free JSON body `{"status":"ok"}` after storage admission, Preview worker startup, and HTTP bind complete. `GET /api/status` separately reports whether a Published Library is available, initializing, scanning, idle, or failed. A root binding, schema, sidecar, or storage-layout failure never exposes a listener. Shutdown stops HTTP admission before closing Preview and Library resources.
+
+A failure closes resources in reverse order. Shutdown stops admission, drains already accepted mutations, stops Preview publication, closes SQLite, and then completes. Repeated shutdown requests share one completion path.
+
+SQLite startup accepts the configured `DELETE` journal policy only from a sidecar-free state. If a journal, WAL, or shared-memory sidecar remains after another process or an unclean stop, startup must return a recovery-required failure before opening SQLite and must leave the database and every sidecar unchanged. Recovery uses an operator-controlled copy rather than letting startup checkpoint or rewrite state whose schema and Library binding may exist only in WAL.
+
+Blocking SQLite, LibRaw, JPEG, and derivative work must not run on asynchronous HTTP executor threads. Queue saturation is explicit backpressure, not unbounded memory growth.
+
+## Network Exposure
+
+The default listener remains loopback. [Instance Access Architecture](access/design.md)
+owns credential verification, sessions, request-origin checks, private response
+caching, and admission before all private route handlers. [Deployment](deployment/spec.md)
+owns optional HTTP/HTTPS exposure. There is no anonymous fallback
+when access configuration is missing. Accounts and identity providers are not
+part of this contract. Minimal health checks retain their fixed readiness body.
+
+## Compatibility
+
+The checked-in files under [`../compatibility/`](../compatibility/) are the authority for JSON omission behavior, startup configuration, canonical SQLite migration inputs and shapes, Capture Time vectors, ordering examples, and legacy deterministic IDs that must survive migration. Rust compatibility tests consume these vectors, and the real Playwright suite remains the final browser authority.
+
+**Fixture coverage boundary.** The browse and validation protocol vectors run against an empty fixture Library, so they pin validation, error, and empty shapes and the contract envelope; the cache vectors seed one Photo and one web asset and pin the derivative and web-asset response headers, ETag shape, and revalidation. Other success shapes and non-empty windows are pinned by the server test suite and the browser suite until Issue #266 lands. Every file under [`../compatibility/`](../compatibility/) must have an executing consumer; Issue #266 tracks the inventory check that enforces this rule.
+
+HTTP response shapes, SQLite v2 and v3 migration inputs, cache records, and existing persisted IDs remain compatible. Deterministic v3 identity vectors define preserved legacy values, not the allocator for new v4 records. SQLite v6 is the writable independent-Photo and Album state defined by [Photo Library Identity and Expansion](photo-library/identity.md) and [Photo Organization](photo-library/design.md); older binaries reject it. Docker preserves bind-mounted state and cache while running the Rust service. The Rust service and Web application form the hosted production application; Bun and TypeScript remain limited to Web, browser tests, and repository tooling. The separate Rust CLI is a service client under [Command-Line Architecture](command-line/design.md), with no direct storage or native Preview dependency.
+
+Golden JSON and SQL fixtures are the source of truth. Speculative shared code generation is rejected because the current protocol is small and generated bindings would create another build and compatibility boundary before demonstrated duplication.
+
+## Selected Technology Direction
+
+### HTTP: Axum and Tokio
+
+Axum `0.8.9` and Tokio `1.53.1` are pinned for the compatibility crate. They compile on the pinned Rust `1.97.1` toolchain with narrow features. Axum maps directly to the service-owned Tokio lifecycle and ordinary module state.
+
+Actix Web `4.15.0` was considered. It supports the required HTTP surface, but its additional server/runtime vocabulary and worker model do not remove a current Slipstream boundary. It remains rejected unless a later exact protocol probe demonstrates substantially safer request limiting, file delivery, or shutdown with less code.
+
+### SQLite: rusqlite with bundled SQLite
+
+rusqlite `0.40.2` is pinned with `bundled`. The probe executes the canonical v6 schema and reports a working SQLite runtime without depending on a deployment host's SQLite version or compile options. One dedicated bounded owner thread preserves the current serialization and direct `BEGIN IMMEDIATE` control.
+
+sqlx `0.9.0` was considered. Its pool, async facade, macro/offline metadata, and generic migration layer do not replace Slipstream's exact schema-shape validation and sidecar admission. It is rejected until concurrent connections or cross-database support become measured requirements.
+
+### Original confinement and LibRaw
+
+Rust owns Linux `openat2` confinement and same-descriptor pre/post `fstat` revision checks. A narrow owned C/C++ wrapper built with `cc` owns LibRaw and libjpeg error handling. Its production ABI uses opaque handles, fixed-width values, owned byte buffers, and normalized outcomes. Broad generated LibRaw bindings and `libraw-sys` are rejected because the available crate does not prove the required thumbnail enumeration, fd boundary, memory policy, or maintenance contract.
+
+The wrapper must expose only embedded-JPEG extraction and complete JPEG validation. Node-API, whole-RAW buffering, sensor unpack, demosaic, and general RAW development are outside the boundary. The wrapper receives a borrowed descriptor adapter; Rust retains descriptor ownership and performs the post-operation revision check.
+
+### Derivative image and color processing
+
+The final runtime does not depend on Sharp or Node. Bun and TypeScript are limited to the Web build, browser tests, and repository tooling.
+
+The selected implementation is a narrow owned C wrapper around libvips, with LittleCMS used where an explicit profile transform is required. The wrapper owns the libvips object graph, translates failures to bounded Rust outcomes, and exposes only JPEG inspection, orientation normalization, bounded resize, profile handling, and JPEG encoding. It must not expose libvips objects or GLib ownership conventions to the rest of the Rust application.
+
+libvips initialization is process-global: the first Preview operation calls `vips_init` once, and libvips remains initialized until process exit. Individual requests, Libraries, and Preview services must not call `vips_shutdown`. The wrapper must use libvips' bounded operation options and the application owns the Preview queue with a default concurrency of 2 jobs per cache directory. Input JPEG bytes are capped at 128 MiB, decoded pixels at 100 million, output JPEG bytes at 64 MiB, and LibRaw native memory at 256 MiB.
+
+`image 0.25.10` with `lcms2 6.1.1` remains a probe-only alternative. It compiles and proves basic Lanczos and sRGB primitives, but it is not selected unless the complete Issue #22 fixture matrix passes orientation 1–8, ICC, CMYK, corruption, memory, and representative pixel checks within the resource budget. `image` alone is rejected.
+
+The Rust derivative uses cache algorithm version `rust-vips-v2`. Cache entries from earlier implementations are not byte-compatible outputs and are rebuildable stale entries. Version 2 adds RAW-container orientation fallback while retaining JPEG orientation precedence. The checked-in fixture contract proves orientation, dimensions, representative decoded pixels, ICC classification, and manifest behavior for the selected implementation. The identity vectors keep their historical `sharp-v2` algorithm label and `historicalCacheKey` and `historicalManifestIdentity` values as provenance for that earlier implementation; those cache and manifest identities are rebuildable and are not migration authority. Only the vectors' Original File IDs, Photo IDs, and source revisions are deterministic migration authority, and new derivative records use `rust-vips-v2`.
+
+## Exact Dependency Evidence
+
+The compatibility workspace pins:
+
+- Rust `1.97.1`;
+- Axum `0.8.9` with `http1`, `json`, and `tokio`;
+- Tokio `1.53.1` with runtime, macro, network, signal, and synchronization features;
+- rusqlite `0.40.2` with bundled SQLite;
+- `cc 1.4.4` and `pkg-config 0.3.32` for the native probe;
+- `image 0.25.10` with JPEG only and no default formats or Rayon;
+- `lcms2 6.1.1` with dynamic system linking.
+
+`cargo info` provided crate metadata and repository URLs for the selected and rejected candidates. These results and a successful locked compile are selection evidence, not a guarantee of future maintenance. Security advisory and upstream activity review remains part of each delivery Issue when dependencies change.
+
+The compatibility probe links system LibRaw `0.21.5`, libjpeg-compatible API `2.1.5`, libvips `8.18.0`, and LittleCMS `2.17`. These versions prove that the selected native headers and process-global libvips lifecycle are available in the build environment; they do not by themselves establish derivative parity. The checked-in Preview fixture contract and later Rust implementation tests are the algorithm-version evidence gate.
+
+## Compatibility Contracts
+
+The service preserves:
+
+- the bounded protocol routes and statuses defined by the latest compatibility fixtures, path-free JSON errors, 16 KiB decoded header bound, and 64 KiB streamed mutation-body bound;
+- strong derivative ETags derived from cache identity, private derivative delivery, revalidatable `index.html`, and no API-to-SPA fallback;
+- canonical SQLite schema validation, the lossless v2-to-v3 migration history, canonical v3-to-v4 identity migration, canonical v4-to-v5 Album migration, canonical v5-to-v6 independent-Photo migration, fail-closed Library Folder admission, exact migration rejection, `foreign_keys=ON`, fixed journal policy, admitted sidecars, and one admitted `BEGIN IMMEDIATE` transaction per write;
+- the explicit ancestor-expansion transaction defined by [Photo Library Identity and Expansion](photo-library/identity.md), with canonical v3, v4, and v5 as preserved migration inputs and v6 as required writable state;
+- exact preservation of existing Original File and Photo IDs as opaque values across migration and Library expansion, without recomputing them from the current Original Location;
+- Location-independent, state-store-unique allocation for every new Original File and Photo ID under current writable state;
+- source revision text and cache/manifest identity serialization, including Unicode and fractional modification times;
+- each Photo's own Preview Source: JPEG Original content or the RAW Original's largest usable embedded JPEG;
+- exact-content Location Recovery for a moved Original File, bounded and resumable fingerprint enrollment, and no state transfer to a duplicate;
+- descriptor confinement, resource limits, atomic cache publication, truthful stale source, and Original zero mutation;
+- required absolute startup paths, loopback default, startup cleanup, signals, and idempotent close.
+
+Implementation details may improve standards compliance, such as parsing an `If-None-Match` list, only when the accepted behavior remains compatible and executable compatibility tests define the change.
+
+## Verification
+
+The verification gate runs the shared compatibility crate, Rust formatting, Clippy with warnings denied, Rust tests/build, Bun Web checks, and real Chromium browser tests against the Rust server.
+
+The checked-in compatibility suite covers representative v0/v1/v2 state migration success and rejection rollback, exact v3, v4, v5, and v6 schema shapes, legacy-ID, Album-state, and independent-Photo preservation, Location-independent new-ID allocation, exact-content recovery, Capture Time parsing and deterministic ordering, request/status/body/header vectors, derivative ETag admission, private delivery, index revalidation, and API no-SPA-fallback behavior. The full gate also covers Linux traversal and inode attacks, every exact HTTP body/header boundary, bind and shutdown failures, cache cross-read, all eight EXIF orientations, ICC conversion vectors, concurrency and memory limits, browser Library browsing and selection behavior, and the configured Sony sample with unchanged Original hash.
+
+## Photo Development Processes
+
+The Rust service retains all Photo, persistence, protocol, and lifecycle ownership when its in-process PhotoExecutor starts native development children or a Python simulation adapter. [Photo Development Architecture](photo-development/design.md) defines that subordinate process boundary inside the one application container. Python must not become a second HTTP or Library owner.

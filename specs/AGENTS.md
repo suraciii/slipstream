@@ -4,10 +4,11 @@
 
 ## Feature Organization
 
-- Organize contracts under `specs/<feature>/` by default.
-- Add `specs/<feature>/<capability>/` only when the feature's contracts become too large to read and maintain clearly in one or two files.
+- `specs/spec.md` owns product-wide behavior; `specs/design.md` owns shared system architecture. Root specialist references, such as `specs/server.md`, stay beside these contracts.
+- Keep each Feature's contracts in one or two files under `specs/<feature>/` by default.
+- Add `specs/<feature>/<capability>/` only when the Feature's contracts become too large to read and maintain clearly in one or two files.
 - Each level may own `spec.md` for observable behavior, `design.md` for technical decisions, or both. Create only files with substantive contracts.
-- Parent contracts own shared rules; child contracts own their specific rules and link to the parent. Read applicable parent contracts when working on a child capability.
+- Parent contracts own shared rules; child contracts own their specific rules and link to the parent. Read applicable root and Feature contracts when working on a child capability.
 - Keep specialist references beside their owning contracts and link to them. List every contract in the index with its scope.
 - Before implementation, update affected behavior contracts. Also update design contracts when work changes boundaries, ownership, lifecycle, data contracts, ordering, failure behavior, or other durable technical decisions. Resolve decisions in the governing Issue and contracts before editing implementation code.
 

@@ -6,9 +6,9 @@ coordinate these operations without giving image engines ownership of Original
 Files, Photo identity, or client state.
 
 [Photo Development](spec.md) owns product behavior.
-[Processing Modules](../processing-modules/design.md) owns one Engine invocation,
+[Processing Modules](processing/design.md) owns one Engine invocation,
 discovery, and Preview/Export identity.
-[Development Color Pipeline](../development-color/design.md) owns the qualified
+[Development Color Pipeline](processing/color.md) owns the qualified
 concrete image contracts of module outputs and their display derivatives.
 Existing Library confinement, camera Preview, and selection contracts
 remain authoritative for their boundaries.
@@ -75,8 +75,8 @@ remain with the durable manager.
 
 The existing Rust modular monolith owns development lifecycle inside its
 one application container. Each selected module runs through the in-process
-PhotoExecutor under [Local Photo Executor](../processing-executor/design.md). [Native
-darktable Integration](../darktable-integration/design.md) owns execution through a
+PhotoExecutor under [Local Photo Executor](processing/execution.md). [Native
+darktable Integration](darktable/design.md) owns execution through a
 fresh private MCP child. Standalone SpektraFilm uses a narrow Python entry point
 calling its pinned runtime. Neither peer invokes another module or publishes a
 Processing Artifact. Engines must not expose an independent public API or start
@@ -118,7 +118,7 @@ to change the admitted bytes. A descriptor-based alternative requires explicit
 engine compatibility and confinement proof before replacing the copy boundary.
 
 Argument vectors must avoid shell interpretation. Engine-private editing state
-must follow [Native darktable Integration](../darktable-integration/design.md); it must
+must follow [Native darktable Integration](darktable/design.md); it must
 never reuse external Rating XMP or overwrite a photographer-owned file. Child
 output paths and manifests must be validated before the service accepts them.
 
@@ -261,7 +261,7 @@ interpreted as new work.
 
 ## Preview Scheduling
 
-[Processing Modules](../processing-modules/design.md#preview-and-export) owns bounded
+[Processing Modules](processing/design.md#preview-and-export) owns bounded
 Edit Preview execution and explicit Export materialization.
 Preview work is ephemeral and latest-intent-wins within its Photo/Edit State owner.
 Pending requests with the same complete identity may coalesce. Completion must
@@ -273,7 +273,7 @@ Temporary comparison requests own their admission, supersession, and delivery
 separately from the main preview and do not change saved intent.
 
 A comparison requests the selected Engine's published default Controls under the
-[module comparison contract](../processing-modules/design.md#bounded-edit-preview).
+[module comparison contract](processing/design.md#bounded-edit-preview).
 For darktable this baseline uses 0 EV and as-shot white balance from the input.
 Every Preview admission settles: completion, failure, and cancellation free its
 identity, a later request cannot report work that no longer exists as still
@@ -314,7 +314,7 @@ persistence owner establishes whether the artifact was committed or the attempt
 ended without publication.
 
 Remove an attempt's private workspace only after its workload has settled and
-terminal evidence is durable. [Local Photo Executor](../processing-executor/design.md)
+terminal evidence is durable. [Local Photo Executor](processing/execution.md)
 owns settlement and cleanup; retained Processing Artifacts follow the retention
 rules below.
 
@@ -336,16 +336,16 @@ only the Rust scheduler. Limits and overload errors must be documented and
 qualified for the supported deployment. Missing required limits must prevent
 processing admission, not normal Library operation.
 
-[Processing Memory](../processing-memory/design.md) owns the shared container
+[Processing Memory](processing/memory.md) owns the shared container
 allocation, serialized enforcement, engine workspace plans, buffer lifetimes,
 and memory failure evidence. These are execution policies independent of the
 Edit State. The deployment must qualify that boundary before processing is
 enabled.
 
-[Local Photo Executor](../processing-executor/design.md) defines admission between this
+[Local Photo Executor](processing/execution.md) defines admission between this
 service boundary and the Engine child. It keeps Photo/source/Edit State and Export
 authority in the service and stages a confined copy rather than exposing a
-Library path. [Processing Modules](../processing-modules/design.md#interface-and-discovery)
+Library path. [Processing Modules](processing/design.md#interface-and-discovery)
 owns each adapter's complete parameter tree and input/output contracts.
 Discoverability cannot qualify a new module/input/parameter/output combination.
 
@@ -485,7 +485,7 @@ This section owns the availability, outcome, and refusal semantics every
 client surface — Web, CLI, or programmatic — preserves for the operations
 above. It defines no HTTP routes, request fields, response fields, or
 universal parameter schemas: the dynamic module interface belongs to
-[Processing Modules](../processing-modules/design.md#interface-and-discovery), and
+[Processing Modules](processing/design.md#interface-and-discovery), and
 wire and CLI syntax belong to their authoritative references under
 [Wire contract](#wire-contract) below.
 
@@ -495,7 +495,7 @@ Availability composes three independent axes. The Engine axis is each
 Processing Engine's own discovery report: availability and refusal reasons
 per Engine, separately from input support and resource admission. The
 Library axis is the scan and recovery phase of the Published Library
-([Scalable Library Browsing](../library-browsing/design.md#loading-status)). The
+([Scalable Library Browsing](../library-browser/design.md#loading-status)). The
 Photo axis is one Photo's source-read state. A ready Engine does not imply
 that the Library scan is idle or that any Photo source is readable, and a
 recovering Library does not change the module axis. While a scan or
@@ -599,7 +599,7 @@ requires its own caller and deployment verification. The general module
 contract does not silently reinterpret a deployment facade, and a facade
 does not expand merely because an adapter describes more controls: the
 dynamic module interface is owned by [Processing
-Modules](../processing-modules/design.md#interface-and-discovery). Every surface must
+Modules](processing/design.md#interface-and-discovery). Every surface must
 preserve the outcome, error, and transport-uncertainty conventions above,
 and no surface accepts executable expressions, arbitrary filesystem paths,
 or a general task engine.

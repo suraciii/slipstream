@@ -1,333 +1,677 @@
-# Browser Navigation and Responsive Surfaces
+# Scalable Library Browsing
 
-The Library Browser needs addressable Grid and Photo destinations without
-creating another owner of source data, Photo mutations, or Browse Snapshots.
-History restoration must remain bounded even when the Library contains tens
-of thousands of Photos. Responsive presentation must not reproduce every
-control in a second mobile tree.
+Slipstream's Web application must browse a Photo Library whose size exceeds what a mobile browser should download, parse, retain, or render as one response. The Photographer opens `All Photos`, one Original Folder, or one Album, browses its Grid, and opens individual Photos in the same Library Browser. The implementation needs a hidden stable-order boundary so a background rescan cannot move Photos underneath the user.
 
-[Library Browser Experience](spec.md) owns the
-observable layout and navigation rules. [Web Async Ownership](../web-async-ownership/design.md)
-owns transport, settlement, recovery, and stale-result policy. This design
-connects those contracts without changing the server's HTTP API.
+## Design Drivers
 
-## Model and Ownership
+- The Library may contain tens of thousands of Photos and continue growing.
+- The first useful screen must not depend on every Photo fact, Album member, or Original Folder.
+- Grid and Photo navigation must preserve deterministic Library and Folder order or explicit Album order.
+- A rescan may refresh Photo facts but must not reorder an already open source.
+- Grid thumbnails and review Previews are rebuildable, persistent derivatives.
+- The current Photo must not compete equally with speculative background work.
+- The server remains one Rust modular monolith with one SQLite owner and one Photographer.
+- Original Files remain descriptor-confined and read-only.
+- The browser must expose truthful loading and scan progress without invented percentages.
 
-A destination is a validated source reference, view order, Selection State
-filter, and optional stable Photo ID. Absence of a Photo ID means Grid. It is
-not a Browse token, Photo array, or saved mutation.
+## Model
 
-A browser entry has an opaque page-generated identifier and bounded
-restoration metadata. A Grid anchor contains a stable Photo ID, an index hint,
-and a CSS-pixel offset relative to its row. A focus target is a Photo ID or the
-Grid itself. A Photo entry may identify the immediately preceding Grid entry
-that opened it. That relationship is evidence for in-app return, not permission
-to infer history from its length or the referrer.
+### Library Overview
 
-A page-local navigation owner owns URL decoding/encoding, the current browser
-entry, pending destination identity, and history transitions. It reports a
-destination intent to the page controller. It issues no HTTP calls and owns no
-Photo facts or mutable source projection. The controller coordinates existing
-source/Grid and Photo owners and reports a committed or failed transition.
+The Library Overview is a bounded summary of the current published Library. It contains:
 
-The source/Grid owner remains authoritative for source identity, options,
-Snapshot readiness, range loading, and anchor lookup. The Photo owner remains
-authoritative for Photo commitment and mutation settlement. The UI owns
-geometry, focus, panels, and pointer state. Panels emit existing semantic
-intents and never become another API client or persistence coordinator.
+- total Photo count;
+- Album identifiers, names, counts, and saved-position availability;
+- current scan state and progress summary; and
+- whether a published Library is available.
 
-## Browser Address Contract
+It contains no complete Photo list, complete Album membership list, or Original Folder tree. Its response size is therefore independent of Library Photo count except for encoded counts and the number of Albums.
 
-Addresses use the existing application path `/` and query parameters. The
-server continues to serve the same application document, so copied addresses
-and refresh do not require a new path fallback or a deployment route change.
-The codec uses URL and URLSearchParams, with decoding performed exactly once.
+### File Location Window
 
-The recognized parameters are:
+A File Location Window is one bounded range of direct child Original Folders beneath a requested parent. Each Folder summary contains its relative Location, display name, recursive Photo count, and whether known descendant Folders exist.
 
-- `source`: `library`, `folder`, or `album`; omission means `library`;
-- `folderPath`: required for `folder`, including an empty value for the
-  Library Folder; forbidden for other sources;
-- `albumId`: required for `album` and forbidden for other sources;
-- `photoId`: optional stable Photo identity; omission means Grid;
-- `order`: `capture-time-asc` or `capture-time-desc`, with `album-order` also
-  allowed for Albums; omission uses that source's default; and
-- `selection`: `all`, `unflagged`, `picked`, or `rejected`; omission means
-  `all`.
+The server derives Folder summaries from one Published Library according to [Physical File Locations and Virtual Albums](../photo-library/design.md). A request provides one validated relative parent Location, start position, bounded limit, and the opaque publication value from the first retained Folder window. The first request may omit that value and binds to the current publication. The server returns the publication, parent, requested start, total direct-child count, and only that range.
 
-IDs and Folder Locations must satisfy the existing API validators. A Location
-must remain relative and component-valid; an encoded slash is a separator
-after the single decode, not an escape from containment. Absolute Locations,
-`.` or `..` components, duplicate recognized parameters, empty required IDs,
-an empty value for an optional parameter, and source-incompatible options
-are invalid. An encoded reserved character
-inside a valid Location must round-trip without double decoding.
+A newer publication expires the old value. The browser restarts File Location navigation instead of combining windows from different publications. No route returns the complete Folder tree or complete recursive Folder membership. The Library Overview therefore remains small even when directory count grows with the Library.
 
-Unknown query keys are ignored and removed on canonicalization; startup
-canonicalization performs that same single replacement of the current URL.
-Known invalid values produce an invalid-link explanation and the All Photos
-Grid, with one replacement of the current URL. This occurs before any request
-for the invalid source. The encoder omits defaults and emits recognized parameters
-in the order above. It must not place filenames, absolute paths, transient
-publication tokens, arbitrary return URLs, or UI panels in an address.
+### Browse Snapshot
 
-Examples use illustrative IDs that satisfy the identifier shape:
+A Browse Snapshot is an internal, ephemeral server object. It is not a product or domain concept exposed to the Photographer.
+
+It contains:
+
+- one opaque token;
+- source identity: `All Photos`, one Original Folder, or one Album;
+- the view order and Selection State filter it was created with;
+- an immutable ordered array of Photo IDs;
+- total count;
+- the source's per-state Selection counts when it was created;
+- the Album's initial saved position when applicable; and
+- last-access time for bounded cleanup.
+
+Creating a Snapshot copies only ordered Photo IDs and bounded counts. It does not copy Photo facts, thumbnails, or Preview bytes. Current Photo facts are queried from the Library owner when a window is requested.
+
+One process may retain only a bounded number of Snapshots. Explicit close, idle expiration, server restart, and bounded oldest-idle eviction may remove one. Losing a Snapshot never loses Selection State, Rating, Album membership, or saved position because those remain in SQLite.
+
+### Browse Window
+
+A Browse Window is a bounded consecutive range within one Browse Snapshot. Each item contains only the facts needed by Grid View and Photo View:
+
+- position and Photo ID;
+- availability of the Photo and its Original;
+- Selection State and Rating;
+- the single Original's kind;
+- the ordering Original filename, because Grid View and Photo View identify a Photo by the Original File the Photographer decides on;
+- current thumbnail and review-Preview facts; and
+- derivative URLs only when current cache identities are known.
+
+The ordering Original filename is a basename only. The relative Location,
+absolute paths, and the Library Folder's absolute path never cross this
+boundary.
+
+A request must provide a start position and bounded limit. The server enforces a small maximum. No browser-facing route may use omission of the limit to mean the complete Library. Each Grid item's Photo summary carries one `original` fact with its kind and availability; the retired `ambiguous` and `originals` array fields must not appear in any current response.
+
+### Photo Review Metadata
+
+Photo View obtains a bounded, Photo-scoped metadata view through
+`GET /api/photos/{id}/metadata`. The response contains only Capture Time,
+Aperture, ISO, Shutter Speed, and Focal Length when the Photo's own
+Original File provides them. Missing fields are omitted from the response and are rendered as `—` by
+the browser. Reading metadata is read-only and failure does not make the Photo
+unavailable or block review actions.
+
+This metadata is intentionally loaded on demand instead of being added to
+every bounded Grid window. The first product does not expose a general EXIF
+tree, metadata editor, or unbounded metadata response.
+
+### Photo Album Membership Query
+
+Photo View obtains the Albums that contain one Photo through
+`GET /api/photos/{id}/albums`. The response lists each containing Album's
+identifier and name in Album-list order. The query is resolved server-side
+from the Album membership tables; the browser must not derive membership by
+traversing every Album's members. The response is bounded by the number of
+Albums and contains no member lists. An unknown Photo identifier is a
+distinct not-found failure. Reading membership is read-only; mutations
+continue through the existing Album routes with their admitted-write
+contracts.
+
+The position lookup accepts one stable Photo ID through
+`GET /api/browse/{token}/position?photoId={id}`. It returns that Photo's
+position in the same immutable Browse Snapshot, or `null` when the Photo is
+not in the source. It returns no Photo facts and has no unbounded form. An
+expired or unknown Snapshot remains a distinct not-found failure.
+
+### Published Library
+
+The Published Library is the most recent complete scan committed by the Library owner. The browser may use it while an ordinary rescan builds a replacement. A root binding, schema, confinement, or state admission failure remains fail-closed and prevents service admission.
+
+While any scan or recovery runs — including a saturated one — the last
+Published Library remains the authority for existing Photos: availability,
+metadata, source facts, and derivative eligibility continue to be served from
+it. Only a completed scan atomically replaces it. A deferred, failed, or
+interrupted scan publishes nothing, and a per-Original read that is empty,
+failed, or deferred never overwrites that Original's known published facts.
+
+### Loading Status
+
+Loading Status reports real phases and counts. It distinguishes:
+
+- opening admitted persisted state;
+- discovering supported Original Files;
+- inspecting Capture Time facts;
+- recovering relocated Original Files;
+- applying a completed scan;
+- enrolling content fingerprints;
+- idle;
+- failed with the prior Published Library retained; and
+- initializing when no Published Library exists.
+
+A phase may omit a total until that total is known. The protocol must not manufacture a percentage from elapsed time.
+The status includes the scanner's last progress update in Unix milliseconds;
+zero means no scan has started in this process. Recovery progress counts cover
+eligible candidates examined during the current scan, not an estimate. A
+recovering phase without an established total may still represent active
+planning. The timestamp changes only when the scanner reports phase or count
+progress, not on reads.
+
+Loading Status is the Library axis only: it never reports processing
+capability or a Photo's source-read state, and a `recovering` phase changes
+neither. A status answer preserves the latest observed phase and counts, so a
+follow-up `status` after an unknown `library check` outcome reports progress
+or the terminal result rather than a reset.
+
+## Semantics
+
+### Application Startup
+
+Startup must first admit the Library Folder binding, SQLite state, cache layout, schema, and sidecar boundary. Admission failure remains a hard startup failure.
+
+When a compatible Published Library exists, the server may bind HTTP and serve it before an ordinary full rescan completes. The rescan runs in the background and exposes Loading Status. Its successful result atomically replaces the Published Library for future Browse Snapshots.
+
+When no Published Library exists, the server serves an initializing Library Overview while the first scan runs. The first Browse Snapshot cannot be created until that scan publishes a Library.
+
+A Library Expansion retains its stricter offline contract. The expansion command must still complete its required post-commit scan before reporting success. Background startup does not weaken expansion admission or rollback behavior.
+
+### Source Opening
+
+The Web application loads the Library Overview first. It may concurrently request the initial destination's Browse Snapshot so Grid placeholders appear immediately, but source navigation must not wait for that request, for a destination whose open needs no pending publication binding. The bare application address selects All Photos. Addressed startup and its single bootstrap election follow [Browser Navigation](experience/design.md#destination-establishment).
+
+Conceptual protocol surfaces are:
 
 ```text literal
-/
-/?source=folder&folderPath=
-/?source=folder&folderPath=RAW%2F26-spring&selection=unflagged
-/?source=album&albumId=00000000-0000-4000-8000-000000000001
-/?source=album&albumId=00000000-0000-4000-8000-000000000001&photoId=00000000-0000-4000-8000-000000000004&order=capture-time-desc
-/?photoId=00000000-0000-4000-8000-000000000009
+GET    /api/overview
+GET    /api/status
+POST   /api/scan
+GET    /api/file-locations?publication={opaque}&parent={folder}&start={position}&limit={count}
+POST   /api/browse
+GET    /api/browse/{token}?start={position}&limit={count}
+GET    /api/browse/{token}/position?photoId={id}
+GET    /api/photos/{id}/albums
+GET    /api/recovery/unavailable
+POST   /api/recovery/propose
+POST   /api/recovery/apply
+DELETE /api/browse/{token}
 ```
 
-These examples define browser addresses, not new HTTP endpoints. Wire values
-remain those of [Scalable Library Browsing](../library-browsing/design.md#source-opening).
-An implementation must test parsing, rejection, canonicalization, and round
-trips from these examples.
+Loading Status also reports the committed recovery result of the most recent completed scan as `lastRecovery {relocatedPhotos, fingerprintedOriginals, unavailablePhotos}` and the enrollment counters as `fingerprints {enrolled, pending}`. The scan phase `recovering` covers fingerprint comparison for candidate locations. The recovery routes serve the bounded manual recovery contract in [Photo Library and Albums](../photo-library/spec.md): `unavailable` lists remembered facts, `propose` returns inspectable mappings without writing, and `apply` commits one approved batch of relocations with per-mapping revalidation. A proposal carries a per-mapping outcome of `matched`, `content-mismatch`, `missing`, `kind-mismatch`, `unreadable`, `occupied`, or `colliding`, and marks the mapping verified only when a persisted fingerprint matched the candidate digest.
 
-## History Mechanism
+When a Published Library exists, both `GET /api/overview` and
+`GET /api/status` include its opaque publication generation. The browser uses
+that generation to revalidate an Overview immediately before committing
+shared counts and Album summaries, so a response captured before replacement
+cannot cross the publication boundary. An unpublished Library omits it.
 
-Use the History API with one page-local navigation owner. Initialize the
-current valid document entry with replaceState; never push a duplicate entry
-on startup. A same-document traversal is observed through one popstate
-subscription, removed on disposal.
+`POST /api/scan` takes no semantic request fields; an empty JSON object is
+accepted. A same-service request admits one application-owned Scan Cycle and
+waits for its terminal Loading Status. Concurrent accepted requests join that
+cycle within the bounded waiter capacity and each receives the one terminal
+status captured by its leader; the browser suppresses a duplicate Retry
+Library Check while its own command is in flight. Success is `200` with the
+bounded Loading Status shape used by `GET /api/status` and no Photo facts.
+`Origin` does not determine scan admission; an unavailable, saturated, or
+failed scan is `5xx`. Wrong-method handling remains the shared `405`
+protocol rule.
 
-Navigation controls must use real same-origin anchors where a destination is
-known. The handler intercepts only an unmodified primary activation. New-tab,
-copy-link, download, and external-link behavior remain native. Buttons remain
-appropriate for decisions, panels, and operations whose destination requires
-resolution, such as Album Resume.
+A waiter whose client command times out or disconnects receives no terminal
+claim: the outcome of the admitted cycle is unknown to that client, which
+reconciles through `GET /api/status`. A timeout is not a cancellation, a
+terminal failure, or a safe duplicate-retry signal; reissuing the request
+joins the still-running cycle and starts no second physical scan.
 
-The browser owns the stack. The application must not mirror it with an
-unbounded in-memory history array. State under a versioned `slipstream`
-namespace stores only the entry identifier, optional Grid anchor/focus,
-optional known parent Grid relationship, and optional Folder publication
-provenance. Merge that namespace without overwriting other history.state
-fields. Treat absent, malformed, or unknown-version state as a direct entry.
+### Scan Cycle Ownership
 
-Store no Photo facts, thumbnails, tokens, request objects, pending writes,
-multi-selection, or Undo descriptions in history.state. No new localStorage
-or server persistence is required. Each entry has constant-size metadata;
-there is no per-visited-Photo cache outside existing bounded owners.
+The Application owns at most one Scan Cycle across background startup and
+explicit `POST /api/scan` callers. The first admission starts an
+application-owned leader task. Later admissions attach bounded waiters to that
+task rather than invoking independent publication lifecycles. The leader runs
+one physical Library scan, publishes its result exactly once, completes status
+accounting exactly once, captures the resulting terminal Loading Status, and
+fans that same result out to every remaining waiter.
 
-Before leaving Grid, capture its anchor and focus from the UI and replace
-only its entry metadata. A Photo opened from that Grid receives its own entry
-and the parent relationship. Subsequent same-source Photo navigation preserves
-that relationship while replacing the Photo URL. In-app return traverses one
-entry only when the current Photo has this known parent; otherwise it replaces
-the Photo entry with its source Grid. A direct link must not call history.back
-based solely on history.length or a same-origin referrer.
+Dropping an HTTP request removes only that request's waiter. It does not cancel
+the admitted leader, skip publication, or leave status accounting elevated.
+Application shutdown may drain or terminate the leader through the ordinary
+server shutdown contract, but cleanup still completes status accounting.
+After the leader reaches terminal state, the next admission may create a new
+cycle. This single-flight boundary prevents one physical scan from producing
+multiple publication generations.
 
-Source selection creates one Grid entry. Resume from another source first
-commits that source's Grid entry and then resolves and opens its saved Photo;
-Resume from its current Grid adds only the Photo entry. A plain Grid open
-starts at index zero unless a restoration anchor is being restored; the initial
-saved position in the existing Browse response is used for Resume, not as an
-instruction to switch every Album open into Photo View. With no available
-saved position, keep the Grid and explain that Resume is unavailable. An
-empty Album must never create an artificial Photo entry.
+`POST /api/browse` accepts one source:
 
-## Destination Establishment
+```json
+{ "source": "library" }
+```
 
-The navigation owner serializes presentation through one latest destination
-identity. A newer intent or traversal invalidates older continuations. It
-passes no mutation through the route decoder.
+or:
 
-A source selection or applied view change may establish its address and a
-truthful pending Grid shell before the source is ready. Retained content must
-be identified as previous content and unavailable for decisions; it must not
-appear to satisfy the requested source or filter. A failed establishment
-keeps that requested destination retryable.
+```json
+{ "source": "folder", "folderPath": "RAW/26-spring", "publication": "opaque" }
+```
 
-Opening a Photo from Grid, stepping to a neighbor, and decision-driven
-advancement commit their Photo address only after the Photo owner commits the
-corresponding bounded facts. Failed steps create no new Photo address and keep
-the existing Photo Retry target. Preview-byte completion is not a prerequisite
-for addressing a Photo whose bounded facts are ready. Persistence-driven
-advancement keeps its existing save-before-advance requirement.
+or:
 
-Direct entry and browser traversal have already selected a URL. They must
-render a destination shell while resolving it. They must not undo traversal
-with history.go, overwrite it with the old Photo, or admit a mutation against
-previously visible content. A transport failure leaves the target URL and
-Retry plus a source-return action. Only confirmed invalid or missing targets
-use the product's explained fallback and replace that current entry.
+```json
+{ "source": "album", "albumId": "opaque-id" }
+```
 
-Startup must elect exactly one source bootstrap from the committed Overview.
-The initial destination replaces the unconditional All Photos bootstrap; it
-must not race a second source open. An unpublished Library waits for the
-existing publication workflow before attempting that destination.
+For an Album, an explicit Resume request adds `"resume": true`. An ordinary
+Album source open omits this field and always creates the Album Grid at its
+initial position. Resume is never inferred from the absence of `photoId`.
 
-A same-source Grid/Photo traversal reuses the live Browse Snapshot when its
-source, filter, and order match. This preserves frozen membership after a
-decision. No Snapshot is retained merely because its source has an older
-browser entry. Once the source is left, its ordinary release rules apply.
+It optionally accepts one explicit view order. For `library` and `folder`
+sources the values are `"capture-time-asc"` (the default when omitted) and
+`"capture-time-desc"`. For `album` sources the values are `"album-order"`
+(the default when omitted), `"capture-time-asc"`, and
+`"capture-time-desc"`. An order value that is invalid for the source is
+rejected before any Snapshot is created.
 
-When a new Snapshot is necessary, open it with the selected source/options
-and the preferred Photo ID where applicable. Resolve the target using the
-existing bounded position endpoint. A preferred Photo is a hint to source
-opening, so a fallback position returned by open is not proof that the
-requested Photo exists. Confirm the stable ID before presenting it. A null
-position produces the specified source-Grid fallback, not another Photo
-silently shown under the missing Photo's URL.
+It optionally accepts one Selection State filter. The values are `"all"`
+(the default when omitted), `"unflagged"`, `"picked"`, and `"rejected"`. An
+unknown value is rejected before any Snapshot is created. The filter is
+applied once, server-side, to the complete ordered source before the Snapshot
+is frozen, so a filtered Snapshot is one frozen bounded sequence with its own
+total and positions. The source's per-state Selection counts describe the
+unfiltered source order and are reported even for an unfiltered open.
 
-For Folder links, a direct entry binds to the current Published Library and
-opens only a valid current relative Location. A history entry from a prior
-Folder publication must not silently reinterpret that Location: if its
-provenance differs, show the changed-Folder explanation and require an
-explicit Open current Folder action after current publication binding. That
-action replaces the entry's provenance; it does not add a history loop.
-A missing current Folder returns to All Photos only after the bounded server
-answer confirms it is absent. Neither a Folder tree download nor scanning
-client-side windows to discover a Photo is permitted.
+It returns the opaque token, total count, initial position, per-state
+Selection counts, and optionally one bounded first window. The exact JSON
+belongs to the protocol compatibility fixtures; database rows and absolute
+Original Locations do not cross this boundary.
 
-## Restoration and Persistence
+The protocol has no route that materializes every Photo fact, every Album member, every Original Folder, or complete recursive Folder membership. The legacy unbounded complete-Photo and complete-membership routes remain retired. Album mutations return bounded Album summaries in the same shape as the Library Overview's Album list, never member lists. Legacy Photo Set routes and source values are retired rather than aliased. A triggered scan reports Loading Status and returns no Photo facts. Operator verification uses bounded traversal or an explicit offline state projection from the owned SQLite state rather than any production route that materializes every Photo fact.
 
-Set browser scroll restoration to manual while the mounted Library Browser
-owns its internal Grid scroller, and restore the previous setting on disposal.
-The UI captures a top-row Photo anchor and its offset, not a window scrollY.
-After source establishment, resolve that Photo against the active Snapshot,
-admit only the bounded window covering its row, and restore geometry after
-the current size step determines column count. Then restore cell focus with
-preventScroll, or focus the Grid when that cell no longer exists.
+### Order Ownership
 
-An index hint is usable only after a stable-ID check in the same Snapshot.
-If the anchor is absent, clamp the prior index hint to the new source and use
-that bounded position; an empty source uses its empty-state focus target.
-If state is absent or invalid, start at the source's first Grid row. Restoration
-must finish once for the current destination and may not continually fight
-subsequent user scrolling. Lookup failure is retryable, not evidence that the
-Photo disappeared.
+An `All Photos` Browse Snapshot copies Photo IDs from the current Published Library's deterministic Capture Time order. An Original Folder Browse Snapshot filters that order by the recursive component-aware Folder rule. An Album Browse Snapshot copies IDs by persisted membership position.
 
-A destination change supersedes only the read/presentation scopes it actually
-leaves. A Grid/Photo change does not gratuitously reopen the source or discard
-valid same-source Undo. A source change or reload keeps existing Undo and
-multi-selection invalidation rules. Traversal never reconstructs those states
-from browser history.
+The requested view order is applied once, server-side, to the complete
+source before the Snapshot is frozen:
 
-Admitted Photo, Album, saved-position, and recovery writes retain the exact
-settlement policies of Web Async Ownership. A route change may detach their
-presentation but must not abort them as a navigation shortcut. Late responses
-cannot repaint the new destination or enqueue advancement. History restores
-no prior mutation intent. A newly committed Album Photo may admit its ordinary
-current saved-position write once; restoring a Grid never does so. Test that
-exception separately from the prohibition on replaying decisions.
+- `capture-time-desc` reverses only the Capture Time direction. Photos
+  without a valid authoritative Capture Time stay in the trailing partition,
+  and the ordering Location and Photo ID tie-breakers keep their existing
+  direction, so a descending view is never produced by reversing a
+  sequence that contains missing-time Photos.
+- An Album time view orders members by the same Capture Time authority
+  through the Published Library's Photo facts while leaving persisted
+  membership positions untouched.
 
-Application teardown must remove browser listeners and cancel navigation
-continuations while preserving the existing release and admitted-write
-settlement behavior. For pagehide/pageshow with the browser back-forward
-cache, the app must resume or remount exactly one usable Library Browser and
-revalidate its destination. It must not leave an inert restored document or
-duplicate subscriptions. A full page return is not assumed to be popstate.
+After creation, a Snapshot's ID order never changes. A rescan may change facts returned for those IDs, including availability and Preview state, but cannot insert, remove, or reorder them. Reopening the source creates a new Snapshot from the latest Published Library, and an explicit refresh reuses the currently selected order and Selection State filter.
 
-## Responsive Presentation Boundary
+### Selection Filtering
 
-Use a single semantic action binding for each product intent. A control may
-move or be rendered for a different layout, but hidden variants must be
-unavailable to accessibility, focus, input, and image-loading paths. There must
-not be duplicate mutation admission or independent mobile Rating/Undo state.
+The Selection State filter is a view option of one open source. It is applied
+after the view order has been resolved to the complete source order and before
+the Snapshot is frozen, so it selects from that order and never rewrites it.
+Filtering writes no persisted state: Album membership, Album member position,
+Selection State, and Original Files are unaffected.
 
-Use native dialog.showModal for modal surfaces. One page UI controller owns
-which surface is active, its invoker, its local subview, and draft values.
-It does not own a stack of routes or server state. A content transition within
-Photo tools replaces the modal content and restores a meaningful focus target.
-Native close/cancel events, explicit Close, and scrim dismissal converge on
-one cleanup path. Use explicit edge focus handling if needed to keep Tab in
-the surface. Destroy pending gesture candidates before opening it.
+The Snapshot's per-state Selection counts are computed over the same complete
+ordered source before the filter is applied. A filtered Snapshot therefore
+reports the filtered total while its counts still describe the whole source,
+which is what makes progress readable inside a filtered view. Both are plain
+Library facts read at creation time: a Photo that the Published Library cannot
+resolve is not counted, and no count is derived from requested windows.
 
-Browser history traversal closes the current modal before destination
-rendering. The UI must not add dummy history to emulate native close requests.
-The existing Chromium support contract applies; do not add a CloseWatcher
-polyfill or a second back-stack implementation for unsupported engines.
+Membership is frozen with the Snapshot order. A decision that changes a
+Photo's Selection State does not add that Photo to, or remove it from, an open
+Snapshot; the Photographer sees the change after reopening the source, which
+applies the filter to the latest facts and re-anchors the current Photo by
+identity. Positions, `GET /api/browse/{token}/position`, windows, and Previous
+and Next navigation all resolve inside the frozen filtered sequence, so a
+filtered view stays one bounded sequence with one meaning for every position.
 
-A supporting surface may grow to a bounded fraction of dynamic viewport
-height and scroll internally. The primary Grid/Photo layout uses dynamic
-viewport units, minmax/overflow constraints, and safe-area padding. Normal
-state region budgets come from the Product Spec. Larger text and error
-content must reflow rather than rely on fixed heights that hide controls.
+The server resolves Album saved position when it creates the Snapshot. It applies the unavailable-member fallback defined by the Product Spec. The browser does not download all members to reproduce this rule. Durable saved position changes only when a Photo becomes current in Photo View and the position write is confirmed; Grid scrolling remains browser-local. Saved position and view order are independent: the position resolves by Photo identity whichever order the open view uses.
 
-Loaded Preview inspection remains local during disconnection. Opening a panel
-must not change Photo readiness; readiness still derives from existing owners.
-Closed Nearby Photos releases strip thumbnails and admits no windows. Opening
-it uses the same bounded neighbor facts and five-entry limit as the wide strip.
+The saved position applies only to an Album open that requests Resume and supplies neither an addressed Photo nor a restored Grid anchor. A view change (a new filter or order) supplies the browser's current Photo by identity as its open anchor; when that Photo does not match the new view, the open starts at the view's first Photo rather than at the durable saved position. A restored Grid anchor is browser-history restoration state, not an open anchor.
+
+Every source open requires the published Library. An Album open reads the same Published snapshot as `library` and `folder` sources for its anchor, filter membership, and counts, and `album-order` is no exception even though its order comes from persisted membership position. An Album open therefore fails with the not-published response before any Snapshot exists instead of failing later at its first window.
+
+### Grid Loading
+
+The source/Grid owner owns one range admission path. The visible range plus
+a bounded buffer is reported as one unit; the owner computes the aligned
+bounded windows still missing for that range, starts at most one in-flight
+request per window, coalesces every concurrent demand for the same window
+onto that request, and settles exactly one completion notification per
+completed window no matter how many consumers joined. Rendering is
+presentational: it never initiates loading and never subscribes per cell.
+
+The rendered Grid must use virtualization or an equivalent bounded-DOM
+mechanism. The number of rendered cells must be proportional to the viewport
+and look-ahead, not the total source size. Grid DOM updates merge to at most
+one per animation frame, and each update reuses the nodes of Photos that
+stay visible: only entering, leaving, or changed cells are touched.
+
+Retained Photo facts are capped at a bound that covers the actual viewport
+and buffer at supported large viewports. Eviction is anchored to the latest
+reported visible range and protects that range and its buffer; a late
+response for an older position must never evict current-viewport data. A
+window request captured before a source change must not commit into the new
+source; correctness never depends on cancellation succeeding.
+
+Duplicate or overlapping window requests share server work through the
+single in-flight coalescing above; a general response cache is not required.
+SQLite queries must run through the existing owner boundary and must
+preserve request order.
+
+### Current Photo Facts
+
+Browse Snapshot order and Photo facts have separate owners:
+
+```text literal
+Browse Snapshot -> stable ordered Photo IDs
+Library owner    -> current Photo facts
+Preview service  -> current derivative facts and bytes
+```
+
+A Selection State or Rating mutation updates SQLite through the existing transaction boundary. The affected loaded window is updated locally after confirmation. A conflict or reconnect refreshes only the affected Photo or current bounded window.
+
+Preview completion must become visible to subsequent window or Photo queries immediately. A stale process-wide scan snapshot must not remain the only source of Preview state after the Preview service has persisted newer facts.
+
+### Batch Selection Writes
+
+Grid multi-selection applies one Selection State to many Photos through
+`POST /api/photos/state`. The request carries one bounded item per selected
+Photo and one `selectionState` value:
+
+```json
+{
+  "selectionState": "picked",
+  "photos": [{ "photoId": "photo-1", "expectedCurrent": "unflagged" }]
+}
+```
+
+The server accepts at most 100 unique Photo identifiers and rejects an empty,
+duplicate, over-limit, malformed, incomplete, unknown-field, or invalid-state
+request before any write, as an invalid request rather than a conflict. The
+browser mirrors that bound, so a batch it builds is always one the server can
+admit. `selectionState` is exactly `picked` or `rejected`, and every item has
+exactly `photoId` and `expectedCurrent`, with `expectedCurrent` exactly
+`unflagged`, `picked`, or `rejected`. Batch Rating is not part of this
+contract, and the route carries no source, Album, or position: the browser
+names the Photos it multi-selected.
+
+The operation is one transaction with per-Photo outcomes, so one unsuccessful
+Photo never rolls back confirmed Photos. The response reports exactly one
+outcome per requested Photo:
+
+- `applied` with the Selection State the Photo held before the write;
+- `changedElsewhere` with the Photo's current Selection State when its current
+  value differs from `expectedCurrent`; and
+- `missing` when the current Library no longer holds the Photo.
+
+A `changedElsewhere` or `missing` Photo is not written. On the batch
+settlement, the browser moves loaded Photo facts and source decision counts
+only for `applied` outcomes. During `Review N`, it reconciles each refreshed
+Photo's contribution from the belief already held by the source counts to the
+observed fact, so a retry cannot move a count twice. A Photo whose write was
+not confirmed is never presented as decided. The browser keeps unsuccessful
+Photos selected for review or retry. A missing
+Photo remains a selected, non-retryable result until clear or source change;
+its ID is excluded from later requests. The browser does not invent a fact for
+a missing Photo. `Review N` refreshes the current facts for N changed Photos
+and replaces their expected states before a retry. Before treating a refreshed
+Photo as missing, the browser resolves its identity against the current Browse
+Snapshot position; bounded local fact eviction is retryable cache pressure, not
+proof that the Photo left the Library.
+
+The response is valid only when its three arrays contain exactly one
+non-overlapping outcome for every requested Photo and each outcome has the
+fields defined above. A missing array, duplicate or invented ID, obsolete
+`conflicts` field, or extra outcome field makes the whole response malformed.
+A malformed response moves no facts, counts, or Undo entries; the selection
+remains retryable and the Grid reports a failed batch.
+
+Batch Undo reuses the single-Photo compare-and-set write: the browser sends
+one bounded write per confirmed Photo, each naming the prior value the server
+reported and the batch's value as `expectedCurrent`. One Photo that changed
+does not block the others, and the browser retires only the Photos whose Undo
+cannot apply. A batch Undo route was rejected: it would add a second
+compare-and-set surface for a workflow the existing route already expresses,
+and the per-Photo conflict truthfulness is identical either way.
+
+Batch **Add to Album** reuses the bounded Album membership route with the
+multi-selected identifiers. The successful membership result identifies the
+newly added Photo IDs and the IDs that were already members. A separate
+bounded compensation operation removes only the newly added IDs; it is not
+global Selection State Undo and does not claim to restore historical Album
+positions. Existing membership rules, the membership bound, and duplicate
+suppression remain authoritative.
+
+The Grid selection tray is source-owned presentation. It shows `Visible
+results` for the currently filtered Browse Snapshot and `Source progress` for
+the complete source's Selection State counts. These labels must not reuse one
+number with two meanings. A batch Selection State decision or batch Album
+addition does not write Album saved position; an Album result explicitly
+reports that the durable Photo View resume position is unchanged. A
+**Remove added Photos** compensation is an ordinary Album removal and reports
+the resulting saved position when it removes the saved Photo.
+
+### Persistent Derivative Cache
+
+The existing cache identity and atomic publication contracts remain authoritative.
+Both `thumbnail-512` and `review-2560` derivatives persist in the configured
+cache directory and may be reused across server restart.
+
+A current cache hit must not reopen or reprocess the Original File. Derivative
+delivery uses identity-bearing URLs and `ETag`; [Instance Access
+Architecture](../access/design.md#private-content-and-transport) owns authentication and
+the private response cache policy. A changed source revision creates a
+different cache identity and cannot be presented as current under the previous
+identity.
+
+After a scan publishes a new or changed usable Photo, the server may warm its
+`review-2560` derivative at background priority. This bounded warmup must not
+delay publication or make browsing depend on completing the derivative. It
+must not backfill every existing Photo, and it does not warm `thumbnail-512`.
+
+The cache is rebuildable and not authoritative for Selection State, Rating,
+membership, or saved position. Removing cache bytes may cause regeneration but
+must not change SQLite user state or Original Files.
+
+### Preview Scheduling
+
+Scheduling priority remains:
+
+1. current Photo review Preview;
+2. immediately next and previous Photo review Previews;
+3. visible Grid thumbnails;
+4. bounded Grid look-ahead thumbnails;
+5. new or changed `review-2560` warmup.
+
+Current Preview completion triggers adjacent prefetch. Prefetch is limited to
+immediate neighbors and remaining shared native-work capacity. Moving to a
+prefetched neighbor promotes that request to current priority.
+
+Duplicate requests for one cache identity share one in-flight job. Leaving
+Photo View may leave a nearly complete reusable job running, but queued
+speculative work with no consumer may be dropped.
+
+### Filmstrip Neighbors
+
+Photo View presents the current Photo's immediate neighbors from the same
+Browse Snapshot. The strip adds no route, no request shape, and no server
+contract. While Photo View owns the UI the browser admits no window work for
+a hidden surface, and the strip admits none itself: it presents the facts
+the current Photo's loaded window already holds. Photo-scoped work the Photo
+surface already runs — the current Preview and its adjacent prefetch — can
+load a neighbor's window too, and the strip presents those facts as they
+arrive. A neighbor no loaded window covers stays a placeholder until the
+Photographer navigates to it, which admits that Photo's window through the
+normal Photo path and no more.
+
+The strip is presentation state of the Photo surface, bounded at five
+entries: two Photos on each side of the current Photo, clamped at the
+source's ends. The strip's responsive placement follows
+[Library Browser Experience](experience/spec.md#photo-view).
+It renders only while its owning Photo surface or Nearby Photos disclosure
+is visible and draws its
+thumbnails from the single `thumbnail-512` derivative. It deliberately does
+not reuse the Grid's cell composition: an entry crops that derivative to a
+square and places the Selection State badge over it, where a Grid cell keeps
+the complete image at its true aspect ratio and carries its indicators in
+the footer. An entry whose window has not loaded yet presents a quiet
+placeholder rather than a guessed Photo, and a strip failure cannot change
+the current Photo's transitions.
+
+Five entries is the bound chosen here: more neighbors would enlarge the
+strip's thumbnail demand without changing which Photos the Photographer can
+reach, and an unbounded strip would contradict the bounded window contract
+this design protects. The strip is navigation, not decision: activating a
+neighbor opens that Photo, and only the open Photo carries a decision. The
+current entry is marked as current and presents no activation, so it can
+never re-open the Photo the Photographer is already viewing and discard
+their zoom.
+
+### Rejected: Let the strip admit its neighbors' windows
+
+A strip that admitted a neighbor's window itself would make a hidden Grid
+range take on work while Photo View owns the UI. The first attempt did
+exactly that and regressed two recovery scenarios: an expired-source reopen
+pulled the tail window behind a hidden Grid, and an expired reopen plus a
+failed adjacent prefetch stopped reaching `Disconnected`. The deferred
+window rule and those recovery paths are worth more than a strip that never
+shows a placeholder, so a neighbor outside the loaded window stays a
+placeholder.
+
+### Client Work Scheduling
+
+The browser treats source control and current-Photo requests as foreground work. Grid thumbnail transfer, bounded look-ahead, adjacent Preview preparation, and scan progress are background work. Background work must not occupy browser network or rendering capacity in a way that delays a new source request or an already available control.
+
+Each source opening and current Photo owns a client request generation. Starting a newer generation aborts fetch-based work from the prior generation and rejects any late response or failure from changing current state. Before a superseded Grid or Photo View is detached or hidden, the browser explicitly removes every pending image source so an already-started transfer cannot continue owning an HTTP connection. A stale Browse Snapshot opened after supersession is explicitly closed.
+
+Grid thumbnail transfer and adjacent Preview preparation use lower browser priority than source, window, and current-Photo requests. Grid and Photo View image decoding is asynchronous, while Photo View's current Preview retains foreground network priority. Scroll events report one visible range per coalesced update; window admission runs immediately while Grid DOM reconstruction is coalesced to at most one render per animation frame that reuses the nodes of Photos still visible.
+
+### Loading Feedback
+
+The Web application owns presentation of asynchronous phases. It must remain responsive while requests run.
+
+- Overview loading shows connection and summary phases.
+- File Location loading reports the real requested direct-child range and total.
+- Browse creation shows source-order preparation without a fake percentage.
+- Grid loading reports the real requested range and total.
+- Thumbnail loading uses stable cell placeholders and real completed/visible counts when useful.
+- Preview loading reports cache lookup or preparation phases without claiming native extraction percentages that are not measured.
+- Background scan status comes from the server's current real phase and counters.
+
+Polling `GET /api/status` at a modest interval is sufficient for one Photographer. WebSocket or a distributed event service is not required.
+
+### Reconnect and Expiration
+
+Already loaded facts and derivative bytes remain visible after disconnection. Mutations remain disabled until the server confirms current state.
+
+The status poll is also the browser's continuous reachability probe. A poll that cannot reach the server marks transport lost, so connectivity and decision readiness stop claiming a live server without a Photographer action. A poll that returns a usable status answer may restore transport reachability, because this probe is the designated reachability signal rather than an unrelated request. A poll that receives an answer without a usable status reports neither transition: the server is reachable, and that answer is a server-side condition.
+
+Restoring transport reachability is not itself a recovery. It does not retire an active Recovery claim, so a decision that still waits for its own confirmation stays unavailable after the probe answers again. Reachability and operation recovery remain separate axes: reachability follows transport evidence, and claims follow operation outcomes.
+
+If a Browse Snapshot still exists, reconnect reloads only the current bounded window. If it expired or the process restarted, the browser creates a new Snapshot for the same source, moves to the same Photo when it still exists, and tells the Photographer that the latest published order is now in use. Browser-local facts scoped to the retired Snapshot, including the temporary memory that keeps a removed Album member visible, are discarded only after the replacement Snapshot commits successfully. A failed reopen retains those facts with the recoverable current view.
+
+Browser URLs restore addressed Photos and view options under
+[Browser Navigation](experience/design.md). Exact Grid placement after reload
+remains browser-local best effort; it is not a durable All Photos or Folder
+resume feature. Album saved position remains durable SQLite state.
+
+## Failure Behavior
+
+A failed File Location request does not clear successfully loaded Folder nodes. The browser identifies and retries only the failed direct-child range. An expired publication clears and reloads File Location navigation from the current Published Library rather than appending incompatible children.
+
+A failed Browse Window request does not clear successfully loaded windows. The browser identifies the failed range and retries that range.
+
+A bounded Grid Photo fact retains the server-supplied Photo availability, Original availability, and Preview state independently. A browser-owned thumbnail delivery failure remains bounded and attached to that Photo without replacing those server facts. None of these outcomes blocks sibling cells, navigation, Selection State, or Rating.
+
+A background rescan failure retains the prior Published Library and reports an actionable failed status. It must not publish a partial order. Root binding mismatch, schema rejection, sidecar admission failure, and invalid storage layout remain hard failures rather than background warnings.
+
+Browse Snapshot eviction returns a distinct not-found or expired response. The browser must not reinterpret an arbitrary token or silently continue with a different order.
+
+Cache write failure may serve a valid stale derivative under the existing stale-truth contract. It must not remove a prior valid derivative before replacement completes and must never modify an Original File.
 
 ## Options
 
-### Selected: History API and a bounded page navigation owner
+### Selected: Bounded Server-Owned Browse Snapshot and Windows
 
-The application has one page slice, two view kinds, and existing source/Photo
-owners. Native URL/history calls plus one codec fit that boundary without a
-routing dependency or another store. Explicit commit timing preserves the
-existing rule that a failed next-Photo read retains the prior current Photo.
-Query addresses keep server and deployment routing unchanged.
+This preserves a stable open-source order while keeping browser transfer, memory, and DOM bounded. It also lets the server resolve Album resume behavior without sending all members.
 
-### Not selected: Navigation API as a required runtime boundary
+### Rejected: Add Progress to the Existing Complete Response
 
-Navigation API offers centralized interception, entry identity, and transition
-coordination. It became Baseline Newly available in January 2026, including
-Firefox 147; it must not be dismissed as Chromium-only. It is a reasonable
-future replacement for the browser adapter, but adopting it here adds a
-runtime requirement without removing the source-readiness, virtual Grid
-restoration, or admitted-write coordination this design must implement.
-Do not ship two parallel navigation implementations to obtain the same behavior.
+A progress indicator would make waiting visible but would still transfer, parse, retain, and map every Photo fact before browsing. Cost would continue growing with the Library.
 
-### Rejected: Framework router migration
+### Rejected: Cursor Pagination Without a Stable Snapshot
 
-React Router and Next.js demonstrate useful gallery semantics, but changing
-rendering frameworks to obtain those semantics would broaden the migration
-without improving Slipstream's ownership boundary. Hash routing also adds no
-value: query addresses already refresh through the existing application path.
+Rows inserted or reordered by a rescan could be duplicated, skipped, or moved between pages while the Photographer scrolls. Stable ordering requires one explicit hidden snapshot boundary.
 
-### Rejected: Put every panel and Photo step in history
+### Rejected: Stream Every Photo Fact
 
-This makes continuous culling require many Back actions and reopens incidental
-panels on Forward. It also confuses platform close requests with browser
-traversal. Destinations and transient surfaces have separate lifetimes.
+Streaming could show early rows sooner, but total transfer and browser memory would still grow with the entire Library. It also complicates reconnect and partial-order publication without solving the underlying boundary.
 
-### Rejected: Shrink or wrap the existing toolbar stack
+### Rejected: Send Every Ordered ID to the Browser
 
-Smaller controls violate touch targets. Wrapping every control can preserve
-reachability while removing the Photo's usable space. Contextual action
-regions and actual closed panels make the space contract testable.
+Sending only IDs is smaller than sending every fact, but it still makes startup transfer and browser memory proportional to the whole Library and leaves Snapshot lifecycle and Album resume rules in the client.
+
+### Selected: Freeze the Filter into the Browse Snapshot
+
+The Selection State filter is resolved with the view order against the same
+complete source and stored in the Snapshot. Every position, window, and
+identity lookup keeps one meaning for the life of the open view, a filter
+change reuses the existing reopen and anchor paths, and the browser never
+derives membership from loaded windows.
+
+### Rejected: Filter as a Per-Window Request Parameter
+
+Letting each `GET /api/browse/{token}` request carry its own filter would avoid
+reopening the source on a filter change. It fails the Snapshot contract: two
+requests for one token could then return different memberships, totals, and
+positions, and the browser would have to fence its retained windows against a
+parameter instead of against the frozen Snapshot. Positions, saved-position
+anchoring, and Previous and Next navigation would all need a filter argument to
+stay coherent. Freezing the filter into the Snapshot keeps one meaning for
+"the open view" and reuses the existing reopen, anchor, and retry paths.
+
+### Selected: Persistent Demand Cache with Adjacent Prefetch
+
+This makes repeat and next-Photo browsing fast while keeping I/O proportional to actual use.
+
+### Rejected: Precompute Every Derivative
+
+A full-Library warmup may consume tens of gigabytes and many hours of mounted-storage I/O while competing with the current Photo. The product has no current requirement for every Photo to be instantly available before browsing.
+
+### Selected: Generation-Scoped Cancellation and Foreground Request Priority
+
+This immediately retires obsolete fetches and prevents rebuildable thumbnail transfer from owning the browser connection pool ahead of a new source request. It preserves demand-driven derivatives and the existing bounded HTTP protocol without another service or transport.
+
+### Rejected: Let Background Requests Drain Before Switching
+
+Allowing old thumbnail or window requests to finish makes source-switch latency proportional to the previous viewport's remaining bytes and browser connection limits. It violates the requirement that background loading not block interaction.
+
+### Rejected: Serialize All Grid Thumbnail Requests
+
+Serial transfer would leave connection capacity available, but it would unnecessarily slow ordinary Grid completion and still would not define cancellation or stale-response ownership. Browser priority plus generation-scoped cancellation preserves useful concurrency.
+
+### Selected: Status Polling
+
+A small status query is sufficient for one local Photographer and keeps process lifecycle simple. One poll carries both the Library scan phase and the browser's reachability signal, so connectivity needs no second timer, channel, or lifecycle.
+
+### Rejected: WebSocket, Message Broker, or Separate Worker Service
+
+These add reconnection protocols, deployment units, and coordination state without a demonstrated need. Existing HTTP, bounded native work, and the SQLite owner remain adequate.
 
 ## Verification
 
-Focused automated coverage must derive from the product examples and prove:
+Verification must include a generated Library projection with at least 40,000 Photos and prove:
 
-- codec round trips, invalid/duplicate values, encoded Locations, defaults,
-  canonicalization, and direct URL startup through the real server;
-- source/Grid/Photo push and replace behavior, Back, Forward, reload, direct
-  entry, known-parent return, duplicate activation, and leaving the site;
-- one initial source bootstrap, delayed facts, rapid Back/Forward, stale
-  success/failure, expired snapshots, removed targets, and Folder publication
-  confirmation without an unbounded read;
-- Grid anchor and focus restoration across resize and eviction in a generated
-  Library of at least 40,000 Photos, with no retained historical Snapshots;
-- no decision or membership replay, no aborted admitted write, no stale
-  advancement, and the separate current Album saved-position rule;
-- same-source frozen filter membership and Undo through view traversal;
-- one modal, no hidden focus or duplicate live announcements, correct close
-  focus after re-render, and no primary shortcuts behind modal content;
-- region budgets, 44-pixel targets, safe areas, 200% text, reduced motion,
-  rotation, desktop/touch input, all batch outcomes, and independent failures;
-- external page navigation and browser return do not break mount/disposal;
-- query deep links still pass the production host's existing health, static
-  asset, and bounded browsing verification without a route migration; and
-- the canonical repository gate passes after each implementation slice.
-
-Physical Android Chromium evidence must identify device, browser version,
-viewport, system Back versus toolbar traversal, keyboard/safe-area behavior,
-and observed results. Emulated Pointer Events alone do not prove platform
-close behavior. Other engines are exploratory until the support contract
-explicitly expands.
-
-## References
-
-- [Next.js intercepting routes](https://nextjs.org/docs/app/api-reference/file-conventions/intercepting-routes): addressable gallery content and Back/Forward semantics.
-- [React Router navigation](https://reactrouter.com/api/hooks/useNavigate): known-history traversal and replacement.
-- [React Router scroll restoration](https://reactrouter.com/api/components/ScrollRestoration): restoration keyed by entry.
-- [Navigation API](https://developer.mozilla.org/en-US/docs/Web/API/Navigation_API) and [January 2026 platform update](https://web.dev/blog/web-platform-01-2026): modern platform alternative.
-- [CloseWatcher](https://developer.mozilla.org/en-US/docs/Web/API/CloseWatcher): native close requests versus navigation.
-- [WAI-ARIA modal dialogs](https://www.w3.org/WAI/ARIA/apg/patterns/dialog-modal/): focus and background interaction.
+- Library Overview size does not grow with Photo count except encoded counts and Album summaries;
+- during a saturated or recovering scan, the Published Library remains
+  authoritative for existing Photos and no route publishes null or stale
+  facts over it;
+- a `library check` timeout returns an explicit unknown, non-terminal outcome
+  while the server-owned scan continues, a later `status` preserves the
+  latest phase and counts, and reissuing joins the running cycle without
+  starting a second physical scan;
+- every File Location Window respects an enforced maximum, retained windows share one publication, expiration reloads rather than mixes generations, and no route returns the complete Folder tree or complete recursive membership;
+- File Location counts count each Photo once and include remembered unavailable Photos at their last known Locations;
+- a moved Original File is restored before any new Photo is allocated, and an ambiguous or unprovable group stays unavailable without state transfer;
+- the first Grid becomes interactive without a complete Photo transfer;
+- every Browse Window respects the enforced maximum;
+- browser-retained Folder nodes, Photo facts, and rendered cells remain bounded while navigating and scrolling from the first to a late position;
+- `All Photos` and Original Folder order match Capture Time rules, while Album order matches membership position;
+- a Selection State filter returns exactly the matching Photos of the source order, its total and positions describe the filtered sequence, its counts describe the unfiltered source, an unknown filter value is rejected before a Snapshot exists, and no filter value changes Album membership, member position, or Original Files;
+- each source's default order is used when no order is requested, `capture-time-desc` and Album time views order the complete source before pagination, missing-time Photos stay last in both directions, tie-breakers keep their direction, and persisted Album positions are unchanged;
+- the per-Photo Album membership query answers from membership tables without materializing member lists, and an unknown Photo is a distinct not-found failure;
+- a rescan refreshes facts and File Location navigation but cannot reorder or insert into an open Browse Snapshot;
+- reopening the source after rescan uses the new complete order and current Folder subtree;
+- Album saved-position and unavailable-member fallback work without complete membership transfer;
+- Selection State, Rating, undo, and saved Album position mutations refresh only affected facts and survive restart;
+- a batch Selection State write compares every existing requested Photo with its expected state in one transaction, reports exactly one non-overlapping `applied`, `changedElsewhere`, or `missing` outcome per request item, never overwrites a changed Photo, rejects an over-limit or malformed request before any write, moves the source's decision counts only for confirmed Photos, and undoes as one unit through per-Photo compare-and-set;
+- current Preview work outranks adjacent and Grid work under the shared capacity-two budget;
+- the manual recovery routes list remembered unavailable facts, return inspectable proposals without writing, commit one approved batch atomically, and refuse a stale or colliding batch without partial association;
+- a generated thumbnail and review Preview are reused from server cache after process restart and from browser HTTP cache when identity is unchanged;
+- a source revision change cannot reuse an old derivative as current;
+- cache removal rebuilds derivatives without changing SQLite user state or Original File hashes;
+- background scan status reports real phases and counts and never publishes a partial Library;
+- disconnect, failed window, expired Snapshot, and retry behavior preserve already loaded content;
+- a source switch reaches its bounded ready state while prior Grid derivative responses remain held, cancels superseded fetches, and ignores late responses;
+- thumbnail requests retain lower browser priority than current source and Photo work, and repeated scroll events cause at most one Grid reconstruction per animation frame while overlapping cells keep their DOM node identity;
+- one coalesced request serves every concurrent demand for a bounded window, each completed window settles exactly one completion notification, a late response for an older position never evicts current-viewport facts, and retained facts and rendered cells stay bounded at supported large viewports; and
+- mobile Chromium remains usable under throttled network and CPU conditions.

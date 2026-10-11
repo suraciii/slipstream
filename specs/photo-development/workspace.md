@@ -8,7 +8,7 @@ response can change the wrong Photo or replace a newer confirmed state.
 [Photo Development](spec.md) owns user-visible behavior.
 [Photo Development Architecture](design.md) owns Edit State, source,
 processing, and Export service contracts.
-[Processing Modules](../processing-modules/design.md) owns one Engine invocation and the
+[Processing Modules](processing/design.md) owns one Engine invocation and the
 Artifact handoff boundary. This document defines the browser workspace
 boundary around those contracts.
 

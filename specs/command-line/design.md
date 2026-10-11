@@ -156,7 +156,7 @@ write submits caller-observed guards and complete parameter trees once.
 Refreshing guards during save would overwrite an unobserved concurrent edit.
 Selected-step Preview executes at most one module; composing modules requires
 explicit immutable artifact selection, without conversion or hidden chaining.
-The [Processing Module boundary](../processing-modules/design.md) owns module admission.
+The [Processing Module boundary](../photo-development/processing/design.md) owns module admission.
 The [Photo Development lifecycle](../photo-development/design.md#service-surface) owns
 serialization, source safety, cancellation, deadlines, retention, and uncertain
 outcome reconciliation. Photo and Browse facts carry the saved-edit projection.
@@ -405,7 +405,7 @@ warmup or speculative neighbor generation.
 ## Web Handoff
 
 Compose relative Destination URLs under the configured service origin using
-[Browser Address Contract](../library-browser/design.md#browser-address-contract).
+[Browser Address Contract](../library-browser/experience/design.md#browser-address-contract).
 Return a canonical Photo URL rooted in All Photos and an Album Grid URL. Do not
 copy server-provided arbitrary origins into links. Unsupported CLI filters have
 no matching Grid URL and must not be silently omitted from a supposed query link.

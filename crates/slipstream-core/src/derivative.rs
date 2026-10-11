@@ -32,7 +32,7 @@ const SOURCE_PROFILE_ASSET_DIGEST: &str =
 
 /// Linear ProPhoto RGB to linear sRGB, Bradford D50-to-D65 adaptation, derived
 /// from the two pinned ICC profile assets and pinned by
-/// `specs/development-color/design.md#display-and-comparison`. Every row sums to 1.0,
+/// `specs/photo-development/processing/color.md#display-and-comparison`. Every row sums to 1.0,
 /// so linear ProPhoto white maps to linear sRGB `[1, 1, 1]` without
 /// normalization.
 const DISPLAY_TRANSFORM_MATRIX: [[f64; 3]; 3] = [
@@ -382,7 +382,7 @@ pub fn process_development_proxy(
 /// samples are resampled in their own light before the pinned matrix, the
 /// per-channel clip, and the sRGB transfer function are applied, so this
 /// branch is the only place that clips, exactly as
-/// `specs/development-color/design.md#display-and-comparison` defines.
+/// `specs/photo-development/processing/color.md#display-and-comparison` defines.
 ///
 /// The result is a display derivative of a Development Result. It must never
 /// replace, or be written back into, the Development TIFF or the Film input.
