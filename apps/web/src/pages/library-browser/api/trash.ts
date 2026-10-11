@@ -309,7 +309,7 @@ export const planTrashReview = (review: TrashReview): TrashReviewPlan => {
 /// so the confirmation the Photographer reads is the confirmation the
 /// contract names.
 export const confirmTrashLabel = (itemCount: number): string =>
-  `Permanently delete ${itemCount.toLocaleString()} Original Files`;
+  `Permanently delete ${itemCount.toLocaleString()} Original ${itemCount === 1 ? "File" : "Files"}`;
 
 /// One delete or fetched operation, partitioned for the outcome surface. The
 /// result always reports the five outcome groups, logical bytes for confirmed

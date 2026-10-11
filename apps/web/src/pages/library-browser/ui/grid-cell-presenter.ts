@@ -1,3 +1,5 @@
+import "./thumbnail-placeholder.css";
+
 export type GridSelectionState = "unflagged" | "picked" | "rejected";
 
 export type GridPhotoPreview = Readonly<{
@@ -187,12 +189,17 @@ export function createGridCellPresenter(options: GridCellPresenterOptions) {
     media.className = "cell-media";
     const image = document.createElement("img");
     image.alt = `Photo ${index + 1} of ${total}`;
-    image.loading = "lazy";
+    // The virtualized window bounds requests; hidden lazy images never load.
+    image.loading = "eager";
     image.fetchPriority = "low";
     image.decoding = "async";
     image.draggable = false;
     image.className = "thumbnail";
-    media.append(image);
+    image.hidden = true;
+    const placeholder = document.createElement("span");
+    placeholder.className = "thumbnail-placeholder";
+    placeholder.setAttribute("aria-hidden", "true");
+    media.append(image, placeholder);
 
     const footer = document.createElement("span");
     footer.className = "cell-footer";
@@ -234,6 +241,23 @@ export function createGridCellPresenter(options: GridCellPresenterOptions) {
         ].join(" — "),
       );
     };
+    const presentThumbnail = (): void => {
+      placeholder.hidden = !image.hidden;
+      placeholder.textContent = rendered.deliveryFailed
+        ? "Thumbnail delivery failed"
+        : rendered.thumbnailState === "failed"
+          ? "Thumbnail failed"
+          : rendered.thumbnailState === "unavailable"
+            ? "Thumbnail unavailable"
+            : photo.preview.state === "failed"
+              ? "Preview failed"
+              : photo.preview.state === "unavailable"
+                ? "Preview unavailable"
+                : photo.preview.state === "inspection-pending"
+                  ? "Inspection pending"
+                  : "Loading thumbnail…";
+    };
+    presentThumbnail();
     presentFacts();
     rendered.signature = gridCellSignature(index, photo, false);
 
@@ -257,13 +281,16 @@ export function createGridCellPresenter(options: GridCellPresenterOptions) {
         image,
         (failed) => {
           rendered.deliveryFailed = failed;
+          if (!failed) rendered.thumbnailState = undefined;
           rendered.signature = gridCellSignature(index, photo, failed);
           presentFacts();
+          presentThumbnail();
         },
         (state) => {
           rendered.thumbnailState = state;
           rendered.deliveryFailed = false;
           presentFacts();
+          presentThumbnail();
         },
       ),
     };

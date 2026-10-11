@@ -1,9 +1,12 @@
 import "./library-browser.css";
+import "./recovery-panel.css";
+import "./removed-panels.css";
 
 import { createModalSurfaces } from "./modal-surface.js";
 import { gridThumbnailTarget } from "./grid-thumbnail-target.js";
 import {
   createRemovedPanels,
+  REMOVED_PANELS_TEMPLATE,
   type RemovedPanelViewModel,
   type RemovalReviewViewModel,
   type TrashReviewViewModel,
@@ -570,7 +573,7 @@ export function createLibraryBrowserView(
         </dialog>
         <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" tabindex="0"></div>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-          <header class="grid-header"><div class="grid-header-row"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false"><span class="source-toggle-name" data-grid-compact-title>All Photos</span><span class="source-toggle-indicator" aria-hidden="true">▾</span></button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-connection" data-grid-connection role="status" hidden></p><div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options>Options</button><span class="options-flag" data-view-options-flag hidden></span><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button><button type="button" class="quiet" data-removal-open hidden>Remove rejected Photos</button><button type="button" class="quiet" data-removed-open>Trash</button></div><div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
+          <header class="grid-header"><div class="grid-header-row"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false"><span class="source-toggle-name" data-grid-compact-title>All Photos</span><span class="source-toggle-indicator" aria-hidden="true">▾</span></button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-connection" data-grid-connection role="status" hidden></p><div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options>Options</button><span class="options-flag" data-view-options-flag hidden></span><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button></div><div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
           <div class="grid-batch" data-grid-batch hidden><div class="grid-batch-result" data-grid-batch-result hidden><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-select>Pick</button><button type="button" data-batch-reject>Reject</button><label for="batch-album-select">Add to</label><select id="batch-album-select" data-batch-album-select></select><button type="button" data-batch-album-add>Add to Album</button></div></div>
         </section>
@@ -607,7 +610,7 @@ ${PHOTO_TOOLS_TEMPLATE}
               <div class="options-field"><label for="view-sort-select">Source order</label><select id="view-sort-select" data-sort-select></select></div>
               <div class="options-field"><label for="view-size-select">Thumbnail size</label><select id="view-size-select" data-size-select></select></div>
               <div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div>
-              <div class="options-source-actions" data-options-source-actions><button type="button" data-album-resume hidden>Resume</button><button type="button" data-refresh>Refresh Current Source</button></div>
+              <div class="options-source-actions" data-options-source-actions><button type="button" data-album-resume hidden>Resume</button><button type="button" data-refresh>Refresh Current Source</button><button type="button" class="quiet" data-removal-open hidden>Remove rejected Photos</button><button type="button" class="quiet" data-removed-open>Trash</button></div>
             </div>
             <footer class="options-footer"><button type="button" data-view-options-apply>Apply</button><button type="button" class="quiet" data-view-options-cancel>Cancel</button></footer>
           </div>
@@ -616,55 +619,7 @@ ${PHOTO_TOOLS_TEMPLATE}
           <div class="album-dialog-sheet" data-album-form-body></div>
         </dialog>
 ${RECOVERY_PANEL_TEMPLATE}
-        <dialog class="removal-dialog" data-removal-review aria-labelledby="removal-title">
-          <div class="removal-sheet">
-            <header class="removal-header"><h3 id="removal-title">Remove rejected Photos</h3><button type="button" class="quiet" data-removal-close>Close</button></header>
-            <div class="removal-body">
-              <p class="removal-summary" data-removal-summary></p>
-              <p class="removal-message" data-removal-message role="alert" hidden></p>
-            </div>
-            <footer class="removal-actions"><button type="button" data-removal-confirm>Remove from Library</button><button type="button" class="quiet" data-removal-undo hidden>Undo</button></footer>
-          </div>
-        </dialog>
-        <dialog class="removed-dialog" data-removed-panel aria-labelledby="removed-title">
-          <div class="removed-sheet">
-            <header class="removed-header"><h3 id="removed-title">Trash</h3><button type="button" class="quiet" data-removed-close>Close</button></header>
-            <p class="removed-status" data-removed-status role="status"></p>
-            <div class="removed-selection" data-removed-selection>
-              <button type="button" class="quiet" data-removed-select-all>Select all Trash</button>
-              <button type="button" class="quiet" data-removed-clear-selection>Clear selection</button>
-              <span data-removed-selection-count></span>
-              <button type="button" class="quiet" data-removed-restore-selection>Restore selected</button>
-              <button type="button" data-removed-delete>Permanently delete selected Originals</button>
-            </div>
-            <ul class="removed-list" data-removed-list></ul>
-            <section class="trash-outcome" data-trash-outcome hidden>
-              <p class="trash-outcome-title" data-trash-outcome-title role="status"></p>
-              <p class="trash-outcome-counts" data-trash-outcome-counts hidden><span data-trash-outcome-deleted></span> <span data-trash-outcome-changed></span> <span data-trash-outcome-missing></span> <span data-trash-outcome-failed></span> <span data-trash-outcome-pending></span></p>
-              <p class="trash-outcome-bytes" data-trash-outcome-bytes hidden></p>
-              <ul class="trash-outcome-items" data-trash-outcome-items></ul>
-              <div class="trash-outcome-actions" data-trash-outcome-actions hidden><button type="button" class="quiet" data-trash-check-result>Check result</button><button type="button" class="quiet" data-trash-retry-delete>Retry</button></div>
-            </section>
-            <p class="removed-message" data-removed-message role="alert" hidden></p>
-            <footer class="removed-pager"><button type="button" class="quiet" data-removed-previous>Previous</button><span data-removed-page></span><button type="button" class="quiet" data-removed-next>Next</button><button type="button" data-removed-retry hidden>Retry</button></footer><footer class="removed-actions"><button type="button" class="quiet" data-removed-undo hidden>Undo the last removal</button></footer>
-          </div>
-        </dialog>
-        <dialog class="removal-dialog trash-review-dialog" data-trash-review aria-labelledby="trash-review-title">
-          <div class="removal-sheet">
-            <header class="removal-header"><h3 id="trash-review-title">Permanently delete from Trash</h3><button type="button" class="quiet" data-trash-review-close>Close</button></header>
-            <div class="removal-body">
-              <p class="removal-summary" data-trash-review-summary></p>
-              <p class="removal-message trash-review-warning">Deletion removes each Photo from every Album that contains it. Slipstream cannot undo it.</p>
-              <p class="removal-summary" data-trash-review-albums></p>
-              <ul class="trash-review-items" data-trash-review-items></ul>
-              <div class="trash-review-rejected" data-trash-review-rejected hidden>
-                <p class="removal-summary" data-trash-review-rejected-heading></p>
-                <ul class="trash-review-rejected-list" data-trash-review-rejected-list></ul>
-              </div>
-            </div>
-            <footer class="removal-actions"><button type="button" data-trash-confirm hidden></button><button type="button" class="quiet" data-trash-cancel>Cancel</button></footer>
-          </div>
-        </dialog>
+${REMOVED_PANELS_TEMPLATE}
       </section>
     </div>`;
 

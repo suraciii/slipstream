@@ -1,0 +1,25 @@
+.thumbnail[hidden],
+.thumbnail-placeholder[hidden] {
+  display: none;
+}
+
+.thumbnail-placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 0.35rem;
+  overflow: hidden;
+  color: var(--muted);
+  background: #0b0d10;
+  font-size: 0.7rem;
+  line-height: 1.3;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.filmstrip-cell .thumbnail-placeholder {
+  padding: 0.1rem;
+  font-size: 0.5rem;
+  line-height: 1.1;
+}

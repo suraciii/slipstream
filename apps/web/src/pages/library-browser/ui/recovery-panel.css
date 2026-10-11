@@ -1,0 +1,212 @@
+/* Recovery review: one bounded entry from scan results, remembered facts,
+   inspectable proposals, and explicit confirmation. */
+.recovery-notice {
+  margin: 0.25rem 0 0;
+  font-size: 0.85rem;
+}
+
+.recovery-dialog .recovery-sheet {
+  box-sizing: border-box;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.recovery-sheet > .recovery-body {
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.recovery-sheet > .recovery-footer {
+  overflow: visible;
+}
+
+.recovery-explanation {
+  margin: 0 0 0.5rem;
+  font-size: 0.82rem;
+  color: var(--muted, #9aa0aa);
+}
+
+.recovery-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.recovery-header h3 {
+  margin: 0;
+  min-width: 0;
+  font-size: 1rem;
+}
+
+.recovery-header button {
+  flex: none;
+}
+
+.recovery-summary {
+  margin: 0.5rem 0 0;
+  font-size: 0.88rem;
+}
+
+.recovery-list {
+  list-style: none;
+  margin: 0.5rem 0;
+  padding: 0;
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.82rem;
+}
+
+.recovery-list,
+.recovery-proposals {
+  max-height: min(30dvh, 16rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+}
+
+.recovery-list > li,
+.recovery-proposals > li {
+  min-width: 0;
+  padding: 0.55rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.35rem;
+}
+
+.recovery-entry-location,
+.recovery-entry-facts {
+  margin: 0 0 0.35rem;
+}
+
+.recovery-entry-facts {
+  color: var(--muted, #9aa0aa);
+}
+
+.recovery-forms {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0.5rem 0;
+}
+
+.recovery-batch,
+.recovery-single {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-width: 0;
+  align-items: end;
+  gap: 0.5rem;
+}
+
+.recovery-batch h4,
+.recovery-single h4 {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.recovery-batch > button,
+.recovery-single > button,
+.recovery-single > label {
+  grid-column: 1 / -1;
+}
+
+.recovery-batch input,
+.recovery-single input,
+.recovery-single select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.recovery-sheet button,
+.recovery-sheet input,
+.recovery-sheet select {
+  min-height: 2.75rem;
+}
+
+.recovery-batch label,
+.recovery-single label {
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+  min-width: 0;
+}
+
+.recovery-note {
+  margin: 0.25rem 0;
+  font-size: 0.8rem;
+  color: var(--muted, #9aa0aa);
+}
+
+.recovery-proposals {
+  list-style: none;
+  margin: 0.5rem 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.recovery-proposal-path {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.recovery-proposal-facts {
+  margin: 0.1rem 0 0;
+  font-size: 0.8rem;
+  color: var(--muted, #9aa0aa);
+}
+
+.recovery-retire {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.3rem;
+  font-size: 0.8rem;
+}
+
+.recovery-confirm {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.3rem;
+  font-size: 0.8rem;
+}
+
+.recovery-proposal-blocked {
+  margin: 0.1rem 0 0;
+  font-size: 0.8rem;
+  color: var(--danger, #e5484d);
+}
+
+.recovery-more {
+  display: flex;
+  margin: 0.25rem 0;
+}
+
+.recovery-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0.5rem;
+}
+
+.recovery-message {
+  margin: 0.25rem 0 0;
+  font-size: 0.85rem;
+  color: var(--danger, #e5484d);
+}
+
+@media (min-width: 761px) {
+  .recovery-dialog {
+    width: min(52rem, calc(100vw - 3rem));
+  }
+
+  .recovery-forms {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+    gap: 1rem;
+  }
+}

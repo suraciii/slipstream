@@ -428,6 +428,7 @@ for (const firstTransport of ["https", "http"] as const) {
       await expect(page.locator("[data-grid-status]")).toHaveText(
         "Ready · 1 Photo",
       );
+      await openViewOptions(page);
       await page.locator("[data-removal-open]").click();
       await expect(page.locator("[data-removal-summary]")).toHaveText(
         /^1 Photo reviewed as Rejected\./,
@@ -438,6 +439,7 @@ for (const firstTransport of ["https", "http"] as const) {
       );
       await page.locator("[data-removal-close]").click();
       await page.reload();
+      await openViewOptions(page);
       await page.locator("[data-removed-open]").click();
       const row = page.locator("[data-removed-list] .removed-item");
       await expect(row).toHaveCount(1);
