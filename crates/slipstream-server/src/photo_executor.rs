@@ -76,10 +76,6 @@ impl PhotoExecutor {
         self.config.failure.is_none()
     }
 
-    pub(crate) fn bundle_sha256(&self) -> &str {
-        &self.config.bundle_sha256
-    }
-
     /// The verified standalone SpektraFilm runtime of this deployment, or
     /// `None` while the module is disabled, missing, or unverified.
     pub(crate) fn film(&self) -> Option<&FilmConfig> {
@@ -119,102 +115,6 @@ impl PhotoExecutor {
                     &input,
                     &output,
                     exposure_milli_ev,
-                    cancellation,
-                    ENGINE_TIMEOUT,
-                )
-            },
-        )
-        .await
-    }
-
-    /// Runs one serialized local development of a selected composable
-    /// step's complete module-owned parameter snapshot through the same
-    /// fresh-engine, private-scratch, cancel-and-deadline boundary as
-    /// [`develop`](Self::develop).
-    pub(crate) async fn develop_selected_step(
-        &self,
-        input: PathBuf,
-        output: PathBuf,
-        parameters: slipstream_processing::modules::Parameters,
-        cancellation: Arc<AtomicBool>,
-    ) -> Result<OutputIdentity, String> {
-        self.dispatch_darktable(
-            cancellation,
-            "Photo Development was cancelled",
-            "Photo Development task failed",
-            move |engine, metadata, profile, work, cancellation| {
-                local_photo::develop_selected_step(
-                    engine,
-                    metadata,
-                    profile,
-                    work,
-                    &input,
-                    &output,
-                    &parameters,
-                    cancellation,
-                    ENGINE_TIMEOUT,
-                )
-            },
-        )
-        .await
-    }
-
-    /// Runs one engine-owned automatic adjustment through the shared
-    /// serialized child boundary. The caller supplies the complete selected
-    /// step parameters and the original request instruction.
-    pub(crate) async fn auto_parameters(
-        &self,
-        input: PathBuf,
-        parameters: slipstream_processing::modules::Parameters,
-        operation: String,
-        multi_priority: i64,
-        instruction: serde_json::Value,
-        cancellation: Arc<AtomicBool>,
-    ) -> Result<serde_json::Value, String> {
-        self.dispatch_darktable(
-            cancellation,
-            "Photo Development was cancelled",
-            "Photo Development task failed",
-            move |engine, metadata, _profile, work, cancellation| {
-                local_photo::auto_parameters(
-                    engine,
-                    metadata,
-                    work,
-                    &input,
-                    &parameters,
-                    &operation,
-                    multi_priority,
-                    &instruction,
-                    cancellation,
-                    ENGINE_TIMEOUT,
-                )
-            },
-        )
-        .await
-    }
-
-    /// Runs one bounded selected-step Preview through the same serialized
-    /// native child boundary as Export, without creating a full-resolution
-    /// handoff or touching the Original.
-    pub(crate) async fn render_selected_step(
-        &self,
-        input: PathBuf,
-        output: PathBuf,
-        parameters: slipstream_processing::modules::Parameters,
-        cancellation: Arc<AtomicBool>,
-    ) -> Result<slipstream_processing::local_preview::PreviewIdentity, String> {
-        self.dispatch_darktable(
-            cancellation,
-            "Photo Preview was cancelled",
-            "Photo Preview task failed",
-            move |engine, metadata, _profile, work, cancellation| {
-                slipstream_processing::local_preview::render_selected_step(
-                    engine,
-                    metadata,
-                    work,
-                    &input,
-                    &output,
-                    &parameters,
                     cancellation,
                     ENGINE_TIMEOUT,
                 )

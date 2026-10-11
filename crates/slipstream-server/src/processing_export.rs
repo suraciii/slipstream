@@ -64,6 +64,9 @@ pub(crate) use download::get_processing_artifact_bytes;
 mod retained;
 use retained::{artifact_timestamp, retained_artifact_json};
 pub(crate) use retained::{list_processing_exports, retry_processing_export};
+#[path = "processing_export_response.rs"]
+mod response;
+use response::outcome_response;
 
 /// The closed terminal failure reason recorded when the deployment's
 /// confined workload could not execute an admitted qualified step.
@@ -144,7 +147,7 @@ fn valid_export_request_id(request_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn input_json(input: &ProcessingInput) -> Value {
+pub(crate) fn input_json(input: &ProcessingInput) -> Value {
     match input {
         ProcessingInput::Original {
             photo_id,
@@ -169,6 +172,25 @@ fn input_json(input: &ProcessingInput) -> Value {
                     "width": contract.geometry.width,
                     "height": contract.geometry.height,
                 },
+                "encoding": contract.encoding,
+            },
+        }),
+        ProcessingInput::WorkspaceArtifact {
+            workspace_id,
+            artifact_id,
+            revision,
+            contract,
+        } => json!({
+            "kind": "workspace-artifact",
+            "workspaceId": workspace_id,
+            "artifactId": artifact_id,
+            "revision": revision,
+            "contract": {
+                "format": contract.format,
+                "precision": contract.precision,
+                "colorSpace": contract.color_space,
+                "transfer": contract.transfer,
+                "geometry": {"width": contract.geometry.width, "height": contract.geometry.height},
                 "encoding": contract.encoding,
             },
         }),
@@ -338,13 +360,19 @@ pub(crate) async fn submit_processing_export(
     // one serialized owner operation; this pre-read only decides which
     // adapter boundary the selected module faces. The recipe revision
     // guard inside admission pins the exact steps that decision names.
-    let selected = match state
-        .application
-        .library
-        .composable_edit_recipe(&photo_id)
-        .await
-    {
-        Ok(Some(recipe)) => match recipe.current_step() {
+    let canonical = match crate::processing_recipe::read_recipe(&state, &photo_id).await {
+        Ok(Some(read)) => read.recipe,
+        Ok(None) => None,
+        Err(_) => {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "storage",
+                "The current Edit State could not be read",
+            );
+        }
+    };
+    let selected = match canonical.as_ref() {
+        Some(recipe) => match recipe.current_step() {
             Some(step) => (
                 step.module.as_str().to_owned(),
                 step.input.clone(),
@@ -362,29 +390,19 @@ pub(crate) async fn submit_processing_export(
                 );
             }
         },
-        Ok(None) => {
+        None => {
             return error(
                 StatusCode::NOT_FOUND,
                 "missing_recipe",
                 "Save an Edit State before submitting an Export",
             );
         }
-        Err(_) => {
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "storage",
-                "The current Edit State could not be read",
-            );
-        }
     };
-    if selected.0 == DARKTABLE_MODULE
-        && let Some(reason) = processing.failure
-    {
-        return error_details(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "module_parameters_unavailable",
-            "The darktable module is unavailable",
-            json!({"reasonCode": reason, "reason": "The configured darktable module failed availability verification"}),
+    if selected.0 == DARKTABLE_MODULE {
+        return error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "use_darktable_namespace",
+            "Use the darktable namespace to execute darktable state",
         );
     }
     let policy = ProcessingModulePolicy::new(processing);
@@ -432,6 +450,57 @@ pub(crate) async fn submit_processing_export(
         }
         Ok(Some(_)) | Ok(None) => {}
     }
+    let dependency_owner = format!("processing-export:{}", body.request_id);
+    if let ProcessingInput::WorkspaceArtifact {
+        workspace_id,
+        artifact_id,
+        revision,
+        contract,
+    } = &selected.1
+    {
+        let manager = Arc::clone(&state.application.workspaces);
+        let workspace_id = workspace_id.clone();
+        let artifact_id = artifact_id.clone();
+        let revision = revision.clone();
+        let contract = contract.clone();
+        let owner = format!("processing-export:{}", body.request_id);
+        let captured = tokio::task::spawn_blocking(move || {
+            let (_lease, admitted) = manager
+                .lease_input(&workspace_id, &artifact_id, &revision)
+                .map_err(|error| error.to_string())?;
+            let actual = &admitted["imageContract"];
+            if actual["format"] != contract.format
+                || actual["precision"] != contract.precision
+                || actual["colorSpace"] != contract.color_space
+                || actual["transfer"] != contract.transfer
+                || actual["encoding"] != contract.encoding
+                || actual["geometry"]["width"] != contract.geometry.width
+                || actual["geometry"]["height"] != contract.geometry.height
+            {
+                return Err("The selected workspace image contract changed".to_owned());
+            }
+            let artifact_id = admitted["artifactId"]
+                .as_str()
+                .ok_or("Missing captured input identity")?
+                .to_owned();
+            let revision = admitted["revision"]
+                .as_str()
+                .ok_or("Missing captured input revision")?
+                .to_owned();
+            manager
+                .register_dependency(&workspace_id, &artifact_id, &revision, &owner, "job")
+                .map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        })
+        .await;
+        if !matches!(captured, Ok(Ok(()))) {
+            return error(
+                StatusCode::CONFLICT,
+                "input_unavailable",
+                "The selected workspace input could not be captured",
+            );
+        }
+    }
     let mutation = SubmitProcessingExport {
         photo_id,
         request_id: body.request_id,
@@ -450,7 +519,11 @@ pub(crate) async fn submit_processing_export(
     let outcome = match state
         .application
         .library
-        .submit_processing_export(mutation, unix_seconds_now())
+        .submit_processing_export_with_recipe(
+            mutation,
+            canonical.expect("selected recipe"),
+            unix_seconds_now(),
+        )
         .await
     {
         Ok(outcome) => outcome,
@@ -462,7 +535,57 @@ pub(crate) async fn submit_processing_export(
             );
         }
     };
-    dispatch_outcome(&state, processing, outcome).await
+    if !matches!(
+        &outcome,
+        ProcessingExportSubmitOutcome::Admitted(_)
+            | ProcessingExportSubmitOutcome::Pending(_)
+            | ProcessingExportSubmitOutcome::ArtifactReplayed(_)
+    ) && release_export_dependency(&state, &dependency_owner)
+        .await
+        .is_err()
+    {
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "outcome_unknown",
+            "The refused Export input pin could not be released",
+        );
+    }
+    let artifact_replayed = matches!(&outcome, ProcessingExportSubmitOutcome::ArtifactReplayed(_));
+    let response = dispatch_outcome(&state, processing, outcome).await;
+    if artifact_replayed
+        && response.status().is_success()
+        && release_export_dependency(&state, &dependency_owner)
+            .await
+            .is_err()
+    {
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "outcome_unknown",
+            "The reconciled Export input pin could not be released",
+        );
+    }
+    response
+}
+
+async fn release_export_dependency(state: &HttpState, owner: &str) -> Result<(), String> {
+    if let Some(request_id) = owner.strip_prefix("processing-export:") {
+        match state
+            .application
+            .library
+            .processing_export_work(request_id)
+            .await
+        {
+            Ok(Some(work)) if !work.state.is_terminal() => return Ok(()),
+            Ok(_) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let manager = Arc::clone(&state.application.workspaces);
+    let owner = owner.to_owned();
+    tokio::task::spawn_blocking(move || manager.release_dependency(&owner))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
 }
 
 async fn dispatch_outcome(
@@ -507,165 +630,88 @@ async fn dispatch_outcome(
         .into_response()
 }
 
+async fn reconcile_workspace_artifact(
+    state: &HttpState,
+    artifact: &slipstream_core::ProcessingArtifact,
+) -> Result<Option<crate::workspace::WorkspaceDownload>, String> {
+    if artifact.module.as_str() != SPEKTRAFILM_MODULE {
+        return Ok(None);
+    }
+    let workspace_id = match &artifact.input.input {
+        ProcessingInput::WorkspaceArtifact { workspace_id, .. } => Some(workspace_id.clone()),
+        _ => None,
+    };
+    let photo_id = artifact.photo_id.clone();
+    let manager = Arc::clone(&state.application.workspaces);
+    let legacy_id = artifact.artifact_id.as_str().to_owned();
+    let path = state
+        .application
+        .export_artifacts_directory
+        .join(format!("{legacy_id}.jpg"));
+    let provenance = artifact_json(artifact);
+    tokio::task::spawn_blocking(move || {
+        let alias = match manager
+            .resolve_artifact_alias(&legacy_id)
+            .map_err(|error| error.to_string())?
+        {
+            Some(alias) => alias,
+            None => {
+                let workspace_id = match workspace_id {
+                    Some(id) => Some(id),
+                    None => manager
+                        .lookup_photo(&photo_id)
+                        .map_err(|error| error.to_string())?
+                        .map(|workspace| workspace.id),
+                };
+                let Some(workspace_id) = workspace_id else {
+                    return Ok(None);
+                };
+                manager
+                    .adopt_output(&workspace_id, &legacy_id, &path, &provenance)
+                    .map_err(|error| error.to_string())?
+            }
+        };
+        let workspace = alias["workspaceId"]
+            .as_str()
+            .ok_or("Invalid artifact workspace alias")?;
+        let artifact = alias["artifactId"]
+            .as_str()
+            .ok_or("Invalid artifact file alias")?;
+        let revision = alias["revision"]
+            .as_str()
+            .ok_or("Invalid artifact revision alias")?;
+        let download = manager
+            .download(workspace, artifact, Some(revision))
+            .map_err(|error| error.to_string())?;
+        if Some(download.sha256.as_str()) != provenance["sha256"].as_str()
+            || Some(download.byte_length) != provenance["byteLength"].as_u64()
+        {
+            return Err("Workspace output bytes differ from retained provenance".to_owned());
+        }
+        Ok(Some(download))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 async fn artifact_created_response(
     state: &HttpState,
     artifact: &slipstream_core::ProcessingArtifact,
     replayed: bool,
 ) -> Response {
+    if reconcile_workspace_artifact(state, artifact).await.is_err() {
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "outcome_unknown",
+            "The retained workspace output publication could not be reconciled",
+        );
+    }
     let value = match retained_artifact_json(state, artifact).await {
         Ok(value) => value,
         Err(response) => return response,
     };
     let body = json!({"artifact": value, "replayed": replayed});
     (StatusCode::CREATED, axum::Json(body)).into_response()
-}
-
-async fn outcome_response(state: &HttpState, outcome: ProcessingExportSubmitOutcome) -> Response {
-    match outcome {
-        ProcessingExportSubmitOutcome::Refused(refusal) => error_details(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "module_parameters_unavailable",
-            "The current Edit State has no qualified Export adapter in this deployment",
-            json!({"refusal": refusal_json(&refusal), "replayed": false}),
-        ),
-        ProcessingExportSubmitOutcome::Replayed(refusal) => error_details(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "module_parameters_unavailable",
-            "The current Edit State has no qualified Export adapter in this deployment",
-            json!({"refusal": refusal_json(&refusal), "replayed": true}),
-        ),
-        ProcessingExportSubmitOutcome::Admitted(_) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "outcome_unknown",
-            "The admitted execution was not dispatched",
-        ),
-        ProcessingExportSubmitOutcome::Pending(admission) => {
-            // A duplicate of one still-live accepted execution: the
-            // committed receipt replays and no second execution starts.
-            // The live state is read back from the same owner so the
-            // receipt names exactly what the work record says.
-            let receipt = match state
-                .application
-                .library
-                .processing_export_work(&admission.request_id)
-                .await
-            {
-                Ok(Some(work)) => work_json(&work),
-                _ => {
-                    let mut receipt = admission_json(&admission);
-                    if let Some(object) = receipt.as_object_mut() {
-                        object.insert("state".to_owned(), json!("accepted"));
-                    }
-                    receipt
-                }
-            };
-            (
-                StatusCode::ACCEPTED,
-                Json(json!({"outcome": "replayed", "receipt": receipt})),
-            )
-                .into_response()
-        }
-        ProcessingExportSubmitOutcome::FailureReplayed(work) => error_details(
-            StatusCode::CONFLICT,
-            "export_terminal",
-            "The Export request already reached a terminal decision",
-            json!({"receipt": work_json(&work), "replayed": true}),
-        ),
-        ProcessingExportSubmitOutcome::CancelledReplayed(work) => error_details(
-            StatusCode::CONFLICT,
-            "export_terminal",
-            "The Export request already reached a terminal decision",
-            json!({"receipt": work_json(&work), "replayed": true}),
-        ),
-        ProcessingExportSubmitOutcome::Expired => error(
-            StatusCode::GONE,
-            "artifact_expired",
-            "The settled artifact's retention window has passed",
-        ),
-        ProcessingExportSubmitOutcome::ReservationFull => error_details(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "server_busy",
-            "The Library holds its maximum live composable Exports",
-            json!({"operation": "photos-processing-export", "retryAfterSeconds": null}),
-        ),
-        ProcessingExportSubmitOutcome::RetainedOutputFull => error_details(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "retained_output_full",
-            "The retained-output allowance cannot admit another composable artifact",
-            json!({"operation": "photos-processing-export", "retryAfterSeconds": null}),
-        ),
-        ProcessingExportSubmitOutcome::ArtifactReplayed(artifact) => {
-            artifact_created_response(state, &artifact, true).await
-        }
-        ProcessingExportSubmitOutcome::RecipeConflict(recipe) => error_details(
-            StatusCode::CONFLICT,
-            "recipe_conflict",
-            "The expected Edit revision is no longer current",
-            recipe
-                .as_ref()
-                .map(crate::processing_recipe::recipe_json)
-                .unwrap_or_else(|| json!({})),
-        ),
-        ProcessingExportSubmitOutcome::SourceChanged(recipe) => error_details(
-            StatusCode::CONFLICT,
-            "source_changed",
-            "The guarded source revision is no longer current",
-            recipe
-                .as_ref()
-                .map(crate::processing_recipe::recipe_json)
-                .unwrap_or_else(|| json!({})),
-        ),
-        ProcessingExportSubmitOutcome::MissingPhoto => error(
-            StatusCode::NOT_FOUND,
-            "unknown_photo",
-            "The Photo is not part of the persisted Library",
-        ),
-        ProcessingExportSubmitOutcome::Unavailable => error(
-            StatusCode::CONFLICT,
-            "source_unavailable",
-            "The guarded source revision is not currently available",
-        ),
-        ProcessingExportSubmitOutcome::MissingRecipe => error(
-            StatusCode::NOT_FOUND,
-            "missing_recipe",
-            "Save an Edit State before submitting an Export",
-        ),
-        ProcessingExportSubmitOutcome::StepNotCurrent(_) => error(
-            StatusCode::CONFLICT,
-            "step_not_current",
-            "Export is bounded to the current Edit State",
-        ),
-        ProcessingExportSubmitOutcome::IncompatibleInput(reason) => match reason {
-            ProcessingInputHandoffError::OriginalPhotoMismatch
-            | ProcessingInputHandoffError::OriginalSourceStale => error(
-                StatusCode::CONFLICT,
-                "source_changed",
-                "The selected Original input is stale",
-            ),
-            ProcessingInputHandoffError::ArtifactMissing => error_details(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "incompatible_input",
-                "The selected artifact input has no published Processing Artifact",
-                json!({"reason": "artifact_missing"}),
-            ),
-            ProcessingInputHandoffError::ArtifactContractMismatch => error_details(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "incompatible_input",
-                "The selected artifact input no longer matches its published contract",
-                json!({"reason": "artifact_contract_mismatch"}),
-            ),
-        },
-        ProcessingExportSubmitOutcome::Invalid(_) => error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_settings",
-            "The submission carries a value outside the closed wire shape",
-        ),
-        ProcessingExportSubmitOutcome::RequestConflict => error(
-            StatusCode::CONFLICT,
-            "request_conflict",
-            "The request identity was already used with a different payload",
-        ),
-    }
 }
 
 fn artifact_json(artifact: &slipstream_core::ProcessingArtifact) -> Value {
@@ -731,6 +777,54 @@ pub(crate) async fn get_processing_export_status(
         // The record is scoped to the Photo whose recipe admitted it; a
         // different Photo's path never resolves another Photo's work.
         Ok(Some(work)) if work.admission.photo_id == photo_id => {
+            let mut workspace_output = None;
+            if work.state == slipstream_core::ProcessingExportWorkState::Succeeded {
+                let artifact = match work.artifact_id.as_ref() {
+                    Some(id) => {
+                        state
+                            .application
+                            .library
+                            .processing_artifact(id.as_str())
+                            .await
+                    }
+                    None => {
+                        return error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "outcome_unknown",
+                            "The settled Export artifact is unconfirmed",
+                        );
+                    }
+                };
+                let Ok(Some(artifact)) = artifact else {
+                    return error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "outcome_unknown",
+                        "The settled Export artifact is unconfirmed",
+                    );
+                };
+                workspace_output = match reconcile_workspace_artifact(&state, &artifact).await {
+                    Ok(output) => output,
+                    Err(_) => {
+                        return error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "outcome_unknown",
+                            "The retained workspace output publication could not be reconciled",
+                        );
+                    }
+                };
+            }
+            if work.state.is_terminal()
+                && release_export_dependency(&state, &format!("processing-export:{request_id}"))
+                    .await
+                    .is_err()
+            {
+                return error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "outcome_unknown",
+                    "The terminal Export input pin could not be released",
+                );
+            }
+            drop(workspace_output);
             Json(work_json(&work)).into_response()
         }
         Ok(Some(_)) | Ok(None) => unknown_request(),
@@ -834,10 +928,22 @@ pub(crate) async fn get_processing_artifact(
         .processing_artifact(&artifact_id)
         .await
     {
-        Ok(Some(artifact)) => match retained_artifact_json(&state, &artifact).await {
-            Ok(value) => Json(value).into_response(),
-            Err(response) => response,
-        },
+        Ok(Some(artifact)) => {
+            if reconcile_workspace_artifact(&state, &artifact)
+                .await
+                .is_err()
+            {
+                return error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "outcome_unknown",
+                    "The retained workspace output publication could not be reconciled",
+                );
+            }
+            match retained_artifact_json(&state, &artifact).await {
+                Ok(value) => Json(value).into_response(),
+                Err(response) => response,
+            }
+        }
         Ok(None) => error(
             StatusCode::NOT_FOUND,
             "unknown_artifact",
@@ -859,21 +965,34 @@ pub(crate) async fn get_processing_artifact(
 /// bytes belong to it or launching a replacement attempt. The bytes remain
 /// untouched; the retention/orphan sweep removes only bytes that persistence
 /// proves are unclaimed.
-pub(crate) fn reconcile_processing_exports(application: &std::sync::Arc<crate::app::Application>) {
-    let library = std::sync::Arc::clone(&application.library);
-    tokio::spawn(async move {
-        let Ok(unfinished) = library.unfinished_processing_exports().await else {
-            return;
-        };
-        let now = unix_seconds_now();
-        for work in unfinished {
-            let _ = library
-                .fail_processing_export(
-                    work.admission.request_id.as_str(),
-                    INTERRUPTED_BY_RESTART,
-                    now,
-                )
-                .await;
+pub(crate) async fn reconcile_processing_exports(
+    application: &std::sync::Arc<crate::app::Application>,
+) -> Result<(), String> {
+    let library = &application.library;
+    let workspaces = &application.workspaces;
+    let unfinished = library
+        .unfinished_processing_exports()
+        .await
+        .map_err(|error| error.to_string())?;
+    let now = unix_seconds_now();
+    for work in unfinished {
+        let outcome = library
+            .fail_processing_export(
+                work.admission.request_id.as_str(),
+                INTERRUPTED_BY_RESTART,
+                now,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if matches!(&outcome,slipstream_core::ProcessingExportFailureOutcome::Failed(terminal)|slipstream_core::ProcessingExportFailureOutcome::Terminal(terminal) if matches!(terminal.state,slipstream_core::ProcessingExportWorkState::Failed|slipstream_core::ProcessingExportWorkState::Cancelled))
+        {
+            let manager = Arc::clone(workspaces);
+            let owner = format!("processing-export:{}", work.admission.request_id);
+            tokio::task::spawn_blocking(move || manager.release_dependency(&owner))
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
         }
-    });
+    }
+    Ok(())
 }

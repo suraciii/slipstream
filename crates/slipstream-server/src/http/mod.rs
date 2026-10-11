@@ -170,6 +170,86 @@ pub(crate) fn create_router_with_processing(
         processing,
     };
     Router::new()
+        .route(
+            "/api/photos/{id}/workspace",
+            post(crate::workspace_http::open),
+        )
+        .route(
+            "/api/workspaces/{id}",
+            get(crate::workspace_http::show).delete(crate::workspace_http::delete),
+        )
+        .route(
+            "/api/workspaces/{id}/files",
+            get(crate::workspace_http::files),
+        )
+        .route(
+            "/api/workspace-files",
+            get(crate::workspace_http::continuation),
+        )
+        .route(
+            "/api/workspaces/{workspace}/files/{id}",
+            get(crate::workspace_http::inspect).delete(crate::workspace_http::remove),
+        )
+        .route(
+            "/api/workspaces/{workspace}/files/{id}/bytes",
+            get(crate::workspace_http::bytes),
+        )
+        .route(
+            "/api/workspaces/{id}/refresh-input",
+            post(crate::workspace_http::refresh),
+        )
+        .route(
+            "/api/photos/{id}/darktable/commands",
+            post(crate::darktable_service::http::photo_commands),
+        )
+        .route(
+            "/api/darktable/commands",
+            post(crate::darktable_service::http::global_commands),
+        )
+        .route(
+            "/api/photos/{id}/darktable/jobs/{requestId}",
+            get(crate::darktable_service::http::status),
+        )
+        .route(
+            "/api/photos/{id}/darktable/jobs/{requestId}/cancel",
+            post(crate::darktable_service::http::cancel),
+        )
+        .route(
+            "/api/photos/{id}/darktable/files",
+            post(crate::darktable_service::http::photo_upload),
+        )
+        .route(
+            "/api/photos/{id}/darktable/files/{transferId}/bytes",
+            get(crate::darktable_service::http::photo_download),
+        )
+        .route(
+            "/api/darktable/files",
+            post(crate::darktable_service::http::global_upload),
+        )
+        .route(
+            "/api/darktable/files/{transferId}/bytes",
+            get(crate::darktable_service::http::global_download),
+        )
+        .route(
+            "/api/darktable/previews/{id}",
+            get(crate::darktable_service::http::preview_status),
+        )
+        .route(
+            "/api/darktable/previews/{id}/bytes",
+            get(crate::darktable_service::http::rendered_bytes),
+        )
+        .route(
+            "/api/darktable/artifacts/{id}/bytes",
+            get(crate::darktable_service::http::rendered_bytes),
+        )
+        .route(
+            "/api/darktable/state-files/{id}/bytes",
+            get(crate::darktable_service::http::rendered_bytes),
+        )
+        .route(
+            "/api/darktable/historical/{id}/bytes",
+            get(export::get_export_artifact),
+        )
         .route(HEALTH_PATH, get(healthz))
         .route("/api/overview", get(overview))
         .route("/api/status", get(cli::status))
@@ -197,17 +277,6 @@ pub(crate) fn create_router_with_processing(
                 .post(crate::development_proxy::post_development_proxy)
                 .delete(crate::development_proxy::delete_development_proxy),
         )
-        .route("/api/photos/{id}/edit", get(crate::edit::get_edit))
-        .route("/api/photos/{id}/edit/set", post(crate::edit::set_edit))
-        .route("/api/photos/{id}/edit/reset", post(crate::edit::reset_edit))
-        .route(
-            "/api/photos/{id}/edit/preview",
-            get(crate::edit::preview_edit),
-        )
-        .route(
-            "/api/photos/{id}/edit/export",
-            post(crate::edit::export_edit),
-        )
         .route(
             "/api/photos/{id}/processing-recipe",
             get(crate::processing_recipe::get_composable_edit_recipe)
@@ -218,10 +287,7 @@ pub(crate) fn create_router_with_processing(
             get(browse::method_not_allowed)
                 .post(crate::processing_recipe::post_composable_edit_recipe_rebind),
         )
-        .route(
-            "/api/photos/{id}/edit-state-exports",
-            get(xmp::list).post(xmp::create),
-        )
+        .route("/api/photos/{id}/edit-state-exports", get(xmp::list))
         .route(
             "/api/photos/{id}/edit-state-exports/{export_id}/artifact",
             get(xmp::artifact),
@@ -720,15 +786,31 @@ pub(crate) async fn request_policy(
     next.run(request).await
 }
 
-/// DELETE is admitted only on the routes that declare it: the browsing session
-/// release, the Development Proxy removal, and the composable Processing
-/// Export cancellation. Every other DELETE is refused before routing, so a
-/// retired or renamed path can never be reached by a method the API does
-/// not publish.
+/// DELETE is admitted only for explicit removal/cancellation routes. Retired
+/// paths remain unavailable before routing.
 fn delete_is_admitted(path: &str) -> bool {
     path.starts_with("/api/browse/")
         || is_development_proxy_route(path)
         || is_processing_export_request_route(path)
+        || is_workspace_delete_route(path)
+}
+
+fn is_workspace_delete_route(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/workspaces/") else {
+        return false;
+    };
+    let mut parts = rest.split('/');
+    let Some(workspace) = parts.next().filter(|part| !part.is_empty()) else {
+        return false;
+    };
+    if !crate::workspace::valid_id(workspace) {
+        return false;
+    }
+    match (parts.next(), parts.next(), parts.next()) {
+        (None, None, None) => true,
+        (Some("files"), Some(id), None) => crate::workspace::valid_id(id),
+        _ => false,
+    }
 }
 
 /// One `/api/photos/{id}/processing-exports/{requestId}` path: exactly one

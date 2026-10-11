@@ -11,33 +11,15 @@ pub(crate) async fn execute(
     if matches!(&cli.command, Command::Auth { .. }) {
         return auth::execute_auth(cli, environment, deadline).await;
     }
-    let preview_destination = match &cli.command {
-        Command::Photos {
-            command: PhotoCommand::Preview { file, .. },
-        } => Some(preview_download::Destination::preflight(
-            preview_download::DestinationKind::Preview,
-            file,
-        )?),
-        Command::Photos {
-            command: PhotoCommand::ProcessingPreview { file, .. },
-        } => Some(preview_download::Destination::preflight(
-            preview_download::DestinationKind::ProcessingPreview,
-            file,
-        )?),
-        Command::Processing {
-            command: ProcessingCommand::ArtifactDownload { file, .. },
-        } => Some(preview_download::Destination::preflight(
-            preview_download::DestinationKind::ProcessingArtifact,
-            file,
-        )?),
-        Command::Photos {
-            command: PhotoCommand::HistoricalExportDownload { file, .. },
-        } => Some(preview_download::Destination::preflight(
-            preview_download::DestinationKind::Artifact,
-            file,
-        )?),
+    let pending_workspace = match &cli.command {
+        Command::Workspace { command } => Some(workspace::prepare(command)?),
         _ => None,
     };
+    let pending_darktable = match &cli.command {
+        Command::Darktable(command) => Some(darktable::prepare(command)?),
+        _ => None,
+    };
+    let preview_destination = destination::prepare(&cli.command)?;
     let (origin, token) = auth::ordinary_credentials(cli, environment, operation, deadline).await?;
     if origin.scheme() == "http" {
         eprintln!(
@@ -149,6 +131,26 @@ pub(crate) async fn execute(
     let result = async {
         match &cli.command {
             Command::Auth { .. } => unreachable!("auth commands return before service dispatch"),
+            Command::Workspace { command } => {
+                workspace::execute(
+                    &client,
+                    admission,
+                    publication,
+                    command,
+                    pending_workspace.expect("prepared workspace command"),
+                )
+                .await
+            }
+            Command::Darktable(command) => {
+                darktable::execute(
+                    &client,
+                    admission,
+                    publication,
+                    command,
+                    pending_darktable.expect("prepared darktable command"),
+                )
+                .await
+            }
             Command::Processing { command } => match command {
                 ProcessingCommand::Modules => development::modules(&client).await,
                 ProcessingCommand::Artifact { artifact_id } => {
@@ -165,9 +167,6 @@ pub(crate) async fn execute(
                     .await
                 }
             },
-            Command::Photos {
-                command: PhotoCommand::Edit { command },
-            } => edit::execute(&client, admission, command, publication).await,
             Command::Photos {
                 command: PhotoCommand::ProcessingRecipe { command },
             } => {
@@ -1341,3 +1340,4 @@ mod invocation;
 #[cfg(test)]
 pub(crate) use invocation::{deadline_failure, render_text};
 pub use invocation::{invalid_invocation, invoke, invoke_until};
+mod destination;

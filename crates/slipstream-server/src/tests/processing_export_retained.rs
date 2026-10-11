@@ -1,32 +1,20 @@
 use super::*;
 
 #[tokio::test]
-async fn admitted_export_publishes_after_the_submission_disconnects() {
+async fn historical_publication_remains_downloadable_after_submission_owner_disconnects() {
     let (base, config) = export_fixture();
-    let engine = FakePhotoEngine::at(&base);
-    engine.hang_attempt(1);
     let (application, router) = export_application(&config).await;
     let photo_id = first_photo_id(&application).await;
-    let (recipe_revision, source_revision) =
-        save_selected_step(&router, &photo_id, "recipe-1").await;
-    let body = submit_body(
+    let (revision, source) = save_selected_step(&application, &photo_id, "recipe-1").await;
+    let artifact_id = settle_historical_export(
+        &application,
+        &photo_id,
         "export-disconnected",
-        "develop-1",
-        &recipe_revision,
-        &source_revision,
-    );
-    let (status, accepted) = tokio::time::timeout(
-        Duration::from_secs(2),
-        post_processing_export(&router, &photo_id, &body),
+        &revision,
+        &source,
     )
-    .await
-    .expect("submission returns while the engine is still blocked");
-    assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(accepted["receipt"]["requestId"], "export-disconnected");
-    assert_eq!(accepted["receipt"]["state"], "accepted");
-    engine.wait_for_runs(1).await;
+    .await;
     drop(router);
-    engine.release();
     let router = create_router_with_processing(
         Arc::clone(&application),
         crate::http::open_web_root(config.web_root()),
@@ -34,7 +22,6 @@ async fn admitted_export_publishes_after_the_submission_disconnects() {
     );
     let work = settled_export(&router, &photo_id, "export-disconnected").await;
     assert_eq!(work["state"], "succeeded");
-    let artifact_id = work["artifactId"].as_str().unwrap();
     let response = send(
         &router,
         authenticated_request()
@@ -50,7 +37,12 @@ async fn admitted_export_publishes_after_the_submission_disconnects() {
     )
     .await
     .unwrap();
-    let (status, replayed) = post_processing_export(&router, &photo_id, &body).await;
+    let (status, replayed) = post_processing_export(
+        &router,
+        &photo_id,
+        &submit_body("export-disconnected", "develop-1", &revision, &source),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(replayed["replayed"], true);
     assert_eq!(replayed["artifact"]["artifactId"], artifact_id);
@@ -59,7 +51,7 @@ async fn admitted_export_publishes_after_the_submission_disconnects() {
         replayed["artifact"]["sha256"],
         format!("{:x}", sha2::Sha256::digest(&bytes))
     );
-    assert_eq!(engine.runs(), 1);
+    assert_eq!(FakePhotoEngine::at(&base).runs(), 0);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -69,11 +61,9 @@ async fn retry_uses_failed_and_cancelled_snapshots_after_recipe_changes() {
     let (base, mut config) = export_fixture();
     // Both captured retries remain live while their durable receipts are read.
     config.export_retained_output_bytes = Some(2 * slipstream_core::MAXIMUM_EXPORT_BYTES);
-    let engine = FakePhotoEngine::at(&base);
-    engine.hang_attempt(0);
-    let (application, router) = export_application(&config).await;
+    let (application, _) = export_application(&config).await;
     let photo_id = first_photo_id(&application).await;
-    let (revision, source) = save_selected_step(&router, &photo_id, "recipe-1").await;
+    let (revision, source) = save_selected_step(&application, &photo_id, "recipe-1").await;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -114,25 +104,30 @@ async fn retry_uses_failed_and_cancelled_snapshots_after_recipe_changes() {
         .cancel_processing_export("export-cancelled-seed", now)
         .await
         .unwrap();
-    let uri = format!("/api/photos/{photo_id}/processing-recipe");
-    let (_, current) = get_json(&router, &uri).await;
-    let mut steps = current["recipe"]["steps"].clone();
-    steps[0]["parameters"]["tree"]["output"] = serde_json::json!({
-        "format": "jpeg", "precisionBits": 8, "colorSpace": "srgb", "transferFunction": "srgb"
-    });
-    let response = post_json(
-        &router,
-        &uri,
-        serde_json::json!({
-            "requestId": "recipe-changed", "expectedRecipeRevision": revision,
-            "expectedSourceRevision": source, "currentStepId": "develop-1", "steps": steps
-        }),
-        Some("https://camera.local"),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let changed = response_json(response).await;
-    assert_ne!(changed["recipe"]["revision"], revision);
+    let current = application
+        .library
+        .composable_edit_recipe_read(&photo_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut recipe = current.recipe.unwrap();
+    recipe.steps[0].parameters.tree["output"] = serde_json::json!({"format":"jpeg","precisionBits":8,"colorSpace":"srgb","transferFunction":"srgb"});
+    let changed = application
+        .library
+        .save_composable_edit_recipe(slipstream_core::SaveComposableEditRecipe {
+            photo_id: photo_id.clone(),
+            request_id: "recipe-changed".into(),
+            expected_recipe_revision: Some(revision.clone()),
+            expected_source_revision: source.clone(),
+            request_intent: None,
+            recipe,
+            automatic_adjustment: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(&changed,slipstream_core::ComposableEditRecipeWriteOutcome::Saved(r) if r.revision!=revision)
+    );
     let read_router = create_router_with_processing(
         Arc::clone(&application),
         crate::http::open_web_root(config.web_root()),
@@ -153,16 +148,30 @@ async fn retry_uses_failed_and_cancelled_snapshots_after_recipe_changes() {
         assert_eq!(replay["error"]["details"]["replayed"], true);
         let (_, original) = export_status(&read_router, &photo_id, previous).await;
         let retry_uri = format!("/api/photos/{photo_id}/processing-exports/{previous}/retry");
-        let response = post_json(
-            &router,
-            &retry_uri,
-            serde_json::json!({"requestId": retry}),
-            Some("https://camera.local"),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let accepted = response_json(response).await;
-        assert_eq!(accepted["receipt"]["requestId"], retry);
+        let outcome = application
+            .library
+            .retry_processing_export(
+                slipstream_core::RetryProcessingExport {
+                    photo_id: photo_id.clone(),
+                    previous_request_id: previous.to_owned(),
+                    request_id: retry.to_owned(),
+                    bundle_id: "c".repeat(64),
+                    retained_output_bytes_max: u64::MAX,
+                    adapter: ProcessingExportAdapterDecision::Qualified {
+                        adapter_version: DARKTABLE_ADAPTER_VERSION.to_owned(),
+                        parameter_schema_version: DARKTABLE_PARAMETER_VERSION.to_owned(),
+                    },
+                },
+                now,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, ProcessingExportSubmitOutcome::Admitted(_)),
+            "{outcome:?}"
+        );
+        let (status, accepted) = export_status(&read_router, &photo_id, retry).await;
+        assert_eq!(status, StatusCode::OK);
         for field in [
             "parameters",
             "input",
@@ -172,10 +181,7 @@ async fn retry_uses_failed_and_cancelled_snapshots_after_recipe_changes() {
             "sourceRevision",
             "bundleId",
         ] {
-            assert_eq!(
-                accepted["receipt"][field], original[field],
-                "captured {field}"
-            );
+            assert_eq!(accepted[field], original[field], "captured {field}");
         }
         let response = post_json(
             &read_router,
@@ -209,7 +215,6 @@ async fn retry_uses_failed_and_cancelled_snapshots_after_recipe_changes() {
             .await
             .unwrap();
     }
-    engine.release();
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -219,7 +224,7 @@ async fn swept_failed_snapshot_retry_reports_expired_without_admission() {
     let (base, config) = export_fixture();
     let (application, router) = export_application(&config).await;
     let photo_id = first_photo_id(&application).await;
-    let (revision, source) = save_selected_step(&router, &photo_id, "expiry-recipe").await;
+    let (revision, source) = save_selected_step(&application, &photo_id, "expiry-recipe").await;
     let outcome = application
         .library
         .submit_processing_export(

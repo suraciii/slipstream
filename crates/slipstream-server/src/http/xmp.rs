@@ -1,49 +1,13 @@
-use crate::http::{HttpState, cli_error, read_body_bytes};
+use crate::http::{HttpState, cli_error};
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{Request, Response, StatusCode, header},
+    http::{Response, StatusCode, header},
 };
-use serde::Deserialize;
-use slipstream_core::{XMP_CONTENT_TYPE, XmpCreateOutcome, XmpExportRecord};
+use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
+use slipstream_core::{XMP_CONTENT_TYPE, XmpExportRecord};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct BodyIn {
-    request_id: String,
-    expected_recipe_version: String,
-    expected_source_revision: String,
-}
-/// The `requestId` wire shape: 1 to 128 characters of ASCII letters, digits,
-/// `.`, `_`, or `-`; unique per Photo and chosen by the caller.
-fn valid_export_request_id(request_id: &str) -> bool {
-    (1..=128).contains(&request_id.len())
-        && request_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-}
-
-/// Reads one XMP snapshot request body. Shape violations are refused before
-/// any state change, including unknown fields and oversized bodies.
-async fn read_export_json_body<T: serde::de::DeserializeOwned>(
-    request: Request<Body>,
-) -> Result<T, Response<Body>> {
-    let bytes = read_body_bytes(request).await.map_err(|_| {
-        error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_settings",
-            "The request body is outside the closed wire shape",
-        )
-    })?;
-    serde_json::from_slice(&bytes).map_err(|_| {
-        error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_settings",
-            "The request body is outside the closed wire shape",
-        )
-    })
-}
 fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -59,34 +23,88 @@ fn timestamp(value: i64) -> String {
         .format(&Rfc3339)
         .expect("RFC3339 timestamp")
 }
+#[cfg(test)]
+#[test]
+fn retained_parameter_support_resolves_namespaces_and_ignores_text() {
+    let document = br#"<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:RDF><rdf:Description xmlns:edit="https://slipstream.app/ns/edit-state/1.0/" xmlns:raw="http://ns.adobe.com/camera-raw-settings/1.0/" raw:WhiteBalance="As Shot"><edit:StepId>saved</edit:StepId><edit:RecipeSnapshot>&lt;slip:Module&gt;darktable&lt;/slip:Module&gt;</edit:RecipeSnapshot><!-- <edit:PhotoId>not a property</edit:PhotoId> --><slip:Module xmlns:slip="https://unrelated.example/">other</slip:Module></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+    assert_eq!(
+        parameter_support(document),
+        (vec!["WhiteBalance"], vec!["StepId", "RecipeSnapshot"]),
+    );
+}
+
+fn parameter_support(document: &[u8]) -> (Vec<&'static str>, Vec<&'static str>) {
+    let mut standard = [("Exposure2012", false), ("WhiteBalance", false)];
+    let mut slipstream = [
+        ("PhotoId", false),
+        ("RecipeVersion", false),
+        ("SourceRevision", false),
+        ("SourceRevisionEncoding", false),
+        ("StepId", false),
+        ("Module", false),
+        ("ParameterSchemaVersion", false),
+        ("RecipeSnapshot", false),
+        ("RecipeSnapshotEncoding", false),
+        ("WhiteBalance", false),
+        ("TemperatureKelvin", false),
+        ("TintMilli", false),
+    ];
+    let mut reader = NsReader::from_reader(document);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element) | Event::Empty(element)) => {
+                let (namespace, name) = reader.resolver().resolve_element(element.name());
+                mark_property(namespace, name.as_ref(), &mut standard, &mut slipstream);
+                for attribute in element.attributes() {
+                    let Ok(attribute) = attribute else {
+                        return (Vec::new(), Vec::new());
+                    };
+                    let (namespace, name) = reader.resolver().resolve_attribute(attribute.key);
+                    mark_property(namespace, name.as_ref(), &mut standard, &mut slipstream);
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => return (Vec::new(), Vec::new()),
+            _ => {}
+        }
+    }
+    (
+        standard
+            .into_iter()
+            .filter_map(|(name, present)| present.then_some(name))
+            .collect(),
+        slipstream
+            .into_iter()
+            .filter_map(|(name, present)| present.then_some(name))
+            .collect(),
+    )
+}
+
+fn mark_property(
+    namespace: ResolveResult<'_>,
+    name: &str,
+    standard: &mut [(&'static str, bool)],
+    slipstream: &mut [(&'static str, bool)],
+) {
+    let ResolveResult::Bound(namespace) = namespace else {
+        return;
+    };
+    let properties = match namespace.as_ref() {
+        "http://ns.adobe.com/camera-raw-settings/1.0/" => standard,
+        "https://slipstream.app/ns/edit-state/1.0/" => slipstream,
+        _ => return,
+    };
+    for (property, present) in properties {
+        if *property == name {
+            *present = true;
+        }
+    }
+}
+
 fn wire(record: &XmpExportRecord) -> serde_json::Value {
-    // Retained documents predate newer generator capabilities. Advertise only
-    // properties present in these acknowledged bytes, never today's template.
-    let document = std::str::from_utf8(&record.document).unwrap_or_default();
-    let standard: Vec<_> = [
-        ("Exposure2012", "<crs:Exposure2012>"),
-        ("WhiteBalance", "<crs:WhiteBalance>"),
-    ]
-    .into_iter()
-    .filter_map(|(name, tag)| document.contains(tag).then_some(name))
-    .collect();
-    let slipstream: Vec<_> = [
-        ("PhotoId", "<slip:PhotoId>"),
-        ("RecipeVersion", "<slip:RecipeVersion>"),
-        ("SourceRevision", "<slip:SourceRevision>"),
-        ("SourceRevisionEncoding", "<slip:SourceRevisionEncoding>"),
-        ("StepId", "<slip:StepId>"),
-        ("Module", "<slip:Module>"),
-        ("ParameterSchemaVersion", "<slip:ParameterSchemaVersion>"),
-        ("RecipeSnapshot", "<slip:RecipeSnapshot>"),
-        ("RecipeSnapshotEncoding", "<slip:RecipeSnapshotEncoding>"),
-        ("WhiteBalance", "<slip:WhiteBalance>"),
-        ("TemperatureKelvin", "<slip:TemperatureKelvin>"),
-        ("TintMilli", "<slip:TintMilli>"),
-    ]
-    .into_iter()
-    .filter_map(|(name, tag)| document.contains(tag).then_some(name))
-    .collect();
+    // Read namespace-qualified properties from the acknowledged bytes; the
+    // retained document and its digest remain untouched.
+    let (standard, slipstream) = parameter_support(&record.document);
     serde_json::json!({
         "exportId": record.export_id, "photoId": record.photo_id,
         "target": "edit-state-xmp", "state": "succeeded",
@@ -95,90 +113,6 @@ fn wire(record: &XmpExportRecord) -> serde_json::Value {
         "artifact": {"filename": record.filename, "contentType": XMP_CONTENT_TYPE, "byteLength": record.byte_length, "sha256": record.sha256},
         "parameterSupport": {"standard": standard, "slipstream": slipstream, "unsupported": ["Arbitrary darktable controls"]}
     })
-}
-pub(crate) async fn create(
-    State(state): State<HttpState>,
-    Path(photo_id): Path<String>,
-    request: Request<Body>,
-) -> Response<Body> {
-    let body: BodyIn = match read_export_json_body(request).await {
-        Ok(body) => body,
-        Err(response) => return response,
-    };
-    if !valid_export_request_id(&body.request_id)
-        || body.expected_recipe_version.is_empty()
-        || body.expected_source_revision.is_empty()
-    {
-        return error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_settings",
-            "The request body is outside the closed wire shape",
-        );
-    }
-    match state
-        .application
-        .library
-        .create_xmp_export(
-            &photo_id,
-            &body.request_id,
-            &body.expected_recipe_version,
-            &body.expected_source_revision,
-            now(),
-        )
-        .await
-    {
-        Ok(XmpCreateOutcome::Created(record)) => {
-            crate::http::json_response(StatusCode::CREATED, &wire(&record))
-        }
-        Ok(XmpCreateOutcome::Replay(record)) => {
-            crate::http::json_response(StatusCode::OK, &wire(&record))
-        }
-        Ok(XmpCreateOutcome::Conflict) => error(
-            StatusCode::CONFLICT,
-            "export_conflict",
-            "The request identity was already used with a different payload",
-        ),
-        Ok(XmpCreateOutcome::Stale) => error(
-            StatusCode::CONFLICT,
-            "stale_edit",
-            "The expected edit state is no longer current",
-        ),
-        Ok(XmpCreateOutcome::Expired) => error(
-            StatusCode::GONE,
-            "export_expired",
-            "The request identity expired and cannot start new work",
-        ),
-        Ok(XmpCreateOutcome::NotFound) => error(
-            StatusCode::NOT_FOUND,
-            "unknown_photo",
-            "The Photo is not part of the published Library",
-        ),
-        Ok(XmpCreateOutcome::MissingRecipe) => error(
-            StatusCode::CONFLICT,
-            "stale_edit",
-            "The Photo has no confirmed edit recipe",
-        ),
-        Ok(XmpCreateOutcome::MissingStep) => error(
-            StatusCode::CONFLICT,
-            "stale_edit",
-            "The confirmed recipe has no selected processing step",
-        ),
-        Ok(XmpCreateOutcome::UnsupportedModule) => error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "unsupported_module",
-            "XMP semantic export requires the selected darktable step",
-        ),
-        Ok(XmpCreateOutcome::UnsupportedParameters) => error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "unsupported_parameters",
-            "The selected step has no unambiguous portable exposure and white-balance intent",
-        ),
-        Err(_) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "outcome_unknown",
-            "The request outcome is unconfirmed",
-        ),
-    }
 }
 pub(crate) async fn list(
     State(state): State<HttpState>,

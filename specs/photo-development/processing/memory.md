@@ -1,128 +1,104 @@
 # Processing Memory
 
-Photo development loads large native image buffers. Slipstream is a personal,
-single-machine application: one container hosts the Web service and the
-development engine together, and they share that container's finite memory and
-CPU. This specification states what that shared boundary guarantees, what it
-deliberately does not, and how the engine stays within it without changing the
-photograph.
+Photo development loads large native image buffers. An independent tool needs a
+finite memory/CPU environment whether invoked directly or supervised by Web.
+The bundled Web deployment shares one container allocation with the service;
+a standalone environment has its own qualified allocation. This specification
+owns those limits and workspace planning without changing the photograph.
 
 ## Design Drivers
 
-- Preserve browsing, saved Edit Recipes, Originals, and completed Exports when
-  processing exhausts the shared container allocation.
-- Keep full developed dimensions, numerical precision, and the qualified Film
-  Recipe independent of deployment memory policy.
-- Keep the Rust service responsible for scheduling and publication. The engine
-  remains a private child process inside the application, not another Library
-  service.
-- Serialize heavy work: at most one development attempt runs at a time inside
-  the one application container.
+- Preserve saved tool state, read-only inputs and completed files under resource
+  failure; the shared Web deployment may still lose browsing to container OOM.
+- Keep full developed dimensions, precision and Film Recipe independent of limits.
+- Keep resource planning and native-child supervision in the independent tool.
+  Slipstream admits and reconciles only work it starts.
+- Serialize supervised Web attempts; do not claim that this also serializes
+  independently invoked tools on the host.
 
-[Photo Development Architecture](../design.md) owns the job lifecycle,
-queue fairness, source safety, and publication contracts. This specification
-owns memory policy, enforcement, and engine workspace behavior.
+[Photo Development Architecture](../design.md) owns captured invocation
+and supervised receipts. [Photo Workspace](../workspace/design.md) owns durable files.
+This specification owns resource enforcement and engine workspace behavior.
 
 ## Model and Ownership
 
-The deployment's one **application container** owns a finite memory and CPU
-allocation shared by the Rust service, Web delivery, SQLite, and the
-development engine. This shared limit is the documented resource boundary of
-the personal single-machine product: there is no separate per-attempt
-processing budget, and public rendering requests cannot change it. Sizing the
-container belongs to [Deployment](../../deployment/spec.md).
+The **execution environment** supplies an effective finite memory and CPU
+allocation covering the tool, every native child and required processing IO.
+The optional Web deployment uses the application's container allocation shared
+with Rust, HTTP, SQLite and Library work. A standalone command uses its own
+qualified environment; no service database, queue or task ID is required.
+Limits and enforcement facts must be inspectable. Missing/unbounded allocation
+refuses image processing, never silently invokes unrestricted host execution.
 
-Inside that boundary the service keeps its **control allowance**: Rust HTTP and
-CLI operations, SQLite, normal Library work, and bounded supervision must
-continue to fit beside one running development attempt. Serialization is what
-makes this plannable. The scheduler admits at most one heavy attempt at a
-time, so the engine's measured peak is the dominant term and Library work
-competes only with bounded supervision, staging copies, and validation.
+In the shared Web deployment, the service reserves its **control allowance**
+for browsing, persistence and bounded supervision beside one heavy attempt.
+The Web scheduler admits one such attempt at a time. Its lock is not a host-wide
+lock: concurrent external commands are outside that promise, and their memory
+must not be omitted when sharing the same enforced environment. Effective policy
+must refuse capacity that cannot be established rather than claiming isolation.
 
-An **attempt** owns a fresh engine child, a private scratch workspace, captured
-settings and source binding, and its terminal outcome. All of its development,
-simulation, validation, and encoding stages run sequentially in the container.
-Queued work retains bounded metadata rather than decoded images or preloaded
-runtimes. Dispatch must not overlap a new attempt with an engine child left by
-an earlier one; the processing lock is released only after termination and
-scratch cleanup are confirmed.
+An **attempt** owns captured input/state revision, a fresh native child, private
+scratch and terminal outcome. Tool processing/validation/encoding stages are
+sequential. Queued Web work retains bounded metadata, not decoded buffers.
+Native children must terminate and scratch ownership settle before the owning
+supervisor releases its capacity. Independent edit-directory locks protect state,
+not all image execution in a workspace.
 
-An engine's **workspace plan** describes required live buffers, temporary
-workspace, batch geometry, and qualified runtime headroom for one input
-geometry, stage, and exact processing bundle. It is computed from the container
-allocation and the bundle's measured resource model. It is not a hard-limit
-mechanism and must not claim that every image can fit every deployment.
-
-The workspace plan belongs to the attempt record, not the Edit Recipe. Changing
-the container allocation affects subsequent attempts; a running attempt keeps
-the environment it started in, and queued work is checked against the current
-allocation when dispatched, without changing its captured image intent.
+A **workspace plan** accounts for required live buffers, temporary workspace,
+batch geometry and qualified runtime headroom for exact input geometry, stage
+and bundle. The independent tool computes and validates it against the effective
+allocation. It is not kernel enforcement or a promise every image fits.
+The plan belongs to the attempt, not canonical saved intent. Policy changes
+affect subsequent attempts; captured processing settings remain unchanged.
 
 ## Enforcement Boundary
 
-The supported Linux implementation is the one application container's finite
-memory and CPU limit, as sized by [Deployment](../../deployment/spec.md). The
-engine runs as an ordinary child process of the Rust service inside that
-container. The container limit bounds the Web service, SQLite, the engine, and
-every native allocation the engine's libraries make, including descendant
-processes. There is no per-attempt cgroup, no processing subtree, and no
-swap policy to tune inside the product: that per-attempt machinery was the
-retained trade of the local model, accepted for a single-user product.
+The supported bundled Web deployment enforces its application's finite Linux
+container memory/CPU limit under [Deployment](../../deployment/spec.md). The tool
+and native descendants share it with Web/SQLite. No per-attempt cgroup, host
+launcher or processing daemon is added. The failure boundary is shared: engine
+OOM can stop the service. Serialized Web admission and resource planning reduce
+risk; they do not prove service isolation or control external CLI concurrency.
 
-The consequence an operator must understand is that the boundary is shared,
-not isolated. A runaway engine allocation can exhaust the container and
-terminate browsing together with the render, and an engine OOM can stop the
-whole application. Serialized execution is the mitigation: at most one heavy
-attempt runs, so the failure surface is one request at a time, and the
-recovery path is the ordinary application restart with its startup scratch
-cleanup. The engine must not be able to grow beyond the plan above: staged
-inputs are bounded, stated dimensions are checked against decoded geometry
-and pixel limits before large allocation, and a deadline bounds total engine
-time.
+A standalone environment must enforce an advertised finite allocation covering
+native allocations and descendants. It may be the same qualified container
+invoked directly or another supported bounded environment. Cooperative estimates,
+process RSS and per-process address-space limits alone cannot prove that bound.
+Unsupported enforcement reports unavailable execution policy before processing;
+independent usability does not mean unrestricted execution.
 
-Supervisor-side work — staging, metadata inspection, artifact validation, and
-file encoding — shares the same container allocation and must use bounded
-buffers so it cannot crowd out Library work by itself. Process RSS figures
-are diagnostics, not enforcement evidence. An unusably small container limit
-is a deployment defect to report through the capability contract, not a reason
-to fall back to unrestricted host execution.
-
-Per-attempt containment is not claimed. Unrelated host-wide OOM, administrator
-termination, or a sibling workload on the same host can still stop the
-application. Capability and deployment checks must distinguish those
-conditions from a development failure.
+Inputs, stated/decoded geometry and pixel limits are checked before large
+allocations. A finite deadline bounds computation; thread policy covers native
+libraries as well as the command process. Metadata inspection, validation and IO
+use bounded buffers and belong to the same resource plan. Workspace input is
+admitted once and reused, not copied from the Library every iteration.
+External host OOM, administrator termination and unrelated workloads can still
+stop the environment; observed failure evidence must preserve that distinction.
 
 ## Deployment Contract
 
-The selected execution mechanism is the in-process PhotoExecutor defined by
-[Local Photo Executor](execution.md): one application image contains
-the server, the optional bundled engine extension, and the qualified runtime.
-A normal start requires no host launcher, processing systemd unit, worker
-container provisioning, processing socket, or processing Compose overlay.
+[Local Photo Executor](execution.md) owns tool/native process lifetime.
+The optional application image bundles permitted independent executables and
+qualified assets. Their manifest/digests are checked per tool; missing assets
+leave Library and file access usable. Service startup configuration controls Web
+tool availability and deployment sizing, never request fields. The existing
+`SLIPSTREAM_PHOTO_DEVELOPMENT` and `SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY` integration
+settings do not become dependencies of standalone state/commands.
 
-Startup discovers the optional extension, verifies its manifest identity and
-every named asset digest, and reports development available only when those
-checks pass. Missing or invalid assets leave Library operations available and
-development reported `bundle-unavailable`. Operator control is the documented
-startup environment — `SLIPSTREAM_PHOTO_DEVELOPMENT` to force the capability
-on or off, and `SLIPSTREAM_PHOTO_BUNDLE_DIRECTORY` to select a locally built
-bundle for development or smoke runs — never a request field.
-
-The operator's resource obligation is to size the one container's memory and
-CPU for the Web service plus one serialized development attempt, using the
-bundle's measured resource model, and to keep that sizing with the deployment
-record. Local verification and the real-camera smoke must exercise a complete
-development, cancellation, deadline, engine failure, and restart inside those
-limits before a deployment is treated as processing-enabled.
+An operator sizes the shared application allocation for its control allowance
+plus one supervised attempt using qualified measured peaks. Standalone callers
+provide a qualified finite environment sized for the actual command/concurrency.
+Execution reports effective host/allocation honestly rather than assuming a
+server path or limit exists on the remote client's machine. Neither mode needs a
+host launcher, processing socket, worker provisioning or separate daemon.
 
 ## Workspace Planning and Admission
 
-Queue acceptance and permission to start image computation are separate checks.
-Known unsupported geometry or policy may be rejected before queue acceptance.
-Otherwise the accepted Export remains queued until dispatch can revalidate
-source, bundle, policy, and capacity. Inspection of an untrusted input, including
-obtaining geometry, must itself run under bounded resources. Stated dimensions
-must be checked against decoded geometry and pixel limits before large allocation.
+Web queue acceptance and permission to start computation are separate checks.
+Dispatch revalidates captured input, revision, bundle, resources and current
+capacity. Standalone execution performs the same tool admission synchronously,
+without a server queue. Untrusted metadata/geometry inspection is itself bounded;
+stated dimensions must agree with decoded geometry before large allocation.
 
 For each stage, the plan must account for simultaneously live inputs and
 outputs, library and thread workspace, IO and file-cache costs, and runtime
@@ -144,11 +120,10 @@ still requires supervised failure settlement; preflight is not a guarantee of
 success. Do not automatically retry an OOM with the same settings or raise the
 budget. Explicit retry creates a new attempt using current policy.
 
-Each Processing Module requires independently qualified resource evidence before
-admission to this shared boundary. [Processing Modules](design.md#explicit-export)
-owns the standalone Film Export lower-bound refusal. Passing that check is not
-complete-attempt qualification; bounded Preview and full-resolution Export require
-separate evidence for the exact bundle, input, parameters, and geometry.
+Each tool/input/parameter/output configuration needs qualified resource evidence.
+[Processing Modules](design.md#explicit-materialization) owns the
+standalone Film lower-bound refusal. Passing it does not qualify the whole
+attempt; Preview and full-resolution Export require separate exact-bundle evidence.
 
 ## Engine Memory Efficiency
 
@@ -257,56 +232,48 @@ algorithm/resource decisions and require their own quality and storage evidence.
 
 ## Failure, Cancellation, and Recovery
 
-The supervisor must distinguish these semantic outcomes before mapping them to
-the shared Web/CLI error contract:
+The owning tool/supervisor distinguishes these outcomes before mapping them to
+its structured local or Web result:
 
 - capability or deployment policy unavailable;
 - input or stage outside the qualified resource envelope;
-- workspace plan exceeds the container allocation;
+- workspace plan exceeds the effective allocation;
 - runtime allocation failure or a confirmed engine termination; and
 - deadline, cancellation, engine error, failed cleanup, or unconfirmed child
   termination.
 
-Exit 137 alone is not proof of OOM. Classify a confirmed limit failure from
-the engine child's termination evidence and the container's observed events,
-and preserve uncertainty when evidence is missing. An allocation failure
-caught before the kernel intervenes remains a resource failure, with its
-distinct evidence.
+Exit 137 alone is not proof of OOM. Confirm a limit failure from native
+termination evidence and the execution environment's observed events; preserve
+uncertainty when evidence is missing. A caught allocation failure is a distinct
+resource failure rather than proof that the kernel enforced a limit.
 
-On failure or cancellation, terminate the engine child's complete process
-group, reap the direct child, remove the private scratch workspace, and
-withhold publication of incomplete artifacts. Do not release the processing
-lock until termination and cleanup are confirmed. If termination is
-unconfirmed, keep heavy work stopped while browsing remains available.
-Existing validated Development Results follow the architecture's retention
-rule.
+Failure/cancellation terminates all owned native descendants, reaps children and
+settles private scratch before releasing the owning execution slot. Partial
+outputs are never installed as final results; earlier complete files and saved
+state remain intact. Unconfirmed termination stops affected heavy admission.
 
-After an application restart there are no owned cgroups or journals to
-reconcile: startup never attaches to an engine process from the previous
-lifetime. It removes abandoned scratch under its exclusive lock, resolves
-unfinished work from the durable Export snapshot, and admits new work through
-ordinary serialization. Orphaned work must not publish independently.
-
-The existing single terminal-result and cancellation/publication race rules
-remain authoritative. Changing the resource policy cannot rewrite an already
-successful Export or its captured settings.
+Service restart reconciles only its own receipts under
+[Local Photo Executor](execution.md#restart). It neither cancels nor
+adopts independent CLI work. Tool-local state/receipts reconcile interrupted
+commands. Scratch cleanup requires established ownership and no live tool user;
+startup cannot indiscriminately delete concurrent external work. Completed files
+are independently indexed, but cannot be attributed to a run without exact
+validated evidence. Policy changes do not rewrite completed output or intent.
 
 ## Evidence and Qualification
 
-Record the attempt identity, bundle identity, geometry, stage, the container
-allocation and workspace plan, stage timings, observed process outcome, and
-cleanup outcome. Retain bounded diagnostics outside the attempt before
-releasing the lock.
-Private source paths and image contents must not enter public logs or Issues.
-Administrative diagnostics may expose detailed resource facts; Photographer
-errors must explain the affected operation, saved-state preservation, and next
-action without exposing kernel or Python internals.
+Record attempt/bundle identity, geometry, stage, effective allocation/enforcement,
+workspace plan, timings, process evidence and cleanup outcome. Retain bounded
+diagnostics through the owning receipt lifetime. Detailed source paths/image
+contents do not enter public logs or Issues. The authorized workspace response
+does expose its actual execution path/host; this is separate from diagnostic logs.
+Errors explain affected work, preserved saved state/files and a useful next action.
 
 Qualification must separately prove:
 
-- one serialized engine attempt stays inside the sized container allocation
-  while Library reads stay responsive, and the next valid attempt can run
-  after cleanup;
+- standalone attempts stay within their qualified finite allocation, and one
+  serialized Web attempt fits beside responsive Library reads in the shared
+  container, with successful subsequent admission after cleanup;
 - engine failure and cancellation terminate the child process group, scratch
   is removed, and no partial artifact is published;
 - queue, cancellation, OOM/complete races, application restart, and failed
@@ -324,38 +291,33 @@ Qualification must separately prove:
   changes leave pre-encoding pixel identity unchanged; and
 - the exact packaged deployment proves the same resource and recovery contract.
 
-Real-camera smoke evidence is separate from simulated unit tests and ordinary
-repository gates. A successful small image or one full-size export cannot
-establish the supported deployment envelope. The retired kernel-containment
-evidence and its operator harness were removed with the launcher path.
+Real-camera evidence is separate from simulated tests and ordinary repository
+gates. One small image or one Export cannot establish the supported envelope.
+Qualification must cover standalone enforcement as well as the shared Web mode;
+the Web supervisor's lock cannot serve as evidence of global CLI serialization.
 
 ## Options
 
-### Selected: One Container with Serialized Local Execution
+### Selected: Finite Tool Execution with Serialized Web Admission
 
-The application container's finite memory and CPU limit is the resource
-boundary, and the single processing lock serializes engine work. It matches
-the personal single-machine deployment: no privileged host components and no
-second operational lifecycle. Its documented cost is the shared failure
-domain — an engine OOM can stop the whole application — accepted because at
-most one request runs at a time and the ordinary application restart recovers.
-Engine workspace planning still minimizes live data so the sized container
-stays sufficient.
+The independent tool owns workspace planning and native children under its
+qualified finite environment. Web may share one container limit and admit one
+heavy command at a time. This avoids a second service and preserves standalone
+use. Shared Web OOM remains an explicit accepted failure domain, not a claim of
+per-attempt isolation. External concurrency requires its own capacity facts.
 
 ### Rejected: Per-Attempt Task Cgroups with a Host Launcher
 
-Kernel containment per attempt would isolate an engine OOM from the Web
-service, but it required a privileged host launcher, Docker authority, cgroup
-management, and a durable journal — operational weight with no single-user
-product value. Issue #490 removed it from the production path together with
-its harness and operator workflows.
+Privileged launcher, Docker authority, dynamic cgroup management and a durable
+launcher journal add an operational lifecycle unneeded by this product. A
+standalone tool still needs qualified finite enforcement without that framework.
 
 ### Rejected: Python Checks or Address-Space Limits Alone
 
 Cooperative checks cannot stop opaque native allocations. A process
 address-space limit measures a different resource and does not aggregate
-independent child processes. Neither replaces the container limit plus
-serialization.
+independent descendants. Neither replaces qualified finite environmental
+enforcement and honest capacity admission.
 
 ## References
 

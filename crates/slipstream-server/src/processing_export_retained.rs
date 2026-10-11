@@ -153,14 +153,11 @@ pub(crate) async fn retry_processing_export(
             "Processing is not configured for this deployment",
         );
     };
-    if captured.module.as_str() == DARKTABLE_MODULE
-        && let Some(reason) = processing.failure
-    {
-        return error_details(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "module_parameters_unavailable",
-            "The captured darktable module is unavailable",
-            json!({"reasonCode": reason, "reason": "The configured darktable module failed availability verification"}),
+    if captured.module.as_str() == DARKTABLE_MODULE {
+        return error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "use_darktable_namespace",
+            "Use the darktable namespace to execute darktable state",
         );
     }
     let policy = ProcessingModulePolicy::new(processing);
@@ -287,7 +284,7 @@ pub(super) async fn retained_artifact_json(
     );
     object.insert(
         "expiresAt".to_owned(),
-        json!(artifact_timestamp(retention.expires_at_unix_seconds)),
+        json!(retention.expires_at_unix_seconds.map(artifact_timestamp)),
     );
     object.insert("orientation".to_owned(), json!("top-left"));
     object.insert("iccEmbedded".to_owned(), json!(true));

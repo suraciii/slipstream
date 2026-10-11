@@ -1,5 +1,5 @@
-//! Advanced snapshot compatibility, selected-step execution, and durable
-//! Export reconciliation. Normal editing uses the Edit State facade.
+//! Qualified non-darktable snapshot compatibility and retained artifact access.
+//! Semantic darktable editing uses the independent tool grammar.
 use super::{
     AdmissionState, CommandFailure, MutationIdentity, Operation, ServiceClient, read_input_bytes,
     valid_request_identity, valid_sha256, web_url,

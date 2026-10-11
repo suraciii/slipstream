@@ -12,6 +12,15 @@ import {
 } from "./browser-server.js";
 import { browseIds } from "./browser-test-support/fixtures.js";
 import {
+  capturedJob,
+  editFixture,
+  fileFixture,
+  json,
+  windowOf,
+  type Command,
+} from "./browser-test-support/workspace-edit-fixtures.js";
+import type { ToolJob } from "./pages/library-browser/index.js";
+import {
   openViewOptions,
   applyViewOptions,
   waitForLoadedReviewImage,
@@ -228,50 +237,133 @@ for (const firstTransport of ["https", "http"] as const) {
   }) => {
     const [photoId] = await browseIds(server.url);
     if (!photoId) throw new Error("The handoff smoke requires one Photo");
-    const current = await fixtureFetch(
-      `${server.url}/api/photos/${photoId}/processing-recipe`,
+    // Only the external editing tool is simulated: library access, Photo
+    // decisions and both authenticated transport aliases remain real.
+    const edit = editFixture(photoId, 0.5, "handoff-r1");
+    edit.instances = windowOf([]);
+    const workspace = {
+      workspaceId: `workspace-${photoId}`,
+      photoId,
+      inputArtifactId: `input-${photoId}`,
+      edits: [{ editId: edit.editId, name: "Photo edit", tool: "darktable" }],
+    };
+    // A complete one-pixel grayscale TIFF, not a native-render acceptance stub.
+    const outputBytes = Buffer.alloc(123);
+    outputBytes.write("II");
+    outputBytes.writeUInt16LE(42, 2);
+    outputBytes.writeUInt32LE(8, 4);
+    outputBytes.writeUInt16LE(9, 8);
+    const tags = [
+      [256, 4, 1],
+      [257, 4, 1],
+      [258, 3, 8],
+      [259, 3, 1],
+      [262, 3, 1],
+      [273, 4, 122],
+      [277, 3, 1],
+      [278, 4, 1],
+      [279, 4, 1],
+    ];
+    for (const [index, tag] of tags.entries()) {
+      const offset = 10 + index * 12;
+      outputBytes.writeUInt16LE(tag[0]!, offset);
+      outputBytes.writeUInt16LE(tag[1]!, offset + 2);
+      outputBytes.writeUInt32LE(1, offset + 4);
+      outputBytes.writeUInt32LE(tag[2]!, offset + 8);
+    }
+    outputBytes[122] = 128;
+    const output = fileFixture(
+      "handoff-output",
+      outputBytes,
+      "handoff-file-r1",
     );
-    expect(current.status).toBe(200);
-    const source = (await current.json()) as { sourceRevision: string };
-    // Saving a recipe and exporting its XMP snapshot never executes a module.
-    const saved = await fixtureFetch(
-      `${server.url}/api/photos/${photoId}/processing-recipe`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          requestId: "handoff-recipe",
-          expectedRecipeRevision: null,
-          expectedSourceRevision: source.sourceRevision,
-          currentStepId: "handoff-step",
-          steps: [
-            {
-              stepId: "handoff-step",
-              module: "darktable",
-              input: {
-                kind: "original",
-                photoId,
-                sourceRevision: source.sourceRevision,
-              },
-              parameters: {
-                schemaVersion: "darktable-params-1",
-                tree: {
-                  stack: [
-                    {
-                      operation: "exposure",
-                      multiPriority: 0,
-                      enabled: true,
-                      params: { mode: "EXPOSURE_MODE_MANUAL", exposure: 0.5 },
-                    },
-                  ],
-                },
-              },
+    output.imageContract = {
+      format: "tiff",
+      precision: "uint8",
+      transfer: "srgb",
+      colorSpace: "gray",
+      width: 1,
+      height: 1,
+    };
+    const files = [
+      fileFixture(workspace.inputArtifactId, outputBytes, "input-r1", "input"),
+    ];
+    const jobs: ToolJob[] = [];
+    const exportCommands: Command[] = [];
+    const downloadedRevisions: string[] = [];
+    await page.route(`**/api/photos/${photoId}/workspace`, (route) =>
+      json(route, workspace),
+    );
+    await page.route(
+      `**/api/workspaces/${workspace.workspaceId}/**`,
+      (route) => {
+        const url = new URL(route.request().url());
+        if (url.pathname.endsWith("/files"))
+          return json(route, windowOf(files));
+        if (url.pathname.endsWith(`/files/${output.artifactId}/bytes`)) {
+          expect(url.searchParams.get("revision")).toBe(output.revision);
+          downloadedRevisions.push(url.searchParams.get("revision")!);
+          return route.fulfill({
+            status: 200,
+            contentType: "image/tiff",
+            headers: {
+              "Content-Disposition":
+                'attachment; filename="handoff-output.tif"',
             },
-          ],
-        }),
+            body: outputBytes,
+          });
+        }
+        throw new Error(`Unexpected handoff workspace request ${url.pathname}`);
       },
     );
-    expect(saved.status).toBe(201);
+    await page.route(`**/api/workspaces/${workspace.workspaceId}`, (route) =>
+      json(route, workspace),
+    );
+    await page.route(`**/api/photos/${photoId}/darktable/commands`, (route) => {
+      const command = route.request().postDataJSON() as Command;
+      expect(command.editId).toBe(edit.editId);
+      switch (command.operation) {
+        case "edit show":
+          return json(route, edit);
+        case "modules list":
+        case "presets list":
+        case "styles list":
+        case "resources list":
+        case "history list":
+          return json(route, windowOf([]));
+        case "resources kinds":
+          return json(route, { kinds: [] });
+        case "export list":
+          return json(route, { jobs });
+        case "export create": {
+          expect(command.arguments.revision).toBe(edit.revision);
+          expect(command.arguments.requestId).toEqual(expect.any(String));
+          exportCommands.push(command);
+          const job = capturedJob(
+            photoId,
+            String(command.arguments.requestId),
+            edit.revision,
+          );
+          jobs.push(job);
+          return json(route, job, 202);
+        }
+        default:
+          throw new Error(`Unexpected handoff command ${command.operation}`);
+      }
+    });
+    await page.route(`**/api/photos/${photoId}/darktable/jobs/*`, (route) => {
+      const requestId = new URL(route.request().url()).pathname
+        .split("/")
+        .at(-1);
+      const job = jobs.find((item) => item.requestId === requestId);
+      if (!job) throw new Error(`Unknown handoff export ${requestId}`);
+      job.status = "succeeded";
+      job.state = "succeeded";
+      job.result = { artifact: output };
+      if (!files.some((file) => file.artifactId === output.artifactId))
+        files.push(output);
+      return json(route, job);
+    });
     const origins =
       firstTransport === "https"
         ? [server.url, server.httpUrl]
@@ -376,25 +468,57 @@ for (const firstTransport of ["https", "http"] as const) {
         index === 0 ? "Rejected" : "Picked",
       );
       await openPhotoToolsView(page, "edit");
-      const xmp = page.locator('[data-editor-output="xmp"]');
-      await expect(
-        xmp.getByRole("button", { name: "Export edit state", exact: true }),
-      ).toBeEnabled();
-      await xmp
-        .getByRole("button", { name: "Export edit state", exact: true })
-        .click();
-      const downloadButton = xmp.getByRole("button", {
-        name: "Download XMP",
-        exact: true,
+      const exportButton = page
+        .locator("[data-workspace-editor-actions]")
+        .getByRole("button", { name: "Export", exact: true });
+      await expect(exportButton).toBeEnabled();
+      const admissionPromise = page.waitForResponse((response) => {
+        if (
+          !response.url().endsWith(`/api/photos/${photoId}/darktable/commands`)
+        )
+          return false;
+        const command = response.request().postDataJSON() as Command;
+        return command.operation === "export create";
       });
+      await exportButton.click();
+      expect((await admissionPromise).status()).toBe(202);
+      await expect.poll(() => exportCommands.length).toBe(index + 1);
+      const requestId = String(exportCommands[index]!.arguments.requestId);
+      await expect(
+        page.locator(
+          `[data-workspace-jobs] article[data-request-id="${requestId}"]`,
+        ),
+      ).toContainText("succeeded");
+      await page.locator("[data-workspace-files] > summary").click();
+      const downloadButton = page
+        .locator(
+          `[data-workspace-file-groups] article[data-artifact-id="${output.artifactId}"]`,
+        )
+        .getByRole("link", { name: "Download", exact: true });
       await expect(downloadButton).toBeVisible();
+      const downloadUrl = new URL(
+        (await downloadButton.getAttribute("href"))!,
+        origin,
+      );
+      expect(downloadUrl.origin).toBe(origin);
+      expect(downloadUrl.searchParams.get("revision")).toBe(output.revision);
+      await expect(downloadButton).toHaveAttribute(
+        "download",
+        "handoff-output.tif",
+      );
+      // Chromium bypasses Playwright routing for a[download] requests. Let the
+      // simulated tool's Content-Disposition response initiate the download
+      // instead, retaining the real link URL and authenticated active origin.
+      await downloadButton.evaluate((link) => link.removeAttribute("download"));
       const downloadPromise = page.waitForEvent("download");
       await downloadButton.click();
       const download = await downloadPromise;
-      expect(download.suggestedFilename()).toMatch(/\.xmp$/);
+      expect(download.suggestedFilename()).toBe("handoff-output.tif");
       const path = await download.path();
-      if (!path) throw new Error("The browser did not retain the XMP download");
-      expect(await readFile(path, "utf8")).toContain("RecipeSnapshot");
+      if (!path)
+        throw new Error("The browser did not retain the TIFF download");
+      expect(await readFile(path)).toEqual(outputBytes);
+      expect(downloadedRevisions).toHaveLength(index + 1);
       await closePhotoTools(page);
       await page
         .getByRole("button", { name: "Back to Grid", exact: true })

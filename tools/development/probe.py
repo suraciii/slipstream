@@ -22,11 +22,12 @@ from film import make_simulator, pixel_digest, render, reset_random_state
 from bundle import load_bundle
 from history import generated_history, validate_imported_history
 from telemetry import RenderTelemetry, workspace_file_bytes
+from film_identity import CANONICAL_INPUT_ICC_SHA256, input_profile_digest
 
 WORK = Path("/work")
 RAW = Path("/input") / os.environ["PROBE_RAW_NAME"]
 ICC = Path("/opt/spektrafilm/src/spektrafilm/data/icc/ellelstone/LargeRGB-elle-V2-g10.icc")
-ICC_SHA256 = "df7b2c677645f1ca5364b52e62f8db04ca61f80163792942f3e409a84a6b12ed"
+ICC_SHA256 = CANONICAL_INPUT_ICC_SHA256
 # Reading the description through LittleCMS parses and reserializes its legacy
 # desc tag. This pinned output differs only in that tag's representation.
 OUTPUT_ICC_SHA256 = "7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe"
@@ -47,7 +48,7 @@ def read_image(path):
         reader.close()
 
 
-def inspect_tiff(path, expected_icc=OUTPUT_ICC_SHA256):
+def inspect_tiff(path, expected_icc=None):
     with tifffile.TiffFile(path) as image:
         page = image.pages[0]
         assert page.dtype == np.dtype("float32") and page.samplesperpixel == 3
@@ -55,7 +56,9 @@ def inspect_tiff(path, expected_icc=OUTPUT_ICC_SHA256):
         assert page.compression == 8
         assert page.tags.get(274) is None or page.tags[274].value == 1
         icc = page.tags[34675].value
-        assert hashlib.sha256(icc).hexdigest() == expected_icc
+        observed_icc = input_profile_digest(icc)
+        if expected_icc is not None:
+            assert observed_icc == expected_icc
         assert icc[16:20] == b"RGB " and icc[20:24] == b"XYZ "
         tags = {}
         for index in range(struct.unpack_from(">I", icc, 128)[0]):
@@ -91,7 +94,7 @@ def inspect_tiff(path, expected_icc=OUTPUT_ICC_SHA256):
         )
         return {
             "shape": list(page.shape), "sample_format": "float32",
-            "icc_sha256": hashlib.sha256(icc).hexdigest(), "icc_xyz": xyz,
+            "icc_sha256": observed_icc, "icc_xyz": xyz,
             "bytes": path.stat().st_size,
         }
 

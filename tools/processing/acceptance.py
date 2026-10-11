@@ -1,9 +1,7 @@
-"""Selected darktable step operator acceptance for Issue #496.
+"""Historical adapter byte/fault helpers and current independent tool acceptance.
 
-Run only against an acknowledged dedicated acceptance instance and an explicitly
-approved RAW fixture. Qualification remains limited to the pinned engine,
-fixture, manual exposure tree, output contract and finite deployment allocation.
-Standalone SpektraFilm qualification is a separate explicitly admitted exercise.
+The executable entrypoint exercises workspace handoff and darktable-edit.
+Retained historical runner fixtures describe legacy receipts only.
 """
 from __future__ import annotations
 import argparse
@@ -1323,4 +1321,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from workspace_acceptance import main as workspace_main
+    raise SystemExit(workspace_main())

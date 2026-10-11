@@ -20,6 +20,7 @@ impl Application {
         // Stop new admissions and drain the application-owned leader before
         // closing the Library, so publication and status accounting complete.
         self.scan_cycle.close();
+        self.tools.begin_shutdown();
         if let Some(exports) = &self.exports {
             exports.begin_shutdown();
         }
@@ -27,6 +28,7 @@ impl Application {
             proxies.begin_shutdown();
         }
         self.scan_cycle.wait_for_idle().await;
+        let tool_result = self.tools.shutdown().await.map_err(ServerError::Export);
         ReviewWarmup::close(self).await;
         if let Some(proxies) = &self.proxies {
             proxies.shutdown().await;
@@ -35,8 +37,9 @@ impl Application {
             exports.shutdown_processing().await;
         }
         let application = Arc::clone(self);
-        tokio::task::spawn_blocking(move || application.shutdown_blocking())
+        let result = tokio::task::spawn_blocking(move || application.shutdown_blocking())
             .await
-            .map_err(|error| ServerError::Join(error.to_string()))?
+            .map_err(|error| ServerError::Join(error.to_string()))?;
+        tool_result.and(result)
     }
 }

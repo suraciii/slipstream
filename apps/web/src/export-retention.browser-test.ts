@@ -1,371 +1,425 @@
-import { expect } from "@playwright/test";
-import { createHash } from "node:crypto";
+import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
+import { setupBrowserSmoke } from "./browser-test-support/fixtures.js";
 import {
-  processingBrowserTest as test,
-  mockEditor,
-  artifact,
-  artifactHeaders,
-  work,
-  parameters,
+  openPhotoToolsView,
+  startReview,
+} from "./browser-test-support/surfaces.js";
+import {
+  capturedJob,
+  commandsFor,
+  editFixture,
+  exportButton,
+  fileRow,
+  jobRow,
   json,
-  submit,
-  exportRow,
-  artifactRow,
-  openFirst,
-  openEdit,
   navigate,
-  setAdvancedExposure,
-  openAdvancedCompatibility,
-  type ProcessingExportFixture as ProcessingExportWork,
-} from "./browser-test-support/processing-fixtures.js";
+  openWorkspace,
+  openWorkspaceFiles,
+  retainFile,
+  setExposure,
+  setupWorkspace,
+} from "./browser-test-support/workspace-edit-fixtures.js";
 
-test("retained tasks and artifacts restore after a browser reload and Photo navigation", async ({
+setupBrowserSmoke();
+
+test("exports capture the saved revision before newer edits and can be cancelled while queued", async ({
   page,
-  running,
 }) => {
-  const state = await mockEditor(page, running);
-  const photoId = state.photos[0]!;
-  const bytes = Buffer.from("retained immutable result");
-  const retained = artifact(photoId, bytes);
-  const expired = {
-    ...artifact(photoId, bytes, "c".repeat(64)),
-    filename: "expired-result.jpg",
-    expiresAt: "2020-01-01T00:00:00Z",
-  };
-  state.exports.set(photoId, [
-    work(photoId, "failed-request", "failed"),
-    work(photoId, "cancelled-request", "cancelled"),
-    work(photoId, "succeeded-request", "succeeded", {
-      artifactId: retained.artifactId,
-    }),
-  ]);
-  state.artifacts.set(photoId, [retained, expired]);
-  await openFirst(page, running.url);
-  await openAdvancedCompatibility(page);
-  await expect(exportRow(page, "failed-request")).toContainText(
-    "The processing allowance is insufficient for this output.",
-  );
-  await expect(
-    exportRow(page, "failed-request").getByRole("button", {
-      name: "Retry captured settings",
-    }),
-  ).toBeEnabled();
-  await expect(
-    exportRow(page, "cancelled-request").getByRole("button", {
-      name: "Retry captured settings",
-    }),
-  ).toBeEnabled();
-  await expect(
-    artifactRow(page, retained.artifactId).getByRole("button", {
-      name: "Download",
-      exact: true,
-    }),
-  ).toBeEnabled();
-  await expect(
-    artifactRow(page, expired.artifactId).getByRole("button", {
-      name: "Download",
-      exact: true,
-    }),
-  ).toBeDisabled();
-  await page.reload();
-  await expect(page.locator("[data-review]")).toBeVisible();
-  await openEdit(page);
-  await openAdvancedCompatibility(page);
-  await expect(exportRow(page, "succeeded-request")).toBeVisible();
-  await navigate(page, "Next");
-  await expect(page.locator("[data-photo-editor-export-list] li")).toHaveCount(
-    0,
-  );
-  await expect(
-    page.locator("[data-photo-editor-composable-artifact-list] li"),
-  ).toHaveCount(0);
-  await navigate(page, "Previous");
-  await expect(page.locator("[data-photo-editor-export-list] li")).toHaveCount(
-    3,
-  );
-  await expect(artifactRow(page, retained.artifactId)).toBeVisible();
-  await setAdvancedExposure(page, "0.75");
+  const state = await setupWorkspace(page);
+  const first = state.photos[0]!;
+  await openWorkspace(page, state);
+  await setExposure(page, "0.5");
+  await expect.poll(() => state.edits.get(first)?.revision).toBe("r2");
+  await exportButton(page).click();
   await expect
-    .poll(() => state.recipes.get(photoId)?.steps[0]?.parameters)
-    .toEqual(parameters(0.75));
-  await expect(artifactRow(page, retained.artifactId)).toContainText(
-    "Based on earlier settings",
-  );
+    .poll(() => commandsFor(state, first, "export create").length)
+    .toBe(1);
+  const request = commandsFor(state, first, "export create")[0]!;
+  const job = state.jobs
+    .get(first)!
+    .find((item) => item.requestId === request.command.arguments.requestId)!;
   await expect(
-    artifactRow(page, retained.artifactId).getByRole("button", {
-      name: "Download",
+    jobRow(page, job.requestId).getByRole("button", {
+      name: "Cancel",
       exact: true,
     }),
   ).toBeEnabled();
-  await artifactRow(page, retained.artifactId)
-    .getByRole("button", { name: "Use as service input" })
+  await setExposure(page, "1");
+  await expect.poll(() => state.edits.get(first)?.revision).toBe("r3");
+  await expect(jobRow(page, job.requestId)).toContainText("saved revision r2");
+  expect(request.command.arguments.revision).toBe("r2");
+  expect(job.capture).toMatchObject({ revision: "r2" });
+  await jobRow(page, job.requestId)
+    .getByRole("button", { name: "Cancel", exact: true })
     .click();
-  await expect
-    .poll(() => state.recipes.get(photoId)?.steps[0]?.input)
-    .toMatchObject({ kind: "artifact", artifactId: retained.artifactId });
+  await expect(jobRow(page, job.requestId)).toContainText("cancelled");
+  await expect(
+    jobRow(page, job.requestId).getByRole("button", {
+      name: "Retry captured settings",
+    }),
+  ).toBeEnabled();
+  await expect(page.getByLabel("Exposure (EV)", { exact: true })).toHaveValue(
+    "1",
+  );
 });
 
-test("retry uses captured settings despite newer edits and cancellation is available on acceptance", async ({
+test("retry retains failed export capture instead of exporting the current settings", async ({
   page,
-  running,
 }) => {
-  const state = await mockEditor(page, running);
-  const photoId = state.photos[0]!;
-  const captured = work(photoId, "old-request", "failed", {
-    stepId: "removed-step",
-    parameters: parameters(-1),
-  });
-  state.exports.set(photoId, [captured]);
-  let retryBody: string | undefined;
-  let retried: ProcessingExportWork | undefined;
-  let cancelRequests = 0;
-  await page.route(
-    "**/api/photos/*/processing-exports/old-request/retry",
-    async (route) => {
-      retryBody = route.request().postData()!;
-      const { requestId } = JSON.parse(retryBody) as { requestId: string };
-      retried = {
-        ...captured,
-        requestId,
-        state: "accepted",
-        failureReason: null,
-        terminalAt: null,
-      };
-      state.exports.set(photoId, [retried, captured]);
-      await json(route, { outcome: "accepted", receipt: retried }, 202);
-    },
-  );
-  await page.route(
-    "**/api/photos/*/processing-exports/*/cancel",
-    async (route) => {
-      cancelRequests += 1;
-      expect(route.request().method()).toBe("POST");
-      retried = { ...retried!, state: "cancelled", terminalAt: 3 };
-      state.exports.set(photoId, [retried, captured]);
-      await json(route, { outcome: "cancelled", receipt: retried });
-    },
-  );
-  await page.route("**/api/photos/*/processing-exports/*", (route) => {
-    const requestId = new URL(route.request().url()).pathname.split("/").at(-1);
-    return json(
-      route,
-      state.exports.get(photoId)!.find((item) => item.requestId === requestId),
-    );
-  });
-  await openFirst(page, running.url);
-  await setAdvancedExposure(page, "0.8");
-  await expect
-    .poll(() => state.recipes.get(photoId)?.steps[0]?.parameters)
-    .toEqual(parameters(0.8));
-  await exportRow(page, captured.requestId)
+  const state = await setupWorkspace(page);
+  const first = state.photos[0]!;
+  const failed = capturedJob(first, "retained-failure", "r0", "failed");
+  failed.result = { fileCommitted: false, reason: "output_budget_exceeded" };
+  state.jobs.get(first)!.push(failed);
+  await openWorkspace(page, state);
+  await setExposure(page, "0.8");
+  await expect.poll(() => state.edits.get(first)?.revision).toBe("r2");
+  await jobRow(page, failed.requestId)
     .getByRole("button", { name: "Retry captured settings" })
     .click();
-  await expect.poll(() => retried?.requestId).toBeTruthy();
-  const row = exportRow(page, retried!.requestId);
-  await expect(row).toContainText("removed-step");
-  const cancel = row.getByRole("button", { name: "Cancel", exact: true });
-  await expect(cancel).toBeEnabled();
-  expect(JSON.parse(retryBody!)).toEqual({ requestId: retried!.requestId });
-  expect(retried!.requestId).not.toBe(captured.requestId);
-  await cancel.click();
+  await expect
+    .poll(() => commandsFor(state, first, "export retry").length)
+    .toBe(1);
+  const retry = commandsFor(state, first, "export retry")[0]!;
+  const newId = String(retry.command.arguments.requestId);
+  expect(retry.command.arguments).toEqual({
+    id: failed.requestId,
+    requestId: newId,
+  });
+  expect(newId).not.toBe(failed.requestId);
+  const retried = state.jobs
+    .get(first)!
+    .find((job) => job.requestId === newId)!;
+  expect(retried.capture).toEqual(failed.capture);
+  await expect(jobRow(page, newId)).toContainText("saved revision r0");
   await expect(
-    row.getByRole("button", { name: "Retry captured settings" }),
-  ).toBeVisible();
-  await expect(
-    row.getByRole("button", { name: "Cancel", exact: true }),
-  ).toHaveCount(0);
-  expect(cancelRequests).toBe(1);
+    jobRow(page, newId).getByRole("button", { name: "Cancel", exact: true }),
+  ).toBeEnabled();
+  expect(commandsFor(state, first, "export create")).toHaveLength(0);
+  await jobRow(page, newId)
+    .getByRole("button", { name: "Cancel", exact: true })
+    .click();
+  await expect(jobRow(page, newId)).toContainText("cancelled");
 });
 
-test("a failed submission receipt retains its reason and captured retry action", async ({
+test("retained files and terminal jobs restore after reload and remain isolated by Photo", async ({
   page,
-  running,
 }) => {
-  const state = await mockEditor(page, running);
-  const photoId = state.photos[0]!;
-  let requestId = "";
-  await page.route("**/api/photos/*/edit/export", (route) => {
-    if (route.request().method() === "GET") return route.fallback();
-    const request = JSON.parse(route.request().postData()!) as {
-      requestId: string;
-    };
-    requestId = request.requestId;
-    const receipt = work(photoId, requestId, "failed");
-    state.exports.set(photoId, [receipt]);
-    return json(
-      route,
-      { error: { code: "export_failed", details: { receipt } } },
-      409,
-    );
-  });
-  await openFirst(page, running.url);
-  await expect(submit(page)).toBeEnabled();
-  await submit(page).click();
-  await expect.poll(() => requestId).not.toBe("");
-  await expect(exportRow(page, requestId)).toContainText(
-    "The processing allowance is insufficient for this output.",
+  const state = await setupWorkspace(page);
+  const first = state.photos[0]!;
+  const retained = retainFile(
+    state,
+    first,
+    "retained-output",
+    Buffer.from("immutable output"),
   );
+  const missing = retainFile(
+    state,
+    first,
+    "missing-output",
+    Buffer.from("missing bytes"),
+  );
+  missing.state = "missing";
+  state.jobs
+    .get(first)!
+    .push(
+      capturedJob(first, "failed-export", "r0", "failed"),
+      capturedJob(first, "cancelled-export", "r1", "cancelled"),
+      capturedJob(first, "finished-export", "r1", "succeeded"),
+    );
+  await openWorkspace(page, state);
+  await openWorkspaceFiles(page);
   await expect(
-    exportRow(page, requestId).getByRole("button", {
+    fileRow(page, retained.artifactId).getByRole("link", {
+      name: "Download",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    fileRow(page, missing.artifactId).getByRole("link", {
+      name: "Download",
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  await expect(
+    jobRow(page, "failed-export").getByRole("button", {
       name: "Retry captured settings",
     }),
   ).toBeEnabled();
-});
-
-for (const digestPath of ["native", "worker"] as const) {
-  test(`a retained artifact validates and downloads using ${digestPath} hashing`, async ({
-    page,
-    running,
-  }) => {
-    if (digestPath === "worker")
-      await page.addInitScript(() =>
-        Object.defineProperty(crypto, "subtle", { value: undefined }),
-      );
-    const state = await mockEditor(page, running, { available: false });
-    const photoId = state.photos[0]!;
-    const bytes = Buffer.alloc(1024 * 1024 + 67);
-    for (let index = 0; index < bytes.length; index++)
-      bytes[index] = index % 251;
-    const retained = artifact(photoId, bytes);
-    state.artifacts.set(photoId, [retained]);
-    state.exports.set(photoId, [
-      work(photoId, "retained-request", "succeeded", {
-        artifactId: retained.artifactId,
-      }),
-    ]);
-    await page.route(
-      `**/api/processing-artifacts/${retained.artifactId}/bytes`,
-      (route) =>
-        route.fulfill({
-          status: 200,
-          contentType: "image/jpeg",
-          headers: artifactHeaders(retained),
-          body: bytes,
-        }),
-    );
-    await openFirst(page, running.url);
-    await expect(submit(page)).toBeDisabled();
-    const download = page.waitForEvent("download");
-    await artifactRow(page, retained.artifactId)
-      .getByRole("button", { name: "Download", exact: true })
-      .click();
-    const file = await download;
-    expect(file.suggestedFilename()).toBe(retained.filename);
-    expect(await readFile(await file.path())).toEqual(bytes);
-  });
-}
-
-test("historical retained outputs restore and download while module execution is unavailable", async ({
-  page,
-  running,
-}) => {
-  const state = await mockEditor(page, running, { available: false });
-  const photoId = state.photos[0]!;
-  const bytes = await readFile("apps/web/test-fixtures/review.jpg");
-  const retained = {
-    exportId: "historical-result",
-    target: "film-jpeg",
-    stage: "film",
-    contentType: "image/jpeg",
-    width: 16,
-    height: 12,
-    profileIdentity: "historical-profile",
-    byteLength: bytes.length,
-    sha256: createHash("sha256").update(bytes).digest("hex"),
-    expiresAt: "2099-01-01T00:00:00Z",
-    filename: "historical-result.jpg",
-    orientation: "landscape",
-    sampleFormat: "uint8",
-    colorSpace: "sRGB",
-    iccEmbedded: true,
-  };
-  state.historicalExports.set(photoId, [
-    {
-      exportId: retained.exportId,
-      target: retained.target,
-      state: "succeeded",
-      failureReason: "",
-      createdAt: "2026-09-01T00:00:00Z",
-      artifact: retained,
-    },
-  ]);
-  const headers = Object.fromEntries(
-    Object.entries({
-      "export-id": retained.exportId,
-      target: retained.target,
-      stage: retained.stage,
-      "content-type": retained.contentType,
-      width: String(retained.width),
-      height: String(retained.height),
-      "profile-identity": retained.profileIdentity,
-      "byte-length": String(retained.byteLength),
-      sha256: retained.sha256,
-      "expires-at": retained.expiresAt,
-      filename: retained.filename,
-      orientation: retained.orientation,
-      "sample-format": retained.sampleFormat,
-      "color-space": retained.colorSpace,
-      "icc-embedded": String(retained.iccEmbedded),
-    }).map(([name, value]) => [`slipstream-artifact-${name}`, value]),
-  );
-  await page.route("**/api/exports/historical-result/artifact", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: retained.contentType,
-      headers,
-      body: bytes,
-    }),
-  );
-  await openFirst(page, running.url);
-  await expect(submit(page)).toBeDisabled();
-  const card = page.locator('[data-historical-export-id="historical-result"]');
-  await expect(card).toContainText(retained.filename);
+  await page.reload();
+  await expect(page.locator("[data-review]")).toBeVisible();
+  await openPhotoToolsView(page, "edit");
+  await openWorkspaceFiles(page);
+  await expect(jobRow(page, "finished-export")).toBeVisible();
   await navigate(page, "Next");
-  await expect(card).toHaveCount(0);
+  await expect(jobRow(page, "finished-export")).toHaveCount(0);
+  await expect(fileRow(page, retained.artifactId)).toHaveCount(0);
   await navigate(page, "Previous");
-  const download = page.waitForEvent("download");
-  await card
-    .getByRole("button", { name: "Download historical output" })
-    .click();
-  const file = await download;
-  expect(file.suggestedFilename()).toBe(retained.filename);
-  expect(await readFile(await file.path())).toEqual(bytes);
+  await openWorkspaceFiles(page);
+  await expect(jobRow(page, "finished-export")).toBeVisible();
+  await expect(fileRow(page, retained.artifactId)).toBeVisible();
 });
 
-for (const mismatch of ["header", "digest"] as const) {
-  test(`a retained artifact with mismatched ${mismatch} is refused before download`, async ({
-    page,
-    running,
-  }) => {
-    const state = await mockEditor(page, running);
-    const bytes = Buffer.from("validated published bytes");
-    const retained = artifact(state.photos[0]!, bytes);
-    state.artifacts.set(retained.photoId, [retained]);
-    let downloads = 0;
-    page.on("download", () => downloads++);
-    await page.route(
-      `**/api/processing-artifacts/${retained.artifactId}/bytes`,
-      (route) =>
-        route.fulfill({
-          status: 200,
-          contentType: "image/jpeg",
-          headers: {
-            ...artifactHeaders(retained),
-            ...(mismatch === "header"
-              ? { "slipstream-artifact-step-id": "another-step" }
-              : {}),
-          },
-          body: mismatch === "digest" ? Buffer.alloc(bytes.length, 0) : bytes,
-        }),
-    );
-    await openFirst(page, running.url);
-    await artifactRow(page, retained.artifactId)
-      .getByRole("button", { name: "Download", exact: true })
-      .click();
-    await expect(
-      page.locator("[data-photo-editor-export-state]"),
-    ).toContainText("discarded");
-    expect(downloads).toBe(0);
+test("download names the exact retained artifact and revision after newer edits and reload", async ({
+  page,
+}) => {
+  const state = await setupWorkspace(page);
+  const first = state.photos[0]!;
+  const oldBytes = Buffer.from("retained first output bytes");
+  const newerBytes = Buffer.from("different newer output bytes");
+  const selected = retainFile(
+    state,
+    first,
+    "chosen-output",
+    oldBytes,
+    "chosen-r1",
+  );
+  retainFile(state, first, "newer-output", newerBytes, "newer-r2");
+  await openWorkspace(page, state);
+  await setExposure(page, "1.25");
+  await expect.poll(() => state.edits.get(first)?.revision).toBe("r2");
+  await page.reload();
+  await openPhotoToolsView(page, "edit");
+  await openWorkspaceFiles(page);
+  const link = fileRow(page, selected.artifactId).getByRole("link", {
+    name: "Download",
+    exact: true,
   });
-}
+  const exactPath = `/api/workspaces/workspace-${first}/files/${selected.artifactId}/bytes?revision=${selected.revision}`;
+  await expect(link).toHaveAttribute("href", exactPath);
+  await expect(link).toHaveAttribute("download", "chosen-output.tif");
+  // Chromium bypasses Playwright routing for a[download]; the simulated
+  // attachment's Content-Disposition must initiate this actual download.
+  // https://github.com/microsoft/playwright/issues/30656
+  await link.evaluate((anchor) => anchor.removeAttribute("download"));
+  const received = page.waitForEvent("download");
+  await link.click();
+  const download = await received;
+  expect(download.suggestedFilename()).toBe("chosen-output.tif");
+  const downloadedPath = await download.path();
+  if (!downloadedPath) throw new Error("Download did not produce a local file");
+  expect(await readFile(downloadedPath)).toEqual(oldBytes);
+  expect(state.downloads.at(-1)).toBe(exactPath);
+  expect(state.downloads.some((path) => path.includes("newer-output"))).toBe(
+    false,
+  );
+});
+
+test("Reload workspace discovers independent CLI edits, exports and retained files", async ({
+  page,
+}) => {
+  const state = await setupWorkspace(page);
+  const first = state.photos[0]!;
+  await openWorkspace(page, state);
+  state.edits.set(first, editFixture(first, -0.75, "r2"));
+  const file = retainFile(
+    state,
+    first,
+    "cli-output",
+    Buffer.from("CLI retained output"),
+    "cli-r1",
+  );
+  state.jobs
+    .get(first)!
+    .push(capturedJob(first, "cli-export", "r2", "succeeded"));
+  await expect(fileRow(page, file.artifactId)).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "Reload workspace", exact: true })
+    .click();
+  await expect(page.getByLabel("Exposure (EV)", { exact: true })).toHaveValue(
+    "-0.75",
+  );
+  await openWorkspaceFiles(page);
+  await expect(fileRow(page, file.artifactId)).toBeVisible();
+  await expect(jobRow(page, "cli-export")).toContainText("saved revision r2");
+  await expect(
+    fileRow(page, file.artifactId).getByRole("link", {
+      name: "Download",
+      exact: true,
+    }),
+  ).toBeVisible();
+  expect(commandsFor(state, first, "edit apply")).toHaveLength(0);
+  expect(commandsFor(state, first, "export create")).toHaveLength(0);
+});
+
+test("removal targets the reviewed revision and reports named dependent-work blockers", async ({
+  page,
+}) => {
+  const state = await setupWorkspace(page);
+  const first = state.photos[0]!;
+  const protectedFile = retainFile(
+    state,
+    first,
+    "protected-output",
+    Buffer.from("protected"),
+    "protected-r1",
+  );
+  const unrelated = retainFile(
+    state,
+    first,
+    "unrelated-output",
+    Buffer.from("other"),
+    "other-r1",
+  );
+  let blocked = true;
+  state.remove = async (route, photoId, artifactId, body) => {
+    if (blocked)
+      return json(
+        route,
+        {
+          error: {
+            code: "file_in_use",
+            effect: "none",
+            message: "Dependent work prevents removal",
+            details: {
+              blockers: [
+                {
+                  name: "Print preparation",
+                  action: "Remove its input reference",
+                },
+                { name: "Queued export", action: "Cancel the captured export" },
+              ],
+            },
+          },
+        },
+        409,
+      );
+    if (
+      artifactId !== protectedFile.artifactId ||
+      body.revision !== protectedFile.revision
+    )
+      throw new Error("Removal did not target reviewed file revision");
+    state.files.set(
+      photoId,
+      state.files
+        .get(photoId)!
+        .filter((file) => file.artifactId !== artifactId),
+    );
+    return json(route, { removed: true });
+  };
+  await openWorkspace(page, state);
+  await openWorkspaceFiles(page);
+  await expect(
+    page.getByRole("button", {
+      name: "Remove this reviewed file",
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  await fileRow(page, protectedFile.artifactId)
+    .getByRole("button", { name: "Inspect / Remove…", exact: true })
+    .click();
+  await expect(page.locator("[data-workspace-file-inspection]")).toContainText(
+    protectedFile.relativePath,
+  );
+  await page
+    .getByRole("button", { name: "Remove this reviewed file", exact: true })
+    .click();
+  await expect(page.locator("[data-workspace-error]")).toContainText(
+    "Print preparation: Remove its input reference",
+  );
+  await expect(page.locator("[data-workspace-error]")).toContainText(
+    "Queued export: Cancel the captured export",
+  );
+  await expect(fileRow(page, protectedFile.artifactId)).toBeVisible();
+  await expect(fileRow(page, unrelated.artifactId)).toBeVisible();
+  expect(state.removals[0]).toMatchObject({
+    artifactId: protectedFile.artifactId,
+    body: { revision: "protected-r1" },
+  });
+  blocked = false;
+  await page
+    .getByRole("button", { name: "Remove this reviewed file", exact: true })
+    .click();
+  await expect(fileRow(page, protectedFile.artifactId)).toHaveCount(0);
+  await expect(fileRow(page, unrelated.artifactId)).toBeVisible();
+  await expect(fileRow(page, `input-${first}`)).toBeVisible();
+  await expect(page.locator("[data-workspace-file-inspection]")).toBeEmpty();
+  expect(state.removals).toHaveLength(2);
+});
+
+test("a file changed after inspection requires reviewing its new revision before removal", async ({
+  page,
+}) => {
+  const state = await setupWorkspace(page);
+  const first = state.photos[0]!;
+  const file = retainFile(
+    state,
+    first,
+    "changing-output",
+    Buffer.from("first bytes"),
+    "file-r1",
+  );
+  await openWorkspace(page, state);
+  await openWorkspaceFiles(page);
+  await fileRow(page, file.artifactId)
+    .getByRole("button", { name: "Inspect / Remove…", exact: true })
+    .click();
+  // The inspected snapshot stays at r1 while an independent writer replaces the file.
+  file.revision = "file-r2";
+  state.bytes.set(
+    `${file.artifactId}:file-r2`,
+    Buffer.from("replacement bytes"),
+  );
+  await page
+    .getByRole("button", { name: "Remove this reviewed file", exact: true })
+    .click();
+  await expect(page.locator("[data-workspace-error]")).toContainText(
+    "artifact_changed",
+  );
+  await expect(fileRow(page, file.artifactId)).toBeVisible();
+  expect(state.removals[0]!.body.revision).toBe("file-r1");
+  await fileRow(page, file.artifactId)
+    .getByRole("button", { name: "Inspect / Remove…", exact: true })
+    .click();
+  await expect(page.locator("[data-workspace-file-inspection]")).toContainText(
+    "file-r2",
+  );
+  await page
+    .getByRole("button", { name: "Remove this reviewed file", exact: true })
+    .click();
+  await expect(fileRow(page, file.artifactId)).toHaveCount(0);
+  expect(state.removals[1]!.body.revision).toBe("file-r2");
+});
+
+test("retained workspace files remain downloadable when editing tool execution is unavailable", async ({
+  page,
+}) => {
+  const state = await setupWorkspace(page);
+  const first = state.photos[0]!;
+  const edit = state.edits.get(first)!;
+  edit.availability = {
+    read: true,
+    write: true,
+    execute: false,
+    reason: "Tool bundle unavailable",
+    recovery: "Install the recorded bundle",
+  };
+  const bytes = Buffer.from("retained bytes require no render");
+  const file = retainFile(state, first, "offline-output", bytes, "offline-r1");
+  // Open without openWorkspace's enabled Export expectation: ready files have their own owner.
+  await startReview(page, state.url, "All Photos");
+  await openPhotoToolsView(page, "edit");
+  await openWorkspaceFiles(page);
+  const link = fileRow(page, file.artifactId).getByRole("link", {
+    name: "Download",
+    exact: true,
+  });
+  const exactPath = `/api/workspaces/workspace-${first}/files/${file.artifactId}/bytes?revision=${file.revision}`;
+  await expect(link).toHaveAttribute("href", exactPath);
+  await expect(link).toHaveAttribute("download", "offline-output.tif");
+  // Chromium bypasses Playwright routing for a[download]; use the simulated
+  // attachment's Content-Disposition without changing its URL or bytes.
+  // https://github.com/microsoft/playwright/issues/30656
+  await link.evaluate((anchor) => anchor.removeAttribute("download"));
+  const received = page.waitForEvent("download");
+  await link.click();
+  const download = await received;
+  expect(download.suggestedFilename()).toBe("offline-output.tif");
+  const localPath = await download.path();
+  if (!localPath) throw new Error("Retained file did not download");
+  expect(await readFile(localPath)).toEqual(bytes);
+  expect(state.downloads.at(-1)).toBe(exactPath);
+  expect(commandsFor(state, first, "export create")).toHaveLength(0);
+  expect(commandsFor(state, first, "preview render")).toHaveLength(0);
+});

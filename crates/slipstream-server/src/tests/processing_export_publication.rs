@@ -6,7 +6,7 @@ async fn publication_survives_sweep_until_durable_settlement() {
     let (application, router) = export_application(&config).await;
     let photo_id = first_photo_id(&application).await;
     let (recipe_revision, source_revision) =
-        save_selected_step(&router, &photo_id, "recipe-1").await;
+        save_selected_step(&application, &photo_id, "recipe-1").await;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -41,47 +41,33 @@ async fn publication_survives_sweep_until_durable_settlement() {
             .begin_processing_export_attempt(request_id, now)
             .await
             .unwrap();
-        let executed = manager
-            .run_processing_export(
-                request_id,
-                &photo_id,
-                &source_revision,
-                slipstream_processing::modules::Parameters {
-                    module: admission.module.as_str().to_owned(),
-                    version: admission.parameters.schema_version.clone(),
-                    tree: admission.parameters.tree.clone(),
-                },
-            )
-            .await
-            .unwrap();
+        let artifact_id = format!("pa-{request_id}");
         let path = manager
-            .artifact_path_for_workload(&executed.artifact_id, "development-tiff")
+            .artifact_path_for_module(&artifact_id, "darktable")
             .unwrap();
-        let bytes = fs::read(&path).unwrap();
-        // Execution has renamed the real validated TIFF, but no artifact
-        // record exists yet. Sweep must preserve these exact bytes.
+        let bytes = valid_development_tiff_fixture();
+        let publication = manager.claim_retained_publication(&artifact_id, request_id);
+        fs::write(&path, &bytes).unwrap();
+        // A retained publication claim owns verified TIFF fixture bytes
+        // before metadata settlement. Sweep must preserve these exact bytes.
         manager.sweep_expiry().await;
         assert_eq!(fs::read(&path).unwrap(), bytes);
         if succeed {
             let mut artifact = published_artifact(&photo_id, &source_revision);
-            artifact.artifact_id = ProcessingArtifactId::new(&executed.artifact_id).unwrap();
+            artifact.artifact_id = ProcessingArtifactId::new(&artifact_id).unwrap();
             artifact.photo_id = admission.photo_id.clone();
             artifact.step_id = admission.step_id.clone();
             artifact.module = admission.module.clone();
             artifact.adapter_schema_version = admission.adapter_schema_version.clone();
             artifact.parameters = admission.parameters.clone();
             artifact.bundle_id = admission.bundle_id.clone();
-            artifact.input = ProcessingInputEvidence::new(
-                admission.input.clone(),
-                &executed.input_sha256,
-                executed.input_size,
-            )
-            .unwrap();
-            artifact.sha256 = executed.sha256.clone();
-            artifact.byte_length = executed.size;
-            artifact.output_contract.format = executed.output.format.to_owned();
-            artifact.output_contract.geometry =
-                ProcessingGeometry::new(executed.width, executed.height).unwrap();
+            artifact.input =
+                ProcessingInputEvidence::new(admission.input.clone(), &"a".repeat(64), 4096)
+                    .unwrap();
+            artifact.sha256 = format!("{:x}", sha2::Sha256::digest(&bytes));
+            artifact.byte_length = bytes.len() as u64;
+            artifact.output_contract.format = "tiff".to_owned();
+            artifact.output_contract.geometry = ProcessingGeometry::new(2, 1).unwrap();
             let settlement = application
                 .library
                 .settle_processing_export(artifact, request_id, &admission.payload_digest, now)
@@ -96,7 +82,7 @@ async fn publication_survives_sweep_until_durable_settlement() {
             );
             // A lost acknowledgement drops the guard. Durable owner reads
             // establish the claim and keep the successfully published bytes.
-            drop(executed);
+            drop(publication);
             manager.sweep_expiry().await;
             assert_eq!(fs::read(&path).unwrap(), bytes);
             let artifact_id = application
@@ -138,7 +124,7 @@ async fn publication_survives_sweep_until_durable_settlement() {
         } else {
             // An uncertain outcome with work still executing cannot authorize
             // deleting bytes. A later durable cancellation proves no claim.
-            drop(executed);
+            drop(publication);
             manager.sweep_expiry().await;
             assert_eq!(fs::read(&path).unwrap(), bytes);
             application
@@ -152,7 +138,7 @@ async fn publication_survives_sweep_until_durable_settlement() {
     }
     // Startup has no live publication claims and still clears orphan leftovers.
     let orphan = manager
-        .artifact_path_for_workload("pa-orphan", "development-tiff")
+        .artifact_path_for_module("pa-orphan", "darktable")
         .unwrap();
     fs::write(&orphan, b"unclaimed interrupted publication").unwrap();
     application.shutdown().await.unwrap();

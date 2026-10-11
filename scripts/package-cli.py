@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Build a non-published, source-bound Linux amd64 CLI candidate."""
 
+import argparse
+import importlib.util
+import sys
 import configparser
 import gzip
 import hashlib
@@ -98,7 +101,10 @@ def file_info(path, name):
     return info
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--darktable-image", help="Immutable built photo image ID; also export a dedicated standalone darktable-edit archive")
+    args = parser.parse_args(argv or [])
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise ValueError("the CLI candidate target is Linux amd64")
     if run("git", "status", "--porcelain", "--untracked-files=normal"):
@@ -150,7 +156,14 @@ def main():
     checksum = output / f"{archive.name}.sha256"
     checksum.write_text(f"{digest.hexdigest()}  {archive.name}\n", encoding="ascii")
     print(output)
+    if args.darktable_image:
+        helper = ROOT / "tools/processing/photo/package_tool.py"
+        spec = importlib.util.spec_from_file_location("package_darktable_tool", helper)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        standalone = dist / f"darktable-edit-{version}-g{commit[:12]}-linux-amd64"
+        print(module.package_tool(args.darktable_image, standalone))
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

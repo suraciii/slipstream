@@ -7,7 +7,7 @@ Slipstream needs the smallest server-owned application boundary that lets one Ph
 - The Web supports visual use on a phone, tablet, or desktop; the CLI supports direct and delegated programmatic use through the same service.
 - Original Files may be large RAW files on local storage or a mounted network share.
 - Browsers cannot display most RAW formats directly.
-- The first product needs camera-produced Previews, not a general RAW development engine.
+- Browsing uses camera-produced Previews; optional headless editing has the separate Photo Development boundary.
 - The product serves one Photographer and their Agent; public access uses instance credentials without accounts or collaboration roles.
 - Selection changes must persist with low latency and survive server restart.
 - File indexing and Preview work must not block gesture interaction.
@@ -19,7 +19,7 @@ Three kinds of state have separate owners:
 2. SQLite owns Photo identity, Albums, Selection State, Rating, saved Album position, and derivative metadata.
 3. The browser owns transient gesture, zoom, navigation, and one-level undo state.
 
-No layer may become the only owner of another layer's state. The CLI owns only invocation-local input, output, and local Preview downloads. It does not own Library state, browsing positions, or an Agent runtime. [Command-Line Architecture](command-line/design.md) defines the machine-client boundary.
+Each kind of state has one canonical owner. The Slipstream CLI owns only invocation-local input, output, and downloads; independent editing tools own their persistent file state under the [Photo Workspace](photo-development/workspace/design.md) boundary. Neither client owns Library state, browsing positions, or an Agent runtime. [Command-Line Architecture](command-line/design.md) defines the machine-client boundary.
 
 ## Application Model
 
@@ -234,4 +234,4 @@ A camera sample corpus must include the Photographer's actual RAW formats. Unsup
 
 ## Photo Development Extension
 
-[Photo Development Architecture](photo-development/design.md) extends the Rust service with Edit Recipe ownership, an in-process executor running serialized native engine children, and captured Exports. [Development Color Pipeline](photo-development/processing/color.md) owns scene-linear processing and display separation. The initial selection-only slice and the rejection of a general RAW module editor remain scoped to their stated goals.
+[Directory Photo Workspace](photo-development/workspace/design.md) defines persistent Photo directories, protected input snapshots, tool-owned editing state, and a reconcilable file index. [Photo Development Architecture](photo-development/design.md) integrates independent editing tools and optional supervised execution into the Rust service. [Development Color Pipeline](photo-development/processing/color.md) owns scene-linear processing and display separation. [Headless darktable Editing](photo-development/darktable/editing.md) owns the general semantic editing target; the Library's camera-produced Preview rules remain independent.

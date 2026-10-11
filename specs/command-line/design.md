@@ -6,8 +6,10 @@ rules. Human and machine clients can act concurrently, and a failed transport
 must not manufacture certainty about a committed write.
 
 [Command-Line Use](spec.md) owns product behavior.
-[CLI Reference](reference.md) alone owns command syntax, input
-shapes, limits, JSON output, and exit codes.
+[CLI Reference](reference.md) owns common grammar, envelopes, and
+Library/peer commands. [darktable CLI](../photo-development/darktable/cli.md) alone owns
+darktable grammar and its machine contract;
+[darktable Editing](../photo-development/darktable/editing.md) owns product editing behavior.
 
 ## Model and Ownership
 
@@ -30,10 +32,11 @@ Photographer -> external Agent -> CLI ---+-> HTTP -> domain owners -> SQLite
                                                        +-> read-only Originals
 ```
 
-A query continuation is a temporary transport reference. A mutation version
-is a precondition on current state. Neither is Photo identity, authority, an
-operation receipt, or a new product-domain object. No new glossary entry,
-Agent task model, event log, or general workflow engine is required.
+A query continuation is a temporary transport reference. A Library mutation version remains owned by the Library persistence owner. A darktable state token is a precondition on canonical tool state; saved revision identifies retained intent; request ID identifies an attempted effect. None is Photo identity. No Agent task model or general workflow engine is required.
+
+The optional full `slipstream darktable` namespace resolves a Photo Workspace and invokes the independent proposed `darktable-edit` tool against its actual input/state directory. Standalone semantic operations need no Slipstream IDs, HTTP, credentials or database and may edit arbitrary local inputs. Native parameter parsing/serialization stays private to the tool. Exact Library Locations resolve to Photo IDs only for opening a workspace; paths become the independent tool interface thereafter. Generic processing routes remain qualified adapter projections and historical access, never a second canonical parameter store or darktable bypass.
+
+The [Photo Workspace Architecture](../photo-development/workspace/design.md) owns preparation, containment, file revisions/indexing and retention/cutover. The tool owns initialized parameters, instances/masks/actions, output settings, catalogs/dependencies, durable state revisions and its per-state lock. Slipstream indexes a state pointer/status, invokes qualified adapters and supervises service jobs; it does not mirror editable parameters as an independent database authority.
 
 ## Client Implementation Boundary
 
@@ -84,85 +87,36 @@ routes as retired; do not revive the unbounded `GET /api/albums` representation.
 
 ### Photo Development Surface
 
-These routes expose Photo Development through the same shared operations as
-Web. They obey the existing method, header-size, body-size, and shutdown
-admission rules:
+The [CLI Reference](reference.md#photo-workspace) owns workspace grammar/results and [darktable CLI Reference](../photo-development/darktable/cli.md) owns both entry points' semantic language. Workspace open supplies one actual directory/input snapshot, suggested state path, explicit preview/output directories and truthful execution host/access facts. A remote client cannot execute a standalone process using a server-only path; use an authorized filesystem-accessible environment or available service supervision. No arbitrary shell endpoint, checkout/sync protocol or invisible mount is added.
 
-- `GET /api/processing/modules`: read-only peer module discovery with complete
-  module-owned parameter schemas, limits, and independent availability;
-- `GET /api/photos/{id}/processing-recipe`: retained composable editing intent
-  and the currently observed source revision. Saved intent remains readable
-  when its source binding differs or execution is unavailable;
-- `POST /api/photos/{id}/processing-recipe`: guarded save with `requestId`,
-  required nullable `expectedRecipeRevision`, `expectedSourceRevision`,
-  required nullable `currentStepId`, and zero or more complete `steps`;
-- `POST /api/photos/{id}/processing-recipe/rebind`: explicit rebind with
-  `requestId`, `expectedRecipeRevision`, and `newSourceRevision`. It preserves
-  exact saved parameter trees and changes only Original source bindings;
-- `GET /api/photos/{id}/processing-preview/{step_id}`: bounded Preview of
-  exactly the selected current step, with pending admission or validated
-  rendition identity. Unsupported bounded execution returns a structured
-  refusal without publishing or invoking another module;
-- `POST /api/photos/{id}/processing-exports`: explicit guarded Export of the
-  selected step, with `requestId`, `stepId`, `expectedRecipeRevision`, and
-  `expectedSourceRevision`. Accepted work returns 202 promptly with
-  `{outcome: "accepted" | "replayed", receipt: work}` and continues under
-  service ownership;
-- `GET /api/photos/{id}/processing-exports`: durable work, published artifact,
-  and separate historical image Export lists:
-  `{photoId, exports: [work], artifacts: [artifact], historicalExports: [historical record]}`.
-  Each array is newest first and independently bounded to 64 records. This
-  view bound does not shorten disclosed retention;
-- `GET /api/photos/{id}/processing-exports/{requestId}`: inspect the durable
-  work record, including its captured immutable intent and current lifecycle;
-- `POST /api/photos/{id}/processing-exports/{requestId}/cancel`: settle
-  cancellation against the actual completion state; the first terminal
-  decision wins;
-- `POST /api/photos/{id}/processing-exports/{requestId}/retry`: new attempt from
-  retained failed or cancelled work, with exactly `{requestId: NEW_ID}`. It
-  revalidates captured input/source, bundle, and resources without replacing
-  the snapshot with the current recipe;
-- `GET /api/processing-artifacts/{id}`: immutable published provenance,
-  validated output contract and byte evidence, filename, publication time,
-  and expiry;
-- `GET /api/processing-artifacts/{id}/bytes`: artifact bytes leased for the
-  response stream, with headers bound to the immutable provenance record;
-- `GET /api/exports/{id}` and `GET /api/exports/{id}/artifact`: read-only
-  historical Export inspection and validated bytes. Historical metadata keeps
-  its captured target/stage fields and existing artifact evidence; it is not
-  represented as a composable Processing Artifact. The explicit CLI historical
-  download validates that evidence and publishes without replacement;
-- the Development Proxy read/create/remove routes remain independent Preview
-  operations and never authorize Original-backed Export without the Original.
+Workspace transport exposes bounded open/show/list/inspect/download/remove operations on admitted workspace/artifact identities. It never accepts arbitrary host paths as Library identity. Independent tools see ordinary files and explicit directories rather than this transport. Final file discovery does not require callback, registration, manifest, upload or commit. Ordinary folder/type role inference cannot fabricate processing success/provenance. [Completion and File Discovery](../photo-development/workspace/design.md#completion-and-file-discovery) defines reconciliation and optional verified invocation metadata. [Stable Bytes and Containment](../photo-development/workspace/design.md#stable-bytes-and-containment) governs fingerprints, changed external files, protected captures, transfers and safe removal.
 
-Retained state remains readable after restart or when processing is unavailable.
-Full exact-body replay resolves before inspecting current recipe or module
-availability. Terminal replay retains the settled artifact/refusal response
-shape. Retry accepts a new request identity and freezes the original work's
-captured intent. Source revisions use a separate 16384-byte opaque UTF-8 bound,
-including NUL; recipe revisions and request identities retain their 128-byte
-bounds. The artifact filename derives from module, step, and immutable artifact
-identity with `.tif` or `.jpg`, and the download repeats it in its headers.
+Selective removal uses that same workspace admission coordination and canonical
+tool-use locks, not a separate cleanup system. Protected snapshots are read-only
+to tools but explicitly removable when no retained state/job/output/dependency or
+active/unverified use remains. New binding admission and removal serialize, so
+neither can create a dangling input. Removing the default clears the default
+association; removing the last leaves no input. Reopen must not read the Original,
+recreate an explicitly removed snapshot, or select another file. Explicit refresh
+may create a new identity without changing the old removal receipt.
 
-The fixed Edit Recipe, stage Preview, target Export mutation, and separate
-processing capability routes are retired. Historical saved intent migrates
-to readable composable state. Historical image and XMP receipts and bytes
-retain their existing provenance and read access; retiring commands never
-deletes user data or fabricates missing composable evidence.
+Service supervision dispatches the same independent executable/state as local editing, with explicit directories and qualified typed semantic input. It captures the exact current or requested retained state revision, protected input evidence, resources, engine/bundle and output before queue admission. A later edit cannot retarget a job; a stale late preview cannot replace the latest relevant rendition. Standalone render/export is synchronous and owned by its process. Only an accepted durable supervised job/receipt justifies continued service work after HTTP disconnect. Cancellation/timeout cannot publish partial files or discard saved adjustments/previous completed results.
 
-The [CLI Reference](reference.md#photo-development) owns the exact
-command grammar, document shapes, limits, and normalized results. Each recipe
-write submits caller-observed guards and complete parameter trees once.
-Refreshing guards during save would overwrite an unobserved concurrent edit.
-Selected-step Preview executes at most one module; composing modules requires
-explicit immutable artifact selection, without conversion or hidden chaining.
-The [Processing Module boundary](../photo-development/processing/design.md) owns module admission.
-The [Photo Development lifecycle](../photo-development/design.md#service-surface) owns
-serialization, source safety, cancellation, deadlines, retention, and uncertain
-outcome reconciliation. Photo and Browse facts carry the saved-edit projection.
-The existing no-replace local file owner handles Preview and artifact output.
-Unusable post-admission responses remain unknown outcomes. Client deadlines
-or disconnection do not imply service cancellation.
+Both paths use the same per-state filesystem lock and atomic state replacement. GUI and Agent read-modify-write, full atomic batches, reorder, rebind, restore and mapped catalog application require observed state evidence. Focused no-guard commands express fresh intent validated wholly under the lock; they cannot overwrite caller-constructed full state. Supplied guards are never refreshed by adapters. Request IDs default to generated returned values; an explicit caller-retained ID permits exact uncertain-outcome replay. Receipts replay the original settled effect before current-state admission and refuse payload reuse. Auto actions commit one validated candidate or nothing and cannot escape the same revision checks.
+
+The existing generic route names remain where compatible:
+
+- `/api/processing/modules` discovers qualified tools/adapters;
+- `/api/photos/{id}/processing-recipe` and its save/rebind forms project retained identities and canonical on-disk state without dual writes;
+- `/api/photos/{id}/processing-preview/{step_id}` projects a captured workspace preview and optional byte transfer;
+- `/api/photos/{id}/processing-exports` and request-specific status/cancel/retry expose supervised jobs and retained snapshots;
+- `/api/processing-artifacts/{id}` and `/bytes` expose verified completed artifact evidence and bound bytes;
+- `/api/exports/{id}` and `/artifact` retain truthful historical metadata/bytes;
+- Development Proxy read/create/remove remains an explicitly bounded cache surface, never the workspace input or authority to substitute a missing binding.
+
+The [retained exchange contract](reference.md#retained-processing-adapter-exchanges) owns exact generic bodies/results. Keep existing Original and immutable Processing Artifact variants and add only `workspace-artifact`, with workspace/artifact identity, observed content revision and verified image contract. Overloading the old immutable artifact variant would erase external revision invalidation; forcing every independent file into verified processing provenance would invent producer facts. Proxy/legacy Export identities remain their own read-only/cache surfaces rather than new binding variants. A discovered compatible image can be selected with unknown provenance. The existing live sourceRevision string observation (empty when unavailable) remains echoable, but does not invalidate artifact-only work when unrelated Original evidence changes; guarded Original bindings remain exact and never retarget. Adapters check canonical state revisions under tool locks, preserve unsupported/unrelated state and selections, and refuse changes outside an atomically supported scope. All darktable mutation/execution stays in its full namespace. Generic projections are optional for peer tools and cannot become an obligatory handoff DSL.
+
+Migration preserves historical identities, native state, XMP/image receipts and retained bytes non-destructively. A supported state is materialized once into tool-owned state, with retained source record/dependencies; unsupported versions remain inspectable rather than silently converted. Current needed input/state/output files persist until explicit safe removal; transient receipt/cache retention is separate. Incomplete historical provenance stays labeled historical. [Retention and Cutover](../photo-development/workspace/design.md#retention-and-cutover) is authoritative. Retired fixed routes remain retired; this boundary change does not delete retained data or purge compatible existing processing adapters.
 
 Every CLI request identifies contract version 1 through
 `Slipstream-CLI-Contract: 1`. A server that advertises version 1 must validate
@@ -361,14 +315,7 @@ output path is local client data; it is not sent as a server Original Location.
 
 ### Resumable Processing Artifact Transfer
 
-A Processing Artifact is immutable, so its SHA-256 is also the strong HTTP
-identity of its retained bytes. `GET /api/processing-artifacts/{id}/bytes`
-returns that identity as `ETag` and advertises `Accept-Ranges: bytes`. A caller
-may request one contiguous range. A matching `If-Range` permits a `206`
-response with `Content-Range`; a stale `If-Range` safely returns the complete
-`200` representation. An invalid or unsatisfiable range returns `416` with the
-full length and no byte stream. The response repeats the complete artifact
-provenance headers for both successful statuses.
+A verified artifact content revision binds one exact SHA-256/length pair. `GET /api/processing-artifacts/{id}/bytes` and workspace download expose that strong `ETag` and `Accept-Ranges: bytes`. A caller may request one contiguous range. Matching `If-Range` permits `206` with `Content-Range`; an invalid/unsatisfiable range returns `416` with full length and no stream. A stale resumable request may receive complete `200` bytes only for the same admitted revision, allowing the client to restart that transfer. If the path now holds a different workspace revision, return `artifact_changed` instead of silently switching its bytes. Protected managed files can reuse their stable descriptor/identity; mutable external files require stability checks and pinned evidence throughout transfer. Headers repeat the admitted revision and verified available provenance for successful responses.
 
 The service acquires one finite artifact lease before opening the retained file.
 The lease is renewed while the response body is live and released when the body
@@ -423,11 +370,21 @@ This preserves one enforcement boundary and keeps native processing near
 storage. The client can run beside an external Agent without the Photo Library
 mounted locally. Established command/HTTP libraries keep the implementation small.
 
-### Rejected: Direct Database or Filesystem CLI
+### Selected: Independent Tool with Same-Directory Slipstream Supervision
 
-A local-only tool could avoid HTTP, but it would duplicate containment,
-transactions, scan coordination, and version checks. It would also require
-access to private storage and fail the remote-client use case.
+An operation catalog and one bounded semantic mutation primitive preserve multi-instance, curve, mask, action, preset/style and output capability without leaking native parsing. `darktable-edit` owns that deep interface and on-disk state. The complete `slipstream darktable` namespace is an optional Photo/workspace resolution and job-supervision adapter, invoking the same state/executable rather than passing edits between duplicate stores. Files directly connect tools; Slipstream provides browsing/indexing, not a mandatory recipe DSL.
+
+### Rejected: Generic Full-Tree Editing or Per-Control Commands for darktable
+
+Generic tree replacement makes clients initialize camera state and preserve
+unseen masks, instances, and output settings. Per-control commands duplicate
+native meanings and grow with every engine module. Native identifiers, typed
+structured values, and catalogued actions keep the language small while the
+engine owns algorithms and layout knowledge.
+
+### Rejected: Database Editing or Per-Iteration Download/Submit Bridge
+
+Direct edits of Slipstream database state would duplicate Library transactions and containment. Downloading RAW/state for every local adjustment and submitting results back would introduce synchronization/conflict work and block same-host composition. Independent tools instead access the real workspace directory and own their state; a thin service client still handles remote Library queries and optional final downloads. Direct filesystem access to a prepared workspace is deliberate, with no write access granted to Originals.
 
 ### Deferred: MCP Adapter
 
@@ -456,6 +413,10 @@ exactly-once tasks or durable Undo. This choice does not replace the distinct
 Edit Recipe and Export receipt requirements.
 
 ## Verification
+
+The darktable acceptance scenario must resolve a Library Photo, open a real workspace and run standalone open/edit/preview/export on that host using explicit output directories. Exercise multiple instances, curves, masks, actions, resources, presets/styles and output geometry; prove the completed file appears through Slipstream reconciliation without registration and can be downloaded or passed directly to another compatible independent tool. Also run the same executable on arbitrary supported local input without Slipstream. Export before preview, reopen after restart, and preserve snapshot editing after the live Original becomes unavailable.
+
+Exercise optional full `slipstream darktable` supervision against exactly the same state/directory. Cover guarded Web/Agent races, no partial invalid apply, bounded per-state busy refusal, exact request replay, prospective initialization, multiple-edit ambiguity, captured queued revisions, stale late previews and restore after explicit rebind. Terminate a standalone owning process and prove no detached guarantee/partial ready file; disconnect a supervised client and reconcile its durable job. Schema discovery or parser success alone does not prove this loop.
 
 Qualification must execute the real CLI against the real Rust service with a
 generated fixture Library. Contract fixtures cover help, parsing, inputs,

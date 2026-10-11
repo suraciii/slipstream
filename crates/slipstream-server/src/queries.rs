@@ -16,6 +16,7 @@ pub(crate) enum RetainedKind {
     Browse,
     Album,
     Photo,
+    WorkspaceFiles,
     /// One unavailable-Photo inspection review.
     RecoveryUnavailable,
     /// One Folder-prefix relocation proposal review.
@@ -28,6 +29,7 @@ impl RetainedKind {
             Self::Browse => 'b',
             Self::Album => 'a',
             Self::Photo => 'p',
+            Self::WorkspaceFiles => 'w',
             Self::RecoveryUnavailable => 'u',
             Self::RecoveryMappings => 'm',
         }
@@ -36,9 +38,11 @@ impl RetainedKind {
     pub(crate) fn idle(self) -> Duration {
         match self {
             Self::Browse => crate::config::BROWSE_SNAPSHOT_IDLE,
-            Self::Album | Self::Photo | Self::RecoveryUnavailable | Self::RecoveryMappings => {
-                QUERY_IDLE
-            }
+            Self::Album
+            | Self::Photo
+            | Self::WorkspaceFiles
+            | Self::RecoveryUnavailable
+            | Self::RecoveryMappings => QUERY_IDLE,
         }
     }
 }

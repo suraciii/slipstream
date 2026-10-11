@@ -24,7 +24,9 @@ PROTOCOL = "2025-06-18"
 LINE_BYTES_MAX = 16 * 1024 * 1024
 TOOLS = {"list_modules", "module_schema", "image_parameters", "encode_params", "decode_params", "export_images", "render", "import_images"}
 ASSET_SHA256 = "df7b2c677645f1ca5364b52e62f8db04ca61f80163792942f3e409a84a6b12ed"
-EMBEDDED_SHA256 = "7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe"
+EMBEDDED_SHA256 = ASSET_SHA256
+HISTORICAL_EMBEDDED_SHA256 = "7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe"
+INPUT_ICC_SHA256_DIGESTS = (EMBEDDED_SHA256, HISTORICAL_EMBEDDED_SHA256)
 WB_FIELDS = ("red", "green", "blue", "various", "preset")
 
 
@@ -237,7 +239,7 @@ def export(engine: MCP, request: dict, target: Path) -> None:
         raise MCPError("export did not settle the exact requested artifact")
 
 
-def inspect_tiff(path: Path) -> dict:
+def inspect_tiff(path: Path, expected_icc=None) -> dict:
     import numpy as np
     import tifffile
     with tifffile.TiffFile(path) as image:
@@ -255,7 +257,8 @@ def inspect_tiff(path: Path) -> dict:
         if (pixels.ndim != 3 or pixels.shape[-1] != 3 or page.samplesperpixel != 3 or page.planarconfig != 1
                 or pixels.dtype != np.float32 or not facts["finite"] or any(int(x) != 3 for x in formats)
                 or int(page.compression) not in (8, 32946) or facts["orientation"] != 1
-                or facts["icc_sha256"] != EMBEDDED_SHA256):
+                or facts["icc_sha256"] not in INPUT_ICC_SHA256_DIGESTS
+                or (expected_icc is not None and facts["icc_sha256"] != expected_icc)):
             raise MCPError("output failed the pinned TIFF contract")
         return facts
 
@@ -370,7 +373,7 @@ def qualify(args) -> dict:
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
     report = {"accepted": False, "protocol": PROTOCOL, "source_sha256": digest(fixture),
-              "icc_asset_sha256": ASSET_SHA256, "icc_embedded_sha256": EMBEDDED_SHA256}
+              "icc_asset_sha256": ASSET_SHA256, "icc_embedded_sha256": None}
     root = prepare_root(out, icc)
     engine, source, profile = start_engine(args, root, fixture)
     try:
@@ -390,7 +393,9 @@ def qualify(args) -> dict:
             ref = run_reference(args.reference_cli, fixture, reference, exposure)
             if ref["temperature"] != temperature:
                 raise MCPError("as-shot coefficients differ from independent baseline")
-            report.setdefault("references", {})[str(exposure)] = {**ref, "native": inspect_tiff(target),
+            native_facts = inspect_tiff(target, expected_icc=EMBEDDED_SHA256)
+            report["icc_embedded_sha256"] = native_facts["icc_sha256"]
+            report.setdefault("references", {})[str(exposure)] = {**ref, "native": native_facts,
                                                                  "comparison": compare_pixels(target, reference)}
         synthetic = root / "synthetic-input.tiff"
         pixels = np.tile(np.array([[[-0.25, 0.5, 2.0], [0.0, 1.0, 0.25]]], dtype="float32"), (32, 32, 1))
@@ -400,7 +405,7 @@ def qualify(args) -> dict:
         target = root / "synthetic-output.tiff"
         export(engine, export_request({"path": output_argument(args, synthetic)}, output_argument(args, target),
                                      profile, baseline_stack(0.0), raw=False), target)
-        report["synthetic"] = inspect_tiff(target)
+        report["synthetic"] = inspect_tiff(target, expected_icc=EMBEDDED_SHA256)
         if not report["synthetic"]["negative"] or not report["synthetic"]["overrange"]:
             raise MCPError("synthetic scene samples were clipped")
     finally:

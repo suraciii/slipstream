@@ -69,15 +69,22 @@ Use this index to locate the affected Feature and its contracts. Follow the [con
 
 ## Photo Development
 
-- [Photo Development](photo-development/spec.md): RAW correction, autosave, film simulation, stage previews, Export, shared client behavior, and recovery.
-- [Photo Development Design](photo-development/design.md): Edit State ownership, headless processing, concurrency, Export snapshots, source safety, and recovery.
-- [Photo Editing Model](photo-development/model.md): editing vocabulary and direct Edit State to Artifact handoff.
-- [Photo Editor Workspace](photo-development/workspace.md): browser ownership, module composition, freshness, conflict, and cross-step lifecycle.
+- [Photo Development](photo-development/spec.md): shared editing state, peer tools, previews, exports, and recovery.
+- [Photo Development Design](photo-development/design.md): independent tool integration, supervised execution, canonical file state, concurrency, and migration.
+- [Photo Editing Model](photo-development/model.md): tool-owned Edit State, directory ownership, and explicit file handoff.
+
+### Workspace
+
+- [Photo Workspace](photo-development/workspace/spec.md): real persistent directory, protected inputs, direct tool output, file discovery, downloads, continued processing, and safe removal.
+- [Directory Photo Workspace](photo-development/workspace/design.md): preparation, containment, indexing, tool-owned state, retention, consistent backup, and cutover.
+- [Photo Editor Workspace](photo-development/workspace/web.md): browser ownership, tool composition, freshness, conflict, and asynchronous lifecycle.
 
 ### darktable
 
-- [darktable Integration](photo-development/darktable/spec.md): engine relationship, admitted controls, saved intent, matching outputs, and upgrade failures.
-- [darktable Integration Design](photo-development/darktable/design.md): private MCP interaction, parameter discovery, image initialization, fresh engine children, and cutover.
+- [darktable Integration](photo-development/darktable/spec.md): engine relationship, capability coverage, saved intent, matching outputs, and upgrade failures.
+- [darktable Integration Design](photo-development/darktable/design.md): independent editor, private native MCP interaction, canonical persistence, initialization, and cutover.
+- [Headless darktable Editing](photo-development/darktable/editing.md): independent file/state editing, instances, masks, resources, Presets, Styles, history, and result delivery.
+- [darktable CLI Reference](photo-development/darktable/cli.md): standalone `darktable-edit` and optional `slipstream darktable` grammar, catalog scope, guards, structured results, and recovery.
 
 ### Processing
 

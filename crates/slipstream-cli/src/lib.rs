@@ -15,13 +15,14 @@ use url::Url;
 
 mod auth;
 mod compatibility;
+mod darktable;
 mod development;
 mod development_proxy;
-mod edit;
 mod historical_export_download;
 mod preview_download;
 mod processing_artifact_download;
 mod processing_preview_download;
+mod workspace;
 
 const CLI_CONTRACT_VERSION: u16 = 1;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
@@ -54,9 +55,11 @@ pub use commands::{
     RecoveryApplyArgs, RecoveryCommand, RecoveryProposeArgs, RecoveryUnavailableArgs, SelectionArg,
     SetSelectionArg, TrashCommand, TrashListArgs, TrashReviewArgs, parse_error_preferences,
 };
+pub use darktable::DarktableArgs;
 pub(crate) use execute::*;
 pub use execute::{invalid_invocation, invoke, invoke_until};
 pub(crate) use input::*;
 pub(crate) use operations::*;
 pub(crate) use protocol::*;
 pub(crate) use state::*;
+pub use workspace::WorkspaceCommand;

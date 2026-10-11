@@ -1,4 +1,50 @@
 use super::*;
+
+/// Records durable workspace ownership before settlement, independently of receipts.
+pub(in crate::persistence) fn retain_processing_artifact_in_workspace(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    artifact_id: &str,
+    published_at: u64,
+) -> Result<(), PersistenceError> {
+    validate_bounded_name(artifact_id, crate::processing::MAXIMUM_ARTIFACT_ID_BYTES)
+        .map_err(|_| PersistenceError::Storage)?;
+    write_transaction(state, database_name, connection, |transaction| {
+        let key = format!("processing_workspace_artifact:{artifact_id}");
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT value FROM library_metadata WHERE key=?",
+                [&key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| PersistenceError::Storage)?;
+        if existing.is_none() {
+            write_metadata_value(transaction, &key, &published_at.to_string())?;
+        }
+        Ok(())
+    })
+}
+
+pub(super) fn workspace_artifact_published_at(
+    connection: &Connection,
+    artifact_id: &str,
+) -> Result<Option<u64>, PersistenceError> {
+    connection
+        .query_row(
+            "SELECT value FROM library_metadata WHERE key=?",
+            [format!("processing_workspace_artifact:{artifact_id}")],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| PersistenceError::Storage)?
+        .map(|value| value.parse().map_err(|_| PersistenceError::Storage))
+        .transpose()
+}
+// Durable workspace ownership is a separate metadata key, so historical record
+// bytes stay unchanged. Receipt expiry removes request state but keeps the
+// immutable artifact provenance and publication timestamp for workspace files.
 /// Settles one admitted qualified composable Export: validates that the
 /// artifact carries exactly the accepted admission's pinned provenance,
 /// publishes the artifact insert-only, records the request's acceptance
@@ -344,12 +390,14 @@ pub(in crate::persistence) fn sweep_processing_export_expiry(
                     }
                 }
             }
-            delete_metadata_value(transaction, &processing_artifact_key(&artifact_id))?;
+            if workspace_artifact_published_at(transaction, &artifact_id)?.is_none() {
+                delete_metadata_value(transaction, &processing_artifact_key(&artifact_id))?;
+                expired.push(artifact_id.clone());
+            }
             delete_metadata_value(
                 transaction,
                 &processing_artifact_retention_key(&artifact_id),
             )?;
-            expired.push(artifact_id);
         }
         // Terminally failed and cancelled receipts keep their replay answer
         // for their own finite window; past it the record is removed and the
@@ -402,6 +450,7 @@ pub(in crate::persistence) fn acquire_processing_artifact_lease(
         if let Some(retention) =
             read_processing_artifact_retention_record(transaction, artifact_id)?
             && retention.retain_until <= now
+            && workspace_artifact_published_at(transaction, artifact_id)?.is_none()
         {
             return Ok(ProcessingArtifactLeaseOutcome::Expired);
         }

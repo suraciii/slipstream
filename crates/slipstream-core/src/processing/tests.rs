@@ -60,6 +60,35 @@ fn recipe(steps: Vec<ProcessingStep>, current: Option<&str>) -> ComposableEditRe
     }
 }
 
+#[test]
+fn workspace_binding_has_bounded_distinct_revision_identity() {
+    let input = ProcessingInput::WorkspaceArtifact {
+        workspace_id: "workspace-1".into(),
+        artifact_id: "image/raw.tif".into(),
+        revision: "revision-1".into(),
+        contract: contract(),
+    };
+    input.validate().unwrap();
+    assert_ne!(
+        input.binding_digest(),
+        artifact_input("image/raw.tif").binding_digest()
+    );
+    let mut changed = input.clone();
+    if let ProcessingInput::WorkspaceArtifact { revision, .. } = &mut changed {
+        *revision = "revision-2".into();
+    }
+    assert_ne!(input.binding_digest(), changed.binding_digest());
+    if let ProcessingInput::WorkspaceArtifact { workspace_id, .. } = &mut changed {
+        *workspace_id = "x".repeat(129);
+    }
+    assert!(changed.validate().is_err());
+    let mut saved = recipe(vec![step("film", input)], Some("film"));
+    saved.source_revision.clear();
+    saved.validate().unwrap();
+    saved.steps[0].input = original_input();
+    assert!(saved.validate().is_err());
+}
+
 fn evidence(input: ProcessingInput) -> ProcessingInputEvidence {
     ProcessingInputEvidence::new(input, &"a1".repeat(32), 118_640_128).unwrap()
 }

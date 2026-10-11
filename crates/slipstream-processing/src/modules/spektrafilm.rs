@@ -21,11 +21,16 @@ pub const SPEKTRAFILM_LEGACY_PARAMETER_VERSION: &str = "spektrafilm-params-1";
 /// exact bundle verification separately pins source, packages, and runtime bytes.
 pub const SPEKTRAFILM_RECIPE_SHA256: &str =
     "8efdd28d3a49fea7e71835dea82dbc416d9f95e4ae4216ae5fb7535087ec5cf8";
-/// The pinned handoff profile of the standalone SpektraFilm input — the
-/// shared `INPUT_ICC_SHA256` of `film_identity.py`, which is the byte
-/// identity of the darktable peer's Development TIFF output profile.
+/// Historical normalized handoff profile; retained recipe identities keep this
+/// value. New input validation admits exactly the profiles below.
 pub const SPEKTRAFILM_INPUT_ICC_SHA256: &str =
     "7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe";
+/// Equivalent qualified profile bytes: canonical asset and historical normalized
+/// profile. Their colorimetric tags match exactly; only description bytes differ.
+pub const SPEKTRAFILM_INPUT_ICC_SHA256S: [&str; 2] = [
+    "df7b2c677645f1ca5364b52e62f8db04ca61f80163792942f3e409a84a6b12ed",
+    SPEKTRAFILM_INPUT_ICC_SHA256,
+];
 /// The pinned sRGB profile bytes of the standalone SpektraFilm Finished
 /// JPEG — the shared `OUTPUT_ICC_SHA256` of `film_identity.py`.
 pub const SPEKTRAFILM_OUTPUT_ICC_SHA256: &str =

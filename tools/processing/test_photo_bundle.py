@@ -63,6 +63,13 @@ def load(name: str) -> types.ModuleType:
 build = load("build")
 manifest = load("manifest")
 discover = load("discover")
+qualify = load("qualify")
+identity_spec = importlib.util.spec_from_file_location(
+    "film_identity", Path(__file__).parents[1] / "development" / "film_identity.py",
+)
+film_identity = importlib.util.module_from_spec(identity_spec)
+assert identity_spec.loader is not None
+identity_spec.loader.exec_module(film_identity)
 
 
 def git(repository: Path, *arguments: str, stdin: str | None = None) -> str:
@@ -292,6 +299,36 @@ class ManifestBundleTest(unittest.TestCase):
         first, second = self.run_main()["bundle"], self.run_main()["bundle"]
         self.assertEqual(first, second)
         self.assertEqual((self.output_root / "bundle").read_text().strip(), first)
+
+
+class FilmInputProfileIdentityTest(unittest.TestCase):
+    def test_canonical_asset_is_admitted_with_its_observed_digest(self):
+        profile = Path(__file__).with_name("photo").joinpath(
+            "icc", "LargeRGB-elle-V2-g10.icc",
+        ).read_bytes()
+        observed = hashlib.sha256(profile).hexdigest()
+        self.assertEqual(film_identity.input_profile_digest(profile), observed)
+        self.assertEqual(observed, film_identity.CANONICAL_INPUT_ICC_SHA256)
+        self.assertEqual(qualify.EMBEDDED_SHA256, observed)
+
+    def test_profile_names_and_modified_bytes_do_not_qualify(self):
+        profile = bytearray(Path(__file__).with_name("photo").joinpath(
+            "icc", "LargeRGB-elle-V2-g10.icc",
+        ).read_bytes())
+        profile[-1] ^= 1
+        for value in (bytes(profile), b"ProPhoto RGB", b""):
+            with self.subTest(profile=value[:16]):
+                with self.assertRaises(ValueError):
+                    film_identity.input_profile_digest(value)
+
+    def test_historical_identity_is_preserved_in_the_exact_dual_allowlist(self):
+        historical = "7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe"
+        canonical = "df7b2c677645f1ca5364b52e62f8db04ca61f80163792942f3e409a84a6b12ed"
+        self.assertEqual(film_identity.INPUT_ICC_SHA256, historical)
+        self.assertEqual(film_identity.INPUT_ICC_SHA256_DIGESTS, (canonical, historical))
+        self.assertEqual(qualify.INPUT_ICC_SHA256_DIGESTS, (canonical, historical))
+        self.assertEqual(film_identity.FILM_RECIPE_SHA256,
+                         "8efdd28d3a49fea7e71835dea82dbc416d9f95e4ae4216ae5fb7535087ec5cf8")
 
 
 if __name__ == "__main__":

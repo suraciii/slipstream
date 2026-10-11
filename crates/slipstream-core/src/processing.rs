@@ -208,6 +208,13 @@ pub fn validate_source_revision(value: &str) -> Result<(), ProcessingContractErr
     }
     Ok(())
 }
+/// Validates contextual source evidence, including an unavailable observation.
+pub fn validate_contextual_source_revision(value: &str) -> Result<(), ProcessingContractError> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    validate_source_revision(value)
+}
 
 /// Validates one byte-evidence or parameter digest: exactly
 /// [`DIGEST_HEX_BYTES`] lowercase hexadecimal characters.
@@ -512,6 +519,13 @@ pub enum ProcessingInput {
         artifact_id: ProcessingArtifactId,
         contract: ProcessingImageContract,
     },
+    /// A completed workspace image pinned to its explicit revision and facts.
+    WorkspaceArtifact {
+        workspace_id: String,
+        artifact_id: String,
+        revision: String,
+        contract: ProcessingImageContract,
+    },
 }
 
 impl ProcessingInput {
@@ -530,6 +544,17 @@ impl ProcessingInput {
                 artifact_id: _,
                 contract,
             } => contract.validate()?,
+            Self::WorkspaceArtifact {
+                workspace_id,
+                artifact_id,
+                revision,
+                contract,
+            } => {
+                validate_bounded_name(workspace_id, MAXIMUM_ARTIFACT_ID_BYTES)?;
+                validate_bounded_name(artifact_id, MAXIMUM_ARTIFACT_ID_BYTES)?;
+                validate_bounded_name(revision, MAXIMUM_REVISION_BYTES)?;
+                contract.validate()?;
+            }
         }
         Ok(())
     }
@@ -553,6 +578,18 @@ impl ProcessingInput {
             } => serde_json::json!({
                 "kind": "processing-input-artifact-v1",
                 "artifact_id": artifact_id.as_str(),
+                "contract": contract.canonical_digest(),
+            }),
+            Self::WorkspaceArtifact {
+                workspace_id,
+                artifact_id,
+                revision,
+                contract,
+            } => serde_json::json!({
+                "kind": "processing-input-workspace-artifact-v1",
+                "workspace_id": workspace_id,
+                "artifact_id": artifact_id,
+                "revision": revision,
                 "contract": contract.canonical_digest(),
             }),
         };
@@ -607,7 +644,15 @@ impl ComposableEditRecipe {
     pub fn validate(&self) -> Result<(), ProcessingContractError> {
         validate_bounded_name(&self.photo_id, MAXIMUM_PHOTO_ID_BYTES)?;
         validate_bounded_name(&self.revision, MAXIMUM_REVISION_BYTES)?;
-        validate_source_revision(&self.source_revision)?;
+        if self
+            .steps
+            .iter()
+            .any(|step| matches!(step.input, ProcessingInput::Original { .. }))
+        {
+            validate_source_revision(&self.source_revision)?;
+        } else {
+            validate_contextual_source_revision(&self.source_revision)?;
+        }
         let actual = self.steps.len();
         if actual > MAXIMUM_RECIPE_STEPS {
             return Err(ProcessingContractError::TooManySteps {
@@ -912,54 +957,8 @@ impl ProcessingPreviewIdentity {
     }
 }
 
-/// The confirmed acceptance identity of one explicit Export: the confirmed
-/// input binding with its verified byte evidence, the selected module with
-/// its pinned adapter/schema version, the canonical digest of the complete
-/// captured step parameters, the intended output contract, and the processing
-/// bundle. It is captured at acceptance, never inherits whichever settings
-/// happen to be current when queued work starts, and deliberately carries no
-/// Preview geometry or display derivation: the Export output geometry is the
-/// one inside the intended output contract.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProcessingExportIdentity {
-    pub input: ProcessingInputEvidence,
-    pub module: ProcessingModuleId,
-    /// The pinned adapter and parameter-schema identity used at acceptance.
-    pub adapter_schema_version: String,
-    /// The canonical digest of the complete captured parameter snapshot.
-    pub parameter_digest: String,
-    /// The intended output contract, including the separately admitted output
-    /// geometry.
-    pub output_contract: ProcessingImageContract,
-    /// The exact processing bundle identity.
-    pub bundle_id: String,
-}
-
-impl ProcessingExportIdentity {
-    /// Validates every component of the identity.
-    pub fn validate(&self) -> Result<(), ProcessingContractError> {
-        self.input.validate()?;
-        validate_bounded_name(&self.adapter_schema_version, MAXIMUM_CONTRACT_NAME_BYTES)?;
-        validate_digest(&self.parameter_digest)?;
-        self.output_contract.validate()?;
-        validate_bounded_name(&self.bundle_id, MAXIMUM_CONTRACT_NAME_BYTES)?;
-        Ok(())
-    }
-
-    /// The canonical digest of the complete Export acceptance identity.
-    pub fn digest(&self) -> String {
-        let payload = serde_json::json!({
-            "kind": "processing-export-identity-v1",
-            "input": self.input.digest(),
-            "module": self.module.as_str(),
-            "adapter_schema_version": self.adapter_schema_version,
-            "parameter_digest": self.parameter_digest,
-            "output_contract": self.output_contract.canonical_digest(),
-            "bundle_id": self.bundle_id,
-        });
-        digest_json(&payload)
-    }
-}
+mod export_identity;
+pub use export_identity::ProcessingExportIdentity;
 
 mod export;
 pub use export::*;

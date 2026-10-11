@@ -94,7 +94,7 @@ async fn explicit_rebind_preserves_every_step_except_original_revision() {
 }
 
 #[tokio::test]
-async fn artifact_only_save_retains_unavailable_binding_and_refuses_known_stale_source() {
+async fn artifact_only_save_retains_binding_across_unrelated_source_changes() {
     let seeded = seeded_persistence();
     let submitted = recipe(
         "raw-photo",
@@ -148,7 +148,7 @@ async fn artifact_only_save_retains_unavailable_binding_and_refuses_known_stale_
             )
         )
         .await,
-        ComposableEditRecipeWriteOutcome::SourceChanged(Some(after))
+        ComposableEditRecipeWriteOutcome::Unchanged(after)
     );
 }
 

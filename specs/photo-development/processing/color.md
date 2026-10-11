@@ -9,6 +9,8 @@ Original input, concrete module results, and their display derivatives.
 The [Photo Development](../spec.md) specification owns
 user-visible controls and composition. [Processing Modules](design.md)
 owns the single-module parameter and artifact boundary.
+[darktable Editing](../darktable/editing.md#output-and-export) owns selectable
+darktable output behavior; [darktable CLI](../darktable/cli.md) owns grammar.
 
 ## Model
 
@@ -17,11 +19,11 @@ camera/film/paper profiles, ICC assets, and fixed processing settings for each
 admitted module configuration. The bundle is part of result identity, not an
 interchangeable tool installation.
 
-An Edit Recipe contains semantic controls and the selected Processing Step
-parameters. A concrete Film Recipe may be one admitted standalone SpektraFilm
-parameter snapshot, but it is not a required suffix of every recipe. Engine
-representations remain behind the module adapter; the domain model must not
-contain darktable history blobs or Python objects.
+A tool-owned persistent Edit State captures semantic controls, operation
+instances and output settings for an explicit input. A Film Recipe may be one
+admitted standalone SpektraFilm snapshot, not a mandatory suffix. Native history
+blobs and Python objects stay private to the independent tool/engine; Slipstream
+indexes state/files rather than duplicating editable parameters in its database.
 
 Module-owned parameters determine each output's format, precision, color
 space, transfer function, geometry, and encoding. The concrete contracts
@@ -29,11 +31,18 @@ this specification pins are qualified module outputs, not global product
 output concepts; a module that does not admit a contract must refuse it
 rather than reinterpret it.
 
-The currently qualified darktable configuration's embedded ICC profile has
-SHA-256
-`7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe`. The
-processing bundle must identify the profile asset bytes and exact embedded
-profile bytes separately; matching a name or appearance is not enough.
+The qualified scene-linear ProPhoto TIFF configuration admits exactly two embedded
+ICC byte identities: the unchanged pinned asset
+`df7b2c677645f1ca5364b52e62f8db04ca61f80163792942f3e409a84a6b12ed` used by
+the independent native tool, and the historical darktable-normalized profile
+`7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe`.
+Their tag sets and every tag payload except `desc` are identical, including
+white point, colorants, and linear transfer curves. Both describe the same
+qualified color transform. Existing historical TIFF bytes remain valid unchanged.
+Consumers must check one of these exact digests and retain the actual embedded
+digest in byte evidence. The processing bundle must identify the profile asset
+bytes and exact embedded profile bytes separately; matching a name or appearance
+is not enough.
 
 ## RAW Development
 
@@ -60,37 +69,45 @@ family label alone does not grant development support. Full-resolution Export
 support requires a full-resolution qualification; reduced-size evidence does
 not establish it. Custom temperature/tint processing requires an independent
 reference for its mapping, range, and direction under that source class and
-bundle. The service must reject an unqualified source, mode, or WB mapping
-before processing admission. It must not silently substitute as-shot WB or
-another mapping. The adjustable-WB product target remains defined by the
-[Product Spec](../spec.md#development-controls).
+bundle. The independent tool must reject an unqualified source, mode or WB
+mapping before processing. It must not silently substitute as-shot WB or another
+mapping; supervised Web invokes that same validation. General native WB editing
+remains defined by [darktable Editing](../darktable/editing.md#discovering-editing-capabilities).
 
-Module ordering, parameter versions, and encoding must be explicit in each
-adapter under [Processing Modules](design.md#concrete-module-shapes).
+Tool-owned module ordering, parameter versions and encoding are explicit under
+[Processing Modules](design.md#concrete-module-shapes).
 [Native darktable Integration](../darktable/design.md) owns construction of
-the complete bounded darktable history from its approved baseline and requested
-intent. Standalone SpektraFilm preserves its grouped parameter tree. Each adapter
-supplies a complete bounded request to its own engine and refuses unsupported
-versions. Ambient XMP discovery and use of a shared desktop database are forbidden.
+private native history from captured canonical state and its qualified baseline.
+Standalone SpektraFilm preserves its grouped parameters. Each independent tool
+supplies a complete bounded request to its engine and refuses unsupported
+versions. Ambient XMP and shared desktop database use are forbidden.
 
-The development path must disable filmic, sigmoid, base curve, AgX, and any
-other display/look mapping. Required technical camera processing must be
-explicitly distinguished from optional artistic processing. The adapter must
-not silently add sharpening, denoising, lens effects, or contrast presets merely
-because a desktop default contains them.
+For a requested scene-linear output, the development path must disable filmic,
+sigmoid, base curve, AgX, and other display/look mappings. A saved combination
+that conflicts with this output contract is refused; selecting an output must
+not silently disable creative modules. Display-referred outputs may retain
+explicitly selected look mapping when advertised by the bundle. Required
+technical camera processing remains distinct from optional artistic processing.
+Initialization must not silently add sharpening, denoising, lens effects, or
+contrast presets merely because a desktop default contains them.
 
 ## Qualified Scene-Referred Module Output
 
-The currently qualified darktable configuration has one concrete
-scene-referred output contract. Its ICC profile must describe both the actual
-ProPhoto primaries/white point and a linear transfer function. A profile name
-or TIFF extension alone is insufficient evidence.
+Scene-linear float32 ProPhoto TIFF is one required advertised darktable output
+combination, not a universal darktable output. These rules apply when it is
+selected, including explicit artifact handoff to standalone SpektraFilm. Other
+advertised formats, profiles, precision, transfer functions, and encodings have
+their own concrete validated contracts captured in the edit revision. For this
+TIFF combination the ICC profile must describe actual ProPhoto primaries/white
+point and a linear transfer function; a profile name or extension is insufficient.
 
 TIFF output must use IEEE float32 RGB samples. The writer must not quantize to
 integers, clamp values to the display interval, or convert through an 8-bit
 preview. Lossless compression must round-trip through the qualified reader.
-Dimensions must describe the full developed image and its already-applied
-orientation, with no hidden upscale or user crop.
+Dimensions must describe the full requested output after selected crop,
+rotation, orientation, and other admitted geometry. No hidden upscale or crop
+is allowed. Default geometry retains the full developed image; explicit crop
+is saved intent and must agree with masks' coordinate frames and output metadata.
 
 The compressed strip layout must account for the declared full geometry. The
 qualified writer emits each Deflate strip through its own buffer, so a strip
@@ -161,6 +178,13 @@ clipping is the defined display behavior for negative, over-range, and
 out-of-gamut values; it may change their hue or brightness in the view. It
 must not alter the module output. This display branch must never enter a
 scene-referred module output or another module's input.
+
+For other advertised output contracts, Preview uses the separately identified
+display conversion appropriate to that captured profile and transfer function;
+it must not apply this linear-ProPhoto transform to already encoded pixels.
+Statistics identify whether they measure source, working, output, or display
+values and their clipping scope. Pixel inspection must disclose scale and
+coordinate frame; a bounded Preview is not full-resolution spatial evidence.
 
 The destination must use standard sRGB colorimetry defined by IEC 61966-2-1
 with a D65 white point. This identifies the target colorimetry, not the profile
@@ -251,10 +275,10 @@ a separate crop/tile implementation requires its own spatial-context contract.
 
 ### Selected: Module-Owned Image Contracts
 
-Each admitted module owns its input and output image contracts. A concrete
-artifact can be inspected independently and can be selected explicitly by a
-later compatible step. Disk and memory costs remain explicit bounded
-processing resources.
+Each admitted tool owns its input/output image contracts. Completed workspace
+files can be inspected and explicitly selected by a compatible tool. A generic
+file requires actual compatibility checks; its folder/extension cannot establish
+these color facts or Processing Artifact provenance.
 
 ### Rejected: Browser Preview as Simulation Input
 
@@ -263,8 +287,8 @@ It cannot establish the linear development contract even if it looks plausible.
 
 ### Selected: Versioned Engine Adapter
 
-One narrow adapter owns module versions and semantic parameter mapping. It
-keeps engine representation out of Web, CLI, and persistence contracts.
+The independent tool/native bridge owns module versions and semantic mapping.
+Engine representation stays out of Slipstream's database and Web controls.
 
 ### Rejected: Arbitrary Engine Parameters
 
@@ -327,6 +351,12 @@ Qualification must establish:
 - repeated CPU output, grain random-state behavior, and preview/detail limits;
 - output profile, metadata, and JPEG encoding correctness; and
 - explicit rejection when a required engine version or profile is missing.
+- scene-linear output conflicting with saved look mapping is refused without
+  changing creative intent, while advertised display outputs retain that intent;
+- explicit crop/rotation and mask coordinate frames match full requested output
+  dimensions and provenance; and
+- each advertised profile/format is decoded and checked against its captured
+  transfer, precision, color, and geometry contract rather than accepted by name.
 
 Use the [author's preparation workflow](https://github.com/andreavolpato/spektrafilm#preparing-input-images-manually-with-darktable)
 and [darktable's CLI reference](https://docs.darktable.org/usermanual/5.6/en/special-topics/program-invocation/darktable-cli/)

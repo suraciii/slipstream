@@ -130,11 +130,7 @@ export type GridProgressViewModel = Readonly<{
   unflagged: number;
 }>;
 
-export type {
-  EditorComposableViewModel,
-  EditorExportViewModel,
-  EditorViewModel,
-} from "./editor-view-contract.js";
+export type { EditorViewModel } from "./editor-view-contract.js";
 
 export type LibraryBrowserIntent =
   | EditorIntent

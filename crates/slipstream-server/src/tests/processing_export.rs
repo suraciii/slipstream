@@ -1,9 +1,6 @@
-//! Explicit composable Export and Processing Artifact route coverage. A
-//! qualified darktable step over its bound Original executes through the
-//! real engine bundle and settles an immutable Processing Artifact with a
-//! durable lifecycle — accepted work, begun attempts, terminal failures,
-//! explicit cancellation, and byte downloads under a finite lease — while
-//! every unqualified pairing records the durable explicit refusal instead.
+//! Historical Processing Artifact provenance and lifecycle remain readable.
+//! Fixtures seed the retained persistence owner directly; generic darktable
+//! routes refuse new execution and never serve as a historical fixture writer.
 
 use super::*;
 use crate::http::create_router_with_processing;
@@ -15,6 +12,10 @@ use slipstream_core::{
     ProcessingParameterSnapshot, ProcessingStepId, SubmitProcessingExport,
 };
 use slipstream_processing::modules::{DARKTABLE_ADAPTER_VERSION, DARKTABLE_PARAMETER_VERSION};
+
+#[path = "processing_export_historical.rs"]
+mod historical;
+use historical::*;
 
 /// One configured processing deployment with a live engine bundle and a
 /// live retained-output owner: the minimum a selected composable step
@@ -46,86 +47,6 @@ async fn first_photo_id(application: &Application) -> String {
         .into_iter()
         .next()
         .unwrap()
-}
-
-/// Saves one selected darktable step bound to the Original and returns the
-/// committed recipe revision plus the observed source revision.
-async fn save_selected_step(router: &Router, photo_id: &str, request_id: &str) -> (String, String) {
-    let uri = format!("/api/photos/{photo_id}/processing-recipe");
-    let (_, current) = get_json(router, &uri).await;
-    let source_revision = current["sourceRevision"].as_str().unwrap().to_owned();
-    let recipe_revision = current["recipe"]["revision"].as_str().map(str::to_owned);
-    let body = serde_json::json!({
-        "requestId": request_id,
-        "expectedRecipeRevision": recipe_revision,
-        "expectedSourceRevision": source_revision,
-        "currentStepId": "develop-1",
-        "steps": [{
-            "stepId": "develop-1",
-            "module": "darktable",
-            "input": {
-                "kind": "original",
-                "photoId": photo_id,
-                "sourceRevision": source_revision
-            },
-            "parameters": {
-                "schemaVersion": "darktable-params-1",
-                "tree": {"stack": [], "output": {"format": "tiff", "precisionBits": 32, "colorSpace": "prophoto-rgb", "transferFunction": "linear"}}
-            }
-        }]
-    });
-    let response = post_json(router, &uri, body, Some("https://camera.local")).await;
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let saved = response_json(response).await;
-    (
-        saved["recipe"]["revision"].as_str().unwrap().to_owned(),
-        source_revision,
-    )
-}
-
-/// Saves one selected SpektraFilm step bound to the published artifact and
-/// returns the committed recipe revision plus the observed source revision.
-async fn save_selected_film_step(
-    router: &Router,
-    photo_id: &str,
-    source_revision: &str,
-    request_id: &str,
-) -> (String, String) {
-    let uri = format!("/api/photos/{photo_id}/processing-recipe");
-    let (_, current) = get_json(router, &uri).await;
-    let body = serde_json::json!({
-        "requestId": request_id,
-        "expectedRecipeRevision": current["recipe"]["revision"],
-        "expectedSourceRevision": source_revision,
-        "currentStepId": "film-1",
-        "steps": [{
-            "stepId": "film-1",
-            "module": "spektrafilm",
-            "input": {
-                "kind": "artifact",
-                "artifactId": "artifact-a1",
-                "contract": {
-                    "format": "image/tiff",
-                    "precision": "float32",
-                    "colorSpace": "prophoto-rgb",
-                    "transfer": "linear",
-                    "geometry": {"width": 9504, "height": 6336},
-                    "encoding": "deflate"
-                }
-            },
-            "parameters": {
-                "schemaVersion": "spektrafilm-params-1",
-                "tree": slipstream_processing::modules::spektrafilm_default_tree()
-            }
-        }]
-    });
-    let response = post_json(router, &uri, body, Some("https://camera.local")).await;
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let saved = response_json(response).await;
-    (
-        saved["recipe"]["revision"].as_str().unwrap().to_owned(),
-        source_revision.to_owned(),
-    )
 }
 
 fn submit_body(request_id: &str, step_id: &str, recipe_revision: &str, source: &str) -> String {
@@ -187,41 +108,8 @@ async fn settled_export(router: &Router, photo_id: &str, request_id: &str) -> se
     .expect("accepted Export must reach a terminal state")
 }
 
-fn published_artifact(photo_id: &str, source_revision: &str) -> ProcessingArtifact {
-    ProcessingArtifact {
-        artifact_id: ProcessingArtifactId::new("artifact-a1").unwrap(),
-        photo_id: photo_id.to_owned(),
-        step_id: ProcessingStepId::new("develop-1").unwrap(),
-        module: ProcessingModuleId::new("darktable").unwrap(),
-        adapter_schema_version: "darktable-adapter-1".to_owned(),
-        parameters: ProcessingParameterSnapshot::new(
-            "darktable-params-1",
-            serde_json::json!({"stack": []}),
-        )
-        .unwrap(),
-        input: ProcessingInputEvidence::new(
-            ProcessingInput::Original {
-                photo_id: photo_id.to_owned(),
-                source_revision: source_revision.to_owned(),
-            },
-            &"a".repeat(64),
-            4096,
-        )
-        .unwrap(),
-        output_contract: ProcessingImageContract {
-            format: "image/tiff".to_owned(),
-            precision: "float32".to_owned(),
-            color_space: "prophoto-rgb".to_owned(),
-            transfer: "linear".to_owned(),
-            geometry: ProcessingGeometry::new(9504, 6336).unwrap(),
-            encoding: "deflate".to_owned(),
-        },
-        bundle_id: "c".repeat(64),
-        sha256: "d".repeat(64),
-        byte_length: 12_288,
-    }
-}
-
+#[path = "processing_export_download.rs"]
+mod download;
 #[path = "processing_export_publication.rs"]
 mod publication;
 #[path = "processing_export_retained.rs"]
@@ -232,7 +120,7 @@ async fn submission_records_and_replays_the_explicit_adapter_refusal() {
     let (base, config) = export_fixture();
     let (application, router) = export_application(&config).await;
     let photo_id = first_photo_id(&application).await;
-    let (_, source_revision) = save_selected_step(&router, &photo_id, "recipe-1").await;
+    let (_, source_revision) = save_selected_step(&application, &photo_id, "recipe-1").await;
 
     // Standalone SpektraFilm has no qualified adapter in this deployment,
     // so its artifact-bound step records the explicit refusal instead of
@@ -247,7 +135,15 @@ async fn submission_records_and_replays_the_explicit_adapter_refusal() {
         ProcessingArtifactPublication::Published
     );
     let (recipe_revision, film_source) =
-        save_selected_film_step(&router, &photo_id, &source_revision, "recipe-2").await;
+        save_selected_film_step(&application, &photo_id, &source_revision, "recipe-2").await;
+    seed_historical_refusal(
+        &application,
+        &photo_id,
+        "export-1",
+        &recipe_revision,
+        &film_source,
+    )
+    .await;
 
     let body = submit_body("export-1", "film-1", &recipe_revision, &film_source);
     let (status, refused) = post_processing_export(&router, &photo_id, &body).await;
@@ -255,7 +151,7 @@ async fn submission_records_and_replays_the_explicit_adapter_refusal() {
     assert_eq!(refused["error"]["code"], "module_parameters_unavailable");
     assert_eq!(refused["error"]["effect"], "none");
     let refusal = &refused["error"]["details"]["refusal"];
-    assert_eq!(refused["error"]["details"]["replayed"], false);
+    assert_eq!(refused["error"]["details"]["replayed"], true);
     assert_eq!(refusal["photoId"], photo_id);
     assert_eq!(refusal["stepId"], "film-1");
     assert_eq!(refusal["recipeRevision"], recipe_revision);
@@ -295,40 +191,119 @@ async fn submission_records_and_replays_the_explicit_adapter_refusal() {
 }
 
 #[tokio::test]
-async fn submission_guards_recipe_source_and_step_selection() {
+async fn generic_darktable_export_refuses_before_new_admission() {
     let (base, config) = export_fixture();
     let (application, router) = export_application(&config).await;
     let photo_id = first_photo_id(&application).await;
     let (recipe_revision, source_revision) =
-        save_selected_step(&router, &photo_id, "recipe-1").await;
+        save_selected_step(&application, &photo_id, "recipe-1").await;
 
-    let (status, body) = post_processing_export(
-        &router,
-        &photo_id,
-        &submit_body("export-1", "develop-1", "stale-revision", &source_revision),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"]["code"], "recipe_conflict");
+    for body in [
+        submit_body(
+            "export-new",
+            "develop-1",
+            &recipe_revision,
+            &source_revision,
+        ),
+        submit_body(
+            "export-stale",
+            "develop-1",
+            "stale-revision",
+            &source_revision,
+        ),
+        submit_body(
+            "export-other",
+            "other-step",
+            &recipe_revision,
+            "stale-source",
+        ),
+    ] {
+        let (status, refusal) = post_processing_export(&router, &photo_id, &body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refusal["error"]["code"], "use_darktable_namespace");
+        assert_eq!(refusal["error"]["effect"], "none");
+    }
+    assert_eq!(FakePhotoEngine::at(&base).runs(), 0);
+    assert!(
+        application
+            .library
+            .processing_export_work("export-new")
+            .await
+            .unwrap()
+            .is_none()
+    );
 
-    let (status, body) = post_processing_export(
-        &router,
-        &photo_id,
-        &submit_body("export-1", "develop-1", &recipe_revision, "stale-source"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"]["code"], "source_changed");
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
 
-    let (status, body) = post_processing_export(
-        &router,
-        &photo_id,
-        &submit_body("export-1", "other-step", &recipe_revision, &source_revision),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"]["code"], "step_not_current");
-
+#[tokio::test]
+async fn historical_owner_keeps_recipe_source_and_step_admission_guards() {
+    let (base, config) = export_fixture();
+    let (application, _) = export_application(&config).await;
+    let photo_id = first_photo_id(&application).await;
+    let (revision, source) =
+        save_selected_step(&application, &photo_id, "historical-guard-recipe").await;
+    for (request, step, guard, source_guard, expected) in [
+        (
+            "stale-recipe",
+            "develop-1",
+            "stale",
+            source.as_str(),
+            "recipe",
+        ),
+        (
+            "stale-source",
+            "develop-1",
+            revision.as_str(),
+            "stale",
+            "source",
+        ),
+        (
+            "other-step",
+            "other",
+            revision.as_str(),
+            source.as_str(),
+            "step",
+        ),
+    ] {
+        let outcome = application
+            .library
+            .submit_processing_export(
+                SubmitProcessingExport {
+                    photo_id: photo_id.clone(),
+                    request_id: request.into(),
+                    step_id: ProcessingStepId::new(step).unwrap(),
+                    expected_recipe_revision: guard.into(),
+                    expected_source_revision: source_guard.into(),
+                    bundle_id: "c".repeat(64),
+                    retained_output_bytes_max: u64::MAX,
+                    adapter: ProcessingExportAdapterDecision::Qualified {
+                        adapter_version: DARKTABLE_ADAPTER_VERSION.into(),
+                        parameter_schema_version: DARKTABLE_PARAMETER_VERSION.into(),
+                    },
+                },
+                1_000,
+            )
+            .await
+            .unwrap();
+        assert!(
+            match expected {
+                "recipe" => matches!(outcome, ProcessingExportSubmitOutcome::RecipeConflict(_)),
+                "source" => matches!(outcome, ProcessingExportSubmitOutcome::SourceChanged(_)),
+                _ => matches!(outcome, ProcessingExportSubmitOutcome::StepNotCurrent(_)),
+            },
+            "{outcome:?}"
+        );
+        assert!(
+            application
+                .library
+                .processing_export_work(request)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -357,15 +332,16 @@ async fn artifact_route_reads_published_provenance_and_refuses_unknown_ids() {
     let (base, config) = export_fixture();
     let (application, router) = export_application(&config).await;
     let photo_id = first_photo_id(&application).await;
-    let (revision, source) = save_selected_step(&router, &photo_id, "recipe-1").await;
-    let submit = submit_body("export-provenance", "develop-1", &revision, &source);
-    assert_eq!(
-        post_processing_export(&router, &photo_id, &submit).await.0,
-        StatusCode::ACCEPTED
-    );
-    let work = settled_export(&router, &photo_id, "export-provenance").await;
-    assert_eq!(work["state"], "succeeded");
-    let artifact_id = work["artifactId"].as_str().unwrap();
+    let (revision, source) = save_selected_step(&application, &photo_id, "recipe-1").await;
+    let artifact_id = settle_historical_export(
+        &application,
+        &photo_id,
+        "export-provenance",
+        &revision,
+        &source,
+    )
+    .await;
+    let (_, work) = export_status(&router, &photo_id, "export-provenance").await;
     let (status, body) =
         get_json(&router, &format!("/api/processing-artifacts/{artifact_id}")).await;
     assert_eq!(status, StatusCode::OK);
@@ -387,7 +363,7 @@ async fn artifact_bound_step_export_captures_the_artifact_handoff() {
     let (base, config) = export_fixture();
     let (application, router) = export_application(&config).await;
     let photo_id = first_photo_id(&application).await;
-    let (_, source_revision) = save_selected_step(&router, &photo_id, "recipe-1").await;
+    let (_, source_revision) = save_selected_step(&application, &photo_id, "recipe-1").await;
 
     let artifact = published_artifact(&photo_id, &source_revision);
     assert_eq!(
@@ -401,38 +377,16 @@ async fn artifact_bound_step_export_captures_the_artifact_handoff() {
 
     // A downstream step bound to the exact published contract is admitted
     // through the handoff and stopped only at the adapter refusal.
-    let uri = format!("/api/photos/{photo_id}/processing-recipe");
-    let (_, current) = get_json(&router, &uri).await;
-    let body = serde_json::json!({
-        "requestId": "recipe-2",
-        "expectedRecipeRevision": current["recipe"]["revision"],
-        "expectedSourceRevision": source_revision,
-        "currentStepId": "film-1",
-        "steps": [{
-            "stepId": "film-1",
-            "module": "spektrafilm",
-            "input": {
-                "kind": "artifact",
-                "artifactId": "artifact-a1",
-                "contract": {
-                    "format": "image/tiff",
-                    "precision": "float32",
-                    "colorSpace": "prophoto-rgb",
-                    "transfer": "linear",
-                    "geometry": {"width": 9504, "height": 6336},
-                    "encoding": "deflate"
-                }
-            },
-            "parameters": {
-                "schemaVersion": "spektrafilm-params-1",
-                "tree": slipstream_processing::modules::spektrafilm_default_tree()
-            }
-        }]
-    });
-    let response = post_json(&router, &uri, body, Some("https://camera.local")).await;
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let saved = response_json(response).await;
-    let recipe_revision = saved["recipe"]["revision"].as_str().unwrap().to_owned();
+    let (recipe_revision, _) =
+        save_selected_film_step(&application, &photo_id, &source_revision, "recipe-2").await;
+    seed_historical_refusal(
+        &application,
+        &photo_id,
+        "export-film",
+        &recipe_revision,
+        &source_revision,
+    )
+    .await;
 
     let (status, refused) = post_processing_export(
         &router,
@@ -458,21 +412,23 @@ async fn artifact_bound_step_export_captures_the_artifact_handoff() {
 /// request identity replays the committed artifact instead of
 /// re-executing.
 #[tokio::test]
-async fn qualified_darktable_export_executes_publishes_and_replays() {
+async fn historical_darktable_publication_reads_and_replays_without_execution() {
     let (base, config) = export_fixture();
     let engine = FakePhotoEngine::at(&base);
     let (application, router) = export_application(&config).await;
     let photo_id = first_photo_id(&application).await;
     let (recipe_revision, source_revision) =
-        save_selected_step(&router, &photo_id, "recipe-1").await;
+        save_selected_step(&application, &photo_id, "recipe-1").await;
 
     let body = submit_body("export-1", "develop-1", &recipe_revision, &source_revision);
-    let (status, accepted) = post_processing_export(&router, &photo_id, &body).await;
-    assert_eq!(status, StatusCode::ACCEPTED, "submit body: {accepted}");
-    assert_eq!(accepted["outcome"], "accepted");
-    assert_eq!(accepted["receipt"]["state"], "accepted");
-    let settled = settled_export(&router, &photo_id, "export-1").await;
-    assert_eq!(settled["state"], "succeeded");
+    settle_historical_export(
+        &application,
+        &photo_id,
+        "export-1",
+        &recipe_revision,
+        &source_revision,
+    )
+    .await;
     let (status, created) = post_processing_export(&router, &photo_id, &body).await;
     assert_eq!(status, StatusCode::CREATED);
     let artifact = &created["artifact"];
@@ -511,7 +467,7 @@ async fn qualified_darktable_export_executes_publishes_and_replays() {
         "the published bytes carry their own digest"
     );
     assert!(artifact["byteLength"].as_u64().unwrap() > 0);
-    assert_eq!(engine.runs(), 1, "exactly one engine attempt ran");
+    assert_eq!(engine.runs(), 0, "historical seed does not execute");
 
     // The settled work record is readable through the status route with
     // its terminal decision and the artifact it settled.
@@ -553,7 +509,7 @@ async fn qualified_darktable_export_executes_publishes_and_replays() {
     assert_eq!(replayed["artifact"], *artifact);
     assert_eq!(
         engine.runs(),
-        1,
+        0,
         "the replay never started a second engine attempt"
     );
 
@@ -585,14 +541,13 @@ async fn qualified_darktable_export_executes_publishes_and_replays() {
 /// and the committed record replays for the same identity without a
 /// second engine attempt.
 #[tokio::test]
-async fn qualified_export_engine_failure_records_the_terminal_failure() {
+async fn historical_export_failure_records_the_terminal_failure() {
     let (base, config) = export_fixture();
     let engine = FakePhotoEngine::at(&base);
-    engine.fail_attempt(1, "the engine refused the development");
     let (application, router) = export_application(&config).await;
     let photo_id = first_photo_id(&application).await;
     let (recipe_revision, source_revision) =
-        save_selected_step(&router, &photo_id, "recipe-1").await;
+        save_selected_step(&application, &photo_id, "recipe-1").await;
 
     let body = submit_body(
         "export-failed",
@@ -600,11 +555,28 @@ async fn qualified_export_engine_failure_records_the_terminal_failure() {
         &recipe_revision,
         &source_revision,
     );
-    let (status, accepted) = post_processing_export(&router, &photo_id, &body).await;
-    assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(accepted["receipt"]["state"], "accepted");
-    let work = settled_export(&router, &photo_id, "export-failed").await;
-    assert_eq!(work["state"], "failed");
+    seed_historical_export(
+        &application,
+        &photo_id,
+        "export-failed",
+        &recipe_revision,
+        &source_revision,
+    )
+    .await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    application
+        .library
+        .begin_processing_export_attempt("export-failed", now)
+        .await
+        .unwrap();
+    application
+        .library
+        .fail_processing_export("export-failed", "execution_failed", now)
+        .await
+        .unwrap();
     let (status, failed) = post_processing_export(&router, &photo_id, &body).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(failed["error"]["code"], "export_terminal");
@@ -612,7 +584,7 @@ async fn qualified_export_engine_failure_records_the_terminal_failure() {
     assert_eq!(receipt["state"], "failed");
     assert_eq!(receipt["failureReason"], "execution_failed");
     assert_eq!(receipt["requestId"], "export-failed");
-    assert_eq!(engine.runs(), 1, "exactly one engine attempt ran");
+    assert_eq!(engine.runs(), 0, "historical failure seed does not execute");
 
     // The committed terminal record is readable through the status route.
     let (status, work) = export_status(&router, &photo_id, "export-failed").await;
@@ -630,7 +602,7 @@ async fn qualified_export_engine_failure_records_the_terminal_failure() {
     assert_eq!(replayed["error"]["details"]["receipt"]["state"], "failed");
     assert_eq!(
         engine.runs(),
-        1,
+        0,
         "the replay never started an engine attempt"
     );
 
@@ -648,7 +620,7 @@ async fn live_work_replays_its_receipt_and_cancels_durably() {
     let (application, router) = export_application(&config).await;
     let photo_id = first_photo_id(&application).await;
     let (recipe_revision, source_revision) =
-        save_selected_step(&router, &photo_id, "recipe-1").await;
+        save_selected_step(&application, &photo_id, "recipe-1").await;
 
     // One admitted-but-not-dispatched request — exactly the state a lost
     // response or an in-flight execution leaves behind — seeded through
@@ -769,222 +741,6 @@ async fn live_work_replays_its_receipt_and_cancels_durably() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
-
-    application.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(base);
-}
-
-/// One settled artifact's published bytes download under a finite lease
-/// with the record's identity field for field in the response headers.
-#[tokio::test]
-async fn artifact_bytes_download_under_a_lease_with_provenance_headers() {
-    let (base, config) = export_fixture();
-    let (application, router) = export_application(&config).await;
-    let photo_id = first_photo_id(&application).await;
-    let (recipe_revision, source_revision) =
-        save_selected_step(&router, &photo_id, "recipe-1").await;
-
-    let body = submit_body(
-        "export-bytes",
-        "develop-1",
-        &recipe_revision,
-        &source_revision,
-    );
-    let (status, accepted) = post_processing_export(&router, &photo_id, &body).await;
-    assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(accepted["receipt"]["state"], "accepted");
-    assert_eq!(
-        settled_export(&router, &photo_id, "export-bytes").await["state"],
-        "succeeded"
-    );
-    let (status, created) = post_processing_export(&router, &photo_id, &body).await;
-    assert_eq!(status, StatusCode::CREATED);
-    let artifact = created["artifact"].clone();
-    let artifact_id = artifact["artifactId"].as_str().unwrap().to_owned();
-    let byte_length = artifact["byteLength"].as_u64().unwrap();
-    let sha256 = artifact["sha256"].as_str().unwrap().to_owned();
-    assert_eq!(
-        artifact["filename"],
-        format!("darktable-develop-1-{artifact_id}.tif")
-    );
-    let (_, settled) = export_status(&router, &photo_id, "export-bytes").await;
-    let timestamp = |seconds: u64| {
-        time::OffsetDateTime::from_unix_timestamp(seconds as i64)
-            .unwrap()
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap()
-    };
-    assert_eq!(
-        artifact["publishedAt"],
-        timestamp(settled["terminalAt"].as_u64().unwrap())
-    );
-    assert_eq!(
-        artifact["expiresAt"],
-        timestamp(settled["retainUntil"].as_u64().unwrap())
-    );
-    assert_eq!(artifact["orientation"], "top-left");
-    assert_eq!(artifact["iccEmbedded"], true);
-    let recipe_uri = format!("/api/photos/{photo_id}/processing-recipe");
-    let (_, current) = get_json(&router, &recipe_uri).await;
-    let mut steps = current["recipe"]["steps"].clone();
-    steps[0]["parameters"]["tree"]["output"] = serde_json::json!({
-        "format": "jpeg", "precisionBits": 8, "colorSpace": "srgb", "transferFunction": "srgb"
-    });
-    let response = post_json(
-        &router,
-        &recipe_uri,
-        serde_json::json!({
-            "requestId": "recipe-after-publication", "expectedRecipeRevision": recipe_revision,
-            "expectedSourceRevision": source_revision, "currentStepId": "develop-1", "steps": steps
-        }),
-        Some("https://camera.local"),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::CREATED);
-    assert_eq!(artifact["sampleFormat"], "float32");
-    let router = create_router_with_processing(
-        Arc::clone(&application),
-        crate::http::open_web_root(config.web_root()),
-        None,
-    );
-    let (status, replayed) = post_processing_export(&router, &photo_id, &body).await;
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(replayed["replayed"], true);
-    assert_eq!(replayed["artifact"], artifact);
-
-    let response = send(
-        &router,
-        authenticated_request()
-            .uri(format!(
-                "https://camera.local/api/processing-artifacts/{artifact_id}/bytes"
-            ))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let headers = response.headers();
-    assert_eq!(headers.get("content-type").unwrap(), "image/tiff");
-    let header = |name: &str| headers.get(name).unwrap().to_str().unwrap();
-    assert_eq!(headers.get(header::ACCEPT_RANGES).unwrap(), "bytes");
-    assert_eq!(
-        headers.get(header::ETAG).unwrap().to_str().unwrap(),
-        format!("\"{sha256}\"")
-    );
-    assert_eq!(header("content-length"), byte_length.to_string());
-    assert_eq!(header("slipstream-artifact-id"), artifact_id);
-    assert_eq!(header("slipstream-artifact-sha256"), sha256);
-    assert_eq!(
-        header("slipstream-artifact-filename"),
-        artifact["filename"].as_str().unwrap()
-    );
-    assert_eq!(
-        header("slipstream-artifact-published-at"),
-        artifact["publishedAt"].as_str().unwrap()
-    );
-    assert_eq!(
-        header("slipstream-artifact-expires-at"),
-        artifact["expiresAt"].as_str().unwrap()
-    );
-    assert_eq!(header("slipstream-artifact-orientation"), "top-left");
-    assert_eq!(header("slipstream-artifact-icc-embedded"), "true");
-    assert_eq!(header("slipstream-artifact-sample-format"), "float32");
-    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024 * 1024)
-        .await
-        .unwrap();
-    assert_eq!(bytes.len() as u64, byte_length);
-
-    let (status, retained) = get_json(
-        &router,
-        &format!("/api/photos/{photo_id}/processing-exports"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        retained["exports"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|work| work["requestId"] == "export-bytes" && work["state"] == "succeeded")
-    );
-    assert_eq!(retained["artifacts"], serde_json::json!([artifact.clone()]));
-    use sha2::{Digest, Sha256};
-    assert_eq!(format!("{:x}", Sha256::digest(&bytes)), sha256);
-
-    // One contiguous range is served against the record's strong identity; a
-    // stale or unreadable If-Range validator falls back to the full
-    // representation, and an unsatisfiable range names the full length.
-    let uri = format!("https://camera.local/api/processing-artifacts/{artifact_id}/bytes");
-    async fn artifact_bytes(
-        router: &Router,
-        uri: &str,
-        range: Option<&str>,
-        if_range: Option<header::HeaderValue>,
-    ) -> Response<Body> {
-        let mut request = authenticated_request().uri(uri);
-        if let Some(range) = range {
-            request = request.header(header::RANGE, range);
-        }
-        if let Some(if_range) = if_range {
-            request = request.header(header::IF_RANGE, if_range);
-        }
-        send(router, request.body(Body::empty()).unwrap()).await
-    }
-    let header_of = |response: &Response<Body>, name: header::HeaderName| {
-        response
-            .headers()
-            .get(name)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned()
-    };
-
-    let range_response = artifact_bytes(
-        &router,
-        &uri,
-        Some("bytes=1-3"),
-        Some(header::HeaderValue::from_str(&format!("\"{sha256}\"")).unwrap()),
-    )
-    .await;
-    assert_eq!(range_response.status(), StatusCode::PARTIAL_CONTENT);
-    assert_eq!(
-        header_of(&range_response, header::CONTENT_RANGE),
-        format!("bytes 1-3/{byte_length}")
-    );
-    assert_eq!(header_of(&range_response, header::CONTENT_LENGTH), "3");
-    let range_bytes = axum::body::to_bytes(range_response.into_body(), 64 * 1024 * 1024)
-        .await
-        .unwrap();
-    assert_eq!(&range_bytes[..], &bytes[1..4]);
-
-    for if_range in [
-        header::HeaderValue::from_static("\"different\""),
-        header::HeaderValue::from_bytes(&[0xff]).unwrap(),
-    ] {
-        let fallback = artifact_bytes(&router, &uri, Some("bytes=1-3"), Some(if_range)).await;
-        assert_eq!(fallback.status(), StatusCode::OK);
-        assert_eq!(
-            header_of(&fallback, header::CONTENT_LENGTH),
-            byte_length.to_string()
-        );
-        let _ = axum::body::to_bytes(fallback.into_body(), 64 * 1024 * 1024)
-            .await
-            .unwrap();
-    }
-
-    let invalid = artifact_bytes(&router, &uri, Some("bytes=999999999-"), None).await;
-    assert_eq!(invalid.status(), StatusCode::RANGE_NOT_SATISFIABLE);
-    assert_eq!(
-        header_of(&invalid, header::CONTENT_RANGE),
-        format!("bytes */{byte_length}")
-    );
-
-    // Unknown bytes identities answer the same closed refusal as the
-    // provenance route.
-    let (status, body) = get_json(&router, "/api/processing-artifacts/pa-none/bytes").await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error"]["code"], "unknown_artifact");
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);

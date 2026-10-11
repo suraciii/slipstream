@@ -1,411 +1,297 @@
 use super::*;
 
+/// Discover a completed TIFF through the same workspace API used by a caller,
+/// then explicitly select its protected capture rather than the live path.
+pub(super) fn completed_film_binding(
+    application: &Application,
+    photo_id: &str,
+) -> serde_json::Value {
+    let workspace = application.workspaces.open_photo(photo_id).unwrap();
+    let workspace_id = workspace["workspaceId"].as_str().unwrap();
+    let directory = application.workspaces.directory(workspace_id).unwrap();
+    fs::write(
+        directory.path().join("independent.tif"),
+        valid_development_tiff_fixture(),
+    )
+    .unwrap();
+    let files = application
+        .workspaces
+        .files(Some(workspace_id), None, 60, None)
+        .unwrap();
+    let selected = files["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["relativePath"] == "independent.tif")
+        .unwrap();
+    assert_eq!(selected["state"], "ready");
+    assert!(!selected["imageContract"].is_null());
+    let (lease, captured) = application
+        .workspaces
+        .lease_input(
+            workspace_id,
+            selected["artifactId"].as_str().unwrap(),
+            selected["revision"].as_str().unwrap(),
+        )
+        .unwrap();
+    drop(lease);
+    serde_json::json!({
+        "kind": "workspace-artifact", "workspaceId": workspace_id,
+        "artifactId": captured["artifactId"], "revision": captured["revision"],
+        "contract": captured["imageContract"],
+    })
+}
+
+pub(super) fn film_save(
+    binding: serde_json::Value,
+    source: serde_json::Value,
+    request: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "requestId": request, "expectedRecipeRevision": null,
+        "expectedSourceRevision": source, "currentStepId": "film",
+        "steps": [{
+            "stepId": "film", "module": "spektrafilm", "input": binding,
+            "parameters": {
+                "schemaVersion": slipstream_processing::modules::SPEKTRAFILM_PARAMETER_VERSION,
+                "tree": slipstream_processing::modules::spektrafilm_default_tree(),
+            },
+        }],
+    })
+}
+
 #[tokio::test]
-async fn composable_recipe_route_persists_zero_and_selected_steps() {
+async fn film_save_captures_external_tiff_and_replays_original_selection() {
     let (base, config) = prepare_fixture();
     approved_raw_fixture(&config.library_root.join("approved.ARW"));
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = configured_router(&application, config.web_root());
     let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
         .await
-        .into_iter()
-        .next()
+        .remove(0);
+    let workspace = application.workspaces.open_photo(&photo_id).unwrap();
+    let workspace_id = workspace["workspaceId"].as_str().unwrap();
+    let directory = application.workspaces.directory(workspace_id).unwrap();
+    let input_path = directory.path().join("external.tif");
+    fs::write(&input_path, valid_development_tiff_fixture()).unwrap();
+    let files = application
+        .workspaces
+        .files(Some(workspace_id), None, 60, None)
         .unwrap();
+    let selected = files["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["relativePath"] == "external.tif")
+        .unwrap();
+    let binding = serde_json::json!({"kind":"workspace-artifact","workspaceId":workspace_id,"artifactId":selected["artifactId"],"revision":selected["revision"],"contract":selected["imageContract"]});
+    let router = configured_router(&application, config.web_root());
     let uri = format!("/api/photos/{photo_id}/processing-recipe");
-    let (_, current) = get_json(&router, &uri).await;
-    let source_revision = current["sourceRevision"].as_str().unwrap().to_owned();
-    assert!(current["recipe"].is_null());
-
-    let body = serde_json::json!({
-        "requestId": "composable-zero",
-        "expectedRecipeRevision": null,
-        "expectedSourceRevision": source_revision,
-        "currentStepId": null,
-        "steps": []
-    });
+    let (_, read) = get_json(&router, &uri).await;
+    let body = film_save(
+        binding.clone(),
+        read["sourceRevision"].clone(),
+        "external-film-capture",
+    );
     let response = post_json(&router, &uri, body.clone(), Some("https://camera.local")).await;
     assert_eq!(response.status(), StatusCode::CREATED);
     let saved = response_json(response).await;
-    assert_eq!(saved["outcome"], "saved");
-    assert_eq!(saved["recipe"]["steps"], serde_json::json!([]));
-
+    let captured = &saved["recipe"]["steps"][0]["input"];
+    assert_ne!(captured["artifactId"], binding["artifactId"]);
+    assert_eq!(captured["contract"], binding["contract"]);
+    let (_, read) = get_json(&router, &uri).await;
+    assert_eq!(read["recipe"], saved["recipe"]);
+    fs::remove_file(input_path).unwrap();
     let response = post_json(&router, &uri, body, Some("https://camera.local")).await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response_json(response).await["outcome"], "replayed");
-
-    let (_, read) = get_json(&router, &uri).await;
-    let recipe_version = read["recipe"]["revision"].as_str().unwrap().to_owned();
-    let source_revision = read["sourceRevision"].as_str().unwrap().to_owned();
-    let step_body = serde_json::json!({
-        "requestId": "composable-darktable",
-        "expectedRecipeRevision": recipe_version,
-        "expectedSourceRevision": source_revision,
-        "currentStepId": "develop-1",
-        "steps": [{
-            "stepId": "develop-1",
-            "module": "darktable",
-            "input": {
-                "kind": "original",
-                "photoId": photo_id,
-                "sourceRevision": source_revision
-            },
-            "parameters": {
-                "schemaVersion": "darktable-params-1",
-                "tree": {"stack": []}
-            }
-        }]
-    });
-    let response = post_json(&router, &uri, step_body, Some("https://camera.local")).await;
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let saved = response_json(response).await;
-    assert_eq!(saved["recipe"]["currentStepId"], "develop-1");
-    assert_eq!(saved["recipe"]["steps"][0]["module"], "darktable");
-
-    let (status, body) = get_json(
-        &router,
-        &format!("/api/photos/{photo_id}/processing-preview/not-current"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"]["code"], "step_not_current");
-    assert_eq!(body["error"]["effect"], "none");
-    assert!(body["error"]["details"].is_object());
-
-    let (status, body) = get_json(
-        &router,
-        &format!("/api/photos/{photo_id}/processing-preview/develop-1"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(body["error"]["code"], "processing_unavailable");
-    let stale_body = serde_json::json!({
-        "requestId": "composable-stale-source",
-        "expectedRecipeRevision": read["recipe"]["revision"],
-        "expectedSourceRevision": "stale-source",
-        "currentStepId": null,
-        "steps": []
-    });
-    let response = post_json(&router, &uri, stale_body, Some("https://camera.local")).await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        response_json(response).await["error"]["code"],
-        "source_changed"
-    );
-
+    assert_eq!(response_json(response).await["recipe"], saved["recipe"]);
     application.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(base);
+    fs::remove_dir_all(base).unwrap();
 }
 
 #[tokio::test]
-async fn stateful_edit_route_updates_controls_replays_and_resets() {
+async fn workspace_film_save_uses_empty_live_source_and_persists_canonical_state() {
     let (base, config) = prepare_fixture();
-    approved_raw_fixture(&config.library_root.join("stateful.ARW"));
+    let original = config.library_root.join("approved.ARW");
+    approved_raw_fixture(&original);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .remove(0);
+    let binding = completed_film_binding(&application, &photo_id);
+    fs::remove_file(original).unwrap();
+    application.rescan().await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = configured_router(&application, config.web_root());
+    let uri = format!("/api/photos/{photo_id}/processing-recipe");
+    let (status, read) = get_json(&router, &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(read["sourceRevision"], "");
+    assert!(read["recipe"].is_null());
+    let body = film_save(
+        binding.clone(),
+        read["sourceRevision"].clone(),
+        "workspace-film-save",
+    );
+    let response = post_json(&router, &uri, body.clone(), Some("https://camera.local")).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let saved = response_json(response).await;
+    assert_eq!(saved["sourceRevision"], "");
+    assert_eq!(saved["recipe"]["sourceRevision"], "");
+    assert_eq!(saved["recipe"]["steps"][0]["input"], binding);
+    let (_, after) = get_json(&router, &uri).await;
+    assert_eq!(after["recipe"], saved["recipe"]);
+    let workspace_id = binding["workspaceId"].as_str().unwrap();
+    let directory = application.workspaces.directory(workspace_id).unwrap();
+    let canonical = crate::processing_recipe::inspect_film_state(
+        &directory.path().join(".edits/spektrafilm/adapter"),
+    )
+    .unwrap();
+    assert_eq!(canonical["recipe"], saved["recipe"]);
+    assert_eq!(canonical["recipe"]["steps"][0]["module"], "spektrafilm");
+    let response = post_json(&router, &uri, body.clone(), Some("https://camera.local")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let replay = response_json(response).await;
+    assert_eq!(replay["outcome"], "replayed");
+    assert_eq!(replay["recipe"], saved["recipe"]);
+    application.shutdown().await.unwrap();
+    drop(router);
+    drop(application);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
     let router = configured_router(&application, config.web_root());
-    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
-        .await
-        .into_iter()
-        .next()
-        .unwrap();
-    let uri = format!("/api/photos/{photo_id}/edit");
-    let (_, initial) = get_json(&router, &uri).await;
-    let body = serde_json::json!({
-        "requestId": "stateful-exposure-1",
-        "expectedEditRevision": null,
-        "target": "darktable.exposure",
-        "control": "ev",
-        "value": 0.5
-    });
-    let response = post_json(
-        &router,
-        &format!("{uri}/set"),
-        body.clone(),
-        Some("https://camera.local"),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let saved = response_json(response).await;
-    assert_eq!(saved["outcome"], "saved");
-    assert_eq!(saved["edit"]["current"]["controls"]["exposure"]["ev"], 0.5);
-    let replay = post_json(
-        &router,
-        &format!("{uri}/set"),
-        body.clone(),
-        Some("https://camera.local"),
-    )
-    .await;
-    assert_eq!(replay.status(), StatusCode::OK);
-    assert_eq!(response_json(replay).await["outcome"], "replayed");
-
-    let revision = saved["edit"]["editRevision"].as_str().unwrap();
-    let reset_body = serde_json::json!({
-        "requestId": "stateful-exposure-reset",
-        "expectedEditRevision": revision,
-        "target": "darktable.exposure",
-        "control": "all"
-    });
-    let response = post_json(
-        &router,
-        &format!("{uri}/reset"),
-        reset_body,
-        Some("https://camera.local"),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let reset = response_json(response).await;
-    assert_eq!(reset["edit"]["current"]["controls"]["exposure"]["ev"], 0.0);
-    let replay_after_change = post_json(
-        &router,
-        &format!("{uri}/set"),
-        body,
-        Some("https://camera.local"),
-    )
-    .await;
-    assert_eq!(replay_after_change.status(), StatusCode::OK);
-    let replayed = response_json(replay_after_change).await;
-    assert_eq!(replayed["outcome"], "replayed");
-    assert_eq!(
-        replayed["edit"]["current"]["controls"]["exposure"]["ev"],
-        0.5
-    );
-    let (preview_status, preview_body) = get_json(&router, &format!("{uri}/preview")).await;
-    assert_eq!(preview_status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(preview_body["error"]["code"], "processing_unavailable");
-    let export = post_json(
-        &router,
-        &format!("{uri}/export"),
-        serde_json::json!({
-            "requestId": "stateful-export-1",
-            "expectedEditRevision": replayed["edit"]["editRevision"],
-        }),
-        Some("https://camera.local"),
-    )
-    .await;
-    assert_eq!(export.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        response_json(export).await["error"]["code"],
-        "processing_unavailable"
-    );
-    let unsupported = serde_json::json!({
-        "requestId": "stateful-white-balance",
-        "expectedEditRevision": initial["editRevision"],
-        "target": "darktable.white-balance",
-        "control": "temperature",
-        "value": 6500
-    });
-    let response = post_json(
-        &router,
-        &format!("{uri}/set"),
-        unsupported,
-        Some("https://camera.local"),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
-        response_json(response).await["error"]["code"],
-        "unsupported_control"
-    );
+    let (_, reopened) = get_json(&router, &uri).await;
+    assert_eq!(reopened["sourceRevision"], "");
+    assert_eq!(reopened["recipe"], saved["recipe"]);
+    let response = post_json(&router, &uri, body, Some("https://camera.local")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let replay = response_json(response).await;
+    assert_eq!(replay["outcome"], "replayed");
+    assert_eq!(replay["sourceRevision"], "");
+    assert_eq!(replay["recipe"], saved["recipe"]);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
 
 #[tokio::test]
-async fn automatic_recipe_failure_leaves_the_saved_recipe_unchanged() {
+async fn workspace_film_missing_input_refuses_initial_save_without_canonical_state() {
     let (base, config) = prepare_fixture();
     approved_raw_fixture(&config.library_root.join("approved.ARW"));
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = configured_router(&application, config.web_root());
     let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
         .await
-        .into_iter()
-        .next()
-        .unwrap();
+        .remove(0);
+    let mut binding = completed_film_binding(&application, &photo_id);
+    binding["artifactId"] = serde_json::json!("missing-artifact");
+    let router = configured_router(&application, config.web_root());
     let uri = format!("/api/photos/{photo_id}/processing-recipe");
     let (_, read) = get_json(&router, &uri).await;
-    let source = read["sourceRevision"].as_str().unwrap().to_owned();
-    let body = serde_json::json!({
-        "requestId": "automatic-failure",
-        "expectedRecipeRevision": null,
-        "expectedSourceRevision": source,
-        "currentStepId": "develop",
-        "steps": [original_step(&photo_id, &source, serde_json::json!({"stack": []}))],
-        "automaticAdjustment": {
-            "stepId": "develop",
-            "operation": "exposure",
-            "multiPriority": 0,
-            "instruction": {
-                "deflicker_percentile": 50.0,
-                "deflicker_target_level": -4.0
-            }
-        }
-    });
-    let response = post_json(&router, &uri, body, Some("https://camera.local")).await;
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
-        response_json(response).await["error"]["code"],
-        "automatic_adjustment_failed"
-    );
+    let response = post_json(
+        &router,
+        &uri,
+        film_save(
+            binding,
+            read["sourceRevision"].clone(),
+            "missing-workspace-input",
+        ),
+        Some("https://camera.local"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let refusal = response_json(response).await;
+    assert_eq!(refusal["error"]["code"], "artifact_changed");
+    assert_eq!(refusal["error"]["effect"], "none");
     let (_, after) = get_json(&router, &uri).await;
     assert!(after["recipe"].is_null());
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
 
-fn original_step(photo_id: &str, source: &str, tree: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "stepId": "develop", "module": "darktable",
-        "input": {"kind": "original", "photoId": photo_id, "sourceRevision": source},
-        "parameters": {"schemaVersion": "darktable-params-1", "tree": tree}
-    })
-}
-
 #[tokio::test]
-async fn saved_unsupported_controls_survive_and_malformed_later_entries_refuse() {
-    let (base, config) = prepare_fixture();
-    approved_raw_fixture(&config.library_root.join("approved.ARW"));
-    let application = Application::open(&config).await.unwrap();
-    wait_for_scan_settled(&application).await;
-    let router = configured_router(&application, config.web_root());
-    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
-        .await
-        .remove(0);
-    let uri = format!("/api/photos/{photo_id}/processing-recipe");
-    let (_, read) = get_json(&router, &uri).await;
-    let source = read["sourceRevision"].as_str().unwrap();
-    let tree = serde_json::json!({"stack": [{
-        "operation": "temperature", "multiPriority": 0, "enabled": true,
-        "params": {"temperatureKelvin": 6500, "tintMilli": -12}
-    }]});
-    let body = serde_json::json!({
-        "requestId": "retained-white-balance", "expectedRecipeRevision": null,
-        "expectedSourceRevision": source, "currentStepId": "develop",
-        "steps": [original_step(&photo_id, source, tree.clone())]
-    });
-    let response = post_json(&router, &uri, body, Some("https://camera.local")).await;
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let saved = response_json(response).await;
-    let (_, read) = get_json(&router, &uri).await;
-    assert_eq!(read["recipe"]["steps"][0]["parameters"]["tree"], tree);
-    assert_eq!(read["recipe"]["executionRefusals"][0]["stepId"], "develop");
-    assert_eq!(
-        read["recipe"]["executionRefusals"][0]["code"],
-        "unsupported-control"
-    );
-    // Retained editing intent never grants execution admission.
-    let parameters = slipstream_processing::modules::Parameters {
-        module: "darktable".to_owned(),
-        version: "darktable-params-1".to_owned(),
-        tree: tree.clone(),
-    };
-    let registry = slipstream_processing::modules::ModuleRegistry::new(
-        slipstream_processing::modules::ModuleAvailability::ready(),
-        slipstream_processing::modules::ModuleAvailability::ready(),
-    );
-    assert!(registry.validate_parameters(&parameters).is_err());
-    let mut malformed = tree.clone();
-    malformed["stack"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!({
-            "operation": "exposure", "multiPriority": 0, "enabled": "yes", "params": {}
-        }));
-    let body = serde_json::json!({
-        "requestId": "malformed-after-retained", "expectedRecipeRevision": saved["recipe"]["revision"],
-        "expectedSourceRevision": source, "currentStepId": "develop",
-        "steps": [original_step(&photo_id, source, malformed)]
-    });
-    let response = post_json(&router, &uri, body, Some("https://camera.local")).await;
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let (_, current) = get_json(&router, &uri).await;
-    assert_eq!(current["recipe"], saved["recipe"]);
-    application.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(base);
-}
-
-#[tokio::test]
-async fn composable_recipe_requires_explicit_rebind_and_replays_it() {
+async fn settled_film_save_replays_after_later_state_and_bound_bytes_disappear() {
     let (base, config) = prepare_fixture();
     let original = config.library_root.join("approved.ARW");
     approved_raw_fixture(&original);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = configured_router(&application, config.web_root());
     let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
         .await
         .remove(0);
+    let binding = completed_film_binding(&application, &photo_id);
+    let router = configured_router(&application, config.web_root());
     let uri = format!("/api/photos/{photo_id}/processing-recipe");
     let (_, read) = get_json(&router, &uri).await;
-    let old_source = read["sourceRevision"].as_str().unwrap().to_owned();
-    let body = serde_json::json!({
-        "requestId": "before-rebind", "expectedRecipeRevision": null,
-        "expectedSourceRevision": old_source, "currentStepId": "develop",
-        "steps": [original_step(&photo_id, &old_source, serde_json::json!({"stack": []}))]
-    });
-    let response = post_json(&router, &uri, body, Some("https://camera.local")).await;
+    let body = film_save(
+        binding.clone(),
+        read["sourceRevision"].clone(),
+        "settled-film-save",
+    );
+    let response = post_json(&router, &uri, body.clone(), Some("https://camera.local")).await;
     assert_eq!(response.status(), StatusCode::CREATED);
-    let saved = response_json(response).await;
-    fs::OpenOptions::new()
-        .append(true)
-        .open(&original)
-        .unwrap()
-        .write_all(&[0])
+    let settled = response_json(response).await;
+    let remove = serde_json::json!({
+        "requestId":"remove-film", "expectedRecipeRevision":settled["recipe"]["revision"],
+        "expectedSourceRevision":read["sourceRevision"], "currentStepId":null, "steps":[],
+    });
+    let response = post_json(&router, &uri, remove, Some("https://camera.local")).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let newer = response_json(response).await;
+    assert_ne!(newer["recipe"]["revision"], settled["recipe"]["revision"]);
+    let input = application
+        .workspaces
+        .inspect(
+            binding["workspaceId"].as_str().unwrap(),
+            binding["artifactId"].as_str().unwrap(),
+        )
         .unwrap();
+    fs::remove_file(input["path"].as_str().unwrap()).unwrap();
+    fs::remove_file(original).unwrap();
     application.rescan().await.unwrap();
     wait_for_scan_settled(&application).await;
-    let (_, changed) = get_json(&router, &uri).await;
-    let new_source = changed["sourceRevision"].as_str().unwrap().to_owned();
-    assert_ne!(old_source, new_source);
-    assert_eq!(changed["recipe"], saved["recipe"]);
-    let draft = serde_json::json!({
-        "requestId": "implicit-rebind", "expectedRecipeRevision": saved["recipe"]["revision"],
-        "expectedSourceRevision": new_source, "currentStepId": "develop",
-        "steps": [original_step(&photo_id, &new_source, serde_json::json!({"stack": []}))]
-    });
-    let response = post_json(&router, &uri, draft, Some("https://camera.local")).await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        response_json(response).await["error"]["code"],
-        "source_changed"
-    );
-    let rebind_uri = format!("{uri}/rebind");
-    let rebind = serde_json::json!({
-        "requestId": "explicit-rebind", "expectedRecipeRevision": saved["recipe"]["revision"],
-        "newSourceRevision": new_source
-    });
-    let response = post_json(
-        &router,
-        &rebind_uri,
-        rebind.clone(),
-        Some("https://camera.local"),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let rebound = response_json(response).await;
-    assert_eq!(rebound["recipe"]["sourceRevision"], new_source);
-    assert_eq!(
-        rebound["recipe"]["steps"][0]["input"]["sourceRevision"],
-        new_source
-    );
-    let response = post_json(
-        &router,
-        &rebind_uri,
-        rebind.clone(),
-        Some("https://camera.local"),
-    )
-    .await;
+    let response = post_json(&router, &uri, body.clone(), Some("https://camera.local")).await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response_json(response).await["outcome"], "replayed");
-    let mut conflict = rebind;
-    conflict["newSourceRevision"] = serde_json::json!(old_source);
-    let response = post_json(&router, &rebind_uri, conflict, Some("https://camera.local")).await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        response_json(response).await["error"]["code"],
-        "request_conflict"
-    );
+    let replay = response_json(response).await;
+    assert_eq!(replay["outcome"], "replayed");
+    assert_eq!(replay["recipe"], settled["recipe"]);
+    assert_eq!(replay["sourceRevision"], body["expectedSourceRevision"]);
+    let (_, current) = get_json(&router, &uri).await;
+    assert_eq!(current["sourceRevision"], "");
+    assert_eq!(current["recipe"]["sourceRevision"], read["sourceRevision"]);
+    assert_eq!(current["recipe"], newer["recipe"]);
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn generic_darktable_save_refuses_without_creating_canonical_state() {
+    let (base, config) = prepare_fixture();
+    approved_raw_fixture(&config.library_root.join("approved.ARW"));
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .remove(0);
+    application.workspaces.open_photo(&photo_id).unwrap();
+    let router = configured_router(&application, config.web_root());
+    let uri = format!("/api/photos/{photo_id}/processing-recipe");
+    let (_, read) = get_json(&router, &uri).await;
+    let body = serde_json::json!({
+        "requestId":"generic-darktable-refusal", "expectedRecipeRevision":null,
+        "expectedSourceRevision":read["sourceRevision"], "currentStepId":"darktable",
+        "steps":[{"stepId":"darktable", "module":"darktable",
+            "input":{"kind":"original", "photoId":photo_id, "sourceRevision":read["sourceRevision"]},
+            "parameters":{"schemaVersion":"darktable-params-1", "tree":{"stack":[]}},
+        }],
+    });
+    let response = post_json(&router, &uri, body, Some("https://camera.local")).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let refusal = response_json(response).await;
+    assert_eq!(refusal["error"]["code"], "unsupported_state");
+    assert_eq!(refusal["error"]["effect"], "none");
+    let (_, after) = get_json(&router, &uri).await;
+    assert!(after["recipe"].is_null());
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -442,228 +328,4 @@ async fn fixed_processing_http_paths_are_retired() {
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
-}
-
-#[tokio::test]
-async fn artifact_only_recipe_remains_readable_and_saveable_without_original() {
-    use slipstream_core::{
-        ProcessingArtifact, ProcessingArtifactId, ProcessingArtifactPublication,
-        ProcessingGeometry, ProcessingImageContract, ProcessingInput, ProcessingInputEvidence,
-        ProcessingModuleId, ProcessingParameterSnapshot, ProcessingStepId,
-    };
-    let (base, config) = prepare_fixture();
-    let original = config.library_root.join("approved.ARW");
-    approved_raw_fixture(&original);
-    let application = Application::open(&config).await.unwrap();
-    wait_for_scan_settled(&application).await;
-    let router = configured_router(&application, config.web_root());
-    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
-        .await
-        .remove(0);
-    let uri = format!("/api/photos/{photo_id}/processing-recipe");
-    let (_, read) = get_json(&router, &uri).await;
-    let source = read["sourceRevision"].as_str().unwrap().to_owned();
-    let artifact = ProcessingArtifact {
-        artifact_id: ProcessingArtifactId::new("offline-artifact").unwrap(),
-        photo_id: photo_id.clone(),
-        step_id: ProcessingStepId::new("upstream").unwrap(),
-        module: ProcessingModuleId::new("darktable").unwrap(),
-        adapter_schema_version: "darktable-adapter-1".to_owned(),
-        parameters: ProcessingParameterSnapshot::new(
-            "darktable-params-1",
-            serde_json::json!({"stack": []}),
-        )
-        .unwrap(),
-        input: ProcessingInputEvidence::new(
-            ProcessingInput::Original {
-                photo_id: photo_id.clone(),
-                source_revision: source.clone(),
-            },
-            &"a".repeat(64),
-            4096,
-        )
-        .unwrap(),
-        output_contract: ProcessingImageContract {
-            format: "image/tiff".to_owned(),
-            precision: "float32".to_owned(),
-            color_space: "prophoto-rgb".to_owned(),
-            transfer: "linear".to_owned(),
-            geometry: ProcessingGeometry::new(9504, 6336).unwrap(),
-            encoding: "deflate".to_owned(),
-        },
-        bundle_id: "b".repeat(64),
-        sha256: "c".repeat(64),
-        byte_length: 12288,
-    };
-    assert_eq!(
-        application
-            .library
-            .publish_processing_artifact(artifact)
-            .await
-            .unwrap(),
-        ProcessingArtifactPublication::Published
-    );
-    let mut body = serde_json::json!({
-        "requestId": "artifact-before-offline", "expectedRecipeRevision": null,
-        "expectedSourceRevision": source, "currentStepId": "film",
-        "steps": [{
-            "stepId": "film", "module": "spektrafilm",
-            "input": {"kind": "artifact", "artifactId": "offline-artifact", "contract": {
-                "format": "image/tiff", "precision": "float32", "colorSpace": "prophoto-rgb",
-                "transfer": "linear", "geometry": {"width": 9504, "height": 6336}, "encoding": "deflate"
-            }},
-            "parameters": {"schemaVersion": "spektrafilm-params-1", "tree": slipstream_processing::modules::spektrafilm_default_tree()}
-        }]
-    });
-    let response = post_json(&router, &uri, body.clone(), Some("https://camera.local")).await;
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let saved = response_json(response).await;
-    fs::remove_file(&original).unwrap();
-    application.rescan().await.unwrap();
-    wait_for_scan_settled(&application).await;
-    let (status, offline) = get_json(&router, &uri).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(offline["sourceAvailable"], false);
-    assert_eq!(offline["sourceRevision"], source);
-    assert_eq!(offline["recipe"], saved["recipe"]);
-    body["requestId"] = serde_json::json!("artifact-offline-save");
-    body["expectedRecipeRevision"] = saved["recipe"]["revision"].clone();
-    body["steps"][0]["stepId"] = serde_json::json!("film-offline");
-    body["currentStepId"] = serde_json::json!("film-offline");
-    let response = post_json(&router, &uri, body, Some("https://camera.local")).await;
-    assert_eq!(response.status(), StatusCode::CREATED);
-    assert_eq!(
-        response_json(response).await["recipe"]["currentStepId"],
-        serde_json::json!("film-offline")
-    );
-    application.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(base);
-}
-
-#[tokio::test]
-async fn old_save_receipt_replays_after_recipe_advances_and_original_disappears() {
-    let (base, config) = prepare_fixture();
-    let original = config.library_root.join("approved.ARW");
-    approved_raw_fixture(&original);
-    let application = Application::open(&config).await.unwrap();
-    wait_for_scan_settled(&application).await;
-    let router = configured_router(&application, config.web_root());
-    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
-        .await
-        .remove(0);
-    let uri = format!("/api/photos/{photo_id}/processing-recipe");
-    let (_, current) = get_json(&router, &uri).await;
-    let source = current["sourceRevision"].as_str().unwrap();
-    let first = serde_json::json!({
-        "requestId": "retained-save", "expectedRecipeRevision": null,
-        "expectedSourceRevision": source, "currentStepId": "develop",
-        "steps": [original_step(&photo_id, source, serde_json::json!({"stack": []}))]
-    });
-    let response = post_json(&router, &uri, first.clone(), Some("https://camera.local")).await;
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let saved = response_json(response).await;
-    let later = serde_json::json!({
-        "requestId": "later-save", "expectedRecipeRevision": saved["recipe"]["revision"],
-        "expectedSourceRevision": source, "currentStepId": null, "steps": []
-    });
-    let response = post_json(&router, &uri, later, Some("https://camera.local")).await;
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let later = response_json(response).await;
-    fs::remove_file(original).unwrap();
-    application.rescan().await.unwrap();
-    wait_for_scan_settled(&application).await;
-    let response = post_json(&router, &uri, first.clone(), Some("https://camera.local")).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let replay = response_json(response).await;
-    assert_eq!(replay["outcome"], "replayed");
-    assert_eq!(replay["recipe"], saved["recipe"]);
-    let (_, current) = get_json(&router, &uri).await;
-    assert_eq!(current["recipe"], later["recipe"]);
-    let mut conflict = first;
-    conflict["steps"][0]["stepId"] = serde_json::json!("develop-conflict");
-    conflict["currentStepId"] = serde_json::json!("develop-conflict");
-    let response = post_json(&router, &uri, conflict, Some("https://camera.local")).await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        response_json(response).await["error"]["code"],
-        "request_conflict"
-    );
-    application.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(base);
-}
-
-#[tokio::test]
-async fn recipe_read_publication_gap_keeps_saved_binding_separate_from_current_facts() {
-    let (base, config) = prepare_fixture();
-    approved_raw_fixture(&config.library_root.join("approved.ARW"));
-    let application = Application::open(&config).await.unwrap();
-    wait_for_scan_settled(&application).await;
-    let router = configured_router(&application, config.web_root());
-    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
-        .await
-        .remove(0);
-    let uri = format!("/api/photos/{photo_id}/processing-recipe");
-    let (_, current) = get_json(&router, &uri).await;
-    let source = current["sourceRevision"].as_str().unwrap();
-    let response = post_json(
-        &router,
-        &uri,
-        serde_json::json!({
-            "requestId":"before-publication-gap", "expectedRecipeRevision":null,
-            "expectedSourceRevision":source, "currentStepId":"develop",
-            "steps":[original_step(&photo_id, source, serde_json::json!({"stack":[]}))]
-        }),
-        Some("https://camera.local"),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let saved = response_json(response).await;
-    let connection =
-        rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
-    connection
-        .execute("UPDATE original_files SET capture_metadata_state='pending',capture_order_key=NULL,capture_time_field=NULL,capture_offset_minutes=NULL,capture_source_revision=NULL,camera_identity_state='pending',camera_make=NULL,camera_model=NULL", [])
-        .unwrap();
-    let (status, gap) = get_json(&router, &uri).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(gap["sourceRevision"], "");
-    assert!(gap["currentSourceRevision"].is_null());
-    assert_eq!(gap["sourceAvailable"], true);
-    assert_eq!(gap["recipe"], saved["recipe"]);
-    assert_eq!(gap["recipe"]["sourceRevision"], source);
-    connection
-        .execute("UPDATE original_files SET available=0", [])
-        .unwrap();
-    let (_, unavailable) = get_json(&router, &uri).await;
-    assert_eq!(unavailable["sourceRevision"], "");
-    assert!(unavailable["currentSourceRevision"].is_null());
-    assert_eq!(unavailable["sourceAvailable"], false);
-    assert_eq!(unavailable["recipe"], saved["recipe"]);
-    application.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(base);
-}
-
-#[test]
-fn automatic_adjustment_rejects_duplicate_target_instances() {
-    let mut stack = vec![
-        serde_json::json!({
-            "operation": "exposure",
-            "multiPriority": 1,
-            "params": {"exposure": 0.0}
-        }),
-        serde_json::json!({
-            "operation": "exposure",
-            "multiPriority": 1,
-            "params": {"exposure": 1.0}
-        }),
-    ];
-    let error = crate::processing_recipe::replace_automatic_parameters(
-        &mut stack,
-        "exposure",
-        1,
-        serde_json::json!({"exposure": 2.0}),
-    )
-    .unwrap_err();
-    assert_eq!(error, "automaticAdjustment target instance is duplicated");
-    assert_eq!(stack[0]["params"]["exposure"], 0.0);
-    assert_eq!(stack[1]["params"]["exposure"], 1.0);
 }

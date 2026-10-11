@@ -1,5 +1,6 @@
-use super::owner::{Command, Persistence, PersistenceError, random_uuid_v4};
-use crate::{WhiteBalanceIntent, XMP_RETENTION_SECONDS, XmpCreateOutcome, XmpExportRecord};
+//! Historical XMP snapshots remain readable; generic processing no longer generates them.
+use super::owner::{Command, Persistence, PersistenceError};
+use crate::{WhiteBalanceIntent, XmpExportRecord};
 use rusqlite::{Connection, OptionalExtension, params};
 use tokio::sync::oneshot;
 
@@ -7,27 +8,6 @@ type PhotoXmpExportsReceiver =
     oneshot::Receiver<Result<Option<Vec<XmpExportRecord>>, PersistenceError>>;
 
 impl Persistence {
-    /// Captures an immutable edit-state document without opening the Original.
-    pub(crate) fn create_xmp_receiver(
-        &self,
-        photo_id: &str,
-        request_id: &str,
-        expected_recipe: &str,
-        expected_source: &str,
-        now: i64,
-    ) -> Result<oneshot::Receiver<Result<XmpCreateOutcome, PersistenceError>>, PersistenceError>
-    {
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::CreateXmp {
-            photo_id: photo_id.to_owned(),
-            request_id: request_id.to_owned(),
-            expected_recipe: expected_recipe.to_owned(),
-            expected_source: expected_source.to_owned(),
-            now,
-            reply: send,
-        })?;
-        Ok(receive)
-    }
     pub(crate) fn read_xmp_receiver(
         &self,
         export_id: &str,
@@ -106,94 +86,6 @@ fn record(row: &rusqlite::Row<'_>) -> rusqlite::Result<XmpExportRecord> {
     })
 }
 
-pub(super) fn create(
-    connection: &mut Connection,
-    photo_id: &str,
-    request_id: &str,
-    expected_recipe: &str,
-    expected_source: &str,
-    now: i64,
-) -> Result<XmpCreateOutcome, PersistenceError> {
-    let transaction = connection
-        .transaction()
-        .map_err(|_| PersistenceError::Storage)?;
-    let payload_digest =
-        crate::export_submission_payload_digest("edit-state-xmp", expected_recipe, expected_source);
-    let existing = transaction
-        .query_row(
-            &format!(
-                "SELECT {COLUMNS},payload_digest FROM xmp_exports WHERE photo_id=? AND request_id=?"
-            ),
-            params![photo_id, request_id],
-            |row| Ok((record(row)?, row.get::<_, String>(14)?)),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
-    if let Some((existing, captured_payload)) = existing {
-        return Ok(if captured_payload != payload_digest {
-            XmpCreateOutcome::Conflict
-        } else if existing.expires_at <= now {
-            XmpCreateOutcome::Expired
-        } else {
-            XmpCreateOutcome::Replay(existing)
-        });
-    }
-    let exists = transaction
-        .query_row("SELECT 1 FROM photos WHERE id=?", [photo_id], |r| {
-            r.get::<_, i64>(0)
-        })
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
-    if exists.is_none() {
-        return Ok(XmpCreateOutcome::NotFound);
-    }
-    let current = super::composable_recipe::read_composable_edit_recipe(&transaction, photo_id)?;
-    let Some(recipe) = current else {
-        return Ok(XmpCreateOutcome::MissingRecipe);
-    };
-    if recipe.revision != expected_recipe || recipe.source_revision != expected_source {
-        return Ok(XmpCreateOutcome::Stale);
-    }
-    let settings = match crate::xmp::semantic_settings(&recipe) {
-        Ok(settings) => settings,
-        Err(error) => return Ok(error.into()),
-    };
-    let id = format!("xmp-{}", random_uuid_v4()?);
-    let document = crate::xmp::document(&recipe, &settings);
-    let byte_length = i64::try_from(document.len()).map_err(|_| PersistenceError::Storage)?;
-    let filename = format!("{id}.xmp");
-    let sha256 = crate::xmp::digest(&document);
-    let expires_at = now
-        .checked_add(XMP_RETENTION_SECONDS)
-        .ok_or(PersistenceError::Storage)?;
-    let (mode, temp, tint) = match settings.white_balance {
-        WhiteBalanceIntent::AsShot => ("as-shot", None, None),
-        WhiteBalanceIntent::TemperatureTint {
-            temperature_kelvin,
-            tint_milli,
-        } => (
-            "temperature-tint",
-            Some(temperature_kelvin),
-            Some(tint_milli),
-        ),
-    };
-    transaction.execute(
-        "INSERT INTO xmp_exports(id,photo_id,request_id,payload_digest,recipe_revision,source_revision,exposure_ev,white_balance_mode,temperature_kelvin,tint_milli,created_at,expires_at,filename,document,byte_length,sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        params![id, photo_id, request_id, payload_digest, recipe.revision, recipe.source_revision, settings.exposure_ev, mode, temp, tint, now, expires_at, filename, document, byte_length, sha256],
-    ).map_err(|_| PersistenceError::Storage)?;
-    let saved = transaction
-        .query_row(
-            &format!("SELECT {COLUMNS} FROM xmp_exports WHERE id=?"),
-            [&id],
-            record,
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    transaction
-        .commit()
-        .map_err(|_| PersistenceError::Storage)?;
-    Ok(XmpCreateOutcome::Created(saved))
-}
-
 pub(super) fn read(
     connection: &Connection,
     id: &str,
@@ -240,13 +132,13 @@ mod tests {
     use crate::persistence::test_support::*;
 
     #[test]
-    fn snapshots_replay_after_restart_without_recipe_or_original() {
+    fn historical_snapshots_read_after_restart_and_keep_expiry_tombstones() {
         let (_base, _library, _state, _name, path) = fixture();
         seed(
             &path,
             include_str!("../../../../compatibility/sqlite/schema-v14.sql"),
         );
-        let mut connection = Connection::open(&path).unwrap();
+        let connection = Connection::open(&path).unwrap();
         add_recipe_test_photo(
             &connection,
             RecipeTestPhoto {
@@ -259,140 +151,45 @@ mod tests {
                 mtime_ms: 3000.0,
             },
         );
+        let now = crate::persistence::export::export_unix_seconds() as i64;
         let source = "missing.ARW\0size\0mtime";
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        assert_eq!(
-            create(&mut connection, "photo", "missing", "recipe", source, now).unwrap(),
-            XmpCreateOutcome::MissingRecipe
-        );
-        connection
-            .execute(
-                "INSERT INTO library_metadata(key,value) VALUES('composable_edit_recipe:photo',?)",
-                [serde_json::json!({
-                    "photo_id":"photo", "revision":"recipe", "source_revision":source,
-                    "current_step_id":null, "steps":[]
-                })
-                .to_string()],
-            )
-            .unwrap();
-        assert_eq!(
-            create(&mut connection, "photo", "empty", "recipe", source, now).unwrap(),
-            XmpCreateOutcome::MissingStep
-        );
-        connection
-            .execute(
-                "DELETE FROM library_metadata WHERE key='composable_edit_recipe:photo'",
-                [],
-            )
-            .unwrap();
-        connection.execute("INSERT INTO library_metadata(key,value) VALUES('composable_edit_recipe:photo',?)", [serde_json::json!({
-            "photo_id":"photo", "revision":"recipe", "source_revision":source,
-            "current_step_id":"selected", "steps":[{
-                "step_id":"selected", "module":"darktable",
-                "input":{"Original":{"photo_id":"photo","source_revision":source}},
-                "parameters":{"schema_version":"darktable-params-1","tree":{"stack":[
-                    {"operation":"exposure","multiPriority":0,"enabled":true,"params":{"mode":"EXPOSURE_MODE_MANUAL","exposure":0.5}}
-                ]}}
-            }]
-        }).to_string()]).unwrap();
-        assert_eq!(
-            create(&mut connection, "photo", "stale", "wrong", source, now).unwrap(),
-            XmpCreateOutcome::Stale
-        );
-        let XmpCreateOutcome::Created(saved) =
-            create(&mut connection, "photo", "request", "recipe", source, now).unwrap()
-        else {
-            panic!("snapshot not created")
-        };
-        // A saved document is authoritative even when generation changes.
         let historical = b"<historical-document/>".to_vec();
-        connection
-            .execute(
-                "UPDATE xmp_exports SET document=?,byte_length=?,sha256=? WHERE id=?",
-                params![
-                    historical,
-                    i64::try_from(historical.len()).unwrap(),
-                    crate::xmp::digest(&historical),
-                    saved.export_id
-                ],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "DELETE FROM library_metadata WHERE key='composable_edit_recipe:photo'",
-                [],
-            )
-            .unwrap();
+        let digest = crate::xmp::digest(&historical);
+        connection.execute(
+            "INSERT INTO xmp_exports(id,photo_id,request_id,payload_digest,recipe_revision,source_revision,exposure_ev,white_balance_mode,temperature_kelvin,tint_milli,created_at,expires_at,filename,document,byte_length,sha256) VALUES(?,?,?,?,?,?,'0.5','as-shot',NULL,NULL,?,?,?,?,?,?)",
+            params!["xmp-historical", "photo", "historical-request", "a".repeat(64), "retained-recipe", source, now, now + crate::XMP_RETENTION_SECONDS, "xmp-historical.xmp", historical, historical.len() as i64, digest],
+        ).unwrap();
         drop(connection);
-        let mut reopened = Connection::open(&path).unwrap();
-        let replay = read(&reopened, &saved.export_id).unwrap().unwrap();
-        assert_eq!(replay.document, historical);
-        assert_eq!(
-            create(&mut reopened, "photo", "request", "recipe", source, now + 1).unwrap(),
-            XmpCreateOutcome::Replay(replay.clone())
-        );
+        let reopened = Connection::open(&path).unwrap();
+        let retained = read(&reopened, "xmp-historical").unwrap().unwrap();
+        assert_eq!(retained.document, historical);
+        assert_eq!(retained.source_revision, source);
+        assert_eq!(retained.recipe_version, "retained-recipe");
         assert_eq!(
             list(&reopened, "photo").unwrap(),
-            Some(vec![replay.clone()])
+            Some(vec![retained.clone()])
         );
+        assert_eq!(read(&reopened, "unknown").unwrap(), None);
+        assert_eq!(list(&reopened, "unknown").unwrap(), None);
         reopened
             .execute(
-                "UPDATE xmp_exports SET created_at=?,document=NULL,expires_at=? WHERE id=?",
-                params![now - XMP_RETENTION_SECONDS - 1, now - 1, saved.export_id],
+                "UPDATE xmp_exports SET document=NULL,created_at=?1,expires_at=?2 WHERE id='xmp-historical'",
+                [now - crate::XMP_RETENTION_SECONDS - 1, now - 1],
             )
             .unwrap();
-        let tombstone = read(&reopened, &saved.export_id).unwrap().unwrap();
+        let tombstone = read(&reopened, "xmp-historical").unwrap().unwrap();
         assert!(tombstone.document.is_empty());
-        assert_eq!(tombstone.byte_length, replay.byte_length);
-        assert_eq!(tombstone.sha256, replay.sha256);
+        assert_eq!(tombstone.byte_length, retained.byte_length);
+        assert_eq!(tombstone.sha256, retained.sha256);
         assert_eq!(list(&reopened, "photo").unwrap(), Some(vec![tombstone]));
-        assert_eq!(
-            create(&mut reopened, "photo", "request", "recipe", source, now).unwrap(),
-            XmpCreateOutcome::Expired
-        );
-        assert_eq!(
-            create(
-                &mut reopened,
-                "photo",
-                "request",
-                "changed",
-                source,
-                now + 1
-            )
-            .unwrap(),
-            XmpCreateOutcome::Conflict
-        );
-        assert_eq!(
-            create(
-                &mut reopened,
-                "photo",
-                "request",
-                "recipe",
-                source,
-                replay.expires_at
-            )
-            .unwrap(),
-            XmpCreateOutcome::Expired
-        );
-        assert_eq!(
-            create(&mut reopened, "photo", "new", "recipe", source, now).unwrap(),
-            XmpCreateOutcome::MissingRecipe
-        );
-        assert_eq!(
-            create(&mut reopened, "unknown", "request", "recipe", source, now).unwrap(),
-            XmpCreateOutcome::NotFound
-        );
         reopened
             .execute(
-                "UPDATE xmp_exports SET document=?,sha256=? WHERE id=?",
-                params![historical, "0".repeat(64), saved.export_id],
+                "UPDATE xmp_exports SET document=?,sha256=? WHERE id='xmp-historical'",
+                params![historical, "0".repeat(64)],
             )
             .unwrap();
         assert!(matches!(
-            read(&reopened, &saved.export_id),
+            read(&reopened, "xmp-historical"),
             Err(PersistenceError::Storage)
         ));
     }

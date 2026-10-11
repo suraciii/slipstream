@@ -39,9 +39,7 @@ pub use admission::{
     DatabaseName, StateDatabaseLock, StateDirectory, StateError, StateFileIdentity,
 };
 pub use albums::AlbumWriteError;
-#[cfg(test)]
-pub(crate) use composable_recipe::deserialize_recipe_snapshot;
-pub(crate) use composable_recipe::serialize_recipe_snapshot;
+pub use composable_recipe::{processing_recipe_decode, processing_recipe_encode};
 pub(crate) use expansion::expand_library_binding;
 pub use metadata::{
     ActiveAssociation, MetadataContext, MetadataRecord, MetadataStoreError, ObservedSidecar,

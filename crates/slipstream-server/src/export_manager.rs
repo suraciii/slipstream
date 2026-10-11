@@ -16,7 +16,9 @@ use slipstream_core::{
 use slipstream_processing::local_photo::OutputIdentity;
 #[path = "export_manager_composable.rs"]
 mod composable;
-pub(crate) use composable::{ProcessingExportExecution, ProcessingPreviewExecution};
+pub(crate) use composable::{
+    ProcessingExportExecution, ProcessingExportInput, ProcessingPreviewExecution,
+};
 use slipstream_processing::photo_profile;
 #[path = "output_validation.rs"]
 pub(crate) mod output_validation;
@@ -49,6 +51,8 @@ const INTERRUPTED_ATTEMPT: &str = "the attempt was interrupted by a restart";
 /// The shared local executor plus the filesystem seams one attempt owns.
 pub(crate) struct ExportManager {
     library: Arc<Library>,
+    workspaces: Arc<crate::workspace::WorkspaceManager>,
+    state_directory: PathBuf,
     library_root: PathBuf,
     resolver: SourceLocationResolver,
     workspace: ExportWorkspace,
@@ -137,6 +141,7 @@ impl ExportManager {
         resolver: SourceLocationResolver,
         processing: ProcessingConfig,
         allowance: u64,
+        workspaces: Arc<crate::workspace::WorkspaceManager>,
     ) -> Result<Self, String> {
         let workspace_root = state_directory.join("exports");
         std::fs::create_dir_all(&workspace_root)
@@ -146,6 +151,8 @@ impl ExportManager {
         let executor = Arc::new(PhotoExecutor::open(&processing, state_directory)?);
         Ok(Self {
             library,
+            workspaces,
+            state_directory: state_directory.to_path_buf(),
             library_root,
             resolver,
             workspace,
@@ -299,12 +306,6 @@ impl ExportManager {
         (self.resolver)(photo_id)
     }
 
-    /// The bundle identity every attempt of this deployment executes
-    /// under. Startup configuration cannot change while the service runs.
-    pub(crate) fn bundle_sha256(&self) -> &str {
-        self.executor.bundle_sha256()
-    }
-
     /// Pre-acceptance admission: the local Photo Development executor must
     /// be available before an Export is accepted, so an unusable bundle
     /// never consumes a request identity or a capacity reservation.
@@ -331,27 +332,6 @@ impl ExportManager {
     ) -> Result<OutputIdentity, String> {
         self.executor
             .develop(input, output, exposure_milli_ev, cancellation)
-            .await
-    }
-
-    pub(crate) async fn auto_parameters(
-        &self,
-        input: PathBuf,
-        parameters: slipstream_processing::modules::Parameters,
-        operation: String,
-        multi_priority: i64,
-        instruction: serde_json::Value,
-        cancellation: Arc<AtomicBool>,
-    ) -> Result<serde_json::Value, String> {
-        self.executor
-            .auto_parameters(
-                input,
-                parameters,
-                operation,
-                multi_priority,
-                instruction,
-                cancellation,
-            )
             .await
     }
 
@@ -394,9 +374,86 @@ impl ExportManager {
             .unwrap_or_else(|error| error.into_inner()) = Some(task);
     }
 
+    /// Runs before serving requests, after interrupted work has been settled.
+    /// Only this quiescent window can prove an absent admission is abandoned.
+    pub(crate) async fn reconcile_export_dependencies_on_startup(&self) -> Result<(), String> {
+        let manager = Arc::clone(&self.workspaces);
+        let owners =
+            tokio::task::spawn_blocking(move || manager.processing_export_dependency_owners())
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
+        for owner in owners {
+            let Some(request) = owner.strip_prefix("processing-export:") else {
+                continue;
+            };
+            if self
+                .library
+                .processing_export_work(request)
+                .await
+                .map_err(|error| error.to_string())?
+                .is_none()
+            {
+                let manager = Arc::clone(&self.workspaces);
+                tokio::task::spawn_blocking(move || manager.release_dependency(&owner))
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        self.reconcile_processing_export_dependencies().await;
+        Ok(())
+    }
+
+    async fn reconcile_processing_export_dependencies(&self) {
+        let manager = Arc::clone(&self.workspaces);
+        let Ok(Ok(owners)) =
+            tokio::task::spawn_blocking(move || manager.processing_export_dependency_owners())
+                .await
+        else {
+            return;
+        };
+        for owner in owners {
+            let Some(request) = owner.strip_prefix("processing-export:") else {
+                continue;
+            };
+            let releasable = match self.library.processing_export_work(request).await {
+                Ok(Some(work))
+                    if matches!(
+                        work.state,
+                        slipstream_core::ProcessingExportWorkState::Failed
+                            | slipstream_core::ProcessingExportWorkState::Cancelled
+                    ) =>
+                {
+                    true
+                }
+                Ok(Some(work))
+                    if work.state == slipstream_core::ProcessingExportWorkState::Succeeded =>
+                {
+                    match work.artifact_id {
+                        Some(id) => self
+                            .workspaces
+                            .resolve_artifact_alias(id.as_str())
+                            .ok()
+                            .flatten()
+                            .is_some(),
+                        None => false,
+                    }
+                }
+                _ => false,
+            };
+            if releasable {
+                let manager = Arc::clone(&self.workspaces);
+                let _ =
+                    tokio::task::spawn_blocking(move || manager.release_dependency(&owner)).await;
+            }
+        }
+    }
+
     /// Removes expired artifacts and orphaned files, then lets the owner
     /// expire the corresponding rows and receipts.
     pub(crate) async fn sweep_expiry(&self) {
+        self.reconcile_processing_export_dependencies().await;
         let now = unix_seconds();
         let Ok(sweep) = self.library.sweep_export_expiry(now).await else {
             return;
@@ -613,20 +670,6 @@ impl ExportManager {
 }
 
 impl ExportManager {
-    /// The common staging seam used by durable Exports and preview-class
-    /// attempts. The expected source revision is supplied directly so the
-    /// ephemeral path never needs an Export snapshot or persistence row.
-    pub(crate) async fn stage_original_for(
-        &self,
-        photo_id: &str,
-        source_revision: &str,
-    ) -> Result<StagedOriginal, String> {
-        let (staged, _) = self
-            .stage_original_details(photo_id, source_revision, None)
-            .await?;
-        Ok(staged)
-    }
-
     /// Stages one preview Original and classifies its approved processing
     /// profile from the same confined bytes. The profile is engine input,
     /// not part of the Edit identity facts.

@@ -126,6 +126,22 @@ impl crate::persistence::owner::Persistence {
         Ok(receive)
     }
 
+    pub(crate) fn submit_processing_export_with_recipe_receiver(
+        &self,
+        mutation: SubmitProcessingExport,
+        recipe: crate::processing::ComposableEditRecipe,
+        now: u64,
+    ) -> Result<
+        oneshot::Receiver<Result<ProcessingExportSubmitOutcome, PersistenceError>>,
+        PersistenceError,
+    > {
+        let (send, receive) = oneshot::channel();
+        self.submit(OwnerCommand::Processing(
+            Command::SubmitProcessingExportWithRecipe(mutation, recipe, now, send),
+        ))?;
+        Ok(receive)
+    }
+
     pub(crate) fn settle_processing_export_receiver(
         &self,
         artifact: ProcessingArtifact,
@@ -144,6 +160,22 @@ impl crate::persistence::owner::Persistence {
             now,
             reply: send,
         }))?;
+        Ok(receive)
+    }
+
+    pub(crate) fn retain_processing_artifact_in_workspace_receiver(
+        &self,
+        artifact_id: &str,
+        published_at: u64,
+    ) -> Result<oneshot::Receiver<Result<(), PersistenceError>>, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(OwnerCommand::Processing(
+            Command::RetainProcessingArtifactInWorkspace(
+                artifact_id.to_owned(),
+                published_at,
+                send,
+            ),
+        ))?;
         Ok(receive)
     }
 

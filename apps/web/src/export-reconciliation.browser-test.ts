@@ -1,510 +1,327 @@
-import { expect, type Page } from "@playwright/test";
-import { createHash } from "node:crypto";
+import { expect, test } from "@playwright/test";
+import { setupBrowserSmoke } from "./browser-test-support/fixtures.js";
 import {
-  processingBrowserTest as test,
-  processingRequestIdFixture,
-  sourceRevision,
-  moduleName,
-  outputContract,
-  mockEditor,
-  artifact,
-  work,
-  parameters,
+  capturedJob,
+  commandsFor,
+  editFixture,
+  exportButton,
+  jobRow,
   json,
-  routePhoto,
-  submit,
-  exportRow,
-  artifactRow,
-  openFirst,
-  openEdit,
   navigate,
+  openWorkspace,
+  retainFile,
   setExposure,
-  setAdvancedExposure,
-  openAdvancedCompatibility,
-} from "./browser-test-support/processing-fixtures.js";
+  setupWorkspace,
+} from "./browser-test-support/workspace-edit-fixtures.js";
+
+setupBrowserSmoke();
 
 for (const lostResponse of [
   "connection",
+  "unreadable",
   "server-unknown",
-  "server-error",
 ] as const) {
-  test(`an uncertain Export (${lostResponse}) replays its exact captured request after navigating`, async ({
+  test(`uncertain export (${lostResponse}) replays the exact captured request for its Photo`, async ({
     page,
-    running,
   }) => {
-    const state = await mockEditor(page, running);
-    const first = state.photos[0]!;
-    const second = state.photos[1]!;
-    const requests = new Map<string, string[]>();
-    await page.route("**/api/photos/*/edit/export", async (route) => {
-      if (route.request().method() === "GET") return route.fallback();
-      const photoId = routePhoto(route);
-      const body = route.request().postData()!;
-      const captured = requests.get(photoId) ?? [];
-      captured.push(body);
-      requests.set(photoId, captured);
-      const request = JSON.parse(body) as {
-        requestId: string;
-        expectedEditRevision: string;
-      };
-      const saved = state.recipes.get(photoId)!;
-      const step = saved.steps.find(
-        (item) => item.stepId === saved.currentStepId,
-      )!;
-      if (photoId === first && captured.length === 1) {
+    const state = await setupWorkspace(page);
+    const [first, second] = state.photos as [string, string];
+    state.command = async (route, captured) => {
+      if (
+        captured.photoId !== first ||
+        captured.command.operation !== "export create"
+      )
+        return false;
+      if (commandsFor(state, first, "export create").length === 1) {
+        // Admission happened; only the acknowledgement was lost. Replaying must not capture again.
+        state.jobs
+          .get(first)!
+          .push(
+            capturedJob(
+              first,
+              String(captured.command.arguments.requestId),
+              String(captured.command.arguments.revision),
+            ),
+          );
         if (lostResponse === "connection")
           return route.abort("connectionreset");
+        if (lostResponse === "unreadable")
+          return route.fulfill({
+            status: 202,
+            contentType: "application/json",
+            body: "{",
+          });
         return json(
           route,
           {
             error: {
-              code:
-                lostResponse === "server-unknown"
-                  ? "outcome_unknown"
-                  : "internal_error",
+              code: "outcome_unknown",
+              effect: "unknown",
+              message: "Admission acknowledgement unavailable",
             },
           },
           500,
         );
       }
-      if (photoId === first) {
-        const retained = artifact(photoId, Buffer.from("published result"));
-        state.artifacts.set(photoId, [retained]);
-        return json(route, { artifact: retained, replayed: true }, 201);
-      }
-      const receipt = work(photoId, request.requestId, "accepted", {
-        recipeRevision: request.expectedEditRevision,
-        sourceRevision: saved.sourceRevision,
-        stepId: step.stepId,
-        parameters: step.parameters,
-      });
-      state.exports.set(photoId, [receipt]);
-      return json(route, { outcome: "accepted", receipt }, 202);
-    });
-    await page.setViewportSize({ width: 390, height: 844 });
-    await openFirst(page, running.url);
-    await expect(submit(page)).toBeEnabled();
-    await submit(page).click();
+      return json(route, state.jobs.get(first)![0], 202);
+    };
+    await openWorkspace(page, state);
+    await exportButton(page).click();
     await expect(
-      page.locator("[data-photo-editor-export-retry]"),
+      page.getByRole("button", { name: "Replay exact request" }),
     ).toBeVisible();
-    await expect(submit(page)).toBeDisabled();
+    await expect(exportButton(page)).toBeDisabled();
     await navigate(page, "Next");
-    await expect(
-      page.getByLabel("Exposure (EV)", { exact: true }),
-    ).toBeEnabled();
+    await expect(exportButton(page)).toBeEnabled();
     await setExposure(page, "0.5");
+    await expect.poll(() => state.edits.get(second)?.revision).toBe("r2");
+    await exportButton(page).click();
     await expect
-      .poll(() => state.recipes.get(second)?.steps[0]?.parameters)
-      .toEqual(parameters(0.5));
-    await expect(submit(page)).toBeEnabled();
-    await submit(page).click();
+      .poll(() => commandsFor(state, second, "export create").length)
+      .toBe(1);
+    const secondRequest = commandsFor(state, second, "export create")[0]!;
     await expect(
-      exportRow(
-        page,
-        processingRequestIdFixture(requests.get(second)![0]!),
-      ).getByRole("button", { name: "Cancel", exact: true }),
+      jobRow(page, String(secondRequest.command.arguments.requestId)),
     ).toBeVisible();
-    await navigate(page, "Previous");
-    await expect(submit(page)).toBeDisabled();
-    await page.locator("[data-photo-editor-export-retry]").click();
     await expect(
-      artifactRow(page, "a".repeat(64)).getByRole("button", {
-        name: "Download",
-        exact: true,
-      }),
-    ).toBeEnabled();
-    await expect(submit(page)).toBeEnabled();
-    expect(requests.get(first)).toHaveLength(2);
-    expect(requests.get(first)![1]).toBe(requests.get(first)![0]);
-    expect(JSON.parse(requests.get(first)![0]!)).toMatchObject({
-      expectedEditRevision: "recipe-1",
+      page.getByRole("button", { name: "Replay exact request" }),
+    ).toHaveCount(0);
+    await navigate(page, "Previous");
+    await page.getByRole("button", { name: "Replay exact request" }).click();
+    await expect(exportButton(page)).toBeEnabled();
+    const requests = commandsFor(state, first, "export create");
+    expect(requests).toHaveLength(2);
+    expect(requests[1]!.body).toBe(requests[0]!.body);
+    expect(requests[0]!.command).toMatchObject({
+      operation: "export create",
+      editId: `edit-${first}`,
+      arguments: { revision: "r1" },
     });
-    expect(processingRequestIdFixture(requests.get(second)![0]!)).not.toBe(
-      processingRequestIdFixture(requests.get(first)![0]!),
+    expect(secondRequest.command.arguments.requestId).not.toBe(
+      requests[0]!.command.arguments.requestId,
     );
+    expect(state.jobs.get(first)).toHaveLength(1);
+    await expect(
+      jobRow(page, String(requests[0]!.command.arguments.requestId)),
+    ).toBeVisible();
+    await expect(
+      jobRow(page, String(secondRequest.command.arguments.requestId)),
+    ).toHaveCount(0);
   });
 }
 
-test("a refused recipe save blocks export until the saved recipe is chosen", async ({
-  page,
-  running,
-}) => {
-  const state = await mockEditor(page, running, {
-    save: async (route) => {
-      await json(
-        route,
-        {
-          error: {
-            code: "recipe_conflict",
-            message: "The saved edit changed.",
-          },
-        },
-        409,
-      );
-    },
-  });
-  await openFirst(page, running.url);
-  await setAdvancedExposure(page, "0.5");
-  await expect(page.locator("[data-photo-editor-conflict]")).toBeVisible();
-  await expect(submit(page)).toBeDisabled();
-  await page.locator("[data-photo-editor-use-saved]").click();
-  await expect(page.getByLabel("Exposure (EV)", { exact: true })).toHaveValue(
-    "0",
-  );
-  await expect(submit(page)).toBeEnabled();
-  expect(state.saves).toHaveLength(1);
-});
-
-for (const response of ["connection", "unreadable"] as const) {
-  test(`an uncertain recipe save (${response}) blocks export and reconciles its exact body`, async ({
+for (const lostResponse of ["connection", "unreadable"] as const) {
+  test(`uncertain save (${lostResponse}) blocks new intent and replays the same guarded changes`, async ({
     page,
-    running,
   }) => {
-    const state = await mockEditor(page, running, {
-      save: async (route, fixture, request) => {
-        if (fixture.saves.length === 1) {
-          if (response === "connection") return route.abort("failed");
-          return route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: "{",
-          });
-        }
-        const photoId = routePhoto(route);
-        const saved = {
-          ...fixture.recipes.get(photoId)!,
-          revision: "recipe-2",
-          currentStepId: request.currentStepId,
-          steps: request.steps,
-        };
-        fixture.recipes.set(photoId, saved);
-        await json(route, {
-          outcome: "replayed",
-          sourceRevision,
-          recipeVersion: saved.revision,
-          recipe: saved,
+    const state = await setupWorkspace(page);
+    const first = state.photos[0]!;
+    state.command = async (route, captured) => {
+      if (captured.command.operation !== "edit apply") return false;
+      if (commandsFor(state, first, "edit apply").length === 1) {
+        state.edits.set(first, editFixture(first, 0.5, "r2"));
+        if (lostResponse === "connection") return route.abort("failed");
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: "{",
         });
-      },
-    });
-    await openFirst(page, running.url);
-    await setAdvancedExposure(page, "0.5");
-    await expect.poll(() => state.saves.length).toBe(1);
-    await expect(submit(page)).toBeDisabled();
+      }
+      return json(route, {
+        revision: "r2",
+        stateToken: "state-r2",
+        current: { revision: "r2" },
+      });
+    };
+    await openWorkspace(page, state);
+    await setExposure(page, "0.5");
+    await expect(
+      page.getByRole("button", { name: "Replay exact request" }),
+    ).toBeVisible();
+    await expect(exportButton(page)).toBeDisabled();
     await expect(
       page.getByLabel("Exposure (EV)", { exact: true }),
     ).toBeDisabled();
-    await page.locator("[data-photo-editor-refresh]").click();
-    await expect(submit(page)).toBeEnabled();
+    await expect(
+      page.getByRole("button", { name: "Discard draft", exact: true }),
+    ).toBeDisabled();
+    await navigate(page, "Next");
+    await expect(exportButton(page)).toBeEnabled();
+    await navigate(page, "Previous");
+    await page.getByRole("button", { name: "Replay exact request" }).click();
+    await expect(exportButton(page)).toBeEnabled();
     await expect(page.getByLabel("Exposure (EV)", { exact: true })).toHaveValue(
       "0.5",
     );
-    expect(state.saves).toHaveLength(2);
-    expect(state.saves[1]).toEqual(state.saves[0]);
-  });
-}
-
-test("an unavailable module preserves editable intent but refuses new export", async ({
-  page,
-  running,
-}) => {
-  const state = await mockEditor(page, running, { available: false });
-  await openFirst(page, running.url);
-  await expect(
-    page
-      .locator(
-        "[data-photo-editor-composable-editor] [data-photo-editor-module-controls]",
-      )
-      .getByLabel("Exposure (EV)", { exact: true }),
-  ).toBeEnabled();
-  await setAdvancedExposure(page, "0.5");
-  await expect
-    .poll(() => state.recipes.get(state.photos[0]!)?.steps[0]?.parameters)
-    .toEqual(parameters(0.5));
-  await expect(submit(page)).toBeDisabled();
-});
-
-test("a recipe bound to an earlier Original retains settings and blocks export", async ({
-  page,
-  running,
-}) => {
-  await mockEditor(page, running, {
-    read: (photoId, saved) => ({
-      photoId,
-      sourceRevision,
-      currentSourceRevision: "replacement-source",
-      sourceAvailable: true,
-      recipe: saved,
-    }),
-  });
-  await openFirst(page, running.url);
-  await expect(page.locator("[data-photo-editor-conflict]")).toBeVisible();
-  await expect(page.getByLabel("Exposure (EV)", { exact: true })).toHaveValue(
-    "0",
-  );
-  await expect(submit(page)).toBeDisabled();
-  await expect(page.locator("[data-photo-editor-rebind]")).toBeVisible();
-});
-
-test("an explicitly chosen retained artifact becomes the new selected step's export input", async ({
-  page,
-  running,
-}) => {
-  const state = await mockEditor(page, running);
-  const photoId = state.photos[0]!;
-  const retained = artifact(photoId, Buffer.from("retained input"));
-  state.artifacts.set(photoId, [retained]);
-  let submitted:
-    | {
-        requestId: string;
-        expectedEditRevision: string;
-        stepId: string;
-        expectedSourceRevision: string;
-      }
-    | undefined;
-  await page.route("**/api/photos/*/edit/export", (route) => {
-    if (route.request().method() === "GET") return route.fallback();
-    const body = JSON.parse(route.request().postData()!) as {
-      requestId: string;
-      expectedEditRevision: string;
-    };
-    const saved = state.recipes.get(photoId)!;
-    const step = saved.steps.find(
-      (item) => item.stepId === saved.currentStepId,
-    )!;
-    submitted = {
-      ...body,
-      stepId: step.stepId,
-      expectedSourceRevision: saved.sourceRevision,
-    };
-    const receipt = work(photoId, submitted.requestId, "accepted", {
-      stepId: step.stepId,
-      recipeRevision: saved.revision,
-      input: step.input,
-      parameters: step.parameters,
+    const saves = commandsFor(state, first, "edit apply");
+    expect(saves).toHaveLength(2);
+    expect(saves[1]!.body).toBe(saves[0]!.body);
+    expect(saves[0]!.command.arguments).toMatchObject({
+      ifState: "state-r1",
+      input: {
+        changes: [
+          {
+            type: "set",
+            instanceId: "exposure-1",
+            parameterId: "exposure",
+            value: 0.5,
+          },
+        ],
+      },
     });
-    state.exports.set(photoId, [receipt]);
-    return json(route, { outcome: "accepted", receipt }, 202);
   });
-  await openFirst(page, running.url);
-  await openAdvancedCompatibility(page);
-  await page
-    .locator("[data-photo-editor-new-step-input]")
-    .selectOption(`artifact:${retained.artifactId}`);
-  await page.locator("[data-photo-editor-composable-add]").click();
-  await expect.poll(() => state.recipes.get(photoId)?.steps.length).toBe(2);
-  const saved = state.recipes.get(photoId)!;
-  const selected = saved.steps.find(
-    (step) => step.stepId === saved.currentStepId,
-  )!;
-  expect(selected.input).toEqual({
-    kind: "artifact",
-    artifactId: retained.artifactId,
-    contract: outputContract,
-  });
-  expect(selected.stepId).not.toBe("step-1");
-  await expect(submit(page)).toBeEnabled();
-  await submit(page).click();
-  await expect.poll(() => submitted?.stepId).toBe(selected.stepId);
-  const latest = state.recipes.get(photoId)!;
-  expect(submitted).toMatchObject({
-    expectedEditRevision: latest.revision,
-    expectedSourceRevision: sourceRevision,
-  });
-  await expect(
-    exportRow(page, submitted!.requestId).getByRole("button", {
-      name: "Cancel",
-      exact: true,
-    }),
-  ).toBeEnabled();
-});
-
-async function png(page: Page): Promise<Buffer> {
-  return Buffer.from(
-    await page.evaluate(async () => {
-      const canvas = document.createElement("canvas");
-      canvas.width = 16;
-      canvas.height = 12;
-      const context = canvas.getContext("2d")!;
-      context.fillStyle = "#607080";
-      context.fillRect(0, 0, 16, 12);
-      const blob = await new Promise<Blob>((resolve) =>
-        canvas.toBlob((value) => resolve(value!), "image/png"),
-      );
-      return Array.from(new Uint8Array(await blob.arrayBuffer()));
-    }),
-  );
 }
 
-function previewHeaders(
-  photoId: string,
-  bytes: Buffer,
-): Record<string, string> {
-  const digest = createHash("sha256").update(bytes).digest("hex");
-  return Object.fromEntries(
-    Object.entries({
-      "photo-id": photoId,
-      "step-id": "step-1",
-      "source-revision": Buffer.from(sourceRevision).toString("hex"),
-      "recipe-revision": "recipe-1",
-      sha256: digest,
-      width: "16",
-      height: "12",
-      geometry: "16",
-      "bundle-id": "fixture-bundle",
-      module: moduleName,
-      "adapter-schema-version": "v1",
-      "parameter-digest": digest,
-      "output-contract": digest,
-      "display-conversion": "srgb-v1",
-      identity: digest,
-      comparison: "current",
-      "input-sha256": "b".repeat(64),
-      "input-byte-length": "100",
-    }).map(([key, value]) => [`slipstream-processing-preview-${key}`, value]),
-  );
-}
-
-test("Original reference ignores a late current Edit Preview", async ({
-  page,
-  running,
-}) => {
-  const state = await mockEditor(page, running);
-  let release!: () => void;
-  const held = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  let settle!: () => void;
-  const settled = new Promise<void>((resolve) => {
-    settle = resolve;
-  });
-  await page.goto(running.url);
-  await expect(page.locator("[data-grid-status]")).toContainText(
-    "Ready · 2 Photos",
-  );
-  const bytes = await png(page);
-  await page.route("**/api/photos/*/edit/preview", async (route) => {
-    await held;
-    try {
-      await route.fulfill({
-        status: 200,
-        contentType: "image/png",
-        headers: previewHeaders(state.photos[0]!, bytes),
-        body: bytes,
-      });
-    } catch {
-      // Switching to the Original may abort the current Edit Preview fetch.
-    } finally {
-      settle();
+for (const resolution of ["reapply", "discard"] as const) {
+  test(`a conflicting draft requires inspection before ${resolution} against independent saved changes`, async ({
+    page,
+  }) => {
+    const state = await setupWorkspace(page);
+    const first = state.photos[0]!;
+    await openWorkspace(page, state);
+    // An independent CLI writer advances the saved edit before the Web's guarded write.
+    state.edits.set(first, editFixture(first, -1, "r2"));
+    await setExposure(page, "0.75");
+    await expect(page.locator("[data-workspace-error]")).toContainText(
+      "state_conflict",
+    );
+    await expect(exportButton(page)).toBeDisabled();
+    const reapply = page.getByRole("button", {
+      name: "Reapply retained draft to inspected state",
+    });
+    await expect(reapply).toBeDisabled();
+    await page
+      .getByRole("button", { name: "Inspect current saved settings" })
+      .click();
+    await expect(reapply).toBeEnabled();
+    if (resolution === "reapply") {
+      await reapply.click();
+      await expect.poll(() => state.edits.get(first)?.revision).toBe("r3");
+      expect(
+        commandsFor(state, first, "edit apply")[1]!.command.arguments.ifState,
+      ).toBe("state-r2");
+      await expect(
+        page.getByLabel("Exposure (EV)", { exact: true }),
+      ).toHaveValue("0.75");
+    } else {
+      await page
+        .getByRole("button", { name: "Discard draft", exact: true })
+        .click();
+      await expect(
+        page.getByLabel("Exposure (EV)", { exact: true }),
+      ).toHaveValue("-1");
+      expect(commandsFor(state, first, "edit apply")).toHaveLength(1);
     }
+    await expect(exportButton(page)).toBeEnabled();
   });
-  const requested = page.waitForRequest((request) =>
-    new URL(request.url()).pathname.endsWith("/edit/preview"),
-  );
+}
+
+test("late export admission stays with its Photo while another Photo saves and exports", async ({
+  page,
+}) => {
+  const state = await setupWorkspace(page);
+  const [first, second] = state.photos as [string, string];
+  const held = Promise.withResolvers<void>();
+  const settled = Promise.withResolvers<void>();
+  state.command = async (route, captured) => {
+    if (
+      captured.photoId !== first ||
+      captured.command.operation !== "export create"
+    )
+      return false;
+    await held.promise;
+    const job = capturedJob(
+      first,
+      String(captured.command.arguments.requestId),
+      String(captured.command.arguments.revision),
+    );
+    state.jobs.get(first)!.push(job);
+    await json(route, job, 202);
+    settled.resolve();
+  };
+  await openWorkspace(page, state);
+  await exportButton(page).click();
+  await expect
+    .poll(() => commandsFor(state, first, "export create").length)
+    .toBe(1);
   try {
-    await page.locator('[data-photo-index="0"]').click();
-    await openEdit(page);
-    await requested;
-    await expect(page.locator("[data-stage] img")).toBeVisible();
-    const originalSrc = await page
-      .locator("[data-stage] img")
-      .getAttribute("src");
-    expect(originalSrc).toBeTruthy();
-    await page.locator("[data-photo-editor-camera-reference]").click();
-    await expect(
-      page.locator("[data-photo-editor-camera-reference]"),
-    ).toHaveAttribute("aria-pressed", "true");
-    release();
-    await settled;
-    await expect(
-      page.locator("[data-photo-editor-preview-image]"),
-    ).toBeHidden();
-    await expect(page.locator("[data-stage] img")).toHaveAttribute(
-      "src",
-      originalSrc!,
+    await navigate(page, "Next");
+    await setExposure(page, "1");
+    await expect.poll(() => state.edits.get(second)?.revision).toBe("r2");
+    await exportButton(page).click();
+    await expect
+      .poll(() => commandsFor(state, second, "export create").length)
+      .toBe(1);
+    held.resolve();
+    await settled.promise;
+    const firstId = String(
+      commandsFor(state, first, "export create")[0]!.command.arguments
+        .requestId,
+    );
+    const secondId = String(
+      commandsFor(state, second, "export create")[0]!.command.arguments
+        .requestId,
+    );
+    await expect(jobRow(page, secondId)).toBeVisible();
+    await expect(jobRow(page, firstId)).toHaveCount(0);
+    await expect(page.getByLabel("Exposure (EV)", { exact: true })).toHaveValue(
+      "1",
+    );
+    await navigate(page, "Previous");
+    await expect(jobRow(page, firstId)).toBeVisible();
+    await expect(page.getByLabel("Exposure (EV)", { exact: true })).toHaveValue(
+      "0",
     );
   } finally {
-    release();
+    held.resolve();
   }
 });
 
-test("an admitted current Edit Preview can finish after fifteen seconds of polling", async ({
+test("Camera reference remains selected when a current preview finishes later", async ({
   page,
-  running,
 }) => {
-  await page.clock.install();
-  const state = await mockEditor(page, running);
-  await page.goto(running.url);
-  await expect(page.locator("[data-grid-status]")).toContainText(
-    "Ready · 2 Photos",
-  );
-  const bytes = await png(page);
-  let requests = 0;
-  await page.route("**/api/photos/*/edit/preview", (route) => {
-    requests++;
-    if (requests <= 21) return json(route, { state: "running" }, 202);
-    return route.fulfill({
-      status: 200,
-      contentType: "image/png",
-      headers: previewHeaders(state.photos[0]!, bytes),
-      body: bytes,
-    });
-  });
-  await page.locator('[data-photo-index="0"]').click();
-  await openEdit(page);
-  await expect.poll(() => requests).toBe(1);
-  for (let count = 1; count <= 21; count++) {
-    await page.clock.runFor(751);
-    await expect.poll(() => requests).toBeGreaterThan(count);
-  }
-  await expect(page.locator("[data-photo-editor-preview-image]")).toBeVisible();
-  await expect(
-    page.locator("[data-photo-editor-preview-image]"),
-  ).toHaveAttribute("src", /^blob:/);
-});
-
-test("numeric controls reject incomplete edits and synchronize Reset while focused", async ({
-  page,
-  running,
-}) => {
-  const state = await mockEditor(page, running);
-  const photoId = state.photos[0]!;
-  await openFirst(page, running.url);
-  const exposure = page
-    .locator(
-      "[data-photo-editor-composable-editor] [data-photo-editor-module-controls]",
-    )
-    .getByLabel("Exposure (EV)", { exact: true });
-  await setAdvancedExposure(page, "1");
+  const state = await setupWorkspace(page);
+  const first = state.photos[0]!;
+  await openWorkspace(page, state);
+  const original = await page.locator("[data-stage] img").getAttribute("src");
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
   await expect
-    .poll(() => state.recipes.get(photoId)?.steps[0]?.parameters)
-    .toEqual(parameters(1));
-  await expect.poll(() => state.saves.length).toBeGreaterThan(0);
-  await expect(
-    page.locator("[data-photo-editor-composable-state]"),
-  ).toContainText("Saved edit.");
-  await expect(exposure).toHaveValue("1");
-  await expect(exposure).toBeEnabled();
-  const savedCount = state.saves.length;
-  await exposure.fill("");
-  await exposure.press("Tab");
-  expect(
-    await exposure.evaluate(
-      (input: HTMLInputElement) => input.validity.valueMissing,
-    ),
-  ).toBe(true);
-  await expect(exposure).toHaveValue("");
-  expect(state.saves.length).toBe(savedCount);
-  expect(state.recipes.get(photoId)?.steps[0]?.parameters).toEqual(
-    parameters(1),
+    .poll(() => commandsFor(state, first, "preview render").length)
+    .toBe(1);
+  await page
+    .getByRole("button", { name: "Camera reference", exact: true })
+    .click();
+  const file = retainFile(
+    state,
+    first,
+    "late-preview",
+    Buffer.from("preview bytes"),
+    "preview-r1",
+    "preview",
   );
-  const reset = exposure
-    .locator("..")
-    .getByRole("button", { name: "Reset", exact: true });
-  await reset.click();
-  await expect(exposure).toHaveValue("0");
-  await expect(reset).toBeFocused();
-  await expect
-    .poll(() => state.recipes.get(photoId)?.steps[0]?.parameters)
-    .toEqual(parameters(0));
+  const job = state.jobs
+    .get(first)!
+    .find((item) => item.operation === "preview render")!;
+  job.status = "succeeded";
+  job.result = {
+    artifact: { artifactId: file.artifactId, revision: file.revision },
+  };
+  await jobRow(page, job.requestId)
+    .getByRole("button", { name: "Check status" })
+    .click();
+  await expect(jobRow(page, job.requestId)).toContainText("succeeded");
+  const preview = page.locator("[data-photo-editor-preview-image]");
+  await expect(preview).toBeVisible();
+  await expect(preview).toHaveAttribute("src", original!);
+  await expect(preview).toHaveAttribute(
+    "alt",
+    "Camera Preview · Original reference",
+  );
+  await expect(page.locator("[data-photo-editor-render-status]")).toHaveText(
+    "Camera Preview · Original reference",
+  );
+  await expect(page.locator("[data-stage] img")).toHaveAttribute(
+    "src",
+    original!,
+  );
 });

@@ -21,7 +21,7 @@ use crate::{
     PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateValue, PreviewSeed,
     PreviewSeedResult, RebindEditRecipe, RecoveryRecord, RecoverySurvey, RemovedPhotoRecord,
     RequestedRelocation, SaveEditRecipe, ScanSnapshot, SelectionState, WhiteBalanceIntent,
-    XmpCreateOutcome, XmpExportRecord,
+    XmpExportRecord,
 };
 
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params};
@@ -386,14 +386,6 @@ pub(super) enum Command {
     SaveEditRecipe(SaveEditRecipe, Reply<EditRecipeWriteOutcome>),
     RebindEditRecipe(RebindEditRecipe, Reply<EditRecipeWriteOutcome>),
     Processing(processing::Command),
-    CreateXmp {
-        photo_id: String,
-        request_id: String,
-        expected_recipe: String,
-        expected_source: String,
-        now: i64,
-        reply: Reply<XmpCreateOutcome>,
-    },
     ReadXmp {
         export_id: String,
         reply: Reply<Option<XmpExportRecord>>,
@@ -1773,23 +1765,6 @@ fn owner_main(
             }
             Command::Processing(command) => {
                 processing::dispatch(command, &state, &database_name, &mut connection);
-            }
-            Command::CreateXmp {
-                photo_id,
-                request_id,
-                expected_recipe,
-                expected_source,
-                now,
-                reply,
-            } => {
-                let _ = reply.send(xmp::create(
-                    &mut connection,
-                    &photo_id,
-                    &request_id,
-                    &expected_recipe,
-                    &expected_source,
-                    now,
-                ));
             }
             Command::ReadXmp { export_id, reply } => {
                 let _ = reply.send(xmp::read(&connection, &export_id));

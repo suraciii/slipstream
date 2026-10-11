@@ -56,12 +56,13 @@ impl<'a> ProcessingModulePolicy<'a> {
                     parameter_schema_version: DARKTABLE_PARAMETER_VERSION.to_owned(),
                 })
             }
-            (SPEKTRAFILM_MODULE, ProcessingInput::Artifact { .. }) if self.film_is_ready() => {
-                Some(ProcessingExportAdapterDecision::Qualified {
-                    adapter_version: SPEKTRAFILM_ADAPTER_VERSION.to_owned(),
-                    parameter_schema_version: SPEKTRAFILM_PARAMETER_VERSION.to_owned(),
-                })
-            }
+            (
+                SPEKTRAFILM_MODULE,
+                ProcessingInput::Artifact { .. } | ProcessingInput::WorkspaceArtifact { .. },
+            ) if self.film_is_ready() => Some(ProcessingExportAdapterDecision::Qualified {
+                adapter_version: SPEKTRAFILM_ADAPTER_VERSION.to_owned(),
+                parameter_schema_version: SPEKTRAFILM_PARAMETER_VERSION.to_owned(),
+            }),
             (DARKTABLE_MODULE | SPEKTRAFILM_MODULE, _) => {
                 Some(ProcessingExportAdapterDecision::NoQualifiedAdapter {
                     reason_code: NO_QUALIFIED_ADAPTER.to_owned(),
@@ -117,8 +118,10 @@ impl<'a> ProcessingModulePolicy<'a> {
         if !self.film_is_ready() {
             return Ok(None);
         }
-        let ProcessingInput::Artifact { contract, .. } = input else {
-            return Ok(None);
+        let contract = match input {
+            ProcessingInput::Artifact { contract, .. }
+            | ProcessingInput::WorkspaceArtifact { contract, .. } => contract,
+            ProcessingInput::Original { .. } => return Ok(None),
         };
         let required = crate::film_resources::minimum_live_bytes(
             contract.geometry.width,

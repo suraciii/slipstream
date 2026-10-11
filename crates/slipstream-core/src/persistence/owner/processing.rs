@@ -20,6 +20,10 @@ pub(in crate::persistence) enum Command {
         SaveComposableEditRecipe,
         Reply<Option<ComposableEditRecipeWriteOutcome>>,
     ),
+    ReplayComposableEditRecipeRebind(
+        crate::processing::RebindComposableEditRecipe,
+        Reply<Option<ComposableEditRecipeWriteOutcome>>,
+    ),
     SaveComposableEditRecipe(
         SaveComposableEditRecipe,
         Reply<ComposableEditRecipeWriteOutcome>,
@@ -37,6 +41,12 @@ pub(in crate::persistence) enum Command {
         u64,
         Reply<crate::processing::ProcessingExportSubmitOutcome>,
     ),
+    SubmitProcessingExportWithRecipe(
+        crate::processing::SubmitProcessingExport,
+        crate::processing::ComposableEditRecipe,
+        u64,
+        Reply<crate::processing::ProcessingExportSubmitOutcome>,
+    ),
     ListProcessingExports(String, u64, Reply<crate::processing::ProcessingExportList>),
     ReplayProcessingExport(
         crate::processing::ReplayProcessingExport,
@@ -51,6 +61,7 @@ pub(in crate::persistence) enum Command {
         String,
         Reply<Option<crate::processing::ProcessingArtifactRetention>>,
     ),
+    RetainProcessingArtifactInWorkspace(String, u64, Reply<()>),
     ReplayProcessingExportRetry {
         photo_id: String,
         previous_request_id: String,
@@ -138,6 +149,11 @@ pub(super) fn dispatch(
                 mutation,
             ));
         }
+        Command::ReplayComposableEditRecipeRebind(mutation, reply) => {
+            let _ = reply.send(composable_recipe::replay_composable_edit_recipe_rebind(
+                connection, mutation,
+            ));
+        }
         Command::SaveComposableEditRecipe(mutation, reply) => {
             let result = composable_recipe::save_composable_edit_recipe(
                 state,
@@ -172,6 +188,16 @@ pub(super) fn dispatch(
             );
             let _ = reply.send(result);
         }
+        Command::SubmitProcessingExportWithRecipe(mutation, recipe, now, reply) => {
+            let _ = reply.send(processing_export::submit_processing_export_with_recipe(
+                state,
+                database_name,
+                connection,
+                mutation,
+                Some(recipe),
+                now,
+            ));
+        }
         Command::ListProcessingExports(photo_id, now, reply) => {
             let _ = reply.send(processing_export::list_processing_exports(
                 connection, &photo_id, now,
@@ -195,6 +221,15 @@ pub(super) fn dispatch(
             let _ = reply.send(processing_export::read_processing_artifact_retention(
                 connection,
                 &artifact_id,
+            ));
+        }
+        Command::RetainProcessingArtifactInWorkspace(artifact_id, published_at, reply) => {
+            let _ = reply.send(processing_export::retain_processing_artifact_in_workspace(
+                state,
+                database_name,
+                connection,
+                &artifact_id,
+                published_at,
             ));
         }
         Command::ReplayProcessingExportRetry {

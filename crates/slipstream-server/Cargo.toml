@@ -7,10 +7,14 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+photo-files = { path = "../photo-files" }
+darktable-edit = { path = "../darktable-edit", default-features = false, features = ["inspection"] }
+parking_lot = "=0.12.5"
 base64 = "=0.22.1"
 getrandom = "=0.4.3"
 subtle = "=2.6.1"
 sha2.workspace = true
+quick-xml.workspace = true
 rusqlite.workspace = true
 url.workspace = true
 axum.workspace = true

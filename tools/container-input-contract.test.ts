@@ -377,6 +377,35 @@ test("the RAW decoder build and runtime use the same verified LibRaw release", a
   expect(await text("crates/slipstream-core/build.rs")).toContain('"libraw_r"');
 });
 
+test("the service image installs the independent editing tool beside its supervisor", async () => {
+  const dockerfile = await text("Dockerfile");
+  const build = dockerfileStage(dockerfile, "rust-build");
+  const runtime = dockerfileStage(dockerfile, "runtime-rootfs");
+  expect(
+    build.some(
+      ({ command, value }) =>
+        command === "RUN" &&
+        value.includes(
+          "cargo build --release --locked -p darktable-edit --bins",
+        ),
+    ),
+  ).toBeTrue();
+  for (const executable of ["darktable-edit", "darktable-edit-supervisor"]) {
+    expect(
+      runtime.some(
+        ({ command, value }) =>
+          command === "COPY" &&
+          value.includes(
+            `/src/target/release/${executable} /usr/local/bin/${executable}`,
+          ),
+      ),
+    ).toBeTrue();
+  }
+  const native = await text("tools/processing/photo/Dockerfile");
+  expect(native).toContain("-DBUILD_GUI=OFF");
+  expect(native).toContain("/opt/darktable-edit/edit-manifest.json");
+});
+
 test("the container and Compose focused contracts are wired through test:fast and verify", async () => {
   const scripts = (await packageManifest()).scripts;
   expect(scripts?.["test:container-input"]).toBe(

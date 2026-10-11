@@ -118,6 +118,46 @@ fn recipe(
     }
 }
 
+#[tokio::test]
+async fn workspace_only_recipe_roundtrips_without_original_source_evidence() {
+    let seeded = seeded_persistence();
+    Connection::open(&seeded.path)
+        .unwrap()
+        .execute(
+            "UPDATE original_files SET available=0 WHERE id='raw-original'",
+            [],
+        )
+        .unwrap();
+    let ProcessingInput::Artifact { contract, .. } = artifact_input("unused") else {
+        unreachable!()
+    };
+    let binding = ProcessingInput::WorkspaceArtifact {
+        workspace_id: "workspace-1".into(),
+        artifact_id: "capture/original.ARW".into(),
+        revision: "capture-1".into(),
+        contract,
+    };
+    let submitted = recipe(
+        "raw-photo",
+        "",
+        vec![step("film", "spektrafilm", binding.clone())],
+        Some("film"),
+    );
+    let encoded = super::processing_recipe_encode(&submitted).unwrap();
+    assert_eq!(super::processing_recipe_decode(encoded).unwrap(), submitted);
+    let ComposableEditRecipeWriteOutcome::Saved(committed) = save_recipe(
+        &seeded,
+        save("raw-photo", "workspace-save", None, "", submitted),
+    )
+    .await
+    else {
+        panic!("workspace-only save needs no Original evidence")
+    };
+    assert_eq!(committed.steps[0].input, binding);
+    assert!(committed.source_revision.is_empty());
+    assert_eq!(read_recipe(&seeded, "raw-photo").await.unwrap(), committed);
+}
+
 fn save(
     photo_id: &str,
     request_id: &str,

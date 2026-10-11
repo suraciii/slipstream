@@ -240,27 +240,6 @@ pub(super) async fn download(
     .await
 }
 
-/// Downloads the current Edit State Preview without exposing the internal
-/// Processing Step route in the primary CLI surface.
-pub(super) async fn download_current(
-    client: &ServiceClient,
-    photo_id: &str,
-    step_id: &str,
-    destination: Destination,
-    publication: &PublicationState,
-) -> Result<Value, CommandFailure> {
-    download_from_endpoint(
-        client,
-        photo_id,
-        step_id,
-        Operation::PhotosEditPreview,
-        client.endpoint(&["api", "photos", photo_id, "edit", "preview"]),
-        destination,
-        publication,
-    )
-    .await
-}
-
 async fn download_from_endpoint(
     client: &ServiceClient,
     photo_id: &str,

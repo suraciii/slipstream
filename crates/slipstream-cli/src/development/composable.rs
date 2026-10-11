@@ -8,6 +8,7 @@ pub(super) const MAXIMUM_STEP_ID_BYTES: usize = 64;
 pub(super) const MAXIMUM_MODULE_ID_BYTES: usize = 64;
 pub(super) const MAXIMUM_ARTIFACT_ID_BYTES: usize = 128;
 pub(super) const MAXIMUM_PHOTO_ID_BYTES: usize = 128;
+pub(super) const MAXIMUM_WORKSPACE_ID_BYTES: usize = 128;
 pub(super) const MAXIMUM_REVISION_BYTES: usize = 128;
 pub(super) const MAXIMUM_CONTRACT_NAME_BYTES: usize = 128;
 pub(super) const MAXIMUM_RECIPE_STEPS: usize = 64;
@@ -146,17 +147,12 @@ pub(super) fn parse_processing_auto(bytes: Vec<u8>) -> Result<Value, CommandFail
         "expectedRecipeRevision",
         input.expected_recipe_revision.as_deref(),
     )?;
-    validate_source_revision("expectedSourceRevision", &input.expected_source_revision)?;
     validate_nonempty_revision("currentStepId", input.current_step_id.as_deref())?;
-    if !matches!(
-        input.automatic_adjustment.operation.as_str(),
-        "exposure" | "channelmixerrgb"
-    ) {
-        return Err(CommandFailure::invalid(
-            "automaticAdjustment.operation",
-            "Only exposure and channelmixerrgb automatic operations are supported.",
-        ));
-    }
+    validate_bounded_argument(
+        "automaticAdjustment.operation",
+        &input.automatic_adjustment.operation,
+        MAXIMUM_CONTRACT_NAME_BYTES,
+    )?;
     if !(0..=128).contains(&input.automatic_adjustment.multi_priority) {
         return Err(CommandFailure::invalid(
             "automaticAdjustment.multiPriority",
@@ -189,18 +185,13 @@ pub(super) fn parse_processing_auto(bytes: Vec<u8>) -> Result<Value, CommandFail
     let current = value.get("currentStepId").and_then(Value::as_str);
     let target = automatic.get("stepId").and_then(Value::as_str);
     if current != target
-        || !steps.iter().any(|step| {
-            step.get("stepId").and_then(Value::as_str) == target
-                && step
-                    .get("input")
-                    .and_then(|input| input.get("kind"))
-                    .and_then(Value::as_str)
-                    == Some("original")
-        })
+        || !steps
+            .iter()
+            .any(|step| step.get("stepId").and_then(Value::as_str) == target)
     {
         return Err(CommandFailure::invalid(
             "automaticAdjustment.stepId",
-            "The automatic stepId must be the current Original-bound recipe step.",
+            "The automatic stepId must be the current recipe step.",
         ));
     }
     value
@@ -232,9 +223,8 @@ pub(super) struct ProcessingParametersWire {
     pub(super) tree: Value,
 }
 
-/// The one explicit input binding of a Processing Step: the guarded Original
-/// identity of a Photo, or one published immutable Processing Artifact with
-/// the concrete image contract its bytes carry.
+/// One explicit input binding: a guarded Original, an immutable Processing
+/// Artifact, or a completed image revision in a selected workspace.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) enum ProcessingInputWire {
@@ -246,6 +236,13 @@ pub(super) enum ProcessingInputWire {
     #[serde(rename_all = "camelCase")]
     Artifact {
         artifact_id: String,
+        contract: ProcessingContractWire,
+    },
+    #[serde(rename_all = "camelCase")]
+    WorkspaceArtifact {
+        workspace_id: String,
+        artifact_id: String,
+        revision: String,
         contract: ProcessingContractWire,
     },
 }
@@ -290,7 +287,9 @@ pub(super) fn parse_processing_save(bytes: Vec<u8>) -> Result<Value, CommandFail
         "expectedRecipeRevision",
         input.expected_recipe_revision.as_deref(),
     )?;
-    validate_source_revision("expectedSourceRevision", &input.expected_source_revision)?;
+    if !input.expected_source_revision.is_empty() {
+        validate_source_revision("expectedSourceRevision", &input.expected_source_revision)?;
+    }
     validate_nonempty_revision("currentStepId", input.current_step_id.as_deref())?;
     if input.steps.len() > MAXIMUM_RECIPE_STEPS {
         return Err(CommandFailure::invalid(
@@ -319,7 +318,25 @@ pub(super) fn parse_processing_save(bytes: Vec<u8>) -> Result<Value, CommandFail
             ProcessingInputWire::Artifact {
                 artifact_id,
                 contract,
+            }
+            | ProcessingInputWire::WorkspaceArtifact {
+                artifact_id,
+                contract,
+                ..
             } => {
+                if let ProcessingInputWire::WorkspaceArtifact {
+                    workspace_id,
+                    revision,
+                    ..
+                } = &step.input
+                {
+                    validate_bounded_argument(
+                        "workspaceId",
+                        workspace_id,
+                        MAXIMUM_WORKSPACE_ID_BYTES,
+                    )?;
+                    validate_bounded_argument("revision", revision, MAXIMUM_REVISION_BYTES)?;
+                }
                 validate_bounded_argument("artifactId", artifact_id, MAXIMUM_ARTIFACT_ID_BYTES)?;
                 for (argument, name) in [
                     ("format", &contract.format),
@@ -401,6 +418,11 @@ pub(super) fn bounded_source_revision(value: &str) -> bool {
     !value.is_empty() && value.len() <= crate::MAXIMUM_SOURCE_REVISION_BYTES
 }
 
+/// Live source evidence is contextual for artifact and workspace inputs.
+pub(super) fn bounded_contextual_source_revision(value: &str) -> bool {
+    value.len() <= crate::MAXIMUM_SOURCE_REVISION_BYTES
+}
+
 /// The nesting depth of one module-owned parameter tree, measured
 /// iteratively so no hostile depth can exhaust the stack while it is
 /// measured.
@@ -480,7 +502,7 @@ async fn processing_recipe_write(
     let prepared_field = |key: &str| {
         body.get(key)
             .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
+            .filter(|value| key == "expectedSourceRevision" || !value.is_empty())
             .map(str::to_owned)
     };
     let Some(request_id) = prepared_field("requestId") else {
@@ -623,7 +645,7 @@ pub(super) fn processing_recipe_valid(recipe: &ProcessingRecipeWire, photo_id: &
     };
     recipe.photo_id == photo_id
         && bounded_revision(&recipe.revision)
-        && bounded_source_revision(&recipe.source_revision)
+        && bounded_contextual_source_revision(&recipe.source_revision)
         && recipe.steps.len() <= MAXIMUM_RECIPE_STEPS
         && recipe.steps.iter().all(|step| {
             bounded_name(&step.step_id, MAXIMUM_STEP_ID_BYTES)
@@ -640,8 +662,25 @@ pub(super) fn processing_recipe_valid(recipe: &ProcessingRecipeWire, photo_id: &
                     ProcessingInputWire::Artifact {
                         artifact_id,
                         contract,
+                    }
+                    | ProcessingInputWire::WorkspaceArtifact {
+                        artifact_id,
+                        contract,
+                        ..
                     } => {
-                        bounded_name(artifact_id, MAXIMUM_ARTIFACT_ID_BYTES)
+                        let workspace_valid = match &step.input {
+                            ProcessingInputWire::WorkspaceArtifact {
+                                workspace_id,
+                                revision,
+                                ..
+                            } => {
+                                bounded_name(workspace_id, MAXIMUM_WORKSPACE_ID_BYTES)
+                                    && bounded_name(revision, MAXIMUM_REVISION_BYTES)
+                            }
+                            _ => true,
+                        };
+                        workspace_valid
+                            && bounded_name(artifact_id, MAXIMUM_ARTIFACT_ID_BYTES)
                             && bounded_name(&contract.format, MAXIMUM_CONTRACT_NAME_BYTES)
                             && bounded_name(&contract.precision, MAXIMUM_CONTRACT_NAME_BYTES)
                             && bounded_name(&contract.color_space, MAXIMUM_CONTRACT_NAME_BYTES)

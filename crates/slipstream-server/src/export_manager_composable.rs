@@ -48,17 +48,6 @@ pub(crate) struct ExportedOutputContract {
 }
 
 impl ExportedOutputContract {
-    /// The darktable peer's pinned Development TIFF handoff.
-    pub(crate) fn development_tiff() -> Self {
-        Self {
-            format: "tiff",
-            precision: "float32",
-            color_space: "prophoto-rgb",
-            transfer: "linear",
-            encoding: "deflate",
-        }
-    }
-
     /// The standalone SpektraFilm peer's pinned Finished JPEG.
     pub(crate) fn finished_jpeg() -> Self {
         Self {
@@ -71,42 +60,19 @@ impl ExportedOutputContract {
     }
 }
 
-/// The concrete input handoff one admitted composable Export executes
-/// against. `Original` names the published Library Location and the exact
-/// source revision admission captured; `Artifact` names the immutable
-/// Processing Artifact the step explicitly selected together with its
-/// declared image contract, staged under a download lease so the retention
-/// sweep cannot delete the input mid-attempt.
+/// The exact completed image selected by an admitted Film Export, held
+/// under a download lease throughout execution.
 pub(crate) enum ProcessingExportInput {
-    Original {
-        photo_id: String,
-        source_revision: String,
-    },
     Artifact {
         artifact_id: String,
         contract: slipstream_core::ProcessingImageContract,
     },
-}
-
-fn darktable_original_input(
-    photo_id: &str,
-    source_revision: &str,
-    digest: &str,
-    byte_size: u64,
-) -> ConfinedInput {
-    ConfinedInput {
-        source_id: format!("original:{photo_id}:{source_revision}"),
-        digest: digest.to_owned(),
-        byte_size,
-        contract: ImageContract {
-            format: "arw".to_owned(),
-            color_space: "camera-native".to_owned(),
-            transfer_function: "linear".to_owned(),
-            precision_bits: 14,
-            width: 9504,
-            height: 6336,
-        },
-    }
+    WorkspaceArtifact {
+        workspace_id: String,
+        artifact_id: String,
+        revision: String,
+        contract: slipstream_core::ProcessingImageContract,
+    },
 }
 
 fn artifact_module_input(
@@ -160,6 +126,7 @@ pub(crate) struct StagedArtifactInput {
     sha256: String,
     size: u64,
     lease: Option<(Arc<Library>, String)>,
+    workspace_input: Option<crate::workspace::WorkspaceDownload>,
 }
 
 impl StagedArtifactInput {
@@ -187,7 +154,9 @@ impl StagedArtifactInput {
 
 impl Drop for StagedArtifactInput {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        if self.workspace_input.is_none() {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -211,6 +180,50 @@ fn processing_artifact_id() -> String {
 }
 
 impl ExportManager {
+    #[cfg(test)]
+    pub(crate) fn claim_retained_publication(
+        &self,
+        artifact_id: &str,
+        request_id: &str,
+    ) -> ProcessingPublication {
+        self.claim_processing_publication(artifact_id, request_id)
+    }
+
+    pub(crate) async fn retain_processing_preview(
+        &self,
+        workspace_id: &str,
+        bytes: &[u8],
+        provenance: serde_json::Value,
+    ) -> Result<(), String> {
+        let manager = Arc::clone(&self.workspaces);
+        let workspace_id = workspace_id.to_owned();
+        let temporary = self
+            .workspace
+            .root()
+            .join(format!("{}.png", processing_artifact_id()));
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .await
+            .map_err(|error| error.to_string())?;
+        use tokio::io::AsyncWriteExt;
+        file.write_all(bytes)
+            .await
+            .map_err(|error| error.to_string())?;
+        file.sync_all().await.map_err(|error| error.to_string())?;
+        drop(file);
+        let path = temporary.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            manager.adopt_output(&workspace_id, &processing_artifact_id(), &path, &provenance)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string());
+        let _ = tokio::fs::remove_file(temporary).await;
+        result.map(|_| ())
+    }
+
     /// Called under heavy admission before the atomic rename. Sweep takes
     /// the same admission slot before it observes claims or deletes bytes.
     fn claim_processing_publication(
@@ -233,119 +246,6 @@ impl ExportManager {
             publications: Arc::clone(&self.publications),
             admission: Arc::clone(&self.admission),
         }
-    }
-
-    /// Renders one selected Original-bound Processing Step directly at the
-    /// bounded Preview geometry. The PNG remains private and is discarded
-    /// when this call returns; no full-resolution handoff or artifact row is
-    /// created.
-    pub(crate) async fn render_selected_preview(
-        &self,
-        photo_id: &str,
-        source_revision: &str,
-        kind: OriginalKind,
-        filename: &str,
-        parameters: slipstream_processing::modules::Parameters,
-        cancellation: Arc<AtomicBool>,
-    ) -> Result<ProcessingPreviewExecution, String> {
-        let _slot = self.acquire_heavy_slot().await;
-        self.ensure_admissible().await?;
-        if cancellation.load(Ordering::Acquire) {
-            return Err("preview render cancelled".to_owned());
-        }
-        let (staged, _) = self
-            .stage_preview_original(photo_id, source_revision, kind, filename)
-            .await?;
-        let staged_facts = staged.facts();
-        let module_input = darktable_original_input(
-            photo_id,
-            source_revision,
-            &staged_facts.sha256,
-            staged_facts.source_facts.size,
-        );
-        let invocation = admit_module(
-            slipstream_processing::modules::DARKTABLE_MODULE,
-            &module_input,
-            &parameters,
-        )?;
-        let attempt_key = processing_preview_id();
-        let writer = self
-            .begin_preview_output(&attempt_key, ExportTarget::DevelopmentTiff)
-            .map_err(|error| format!("preview output staging failed: {error}"))?;
-        let output = writer.temporary_path().to_path_buf();
-        let rendered = self
-            .executor
-            .render_selected_step(
-                staged.path().to_path_buf(),
-                output.clone(),
-                invocation.parameters.clone(),
-                cancellation.clone(),
-            )
-            .await;
-        let staged_facts = staged.facts();
-        let input = slipstream_core::ProcessingInputEvidence::new(
-            slipstream_core::ProcessingInput::Original {
-                photo_id: photo_id.to_owned(),
-                source_revision: source_revision.to_owned(),
-            },
-            &staged_facts.sha256,
-            staged_facts.source_facts.size,
-        )
-        .map_err(|error| error.to_string())?;
-        drop(staged);
-        let identity = rendered?;
-        if cancellation.load(Ordering::Acquire) {
-            return Err("preview render cancelled".to_owned());
-        }
-        let expected_size = identity.size;
-        let expected_sha256 = identity.sha256.clone();
-        let bytes = tokio::task::spawn_blocking(move || {
-            let bytes =
-                fs::read(&output).map_err(|error| format!("preview could not be read: {error}"))?;
-            if bytes.len() as u64 != expected_size || bytes.len() > 16 * 1024 * 1024 {
-                return Err("preview size changed after rendering".to_owned());
-            }
-            let mut hasher = sha2::Sha256::new();
-            use std::io::Write;
-            hasher
-                .write_all(&bytes)
-                .map_err(|error| error.to_string())?;
-            if format!("{:x}", hasher.finalize()) != expected_sha256 {
-                return Err("preview digest changed after rendering".to_owned());
-            }
-            Ok(bytes)
-        })
-        .await
-        .map_err(|error| format!("preview read task failed: {error}"))??;
-        Ok(ProcessingPreviewExecution {
-            bytes,
-            rendition: identity,
-            input,
-        })
-    }
-    /// Executes one admitted qualified composable Export of an
-    /// Original-bound darktable step through the confined local development
-    /// workload with its frozen parameter tree. The validated Development
-    /// TIFF is published into the retained artifact namespace under the
-    /// minted artifact identity, and the staged source's verified byte
-    /// evidence travels with the result for the artifact record. Nothing is
-    /// recorded in the Library here; settlement is the caller's atomic step.
-    pub(crate) async fn run_processing_export(
-        &self,
-        request_id: &str,
-        photo_id: &str,
-        source_revision: &str,
-        parameters: Parameters,
-    ) -> Result<ProcessingExportExecution, String> {
-        self.execute_processing_export(
-            request_id,
-            ProcessingExportInput::Original {
-                photo_id: photo_id.to_owned(),
-                source_revision: source_revision.to_owned(),
-            },
-            parameters,
-        )
-        .await
     }
 
     /// Executes one admitted qualified composable Export of an
@@ -381,8 +281,7 @@ impl ExportManager {
     /// full-resolution handoff or artifact row is created.
     pub(crate) async fn render_film_preview(
         &self,
-        artifact_id: &str,
-        contract: &slipstream_core::ProcessingImageContract,
+        input: &slipstream_core::ProcessingInput,
         parameters: Parameters,
         cancellation: Arc<AtomicBool>,
     ) -> Result<ProcessingPreviewExecution, String> {
@@ -391,9 +290,9 @@ impl ExportManager {
         if cancellation.load(Ordering::Acquire) {
             return Err("preview render cancelled".to_owned());
         }
-        let staged = self.stage_artifact_input(artifact_id, contract).await?;
+        let (staged, contract, source_id) = self.stage_film_input(input).await?;
         let module_input =
-            artifact_module_input(artifact_id, contract, staged.sha256(), staged.size())?;
+            artifact_module_input(&source_id, &contract, staged.sha256(), staged.size())?;
         let invocation = admit_module(
             slipstream_processing::modules::SPEKTRAFILM_MODULE,
             &module_input,
@@ -407,6 +306,12 @@ impl ExportManager {
         writer
             .release_temporary_path()
             .map_err(|error| format!("preview output reservation failed: {error}"))?;
+        let state_directory = self.state_directory.clone();
+        let _processing_lease = tokio::task::spawn_blocking(move || {
+            crate::darktable_service::acquire_processing_admission(&state_directory)
+        })
+        .await
+        .map_err(|error| error.to_string())??;
         let rendered = self
             .executor
             .render_film_selected_step(
@@ -417,11 +322,7 @@ impl ExportManager {
             )
             .await;
         let input = slipstream_core::ProcessingInputEvidence::new(
-            slipstream_core::ProcessingInput::Artifact {
-                artifact_id: slipstream_core::ProcessingArtifactId::new(artifact_id)
-                    .map_err(|error| error.to_string())?,
-                contract: contract.clone(),
-            },
+            input.clone(),
             staged.sha256(),
             staged.size(),
         )
@@ -490,11 +391,7 @@ impl ExportManager {
                 self.execute_film_export(request_id, input, parameters)
                     .await
             }
-            _ => {
-                self.ensure_admissible().await?;
-                self.execute_darktable_export(request_id, input, parameters)
-                    .await
-            }
+            _ => Err("Use the darktable namespace to execute darktable state".to_owned()),
         }
     }
 
@@ -506,103 +403,6 @@ impl ExportManager {
             return Err("Photo Development is shutting down".to_owned());
         }
         self.executor.film_available()
-    }
-
-    /// The Original-bound darktable execution the first qualified workload
-    /// runs: stage the guarded source, develop the frozen stack, validate,
-    /// and publish the Development TIFF handoff.
-    async fn execute_darktable_export(
-        &self,
-        request_id: &str,
-        input: ProcessingExportInput,
-        parameters: Parameters,
-    ) -> Result<ProcessingExportExecution, String> {
-        let _slot = self.admission.lock().await;
-        let artifact_id = processing_artifact_id();
-        let staged = match &input {
-            ProcessingExportInput::Original {
-                photo_id,
-                source_revision,
-            } => self.stage_original_for(photo_id, source_revision).await?,
-            ProcessingExportInput::Artifact { .. } => {
-                return Err(
-                    "the darktable module admits only its explicitly bound Original input"
-                        .to_owned(),
-                );
-            }
-        };
-        let staged_facts = staged.facts();
-        let input_sha256 = staged_facts.sha256.clone();
-        let input_size = staged_facts.source_facts.size;
-        let module_input = match &input {
-            ProcessingExportInput::Original {
-                photo_id,
-                source_revision,
-            } => darktable_original_input(photo_id, source_revision, &input_sha256, input_size),
-            ProcessingExportInput::Artifact { .. } => {
-                return Err("the darktable module admits only its Original input".to_owned());
-            }
-        };
-        let invocation = admit_module(
-            slipstream_processing::modules::DARKTABLE_MODULE,
-            &module_input,
-            &parameters,
-        )?;
-        let target = ExportTarget::DevelopmentTiff;
-
-        // The private output the engine writes; validation gates any
-        // publication, and dropping the writer discards a partial output.
-        let writer = self
-            .workspace
-            .begin_artifact(&artifact_id, target)
-            .map_err(|error| format!("output staging failed: {error}"))?;
-        let output_path = writer.temporary_path().to_path_buf();
-
-        // The running token is registered by request identity so the durable
-        // cancel route can terminate this exact engine attempt.
-        let cancellation = self.begin_running(request_id);
-        let developed = self
-            .executor
-            .develop_selected_step(
-                staged.path().to_path_buf(),
-                output_path.clone(),
-                invocation.parameters.clone(),
-                Arc::clone(&cancellation),
-            )
-            .await;
-        self.end_running(request_id, &cancellation);
-        drop(staged);
-        let identity = developed?;
-
-        // Verify the developed bytes against the executor's report and the
-        // closed Development TIFF contract before anything is published.
-        let validation_path = output_path.clone();
-        let facts = tokio::task::spawn_blocking(move || {
-            verify_developed_output(&validation_path, &identity, target)
-        })
-        .await
-        .map_err(|error| format!("validation task failed: {error}"))?
-        .map_err(|_| OUTPUT_VALIDATION_FAILED.to_owned())?;
-
-        let publication = self.claim_processing_publication(&artifact_id, request_id);
-        let published = match writer.publish(|path| validate_output(path, target).map(|_| ())) {
-            Ok(published) => published,
-            Err(error) => {
-                publication.clear();
-                return Err(format!("artifact publication failed: {error}"));
-            }
-        };
-        Ok(ProcessingExportExecution {
-            artifact_id,
-            size: published.size,
-            sha256: published.sha256,
-            width: facts.width,
-            height: facts.height,
-            input_sha256,
-            input_size,
-            output: ExportedOutputContract::development_tiff(),
-            publication,
-        })
     }
 
     /// The artifact-bound standalone SpektraFilm execution (Issue #496):
@@ -618,25 +418,34 @@ impl ExportManager {
         input: ProcessingExportInput,
         parameters: Parameters,
     ) -> Result<ProcessingExportExecution, String> {
-        let ProcessingExportInput::Artifact {
-            artifact_id: input_artifact_id,
-            contract,
-        } = &input
-        else {
-            return Err(
-                "the standalone SpektraFilm module admits only its explicitly selected artifact input"
-                    .to_owned(),
-            );
+        let binding = match input {
+            ProcessingExportInput::Artifact {
+                artifact_id,
+                contract,
+            } => slipstream_core::ProcessingInput::Artifact {
+                artifact_id: slipstream_core::ProcessingArtifactId::new(&artifact_id)
+                    .map_err(|error| error.to_string())?,
+                contract,
+            },
+            ProcessingExportInput::WorkspaceArtifact {
+                workspace_id,
+                artifact_id,
+                revision,
+                contract,
+            } => slipstream_core::ProcessingInput::WorkspaceArtifact {
+                workspace_id,
+                artifact_id,
+                revision,
+                contract,
+            },
         };
         let _slot = self.admission.lock().await;
         let artifact_id = processing_artifact_id();
-        let staged = self
-            .stage_artifact_input(input_artifact_id, contract)
-            .await?;
+        let (staged, contract, input_artifact_id) = self.stage_film_input(&binding).await?;
         let input_sha256 = staged.sha256().to_owned();
         let input_size = staged.size();
         let module_input =
-            artifact_module_input(input_artifact_id, contract, &input_sha256, input_size)?;
+            artifact_module_input(&input_artifact_id, &contract, &input_sha256, input_size)?;
         let invocation = admit_module(
             slipstream_processing::modules::SPEKTRAFILM_MODULE,
             &module_input,
@@ -654,6 +463,12 @@ impl ExportManager {
             .map_err(|error| format!("output reservation failed: {error}"))?;
 
         let cancellation = self.begin_running(request_id);
+        let state_directory = self.state_directory.clone();
+        let _processing_lease = tokio::task::spawn_blocking(move || {
+            crate::darktable_service::acquire_processing_admission(&state_directory)
+        })
+        .await
+        .map_err(|error| error.to_string())??;
         let developed = self
             .executor
             .develop_film_selected_step(
@@ -703,6 +518,89 @@ impl ExportManager {
     /// closed Development TIFF contract against the binding the recipe
     /// captured. A missing, expired, or mismatched artifact fails; it
     /// never resolves a newer upstream result.
+    async fn stage_film_input(
+        &self,
+        input: &slipstream_core::ProcessingInput,
+    ) -> Result<
+        (
+            StagedArtifactInput,
+            slipstream_core::ProcessingImageContract,
+            String,
+        ),
+        String,
+    > {
+        match input {
+            slipstream_core::ProcessingInput::Artifact {
+                artifact_id,
+                contract,
+            } => Ok((
+                self.stage_artifact_input(artifact_id.as_str(), contract)
+                    .await?,
+                contract.clone(),
+                artifact_id.as_str().to_owned(),
+            )),
+            slipstream_core::ProcessingInput::WorkspaceArtifact {
+                workspace_id,
+                artifact_id,
+                revision,
+                contract,
+            } => {
+                let manager = Arc::clone(&self.workspaces);
+                let workspace_id = workspace_id.clone();
+                let artifact_id = artifact_id.clone();
+                let revision = revision.clone();
+                let contract = contract.clone();
+                tokio::task::spawn_blocking(move || {
+                    let (download, admitted) = manager
+                        .lease_input(&workspace_id, &artifact_id, &revision)
+                        .map_err(|error| error.to_string())?;
+                    let actual = &admitted["imageContract"];
+                    if actual["format"] != contract.format
+                        || actual["precision"] != contract.precision
+                        || actual["colorSpace"] != contract.color_space
+                        || actual["transfer"] != contract.transfer
+                        || actual["encoding"] != contract.encoding
+                        || actual["geometry"]["width"] != contract.geometry.width
+                        || actual["geometry"]["height"] != contract.geometry.height
+                    {
+                        return Err(
+                            "The workspace input does not match its captured image contract"
+                                .to_owned(),
+                        );
+                    }
+                    use std::os::fd::AsRawFd;
+                    let path = PathBuf::from(format!(
+                        "/proc/{}/fd/{}",
+                        std::process::id(),
+                        download.file.as_raw_fd()
+                    ));
+                    let staged = StagedArtifactInput {
+                        path,
+                        sha256: download.sha256.clone(),
+                        size: download.byte_length,
+                        lease: None,
+                        workspace_input: Some(download),
+                    };
+                    let identity = slipstream_processing::local_film::validate_input(staged.path())
+                        .map_err(|error| error.to_string())?;
+                    if identity.sha256 != staged.sha256 || identity.size != staged.size {
+                        return Err("The captured workspace input bytes changed".to_owned());
+                    }
+                    Ok((
+                        staged,
+                        contract,
+                        format!("workspace:{workspace_id}:{artifact_id}:{revision}"),
+                    ))
+                })
+                .await
+                .map_err(|error| error.to_string())?
+            }
+            slipstream_core::ProcessingInput::Original { .. } => {
+                Err("Film requires an explicitly selected completed image".to_owned())
+            }
+        }
+    }
+
     async fn stage_artifact_input(
         &self,
         artifact_id: &str,
@@ -812,5 +710,6 @@ fn stage_artifact_bytes(
         sha256: identity.sha256,
         size: identity.size,
         lease: None,
+        workspace_input: None,
     })
 }

@@ -46,7 +46,9 @@ pub(super) fn parse_processing_export(bytes: Vec<u8>) -> Result<Value, CommandFa
         "expectedRecipeRevision",
         Some(&input.expected_recipe_revision),
     )?;
-    validate_source_revision("expectedSourceRevision", &input.expected_source_revision)?;
+    if !input.expected_source_revision.is_empty() {
+        validate_source_revision("expectedSourceRevision", &input.expected_source_revision)?;
+    }
     serde_json::to_value(&input).map_err(|_| unusable_input())
 }
 
@@ -262,69 +264,6 @@ pub(crate) async fn execute_processing_export(
         &args.photo_id,
         &request_id,
         &step_id,
-        status,
-        result,
-        &client.origin,
-    )
-}
-
-/// Submits the current Edit State through the primary `/edit/export` route.
-/// The caller supplies the state revision and the server resolves the
-/// internal current Processing Step; the step id is retained only to validate
-/// the returned receipt and artifact provenance.
-pub(crate) async fn execute_edit_export(
-    client: &ServiceClient,
-    admission: &AdmissionState,
-    photo_id: &str,
-    request_id: &str,
-    edit_revision: &str,
-    step_id: &str,
-    source_revision: &str,
-) -> Result<Value, CommandFailure> {
-    let identity = MutationIdentity {
-        operation: Operation::PhotosEditExport,
-        photo_ids: vec![photo_id.to_owned()],
-        album_id: None,
-        album_name: None,
-        mappings: Vec::new(),
-    };
-    validate_request_identity(request_id)?;
-    validate_nonempty_revision("expectedEditRevision", Some(edit_revision))?;
-    validate_bounded_argument("stepId", step_id, MAXIMUM_STEP_ID_BYTES)?;
-    validate_source_revision("expectedSourceRevision", source_revision)?;
-    let body = json!({
-        "requestId": request_id,
-        "expectedEditRevision": edit_revision,
-    });
-    let (status, bytes) = client
-        .mutation_statuses(
-            Method::POST,
-            &identity,
-            admission,
-            client.endpoint(&["api", "photos", photo_id, "edit", "export"]),
-            Some(body),
-            &[StatusCode::CREATED, StatusCode::ACCEPTED],
-        )
-        .await?;
-    if status == StatusCode::ACCEPTED {
-        let receipt: ProcessingExportPendingWire =
-            serde_json::from_slice(&bytes).map_err(|_| CommandFailure::unknown(&identity))?;
-        return confirmed_processing_export_pending(
-            &identity,
-            photo_id,
-            request_id,
-            step_id,
-            receipt,
-            &client.origin,
-        );
-    }
-    let result: ProcessingExportResultWire =
-        serde_json::from_slice(&bytes).map_err(|_| CommandFailure::unknown(&identity))?;
-    confirmed_processing_export(
-        &identity,
-        photo_id,
-        request_id,
-        step_id,
         status,
         result,
         &client.origin,
@@ -563,7 +502,10 @@ pub(crate) fn processing_work_valid(
         && bounded("stepId", MAXIMUM_STEP_ID_BYTES)
         && bounded("module", MAXIMUM_MODULE_ID_BYTES)
         && bounded("recipeRevision", MAXIMUM_REVISION_BYTES)
-        && bounded("sourceRevision", crate::MAXIMUM_SOURCE_REVISION_BYTES)
+        && record
+            .get("sourceRevision")
+            .and_then(Value::as_str)
+            .is_some_and(bounded_contextual_source_revision)
         && bounded("adapterSchemaVersion", MAXIMUM_CONTRACT_NAME_BYTES)
         && parameters.is_some_and(|parameters| {
             parameters
@@ -586,6 +528,41 @@ pub(crate) fn processing_work_valid(
                 }
                 ProcessingInputWire::Artifact { artifact_id, .. } => {
                     !artifact_id.is_empty() && artifact_id.len() <= MAXIMUM_ARTIFACT_ID_BYTES
+                }
+                ProcessingInputWire::WorkspaceArtifact {
+                    workspace_id,
+                    artifact_id,
+                    revision,
+                    contract,
+                } => {
+                    validate_bounded_argument(
+                        "workspaceId",
+                        &workspace_id,
+                        MAXIMUM_WORKSPACE_ID_BYTES,
+                    )
+                    .is_ok()
+                        && validate_bounded_argument(
+                            "artifactId",
+                            &artifact_id,
+                            MAXIMUM_ARTIFACT_ID_BYTES,
+                        )
+                        .is_ok()
+                        && validate_bounded_argument("revision", &revision, MAXIMUM_REVISION_BYTES)
+                            .is_ok()
+                        && [
+                            &contract.format,
+                            &contract.precision,
+                            &contract.color_space,
+                            &contract.transfer,
+                            &contract.encoding,
+                        ]
+                        .iter()
+                        .all(|name| {
+                            validate_bounded_argument("contract", name, MAXIMUM_CONTRACT_NAME_BYTES)
+                                .is_ok()
+                        })
+                        && (1..=MAXIMUM_GEOMETRY_EDGE).contains(&contract.geometry.width)
+                        && (1..=MAXIMUM_GEOMETRY_EDGE).contains(&contract.geometry.height)
                 }
             })
         && bounded("bundleId", MAXIMUM_REVISION_BYTES)
@@ -664,6 +641,26 @@ pub(super) fn processing_artifact_valid(artifact: &Value, photo_id: &str) -> boo
                         .and_then(|binding| binding.get("contract"))
                         .is_some_and(contract_shape)
             }
+            Some("workspace-artifact") => binding.is_some_and(|binding| {
+                serde_json::from_value::<ProcessingInputWire>(binding.clone()).is_ok()
+                    && [
+                        ("workspaceId", MAXIMUM_WORKSPACE_ID_BYTES),
+                        ("artifactId", MAXIMUM_ARTIFACT_ID_BYTES),
+                        ("revision", MAXIMUM_REVISION_BYTES),
+                    ]
+                    .iter()
+                    .all(|(field, maximum)| {
+                        binding[*field].as_str().is_some_and(|value| {
+                            validate_bounded_argument("binding", value, *maximum).is_ok()
+                        })
+                    })
+                    && contract_shape(&binding["contract"])
+                    && ["format", "precision", "colorSpace", "transfer", "encoding"]
+                        .iter()
+                        .all(|field| {
+                            bounded_name(&binding["contract"][*field], MAXIMUM_CONTRACT_NAME_BYTES)
+                        })
+            }),
             _ => false,
         }
     });
@@ -707,10 +704,11 @@ pub(super) fn processing_artifact_valid(artifact: &Value, photo_id: &str) -> boo
             .get("publishedAt")
             .and_then(Value::as_str)
             .is_some_and(crate::valid_utc_time)
-        && artifact
-            .get("expiresAt")
-            .and_then(Value::as_str)
-            .is_some_and(crate::valid_utc_time)
+        && match artifact.get("expiresAt") {
+            Some(Value::Null) => true,
+            Some(Value::String(time)) => crate::valid_utc_time(time),
+            _ => false,
+        }
         && artifact
             .get("sha256")
             .and_then(Value::as_str)

@@ -34,8 +34,10 @@ pub async fn invoke_until(
         &cli.command,
         Command::Processing {
             command: ProcessingCommand::ArtifactDownload { .. }
+        } | Command::Workspace {
+            command: workspace::WorkspaceCommand::Download { .. }
         }
-    );
+    ) || matches!(&cli.command, Command::Darktable(command) if command.operation.ends_with("download") || command.operation.ends_with("wait") || command.operation.ends_with(" export"));
     let command = execute(&cli, environment, &admission, &publication, deadline);
     tokio::pin!(command);
     let deadline_signal = async {

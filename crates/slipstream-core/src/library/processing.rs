@@ -16,6 +16,22 @@ impl Library {
             .map_err(Into::into)
     }
 
+    /// Reads an exact historical rebind receipt without consulting live source state.
+    pub async fn replay_composable_edit_recipe_rebind(
+        &self,
+        mutation: crate::processing::RebindComposableEditRecipe,
+    ) -> Result<Option<ComposableEditRecipeWriteOutcome>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .replay_composable_edit_recipe_rebind_receiver(mutation)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
     pub async fn replay_processing_export_retry(
         &self,
         photo_id: &str,
@@ -224,6 +240,24 @@ impl Library {
             .map_err(Into::into)
     }
 
+    /// Admits a recipe captured under the canonical file adapter's state locks.
+    pub async fn submit_processing_export_with_recipe(
+        &self,
+        mutation: crate::processing::SubmitProcessingExport,
+        recipe: crate::processing::ComposableEditRecipe,
+        now: u64,
+    ) -> Result<crate::processing::ProcessingExportSubmitOutcome, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .submit_processing_export_with_recipe_receiver(mutation, recipe, now)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
     /// Settles one admitted qualified composable Export inside one
     /// serialized persistence-owner operation: the validated artifact is
     /// published insert-only, the work is recorded `Succeeded`, and the
@@ -246,6 +280,24 @@ impl Library {
                 payload_digest,
                 now,
             )
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Marks a minted artifact as durably owned by a verified workspace publication.
+    /// Call before settlement; provenance then outlives finite request receipts.
+    pub async fn retain_processing_artifact_in_workspace(
+        &self,
+        artifact_id: &str,
+        published_at: u64,
+    ) -> Result<(), LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .retain_processing_artifact_in_workspace_receiver(artifact_id, published_at)
         }?;
         receive
             .await

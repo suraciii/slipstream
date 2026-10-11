@@ -64,6 +64,78 @@ fn settled_artifact(admission: &ProcessingExportAdmission) -> ProcessingArtifact
     artifact
 }
 
+#[tokio::test]
+async fn workspace_publication_keeps_provenance_after_request_receipt_expiry() {
+    let seeded = seeded();
+    let admission = admitted(&seeded, "workspace-retained").await;
+    let output = settled_artifact(&admission);
+    let artifact_id = output.artifact_id.as_str();
+    seeded
+        .persistence
+        .retain_processing_artifact_in_workspace_receiver(artifact_id, 1000)
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    seeded
+        .persistence
+        .settle_processing_export_receiver(
+            output.clone(),
+            &admission.request_id,
+            &admission.payload_digest,
+            1000,
+        )
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    let expired = seeded
+        .persistence
+        .sweep_processing_export_expiry_receiver(1000 + PROCESSING_ARTIFACT_RETENTION_SECONDS + 1)
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(expired.is_empty());
+    assert_eq!(read_artifact(&seeded, artifact_id).await.unwrap(), output);
+    assert!(
+        seeded
+            .persistence
+            .read_processing_export_work_receiver(&admission.request_id)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    let retention = seeded
+        .persistence
+        .read_processing_artifact_retention_receiver(artifact_id)
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(retention.published_at_unix_seconds, 1000);
+    assert_eq!(retention.expires_at_unix_seconds, None);
+    let listed = seeded
+        .persistence
+        .list_processing_exports_receiver(
+            "raw-photo",
+            1000 + PROCESSING_ARTIFACT_RETENTION_SECONDS + 1,
+        )
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        listed
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.artifact_id.as_str() == artifact_id)
+    );
+}
+
 fn replay_of(seeded: &Seeded, admission: &ProcessingExportAdmission) -> SubmitProcessingExport {
     qualified_submission(
         seeded,
