@@ -81,8 +81,10 @@ describe("metadata draft input", () => {
         const draft = store.admit("a", facts("a"), "{}")!;
         draft.changes["dc:title"] = result.change;
         draft.reviewed = true;
-        const serialized = JSON.parse(store.beginSave("a")!.body);
-        expect(serialized.changes["dc:title"].languages).toEqual({
+        const serialized = JSON.parse(store.beginSave("a")!.body) as {
+          changes: Record<string, { languages: Record<string, string | null> }>;
+        };
+        expect(serialized.changes["dc:title"]?.languages).toEqual({
           ...(operation === "set" ? { "x-default": "Default text" } : {}),
           fr: "Texte",
           ["__proto__"]: action === "remove" ? null : "Selected text",

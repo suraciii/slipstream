@@ -42,7 +42,7 @@ export function metadataInputChange(
   if (input.operation === "clear" || input.operation === "remove")
     return { change: { op: input.operation } };
   if (kind === "languages") {
-    const languages: Record<string, string | null> = Object.create(null);
+    const languages = Object.create(null) as Record<string, string | null>;
     if (input.operation === "set") languages["x-default"] = input.text;
     for (const row of input.languages) {
       if (row.action === "unchanged") continue;

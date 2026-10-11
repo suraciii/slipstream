@@ -43,7 +43,7 @@ The CLI must let its caller:
 - obtain current facts and Album membership for an identified Photo;
 - download one Photo's thumbnail or review Preview;
 - change Selection State or Rating for identified Photos;
-- [read and save standard metadata](../metadata/spec.md) with explicit provenance and checked Sidecar changes;
+- [read and save standard metadata](../photo-library/metadata/spec.md) with explicit provenance and checked Sidecar changes;
 - create, rename, and delete Albums and add, remove, or order their members;
 - remove explicitly identified eligible Photos into Trash and Restore observed removals;
 - inspect Trash, review and separately confirm permanent deletion, and recover operation outcomes;
@@ -51,8 +51,8 @@ The CLI must let its caller:
 - request a Library check; and
 - return a browser Destination for a Photo or Album.
 
-[Composable Removal and Restore](../library-removal/spec.md) defines
-explicit-set mutations and their effect recovery. [Trash](../trash/spec.md)
+[Composable Removal and Restore](../photo-library/removal/spec.md) defines
+explicit-set mutations and their effect recovery. [Trash](../photo-library/trash/spec.md)
 is the sole product authority for confirmed permanent Original deletion.
 [Manual Recovery](../photo-library/spec.md#manual-recovery) owns Location Recovery
 inspection, reviewed evidence, content confirmation, permitted retirement,
@@ -135,7 +135,7 @@ with its image tools. A private server URL alone is insufficient. The response
 must identify the Photo, Preview Source, actual pixel dimensions, detail limit,
 source revision, and local output path.
 
-[Photo Previews](../previews/spec.md) owns source selection and quality. A thumbnail
+[Photo Previews](../photo-library/previews/spec.md) owns source selection and quality. A thumbnail
 must not be described as sufficient for precise focus judgment. The client
 must not substitute a sibling JPEG, develop RAW sensor data, upscale evidence,
 or silently return a stale Preview as current.
@@ -235,7 +235,7 @@ confirmed and which work remains unresolved.
 ## Moving Between CLI and Web
 
 Photo and Album results must include a browser Destination where one is
-available. [Library Browser Experience](../library-browser/spec.md#destinations-and-browser-history)
+available. [Library Browser Experience](../library-browser/experience/spec.md#destinations-and-browser-history)
 owns how these links resolve. A link is a current view, not a historical result
 or a grant of access.
 

@@ -15,10 +15,10 @@ const state = (photoId: string, revision: string | null = null) => ({
 });
 
 test("no saved state is a checked start state", async () => {
-  const editor = createEditorEditState(async () => Response.json(state("p1")), {
-    owns: () => true,
-    render: () => {},
-  });
+  const editor = createEditorEditState(
+    () => Promise.resolve(Response.json(state("p1"))),
+    { owns: () => true, render: () => {} },
+  );
   await editor.load("p1");
   expect(editor.blocked).toBe(false);
   expect(editor.read?.current).toBe(null);
@@ -49,9 +49,7 @@ test("concurrent reads share ownership and late reads cannot affect another Phot
 
 test("read failure keeps processing blocked", async () => {
   const editor = createEditorEditState(
-    async () => {
-      throw new Error("offline");
-    },
+    () => Promise.reject(new Error("offline")),
     {
       owns: () => true,
       render: () => {},

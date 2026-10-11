@@ -220,8 +220,8 @@ in comparison against these second-aligned boundaries.
 
 Order defaults to `album-order` for an Album and `capture-time-asc` otherwise.
 `album-order` is invalid for other sources. Capture ordering and ties follow
-[Source Order](../library-browsing/spec.md#source-order) and
-[Source Ordering Selection](../library-browsing/spec.md#source-ordering-selection).
+[Source Order](../library-browser/spec.md#source-order) and
+[Source Ordering Selection](../library-browser/spec.md#source-ordering-selection).
 Filters never rewrite Album order. The list pagination rules above apply.
 
 Each ordinary Photo item uses the `PhotoItem` shape defined under
@@ -333,7 +333,7 @@ PATH is local to the CLI host, must be valid UTF-8, must have an existing parent
 directory, and must not exist. A non-UTF-8 value is `invalid_input` and must fail
 before network access or temporary-file creation, without lossy substitution.
 The transfer must not exceed 64 MiB, which is the existing
-[Preview output JPEG bound](../previews/design.md#native-library-boundary);
+[Preview output JPEG bound](../photo-library/previews/design.md#native-library-boundary);
 `photos preview --help` must report this limit. The command publishes a complete
 JPEG without replacement. Final no-replace publication is the local commit
 point. Cancellation or failure before that point removes only this invocation's
@@ -678,7 +678,7 @@ lead with `photos edit` and explicit Artifact handoff.
 peer module's parameter schema tree, finite limits, versions, availability,
 and refusal reasons. Discovery does not authorize arbitrary engine controls.
 The service separately checks input, parameters, bundle, and resources before
-execution. [Processing Modules](../processing-modules/design.md) owns the
+execution. [Processing Modules](../photo-development/processing/design.md) owns the
 module boundary. Output format, precision, color, geometry, and encoding are
 ordinary module parameters. Each execution selects one step; composition
 requires explicitly selecting a published immutable artifact as another

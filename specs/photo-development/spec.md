@@ -60,11 +60,11 @@ Engine formats implicitly or answer a refusal with another Engine.
 
 Each Engine must report its availability, refusal reasons, compatible inputs and
 outputs, product Controls, and limits through the read-only discovery operation
-defined in [Processing Modules](../processing-modules/design.md#interface-and-discovery).
+defined in [Processing Modules](processing/design.md#interface-and-discovery).
 Discovery describes what an Engine can do; it must not by itself expose native
 history, catalog state, host paths, or unqualified parameters.
 
-The [darktable Integration](../darktable-integration/spec.md) specification owns the
+The [darktable Integration](darktable/spec.md) specification owns the
 product relationship with the darktable Engine. Engine discovery must not
 expand this editing scope or grant support to unqualified Controls.
 
@@ -368,8 +368,8 @@ change saved looks.
 
 [Photo Development Architecture](design.md) owns execution,
 concurrency, and storage contracts.
-[Processing Modules](../processing-modules/design.md) owns module identity,
+[Processing Modules](processing/design.md) owns module identity,
 the execution boundary, and interface compatibility.
-[Development Color Pipeline](../development-color/design.md)
-owns the engine and color boundary. [Photo Previews](../previews/spec.md) continues to
+[Development Color Pipeline](processing/color.md)
+owns the engine and color boundary. [Photo Previews](../photo-library/previews/spec.md) continues to
 own camera Preview behavior.

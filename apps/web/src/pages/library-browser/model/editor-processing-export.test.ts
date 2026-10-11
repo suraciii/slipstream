@@ -467,25 +467,27 @@ test("primary Download identifies confirmed current output without retargeting i
     fetchEditorArtifact: async () => {},
   };
   const owner = createEditorProcessingExport(
-    async () =>
-      Response.json({
-        photoId: "photo-1",
-        artifacts: [artifact],
-        exports: [
-          {
-            ...work("current", "succeeded"),
-            artifactId: artifact.artifactId,
-            recipeRevision: "r1",
-            sourceRevision: "source",
-          },
-        ],
-      }),
+    () =>
+      Promise.resolve(
+        Response.json({
+          photoId: "photo-1",
+          artifacts: [artifact],
+          exports: [
+            {
+              ...work("current", "succeeded"),
+              artifactId: artifact.artifactId,
+              recipeRevision: "r1",
+              sourceRevision: "source",
+            },
+          ],
+        }),
+      ),
     recipe,
     {
       editorOwnsPhoto: () => true,
       renderEditor: () => {},
       processingAvailable: () => true,
-      describeEditRefusal: async () => "refused",
+      describeEditRefusal: () => Promise.resolve("refused"),
     },
   );
   owners.push(owner);

@@ -4,7 +4,7 @@ This opt-in harness exercises real darktable and Spektrafilm processes for
 [#329](https://github.com/suraciii/slipstream/issues/329). It does not enable
 editing in the service. Measurements, camera acceptance, open failures, and the
 go/no-go decision belong in that Issue. The processing contract is
-[Development Color Pipeline](../../specs/development-color/design.md).
+[Development Color Pipeline](../../specs/photo-development/processing/color.md).
 
 Build from this directory only. The build context admits named engine, patch,
 and check files through an allowlist. It cannot include an Original or a previous
@@ -188,7 +188,7 @@ an allowance below 67,110,912 bytes fails before destination allocation.
 These coefficients describe this pinned transform, not total process memory or
 a production admission model. Engine/runtime headroom, live pipeline buffers,
 file cache, and encoding still need separate accounting under
-[Processing Memory](../../specs/processing-memory/design.md). A different bundle or
+[Processing Memory](../../specs/photo-development/processing/memory.md). A different bundle or
 transform mode needs its own qualification; a successful small-image check does
 not establish a supported camera or deployment envelope.
 

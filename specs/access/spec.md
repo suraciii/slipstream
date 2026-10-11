@@ -113,7 +113,7 @@ must preserve authentication, CSRF protection, and all ordinary browser Library
 operations, including editing, deletion, and verified downloads. It must not
 enable anonymous access, including on loopback. Clients must not change the
 configured scheme after a connection failure. PWA installation remains subject
-to [Installed Web App](../installed-web-app/spec.md).
+to [Installed Web App](../web-application/installation/spec.md).
 Session status and view revalidation must not extend the fixed session lifetime.
 
 [Deployment](../deployment/spec.md) owns configuration and upgrade procedures.

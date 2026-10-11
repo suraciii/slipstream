@@ -31,9 +31,10 @@ function fixture(initial = true) {
   });
   const owner = createComposableAutosave(
     async (input, init) => {
-      const path = input.toString();
+      const path = input instanceof Request ? input.url : String(input);
       if (init?.method !== "POST") return Response.json(read());
-      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      if (typeof init.body !== "string") throw new Error("Expected JSON body");
+      const body = JSON.parse(init.body) as Record<string, unknown>;
       writes.push({ path, body });
       if (pending) return pending;
       if (failure)

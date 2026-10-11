@@ -24,10 +24,12 @@ describe("Photo details owner", () => {
     let succeed = false;
     let mutations = 0;
     const owner = createPhotoDetailsOwner(
-      async () =>
-        succeed
-          ? json({ albums: [{ id: album.id, name: album.name }] })
-          : new Response("{}", { status: 503 }),
+      () =>
+        Promise.resolve(
+          succeed
+            ? json({ albums: [{ id: album.id, name: album.name }] })
+            : new Response("{}", { status: 503 }),
+        ),
       {
         isAlive: () => true,
         currentPhoto: () => ({ id: "photo" }),

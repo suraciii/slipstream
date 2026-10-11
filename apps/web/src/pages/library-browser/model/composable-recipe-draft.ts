@@ -4,7 +4,7 @@
 //! submitted. The draft owns no network or DOM work, so the whole editing
 //! reading can be checked without a browser.
 //!
-//! [Composable Photo Processing Modules](../../../../../../specs/processing-modules/design.md)
+//! [Composable Photo Processing Modules](../../../../../../specs/photo-development/processing/design.md)
 //! makes the caller the composer: each step is one module, one explicit input
 //! binding, and one complete module-owned parameter snapshot, and a recipe
 //! with steps selects exactly one current step. Nothing here invents a

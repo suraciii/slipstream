@@ -29,9 +29,13 @@ class CandidateArchiveTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(source, encoding="ascii")
         specs = {
+            "specs/spec.md": "[Architecture](design.md)\n[Photo Library](photo-library/spec.md)\n",
+            "specs/design.md": "[Preview](photo-library/previews/design.md#native-library-boundary)\n",
             "specs/command-line/spec.md": "[Reference](reference.md)\n",
-            "specs/command-line/reference.md": "[Preview](../previews/design.md#native-library-boundary)\n[Source](../../tools/processing/runner.py#main)\n[Locks](../../docker/apt/)\n",
-            "specs/previews/design.md": "# Preview\n",
+            "specs/command-line/reference.md": "[Preview](../photo-library/previews/design.md#native-library-boundary)\n[Source](../../tools/processing/runner.py#main)\n[Locks](../../docker/apt/)\n",
+            "specs/photo-library/spec.md": "[Preview](previews/spec.md)\n",
+            "specs/photo-library/previews/spec.md": "[Design](design.md)\n",
+            "specs/photo-library/previews/design.md": "# Native Library Boundary\n[Source](../../../tools/processing/runner.py#main)\n",
             "specs/AGENTS.md": "Repository-only instructions\n",
         }
         for source, contents in specs.items():
@@ -92,18 +96,39 @@ class CandidateArchiveTests(unittest.TestCase):
                 self.assertEqual((member.mtime, member.uid, member.gid), (0, 0, 0))
                 self.assertEqual(member.mode, 0o755 if member.name.endswith("/slipstream") else 0o644)
             self.assertIn(f"{name}/specs/command-line/reference.md", tar.getnames())
-            self.assertIn(f"{name}/specs/previews/design.md", tar.getnames())
+            self.assertIn(f"{name}/specs/spec.md", tar.getnames())
+            self.assertIn(f"{name}/specs/design.md", tar.getnames())
+            self.assertIn(f"{name}/specs/photo-library/previews/spec.md", tar.getnames())
+            self.assertIn(f"{name}/specs/photo-library/previews/design.md", tar.getnames())
             self.assertNotIn(f"{name}/specs/AGENTS.md", tar.getnames())
             self.assertFalse(any("/design/" in path for path in tar.getnames()))
             self.assertEqual(
                 tar.extractfile(f"{name}/docs/agent-cli.md").read().decode(),
                 "[Reference](../specs/command-line/reference.md)\n",
             )
+            self.assertEqual(
+                tar.extractfile(f"{name}/specs/spec.md").read().decode(),
+                "[Architecture](design.md)\n[Photo Library](photo-library/spec.md)\n",
+            )
+            self.assertEqual(
+                tar.extractfile(f"{name}/specs/design.md").read().decode(),
+                "[Preview](photo-library/previews/design.md#native-library-boundary)\n",
+            )
+            self.assertEqual(
+                tar.extractfile(f"{name}/specs/photo-library/spec.md").read().decode(),
+                "[Preview](previews/spec.md)\n",
+            )
+            self.assertEqual(
+                tar.extractfile(f"{name}/specs/photo-library/previews/spec.md").read().decode(),
+                "[Design](design.md)\n",
+            )
             reference = tar.extractfile(f"{name}/specs/command-line/reference.md").read().decode()
-            self.assertIn("[Preview](../previews/design.md#native-library-boundary)", reference)
+            self.assertIn("[Preview](../photo-library/previews/design.md#native-library-boundary)", reference)
             source_url = "https://github.com/suraciii/slipstream/"
             self.assertIn(f"[Source]({source_url}blob/{'a' * 40}/tools/processing/runner.py#main)", reference)
             self.assertIn(f"[Locks]({source_url}tree/{'a' * 40}/docker/apt)", reference)
+            preview = tar.extractfile(f"{name}/specs/photo-library/previews/design.md").read().decode()
+            self.assertIn(f"[Source]({source_url}blob/{'a' * 40}/tools/processing/runner.py#main)", preview)
             notices = tar.extractfile(f"{name}/THIRD-PARTY-NOTICES.md").read().decode()
             self.assertEqual(
                 notices,
