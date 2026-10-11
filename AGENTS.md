@@ -1,12 +1,10 @@
 # Agent Instructions
 
-## Project Overview
+## Project Context
 
-Slipstream is in initial product definition.
-
-- `docs/`: product specifications and user-visible behavior
-- `design/`: architecture decisions and implementation contracts
-- `CONTEXT.md`: canonical product and domain language
+- [`CONTEXT.md`](CONTEXT.md) defines canonical product and domain vocabulary.
+- [`specs/`](specs/README.md) is the authority for product behavior, design decisions, and implementation contracts.
+- [`docs/`](docs/README.md) provides usage and installation guidance.
 
 ## Engineering Principles
 
@@ -21,22 +19,14 @@ Slipstream is in initial product definition.
 
 ## Context Management
 
+- Read this file first, then [`CONTEXT.md`](CONTEXT.md).
+- Before implementing or reviewing a behavior change, read the governing Issue and use the [`specs/` index](specs/README.md) to find and read the affected behavior contracts.
+- When work changes boundaries, ownership, lifecycle, data contracts, ordering, or failure behavior, also read the affected design and named specialist contracts linked from the index and capability documents.
+- Before creating or changing a contract, follow [`specs/AGENTS.md`](specs/AGENTS.md). Before changing usage or installation guidance, follow [`docs/AGENTS.md`](docs/AGENTS.md).
 - Follow [Language and Writing](CONTRIBUTING.md#language-and-writing) for project artifacts, including Issues, pull requests, and commits.
-- Read this file first, then `CONTEXT.md`.
-- Follow the scoped `AGENTS.md` in `docs/` or `design/` when working in those directories.
-- Read the governing Issue and affected specifications before implementing a change.
 - Keep this file limited to repository-wide rules. Put scoped guidance beside the files it governs.
-- Keep Product and Design Specs limited to durable target behavior, boundaries, decisions, and contracts.
-- Keep delivery plans, dependencies, and implementation tracking in GitHub Issues, not repository files. Keep temporary measurements, probes, and one-off evidence in the governing Issue or change review, not in Specs or `CONTEXT.md`.
 - Define each rule in one authoritative document. Link to it instead of copying it.
-
-## Spec-First Development
-
-- Specify user-visible behavior in `docs/` before implementation.
-- Add or update a Design Spec in `design/` when work changes boundaries, ownership, lifecycle, data contracts, failure behavior, or other durable technical decisions.
-- Resolve product and architecture decisions in the governing Issue and specifications before editing implementation code.
-- Specifications describe the durable target. Do not add implementation-progress sections or temporary gaps to them.
-- Treat examples as contracts. They must parse or run as written when tooling exists.
+- Keep delivery plans, dependencies, implementation tracking, temporary measurements, probes, and one-off evidence in the governing GitHub Issue or pull request. Specifications describe durable targets; `CONTEXT.md` defines vocabulary.
 
 ## Verification
 

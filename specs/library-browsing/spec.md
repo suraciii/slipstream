@@ -1,0 +1,862 @@
+# Library Browsing and Selection
+
+A Photographer opens Slipstream to browse the Photo Library, find Photos, and record decisions. Browsing must become useful before a large Library has transferred every Photo fact, every Album member, or every Original Folder. Slipstream therefore uses one progressively loaded Library Browser for `All Photos`, File Locations, and Albums.
+
+## Library Browser
+
+The Library Browser is Slipstream's primary screen. A bare application address must open directly to the `All Photos` Grid rather than an Album landing page. Addressed entry follows [Library Browser Experience](../library-browser/spec.md#destinations-and-browser-history). Source navigation must show:
+
+- the Photo Library as the `All Photos` source;
+- the read-only Library Folder root and its Original Folders under a `Folders` section;
+- each Album under a separate `Albums` section;
+- the Photo count for each displayed source;
+- current Library loading or scan status; and
+- whether an Album has a saved position.
+
+The `Folders` section presents the File Locations source defined by [Physical File Locations and Virtual Albums](../photo-library/design.md). The bounded File Location windows and their design contract keep that name.
+
+The active Grid status and every source card must use `1 Photo` for one and `N Photos` for every other count in both visible and accessible text.
+
+Source layout, its narrow-screen disclosure, and focus restoration follow [Library Browser Experience](../library-browser/spec.md#screen-structure). Both layouts must preserve the `Folders` and `Albums` distinction. A Folder and Album with the same name must remain distinguishable by section and source labeling. Changing source must not require entering a separate workflow.
+
+On a wide viewport, the Photographer must be able to resize the source navigation with its separator control by pointer drag or with the Left and Right Arrow keys while that control has focus, within a bounded width range. The separator must expose an accessible name. A narrow viewport must not offer the separator and must keep the source navigation behind the Sources disclosure.
+
+The current source must be visually and programmatically identifiable. Source state must not depend on color alone.
+
+A source name that is visually truncated must expose its complete name on hover. An Original Folder with no descendant Folders must not present an expand control; affected rows must keep their alignment without it.
+
+Opening Slipstream must not require the browser to download every Photo fact, every Album member, or the complete Original Folder tree. Album summaries may arrive with the bounded Library Overview. The `Folders` section must show a root labeled `Library Folder` without exposing its absolute server path, then load descendants as bounded direct-child Folder windows. A Folder window must report its real parent, range, direct-child count, and recursive Photo counts without returning complete recursive membership.
+
+All Folder windows retained together must come from the same Published Library. Library summary counts and Albums must also be revalidated against that publication before they replace visible shared facts. If a rescan replaces the publication while an older summary or File Locations are loading, Slipstream must discard the older summary and refresh File Locations rather than append or present facts from different publications. Opening a Folder from an expired publication must refresh navigation and require the Photographer to open the current Folder projection; it must not silently reinterpret the stale Location against a different publication.
+
+The first product uses two views:
+
+- **Grid View** shows progressively loaded thumbnail cells from the current
+  source.
+- **Photo View** shows one current Photo with selection, Rating, Preview,
+  Album membership, navigation, and Preview zoom controls.
+
+The Photographer opens Photo View by activating a Grid cell. A Grid cell must be enabled only while its activation can immediately open Photo View against the current source. While Slipstream replaces an expired source snapshot, it must make retained Grid cells unavailable until the replacement source is ready. It must not expose an enabled Grid cell whose activation does nothing. Photo View must provide a direct return to Grid View. Returning to Grid View must restore the browser-local scroll position and current Photo when those cells remain in the open source. Keyboard focus must return to that Photo cell when it is rendered, or to the Grid viewport when it is not.
+
+Slipstream follows this familiar Library-browser shape without adding desktop editing panels, folder mutation, Album Groups, Smart Albums, keywording, publishing, or a general RAW module editor. The separate [Photo Development](../photo-development/spec.md) workspace owns the bounded exposure and white-balance controls.
+
+## Presentation and Control Hierarchy
+
+[Library Browser Experience](../library-browser/spec.md) owns responsive
+screen composition, control placement, modal behavior, space budgets, and
+browser navigation. The action semantics below apply regardless of where a
+control is presented. Clear flag is unavailable while the current Photo is already
+`unflagged`; Undo is unavailable until the current source has an undoable
+Selection State or Rating change.
+
+## Mobile Photo View Quick Actions
+
+The Quick Action Dock, Photo tools, explicit Rating choices, and separate
+Photo navigation follow [Photo View](../library-browser/spec.md#photo-view)
+and [Supporting Surfaces](../library-browser/spec.md#supporting-surfaces).
+They reuse the existing Photo, Album, Rating, Selection State, and Undo owners
+and add no HTTP endpoint. The [Rating Wheel](#rating-wheel) remains an optional
+touch accelerator using the same Photo Rating mutation.
+
+## Source Order
+
+Each source owns one order:
+
+- `All Photos` uses deterministic Capture Time order.
+- An Original Folder filters that same order to one recursive Folder subtree.
+- An Album uses explicit membership position.
+
+When the Photographer opens or changes a source, Slipstream fixes that source's ordered Photo IDs for the open view. A rescan may refresh availability, Selection State, Rating, Preview facts, and File Location navigation, but it must not insert, remove, or reorder Photos in that open view. Reopening or refreshing the source may use a newly published order or Folder subtree.
+
+`All Photos` must use this deterministic order:
+
+1. Photos with a valid authoritative Capture Time, ordered by normalized camera-local Capture Time.
+2. Photos without a valid authoritative Capture Time.
+3. For equal Capture Times and throughout the missing-time partition, the Photo's ordering Location by UTF-8 bytes.
+4. Photo ID by UTF-8 bytes when all earlier values tie.
+
+The Photo's ordering Location is its own Original Location.
+
+During a Library check, if an Original changes between observations or while
+Capture Time is being read, Slipstream must discard that read's result and
+retry once from the current file at the same Location. A successful retry
+must use only the current file's metadata. If the retry also fails, the
+Photo must remain in the missing-time partition until a later successful
+check. This retry must not change Photo identity, decisions, Album membership
+order, or Resume.
+
+Original Folder order must use the `All Photos` order filtered by component-aware Folder ancestry. A Folder named `a` must not include a sibling named `ab`. Folder filtering must project each Photo once through the parent of its ordering Original Location.
+
+Album order must use membership position only. Capture metadata, availability, Selection State, Rating, Preview state, Original Folder changes, and rescans must not reorder an Album.
+
+## Source Ordering Selection
+
+Grid View must expose one explicit order selection for the open source:
+
+- `All Photos` and an Original Folder offer Capture Time, earliest first
+  (the default) and Capture Time, latest first.
+- An Album offers Album order (the default), Capture Time earliest first, and
+  Capture Time latest first.
+
+A time order belongs to the open view only. It must never rewrite persisted
+Album member positions, and an Album's persisted order remains the default
+when opened without an addressed order.
+
+The server applies the selected order to the complete source before it
+paginates windows, so Grid and Photo navigation share one globally ordered
+view. Photos without a valid authoritative Capture Time sort last in both
+directions. Equal Capture Times keep the deterministic ordering Location and
+Photo ID tie-breakers; reversing the time direction never reverses those
+tie-breakers and never moves missing-time Photos ahead of timed Photos. Time
+ordering uses the Photo's own Capture Time authority and camera-local
+normalization; it does not guess time zones and does not use file modification
+time.
+
+Changing the order must keep the current Photo, resolved by Photo ID, and
+reposition the view around it. Opening or reopening a different source uses
+that source's default order unless an addressed destination specifies another
+order. Committed order survives reload through the destination URL under
+[Browser History](../library-browser/spec.md#destinations-and-browser-history).
+Album saved positions restore by Photo identity and are unaffected by the
+selected view order.
+
+## Progressive Grid Loading
+
+Grid View must become interactive from a bounded first window of Photos. It must not wait for the entire source to transfer, parse, or render.
+
+While a window loads, Grid View must show stable placeholders and a truthful status such as:
+
+```text literal
+Loading Photos 1–60 of 36,997…
+```
+
+As the Photographer scrolls, Slipstream loads bounded later windows. The
+browser must keep the number of retained Photo facts and rendered Grid cells
+bounded independently of total Library size.
+
+Loading is range-based and rendering never initiates it:
+
+- scrolling or Grid keyboard movement computes the visible range plus a
+  bounded buffer and reports that one range; the Grid requests only the
+  bounded windows still missing for that range, and one completion
+  notification updates everything the range needs — neither scrolling nor
+  keyboard movement creates per-cell loading work;
+- Grid updates are merged to at most one per animation frame while scrolling,
+  and each update reuses the DOM nodes of Photos that remain visible: only
+  cells that enter, leave, or change are added, removed, or updated;
+- already loaded Photos keep their fixed-size cells while later positions
+  load, so stopping the scroll converges to a complete view without repeated
+  placeholder churn; and
+- retained Photo facts are capped at a bound that covers the actual viewport
+  and buffer at supported large viewports; eviction protects the current
+  range and buffer and always uses the latest visible range, never a position
+  captured when an older request started.
+
+A Grid cell must show, when available:
+
+- a cached or progressively generated thumbnail;
+- the Original filename;
+- Selection State;
+- Rating;
+- Photo and Original unavailability as distinct facts;
+- Preview unavailability or failure without removing the Photo from its position;
+- Thumbnail unavailability or failure without changing a known Review Preview fact; and
+- thumbnail delivery failure without replacing the Photo, Preview, or Thumbnail facts above.
+
+When a Photo's Preview is already known to be unavailable, the Grid must not
+request its thumbnail or report a thumbnail delivery failure for that Photo.
+A thumbnail delivery failure applies only when an otherwise available Preview
+could not be transferred or displayed. A failed Preview must remain distinct
+from a failed transfer.
+
+A Thumbnail request may fail while the Photo's Review Preview is ready. Its
+result must remain a Thumbnail fact; a later Review Preview recovery must allow
+the Grid to retry that Thumbnail.
+
+The Original filename is the basename of the Photo's ordering Original Location
+defined under Source Order. A Grid cell must keep the position number visible
+and must truncate a long filename instead of breaking the cell layout.
+
+A Grid cell must carry a Selection State badge only while that Photo is `picked` or `rejected`. An `unflagged` Photo must show no badge, so the badge always marks a recorded decision.
+
+Thumbnail completion must not change source order, Selection State, Rating, or saved Album position.
+
+## Grid Composition and Orientation
+
+Grid cells remain uniform, virtualizable units. The Photo image inside each
+cell must display complete and unstretched at its true aspect ratio:
+landscape Photos render wider than tall, portrait Photos taller than wide,
+and square Photos square. A panoramic Photo must read as one long
+composition rather than a cropped strip.
+
+Letterboxing must stay quiet. A cell must not crop every Photo to one
+composition and must not stretch an image to fill its area. Selection State,
+Rating, and Photo state indicators must not overlay the Photo image; they
+render beside or beneath the image area.
+
+Orientation follows the EXIF-corrected derivative dimensions. A Photo whose
+Preview derivative applies an EXIF rotation must display with the corrected
+orientation exactly once. Each Photo has one Grid cell.
+
+While a thumbnail is not yet loaded or its dimensions are unknown, the cell
+must keep a stable placeholder. The placeholder must not fake an orientation
+and must not cause Grid layout to jump when the thumbnail arrives.
+
+Thumbnail, Preview, scan, and bounded look-ahead loading must run in the background. Rebuildable or superseded loading must not delay source changes, navigation, already available controls, or returning between Grid View and Photo View. Changing source or view must cancel pending image transfers and requests owned only by the previous source, Photo, or view; hiding obsolete loading is not sufficient when it would continue consuming capacity. Slipstream may wait only when the requested action depends on confirmed facts or persistence, such as opening a source's first bounded window or safely completing a Selection State change before advancing.
+
+## Grid Thumbnail Size
+
+The Photographer judges focus and expression from the thumbnails themselves,
+and one fixed thumbnail size forces a choice between seeing too few Photos and
+seeing them too small. Grid View must therefore offer Small, Medium, and Large
+thumbnail sizes, and a newly loaded Library Browser starts at Medium.
+
+The size is a presentation option of the open Grid. It must not create a
+source, and it must not change source order, Album membership, Selection
+State, Rating, saved Album position, or Original Files. The chosen size
+applies while the Library Browser stays open: opening another source keeps
+it, and a browser reload starts again at Medium.
+
+Changing the size must keep the Photographer's place: the topmost visible row
+of Photos stays the first visible row, and the Grid then loads the bounded
+windows of the new layout exactly as scrolling does. Every size keeps the
+cell rules of Grid Composition and Orientation and the bounded rendering and
+loading rules of Progressive Grid Loading.
+
+The size control must be operable from a keyboard. Grid keys act only while
+the Grid owns keyboard focus, so the control receives its own keys unchanged.
+
+## Photo View
+
+Photo View must show one current Photo as the primary content. It must make
+the following facts and actions available, with their primary or disclosed
+placement defined by [Library Browser Experience](../library-browser/spec.md#photo-view):
+
+- current position and total Photo count;
+- the Original filename when available;
+- Selection State;
+- Rating;
+- Preview Source;
+- the Albums that contain the current Photo;
+- controls for pick, reject, clear flag, undo, and Rating;
+- previous and next navigation;
+- whether Preview detail is limited; and
+- review-relevant capture metadata when available: Capture Time, Aperture,
+  ISO, Shutter Speed, and Focal Length.
+
+Capture metadata is read-only. A missing or unreadable field must display an
+explicit `—` value. The displayed values come from the Photo's own Original
+File. Metadata loading failure must not
+disable selection, Rating, navigation, or Preview behavior. Slipstream does
+not provide a general EXIF editor or an unbounded metadata browser.
+
+Capture Time must display as camera-local `YYYY-MM-DD HH:MM`. Sub-second
+precision and the timezone-free normalized form are transport detail and must
+not appear in the interface. Slipstream must not convert, re-interpret, or
+invent a timezone for this value.
+
+Limited Preview detail must be identified together with the Preview Source
+fact, and must not be presented as a separate fact row. The complete
+explanation of the limit must remain available to assistive technology.
+
+The next and previous Photos must remain reachable without recording a decision.
+
+Photo View must provide the current Photo's immediate neighbors as a bounded
+strip of thumbnails centered on the current Photo. Its wide and compact
+placement follows [Library Browser Experience](../library-browser/spec.md#photo-view).
+Activating an entry
+navigates to that Photo, and the entry for the current Photo is marked as
+current and presents no activation.
+The strip is bounded independently of source size and follows the open
+source's order, so an Album's explicit order and a Selection State filter
+show the neighbors the Photographer actually moves through.
+
+The strip is supporting content. On a short viewport it yields so the
+Preview, the decisions, and Rating keep their space, and it must never widen
+Photo View or clip a control. A neighbor the browser has not loaded must
+appear as an unavailable entry rather than a guessed Photo. Moving through
+the strip is navigation: it must not record a decision, and it must not
+replace the Previous and Next controls. Every entry must be reachable and
+operable with the keyboard, and the strip must not take over a Photo View
+shortcut.
+
+Slipstream must prioritize the current Photo's Preview. After the current Preview is ready, it may prepare the immediately next and previous Previews in the background. This preparation must not change saved position or selection state.
+
+Photo View must keep the Preview inside the available viewport width. The
+Preview area may be shorter than the full Photo View when the remaining
+controls need more room, but it must remain large enough to inspect the image
+and must never create horizontal overflow. The Photo View may scroll
+vertically on a short viewport so every existing control remains reachable.
+
+## Loading Feedback
+
+Slipstream must distinguish these user-visible states:
+
+- connecting to the server;
+- loading the Library summary;
+- preparing the current source order;
+- loading a bounded Grid or Photo window;
+- preparing a thumbnail or review Preview;
+- scanning the Library Folder;
+- recovering relocated Original Files;
+- enrolling content fingerprints; and
+- disconnected or failed.
+
+Slipstream must show a numeric count or percentage only when it knows the corresponding total and completed amount. Otherwise it must show the current phase without inventing progress.
+
+An existing published Library must remain browsable while an ordinary background rescan checks for changes. The interface must show the current scan phase and real counts when available. If the check fails, Slipstream must retain the prior Published Library and offer **Retry Library Check**. When a replacement publishes, a completion notice must offer **Refresh Current Source**. Shared counts and the `Folders` section may refresh immediately, but Photos discovered by that scan appear in the open source only after the Photographer refreshes or reopens it; they must not move the current open view.
+
+On a new state store with no published Library, the browser may show initialization progress until the first scan publishes the Library.
+
+## Recovery Review
+
+A rescan that relocates or still misses Original Files must report committed recovery counts on the Library status, for example `Updated locations for 126 photos. 3 originals still unavailable.` A successful recovery must stay unobtrusive: it must not open a dialog or require a path entry.
+
+Slipstream must offer one bounded `Review unavailable originals` entry from the scan result and from an affected Photo. The entry must list remembered Locations, filenames, kinds, Ratings, Selection States, Album counts, and whether each Original has a fingerprint. It must let the Photographer propose mappings, inspect every proposal, and confirm an explicit apply under the [Photo Library and Albums](../photo-library/spec.md) manual recovery rules.
+
+Unavailable Photos must stay in their Grid positions and Albums with their remembered facts. Slipstream must not remove a Photo or its decisions only because its Original File is missing.
+
+Slipstream must show one primary actionable failure for an affected Photo. It must distinguish not found, unreadable, Preview failure, request failure, and disconnection. Once Original unavailability is established, it must suppress a redundant thumbnail-delivery error for that Photo.
+
+## Empty Sources
+
+An empty source must identify what is empty and must not imply that Photos or Original Files were removed.
+
+When the Photo Library contains no Photos, the `All Photos` source and Library Folder source must say that no supported Photos were found. They must direct the operator to check the configured Library Folder or add supported files, then offer **Check Library** through the existing rescan workflow. A completed check follows the normal **Refresh Current Source** contract above.
+
+An empty Album must remain openable and manageable. Its Grid must say that the Album contains no Photos and that the Photographer can add Photos from another source's Photo View. Rename and delete remain available through source navigation.
+
+## Saved Position
+
+Slipstream must remember the last Photo shown in Photo View for each Album.
+Grid scrolling alone does not change durable saved position. Opening the
+Album's Grid must expose Resume when a saved position exists. Resume must
+return to the saved Photo when it is still a member and available. An explicit
+Photo address takes precedence over that saved position. Source navigation and
+Resume history follow [Library Browser Experience](../library-browser/spec.md#destinations-and-browser-history).
+
+If the saved Photo is unavailable, Slipstream must move to the next available member by membership position and wrap once to the first available member. If no member is available, Slipstream must keep the saved member current.
+
+Removing the saved Photo from the Album clears that Album's saved position
+and removes its Resume availability. Opening the Album still shows its Grid;
+opening a Photo from that Grid establishes a new saved position.
+
+The first product does not persist a durable `All Photos` or Original Folder
+resume position. Their addressed Photo and browser-local Grid restoration
+follow [Returning to a Grid](../library-browser/spec.md#returning-to-a-grid).
+
+## Album Management
+
+The Photographer must be able to create an Album from source navigation. Album names must be nonempty, at most 120 characters, and unique within the flat Album list under ASCII letter-case folding, exactly as SQLite's NOCASE collation performs it; scripts without letter case, such as Chinese, are unaffected. [Physical File Locations and Virtual Albums](../photo-library/design.md) owns that naming boundary. A newly created empty Album must open to a usable empty Grid with controls to rename or delete it.
+
+Opening Album creation or rename must focus the Album name input and select its current value. Closing an Album form after cancellation or a completed action must return focus to the control that opened it when that control remains available, or to the nearest stable Album action. A validation or persistence failure must keep the form and its input recoverable; closing that form follows the same focus rule.
+
+The Photographer must be able to rename an Album and delete an Album after a confirmation that Photos and Original Files remain unchanged. Deleting the open Album must return to `All Photos` or another valid source without leaving an unusable current source.
+
+Photo View must let the Photographer add the current Photo to one or more Albums. Adding a Photo that already belongs to an Album must not create a duplicate membership. When the current source is an Album, Photo View must let the Photographer remove the current Photo from that Album.
+
+When the current source is an Original Folder, View options must offer one
+explicit **Add Folder** action. The Photographer chooses an Album and confirms
+the action. Slipstream adds every Photo in that Folder and its descendants in
+the same order as the open Folder source. The browser sends the Folder
+Location and its Published Library value, not the complete Photo list.
+
+The action is one bounded, idempotent operation. A Photo already in the Album
+is skipped without changing its membership position. The response must report
+the matched, added, and already-member counts. While it is running, the
+action is disabled and reports that the Folder is being added. A failed or
+expired operation must remain visibly incomplete and may be retried after the
+current Folder source is refreshed. A Folder with more than the server's
+bounded operation limit is rejected before any membership is committed.
+
+A confirmed membership addition appends the Photo after existing members. Removing a Photo must compact later membership positions without changing their relative order. Removing the saved or current Photo must apply the saved-position rules before the Album is next opened.
+
+Album mutations must persist before Slipstream presents them as complete. Changing source or Photo must not cancel an admitted persistence operation, but a late response from an obsolete UI generation must not overwrite the current source, current Photo, or current error state.
+
+The first Album-management interface does not require drag-and-drop, a visual bulk reorder surface, Album covers, sharing, Album Groups, or Smart Albums. Adding an entire current Folder and adding the Grid's multi-selection are supported separately from each other.
+
+## Photo Album Membership
+
+Photo View must show which Albums contain the current Photo. The membership
+list is the server's answer for that Photo, distinct from the browsing
+source and from recent management actions: viewing the same Photo from any
+source must present the same membership, and it must remain correct after a
+reload.
+
+A Photo in no Album must say so explicitly. Membership loading and failure
+are displayed independently of the Preview and capture metadata; a failed
+membership load must not disable selection, Rating, navigation, or Preview
+behavior and must offer a retry that reloads only the membership facts.
+
+Photo View must offer one membership management panel that lists Albums with
+a checkbox reflecting the Photo's true membership. Checking an Album adds
+the Photo through the same persistence rules as any membership addition,
+and unchecking removes it through the same rules as membership removal,
+including the browsing-position contract when removing from the open Album.
+Creating a new Album reuses the existing Album creation entry. An Album list
+too large for one view must load on demand rather than transferring every
+member of every Album.
+
+A successful add or remove must update the membership list and the Album
+counts. A failed toggle must keep the prior true state, identify the failed
+Album and action, and leave the toggle retryable. Adding a Photo that
+already belongs must not create a duplicate membership.
+
+Switching Photos quickly must never present another Photo's membership. A
+membership response that arrives after its Photo is no longer current must
+be discarded.
+
+## Selection State
+
+Each Photo has exactly one Selection State:
+
+- `unflagged`;
+- `picked`;
+- `rejected`.
+
+Picking a rejected Photo changes it to `picked`. Rejecting a picked Photo changes it to `rejected`. Clearing either state changes it to `unflagged`.
+
+A review action must persist before Slipstream treats navigation caused by that action as safely completed. The interface may animate immediately, but a persistence failure must restore or retain the prior visible state and keep the affected Photo recoverable.
+
+## Selection Filter and Progress
+
+A second reviewing pass works on one Selection State at a time: the
+Photographer re-checks rejects, then finishes the unflagged Photos. Grid View
+must therefore offer an `All`, `Unflagged`, `Picked`, or `Rejected` view of
+the open source, and must show how much of that source is decided.
+
+The filter is a view option of the open source. It must not create a source or
+an Album, and it must not change Album membership, Album member position, or
+Original Files. The filter and the view order are independent: changing one
+keeps the other. Committed filter values survive reload through the destination URL
+under [Browser History](../library-browser/spec.md#destinations-and-browser-history).
+
+The server applies the filter to the open source's complete order before the
+view is frozen, so the reported Photo count is the filtered count and the
+browser must not decide membership from the loaded Grid windows. A filtered
+view pages and navigates like an unfiltered one: Previous and Next move
+through the filtered Photos only. A filtered view that matches no Photos must
+report that no Photos match the filter; it must not report an empty source,
+offer a Library check, or show the previous filter's Photos.
+
+Changing the filter reopens the same source in the new view. When the current
+Photo matches the new filter, the reopened view keeps that Photo; otherwise it
+starts at its first Photo. A rescan must not insert, remove, or reorder Photos
+in an open filtered view. A decision that makes a Photo stop matching the open
+filter leaves that Photo visible until the source is reopened.
+
+Grid View must show decision progress for the open source: the number of
+decided Photos against the source total, and the per-state counts. The counts
+describe the source rather than the open filtered view, so they still answer
+how much review remains while the Photographer works inside one Selection
+State. They come from the server's source facts; the loaded Grid window must
+not be their only source. A confirmed decision and Undo update them without a
+reload, and reopening the source replaces them with the server's counts.
+
+The filter control must be operable from a keyboard and must receive its own
+keys unchanged. Grid decision and Rating keys must not act on the focused
+Photo while the filter control holds focus.
+
+While a Library scan runs, the counts describe the open source's bounded
+published state. They must not imply that the whole Library is decided or that
+the source is final.
+
+## Touch Gestures
+
+While the Preview zoom state is Fit:
+
+- a committed right swipe must set `picked`;
+- a drag below the commit threshold must return the Photo to its starting position without changing state; and
+- the surface must show the pending direction before release.
+
+The direction labels are a touch affordance. A device whose primary pointer
+can hover must not show them outside an in-progress decision drag.
+
+A committed swipe advances to the next Photo after the decision is accepted.
+
+Vertical swipes do not record a decision. At supported narrow or short-landscape touch viewports, while the zoom state is Fit, a vertical gesture that begins on the Preview must scroll Photo View naturally. A two-finger pinch always zooms the Preview, and a manual zoom state gives one-finger dragging to bounded panning instead of decisions. Rating uses the explicit controls required below and may use the touch-only [Rating Wheel](#rating-wheel). Slipstream must provide visible controls equivalent to swipe actions.
+
+### Rating Wheel
+
+The Rating Wheel is an optional touch accelerator for the current Photo. It is
+available only while the Preview is in Fit, the current Photo is connected and
+ready for decisions, and no other Photo mutation is settling. A mouse pointer
+must not open it. Grid View must not acquire a Rating Wheel or any other
+long-press action as part of this contract.
+
+The touch ownership states are:
+
+```mermaid
+stateDiagram-v2
+  [*] --> Idle
+  Idle --> PendingPress: touch pointerdown on Fit Preview
+  PendingPress --> Swipe: horizontal movement first
+  PendingPress --> Scroll: vertical movement first
+  PendingPress --> Pinch: second pointer first
+  PendingPress --> WheelOpen: 450 ms hold
+  WheelOpen --> WheelOpen: move across rating sector
+  WheelOpen --> Idle: cancel, Photo change, disconnect, pointercancel
+  WheelOpen --> Saving: release with candidate
+  Saving --> Idle: accepted
+  Saving --> RetryableFailure: answered error, conflict, malformed response, or transport loss
+  RetryableFailure --> Saving: retry current Rating
+  Swipe --> Idle
+  Scroll --> Idle
+  Pinch --> Idle
+```
+
+A touch pointer that begins on the Preview enters a pending long-press
+candidate. The candidate uses these initial product thresholds:
+
+- the pointer must remain within 12 CSS pixels of its starting point; and
+- it must remain stable for 450 milliseconds.
+
+The thresholds are interaction behavior, not a user setting. A later device
+qualification may propose new thresholds only through a Product Spec change.
+
+A pointer release before 450 milliseconds cancels the candidate without a
+mutation. It leaves the existing double-tap detail-zoom behavior unchanged.
+Before the 450-millisecond threshold, once movement exceeds 12 CSS pixels, the
+larger absolute axis delta owns the gesture:
+
+- a horizontal-dominant movement cancels the candidate and gives the gesture
+  to the existing Pick / Reject swipe;
+- a vertical-dominant movement cancels the candidate and gives the gesture to
+  natural Photo View scrolling;
+- an equal-axis movement cancels the candidate and gives the gesture to
+  natural scrolling;
+- a second pointer cancels the candidate and gives the gesture to Pinch Zoom;
+- pointer cancellation, Photo change, source change, disconnect, or a
+  superseding UI generation cancels the candidate without a mutation.
+
+When the threshold is reached, Slipstream opens a transient Rating Wheel near
+the starting point. The Wheel must adapt inward when the starting point is
+near an edge or safe-area inset. It must expose exactly six candidates: `0`,
+`1`, `2`, `3`, `4`, and `5`; `0` means Clear Rating. The current Rating must
+be highlighted, and the candidate under the pointer must be communicated with
+its numeric and star meaning. A candidate highlight is presentation only; it
+must not persist while the pointer remains down.
+
+Moving between candidates may change the highlighted candidate any number of
+times, but it must never start a save. Releasing on one candidate must emit
+exactly one Rating value for that gesture and enter Saving once; duplicate
+pointer-up or late events must not create another Rating mutation.
+
+The Photographer selects a candidate by moving across the Wheel and commits it
+by releasing the pointer on a candidate. A release without a candidate, a
+pointer cancellation, a second pointer, a Photo change, or a disconnect closes
+the Wheel without changing Rating. A committed Rating must:
+
+- persist through the existing Photo Rating mutation;
+- leave Selection State, Album membership, Photo position, and saved Album
+  position unchanged; and
+- keep the current Photo open without automatically advancing to the next
+  Photo.
+
+While the Wheel is pending or open, the Preview must suppress the browser's
+context menu for that gesture. It must not suppress the browser context menu
+for an unrelated mouse interaction. The Wheel must provide a programmatic
+name, current candidate, and instruction that the Photographer must release
+to save. Existing visible Rating controls and keyboard shortcuts remain the
+accessible and non-gesture fallback.
+
+On a persistence failure or uncertain transport result, Slipstream must close
+the Wheel, keep the previous Rating visible, identify that the change was not
+confirmed, and expose the existing retry and connection-recovery path. The
+outcome rules are:
+
+- an accepted response may update the current Rating only with the server's
+  confirmed value;
+- an answered error or conflict keeps the previous Rating, identifies that the
+  Photo changed elsewhere or the action was rejected, and offers retry;
+- a malformed, incomplete, or otherwise untrusted response moves no Rating,
+  Selection State, Photo position, or Undo entry and offers retry; and
+- transport loss leaves the admitted change retryable without claiming whether
+  the server applied it, until the existing recovery path confirms the current
+  Photo state.
+
+If a newer Rating intent, Photo change, source change, disconnect, or teardown
+supersedes a save, the Photo owner must cancel or fence the older request. A
+late result for an obsolete Photo or obsolete intent must not repaint the
+current Photo's Rating or status and must not create a second Undo entry.
+Reduced-motion users must not need animation or haptic feedback to understand
+or complete the action.
+
+## Preview Zoom and Fit
+
+Photo View must keep the complete Preview visible by default. **Fit** shows
+the entire Preview without cropping, as large as the available Preview area
+allows, and is the state every Photo opens in.
+
+Photo View must expose explicit zoom controls:
+
+- a **Fit Window** action that restores the complete composition;
+- a zoom out action, a continuous zoom slider, and a zoom in action;
+- a live zoom percentage; and
+- a **100%** action.
+
+The percentage is relative to the Preview image's own pixels. `100%` maps one
+Preview pixel to one CSS pixel regardless of device pixel ratio; it reports
+the honest derivative resolution and never implies RAW sensor precision. The
+zoom range is 10% to 800% of the Preview's natural size. The buttons and
+wheel step zoom multiplicatively, and the slider moves continuously within
+the same range. Fit is reported with the percentage it actually produces.
+
+On a device with a pointer wheel, wheel zoom must keep the image point under
+the pointer stationary while zooming. On a touch device, a two-finger pinch
+zooms around the gesture midpoint. Once the Photo is larger than the Preview
+area, dragging pans within bounded overflow so the image cannot be dragged
+out of view; while it fits, panning is not available and the image stays
+centered.
+
+Zoom and pan must never record a Selection State or Rating. While the zoom
+state is manual, one-finger dragging pans the Preview and swipe decisions are
+unavailable; explicit Pick and Reject controls stay available. In Fit,
+horizontal dragging keeps the decision gesture and vertical dragging scrolls
+a short Photo View naturally.
+
+Every zoom control must be operable from the keyboard, and the current zoom
+state must be exposed programmatically. Keyboard shortcuts `+` and `-` step
+zoom, `F` restores Fit, and `D` toggles a 200% detail zoom.
+
+Changing Photo or returning to Grid View must reset the zoom state to Fit.
+When the viewport or Preview area changes size, Fit must recompute, and a
+manual zoom must keep its percentage while its pan is constrained again.
+Zooming above 100% is allowed but is always reported truthfully; the interface
+must not suggest the source contains detail beyond the Preview derivative.
+
+## Rating
+
+A Photo has a Rating from zero through five stars. Zero means no Rating.
+
+Changing Rating must not change Selection State. Picking or rejecting a Photo must not change Rating.
+
+The Photographer must be able to set Rating through visible controls. Keyboard shortcuts `0` through `5` may provide the same behavior on devices with keyboards.
+
+Exactly one visible Rating control from zero through five must communicate the current Rating visually and programmatically. The mobile Rating entry and the explicit Rating path opened from it count as the same Rating control for this rule; the touch-only Rating Wheel is an accelerator and does not replace them. Zero must remain an explicit current value when the Photo has no Rating.
+
+Photo View must present a Photo with no Rating as `No rating` in its Rating
+fact. A rated Photo must present `<N> star` for one and `<N> stars`
+otherwise. This wording applies to the fact only; the Rating control keeps
+zero as an explicit value.
+
+## Undo
+
+Slipstream must provide undo for the most recent Selection State or Rating change made since the Photographer opened the current source.
+
+Undo must restore the previous value and return to the affected Photo when the original action advanced away from it.
+
+The first product requires one-level undo. Undo remains available until another Selection State or Rating change occurs, the Photographer changes source, or the browser reloads. One batched Selection State change counts as one change for this rule. The browser holds the one undo description; the server does not persist undo history.
+
+The undo description must identify its affected Photo by stable Photo ID. Any position retained with that description is only a hint for the current Browse Snapshot. When the same source is reopened with a replacement Snapshot, Slipstream must resolve the Photo ID against that Snapshot before loading or applying Undo. The resolution must use one bounded position lookup and must not transfer the complete source or create browser-global state.
+
+If the affected Photo is no longer in the current source, Slipstream must clear the undo description and identify that Undo is no longer available. If the bounded lookup fails, Slipstream must keep the undo description and current Photo unchanged, identify that the target could not be located, and allow the Photographer to retry. It must not send the Undo mutation until the target identity and current position are confirmed.
+
+Undo must fail without changing state when the Photo's current value no longer matches the value produced by the action being undone.
+
+## Keyboard Behavior
+
+On a device with a keyboard, Photo View provides:
+
+- Right Arrow moves to the next Photo without changing it.
+- Left Arrow moves to the previous Photo without changing it.
+- `P` picks the current Photo.
+- `X` rejects the current Photo.
+- `U` clears the current Photo's Selection State.
+- `0` through `5` set Rating.
+- `Ctrl+Z` or `Command+Z` performs undo.
+
+Keyboard actions must follow the same persistence and undo rules as visible controls and gestures.
+
+## Grid View Keyboard
+
+Grid View must be operable from a keyboard without opening Photo View.
+
+- The Grid is entered once by Tab: the Grid viewport is its entry and fallback Tab stop, and at most one rendered cell is a Tab stop at a time (the cell the keyboard owns). Arrow keys move cell focus. Left and Right move one Photo; Up and Down move one complete row.
+- Moving cell focus must load the bounded window that contains the target row, exactly as scrolling does. Cell focus must not stop at the edge of a loaded window.
+- While the focused Photo's bounded window is loading, the Grid keeps keyboard focus and returns it to the cell once that cell renders.
+- The focused cell must keep its visible focus ring when a window replacement or a merged render rebuilds it.
+- `Enter` opens the focused Photo in Photo View.
+- `P`, `X`, `U`, and `0` through `5` apply to the focused Photo, with the same persistence and undo rules as their Photo View equivalents. A decision must not move cell focus, and `U` must perform no write while the focused Photo is already `unflagged`.
+- A failed Grid decision must report on the Grid's status line and must keep the affected Photo recoverable. It must not open Photo View.
+- Grid keys must act only while the Grid owns keyboard focus. Another surface with focus, such as an Album name input, must receive its own keys unchanged.
+
+While the Grid is open, undo of a change that did not advance away from the affected Photo must restore the value in place, keep the Grid open, and return cell focus to the affected Photo. Undo of a change that advanced away must return to the affected Photo in Photo View. The browser holds one undo description, shared with Photo View.
+
+## Grid Multi-Selection and Batch Actions
+
+Culling one Photo at a time does not scale to a burst or a shoot. Grid View
+must therefore let the Photographer mark several Photos and apply one decision
+or one Album addition to all of them.
+
+Grid View supports multi-selection in addition to the single open target:
+
+- a shift-click extends the multi-selection over the Photos between the last
+  multi-selection anchor and the clicked Photo;
+- a Control-click or Command-click toggles one Photo;
+- an explicit **Select** mode makes every Grid cell activation toggle that
+  Photo's multi-selection instead of opening Photo View, so a touch device can
+  multi-select without a modifier key.
+
+One batch addresses at most 100 Photos. When **Select** mode is active, the
+Grid must show a selection tray even when it is empty, with `0 / 100 Photos`.
+The Grid refuses to grow the multi-selection past that bound, names the bound
+when it does, and keeps the selection it already holds, so a batch the server
+would refuse can never be built. A refused toggle or range is one operation:
+the selection and its anchor do not change. The Grid must say: `Selection limit
+reached. Remove a Photo to extend the range.`
+
+The selection tray must state `Selection remains active` after a batch
+operation. It must show the active source and must distinguish the visible
+filtered result count from the Selection State counts for the complete source.
+
+The **Select** mode must be enterable and leavable from a keyboard. The clear exit labeled Done and `Escape` empty the multi-selection and leave **Select** mode, including
+when the tray currently shows `0 / 100 Photos`. Opening or reopening a source
+also leaves Select mode. The Grid decision and Rating keys keep
+their existing meaning for the focused Photo.
+
+A range extends over the Photos the Grid has loaded. A position the Grid has
+not loaded cannot join the multi-selection, and the count reports the Photos
+that are actually selected.
+
+While the multi-selection is not empty, the Grid must show its count, one
+clear exit that empties the multi-selection and leaves **Select** mode, and the
+batch actions **Pick**, **Reject**, and **Add to Album**. Multi-selection must
+read differently from the single open target and must not depend on color
+alone; a multi-selected Grid cell must expose that state to assistive
+technology.
+
+Batch **Pick** and **Reject** apply one Selection State to every selected Photo
+through the same persistence rules as a single decision, as one bounded
+operation. Each selected Photo carries the last Selection State the browser
+confirmed for it. A Photo whose current Selection State differs from that
+expected value is reported as changed elsewhere and is not overwritten. A
+Photo the current Library no longer holds is reported as missing and does not
+block the other Photos. A confirmed Photo moves the decision progress once.
+`Review N` also reconciles each refreshed Photo from the state contribution the
+source counts already held to the observed state, so a retry does not move its
+progress twice. A batch carries no Album position write even in an open Album:
+it moves no browsing position. A failed or partial operation must leave every
+affected Photo recoverable and must not present the batch as complete.
+
+The Grid must report applied, changed-elsewhere, and missing Photos separately.
+A changed-elsewhere Photo remains selected for review or retry. The result must
+identify missing Photos as `no longer in this Library`, identify concurrent
+state differences as `changed elsewhere`, and offer a `Review N` action for the
+latter, where `N` is the number of affected Photos. `Review N` focuses the
+affected cells and opens no modal. Review must refresh each affected Photo's
+current facts before another decision can be confirmed. Review verifies the
+Photo's position in the current Browse Snapshot before it reports the Photo as
+missing; local fact eviction stays retryable and is not proof of deletion.
+
+A missing Photo remains visible in the selection result and the tray count
+until the Photographer clears it or opens another source, but it is marked
+`no longer in this Library` and is excluded from later batch requests. It does
+not consume a retry or create a new decision count.
+
+A batched Selection State change is one undoable change: Undo restores the
+prior Selection State of every Photo the batch confirmed, as one unit. The
+one-level Undo rule is unchanged. A Photo whose batch write failed is not part
+of that undo description; its current state is presented truthfully and a
+later decision or retry decides it again. A batch never changes a Rating.
+
+Batch **Add to Album** adds every selected Photo to one Album through the same
+membership rules as a single addition. A Photo that already belongs to the
+Album is skipped without changing its membership position. The confirmed
+result must identify Photos newly added and Photos already belonging to the
+Album.
+
+The result must offer a scoped **Remove added Photos** action for Photos newly
+added by that operation. It must not remove Photos that were already members,
+and it must not be called **Undo** because removing and re-adding a member may
+change its Album position. The action remains available while its result is
+visible and may expire on source change, a new membership operation, target
+Album deletion, page teardown, or page reload. Membership changes stay outside
+the global Selection State Undo contract.
+
+Opening or reopening a source clears the multi-selection; scrolling and Grid
+renders must not. A batch decision or one batch Album addition keeps the
+multi-selection, so the same Photos can take another decision or join another
+Album; only the clear exit, `Escape`, and opening or reopening a source empty
+it. After a batch Selection State decision or batch Album addition settles in
+an Album, the Grid must report that the durable Photo View resume position is
+unchanged, for example `Album resume point unchanged.` The
+**Remove added Photos** compensation reports the ordinary Album removal result
+instead. If it removes the saved Photo, it reports the resulting saved
+position, or that no saved position remains. The batch actions must remain
+reachable from a keyboard. Every batch result count and outcome must be
+announced on the Grid's status surface; the tray count is a visual summary and
+is not a second live-region announcement.
+
+## Failure Behavior
+
+If a File Location window fails to load, Slipstream must retain already loaded Folder nodes, identify the failed range, and offer retry without collapsing unrelated navigation. If its publication expired, Slipstream must replace the retained File Locations with one coherent current publication and identify that scan results changed them.
+
+If a Grid or Photo window fails to load, Slipstream must retain already loaded content, identify the failed range, and offer retry without returning to an empty application screen.
+
+If a filter change cannot open its view, Slipstream must report the failure on
+the Grid and keep the requested view recoverable through the source Retry,
+like any other source open. It must not present the previous filter's Photos
+as the requested filter's result.
+
+Photo navigation must commit a new current Photo only after its bounded Photo facts are available. If navigation cannot commit its target, Slipstream must retain the prior visible current Photo and position as the Photo Retry target. The displayed Photo, recovery target, and retried bounded window must refer to the same Photo.
+
+If the current Preview cannot load, Slipstream must keep the Photo in source order, identify the failure, and allow navigation without forcing a selection decision.
+
+If an Album creation, rename, delete, or membership change cannot persist, Slipstream must identify the affected Album and action. It must retain a recoverable current source and must not present the failed change as complete.
+
+If the current Photo's Album membership cannot load, Slipstream must keep the prior or empty membership presentation truthful, identify the failure beside the membership panel, and offer a retry. The failure must not affect selection, Rating, navigation, or Preview behavior.
+
+If a selection or Rating change cannot persist, Slipstream must identify the affected action. It must not silently advance as if the decision were saved.
+
+If a batch contains both confirmed and unsuccessful Photos, Slipstream must
+present the confirmed result and the unsuccessful Photos separately. A
+changed-elsewhere Photo must remain recoverable through Review and retry. A
+transport failure must leave the admitted batch retryable without claiming
+which Photos the server confirmed. A malformed or incomplete batch response is
+untrusted: Slipstream must move no Photo facts, progress counts, or Undo
+entries from it, must keep the selection retryable, and must identify the
+batch as needing retry rather than inventing per-Photo outcomes.
+
+If a scoped **Remove added Photos** compensation cannot persist, Slipstream
+must identify the Album and retain the compensation action for retry when the
+same operation remains current. A late compensation result must not replace a
+newer Album action or source status.
+
+A disconnected browser may continue displaying already loaded thumbnails and Previews. An already loaded Preview must remain available for local Detail Review zoom and pan while disconnected, but the browser must stop accepting new decisions until both the connection and the current Photo state are confirmed. Fit-mode decision gestures and persisted controls remain unavailable while disconnected. Success from an unrelated request, such as another File Location range, does not confirm the current Photo state or re-enable decisions. Reconnect must refresh only the current source window and affected state; it must not require a full-Library transfer.
+
+Slipstream must not present the Library Browser as connected while the server is unreachable. The browser must probe server reachability while the Photographer is idle, and it must report a lost connection within a bounded delay and without a Photographer action. A probe that cannot reach the server must mark the browser disconnected and withhold new decisions.
+
+A probe that receives a usable status answer may confirm the connection again, because that probe is the designated reachability signal. It does not confirm the current Photo state: only the recovery that owns an affected operation confirms that state, so a confirmed connection must not clear an unfinished recovery or release a decision that still waits for its own confirmation. A status answer that arrives without usable content reports neither outcome: the server is reachable, and the condition belongs to the server rather than to connectivity.
+
+If an ephemeral server-side browse snapshot expires or is lost after server restart, Slipstream must reopen the current source from the latest published Library and identify that newly completed scans may affect its order. A successful replacement snapshot also replaces browser-local Album membership facts from the retired snapshot; a failed reopen retains the recoverable current view.
+
+## Examples
+
+A Library contains 36,997 Photos. Slipstream displays the Library count and first Grid window without transferring all 36,997 Photo facts. Scrolling loads later windows while the source order remains stable.
+
+The Photographer opens the Album `26春节`, activates its fourth Grid cell, and later returns to the source list. Opening that Album's Grid exposes Resume, which returns to the saved Photo when it remains available.
+
+The filesystem also contains the Original Folder `RAW/26春节`. Opening it shows Photos from that Folder and its descendants in Capture Time order. Its matching name does not connect it to the Album or change Album membership.
+
+A rescan discovers 100 new Photos while the Photographer is viewing the Library. The open Grid does not insert them or move existing cells. A completion notice offers refresh; reopening `All Photos` includes the new Photos in Capture Time order.
+
+The Photographer opens Photo 100. Slipstream prepares its review Preview first, then prepares Photos 101 and 99 with lower priority. Moving to Photo 101 normally reuses the completed cache entry.
+
+The Photographer drags a Photo to the right. A picked indicator grows with the drag. The Photographer releases after the commit threshold. Slipstream records `picked` and advances to the next Photo.
+
+On a Fit Preview, the Photographer holds a touch pointer still for 450
+milliseconds, slides to `4`, and releases. Slipstream saves exactly Rating `4`,
+leaves Selection State and Photo position unchanged, and keeps the Photo open.
+Holding while moving vertically first scrolls Photo View; moving horizontally
+first starts the existing Select / Reject swipe; adding a second pointer starts
+Pinch Zoom. None of those handoffs changes Rating.
+
+The Photographer releases the Wheel outside all six candidates. The Wheel
+closes without saving. If the save returns a conflict or malformed response,
+the prior Rating remains visible with retry; if the Photo changes before a late
+response arrives, that response is ignored.
+
+A Library contains `shoot/A.JPG` captured at `2026:01:01 10:00:00` and `shoot/Z.JPG` captured at `2026:01:01 09:00:00`. Grid and Photo navigation show `Z`, then `A`, even though the filenames sort in the opposite order.
+
+An Album explicitly contains `shoot/A.JPG` at position 0 and `shoot/Z.JPG` at position 1, while `Z` has the earlier Capture Time. That Album shows `A`, then `Z`. `All Photos` and the `shoot` Original Folder show `Z`, then `A`.

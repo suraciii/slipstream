@@ -2,10 +2,10 @@
 
 This directory builds and exercises optional processing modules of the single
 Slipstream application container: native darktable and standalone SpektraFilm. The
-[local executor design](../../design/processing-executor.md) owns the
+[local executor design](../../specs/processing-executor/design.md) owns the
 execution and failure lifetime; the
-[darktable integration](../../design/darktable-integration.md) and
-[development color](../../design/development-color.md) designs own the
+[darktable integration](../../specs/darktable-integration/design.md) and
+[development color](../../specs/development-color/design.md) designs own the
 semantic requests and output contracts.
 
 There is no host processing launcher, processing systemd unit, worker

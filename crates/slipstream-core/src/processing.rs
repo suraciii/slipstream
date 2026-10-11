@@ -1,6 +1,6 @@
 //! Durable domain vocabulary for composable photo processing.
 //!
-//! `design/processing-modules.md` separates single-module execution from
+//! `specs/processing-modules/design.md` separates single-module execution from
 //! caller-controlled composition. This module owns the vocabulary of that
 //! boundary: module, step, and artifact identities, the Original-or-Artifact
 //! input binding, the concrete image contract, the complete versioned

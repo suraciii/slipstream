@@ -1,7 +1,7 @@
 /// Browser addresses and native history for Library Browser destinations.
 ///
 /// This is the page-local navigation owner described by
-/// [Browser Navigation](../../../../design/browser-navigation.md). It decodes
+/// [Browser Navigation](../../../../../../specs/library-browser/design.md). It decodes
 /// and encodes addresses, owns the current browser entry, and reports a
 /// traversal intent to the page controller. It issues no HTTP calls, holds no
 /// Photo facts, and mirrors no history stack: the browser owns the stack and

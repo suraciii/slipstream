@@ -1,6 +1,6 @@
 # Agent Use of the Slipstream CLI
 
-Use the shipped [CLI Reference](cli-reference.md) for exact commands, result
+Use the shipped [CLI Reference](../specs/command-line/reference.md) for exact commands, result
 fields, and error codes. The Photographer's Agent owns the plan and any image
 interpretation. Slipstream supplies current facts and checked operations; it
 does not ask a model to judge a Photo.

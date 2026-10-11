@@ -1244,7 +1244,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=MAX_DOWNLOAD_BYTES,
         help=(
             "Read bound for artifact downloads: the deployment's retained-output allowance in bytes "
-            "(`SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES`, docs/deployment.md), which must cover a "
+            "(`SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES`, specs/deployment/spec.md), which must cover a "
             f"full-resolution Development TIFF. Defaults to {MAX_DOWNLOAD_BYTES}; the service's hard "
             f"output maximum is {MAXIMUM_DOWNLOAD_BYTES}."
         ),

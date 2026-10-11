@@ -57,24 +57,22 @@ const allowed = (path: string, line: number, text: string): boolean => {
       text.includes('"name": "retired-photo-set-create"') ||
       text.includes('"path": "/api/photo-sets"')
     );
-  if (path === "design/capture-time-ordering.md")
+  if (path === "specs/photo-library/ordering.md")
     return text.includes("under earlier Photo Set names");
-  if (path === "design/library-browsing.md")
+  if (path === "specs/library-browsing/design.md")
     return text.includes("Legacy Photo Set routes and source values");
-  if (path === "design/photo-organization.md")
+  if (path === "specs/photo-library/design.md")
     return (
       text.includes("It replaces active `photo_sets`") ||
       text.includes("Legacy `Photo Set` names remain only") ||
       text.startsWith("### Rejected: Retain Photo Set Internally") ||
       text.startsWith("- absence of active `Photo Set` names")
     );
-  if (path === "design/library-management-removal-and-restore.md") return true;
-  if (path === "docs/0.1-support-and-release.md")
+  if (path === "specs/library-removal/design.md") return true;
+  if (path === "specs/support-and-release/spec.md")
     return text.includes("legacy v4 Photo Set storage names");
-  if (path === "docs/README.md")
-    return text.includes("Composable Removal and Restore");
-  if (path === "docs/library-management-removal-and-restore.md") return true;
-  if (path === "docs/rejected-photo-cleanup.md")
+  if (path === "specs/library-removal/spec.md") return true;
+  if (path === "specs/rejected-photo-cleanup/spec.md")
     return text.includes("explicitly identified Photo sets");
   if (path === "crates/slipstream-core/src/library/mod.rs")
     return text.includes("explicit, caller-reviewed Photo set");

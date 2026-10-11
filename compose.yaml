@@ -5,7 +5,7 @@ x-slipstream-container: &slipstream-container
   read_only: true
   # One finite shared allocation for the Web service and the optional native
   # Photo engine that runs inside this same application container
-  # (design/processing-executor.md): an engine over-run fails this container
+  # (specs/processing-executor/design.md): an engine over-run fails this container
   # instead of the host. pids_limit and OMP_NUM_THREADS bound engine worker
   # threads to the same CPU allocation; the service stop_grace_period bounds
   # engine shutdown timing before the container is killed. No Docker socket is

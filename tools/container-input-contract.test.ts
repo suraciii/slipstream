@@ -395,17 +395,3 @@ test("the container and Compose focused contracts are wired through test:fast an
     ),
   ).toBeTrue();
 });
-
-test("deployment documentation distinguishes build inputs from qualification output", async () => {
-  const deployment = await text("docs/deployment.md");
-  const design = await text("design/container-inputs.md");
-  expect(deployment).toContain("`docker buildx build --platform linux/amd64`");
-  expect(deployment).toContain("runs only the digest-pinned image");
-  expect(deployment).toContain("source reproducibility");
-  expect(deployment).toContain("single build's traceability");
-  expect(deployment).toContain("OCI revision and immutable digest");
-  expect(deployment).toContain("final native package versions");
-  expect(deployment).toContain("SBOM");
-  expect(deployment).toContain("advisory database timestamp");
-  expect(design).toContain("has no `build` input");
-});

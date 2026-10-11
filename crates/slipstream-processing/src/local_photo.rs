@@ -40,7 +40,7 @@ pub struct OutputIdentity {
 /// The staged profile must hash to these bytes, and the server's installed
 /// bundle check pins the same identity. The output contract pins these
 /// asset bytes and the exact embedded profile bytes separately
-/// (`design/development-color.md`).
+/// (`specs/development-color/design.md`).
 pub const ICC_ASSET_SHA256: &str =
     "df7b2c677645f1ca5364b52e62f8db04ca61f80163792942f3e409a84a6b12ed";
 /// Matches the Export artifact limit of the application seams; the

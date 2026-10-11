@@ -3,13 +3,17 @@
 
 import gzip
 import hashlib
+import io
 import json
 import os
 import platform
+import posixpath
+import re
 import stat
 import subprocess
 import tarfile
 from pathlib import Path
+from urllib.parse import quote, unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 FILES = {
@@ -17,13 +21,45 @@ FILES = {
     "THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md",
     "RUST-LICENSES.html": "RUST-LICENSES.html",
     "docs/cli-install.md": "docs/cli-install.md",
-    "docs/cli-reference.md": "docs/cli-reference.md",
-    "docs/command-line.md": "docs/command-line.md",
-    "docs/access.md": "docs/access.md",
-    "docs/library-browsing-and-selection.md": "docs/library-browsing-and-selection.md",
-    "design/preview-pipeline.md": "design/preview-pipeline.md",
+    "CONTEXT.md": "CONTEXT.md",
+    "CONTRIBUTING.md": "CONTRIBUTING.md",
     "docs/agent-cli.md": "docs/agent-cli.md",
 }
+
+
+def archive_files():
+    files = dict(FILES)
+    for path in sorted((ROOT / "specs").rglob("*.md")):
+        if path.name == "AGENTS.md":
+            continue
+        relative = path.relative_to(ROOT).as_posix()
+        files[relative] = relative
+    return files
+
+
+def archive_markdown(source, member, files, commit):
+    """Keep shipped links local and pin source-only links to the candidate commit."""
+    text = source.read_text(encoding="utf-8")
+
+    def rewrite(match):
+        target = match.group(2)
+        parsed = urlsplit(target)
+        if parsed.scheme or parsed.netloc or not parsed.path or parsed.path.startswith("/"):
+            return match.group(0)
+        path = posixpath.normpath(
+            posixpath.join(posixpath.dirname(member), unquote(parsed.path))
+        )
+        if path in files.values():
+            return match.group(0)
+        kind = "tree" if (ROOT / path).is_dir() else "blob"
+        url = f"https://github.com/suraciii/slipstream/{kind}/{commit}/{quote(path, safe='/')}"
+        if parsed.query:
+            url += f"?{parsed.query}"
+        if parsed.fragment:
+            url += f"#{parsed.fragment}"
+        return f"{match.group(1)}{url}{match.group(3)}"
+
+    return re.sub(r"(\]\()([^\s)]+)(\))", rewrite, text).encode("utf-8")
 
 
 def run(*command):
@@ -76,14 +112,20 @@ def main():
     output.mkdir()
     archive = output / f"{name}.tar.gz"
     with archive.open("xb") as stream:
+        files = archive_files()
         with gzip.GzipFile(fileobj=stream, mode="wb", filename="", mtime=0) as compressed:
             with tarfile.open(fileobj=compressed, mode="w") as tar:
                 sources = [(binary, "slipstream")]
-                sources.extend((ROOT / path, member) for path, member in FILES.items())
+                sources.extend((ROOT / path, member) for path, member in files.items())
                 for source, member in sources:
                     info = file_info(source, f"{name}/{member}")
-                    with source.open("rb") as data:
-                        tar.addfile(info, data)
+                    if source.suffix == ".md":
+                        data = archive_markdown(source, member, files, commit)
+                        info.size = len(data)
+                        tar.addfile(info, io.BytesIO(data))
+                    else:
+                        with source.open("rb") as data:
+                            tar.addfile(info, data)
     digest = hashlib.sha256()
     with archive.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
