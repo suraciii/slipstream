@@ -362,6 +362,7 @@ for (const firstTransport of ["https", "http"] as const) {
       // The second alias observes the first alias's saved Photo decision.
       await openPhotoToolsView(page, "tools");
       await page
+        .locator("[data-photo-tools]")
         .getByRole("button", {
           name: index === 0 ? "Reject" : "Pick",
           exact: true,

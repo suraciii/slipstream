@@ -68,7 +68,11 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
     await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
   await returnToPhotoTools(page);
   for (const name of ["Clear flag", "Undo"])
-    await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
+    await expect(
+      page
+        .locator("[data-photo-tools]")
+        .getByRole("button", { name, exact: true }),
+    ).toBeVisible();
   await openRatingChoices(page);
   await expect(
     page.getByRole("button", { name: "Rate 5 stars", exact: true }),
