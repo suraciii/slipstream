@@ -1,44 +1,6 @@
-# Product Specs
+# Usage and Installation
 
-`docs/` defines the target behavior that Photographers and their Agents can observe or depend on. It is the product specification layer, not a record of source-code structure.
+`docs/` explains how to install and use Slipstream. Product behavior, design decisions, and implementation contracts are defined in the [specifications index](../specs/README.md).
 
-Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or changing a Product Spec.
-
-## Product Definition
-
-- [Product Vision](vision.md): human and machine use, goals, audience, principles, and product boundaries
-- [Command-Line Use](command-line.md): delegated photo workflows, shared state, Preview delivery, effects, and recovery
-- [CLI Reference](cli-reference.md): authoritative command syntax, inputs, structured results, errors, and composition examples
-- [CLI Candidate Installation](cli-install.md): checksum verification, local installation, connection, and upgrade
-- [Agent Use](agent-cli.md): bounded query, Album, Preview, and error-handling workflow
-
-## Core Experience
-
-- [Instance Access](access.md): instance token entry, browser sessions, CLI access, sign-out, and recovery
-
-- [Photo Library and Albums](photo-library.md): indexing existing files, read-only Original Folders, virtual Albums, independent RAW and JPEG Photos with Location Recovery, and Original File ownership
-- [Library Browser Experience](library-browser-experience.md): responsive screen composition, contextual controls, browser destinations, history restoration, and space acceptance
-- [Source-Scoped Library Filters](library-filter-experience.md): source scope, Selection State and metadata conditions, stable filtered work, Web/CLI handoff, and Rejected cleanup boundaries
-- [Library Browsing and Selection](library-browsing-and-selection.md): progressive Grid and Photo views, source order, loading feedback, gestures, selection state, rating, detail inspection, and undo
-- [Library Management: Remove Rejected Photos](rejected-photo-cleanup.md): Photo marking, reversible Library removal, restore, and Original File safety
-- [Photo Previews](previews.md): acceptable preview sources, visible provenance, quality limits, caching behavior, and failures
-
-## Photo Development
-
-- [Photo Development](photo-development.md): RAW correction, autosave, fixed film simulation, stage previews, exports, shared client behavior, and recovery
-- [darktable Integration](darktable-integration.md): engine relationship, admitted controls, saved intent, matching outputs, and upgrade failures
-
-## Support and Release
-
-- [Installed Web Application](installed-web-app.md): online installation, launch, and supported deployment
-
-- [0.1 Support and Release Contract](0.1-support-and-release.md): supported environment, file and camera boundary, recovery, limitations, rollback-artifact retention, and 0.1.0 release notes
-- [Deployment](deployment.md): image, host storage, and supported Compose operator contract
-
-## Library Management
-
-- [Composable Removal and Restore](library-management-removal-and-restore.md): explicit Photo sets, reversible effects, stale-state protection, and recoverable outcomes
-
-- [Trash and Permanent Deletion](library-management-trash.md): complete Trash browsing, Restore, explicit Original deletion, and truthful batch outcomes
-
-- [Read and Save Metadata](library-management-metadata.md): standard field coverage, provenance, checked XMP Sidecar saves, and external interoperability
+- [CLI Candidate Installation](cli-install.md): checksum verification, local installation, connection, and upgrade.
+- [Agent Use](agent-cli.md): bounded query, Album, Preview, and error-handling workflow.

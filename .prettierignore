@@ -3,3 +3,10 @@ dist
 coverage
 .slipstream
 bun.lock
+
+# Product Specs retain their authored formatting.
+specs/**/spec.md
+specs/command-line/reference.md
+specs/photo-development/model.md
+specs/README.md
+specs/AGENTS.md

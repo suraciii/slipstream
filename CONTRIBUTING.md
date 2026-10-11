@@ -172,7 +172,7 @@ PLAYWRIGHT_CHROMIUM_EXECUTABLE=/absolute/path/to/chrome bun run test:browser
 
 `test:browser` runs the browser smoke suite against the Rust `slipstream-server` binary. It builds the Web assets, starts the binary on a private loopback TCP port behind a local HTTPS proxy, and gives it independent temporary state and cache directories. Fixtures provision a generated Access Token and establish real sessions; the checked-in test certificate and key under `tools/test-tls/` are for synthetic fixtures only. The combined CLI-to-Web scenario runs the compiled `slipstream` client the same way. Use `SLIPSTREAM_SERVER_BINARY`, `SLIPSTREAM_CLI_BINARY`, or `SLIPSTREAM_WEB_ROOT` only when testing separately built Rust binaries or a Web directory. `test:rust` checks formatting, denies Clippy warnings, and runs Rust tests serially because the native Preview stack has one process-global libvips lifecycle. `test:fast` adds Bun/TypeScript linting and type checking plus the Rust-only browser suite. `verify` also checks repository formatting and builds Rust plus the Web application. GitHub Actions invokes the same `verify` command.
 
-The Rust workspace contains the production Library/Preview core and HTTP server in `crates/slipstream-server`. The production-language contract is in [`design/rust-server.md`](design/rust-server.md). Shared JSON and SQL vectors live in [`compatibility/`](compatibility/); Rust compatibility tests consume them.
+The Rust workspace contains the production Library/Preview core and HTTP server in `crates/slipstream-server`. The production-language contract is in [`specs/rust-server/design.md`](specs/rust-server/design.md). Shared JSON and SQL vectors live in [`compatibility/`](compatibility/); Rust compatibility tests consume them.
 
 The composable Export route tests cover submission disconnection: accepted
 work must finish validation and publication under service ownership, remain
@@ -307,14 +307,14 @@ cargo run --locked -p slipstream-server
 `SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults
 to loopback. Open `http://localhost:3000`; optionally set `SLIPSTREAM_PUBLIC_ORIGIN`
 to an HTTP or HTTPS origin and `SLIPSTREAM_HOST` to an explicit network listener.
-Provision an Access Token with the stopped-server [access administration procedure](docs/deployment.md#access-administration).
+Provision an Access Token with the stopped-server [access administration procedure](specs/deployment/spec.md#access-administration).
 Without a token, only the public shell, access status, and health check are
 available. `GET /api/status` requires valid access and reports Library
 initialization, scan, and publication state.
 
 To expand a stopped schema-v5 Library to an ancestor Folder, first create and
 record a verified consistent backup with the service stopped (see
-[`docs/deployment.md`](docs/deployment.md)). Then set
+[`specs/deployment/spec.md`](specs/deployment/spec.md)). Then set
 `SLIPSTREAM_LIBRARY_ROOT` to the proposed canonical ancestor while retaining
 the same state, cache, and database settings, and run:
 
@@ -337,6 +337,6 @@ Bun, Sharp, or Node-API runtime. `bun run test:container-input` checks the
 fixed container inputs without building an image. The explicit Linux amd64
 `docker buildx build` command, qualification-output boundary, and supported
 digest-only Compose operation are defined by
-[`docs/deployment.md`](docs/deployment.md).
+[`specs/deployment/spec.md`](specs/deployment/spec.md).
 
-The host bind address uses `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. Direct HTTP needs no proxy; existing HTTPS deployments retain their private proxy backend. Supported Compose operations use [`scripts/compose`](scripts/compose); their input grammar and Linux-local Docker deployment contract are defined by [`docs/deployment.md`](docs/deployment.md).
+The host bind address uses `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. Direct HTTP needs no proxy; existing HTTPS deployments retain their private proxy backend. Supported Compose operations use [`scripts/compose`](scripts/compose); their input grammar and Linux-local Docker deployment contract are defined by [`specs/deployment/spec.md`](specs/deployment/spec.md).

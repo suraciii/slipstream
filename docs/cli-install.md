@@ -24,10 +24,12 @@ tar -xzf slipstream-cli-VERSION-gCOMMIT-linux-amd64.tar.gz
 ```
 
 Replace `VERSION` and `COMMIT` with the values in the candidate name. The
-archive includes this installation guide, the CLI reference, the Agent guide,
-selected background specs linked by the reference, and license notices. Other
-links in those background specs may require the source repository at the named
-commit. Help and version require no service, token, or native server
+archive includes this installation guide, the Agent guide, the complete
+specification index and contracts, shared vocabulary, contributor guidance,
+and license notices. Contract links remain local. Links to repository-only
+instructions, source files, and directories open GitHub at the candidate's
+exact commit. Submodule links use the recorded submodule commit in its own
+repository. Help and version require no service, token, or native server
 libraries. The client needs a Linux amd64 host with a compatible glibc
 runtime. Other systems are not qualified by this candidate.
 
@@ -57,5 +59,5 @@ contract-1 response can still be incomplete: `incompatible_server` preserves
 the advertised versions and identifies a missing or invalid capability field.
 Install the matching service candidate before retrying; do not bypass this
 check. For photo processing, also inspect `processing modules` and follow
-the [Agent workflow](agent-cli.md#compose-processing-steps). A working
+the [Agent workflow](agent-cli.md#stateful-agent-editing). A working
 client/service pair does not qualify its native modules or parameter combinations.
