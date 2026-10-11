@@ -222,9 +222,9 @@ test("real-processing: native settings save, explicit preview and export remain 
   ).toBeVisible({ timeout: 300_000 });
   await page.reload();
   await openPhotoToolsView(page, "edit");
-  await expect(page.getByLabel("Saved edit")).toHaveValue(edit.editId, {
-    timeout: 300_000,
-  });
+  await expect(
+    page.getByRole("combobox", { name: "Saved edit", exact: true }),
+  ).toHaveValue(edit.editId, { timeout: 300_000 });
   expect(await originalSnapshot(original)).toEqual(before);
   expect(await originalSnapshot(sidecar)).toEqual(xmpBefore);
 });
