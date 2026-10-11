@@ -78,6 +78,8 @@ existing server-authoritative count rules. A consequential scan completion or
 failure must remain discoverable under Status and Recovery, even while the
 options surface is closed.
 
+Trash and the current Rejected result's removal review belong in View options, beside source management actions. They must not add a permanent row to the narrow Grid header. Trash remains reachable regardless of the active source or filter. Removal review must retain its current-source and reviewed-result scope.
+
 Changing View options uses an explicit Apply action. Closing without Apply
 must discard uncommitted changes. Applying only a thumbnail-size change must
 not reopen the source. Applying filter and order together must open one view
@@ -87,6 +89,7 @@ Grid cells must retain complete, unstretched composition, a position number,
 filename, Selection State, Rating, and independent availability facts. The
 uniform cell geometry, placeholders, keyboard behavior, and bounded loading
 contract remain in [Grid Composition and Orientation](../library-browsing/spec.md#grid-composition-and-orientation).
+An unavailable or failed Thumbnail must use an explicit text placeholder in the image region, retaining the Photo's facts and interaction. A failed image delivery must not leave a browser broken-image icon visible.
 At narrow widths, complete rows must divide the available Grid width evenly,
 leaving no more than the ordinary inter-cell gap at the trailing edge.
 

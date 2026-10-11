@@ -84,6 +84,8 @@ Slipstream must support two proposal forms:
 - a batch mapping from one old Folder prefix to one new Folder prefix that keeps each relative suffix; and
 - a single mapping from one remembered Original File to one new Location for a renamed or split file.
 
+The Web recovery surface must present these mapping actions before its progressive list of unavailable Originals. The list and mapping results must scroll without displacing the task controls or Close action. Each listed Original must retain its remembered facts and offer a direct way to choose it for a single mapping. Photo links must use a recognizable filename or Location instead of an opaque identity. A proposal must remain a separate read-only step before explicit Apply.
+
 Every proposed mapping must be inspectable before it is applied, and proposal must never write. A proposal for an Original File without a persisted fingerprint must state that the old content cannot be verified and must require explicit confirmation. A fingerprinted Original File must be verified against its persisted fingerprint at proposal and at commit.
 
 Slipstream must apply a batch atomically with revalidation at commit. It must reject the whole batch with per-mapping reasons when any mapping is stale, colliding, or occupied without a permitted retire, and it must not apply a partial association.

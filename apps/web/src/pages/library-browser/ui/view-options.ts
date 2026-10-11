@@ -110,9 +110,18 @@ export function createViewOptions({
   let renderedProgressText = "";
   let renderedSourceProgressText = "";
 
+  const resetDraft = () => {
+    draftOrder = committedOrder;
+    draftFilter = committedFilter;
+    sortSelect.value = committedOrder;
+    filterSelect.value = committedFilter;
+  };
+
   surfaces.register("view-options", {
     dialog: viewOptionsDialog,
     modal: () => true,
+    // Returning from a management surface must also discard unapplied choices.
+    onOpen: resetDraft,
   });
 
   const presentViewOptionsFlag = () => {
@@ -142,10 +151,6 @@ export function createViewOptions({
 
   const openViewOptions = () => {
     if (!alive) return;
-    draftOrder = committedOrder;
-    draftFilter = committedFilter;
-    sortSelect.value = draftOrder;
-    filterSelect.value = draftFilter;
     // Read the invoker before closing the surface that holds it, exactly as
     // opening Sources does.
     const invoker =
@@ -163,10 +168,7 @@ export function createViewOptions({
     if (!alive) return;
     // Closing without Apply discards the draft: the selects return to the
     // committed choices the open Grid presents.
-    draftOrder = committedOrder;
-    draftFilter = committedFilter;
-    sortSelect.value = committedOrder;
-    filterSelect.value = committedFilter;
+    resetDraft();
     surfaces.close("view-options", restoreFocus);
   };
 

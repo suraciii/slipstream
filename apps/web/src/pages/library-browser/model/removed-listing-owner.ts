@@ -485,7 +485,15 @@ export function createRemovedListingOwner(
 
   const removedPanelModel = (): RemovedPanelViewModel => {
     const pending = removedPending || removedSelectionPending;
+    const status = removedPending
+      ? "loading"
+      : removedLoadFailed
+        ? "failed"
+        : removedPage
+          ? "ready"
+          : "loading";
     return {
+      status,
       start: removedPage?.start ?? 0,
       total: removedPage?.total ?? 0,
       limit: REMOVED_PAGE_LIMIT,
@@ -504,8 +512,8 @@ export function createRemovedListingOwner(
         !removedRestoringSelection,
       canRetry: removedLoadFailed,
       restoringSelection: removedRestoringSelection,
-      ...(removal.operation
-        ? { undo: { removed: removal.operation.removed } }
+      ...(status === "ready" && removedPage?.operation
+        ? { undo: { removed: removedPage.operation.removed } }
         : {}),
       ...(removedRestoringId ? { restoringPhotoId: removedRestoringId } : {}),
       ...(removedMessage ? { message: removedMessage } : {}),
@@ -614,6 +622,7 @@ export function createRemovedListingOwner(
     trashOutcomeBusy = undefined;
     trashOperation = undefined;
     present.openPanel({
+      status: "loading",
       start: 0,
       total: 0,
       limit: REMOVED_PAGE_LIMIT,

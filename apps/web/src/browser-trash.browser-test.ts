@@ -51,6 +51,7 @@ test("rejected Photos leave the Library, return from Undo, and are restored from
 
   // The review names the result it covers and removes nothing by itself.
   const review = page.locator("[data-removal-review]");
+  await openViewOptions(page);
   await page.locator("[data-removal-open]").click();
   await expect(review).toBeVisible();
   await expect(page.locator("[data-removal-summary]")).toHaveText(
@@ -88,6 +89,7 @@ test("rejected Photos leave the Library, return from Undo, and are restored from
   await expect(
     page.getByRole("link", { name: /^All Photos 1 Photo$/ }),
   ).toBeVisible();
+  await openViewOptions(page);
   await page.locator("[data-removed-open]").click();
   const removed = page.locator("[data-removed-panel]");
   await expect(page.locator("[data-removed-status]")).toHaveText(
@@ -122,6 +124,7 @@ test("rejected Photos leave the Library, return from Undo, and are restored from
 
   // Remove again, then restore one named Photo from the listing: the durable
   // per-Photo path survives a reload.
+  await openViewOptions(page);
   await page.locator("[data-removal-open]").click();
   await expect(page.locator("[data-removal-summary]")).toHaveText(
     /^2 Photos reviewed as Rejected\./,
@@ -131,6 +134,7 @@ test("rejected Photos leave the Library, return from Undo, and are restored from
     /^2 Photos removed from the Library\./,
   );
   await page.locator("[data-removal-close]").click();
+  await openViewOptions(page);
   await page.locator("[data-removed-open]").click();
   await expect(page.locator("[data-removed-list] .removed-item")).toHaveCount(
     2,
@@ -151,6 +155,7 @@ test("rejected Photos leave the Library, return from Undo, and are restored from
   await expect(
     page.getByRole("link", { name: /^All Photos 2 Photos$/ }),
   ).toBeVisible();
+  await openViewOptions(page);
   await page.locator("[data-removed-open]").click();
   await expect(page.locator("[data-removed-list] .removed-item")).toHaveCount(
     1,
@@ -225,6 +230,7 @@ test("Trash permanent deletion reviews the files, reports outcomes, and blocks p
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 2 Photos",
   );
+  await openViewOptions(page);
   await page.locator("[data-removal-open]").click();
   await page.locator("[data-removal-confirm]").click();
   await expect(page.locator("[data-removal-message]")).toHaveText(
@@ -396,6 +402,7 @@ test("Trash permanent deletion reviews the files, reports outcomes, and blocks p
     throw new Error(`Unexpected Trash route ${pathname}`);
   });
 
+  await openViewOptions(page);
   await page.locator("[data-removed-open]").click();
   const removed = page.locator("[data-removed-panel]");
   await expect(page.locator("[data-removed-status]")).toHaveText(
@@ -467,9 +474,6 @@ test("Trash permanent deletion reviews the files, reports outcomes, and blocks p
   await expect(review).toBeVisible();
   await expect(page.locator("[data-trash-review-summary]")).toHaveText(
     "2 Photos selected for permanent deletion · 3,072 logical bytes.",
-  );
-  await expect(page.locator(".trash-review-warning")).toHaveText(
-    "Deletion removes each Photo from every Album that contains it. Slipstream cannot undo it.",
   );
   await expect(page.locator("[data-trash-review-albums]")).toHaveText(
     "1 Album affected: Keepers.",

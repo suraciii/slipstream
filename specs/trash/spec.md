@@ -14,6 +14,10 @@ The Library Browser must provide a persistent, named **Trash** entry accessible 
 
 Trash must show the complete item count and allow progressively browsing every item, newest removal first. It must not inherit the active Album, Folder, or Selection State filter. Each item must show its filename, relative Original Location, file kind, removal time, and thumbnail when available. An unavailable Original or thumbnail must have a truthful fallback and must not hide the item. An empty Trash must state that there are no Photos in Trash.
 
+While Trash is loading, its status must say that it is loading. A failed read must offer Retry and must not claim that Trash is empty. The complete count and removal Undo must come from the same successful read; an absent or empty removal operation must not leave a previous Undo action visible.
+
+Selection applies equally to Restore and permanent deletion review. Restore must be the primary recovery action. The permanent-deletion entry must identify that it opens a review; only the final reviewed confirmation may delete files. On narrow screens, each item must keep its filename, Location, facts, and Restore action readable without horizontal scrolling. Long Locations may wrap. Batch actions, the item count, and available Undo must remain reachable without scrolling through the entire list.
+
 Items must remain in Trash across reload and restart. There is no automatic expiration or emptying. Trash is an application view; entering it does not move an Original into an operating-system trash directory or release its storage. Files deleted outside Slipstream are not automatically Trash items.
 
 ## Selection and Restore

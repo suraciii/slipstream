@@ -191,13 +191,9 @@ export function createRecoveryPanel({
         const item = document.createElement("li");
         const decisions = [
           selectionLabel(entry.selectionState),
-          entry.rating > 0 ? `${entry.rating} stars` : null,
-          entry.albumCount > 0
-            ? `${entry.albumCount} album${entry.albumCount === 1 ? "" : "s"}`
-            : null,
-        ]
-          .filter(Boolean)
-          .join(" · ");
+          `${entry.rating} stars`,
+          `${entry.albumCount} album${entry.albumCount === 1 ? "" : "s"}`,
+        ].join(" · ");
         const fingerprint = entry.fingerprintEnrolled
           ? "Fingerprint on file"
           : "No fingerprint";
@@ -209,14 +205,31 @@ export function createRecoveryPanel({
             : `${recoveryEntryStateLabel(entry.state)} — `;
         const photoLink = document.createElement("a");
         photoLink.href = entry.webUrl;
-        photoLink.textContent = `Photo ${entry.photoId}`;
-        photoLink.title = entry.photoId;
-        item.append(
-          document.createTextNode(
-            `${state}${entry.location} — ${entry.kind.toUpperCase()} — ${decisions} — ${fingerprint} — `,
-          ),
+        photoLink.textContent =
+          entry.location.split("/").at(-1) || entry.location;
+        photoLink.title = entry.location;
+        const location = document.createElement("p");
+        location.className = "recovery-entry-location";
+        location.append(
           photoLink,
+          document.createTextNode(` — ${entry.location}`),
         );
+        const facts = document.createElement("p");
+        facts.className = "recovery-entry-facts";
+        facts.textContent = `${state}${entry.kind.toUpperCase()} · ${decisions} · ${fingerprint}`;
+        item.append(location, facts);
+        if (entry.state === "unavailable") {
+          const map = document.createElement("button");
+          map.type = "button";
+          map.className = "quiet";
+          map.dataset.recoveryMapOriginal = entry.originalId;
+          map.textContent = "Map this Original";
+          map.addEventListener("click", () => {
+            recoverySingleOriginal.value = entry.originalId;
+            recoverySingleLocation.focus();
+          });
+          item.append(map);
+        }
         return item;
       }),
     );
@@ -485,27 +498,38 @@ export function createRecoveryPanel({
 export const RECOVERY_PANEL_TEMPLATE = `        <dialog class="recovery-dialog" data-recovery-panel aria-labelledby="recovery-title">
           <div class="recovery-sheet">
             <header class="recovery-header"><h3 id="recovery-title">Review unavailable originals</h3><button type="button" class="quiet" data-recovery-close>Close</button></header>
-          <p class="recovery-summary" data-recovery-summary role="status"></p>
-          <ul class="recovery-list" data-recovery-list></ul>
-          <div class="recovery-more"><button type="button" class="quiet" data-recovery-more hidden>Load more</button></div>
-          <div class="recovery-forms">
-            <div class="recovery-batch">
-              <label>Old folder prefix<input data-recovery-old-prefix type="text" autocomplete="off" spellcheck="false" placeholder="2023/travel" /></label>
-              <label>New folder prefix<input data-recovery-new-prefix type="text" autocomplete="off" spellcheck="false" placeholder="2024/travel" /></label>
-              <button type="button" data-recovery-propose>Propose batch mappings</button>
+            <div class="recovery-body">
+              <p class="recovery-explanation">Propose mappings to read and review new locations before Apply. Recovery changes associations; files are never moved or renamed.</p>
+              <div class="recovery-forms">
+                <section class="recovery-batch" aria-labelledby="recovery-batch-title">
+                  <h4 id="recovery-batch-title">Map a moved folder</h4>
+                  <label>Old folder prefix<input data-recovery-old-prefix type="text" autocomplete="off" spellcheck="false" placeholder="2023/travel" /></label>
+                  <label>New folder prefix<input data-recovery-new-prefix type="text" autocomplete="off" spellcheck="false" placeholder="2024/travel" /></label>
+                  <button type="button" data-recovery-propose>Propose batch mappings</button>
+                </section>
+                <section class="recovery-single" aria-labelledby="recovery-single-title">
+                  <h4 id="recovery-single-title">Map one renamed or moved Original</h4>
+                  <label>Single Original<select data-recovery-single-original></select></label>
+                  <label>New location<input data-recovery-single-location type="text" autocomplete="off" spellcheck="false" placeholder="2024/travel/renamed.ARW" /></label>
+                  <button type="button" data-recovery-propose-single>Propose this mapping</button>
+                </section>
+              </div>
+              <section class="recovery-results" aria-label="Proposed mappings">
+                <p class="recovery-note" data-recovery-note hidden>Old content cannot be verified for Originals without a fingerprint. Review every mapping and confirm explicitly.</p>
+                <p class="recovery-summary" data-recovery-proposal-summary role="status" hidden></p>
+                <ul class="recovery-proposals" data-recovery-proposals tabindex="0" aria-label="Proposed mappings" hidden></ul>
+                <div class="recovery-more"><button type="button" class="quiet" data-recovery-mappings-more hidden>Load more</button></div>
+              </section>
+              <section class="recovery-results" aria-label="Unavailable originals">
+                <p class="recovery-summary" data-recovery-summary role="status"></p>
+                <ul class="recovery-list" data-recovery-list tabindex="0" aria-label="Unavailable originals"></ul>
+                <div class="recovery-more"><button type="button" class="quiet" data-recovery-more hidden>Load more</button></div>
+              </section>
             </div>
-            <div class="recovery-single">
-              <label>Single Original<select data-recovery-single-original></select></label>
-              <label>New location<input data-recovery-single-location type="text" autocomplete="off" spellcheck="false" placeholder="2024/travel/renamed.ARW" /></label>
-              <button type="button" data-recovery-propose-single>Propose this mapping</button>
-            </div>
-          </div>
-          <p class="recovery-note" data-recovery-note hidden>Old content cannot be verified for Originals without a fingerprint. Review every mapping and confirm explicitly.</p>
-          <p class="recovery-summary" data-recovery-proposal-summary role="status" hidden></p>
-          <ul class="recovery-proposals" data-recovery-proposals hidden></ul>
-          <div class="recovery-more"><button type="button" class="quiet" data-recovery-mappings-more hidden>Load more</button></div>
-          <div class="recovery-actions"><button type="button" data-recovery-apply hidden>Apply mappings</button></div>
-          <p class="recovery-message" data-recovery-message role="alert" hidden></p>
+            <footer class="recovery-footer">
+              <p class="recovery-message" data-recovery-message role="alert" hidden></p>
+              <div class="recovery-actions"><button type="button" data-recovery-apply hidden>Apply mappings</button></div>
+            </footer>
           </div>
         </dialog>`;
 

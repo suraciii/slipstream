@@ -98,7 +98,7 @@ Removal is a Library Management action, so it is offered where the Photographer
 manages the Library and never as a Grid decision:
 
 - The **removal review** is the only surface that removes Photos. It opens from
-  the Grid header of a `Rejected` result and names the count that would leave
+  View options of a `Rejected` result and names the count that would leave
   the Library, the Original Files that stay, and the one confirmation it
   requires. Opening it removes nothing, and it is offered only while a removal
   could be admitted against the open Snapshot.
@@ -126,6 +126,13 @@ model, and no Grid position. It reads one bounded page at a time and restores
 named Photos through the same compare-and-set the operation-level Undo uses,
 naming the removal marker each row presented. Undo stays offered beside the
 listing exactly while the confirmed operation still owns a Photo.
+
+The listing projects loading, failed, and ready states separately from action
+admission. Only a successful listing read establishes its current count and
+Undo operation together. Loading and failed reads must not project an empty
+Trash or offer an operation retained from another read. An absent operation
+withdraws Undo. This keeps the listing response authoritative instead of
+combining an uninitialized count with the removal owner's previous operation.
 
 ## Options
 
