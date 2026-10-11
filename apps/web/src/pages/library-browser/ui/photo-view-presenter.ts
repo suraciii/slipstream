@@ -212,6 +212,7 @@ export function createPhotoViewPresenter({
     else previewSource.removeAttribute("title");
   };
   const renderStatus = (text: string): void => {
+    status.hidden = !text && !canReviewRecovery;
     status.replaceChildren();
     if (text) status.append(document.createTextNode(text));
     if (canReviewRecovery) {

@@ -26,7 +26,8 @@ struct StateDocument {
 }
 
 pub(super) struct FilmState {
-    directory: Directory,
+    workspace: Directory,
+    directory: Option<Directory>,
     _leases: Vec<FileLease>,
     document: Option<StateDocument>,
 }
@@ -72,34 +73,73 @@ impl FilmState {
                 .lease(LeaseMode::Shared, LOCK_WAIT)
                 .map_err(|e| e.to_string())?,
         );
-        let directory = workspace
-            .create_directory(".edits")
-            .and_then(|d| d.create_directory("spektrafilm"))
-            .and_then(|d| d.create_directory("adapter"))
-            .map_err(|e| e.to_string())?;
-        let lock = match directory.open_file(".state-lock") {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                match directory.create_file(".state-lock", 0o600) {
-                    Ok(file) => file,
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => directory
-                        .open_file(".state-lock")
-                        .map_err(|e| e.to_string())?,
+        let directory = match workspace.child(".edits") {
+            Ok(edits) => match edits.child("spektrafilm") {
+                Ok(film) => match film.child("adapter") {
+                    Ok(directory) => Some(directory),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                     Err(e) => return Err(e.to_string()),
-                }
-            }
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e.to_string()),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.to_string()),
         };
-        leases.push(
-            FileLease::acquire(lock, LeaseMode::Exclusive, LOCK_WAIT).map_err(|e| e.to_string())?,
-        );
-        let document = load(&directory)?;
+        if let Some(directory) = directory.as_ref() {
+            let lock = match directory.open_file(".state-lock") {
+                Ok(file) => file,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    match directory.create_file(".state-lock", 0o600) {
+                        Ok(file) => file,
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => directory
+                            .open_file(".state-lock")
+                            .map_err(|e| e.to_string())?,
+                        Err(e) => return Err(e.to_string()),
+                    }
+                }
+                Err(e) => return Err(e.to_string()),
+            };
+            leases.push(
+                FileLease::acquire(lock, LeaseMode::Exclusive, LOCK_WAIT)
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+        let document = directory.as_ref().map(load).transpose()?.flatten();
         Ok(Self {
+            workspace: workspace.try_clone().map_err(|e| e.to_string())?,
             directory,
             _leases: leases,
             document,
         })
     }
+    fn publish_directory(&mut self) -> Result<&Directory, String> {
+        if self.directory.is_none() {
+            let directory = self
+                .workspace
+                .create_directory(".edits")
+                .and_then(|d| d.create_directory("spektrafilm"))
+                .and_then(|d| d.create_directory("adapter"))
+                .map_err(|e| e.to_string())?;
+            let lock = directory
+                .create_file(".state-lock", 0o600)
+                .or_else(|e| {
+                    if e.kind() == std::io::ErrorKind::AlreadyExists {
+                        directory.open_file(".state-lock")
+                    } else {
+                        Err(e)
+                    }
+                })
+                .map_err(|e| e.to_string())?;
+            self._leases.push(
+                FileLease::acquire(lock, LeaseMode::Exclusive, LOCK_WAIT)
+                    .map_err(|e| e.to_string())?,
+            );
+            self.directory = Some(directory);
+        }
+        Ok(self.directory.as_ref().expect("published directory"))
+    }
+
     pub(super) fn recipe(&self) -> Result<Option<ComposableEditRecipe>, String> {
         self.document
             .as_ref()
@@ -151,6 +191,7 @@ impl FilmState {
         } else {
             projected(&encoded)?
         };
+        let initially_unpublished = self.directory.is_none();
         let mut document = self.document.take().unwrap_or(StateDocument {
             format_version: 1,
             recipe: encoded.clone(),
@@ -162,7 +203,7 @@ impl FilmState {
         document.receipts.insert(
             mutation.request_id.clone(),
             Receipt {
-                intent,
+                intent: intent.clone(),
                 recipe: slipstream_core::processing_recipe_encode(&committed)
                     .map_err(|e| e.to_string())?,
             },
@@ -171,8 +212,34 @@ impl FilmState {
         if bytes.len() as u64 > MAX_STATE_BYTES {
             return Err("Film state retention allowance is exhausted; no state was changed".into());
         }
-        photo_files::atomic_json(&self.directory, "state.json", &document)
-            .map_err(|e| e.to_string())?;
+        self.publish_directory()?;
+        if initially_unpublished
+            && let Some(directory) = self.directory.as_ref()
+            && let Some(latest) = load(directory)?
+        {
+            self.document = Some(latest);
+            if let Some(receipt) = self
+                .document
+                .as_ref()
+                .and_then(|document| document.receipts.get(&mutation.request_id))
+            {
+                if receipt.intent == intent {
+                    let replayed =
+                        slipstream_core::processing_recipe_decode(receipt.recipe.clone())
+                            .map_err(|e| e.to_string())?;
+                    return Ok(ComposableEditRecipeWriteOutcome::Replayed(replayed));
+                }
+                return Ok(ComposableEditRecipeWriteOutcome::RequestConflict);
+            }
+            let current = self.recipe()?;
+            return Ok(ComposableEditRecipeWriteOutcome::Conflict(current));
+        }
+        photo_files::atomic_json(
+            self.directory.as_ref().expect("published directory"),
+            "state.json",
+            &document,
+        )
+        .map_err(|e| e.to_string())?;
         self.document = Some(document);
         Ok(if unchanged {
             ComposableEditRecipeWriteOutcome::Unchanged(committed)
@@ -324,7 +391,7 @@ mod tests {
         owner.document.as_mut().unwrap().recipe =
             slipstream_core::processing_recipe_encode(&decoded).unwrap();
         photo_files::atomic_json(
-            &owner.directory,
+            owner.directory.as_ref().unwrap(),
             "state.json",
             owner.document.as_ref().unwrap(),
         )
@@ -347,7 +414,7 @@ mod tests {
             ComposableEditRecipeWriteOutcome::Replayed(r) => assert_eq!(r, saved),
             _ => panic!("not replayed"),
         };
-        let facts = inspect(reopened.directory.path()).unwrap();
+        let facts = inspect(reopened.directory.as_ref().unwrap().path()).unwrap();
         assert!(
             facts["dependencies"]
                 .as_array()
@@ -376,5 +443,104 @@ mod tests {
         changed.steps[1].parameters.tree = json!({"unknown":false});
         assert!(preserve_retained(Some(&old), &changed).is_err());
         assert!(preserve_retained(Some(&old), &old).is_ok());
+    }
+
+    #[test]
+    fn rejected_initial_save_does_not_publish_empty_state_directory() {
+        let path = std::env::temp_dir().join(photo_files::identity("film-refused").unwrap());
+        let directory = Directory::create(&path).unwrap();
+        let mut owner = FilmState::open(&directory).unwrap();
+        let mut proposed = recipe();
+        proposed.steps[0].parameters.schema_version = "foreign-version".into();
+        let result = owner.settle(
+            &mutation(proposed, None, "rejected"),
+            None,
+            json!({"test":"rejected"}),
+        );
+        assert!(result.is_err());
+        assert!(!path.join(".edits").exists());
+        drop(owner);
+        drop(directory);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn malformed_published_state_remains_inspection_blocker() {
+        let path = std::env::temp_dir().join(photo_files::identity("film-malformed").unwrap());
+        let adapter = Directory::create(&path)
+            .unwrap()
+            .create_directory(".edits")
+            .unwrap()
+            .create_directory("spektrafilm")
+            .unwrap()
+            .create_directory("adapter")
+            .unwrap();
+        std::fs::write(adapter.path().join("state.json"), b"{}").unwrap();
+        assert!(inspect(adapter.path()).is_err());
+        drop(adapter);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn raced_initial_save_conflicts_without_overwriting_receipt() {
+        let path = std::env::temp_dir().join(photo_files::identity("film-race-conflict").unwrap());
+        let directory = Directory::create(&path).unwrap();
+        let mut first = FilmState::open(&directory).unwrap();
+        let mut second = FilmState::open(&directory).unwrap();
+        let saved = match first
+            .settle(
+                &mutation(recipe(), None, "first"),
+                None,
+                json!({"request":"first"}),
+            )
+            .unwrap()
+        {
+            ComposableEditRecipeWriteOutcome::Saved(recipe) => recipe,
+            other => panic!("unexpected outcome: {other:?}"),
+        };
+        drop(first);
+        let result = second
+            .settle(
+                &mutation(recipe(), None, "second"),
+                None,
+                json!({"request":"second"}),
+            )
+            .unwrap();
+        assert!(matches!(
+            result,
+            ComposableEditRecipeWriteOutcome::Conflict(_)
+        ));
+        assert!(
+            matches!(second.replay("first", &json!({"request":"first"})).unwrap(), Some(ComposableEditRecipeWriteOutcome::Replayed(replayed)) if replayed == saved)
+        );
+        drop(second);
+        drop(directory);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn raced_initial_same_request_replays_committed_receipt() {
+        let path = std::env::temp_dir().join(photo_files::identity("film-race-replay").unwrap());
+        let directory = Directory::create(&path).unwrap();
+        let mut first = FilmState::open(&directory).unwrap();
+        let mut second = FilmState::open(&directory).unwrap();
+        let intent = json!({"request":"same"});
+        let saved = match first
+            .settle(&mutation(recipe(), None, "same"), None, intent.clone())
+            .unwrap()
+        {
+            ComposableEditRecipeWriteOutcome::Saved(recipe) => recipe,
+            other => panic!("unexpected outcome: {other:?}"),
+        };
+        drop(first);
+        let result = second
+            .settle(&mutation(recipe(), None, "same"), None, intent)
+            .unwrap();
+        assert!(
+            matches!(result, ComposableEditRecipeWriteOutcome::Replayed(replayed) if replayed == saved)
+        );
+        drop(second);
+        drop(directory);
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

@@ -68,7 +68,11 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
     await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
   await returnToPhotoTools(page);
   for (const name of ["Clear flag", "Undo"])
-    await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
+    await expect(
+      page
+        .locator("[data-photo-tools]")
+        .getByRole("button", { name, exact: true }),
+    ).toBeVisible();
   await openRatingChoices(page);
   await expect(
     page.getByRole("button", { name: "Rate 5 stars", exact: true }),
@@ -76,7 +80,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   // The decision acts on the Photo, so both surfaces close for it.
   await closePhotoSurfaces(page);
   await openPhotoToolsView(page, "tools");
-  await page.getByRole("button", { name: "Pick", exact: true }).click();
+  await page.locator("[data-photo-tools-pick]").click();
   await expect(page.locator("[data-selection]")).toHaveText("Picked");
   await expect(page.getByText("1 / 2")).toBeVisible();
   await actionWithProgress(page, albumId, () =>
@@ -115,8 +119,6 @@ test("Photo View gestures navigate and cycle state while More owns one review sh
   await waitForLoadedReviewImage(page);
 
   for (const selector of [
-    "[data-dock-select]",
-    "[data-dock-reject]",
     "[data-dock-rating]",
     "[data-dock-previous]",
     "[data-dock-next]",
@@ -128,9 +130,7 @@ test("Photo View gestures navigate and cycle state while More owns one review sh
   await page.getByRole("button", { name: "More", exact: true }).click();
   const tools = page.locator("[data-photo-tools]");
   await expect(tools).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Pick", exact: true }),
-  ).toBeVisible();
+  await expect(page.locator("[data-photo-tools-pick]")).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Previous", exact: true }),
   ).toBeVisible();
@@ -166,6 +166,12 @@ test("Photo View gestures navigate and cycle state while More owns one review sh
 
   await swipe(-140, 0);
   await expect(page.locator("[data-position]")).toHaveText("2 / 3");
+  // Position text updates when navigation commits, while the destination
+  // Preview and decision admission settle afterward. Wait for both before
+  // sending a vertical decision gesture; otherwise the gesture is correctly
+  // ignored during the transition and no state request can be observed.
+  await waitForLoadedReviewImage(page);
+  await expect(page.locator("[data-dock-select]")).toBeEnabled();
   const picked = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" &&

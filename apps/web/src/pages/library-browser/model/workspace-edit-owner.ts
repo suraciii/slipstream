@@ -106,6 +106,7 @@ export function createWorkspaceEditOwner(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let wantedPreviewRequest: string | undefined;
   let polling = false;
+  let previewAfterSave = false;
   let selectingEdit = false;
   const publish = () => {
     if (alive) notify(model);
@@ -427,6 +428,7 @@ export function createWorkspaceEditOwner(
     );
     publish();
     polling = false;
+    if (alive) void renderPendingPreview();
     if (alive && pending)
       timer = setTimeout(() => {
         void pollJobs();
@@ -444,6 +446,7 @@ export function createWorkspaceEditOwner(
       (!captured && (model.draft.length || model.saving))
     )
       return;
+    if (operation === "preview render") previewAfterSave = false;
     const payload = {
       ...args,
       revision: edit.revision,
@@ -490,6 +493,10 @@ export function createWorkspaceEditOwner(
       failure(error, operation);
     }
   };
+  const renderPendingPreview = async () => {
+    if (previewAfterSave && !barrier && !model.previewPending)
+      await render("preview render");
+  };
   const drain = async (force = false) => {
     if (savePromise) return savePromise;
     savePromise = (async () => {
@@ -532,6 +539,7 @@ export function createWorkspaceEditOwner(
             );
           if (generation !== editGeneration) continue;
           acknowledged = true;
+          if (result.revision !== edit.revision) previewAfterSave = true;
           model.edit = {
             ...edit,
             stateToken: result.stateToken,
@@ -585,6 +593,7 @@ export function createWorkspaceEditOwner(
       await savePromise;
     } finally {
       savePromise = undefined;
+      void renderPendingPreview();
     }
   };
   const change = (next: EditChange) => {
@@ -593,15 +602,7 @@ export function createWorkspaceEditOwner(
     model.comparing = false;
     model.status = "Unsaved settings";
     publish();
-    void drain().then(() => {
-      if (
-        !model.draft.length &&
-        !model.blocked &&
-        !barrier &&
-        !model.previewPending
-      )
-        void render("preview render");
-    });
+    void drain();
   };
   const command = async (
     operation: string,
@@ -704,6 +705,7 @@ export function createWorkspaceEditOwner(
             "Save or reconcile this draft before choosing another edit.",
           );
         editGeneration++;
+        previewAfterSave = false;
         delete model.preview;
         await readEdit(String(args.editId));
         return;
@@ -808,7 +810,13 @@ export function createWorkspaceEditOwner(
         );
         return;
       }
+      if (action === "current") {
+        model.cameraReference = model.comparing = false;
+        publish();
+        return;
+      }
       if (action === "compare") {
+        model.cameraReference = false;
         model.comparing =
           Boolean(args.pressed) &&
           Boolean(model.preview?.comparisonUrl) &&
@@ -834,6 +842,7 @@ export function createWorkspaceEditOwner(
         } finally {
           barrier = false;
           if (model.draft.length) void drain();
+          else void renderPendingPreview();
         }
         return;
       }

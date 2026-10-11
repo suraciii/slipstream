@@ -151,6 +151,7 @@ export function createAlbumForm({
       confirmBox.className = "album-confirm";
       confirmBox.setAttribute("role", "alert");
       confirmBox.append(
+        paragraph(`Delete “${form.name}”?`),
         paragraph("Photos and Original Files remain unchanged."),
       );
       const confirm = document.createElement("button");

@@ -103,9 +103,13 @@ export function createMembershipPanel({
       membershipOptions.replaceChildren();
       if (!model.options.length) {
         const empty = document.createElement("p");
-        empty.textContent = model.photoPresent
-          ? "No Albums yet."
-          : "No current Photo.";
+        empty.textContent = !model.photoPresent
+          ? "No current Photo."
+          : model.loading
+            ? "Loading Album membership…"
+            : model.failed
+              ? "Retry loading Album membership to manage Albums."
+              : "No Albums yet.";
         empty.className = "membership-empty";
         membershipOptions.append(empty);
         return;
@@ -117,7 +121,11 @@ export function createMembershipPanel({
         input.type = "checkbox";
         input.dataset.membershipAlbumId = album.id;
         input.checked = album.member;
-        input.disabled = !model.photoPresent || pending.has(album.id);
+        input.disabled =
+          !model.photoPresent ||
+          model.loading ||
+          model.failed ||
+          pending.has(album.id);
         input.addEventListener("change", () => {
           if (!alive) return;
           send({

@@ -121,6 +121,8 @@ export const createSourceListPresenter = (
     prior.type = "button";
     prior.className = "folder-page-button";
     prior.textContent = "Previous Folders";
+    prior.dataset.focusKey = `folder:previous:${location}`;
+    prior.dataset.focusFallback = `folder:next:${location}`;
     prior.disabled = !pager.hasPrevious;
     prior.addEventListener("click", () =>
       options.send({ kind: "folder-page", location, direction: -1 }),
@@ -132,6 +134,8 @@ export const createSourceListPresenter = (
     more.type = "button";
     more.className = "folder-page-button";
     more.textContent = "More Folders";
+    more.dataset.focusKey = `folder:next:${location}`;
+    more.dataset.focusFallback = `folder:previous:${location}`;
     more.disabled = !pager.hasNext;
     more.addEventListener("click", () =>
       options.send({ kind: "folder-page", location, direction: 1 }),
@@ -151,6 +155,7 @@ export const createSourceListPresenter = (
       const expand = document.createElement("button");
       expand.type = "button";
       expand.className = "folder-expand";
+      expand.dataset.focusKey = `folder:expand:${folder.location}`;
       expand.setAttribute("aria-expanded", String(folder.expanded));
       expand.textContent = folder.expanded ? "▾" : "▸";
       expand.setAttribute("aria-label", `Toggle ${folder.name} subfolders`);
@@ -175,6 +180,7 @@ export const createSourceListPresenter = (
       options.sourceAddress(source),
       folder.enabled,
     );
+    button.dataset.focusKey = `source:folder:${folder.location}`;
     interceptDestination(button, () =>
       options.send({ kind: "source-open", source }),
     );
@@ -195,6 +201,10 @@ export const createSourceListPresenter = (
     const focused = document.activeElement;
     const focusedKey =
       focused instanceof HTMLElement ? focused.dataset.focusKey : undefined;
+    const focusedFallback =
+      focused instanceof HTMLElement
+        ? focused.dataset.focusFallback
+        : undefined;
     sourceList.replaceChildren();
     const library = createSourceButton(
       "All Photos",
@@ -242,6 +252,7 @@ export const createSourceListPresenter = (
     const rootExpand = document.createElement("button");
     rootExpand.type = "button";
     rootExpand.className = "folder-expand";
+    rootExpand.dataset.focusKey = "folder:expand:";
     rootExpand.setAttribute("aria-expanded", String(next.rootExpanded));
     rootExpand.textContent = next.rootExpanded ? "▾" : "▸";
     rootExpand.setAttribute("aria-label", "Toggle Library Folder subfolders");
@@ -294,7 +305,14 @@ export const createSourceListPresenter = (
     }
     if (options.restoreSourceFocus(focusTarget)) return;
     const restored = focusedKey ? focusTarget(focusedKey) : undefined;
-    if (restored && !restored.matches(":disabled")) restored.focus();
+    const target =
+      restored && !restored.matches(":disabled")
+        ? restored
+        : focusedFallback
+          ? focusTarget(focusedFallback)
+          : undefined;
+    if (target && !target.matches(":disabled"))
+      target.focus({ preventScroll: true });
   };
   const renderFolderAlbum = (next: FolderAlbumViewModel) => {
     if (disposed || !options.alive()) return;

@@ -263,6 +263,7 @@ fn discover(
                     state_value["name"] = json!(state.name);
                     state_value["workspaceId"] = json!(workspace);
                     state_value["external"] = json!(external);
+                    classify_captures(&state_value, workspace, &name, external, inventory)?;
                     references(
                         &state_value,
                         "state",
@@ -281,6 +282,62 @@ fn discover(
                 }
                 Err(error) => unknown(inventory, workspace, &name, external, error),
             }
+        }
+    }
+    Ok(())
+}
+
+fn classify_captures(
+    state: &Value,
+    workspace: &str,
+    state_name: &str,
+    external: bool,
+    inventory: &mut Value,
+) -> Result<()> {
+    for capture in state["captures"].as_array().into_iter().flatten() {
+        let Some(capture_id) = capture["captureId"].as_str() else {
+            unknown(
+                inventory,
+                workspace,
+                state_name,
+                external,
+                "Retained capture has no identity".into(),
+            );
+            continue;
+        };
+        let Some(status) = capture["status"].as_str() else {
+            unknown(
+                inventory,
+                workspace,
+                &format!("{state_name}/{capture_id}"),
+                external,
+                "Retained capture has no lifecycle status".into(),
+            );
+            continue;
+        };
+        match status {
+            "accepted" | "queued" | "running" | "executing" => {
+                let active = inventory["activeOperations"].as_array_mut().unwrap();
+                if active.len() >= ENTRY_MAX {
+                    return Err(limit());
+                }
+                active.push(json!({
+                    "kind": "active-use",
+                    "id": capture_id,
+                    "name": format!("{workspace}/{state_name}/{capture_id}"),
+                    "action": "Wait for the captured render to settle before deleting the workspace",
+                    "external": external,
+                    "reason": format!("Retained capture status is {status}"),
+                }));
+            }
+            "succeeded" | "failed" | "cancelled" => {}
+            _ => unknown(
+                inventory,
+                workspace,
+                &format!("{state_name}/{capture_id}"),
+                external,
+                format!("Unrecognized retained capture status: {status}"),
+            ),
         }
     }
     Ok(())
@@ -330,8 +387,7 @@ fn references(
                 }
                 let child_kind = match key.as_str() {
                     "completedRenders" | "result" => "output",
-                    "captures" => "job",
-                    "dependencies" => "dependency",
+                    "captures" | "dependencies" => "dependency",
                     _ => kind,
                 };
                 references(child, child_kind, owner, inventory, depth + 1)?;
@@ -376,13 +432,14 @@ pub(super) fn blockers(
                             == Path::new(artifact["relativePath"].as_str().unwrap_or(""))
                 })
         } else {
-            dependency["external"] == true
-                && (dependency["path"]
-                    .as_str()
-                    .is_some_and(|p| Path::new(p).starts_with(directory))
-                    || dependency["workspaceId"].as_str().is_some_and(|id| {
-                        Some(id) == directory.file_name().and_then(|n| n.to_str())
-                    }))
+            (dependency["kind"] == "job" && dependency["external"] != true)
+                || (dependency["external"] == true
+                    && (dependency["path"]
+                        .as_str()
+                        .is_some_and(|path| Path::new(path).starts_with(directory))
+                        || dependency["workspaceId"].as_str().is_some_and(|id| {
+                            directory.file_name().is_some_and(|name| name == id)
+                        })))
         };
         if selected {
             result.push(dependency.clone());
@@ -437,6 +494,95 @@ mod tests {
     fn unknown_state_is_never_disposable() {
         let inventory = json!({"dependencies":[],"activeOperations":[],"unknown":[{"name":"unsupported state","kind":"unverified-use"}]});
         assert_eq!(blockers(&inventory, None, Path::new("/workspace")).len(), 1);
+    }
+    #[test]
+    fn accepted_capture_blocks_whole_workspace_deletion() {
+        let mut inventory = json!({"dependencies":[],"activeOperations":[],"unknown":[]});
+        classify_captures(
+            &json!({"captures":[{"captureId":"render-1","status":"accepted","result":null}]}),
+            "workspace-1",
+            "edit-1",
+            false,
+            &mut inventory,
+        )
+        .unwrap();
+        let blockers = blockers(&inventory, None, Path::new("/workspace-1"));
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0]["id"], "render-1");
+        assert_eq!(blockers[0]["name"], "workspace-1/edit-1/render-1");
+    }
+    #[test]
+    fn settled_capture_allows_whole_workspace_deletion() {
+        for status in ["succeeded", "failed", "cancelled"] {
+            let mut inventory = json!({"dependencies":[],"activeOperations":[],"unknown":[]});
+            classify_captures(
+                &json!({"captures":[{"captureId":"render-1","status":status,"result":{}}]}),
+                "workspace-1",
+                "edit-1",
+                false,
+                &mut inventory,
+            )
+            .unwrap();
+            references(
+                &json!({"captures":[{"captureId":"render-1","status":status,"input":{"path":"/workspace-1/input.raw"},"result":{"path":"/workspace-1/preview.png"}}]}),
+                "state",
+                &ReferenceOwner { id: "edit", name: "edit", external: false, workspace: "workspace-1" },
+                &mut inventory,
+                0,
+            ).unwrap();
+            assert!(blockers(&inventory, None, Path::new("/workspace-1")).is_empty());
+        }
+    }
+    #[test]
+    fn unknown_capture_status_blocks_conservatively() {
+        let mut inventory = json!({"dependencies":[],"activeOperations":[],"unknown":[]});
+        classify_captures(
+            &json!({"captures":[{"captureId":"render-1","status":"future","result":null}]}),
+            "workspace-1",
+            "edit-1",
+            false,
+            &mut inventory,
+        )
+        .unwrap();
+        assert_eq!(
+            blockers(&inventory, None, Path::new("/workspace-1")).len(),
+            1
+        );
+    }
+    #[test]
+    fn internal_job_dependency_blocks_whole_but_keeps_selective_behavior() {
+        let inventory = json!({"dependencies":[{"kind":"job","id":"export-1","name":"export-1","artifactId":"a","external":false}],"activeOperations":[],"unknown":[]});
+        assert_eq!(blockers(&inventory, None, Path::new("/workspace")).len(), 1);
+        assert!(
+            blockers(
+                &inventory,
+                Some(&json!({"artifactId":"b","relativePath":"input/b"})),
+                Path::new("/workspace")
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            blockers(
+                &inventory,
+                Some(&json!({"artifactId":"a","relativePath":"input/a"})),
+                Path::new("/workspace")
+            )
+            .len(),
+            1
+        );
+    }
+    #[test]
+    fn external_dependency_blocks_only_its_target_workspace() {
+        let inventory = json!({"dependencies":[
+            {"kind":"dependency","id":"by-path","external":true,"path":"/workspaces/target/outputs/image.tiff"},
+            {"kind":"state","id":"by-id","external":true,"workspaceId":"target","artifactId":"input"},
+            {"kind":"state","id":"unrelated","external":true,"path":"/workspaces/other/input.raw","workspaceId":"other"},
+            {"kind":"state","id":"prefix","external":true,"path":"/workspaces/target-other/input.raw"}
+        ],"activeOperations":[],"unknown":[]});
+        let blocked = blockers(&inventory, None, Path::new("/workspaces/target"));
+        assert_eq!(blocked.len(), 2);
+        assert!(blocked.iter().any(|entry| entry["id"] == "by-path"));
+        assert!(blocked.iter().any(|entry| entry["id"] == "by-id"));
     }
     #[test]
     fn external_exclusive_workspace_admission_returns_active_use_without_waiting() {

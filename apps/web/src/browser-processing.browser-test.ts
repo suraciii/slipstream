@@ -41,9 +41,6 @@ test("Edit prepares a real input without initializing or rendering a tool", asyn
   await expect(
     page.getByRole("button", { name: "Edit with darktable", exact: true }),
   ).toBeVisible();
-  await expect(page.locator("[data-photo-editor-render-status]")).toContainText(
-    "Edit preview has not been rendered",
-  );
   await page.locator("[data-workspace-files] summary").click();
   await expect(page.locator("[data-workspace-file-groups]")).toContainText(
     "Inputs",
@@ -203,6 +200,9 @@ test("real-processing: native settings save, explicit preview and export remain 
     /\/api\/workspaces\/.+\/files\/.+\/bytes\?revision=/,
     { timeout: 300_000 },
   );
+  await expect(
+    page.locator("[data-photo-editor-reference-image]"),
+  ).toBeHidden();
   await page.getByRole("button", { name: "Export", exact: true }).click();
   await page.locator("[data-workspace-files] summary").click();
   await expect(

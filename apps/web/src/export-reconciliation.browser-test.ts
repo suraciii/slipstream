@@ -311,9 +311,11 @@ test("Camera reference remains selected when a current preview finishes later", 
     .click();
   await expect(jobRow(page, job.requestId)).toContainText("succeeded");
   const preview = page.locator("[data-photo-editor-preview-image]");
-  await expect(preview).toBeVisible();
-  await expect(preview).toHaveAttribute("src", original!);
-  await expect(preview).toHaveAttribute(
+  const reference = page.locator("[data-photo-editor-reference-image]");
+  await expect(preview).toBeHidden();
+  await expect(reference).toBeVisible();
+  await expect(reference).toHaveAttribute("src", original!);
+  await expect(reference).toHaveAttribute(
     "alt",
     "Camera Preview · Original reference",
   );

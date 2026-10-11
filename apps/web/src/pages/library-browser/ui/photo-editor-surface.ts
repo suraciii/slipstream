@@ -53,6 +53,10 @@ export function createPhotoEditorSurfaceController({
     return found;
   };
   const image = element<HTMLImageElement>("[data-photo-editor-preview-image]");
+  const referenceImage = element<HTMLImageElement>(
+    "[data-photo-editor-reference-image]",
+  );
+  const empty = element<HTMLElement>("[data-photo-editor-image-empty]");
   const act = (action: string, args: JsonObject = {}) => {
     if (alive && photoId)
       send({
@@ -62,6 +66,27 @@ export function createPhotoEditorSurfaceController({
         arguments: args,
       });
   };
+  const viewListeners = new AbortController();
+  const currentButton = element<HTMLButtonElement>(
+    "[data-photo-editor-current]",
+  );
+  const cameraButton = element<HTMLButtonElement>(
+    "[data-photo-editor-camera-reference]",
+  );
+  const compareButton = element<HTMLButtonElement>(
+    "[data-photo-editor-compare]",
+  );
+  currentButton.addEventListener("click", () => act("current"), {
+    signal: viewListeners.signal,
+  });
+  cameraButton.addEventListener("click", () => act("camera"), {
+    signal: viewListeners.signal,
+  });
+  compareButton.addEventListener(
+    "click",
+    () => act("compare", { pressed: !current?.comparing }),
+    { signal: viewListeners.signal },
+  );
   const button = (
     label: string,
     action: string,
@@ -602,6 +627,9 @@ export function createPhotoEditorSurfaceController({
       controlsIdentity = "";
       image.hidden = true;
       image.removeAttribute("src");
+      referenceImage.hidden = true;
+      referenceImage.removeAttribute("src");
+      empty.hidden = false;
       openEditorSurface();
       send({ kind: "editor-open", photoId: id });
     },
@@ -626,7 +654,13 @@ export function createPhotoEditorSurfaceController({
           ? "Camera Preview · Original reference"
           : model.preview
             ? `${model.comparing ? "Initialized baseline comparison" : "Edit preview"} · ${stale ? "Previous saved revision · out of date" : model.previewPending ? "Updating" : "Ready"}`
-            : "Workspace input · Preview has not been rendered";
+            : model.edit
+              ? "Edit preview has not been rendered"
+              : "Start editing · no Edit State yet";
+      currentButton.disabled = !model.preview;
+      cameraButton.setAttribute("aria-pressed", String(model.cameraReference));
+      compareButton.disabled = !model.preview?.comparisonUrl || stale;
+      compareButton.setAttribute("aria-pressed", String(model.comparing));
       const actions = element("[data-workspace-editor-actions]");
       actions.replaceChildren(
         button("Reload workspace", "refresh", {}, model.loading),
@@ -646,13 +680,6 @@ export function createPhotoEditorSurfaceController({
             model.blocked ||
             model.previewPending,
         ),
-        button(
-          model.comparing ? "Show current" : "Show baseline",
-          "compare",
-          { pressed: !model.comparing },
-          !model.preview?.comparisonUrl || stale,
-        ),
-        button("Camera reference", "camera"),
         button(
           "Export",
           "export",
@@ -833,60 +860,58 @@ export function createPhotoEditorSurfaceController({
         element("[data-workspace-catalog]").replaceChildren(
           model.catalogElement,
         );
-      if (
-        !model.preview &&
-        model.inspectedFile?.kind === "preview" &&
-        model.workspace &&
-        model.inspectedFile.state === "ready"
-      ) {
-        image.src = fileBytesUrl(
-          model.workspace.workspaceId,
-          model.inspectedFile,
-        );
-        image.hidden = false;
-      } else if (!model.preview) {
-        const reference =
-          root.querySelector<HTMLImageElement>("[data-stage] img");
-        if (reference?.src && model.selectedInput) {
-          image.src = reference.src;
-          image.alt = "Camera Preview · reference for the prepared input";
-          image.hidden = false;
-          element("[data-photo-editor-render-status]").textContent =
-            "Camera Preview · reference only · Edit preview has not been rendered";
-        } else {
-          image.hidden = true;
-          image.removeAttribute("src");
-        }
-      }
+      image.hidden = true;
+      referenceImage.hidden = true;
+      empty.hidden = Boolean(model.preview || model.cameraReference);
+      if (model.preview) {
+        image.src = model.preview.url;
+        image.alt = model.comparing
+          ? "Initialized tool baseline comparison"
+          : "Selected workspace edit preview";
+        image.hidden = model.cameraReference;
+        empty.hidden = true;
+      } else image.removeAttribute("src");
       if (model.cameraReference) {
         const reference =
           root.querySelector<HTMLImageElement>("[data-stage] img");
         if (reference?.src) {
-          image.src = reference.src;
-          image.alt = "Camera Preview · Original reference";
-          image.hidden = false;
+          referenceImage.src = reference.src;
+          referenceImage.alt = "Camera Preview · Original reference";
+          referenceImage.hidden = false;
+          empty.hidden = true;
         } else {
-          image.hidden = true;
-          image.removeAttribute("src");
+          referenceImage.removeAttribute("src");
+          empty.textContent =
+            "The camera Preview for this Photo is unavailable. No image has been substituted.";
+          empty.hidden = false;
         }
-      } else if (model.preview)
-        image.alt = model.comparing
-          ? "Initialized tool baseline comparison"
-          : "Selected workspace edit preview";
+      } else {
+        empty.textContent = model.preview
+          ? ""
+          : model.edit
+            ? "No Edit Preview is available yet. Refresh the preview when processing is ready."
+            : "No Edit State yet. Choose an available Processing Engine to start, or inspect the Original reference.";
+      }
     },
     presentPreview(url) {
       if (alive && current && !current.cameraReference) {
         image.src = url;
         image.hidden = false;
+        empty.hidden = true;
       }
     },
     clearPreview() {
       image.hidden = true;
       image.removeAttribute("src");
+      referenceImage.hidden = true;
+      referenceImage.removeAttribute("src");
+      empty.hidden = false;
     },
     dispose() {
+      viewListeners.abort();
       alive = false;
       image.removeAttribute("src");
+      referenceImage.removeAttribute("src");
     },
   };
 }

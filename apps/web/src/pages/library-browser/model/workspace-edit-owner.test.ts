@@ -44,7 +44,10 @@ function state(revision = "r1"): JsonObject {
 }
 function harness(
   onApply?: (body: JsonObject) => Promise<Response>,
-  onCommand?: (body: JsonObject) => Promise<Response | undefined>,
+  onCommand?: (
+    body: JsonObject,
+  ) => Response | undefined | Promise<Response | undefined>,
+  onRequest?: (path: string) => Promise<Response | undefined>,
 ) {
   const bodies: JsonObject[] = [];
   const ready = Promise.withResolvers<void>();
@@ -63,6 +66,8 @@ function harness(
           : input instanceof URL
             ? input.href
             : input.url;
+      const response = await onRequest?.(path);
+      if (response) return response;
       if (path.endsWith("/commands")) {
         if (typeof options?.body !== "string")
           throw new Error("Expected string request body");
@@ -264,5 +269,99 @@ test("reload during creation cannot restore the previous edit", async () => {
   createdRead.resolve(Response.json({ ...state(), editId: "new-edit" }));
   await action;
   expect(owner.model.edit?.editId).toBe("new-edit");
+  owner.dispose();
+});
+
+for (const terminal of ["succeeded", "failed"]) {
+  test(`latest saved revision previews after an older ${terminal} preview`, async () => {
+    const completion = Promise.withResolvers<Response>();
+    const pollingStarted = Promise.withResolvers<void>();
+    const latestRequested = Promise.withResolvers<void>();
+    let revision = "r1";
+    let renders = 0;
+    const { owner, bodies } = harness(
+      undefined,
+      (body) => {
+        if (body.operation === "edit show")
+          return Response.json(state(revision));
+        if (body.operation === "edit apply") {
+          revision = `r${Number(revision.slice(1)) + 1}`;
+          return Response.json({
+            revision,
+            stateToken: `token-${revision}`,
+            current: { revision },
+          });
+        }
+        if (body.operation === "preview render") {
+          renders++;
+          if (renders > 1) latestRequested.resolve();
+          return Response.json({
+            requestId: (body.arguments as JsonObject).requestId,
+            status: renders === 1 ? "running" : "failed",
+          });
+        }
+        return undefined;
+      },
+      async (path) => {
+        if (!path.includes("/jobs/")) return undefined;
+        pollingStarted.resolve();
+        return completion.promise;
+      },
+    );
+    await owner.refresh();
+    await owner.act("preview");
+    await pollingStarted.promise;
+    for (const value of [1, 2]) {
+      await owner.act("change", {
+        change: {
+          type: "set",
+          instanceId: "i",
+          parameterId: "scalar",
+          value,
+        },
+      });
+      await owner.settle();
+    }
+    expect(renders).toBe(1);
+    const first = bodies.find((body) => body.operation === "preview render")!;
+    completion.resolve(
+      Response.json({
+        requestId: (first.arguments as JsonObject).requestId,
+        status: terminal,
+      }),
+    );
+    await latestRequested.promise;
+    const previews = bodies.filter(
+      (body) => body.operation === "preview render",
+    );
+    expect(previews).toHaveLength(2);
+    expect((previews[1]!.arguments as JsonObject).revision).toBe("r3");
+    await owner.act("job-check");
+    expect(renders).toBe(2);
+    owner.dispose();
+  });
+}
+
+test("unchanged settings do not request another preview", async () => {
+  const { owner, bodies } = harness(
+    () =>
+      Promise.resolve(
+        Response.json({
+          revision: "r1",
+          stateToken: "token-r1",
+          current: { revision: "r1" },
+        }),
+      ),
+    (body) =>
+      body.operation === "edit show" ? Response.json(state()) : undefined,
+  );
+  await owner.refresh();
+  await owner.act("change", {
+    change: { type: "set", instanceId: "i", parameterId: "scalar", value: 0 },
+  });
+  await owner.settle();
+  expect(bodies.filter((body) => body.operation === "preview render")).toEqual(
+    [],
+  );
   owner.dispose();
 });

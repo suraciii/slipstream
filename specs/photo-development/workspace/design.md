@@ -188,11 +188,24 @@ supplied guard or use that convenience to replace a stale complete snapshot.
 Explicit request identities support reconciliation of uncertain outcomes;
 [darktable CLI Reference](../darktable/cli.md) owns their syntax and scope.
 
+First state publication must validate before creating tool-private state. A
+refused initial save must not leave an empty state directory that prevents
+workspace inspection or deletion. Concurrent first writers must recheck the
+published state under the tool's mutation lock: identical requests replay the
+committed receipt; competing intent must preserve the existing state and report
+the appropriate conflict.
+
 Rendering captures one immutable saved revision before execution or supervised
 queue admission. It need not hold the state mutation lock throughout rendering.
 Later edits mark that render stale without changing its input. Distinct edit
 state directories and output files must not contend on one editing lock; shared
 processing admission may serialize expensive runs for resource safety.
+
+An accepted capture or persisted job dependency remains active during queue
+waiting, execution, and terminal settlement. Workspace deletion must inspect
+these retained admissions as well as live process leases. A settled capture
+alone is retained loss inventory; it must not make the whole workspace
+permanently undeletable.
 
 Standalone command lifetime belongs to its process. It must not promise durable
 service jobs after it exits or dies. The Slipstream supervisor may retain

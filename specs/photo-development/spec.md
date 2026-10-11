@@ -102,6 +102,12 @@ It may retain the previous preview while rendering, but must identify it as out
 of date. A result's current status depends on its input and saved tool revision,
 not its filename, arrival time, or being the most recent image found.
 
+When settings are saved while a Preview is rendering, the editor must request a
+Preview of the newest confirmed revision after the older render settles. An
+older completion must not replace that current result. A failed Preview must
+remain an explicit failure with a retry action rather than trigger repeated
+automatic execution.
+
 Library scanning, live Original availability, workspace input availability, and
 tool availability are independent. Once the input snapshot is complete and
 unchanged, a missing or changed live Original must not disable its editing or
@@ -110,6 +116,27 @@ and explain the unavailable dependency. Browsing thumbnails, Selection State,
 Rating, Album membership, and browsing position remain independent of editing.
 The Grid's saved-edit indicator reflects retained tool state, even if it equals
 the baseline or cannot currently execute.
+
+The workspace identifies the current Engine, input, and Controls in plain
+language. It distinguishes edit-state saving, saved, conflict, and failure
+from Preview updating, current, stale, and failure. Technical evidence such as
+revision tokens, request identities, and processing reasons stays behind an
+optional details affordance. The primary flow uses editing state, editing TIFF,
+and output language.
+
+The current image and comparison controls must stay visible while the
+Photographer operates or scrolls editing controls. Wide layouts place image
+and controls beside each other; narrow layouts retain an image region above
+independently scrolling controls. Original reference must show the camera
+Preview inside this workspace at normal visibility, explicitly labelled as
+reference. No saved Edit State is a start state, not an Edit Preview failure.
+Controls and explanations must fit without horizontal scrolling or clipping.
+Undo, Redo, save feedback, and conflict recovery belong beside the primary
+controls rather than inside a technical disclosure.
+
+Edit availability reports three independent facts: whether the selected Processing Engine admits the selected workspace input, whether the Library is still scanning or recovering, and whether the Photo's live Original File currently reads. A recovering Library or a busy Engine must not be presented as an unreadable Original. The live Original fact does not disable editing or Export when the workspace input snapshot remains available.
+
+When a service accepts a retained Processing Artifact, that Artifact is the explicit input identity for the selected tool's canonical Edit State. The tool uses the Artifact's actual image contract and workspace retention state; it must not reopen or re-stage the upstream Original, mutate upstream state, or assume a latest result. If the workspace input itself is missing or unreadable, the workspace preserves saved Edit State and prior Artifacts and reports the unavailable dependency.
 
 ## Autosave and Reversible Editing
 
@@ -130,6 +157,9 @@ that state and retains the draft. The Photographer may use the newly saved state
 or explicitly reapply the draft against its newly observed revision; this can
 conflict again. A busy state must report bounded waiting or refusal. Separate
 state directories must not conflict merely because they share a workspace.
+
+Pending settings have bounded recovery in the current browser. Recovered settings are local drafts until the selected tool confirms them. A draft must not silently override newer tool state. Undo and redo in the browser submit new guarded updates for edit actions; the tool's retained history and restore semantics remain authoritative across sessions.
+Primary exposure changes, individual resets, and compatibility edits share one chronological edit history per Photo through the selected tool's saved state. An external revision invalidates history entries that can no longer be applied safely; it must not erase a local action merely because that action was confirmed by the tool.
 
 Undo and redo apply completed actions through the same guarded state history.
 [History and Recovery](darktable/editing.md#history-and-recovery) owns darktable's
@@ -190,6 +220,10 @@ be overwritten. The workspace can discover files without the tool's response.
 Concurrent completions must retain both outputs and must not attribute one run's
 file to another run. Atomic completion and external file-change handling follow
 [Photo Workspace](workspace/spec.md).
+
+Export states are queued, exporting, ready to download, failed, or cancelled. Accepted work follows the durable settlement rules. A confirmed later edit marks an earlier Artifact as based on older settings but does not remove or retarget it. A failed or cancelled Export does not publish partial output.
+Workspace retention is governed by [Photo Workspace](workspace/spec.md), explicit removal, and reviewed whole-workspace deletion. A run receipt or cache lifetime must not expire or delete a confirmed output, saved state, or required input. If a retained file is removed, the primary Download location must identify that it is unavailable and must not offer an enabled Download action.
+The primary Download location shows whether an output uses earlier settings. Provenance identifiers and image-contract details remain available through an optional disclosure.
 
 The Web uses plain status such as Exporting and Ready to download. Output cards
 identify available filename, size, time, tool, dimensions, and verified image

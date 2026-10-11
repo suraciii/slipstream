@@ -233,7 +233,7 @@ test("an idle browser reports a lost connection from the status probe", async ({
   await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
   await expect(page.getByText("1 / 2")).toBeVisible();
   await openPhotoTools(page);
-  await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
+  await expect(page.locator("[data-photo-tools-undo]")).toBeDisabled();
 
   // A usable status answer confirms the connection again.
   await page.unroute("**/api/status");

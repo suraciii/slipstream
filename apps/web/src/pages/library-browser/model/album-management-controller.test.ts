@@ -39,6 +39,8 @@ const setup = (answer: Deferred<Response>) => {
   const navigated: string[] = [];
   const dismissed: string[] = [];
   const pending: string[] = [];
+  const messages: Array<{ formId: string; message: string }> = [];
+  const pendingNames: Array<{ formId: string; name?: string }> = [];
   const settled = deferred<void>();
   const rendered: Array<
     Readonly<{ selectedAlbumId: string; pending: boolean; status?: string }>
@@ -69,7 +71,11 @@ const setup = (answer: Deferred<Response>) => {
       const outcome = await admission.settlement;
       if (outcome.kind !== "persisted") {
         settled.resolve();
-        return { ok: false, latest: false };
+        return {
+          ok: false,
+          latest: false,
+          failureMessage: outcome.failureMessage,
+        };
       }
       settled.resolve();
       return {
@@ -80,8 +86,11 @@ const setup = (answer: Deferred<Response>) => {
       };
     },
     present: {
-      setFormPending: (id) => pending.push(id),
-      setFormMessage: () => {},
+      setFormPending: (id, _pending, name) => {
+        pending.push(id);
+        pendingNames.push({ formId: id, ...(name ? { name } : {}) });
+      },
+      setFormMessage: (formId, message) => messages.push({ formId, message }),
       dismissForm: (id) => dismissed.push(id),
       renderFolder: (model) => rendered.push(model),
     },
@@ -100,6 +109,8 @@ const setup = (answer: Deferred<Response>) => {
     dismissed,
     navigated,
     pending,
+    messages,
+    pendingNames,
     rendered,
     settled,
     switchSource: () =>
@@ -109,6 +120,42 @@ const setup = (answer: Deferred<Response>) => {
 };
 
 describe("album management controller fences", () => {
+  test("duplicate create and rename keep their current form recoverable", async () => {
+    for (const kind of ["create", "rename"] as const) {
+      const answer = deferred<Response>();
+      const state = setup(answer);
+      state.controller.openForm({
+        formId: kind,
+        kind,
+        albumId: album.id,
+        name: kind === "rename" ? "Original" : "",
+      });
+      const submission = state.controller.submitForm(kind, "Picks");
+      answer.resolve(new Response("{}", { status: 409 }));
+      await submission;
+      expect(state.messages).toEqual([
+        { formId: kind, message: "An Album with this name already exists." },
+      ]);
+      expect(state.pendingNames).toContainEqual({
+        formId: kind,
+        name: "Picks",
+      });
+      expect(state.dismissed).toEqual([]);
+      expect(state.navigated).toEqual([]);
+    }
+  });
+
+  test("a failed older form cannot put its error into a replacement form", async () => {
+    const answer = deferred<Response>();
+    const state = setup(answer);
+    state.controller.openForm({ formId: "first", kind: "create", name: "" });
+    const submission = state.controller.submitForm("first", "Picks");
+    state.controller.openForm({ formId: "second", kind: "create", name: "" });
+    answer.resolve(new Response("{}", { status: 409 }));
+    await submission;
+    expect(state.messages).toEqual([]);
+    expect(state.dismissed).toEqual([]);
+  });
   test("late settlement cannot dismiss a replacement form or navigate", async () => {
     const answer = deferred<Response>();
     const setupState = setup(answer);

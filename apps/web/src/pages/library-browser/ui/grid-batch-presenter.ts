@@ -87,8 +87,8 @@ export const createGridBatchPresenter = (
     renderTray();
   };
   const renderTray = () => {
-    const visible = count > 0 || result !== undefined;
-    e.gridBatch.hidden = !visible;
+    const visible = mode || count > 0;
+    e.gridBatch.hidden = count === 0;
     e.gridSelectMode.setAttribute("aria-pressed", String(mode));
     const toolsFocus = e.gridTools.contains(document.activeElement),
       selectionFocus = e.gridSelection.contains(document.activeElement);

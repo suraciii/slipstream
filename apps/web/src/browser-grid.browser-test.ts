@@ -167,7 +167,7 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   await cell(3).click();
   await expect(page.locator("[data-review]")).toBeVisible();
   await openPhotoToolsView(page, "tools");
-  await page.getByRole("button", { name: "Reject", exact: true }).click();
+  await page.locator("[data-photo-tools-reject]").click();
   await expect(page.locator("[data-selection]")).toHaveText("Rejected");
   await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
@@ -318,6 +318,15 @@ test("Grid batch Select decides every multi-selected Photo and Undo restores the
 
   // Select mode marks three Photos, and one batch decision applies to all of
   // them through one bounded request.
+  await page.locator("[data-grid-select-mode]").click();
+  await expect(count).toHaveText("0 / 100 Photos");
+  await expect(page.locator("[data-grid-multi-done]")).toBeVisible();
+  await expect(page.locator("[data-grid-batch]")).toBeHidden();
+  await page.locator("[data-grid-multi-done]").click();
+  await expect(page.locator("[data-grid-select-mode]")).toBeVisible();
+  await page.locator("[data-grid-select-mode]").click();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("[data-grid-select-mode]")).toBeVisible();
   await page.locator("[data-grid-select-mode]").click();
   for (const index of [0, 1, 2]) await cell(index).click();
   await expect(count).toHaveText("3 / 100 Photos");

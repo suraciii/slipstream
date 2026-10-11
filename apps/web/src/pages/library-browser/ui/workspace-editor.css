@@ -1,3 +1,93 @@
+.photo-tools-dialog[data-photo-tools-surface="edit"] {
+  height: 100dvh;
+  max-height: 100dvh;
+  border-radius: 0;
+}
+.photo-tools-dialog[data-photo-tools-surface="edit"] .photo-tools-sheet {
+  height: 100%;
+  max-height: none;
+  box-sizing: border-box;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.photo-tools-dialog[data-photo-tools-surface="edit"] .photo-tools-body {
+  min-height: 0;
+  overflow: hidden;
+}
+@media (min-width: 761px) {
+  .photo-tools-dialog[data-photo-tools-surface="edit"] {
+    width: min(92rem, calc(100vw - 3rem));
+    height: min(90dvh, 64rem);
+    max-height: none;
+    border-radius: 0.75rem;
+  }
+}
+.photo-editor-workspace:not([hidden]) {
+  display: grid;
+  min-height: 0;
+  min-width: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0.5rem;
+  height: 100%;
+}
+.photo-editor-layout {
+  display: grid;
+  min-height: 0;
+  min-width: 0;
+  grid-template-rows: minmax(12rem, 42%) minmax(0, 1fr);
+  gap: 0.75rem;
+}
+.photo-editor-image-region {
+  display: grid;
+  grid-template-rows: auto minmax(3rem, 1fr) auto;
+  gap: 0.35rem;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+.photo-editor-image-frame {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  background: #000;
+  border: 1px solid var(--border);
+}
+.photo-editor-preview-image,
+.photo-editor-reference-image {
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  inset: 0;
+  object-fit: contain;
+}
+.photo-editor-image-empty {
+  align-self: center;
+  margin: 0;
+  padding: 0.6rem;
+  color: var(--muted);
+}
+.photo-editor-view-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-width: 0;
+  gap: 0.35rem;
+}
+.photo-editor-view-actions button {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.photo-editor-controls {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  min-height: 0;
+}
+@media (min-width: 900px) {
+  .photo-editor-layout {
+    grid-template-columns: minmax(0, 1fr) minmax(18rem, 36%);
+    grid-template-rows: minmax(0, 1fr);
+  }
+}
 .workspace-editor {
   display: grid;
   gap: 0.75rem;

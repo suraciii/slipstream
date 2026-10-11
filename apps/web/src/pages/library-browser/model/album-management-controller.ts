@@ -41,6 +41,7 @@ type FolderAlbumModel = Readonly<{
 export type AlbumMutationResult = Readonly<{
   ok: boolean;
   latest: boolean;
+  failureMessage?: string;
   createdAlbum?: AlbumSummary;
   folderAdd?: Readonly<{
     matchedCount: number;
@@ -214,7 +215,15 @@ export function createAlbumManagementController(
       if (current) {
         if (result.ok && (record.kind === "rename" || result.createdAlbum))
           dismiss(record);
-        else options.present.setFormPending(formId, false);
+        else {
+          options.present.setFormPending(formId, false);
+          if (!result.ok)
+            options.present.setFormMessage(
+              formId,
+              result.failureMessage ??
+                "The Album could not be saved. Try again.",
+            );
+        }
       }
       renderFolder();
       if (

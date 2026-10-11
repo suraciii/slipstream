@@ -119,17 +119,14 @@ function mountPrivateLibraryBrowser(
       void sourceGrid.loadThumbnail(binding.photoId, binding.target);
     },
     (binding) => sourceGrid.releaseThumbnail(binding.photoId, binding.target),
+    () => metadataPanel.refresh(),
   );
   const metadataHost = root.querySelector<HTMLElement>(
     "[data-external-metadata]",
   );
   if (!metadataHost) throw new Error("External Metadata surface is missing.");
-  const metadataPanel = createMetadataPanel(
-    metadataHost,
-    fetcher,
-    (message) => {
-      view.presentSummary(message);
-    },
+  const metadataPanel = createMetadataPanel(metadataHost, fetcher, (message) =>
+    view.presentSummary(message),
   );
   const photoOwner = createPhotoOwner(
     fetcher,
