@@ -1,5 +1,6 @@
 import { createComposableEditorSurface } from "./composable-editor-surface.js";
 import { createWorkspaceOutputSurface } from "./workspace-output-surface.js";
+import { editorSaveRecovery } from "./photo-editor-presentation.js";
 import type {
   EditorViewModel,
   LibraryBrowserIntent,
@@ -19,12 +20,14 @@ export function createPhotoEditorSurfaceController({
   isPhotoVisible,
   isEditorSurfaceVisible,
   openEditorSurface,
+  getCameraReferenceUrl = () => undefined,
 }: Readonly<{
   root: ParentNode;
   send: (intent: EditorIntent) => void;
   isPhotoVisible: () => boolean;
   isEditorSurfaceVisible: () => boolean;
   openEditorSurface: () => void;
+  getCameraReferenceUrl?: (photoId: string) => string | undefined;
 }>): PhotoEditorSurfaceController {
   let alive = true;
   let photoId: string | undefined;
@@ -42,6 +45,28 @@ export function createPhotoEditorSurfaceController({
     return value;
   };
   const image = element<HTMLImageElement>("preview-image");
+  const referenceImage = element<HTMLImageElement>("reference-image");
+  const syncImage = (): void => {
+    const reference = model?.cameraReference === true;
+    const url =
+      alive &&
+      photoId &&
+      reference &&
+      isPhotoVisible() &&
+      isEditorSurfaceVisible()
+        ? getCameraReferenceUrl(photoId)
+        : undefined;
+    if (url) referenceImage.src = url;
+    else referenceImage.removeAttribute("src");
+    referenceImage.hidden = !url;
+    image.hidden = reference || !image.getAttribute("src");
+    element("image-empty").hidden = !image.hidden || !referenceImage.hidden;
+    element("image-empty").textContent = reference
+      ? "The camera Preview for this Photo is unavailable. No image has been substituted."
+      : model?.primary?.revision || model?.composable.steps.length
+        ? "No Edit Preview is available yet. Refresh the preview when processing is ready."
+        : "No Edit State yet. Choose an available Processing Engine to start, or inspect the Original reference.";
+  };
   const text = (name: string, value: string, hideEmpty = false): void => {
     const target = element(name);
     target.textContent = value;
@@ -116,6 +141,17 @@ export function createPhotoEditorSurfaceController({
     },
     { signal: listeners.signal },
   );
+  element<HTMLButtonElement>("current").addEventListener(
+    "click",
+    () => {
+      if (!alive || !photoId || !model) return;
+      if (model.cameraReference)
+        send({ kind: "editor-camera-reference", photoId, pressed: false });
+      else if (model.comparing)
+        send({ kind: "editor-compare", photoId, pressed: false });
+    },
+    { signal: listeners.signal },
+  );
   element<HTMLButtonElement>("compare").addEventListener(
     "click",
     () => {
@@ -127,6 +163,7 @@ export function createPhotoEditorSurfaceController({
   const clearPreview = (): void => {
     image.hidden = true;
     image.removeAttribute("src");
+    syncImage();
   };
   return {
     open(id) {
@@ -134,6 +171,8 @@ export function createPhotoEditorSurfaceController({
       photoId = id;
       model = undefined;
       clearPreview();
+      referenceImage.hidden = true;
+      referenceImage.removeAttribute("src");
       text("status", "Loading Edit State…");
       root
         .querySelectorAll<HTMLButtonElement>(".photo-editor-controls button")
@@ -149,17 +188,30 @@ export function createPhotoEditorSurfaceController({
       model = next;
       const busy = next.loading || next.saving;
       const primary = next.primary;
-      text(
-        "primary-state",
-        primary
-          ? `Revision ${primary.revision ?? "unsaved"} · Source ${primary.sourceRevision ?? "unavailable"} · ${primary.ready ? "Ready" : "Not ready"}. ${primary.note}`
-          : "Checking current Edit State…",
-      );
+      text("primary-state", primary?.note ?? "Checking current Edit State…");
       text(
         "primary-input",
         primary?.input?.kind === "artifact"
-          ? `Input: artifact ${primary.input.artifactId}`
+          ? "Input: retained Processing Artifact"
           : "Input: Original of this Photo",
+      );
+      text(
+        "primary-detail",
+        primary
+          ? `Revision ${primary.revision ?? "unsaved"} · Source ${primary.sourceRevision ?? "unavailable"}${primary.input?.kind === "artifact" ? ` · Artifact ${primary.input.artifactId}` : ""}`
+          : "",
+      );
+      text(
+        "engine-state",
+        next.loading
+          ? "Checking Processing Engine availability…"
+          : next.composable.modules
+              .map((engine) =>
+                engine.ready
+                  ? `${engine.name}: available`
+                  : `${engine.name}: unavailable${engine.refusalNote ? ` — ${engine.refusalNote}` : ""}`,
+              )
+              .join(" · ") || "No Processing Engine is available.",
       );
       exposure.disabled = !primary?.canSet || next.mutationsBlocked;
       exposure.value =
@@ -175,7 +227,7 @@ export function createPhotoEditorSurfaceController({
       text(
         "capability",
         next.processingReadiness === "unavailable"
-          ? "The selected module is unavailable for processing."
+          ? "The selected Processing Engine is unavailable for processing."
           : "",
         true,
       );
@@ -185,21 +237,39 @@ export function createPhotoEditorSurfaceController({
         "render-status",
         next.cameraReference
           ? "Camera Preview · Original reference"
-          : next.comparing
-            ? "Current Edit State baseline comparison"
-            : next.previewState === "ready"
-              ? "Current Edit Preview"
-              : next.previewState === "stale"
-                ? "Previous Edit Preview · updating"
-                : next.previewState === "failed"
-                  ? "Edit Preview failed"
-                  : "Edit Preview pending",
+          : primary?.saveState === "none" ||
+              (!primary?.revision && !next.composable.steps.length)
+            ? "Start editing · no Edit State yet"
+            : next.comparing
+              ? "Baseline comparison · same processing input"
+              : next.previewState === "ready"
+                ? "Current Edit Preview"
+                : next.previewState === "stale"
+                  ? "Previous Edit Preview · updating"
+                  : next.previewState === "failed"
+                    ? "Edit Preview failed"
+                    : "Edit Preview pending",
       );
-      text("preview-note", next.cameraReference ? "" : next.previewNote, true);
+      image.alt = next.comparing
+        ? "Baseline comparison · same processing input"
+        : "Current Edit Preview";
+      text(
+        "preview-note",
+        next.cameraReference || primary?.saveState === "none"
+          ? ""
+          : next.previewNote,
+        true,
+      );
       element("preview-note").dataset.tone = next.previewStale ? "stale" : "";
       text("draft", next.draftNote, true);
-      element("conflict").hidden = !next.conflict;
-      text("conflict-message", next.conflict?.message ?? "");
+      const recovery = editorSaveRecovery(next);
+      element("conflict").hidden = !recovery.visible;
+      text("conflict-message", recovery.message);
+      button("current", !next.loading);
+      element("current").setAttribute(
+        "aria-pressed",
+        String(!next.cameraReference && !next.comparing),
+      );
       button("camera-reference", !next.loading);
       element("camera-reference").setAttribute(
         "aria-pressed",
@@ -212,9 +282,9 @@ export function createPhotoEditorSurfaceController({
       button("redo", !next.loading && next.canRedo);
       button("refresh", !next.loading);
       button("rebind", !busy && next.rebindAvailable, !next.rebindAvailable);
-      button("use-saved", !busy);
-      button("reapply", !busy);
-      button("discard-draft", !busy);
+      button("use-saved", !busy, !recovery.canUseSaved);
+      button("reapply", !busy, !recovery.canReapply);
+      button("discard-draft", !busy, !recovery.canDiscard);
       text("proxy-state", next.proxy?.note ?? "No Development Proxy.");
       button("proxy-create", !busy && Boolean(next.proxy?.canCreate));
       button(
@@ -224,13 +294,21 @@ export function createPhotoEditorSurfaceController({
       );
       text("export-target", "current Edit State");
       text("export-state", next.export.note);
+      const output = next.export.output;
+      text(
+        "export-output",
+        output ? `${output.note} Expires ${output.expiresAt}.` : "",
+        true,
+      );
+      text("export-evidence", output?.evidence ?? "");
+      element("export-details").hidden = !output;
       button("export-submit", !next.loading && next.export.canSubmit);
       button("export-cancel", next.export.canCancel, !next.export.canCancel);
       button("export-retry", next.export.canRetry, !next.export.canRetry);
       button(
         "export-download",
-        next.export.canDownload,
-        !next.export.canDownload,
+        next.export.canDownload && output?.state !== "expired",
+        !output && !next.export.canDownload,
       );
       button(
         "export-check",
@@ -240,7 +318,7 @@ export function createPhotoEditorSurfaceController({
       );
       element("export-retry").textContent =
         next.export.state === "outcome-unknown" ? "Check result" : "Retry";
-      if (next.cameraReference) clearPreview();
+      syncImage();
       composable.render(next);
       button("composable-artifact-fetch", !next.loading);
       root
@@ -264,13 +342,15 @@ export function createPhotoEditorSurfaceController({
     presentPreview(url) {
       if (!alive || !model || model.cameraReference) return;
       image.src = url;
-      image.hidden = false;
+      syncImage();
     },
     clearPreview,
     dispose() {
       alive = false;
       listeners.abort();
       clearPreview();
+      referenceImage.hidden = true;
+      referenceImage.removeAttribute("src");
     },
   };
 }

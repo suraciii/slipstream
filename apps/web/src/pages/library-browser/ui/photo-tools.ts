@@ -27,6 +27,7 @@ export function createPhotoToolsController({
   syncSecondarySurface,
   openSources,
   openEditor,
+  openDetails,
   navigate,
 }: Readonly<{
   elements: Readonly<{
@@ -44,6 +45,7 @@ export function createPhotoToolsController({
   syncSecondarySurface: () => void;
   openSources: () => void;
   openEditor: (photoId: string) => void;
+  openDetails?: (photoId: string) => void;
   navigate: (direction: "previous" | "next") => void;
 }>): PhotoToolsController {
   const {
@@ -136,6 +138,10 @@ export function createPhotoToolsController({
     resetGestures();
     currentView = view;
     applyView();
+    if (view === "details") {
+      const photoId = currentPhotoId();
+      if (photoId) openDetails?.(photoId);
+    }
     if (!surfaces.isActive("photo-tools"))
       surfaces.open(
         "photo-tools",
@@ -152,6 +158,7 @@ export function createPhotoToolsController({
     if (!alive || !surfaces.isActive("photo-tools")) return;
     currentView = "tools";
     applyView();
+    syncSecondarySurface();
     syncFilmstripHost();
     photoToolsClose.focus();
   };

@@ -58,15 +58,16 @@ export function createEditorController(
     baseline.clear();
     view.clearEditorPreview();
   };
+  const markPreviewStale = (): void => {
+    comparisonRequested = false;
+    preview.markStale();
+    baseline.markStale();
+    presentSelected();
+  };
   const requestPreview = async (id: string): Promise<void> => {
+    if (!owns(id) || composable.readPending || composable.state?.saving) return;
     if (
-      !owns(id) ||
-      cameraReference ||
-      composable.readPending ||
-      primary.pending
-    )
-      return;
-    if (
+      primary.blocked ||
       primary.read?.editRevision !== (composable.read?.recipe?.revision ?? null)
     )
       await primary.load(id);
@@ -75,19 +76,12 @@ export function createEditorController(
       primary.read?.editRevision !== (composable.read?.recipe?.revision ?? null)
     )
       return;
+    if (cameraReference) return;
     await preview.requestCurrent(id);
   };
   const primary = createEditorEditState(fetcher, {
     owns,
     render: () => render(),
-    markStale: () => {
-      comparisonRequested = false;
-      preview.markStale();
-      baseline.markStale();
-    },
-    refreshCompatibility: (id) => composable.loadComposableRecipe(id),
-    requestPreview,
-    describeRefusal: describeEditRefusal,
   });
   const composable = createEditorComposableRecipe(fetcher, {
     ...dependencies,
@@ -96,12 +90,7 @@ export function createEditorController(
     previewSelection: () => preview.selection,
     clearEditorPreview: clearPreview,
     requestEditorPreview: requestPreview,
-    markEditorPreviewStale: () => {
-      comparisonRequested = false;
-      preview.markStale();
-      baseline.markStale();
-      presentSelected();
-    },
+    markEditorPreviewStale: markPreviewStale,
     describeEditRefusal,
   });
   const preview = createEditorComposablePreview(fetcher, {
@@ -148,7 +137,7 @@ export function createEditorController(
         recipeRevision: recipe?.revision ?? null,
         sourceRevision: recipe?.sourceRevision ?? null,
         stepId: recipe?.currentStepId ?? null,
-        saving: (state?.saving ?? false) || primary.pending,
+        saving: state?.saving ?? false,
         dirty: composable.dirty() || primary.blocked || exports.unresolved(id),
         conflict: state?.conflict ?? false,
       };
@@ -199,6 +188,19 @@ export function createEditorController(
         input: primary.read?.current?.input ?? null,
         engine: primary.read?.current?.engine ?? null,
         exposureEv: primary.read?.current?.exposureEv ?? null,
+        saveState: state?.uncertain
+          ? "unknown"
+          : state?.conflict
+            ? "conflict"
+            : state?.saving
+              ? "saving"
+              : state?.failure
+                ? "failed"
+                : composable.dirty()
+                  ? "draft"
+                  : primary.read?.current
+                    ? "saved"
+                    : "none",
         canSet:
           !composable.readPending &&
           !primary.blocked &&
@@ -216,7 +218,7 @@ export function createEditorController(
           primary.read?.canSave === true &&
           primary.read?.current?.engine === "darktable",
         ready: primary.read?.canPreview === true,
-        note: primary.note,
+        note: state?.note || primary.note,
       },
       loading: composable.readPending,
       cameraReference,
@@ -233,7 +235,8 @@ export function createEditorController(
       sourceFactNote:
         composable.read?.sourceAvailable === false
           ? "The Original source is unavailable."
-          : composable.read?.currentSourceRevision &&
+          : composable.read?.recipe &&
+              composable.read.currentSourceRevision &&
               composable.read.currentSourceRevision !==
                 composable.read.recipe?.sourceRevision
             ? "The Original has changed since this Edit State was saved."
@@ -251,7 +254,7 @@ export function createEditorController(
         ? null
         : current.busy || current.pending
           ? "pending"
-          : current.outcome === "failed" || current.refused
+          : selected && (current.outcome === "failed" || current.refused)
             ? "failed"
             : current.url
               ? current.stale
@@ -266,14 +269,16 @@ export function createEditorController(
         primary.read?.canPreview === true &&
         !cameraReference,
       previewing: current.busy,
-      previewNote: comparisonRequested
-        ? baseline.current.outcome === "ready" && !baselineReady()
-          ? "The baseline does not match this current Preview's processing provenance, so the current Preview remains shown."
-          : baseline.current.note ||
-            "Preparing the current Edit State's baseline comparison…"
-        : current.note,
+      previewNote: !selected
+        ? "Choose exposure settings to create an Edit State before requesting an Edit Preview."
+        : comparisonRequested
+          ? baseline.current.outcome === "ready" && !baselineReady()
+            ? "The baseline does not match this current Preview's processing provenance, so the current Preview remains shown."
+            : baseline.current.note ||
+              "Preparing the current Edit State's baseline comparison…"
+          : current.note,
       previewStale: current.stale,
-      saving: (state?.saving ?? false) || primary.pending,
+      saving: state?.saving ?? false,
       dirty: composable.dirty() || primary.blocked,
       mutationsBlocked: Boolean(
         primary.blocked ||
@@ -291,12 +296,16 @@ export function createEditorController(
       ),
       canUndo:
         Boolean(state?.undo.length) &&
+        !state?.saving &&
+        !state?.pending &&
         !state?.uncertain &&
         !state?.conflict &&
         !exports.unresolved(photoId) &&
         !outputs.unresolved(photoId),
       canRedo:
         Boolean(state?.redo.length) &&
+        !state?.saving &&
+        !state?.pending &&
         !state?.uncertain &&
         !state?.conflict &&
         !exports.unresolved(photoId) &&
@@ -308,7 +317,7 @@ export function createEditorController(
       export: exports.view(),
       composable: recipeView,
       outputs: outputs.view(photoId),
-      status: primary.note,
+      status: state?.note || primary.note,
       statusDetail: state?.uncertain
         ? "The save outcome is unknown. Check the saved edit before another action."
         : "",
@@ -343,7 +352,7 @@ export function createEditorController(
     scoped((id: string, ...args: A) => {
       const state = composable.state;
       if (
-        primary.pending ||
+        state?.saving ||
         state?.uncertain ||
         state?.conflict ||
         exports.unresolved(id) ||
@@ -355,12 +364,34 @@ export function createEditorController(
   return {
     open,
     setExposure: mutate((id, value: number) => {
-      if (!composable.readPending && !composable.dirty())
-        return primary.setExposure(id, value);
+      if (
+        Number.isFinite(value) &&
+        !composable.readPending &&
+        !composable.dirty() &&
+        !primary.blocked &&
+        !primary.read?.requiresRebind &&
+        (primary.read?.current
+          ? primary.read.canSave
+          : primary.read?.sourceAvailable)
+      ) {
+        primary.invalidate();
+        markPreviewStale();
+        return composable.setExposure(id, value);
+      }
     }),
     resetExposure: mutate((id) => {
-      if (!composable.readPending && !composable.dirty())
-        return primary.resetExposure(id);
+      if (
+        !composable.readPending &&
+        !composable.dirty() &&
+        !primary.blocked &&
+        !primary.read?.requiresRebind &&
+        primary.read?.canSave &&
+        primary.read.current?.engine === "darktable"
+      ) {
+        primary.invalidate();
+        markPreviewStale();
+        return composable.resetExposure(id);
+      }
     }),
     refresh: scoped((id) => {
       void primary.load(id).then(() => requestPreview(id));
@@ -372,10 +403,7 @@ export function createEditorController(
       void outputs.refresh(id);
     }),
     stepHistory: mutate((id, operation: "undo" | "redo") => {
-      comparisonRequested = false;
-      preview.markStale();
-      baseline.markStale();
-      presentSelected();
+      markPreviewStale();
       if (operation === "undo") void composable.undo(id);
       else void composable.redo(id);
     }),
@@ -384,8 +412,11 @@ export function createEditorController(
       cameraReference = pressed;
       render();
       if (pressed) view.clearEditorPreview();
-      else if (preview.current.url) presentSelected();
-      else void requestPreview(id);
+      else {
+        presentSelected();
+        if (!preview.current.url || preview.current.stale)
+          void requestPreview(id);
+      }
     }),
     setComparison: scoped((id, pressed: boolean) => {
       if (

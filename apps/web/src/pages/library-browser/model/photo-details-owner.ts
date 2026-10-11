@@ -96,11 +96,14 @@ export function createPhotoDetailsOwner(
       failed: Boolean(photo) && facts.kind === "failed",
       ...(membershipMessage ? { message: membershipMessage } : {}),
       containing,
-      options: deps.albums().map((album) => ({
-        id: album.id,
-        name: album.name,
-        member: memberIds.has(album.id),
-      })),
+      options:
+        facts.kind === "ready"
+          ? deps.albums().map((album) => ({
+              id: album.id,
+              name: album.name,
+              member: memberIds.has(album.id),
+            }))
+          : [],
       pendingAlbumIds: pending,
     });
   };
@@ -168,6 +171,8 @@ export function createPhotoDetailsOwner(
     if (
       !photo ||
       !albumId ||
+      membershipPhotoId !== photo.id ||
+      membershipFacts.kind !== "ready" ||
       deps.isMembershipAdmitted(member ? "add" : "remove", albumId, photo.id)
     )
       return;

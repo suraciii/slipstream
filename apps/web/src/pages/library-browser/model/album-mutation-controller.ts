@@ -14,6 +14,7 @@ export type AlbumMutationResult = Readonly<{
   admitted: boolean;
   ok: boolean;
   latest: boolean;
+  failureMessage?: string;
   announce: (text: string) => void;
   removedFromCurrentAlbum?: Readonly<{
     albumId: string;
@@ -163,6 +164,7 @@ export function createAlbumMutationController(
           return {
             ...silent,
             admitted: true,
+            failureMessage: outcome.failureMessage,
             latest: options.actions.isLatest(outcome.mutation),
           };
         }

@@ -489,13 +489,11 @@ export async function mockEditor(
       ],
     }),
   );
-  await page.route("**/api/photos/*/edit", (route) => {
-    const photoId = routePhoto(route);
-    const saved = state.recipes.get(photoId)!;
+  const edit = (photoId: string, saved: ProcessingRecipeFixture) => {
     const step = saved.steps.find(
       (item) => item.stepId === saved.currentStepId,
     );
-    return json(route, {
+    return {
       photoId,
       editRevision: saved.revision,
       sourceRevision: saved.sourceRevision,
@@ -507,12 +505,17 @@ export async function mockEditor(
       canExport: Boolean(step) && options.available !== false,
       current: step
         ? {
+            stepId: step.stepId,
             engine: step.module,
             input: step.input,
             controls: { exposure: { ev: recipeExposure(saved) } },
           }
         : null,
-    });
+    };
+  };
+  await page.route("**/api/photos/*/edit", (route) => {
+    const photoId = routePhoto(route);
+    return json(route, edit(photoId, state.recipes.get(photoId)!));
   });
 
   const updateExposure = async (route: Route, reset: boolean) => {
@@ -538,7 +541,7 @@ export async function mockEditor(
       ),
     };
     state.recipes.set(photoId, next);
-    await json(route, { outcome: "saved" });
+    await json(route, { outcome: "saved", edit: edit(photoId, next) }, 201);
   };
   await page.route("**/api/photos/*/edit/set", (route) =>
     updateExposure(route, false),

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import {
   createEditorProcessingExport,
   type ProcessingExportRecipe,
@@ -81,14 +81,18 @@ const artifact: ProcessingArtifactRecord = {
   sampleFormat: "uint8",
 };
 const owners: Array<{ reset(): void }> = [];
+const cleanups: Array<() => void> = [];
 afterEach(() => {
   for (const owner of owners.splice(0)) owner.reset();
+  for (const cleanup of cleanups.splice(0)) cleanup();
+  mock.restore();
 });
 function fixture(
   fetcher: (
     input: RequestInfo | URL,
     init?: RequestInit,
   ) => Response | Promise<Response>,
+  onRender: () => void = () => {},
 ) {
   let current = "photo-1";
   let dirty = false;
@@ -132,7 +136,7 @@ function fixture(
   };
   const owner = createEditorProcessingExport(browserFetch, recipe, {
     editorOwnsPhoto: (id) => id === current,
-    renderEditor: () => {},
+    renderEditor: onRender,
     processingAvailable: () => true,
     describeEditRefusal: () => Promise.resolve("refused"),
   });
@@ -150,6 +154,348 @@ function fixture(
     },
   };
 }
+
+function clock() {
+  let now = Date.parse("2026-10-11T00:00:00Z");
+  let sequence = 0;
+  const timers = new Map<number, { at: number; run: () => void }>();
+  spyOn(Date, "now").mockImplementation(() => now);
+  spyOn(globalThis, "setTimeout").mockImplementation(((
+    run: () => void,
+    delay: number,
+  ) => {
+    const id = ++sequence;
+    timers.set(id, { at: now + delay, run });
+    return id;
+  }) as typeof setTimeout);
+  spyOn(globalThis, "clearTimeout").mockImplementation((id) => {
+    timers.delete(id as unknown as number);
+  });
+  return {
+    timers,
+    now: () => now,
+    jump: (milliseconds: number) => {
+      now += milliseconds;
+    },
+    advance: (milliseconds: number) => {
+      const end = now + milliseconds;
+      while (true) {
+        const next = [...timers.entries()]
+          .filter(([, timer]) => timer.at <= end)
+          .sort((left, right) => left[1].at - right[1].at)[0];
+        if (!next) break;
+        now = next[1].at;
+        timers.delete(next[0]);
+        next[1].run();
+      }
+      now = end;
+    },
+  };
+}
+
+test("idle retained outputs render each expiration without requests or user actions", async () => {
+  const time = clock();
+  let requests = 0;
+  const rendered: Array<{ canDownload: boolean; state: string | undefined }> =
+    [];
+  const primary = {
+    ...artifact,
+    expiresAt: new Date(time.now() + 2000).toISOString(),
+  };
+  const earlier = {
+    ...artifact,
+    artifactId: "d".repeat(64),
+    expiresAt: new Date(time.now() + 1000).toISOString(),
+  };
+  const f = fixture(
+    () => {
+      requests += 1;
+      return Response.json({
+        photoId: "photo-1",
+        exports: [
+          { ...work("retained", "succeeded"), artifactId: primary.artifactId },
+        ],
+        artifacts: [primary, earlier],
+        historicalExports: [
+          {
+            exportId: "legacy",
+            target: "development-tiff",
+            state: "succeeded",
+            createdAt: "2026-10-01T00:00:00Z",
+            artifact: {
+              exportId: "legacy",
+              target: "development-tiff",
+              stage: "develop",
+              contentType: "image/tiff",
+              width: 10,
+              height: 20,
+              profileIdentity: "ProPhoto RGB",
+              byteLength: 1,
+              sha256: "a".repeat(64),
+              expiresAt: new Date(time.now() + 3000).toISOString(),
+              filename: "historical.tiff",
+              orientation: "top-left",
+              sampleFormat: "float32",
+              colorSpace: "prophoto-rgb",
+              iccEmbedded: true,
+            },
+          },
+        ],
+      });
+    },
+    () => {
+      const view = f.owner.view();
+      rendered.push({
+        canDownload: view.canDownload,
+        state: view.output?.state,
+      });
+    },
+  );
+  await f.owner.load("photo-1");
+  expect(f.owner.view().output?.state).toBe("earlier-settings");
+  expect(f.owner.view().output?.expiresAt).toBe(primary.expiresAt);
+  expect(f.owner.view().output?.note).toContain("earlier settings");
+  expect(f.owner.view().output?.evidence).toContain(artifact.filename);
+  const initialRenders = rendered.length;
+  time.advance(1000);
+  expect(rendered.length).toBe(initialRenders + 1);
+  expect(
+    f.owner
+      .view()
+      .processingArtifacts.find(
+        (item) => item.artifactId === earlier.artifactId,
+      )?.isExpired,
+  ).toBe(true);
+  expect(rendered.at(-1)?.canDownload).toBe(true);
+  time.advance(1000);
+  expect(rendered.at(-1)).toEqual({ canDownload: false, state: "expired" });
+  expect(f.owner.view().output?.note).toContain("Export again");
+  expect(f.owner.view().historicalExports[0]?.canDownload).toBe(true);
+  time.advance(1000);
+  expect(rendered.length).toBe(initialRenders + 3);
+  expect(f.owner.view().historicalExports[0]?.canDownload).toBe(false);
+  expect(requests).toBe(1);
+  expect(time.timers.size).toBe(0);
+});
+
+test("expiry deadlines beyond the timer limit wait for the actual retention boundary", async () => {
+  const time = clock();
+  const delay = 2_147_483_647;
+  let renders = 0;
+  const f = fixture(
+    () =>
+      Response.json({
+        photoId: "photo-1",
+        exports: [
+          { ...work("retained", "succeeded"), artifactId: artifact.artifactId },
+        ],
+        artifacts: [
+          {
+            ...artifact,
+            expiresAt: new Date(time.now() + delay + 1000).toISOString(),
+          },
+        ],
+      }),
+    () => {
+      renders += 1;
+    },
+  );
+  await f.owner.load("photo-1");
+  const initialRenders = renders;
+  time.advance(delay);
+  expect(renders).toBe(initialRenders);
+  expect(f.owner.view().canDownload).toBe(true);
+  expect(time.timers.size).toBe(1);
+  time.advance(1000);
+  expect(renders).toBe(initialRenders + 1);
+  expect(f.owner.view().canDownload).toBe(false);
+  expect(time.timers.size).toBe(0);
+});
+
+test("expired Download is refused before a delayed expiry render", async () => {
+  const time = clock();
+  let requests = 0;
+  const f = fixture(() => {
+    requests += 1;
+    return Response.json({
+      photoId: "photo-1",
+      exports: [
+        { ...work("retained", "succeeded"), artifactId: artifact.artifactId },
+      ],
+      artifacts: [
+        { ...artifact, expiresAt: new Date(time.now() + 1000).toISOString() },
+      ],
+    });
+  });
+  await f.owner.load("photo-1");
+  time.jump(1000);
+  await f.owner.download("photo-1");
+  expect(requests).toBe(1);
+  expect(f.owner.view().note).toContain("expired");
+  expect(f.owner.view().canDownload).toBe(false);
+});
+
+test("a detached expiry callback cannot render a reopened Photo lifecycle", async () => {
+  const time = clock();
+  let renders = 0;
+  const f = fixture(
+    (input) => {
+      const photoId = requestUrl(input).includes("photo-2")
+        ? "photo-2"
+        : "photo-1";
+      return Response.json({
+        photoId,
+        exports:
+          photoId === "photo-1"
+            ? [
+                {
+                  ...work("retained", "succeeded"),
+                  artifactId: artifact.artifactId,
+                },
+              ]
+            : [],
+        artifacts:
+          photoId === "photo-1"
+            ? [
+                {
+                  ...artifact,
+                  expiresAt: new Date(time.now() + 1000).toISOString(),
+                },
+              ]
+            : [],
+      });
+    },
+    () => {
+      renders += 1;
+    },
+  );
+  await f.owner.load("photo-1");
+  const stale = [...time.timers.values()][0]!;
+  f.navigate("photo-2");
+  await f.owner.load("photo-2");
+  const currentRenders = renders;
+  time.jump(1000);
+  stale.run();
+  expect(renders).toBe(currentRenders);
+  expect(f.owner.view().output).toBeNull();
+  f.navigate("photo-1");
+  await f.owner.load("photo-1");
+  const reopenedRenders = renders;
+  stale.run();
+  expect(renders).toBe(reopenedRenders);
+  expect(time.timers.size).toBe(1);
+  f.owner.reset();
+  expect(time.timers.size).toBe(0);
+});
+
+test("resuming a visible browser refreshes expired output and releases listeners on close", async () => {
+  const time = clock();
+  const browserDocument = new EventTarget();
+  let visibilityState = "visible";
+  Object.defineProperty(browserDocument, "visibilityState", {
+    get: () => visibilityState,
+  });
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "document");
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: browserDocument,
+  });
+  cleanups.push(() => {
+    if (descriptor) Object.defineProperty(globalThis, "document", descriptor);
+    else Reflect.deleteProperty(globalThis, "document");
+  });
+  let requests = 0;
+  let renderedCanDownload = false;
+  let renders = 0;
+  const f = fixture(
+    () => {
+      requests += 1;
+      return Response.json({
+        photoId: "photo-1",
+        exports: [
+          { ...work("retained", "succeeded"), artifactId: artifact.artifactId },
+        ],
+        artifacts: [
+          { ...artifact, expiresAt: new Date(time.now() + 1000).toISOString() },
+        ],
+      });
+    },
+    () => {
+      renders += 1;
+      renderedCanDownload = f.owner.view().canDownload;
+    },
+  );
+  await f.owner.load("photo-1");
+  expect(renderedCanDownload).toBe(true);
+  time.jump(1000);
+  visibilityState = "hidden";
+  browserDocument.dispatchEvent(new Event("visibilitychange"));
+  expect(renderedCanDownload).toBe(true);
+  visibilityState = "visible";
+  browserDocument.dispatchEvent(new Event("visibilitychange"));
+  expect(renderedCanDownload).toBe(false);
+  expect(requests).toBe(1);
+  expect(time.timers.size).toBe(0);
+  f.owner.reset();
+  const closedRenders = renders;
+  browserDocument.dispatchEvent(new Event("visibilitychange"));
+  expect(renders).toBe(closedRenders);
+});
+
+test("primary Download identifies confirmed current output without retargeting its artifact", async () => {
+  const step = {
+    stepId: artifact.stepId,
+    module: artifact.module,
+    input: artifact.input.binding,
+    parameters: artifact.parameters,
+  };
+  const recipe: ProcessingExportRecipe = {
+    read: {
+      sourceRevision: "source",
+      recipe: {
+        photoId: "photo-1",
+        revision: "r1",
+        sourceRevision: "source",
+        currentStepId: step.stepId,
+        steps: [step],
+      },
+    },
+    artifacts: [],
+    target: () => ({ kind: "step", step }),
+    dirty: () => false,
+    retainArtifact: () => {},
+    fetchEditorArtifact: async () => {},
+  };
+  const owner = createEditorProcessingExport(
+    () =>
+      Promise.resolve(
+        Response.json({
+          photoId: "photo-1",
+          artifacts: [artifact],
+          exports: [
+            {
+              ...work("current", "succeeded"),
+              artifactId: artifact.artifactId,
+              recipeRevision: "r1",
+              sourceRevision: "source",
+            },
+          ],
+        }),
+      ),
+    recipe,
+    {
+      editorOwnsPhoto: () => true,
+      renderEditor: () => {},
+      processingAvailable: () => true,
+      describeEditRefusal: () => Promise.resolve("refused"),
+    },
+  );
+  owners.push(owner);
+  await owner.load("photo-1");
+  expect(owner.view().output?.state).toBe("ready");
+  expect(owner.view().canDownload).toBe(true);
+  expect(owner.view().processingArtifact).toEqual(artifact);
+});
 
 describe("retained Processing Exports", () => {
   test("historical outputs remain readonly cards and expired bytes are not fetched", async () => {
@@ -581,7 +927,7 @@ describe("retained Processing Exports", () => {
     );
     Object.defineProperty(globalThis, "document", {
       configurable: true,
-      value: {
+      value: Object.assign(new EventTarget(), {
         createElement: () => ({
           href: "",
           download: "",
@@ -589,7 +935,7 @@ describe("retained Processing Exports", () => {
             downloaded = this.download;
           },
         }),
-      },
+      }),
     });
     try {
       let corrupt = false;

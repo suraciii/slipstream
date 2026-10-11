@@ -1,0 +1,72 @@
+.external-metadata-panel {
+  border-top: 1px solid var(--border-strong);
+  padding-top: 1rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.external-metadata-panel .external-metadata-fields {
+  display: grid;
+  gap: 0.75rem;
+}
+.external-metadata-panel section {
+  min-width: 0;
+  border-bottom: 1px solid var(--border-strong);
+  padding-bottom: 0.75rem;
+}
+.external-metadata-panel h5 {
+  margin: 0.5rem 0;
+  font-size: 0.9rem;
+}
+.external-metadata-panel p {
+  margin: 0.35rem 0;
+}
+.external-metadata-panel input,
+.external-metadata-panel textarea,
+.external-metadata-panel select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  font: inherit;
+}
+.external-metadata-panel textarea {
+  resize: vertical;
+}
+.external-metadata-panel details {
+  margin: 0.65rem 0;
+  min-width: 0;
+}
+.external-metadata-panel summary {
+  cursor: pointer;
+}
+.external-metadata-panel button {
+  margin: 0.35rem 0.35rem 0.35rem 0;
+  white-space: normal;
+}
+.external-metadata-panel .metadata-language-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
+  gap: 0.35rem;
+  margin: 0.65rem 0;
+}
+.external-metadata-panel .metadata-language-row textarea {
+  grid-column: 1 / -1;
+}
+.external-metadata-panel h4 {
+  font-size: 1rem;
+}
+.external-metadata-panel dl {
+  display: grid;
+  grid-template-columns: minmax(4rem, auto) minmax(0, 1fr);
+  gap: 0.25rem 0.5rem;
+}
+.external-metadata-panel dd {
+  margin: 0;
+  white-space: pre-wrap;
+}
+.external-metadata-panel [role="alert"] {
+  color: var(--danger, #b42318);
+}
+.external-metadata-panel [hidden] {
+  display: none;
+}

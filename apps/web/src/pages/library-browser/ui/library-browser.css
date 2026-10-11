@@ -720,25 +720,6 @@
 }
 
 @media (min-width: 761px) {
-  /* The Edit surface docks beside the Preview: the controls and the image they
-     change stay visible together, and the stage keeps its own size. */
-  .photo-tools-dialog[data-photo-tools-surface="edit"] {
-    inset: 0 0 0 auto;
-    transform: none;
-    height: 100dvh;
-    max-height: none;
-    width: min(26rem, 42vw);
-    border-radius: 0;
-    border-left: 1px solid var(--border-strong);
-    border-bottom: 0;
-  }
-
-  .photo-tools-dialog[data-photo-tools-surface="edit"] .photo-tools-sheet {
-    max-height: none;
-    height: 100dvh;
-    overflow-y: auto;
-  }
-
   .options-dialog,
   .album-dialog,
   .recovery-dialog,
@@ -1063,7 +1044,7 @@
   min-height: 0;
   grid-column: 1 / -1;
   display: grid;
-  grid-template-rows: auto minmax(10rem, 1fr) auto auto auto;
+  grid-template-rows: auto minmax(10rem, 1fr) auto auto;
   overflow-y: auto;
   background: var(--canvas);
 }
@@ -1113,20 +1094,27 @@
   justify-self: end;
 }
 
-/* One Previous/Next pair with the position and total. It is a separate group
-   from the primary actions, so it never shares an activation target with
-   Select or Reject. */
-.photo-navigation {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+/* Position and Selection State share the review strip without overlaying the
+   Preview. The same strip is used on wide, narrow, and short viewports. */
+.photo-review-controls {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.15rem max(0.5rem, env(safe-area-inset-left))
-    max(0.15rem, env(safe-area-inset-bottom))
-    max(0.5rem, env(safe-area-inset-right));
+  gap: 0.2rem 0.5rem;
+  min-width: 0;
+  padding: 0.2rem max(0.5rem, env(safe-area-inset-right))
+    max(0.2rem, env(safe-area-inset-bottom))
+    max(0.5rem, env(safe-area-inset-left));
   border-top: 1px solid var(--border);
   background: var(--panel);
+}
+
+.photo-navigation {
+  min-width: 0;
+  flex: 0 1 6.4rem;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
 }
 
 .photo-navigation button {
@@ -1473,28 +1461,10 @@
   bottom: 0.1rem;
 }
 
-/* One compact row: the current Selection State and Rating, and the Photo
-   status. Both stay readable without opening Photo tools. */
-.review-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.2rem 0.75rem;
-  min-width: 0;
-  padding: 0.3rem max(0.5rem, env(safe-area-inset-left))
-    max(0.3rem, env(safe-area-inset-bottom))
-    max(0.5rem, env(safe-area-inset-right));
-  border-top: 1px solid var(--border);
-  background: var(--panel);
-}
-
-.review-state {
-  min-width: 0;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.2rem 0.85rem;
+.photo-review-controls .status {
+  grid-column: 1 / -1;
+  flex-basis: 100%;
+  margin: 0;
 }
 
 /* The decision facts keep one deterministic line height, so the Preview
@@ -1586,8 +1556,7 @@
   content: "· ";
 }
 
-/* The status line reserves one line even while it is empty, so a message
-   appearing never moves the Preview. */
+/* Consequential Photo feedback remains beside the actions that caused it. */
 .status {
   min-height: 1.1rem;
   color: var(--warning);
@@ -1621,9 +1590,6 @@
   background: #592b26;
 }
 
-/* Photo View keeps only navigation context, the Selection State badge, and
-   More in its default chrome. The existing controls remain owned by the
-   tools surface but are not duplicate focus targets while closed. */
 .selection-badge {
   min-width: 44px;
   min-height: 44px;
@@ -1633,16 +1599,12 @@
   color: var(--text);
 }
 
-.review-bar {
-  justify-content: center;
-}
-
-.review-bar .status {
-  display: none;
-}
-
 .quick-action-dock {
-  grid-template-columns: minmax(0, 1fr);
+  display: grid;
+  flex: 1 1 12rem;
+  min-width: 0;
+  grid-template-columns: repeat(auto-fit, minmax(2.75rem, 1fr));
+  gap: 0.3rem;
 }
 
 .photo-tools-help {
@@ -2079,9 +2041,7 @@
   }
 }
 
-/* Short landscape consolidates navigation and the primary actions into one
-   row without shrinking either target, and the brand row yields, so the
-   Preview keeps the rest of the height. */
+/* The brand row yields on short screens; review controls retain their size. */
 @media (max-height: 480px) {
   .app-shell:has(.photo-view:not([hidden])) {
     grid-template-rows: minmax(0, 1fr);
@@ -2091,26 +2051,25 @@
     display: none;
   }
 
-  .photo-view {
-    grid-template-columns: auto minmax(0, 1fr);
-    grid-template-rows: auto minmax(9rem, 1fr) auto auto;
-  }
-
-  .photo-header,
-  .preview,
-  .review-bar {
-    grid-column: 1 / -1;
+  .photo-review-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 10rem) minmax(0, 1fr);
   }
 
   .photo-navigation {
-    grid-row: 4;
-    grid-column: 1;
-    border-top: 0;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 0.5rem;
   }
 
-  .photo-view > .quick-action-dock {
-    grid-row: 4;
-    grid-column: 2;
+  .photo-review-controls:has(.status:not([hidden])) {
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 2fr) minmax(0, 1fr);
+  }
+
+  .photo-review-controls .status {
+    grid-column: auto;
+    overflow-wrap: anywhere;
   }
 }
 
@@ -2138,207 +2097,4 @@
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
   }
-}
-
-.photo-editor-controls {
-  display: grid;
-  gap: 0.6rem;
-  align-content: start;
-  min-width: 0;
-}
-
-.photo-editor-view-actions {
-  display: flex;
-  gap: 0.35rem;
-  flex-wrap: wrap;
-}
-
-.photo-editor-view-actions button[aria-pressed="true"] {
-  border-color: var(--accent, var(--border-strong));
-  background: var(--panel-strong, var(--panel));
-}
-
-.photo-editor-provenance,
-.photo-editor-stage-note,
-.photo-editor-preview-note,
-.photo-editor-draft,
-.photo-editor-status,
-.photo-editor-details,
-.photo-editor-note {
-  margin: 0;
-  font-size: 0.85rem;
-  color: var(--text-muted);
-}
-
-.photo-editor-stage-note:not([hidden]) {
-  color: var(--warning, inherit);
-}
-
-.photo-editor-details summary {
-  cursor: pointer;
-}
-
-.photo-editor-details p {
-  margin: 0.25rem 0 0;
-}
-
-.photo-editor-white-balance {
-  gap: 0.35rem;
-}
-
-.photo-editor-white-balance > label,
-.photo-editor-white-balance > select {
-  grid-column: 1 / -1;
-}
-
-.photo-editor-white-balance > select {
-  width: 100%;
-}
-
-.photo-editor-field button {
-  justify-self: start;
-  font-size: 0.8rem;
-}
-
-.photo-editor-preview-note[data-tone="stale"] {
-  color: var(--warning, inherit);
-}
-
-.photo-editor-preview-image {
-  width: 100%;
-  max-height: 32dvh;
-  object-fit: contain;
-  background: #000;
-  border: 1px solid var(--border-strong);
-}
-
-.photo-editor-field {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 0.25rem 0.6rem;
-  align-items: center;
-}
-
-.photo-editor-field input[type="range"] {
-  grid-column: 1 / -1;
-  width: 100%;
-}
-
-.photo-editor-fact,
-.photo-editor-export-heading {
-  display: flex;
-  justify-content: space-between;
-  gap: 0.6rem;
-  margin: 0;
-  font-size: 0.85rem;
-}
-
-.photo-editor-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-}
-
-.photo-editor-conflict,
-.photo-editor-export {
-  display: grid;
-  gap: 0.4rem;
-  padding: 0.5rem 0.6rem;
-  border: 1px solid var(--border-strong);
-  border-radius: 0.5rem;
-}
-
-.photo-editor-output-card {
-  display: grid;
-  gap: 0.4rem;
-  min-width: 0;
-  padding: 0.6rem 0;
-  overflow-wrap: anywhere;
-}
-
-.photo-editor-output-card + .photo-editor-output-card {
-  border-top: 1px solid var(--border-strong);
-}
-
-.photo-editor-output-card p {
-  margin: 0;
-  font-size: 0.82rem;
-  line-height: 1.45;
-}
-
-.photo-editor-conflict p {
-  margin: 0;
-  font-size: 0.85rem;
-}
-
-.external-metadata {
-  display: grid;
-  gap: 0.75rem;
-  min-width: 0;
-  border-top: 1px solid var(--border-strong);
-  padding-top: 1rem;
-  overflow-wrap: anywhere;
-}
-
-.external-metadata h4,
-.external-metadata h5,
-.external-metadata p {
-  margin: 0;
-}
-
-.external-metadata h4 {
-  font-size: 1rem;
-}
-.external-metadata h5 {
-  font-size: 0.9rem;
-}
-.external-metadata-fields {
-  display: grid;
-  gap: 1rem;
-}
-.external-metadata section {
-  display: grid;
-  gap: 0.5rem;
-  border-bottom: 1px solid var(--border-strong);
-  padding-bottom: 0.75rem;
-  min-width: 0;
-}
-.external-metadata label,
-.metadata-language-row {
-  display: grid;
-  gap: 0.4rem;
-}
-.external-metadata input,
-.external-metadata textarea,
-.external-metadata select {
-  box-sizing: border-box;
-  width: 100%;
-  min-width: 0;
-  max-width: 100%;
-  font: inherit;
-}
-.external-metadata textarea {
-  min-height: 4.5rem;
-  resize: vertical;
-}
-.metadata-language-row {
-  margin-block: 0.6rem;
-}
-.external-metadata details {
-  min-width: 0;
-}
-.external-metadata dl {
-  display: grid;
-  grid-template-columns: minmax(4rem, auto) minmax(0, 1fr);
-  gap: 0.25rem 0.5rem;
-}
-.external-metadata dd {
-  margin: 0;
-  white-space: pre-wrap;
-}
-.external-metadata [role="alert"] {
-  color: var(--danger, #b42318);
-}
-.external-metadata [hidden] {
-  display: none;
 }

@@ -16,7 +16,7 @@ failures, and Undo. Moving a control must preserve those rules.
 Library Browser
 ├── Grid: Sources · View options (incl. Album Resume) · Select mode
 │   └── Select mode: count · Done / Pick · Reject · Add to Album
-├── Photo: Back · Preview · position/state badge · More
+├── Photo: Back · Preview · position/state badge · Pick / Reject / Undo · More
 │   └── Gestures: left/right navigate · up/down cycle Selection State
 └── One supporting surface: Sources, options, Rating, tools, or recovery
 ```
@@ -118,9 +118,11 @@ modal. The existing single live-region announcement rule remains in force.
 ## Photo View
 
 Photo View's default surface is compact: Back, the Preview, a position/state
-badge, and More. Back returns directly to the originating Grid destination.
-The position/state badge communicates the current position and Selection State
-without requiring Photo tools to open.
+badge, a review strip with Pick, Reject, and Undo, and More. Back returns
+directly to the originating Grid destination. The badge communicates the
+current position and Selection State without requiring Photo tools to open.
+The review strip shares the existing decision and Undo ownership with Photo
+tools and keyboard actions. It must preserve the Preview space budgets.
 
 On touch input, left and right gestures navigate to the previous and next Photo.
 Up and down gestures cycle the Selection State through Unflagged, Picked, and
@@ -162,8 +164,9 @@ surface may be a centered dialog or an appropriate source drawer.
 At most one modal surface may be active. Moving from Photo tools to Details,
 Albums, Zoom, or Nearby Photos replaces its content and provides a local
 return to Photo tools. That local return is not a browser history entry.
-Leaving a form with an unsubmitted draft discards the draft after an explicit
-cancel or close; an admitted operation still follows its settlement rules.
+Leaving an Album form with an unsubmitted draft discards it after an explicit
+cancel or close. Metadata drafts follow the [metadata editing contract](../../photo-library/metadata/spec.md#human-and-agent-access).
+An admitted operation still follows its settlement rules.
 
 Opening a modal must cancel a pending Rating Wheel and move focus into the
 surface. Background content must not receive pointer input, keyboard focus,
@@ -186,6 +189,13 @@ actions must not depend on hover. Photo membership management retains its
 true per-Album checkboxes, including removal. Original Folder Add Folder
 remains an explicit confirmable action distinct from Add to Album for selected
 Photos. Recovery review retains its proposal and explicit apply workflow.
+
+Album creation and rename failures must appear inside the active form with
+the submitted name retained. Delete Album confirmation must name the Album
+and explain that Photos and Original Files remain unchanged. An unknown
+membership read must not show editable unchecked boxes as confirmed absence;
+Retry remains available. Folder expansion and paging must retain keyboard
+focus on the corresponding control after the source list changes.
 
 ## Destinations and Browser History
 

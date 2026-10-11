@@ -203,6 +203,25 @@ Sidecar changes separately from Library Rating changes and must not promise an
 external save before confirmation. No specialized import or synchronization
 wizard is required.
 
+The Web must lead with Title, Description, and Keywords. A normal Title or
+Description edit supplies the default language without requiring a language
+tag or operation selector. Additional languages, attribution, rights, source
+inspection, empty values, and property removal remain explicit and available
+through labelled disclosures. Unchanged fields and unmentioned languages
+must remain unchanged. Pending-change review uses human field names.
+
+Unsaved metadata input belongs to its Photo and must survive ordinary
+Photo and Grid navigation in the current mounted browser session. Closing
+Details does not discard it. Reopening inspects current metadata and retains
+the draft for explicit review; saving still uses checked evidence and must
+not silently replace changed external content. A visible Discard changes
+action removes the draft. Reload recovery is not promised. Admitted Saves
+retain settlement ownership after navigation.
+
+A read-only deployment must lead with readable facts and a concise reason
+Save is unavailable. It must not present a long form of disabled mutation
+selectors. Capture facts and source provenance remain inspectable.
+
 The CLI must expose the same read and checked-save capability, discoverable field
 coverage, limits, and structured outcomes. One-Photo operations are sufficient:
 Agents may query and compose them. The application must not silently split,

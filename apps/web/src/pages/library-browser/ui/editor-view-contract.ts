@@ -21,6 +21,14 @@ export type EditorViewModel = Readonly<{
     canSet: boolean;
     canReset: boolean;
     ready: boolean;
+    saveState:
+      | "none"
+      | "draft"
+      | "saving"
+      | "saved"
+      | "failed"
+      | "conflict"
+      | "unknown";
     note: string;
   }>;
   loading: boolean;
