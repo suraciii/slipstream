@@ -108,6 +108,10 @@ older completion must not replace that current result. A failed Preview must
 remain an explicit failure with a retry action rather than trigger repeated
 automatic execution.
 
+After a render completes, a temporary workspace lease may delay file discovery.
+The editor must keep checking the completed file until discovery can proceed,
+without reporting an engine failure or submitting another render.
+
 Library scanning, live Original availability, workspace input availability, and
 tool availability are independent. Once the input snapshot is complete and
 unchanged, a missing or changed live Original must not disable its editing or

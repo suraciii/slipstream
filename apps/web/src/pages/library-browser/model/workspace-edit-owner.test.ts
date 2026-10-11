@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { createWorkspaceEditOwner } from "./workspace-edit-owner.js";
+import {
+  createWorkspaceEditOwner,
+  type WorkspaceEditModel,
+} from "./workspace-edit-owner.js";
 import { coalesceChanges } from "./workspace-edit-draft.js";
 import { WorkspaceApiError, type JsonObject } from "../api/workspace-edit.js";
 const capability = {
@@ -47,7 +50,10 @@ function harness(
   onCommand?: (
     body: JsonObject,
   ) => Response | undefined | Promise<Response | undefined>,
-  onRequest?: (path: string) => Promise<Response | undefined>,
+  onRequest?: (
+    path: string,
+  ) => Response | undefined | Promise<Response | undefined>,
+  onPublish?: (model: WorkspaceEditModel) => void,
 ) {
   const bodies: JsonObject[] = [];
   const ready = Promise.withResolvers<void>();
@@ -138,6 +144,7 @@ function harness(
     "photo",
     (model) => {
       if (model.edit && !model.loading) ready.resolve();
+      onPublish?.(model);
     },
   );
   return { owner, bodies, ready };
@@ -364,4 +371,70 @@ test("unchanged settings do not request another preview", async () => {
     [],
   );
   owner.dispose();
+});
+
+test("completed export discovers its file after a temporary workspace lease", async () => {
+  const refreshed = Promise.withResolvers<void>();
+  let terminal = false;
+  let fileReads = 0;
+  let requestId = "";
+  const output = {
+    artifactId: "output",
+    revision: "output-bytes",
+    relativePath: "outputs/image.tiff",
+    kind: "output",
+    state: "ready",
+    byteLength: 12,
+    imageContract: null,
+  };
+  const { owner, bodies } = harness(
+    undefined,
+    (body) => {
+      if (body.operation !== "export create") return undefined;
+      requestId = String((body.arguments as JsonObject).requestId);
+      return Response.json({ requestId, status: "running" });
+    },
+    (path) => {
+      if (path.includes("/jobs/")) {
+        terminal = true;
+        return Response.json({ requestId, status: "succeeded" });
+      }
+      if (!terminal || !path.endsWith("/files?limit=60")) return undefined;
+      fileReads++;
+      if (fileReads === 1) {
+        return Response.json(
+          {
+            error: {
+              code: "workspace_busy",
+              message: "Writer settling",
+              effect: "none",
+              details: {},
+            },
+          },
+          { status: 409 },
+        );
+      }
+      return Response.json({ items: [output], total: 1, nextCursor: null });
+    },
+    (model) => {
+      if (
+        model.files.some((file) => file.artifactId === output.artifactId) &&
+        model.jobs[0]?.status === "succeeded"
+      )
+        refreshed.resolve();
+    },
+  );
+  try {
+    await owner.refresh();
+    await owner.act("export");
+    await refreshed.promise;
+    expect(owner.model.files).toContainEqual(output);
+    expect(owner.model.jobs[0]?.status).toBe("succeeded");
+    expect(owner.model.error).toBeUndefined();
+    expect(
+      bodies.filter((body) => body.operation === "export create"),
+    ).toHaveLength(1);
+  } finally {
+    owner.dispose();
+  }
 });

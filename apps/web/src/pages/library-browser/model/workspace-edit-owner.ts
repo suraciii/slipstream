@@ -3,7 +3,6 @@ import { isRecord } from "../api/guards.js";
 import {
   fileBytesUrl,
   parseEdit,
-  parseFile,
   parseToolJob,
   parseWindow,
   requestIdentity,
@@ -20,6 +19,7 @@ import {
 } from "../api/workspace-edit.js";
 import type { ProcessingModuleDescription } from "../api/processing-modules.js";
 import { coalesceChanges } from "./workspace-edit-draft.js";
+import { refreshWorkspaceFiles } from "./workspace-edit-files.js";
 
 export type EditChange = JsonObject & { type: string };
 export type WorkspaceEditModel = {
@@ -120,27 +120,7 @@ export function createWorkspaceEditOwner(
     publish();
   };
   const readFiles = async (continuation = false) => {
-    if (!model.workspace) return;
-    const result = await workspaceRequest(
-      fetcher,
-      continuation && model.fileCursor
-        ? `/api/workspace-files?cursor=${encodeURIComponent(model.fileCursor)}`
-        : `${workspacePath(model.workspace.workspaceId)}/files?limit=60`,
-    );
-    const window = parseWindow(result, parseFile);
-    model.files = continuation
-      ? [...model.files, ...window.items]
-      : window.items;
-    model.fileCursor = window.nextCursor;
-    if (model.inspectedFile) {
-      const reviewed = model.files.find(
-        (file) =>
-          file.artifactId === model.inspectedFile?.artifactId &&
-          file.revision === model.inspectedFile.revision,
-      );
-      if (reviewed) model.inspectedFile = reviewed;
-      else delete model.inspectedFile;
-    }
+    await refreshWorkspaceFiles(fetcher, model, continuation);
     publish();
   };
   const readEdit = async (editId: string, generation = editGeneration) => {
@@ -347,7 +327,24 @@ export function createWorkspaceEditOwner(
           pending = true;
           continue;
         }
-        await readFiles();
+        try {
+          await readFiles();
+        } catch (error) {
+          if (
+            !(error instanceof WorkspaceApiError) ||
+            error.code !== "workspace_busy"
+          )
+            throw error;
+          model.jobs[index] = { ...previous, ...job, status: "checking" };
+          model.status = "Checking file";
+          pending = true;
+          continue;
+        }
+        if (
+          job.status === "succeeded" &&
+          previous.operation === "export create"
+        )
+          model.status = "Ready";
         if (job.status === "failed")
           throw new WorkspaceApiError(
             "render_failed",
