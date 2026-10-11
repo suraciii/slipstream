@@ -117,6 +117,8 @@ Bun owns Web builds and browser-test tooling; the production server and Preview 
 Use the repository commands rather than invoking individual tools in CI or reviews:
 
 ```sh
+bun run check:static
+bun run verify:web
 bun run check:fsd
 bun run test:fsd
 bun run test:rust
@@ -127,6 +129,22 @@ bun run test:container-input
 bun run test:fast
 bun run verify
 ```
+
+`check:static` runs formatting, lint, type checking, Album language, FSD, and
+file-size checks. Both `verify` and `verify:web` run this stage first, so a
+static error stops the command before native builds or tests.
+
+For Web changes, run `bun run verify:web`. It runs the shared static stage,
+Web unit tests, and the complete browser smoke suite. The browser stage builds
+the Rust workspace, pinned SpektraFilm CLI, and production Web assets before
+starting Chromium. Use the prerequisites above, including the initialized
+submodule and installed Chromium. The documented real-camera and processing
+scenarios remain opt-in; skipped scenarios do not establish their qualification.
+
+`verify` remains the full repository gate required before handoff and in CI.
+Its `test:fast` stage includes the shared static checks, Web unit tests, all
+repository tooling and Rust checks, RAW discovery, and the browser suite. The
+browser stage owns the production build; the gate does not build again after it.
 
 `check:fsd` parses the Web TypeScript project and enforces the current FSD
 boundary: app and page public APIs, downward dependencies, slice and segment
