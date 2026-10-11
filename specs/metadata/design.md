@@ -342,6 +342,21 @@ The CLI exposes the same operations as `photos metadata PHOTO_ID` and
 displays provenance and pending patches, and refreshes after a conflict.
 Neither path creates an import or synchronization workflow.
 
+The mounted Web page retains pending typed patches by Photo identity, with
+the read evidence under which each draft began. Navigation detaches its
+presentation but does not discard the draft or cancel an admitted Save.
+Reopening reads current facts; changed evidence requires explicit review of
+the retained draft before a new Save, preserving the service conflict guard.
+Successful Save or explicit Discard removes only that Photo's draft. Teardown
+releases browser-local drafts. A bounded store must refuse further draft
+admission visibly rather than silently evict unsaved input.
+
+Per-Photo draft retention is selected over a navigation-blocking confirmation:
+ordinary browsing remains usable and admitted writes retain their owner.
+Metadata autosave is rejected because Sidecar writes require explicit review
+and confirmation. Ordinary text controls create the same typed patches as
+advanced controls; there is no separate simplified save operation.
+
 ### Library ownership
 
 The database remains the owner of Library decisions and Photo identity. It

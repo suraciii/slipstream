@@ -760,6 +760,9 @@ export function createEditorComposableRecipe(
     },
     commitEditorComposableParameters,
     undo: autosave.undo,
+    setExposure: (photoId: string, value: number) =>
+      autosave.primary(photoId, value),
+    resetExposure: (photoId: string) => autosave.primary(photoId),
     redo: autosave.redo,
     useSaved: autosave.useSaved,
     reapplyLocal: autosave.reapply,

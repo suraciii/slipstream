@@ -76,8 +76,8 @@ async function previewResponse(revision: string, comparison: string) {
   });
 }
 
-for (const operation of ["undo", "redo"] as const) {
-  test(`${operation} aborts current and baseline Preview owners before saving history`, async () => {
+for (const operation of ["undo", "redo", "set", "reset"] as const) {
+  test(`${operation} aborts current and baseline Preview owners before saving`, async () => {
     let recipe = structuredClone(initial);
     let snapshot: EditorViewModel | undefined;
     let settled = Promise.withResolvers<void>();
@@ -137,6 +137,11 @@ for (const operation of ["undo", "redo"] as const) {
             recipe.revision,
             path.includes("comparison=baseline") ? "baseline" : "current",
           );
+        }
+        if (path.endsWith("/edit/set") || path.endsWith("/edit/reset")) {
+          abortedAtSave = pending.map((item) => item.signal.aborted);
+          saveStarted.resolve();
+          return saveGate.promise;
         }
         if (path.endsWith("processing-recipe")) {
           if (init?.method === "POST") {
@@ -223,10 +228,14 @@ for (const operation of ["undo", "redo"] as const) {
       expect(pending).toHaveLength(2);
       holdSave = true;
       saveStarted = Promise.withResolvers<void>();
-      controller.stepHistory("photo-1", operation);
+      if (operation === "set") controller.setExposure("photo-1", 2);
+      else if (operation === "reset") controller.resetExposure("photo-1");
+      else controller.stepHistory("photo-1", operation);
       await saveStarted.promise;
       expect(abortedAtSave).toEqual([true, true]);
       expect(snapshot?.comparing).toBe(false);
+      expect(snapshot?.previewStale).toBe(true);
+      expect(snapshot?.saving).toBe(true);
       const before = presented.length;
       for (const item of pending)
         item.response.resolve(
@@ -354,6 +363,9 @@ test("ordinary exposure and reset use primary routes while advanced parameters k
   let ev = 0;
   let snapshot: EditorViewModel | undefined;
   let settled = Promise.withResolvers<void>();
+  let previewReady = Promise.withResolvers<void>();
+  const previewRevisions: string[] = [];
+  const presented: string[] = [];
   let expectedRevision = "r0";
   const writes: { path: string; body: Record<string, unknown> }[] = [];
   const controller = createEditorController(
@@ -378,7 +390,17 @@ test("ordinary exposure and reset use primary routes while advanced parameters k
             recipe,
           });
         }
-        return Response.json({ outcome: "saved" });
+        recipe = {
+          ...recipe,
+          steps: recipe.steps.map((step) => ({
+            ...step,
+            parameters: { ...step.parameters, tree: { exposure: ev } },
+          })),
+        };
+        return Response.json({
+          outcome: "saved",
+          edit: { editRevision: recipe.revision },
+        });
       }
       if (path.endsWith("/edit"))
         return Response.json({
@@ -403,14 +425,17 @@ test("ordinary exposure and reset use primary routes while advanced parameters k
           sourceRevision: "source-1",
           recipe,
         });
-      if (path.includes("/edit/preview"))
+      if (path.includes("/edit/preview")) {
+        previewRevisions.push(recipe.revision);
         return previewResponse(recipe.revision, "current");
+      }
       return Response.json({ exports: [], artifacts: [] });
     },
     {
       editorVisible: () => true,
       renderEditor: (next: EditorViewModel) => {
         snapshot = next;
+        if (next.canCompare) previewReady.resolve();
         if (
           next.primary?.revision === expectedRevision &&
           next.primary.canSet &&
@@ -419,7 +444,7 @@ test("ordinary exposure and reset use primary routes while advanced parameters k
         )
           settled.resolve();
       },
-      presentEditorPreview: () => {},
+      presentEditorPreview: (url: string) => presented.push(url),
       clearEditorPreview: () => {},
     } as unknown as LibraryBrowserView,
     {
@@ -439,11 +464,24 @@ test("ordinary exposure and reset use primary routes while advanced parameters k
   try {
     controller.open("photo-1");
     await settled.promise;
+    await previewReady.promise;
+    const initialPreview = presented.at(-1);
+    controller.setCameraReference("photo-1", true);
+    previewReady = Promise.withResolvers<void>();
     settled = Promise.withResolvers<void>();
     expectedRevision = "r0-next";
     controller.setExposure("photo-1", 1.25);
     await settled.promise;
     expect(snapshot?.primary?.exposureEv).toBe(1.25);
+    expect(snapshot?.previewStale).toBe(true);
+    expect(previewRevisions).toEqual(["r0"]);
+    controller.setCameraReference("photo-1", false);
+    expect(presented.at(-1)).toBe(initialPreview);
+    expect(snapshot?.previewStale).toBe(true);
+    await previewReady.promise;
+    expect(previewRevisions).toEqual(["r0", "r0-next"]);
+    expect(snapshot?.previewStale).toBe(false);
+    expect(snapshot?.comparing).toBe(false);
     expect(writes[0]?.path).toBe("/api/photos/photo-1/edit/set");
     expect(writes[0]?.body).toMatchObject({
       expectedEditRevision: "r0",
@@ -451,11 +489,20 @@ test("ordinary exposure and reset use primary routes while advanced parameters k
       control: "ev",
       value: 1.25,
     });
-    settled = Promise.withResolvers<void>();
     expectedRevision = "r0-next-next";
+    settled = Promise.withResolvers<void>();
+    controller.setCameraReference("photo-1", true);
+    previewReady = Promise.withResolvers<void>();
     controller.resetExposure("photo-1");
     await settled.promise;
     expect(snapshot?.primary?.exposureEv).toBe(0);
+    expect(snapshot?.previewStale).toBe(true);
+    expect(previewRevisions).toEqual(["r0", "r0-next"]);
+    controller.setCameraReference("photo-1", false);
+    expect(snapshot?.previewStale).toBe(true);
+    await previewReady.promise;
+    expect(previewRevisions).toEqual(["r0", "r0-next", "r0-next-next"]);
+    expect(snapshot?.previewStale).toBe(false);
     expect(writes[1]?.path).toBe("/api/photos/photo-1/edit/reset");
     expect(writes[1]?.body).toMatchObject({
       expectedEditRevision: "r0-next",

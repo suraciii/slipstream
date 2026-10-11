@@ -119,6 +119,12 @@ The browser may retain a bounded local draft and session undo/redo entries. A
 draft never silently replaces newer service state. Undo and redo submit new
 guarded updates; they do not promise a durable action history.
 
+Primary controls and compatibility controls contribute to the same history.
+A confirmed primary update records its previous complete state and reconciles
+the new revision before dependent work. Undo and redo submit that state through
+the existing guarded save path. Separate exposure-only history is rejected:
+it would reorder mixed actions and permit a reset to discard later edits.
+
 ### Preview action
 
 A Preview request carries the Photo identity, current edit revision, input
@@ -135,6 +141,13 @@ Artifact or a downstream service input.
 Comparison uses the current Edit State and the same input, geometry, and display
 conversion as the baseline or as-shot operand. The Original reference remains a
 separately labelled action and is not a comparison substitute.
+
+The Edit surface remains one focus-contained modal workspace. It contains its
+own visible image region and scrolling controls, using the existing camera
+Preview URL only for explicitly selected Original reference. A URL is not
+copied into processing input or presented as an Edit Preview. Compared with
+a nonmodal dock that leaves Photo shortcuts active, this keeps one interaction
+owner while allowing the image to remain visible inside the active surface.
 
 ### Leave, navigation, and reopen
 

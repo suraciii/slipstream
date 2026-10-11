@@ -105,6 +105,8 @@ export function createViewOptions({
   let committedFilter: ViewSelectionFilter = "all";
   let draftOrder: ViewSourceOrder = "source-default";
   let draftFilter: ViewSelectionFilter = "all";
+  let committedSize: ViewOptionsThumbnailSize = "medium";
+  let draftSize: ViewOptionsThumbnailSize = committedSize;
   let renderedSortKind: ViewSourceKind | undefined;
   let filterRendered = false;
   let renderedProgressText = "";
@@ -113,9 +115,12 @@ export function createViewOptions({
   const resetDraft = () => {
     draftOrder = committedOrder;
     draftFilter = committedFilter;
+    draftSize = committedSize;
+    sizeSelect.value = committedSize;
     sortSelect.value = committedOrder;
     filterSelect.value = committedFilter;
   };
+  viewOptionsDialog.addEventListener("close", resetDraft);
 
   surfaces.register("view-options", {
     dialog: viewOptionsDialog,
@@ -177,9 +182,12 @@ export function createViewOptions({
     const order = draftOrder;
     const filter = draftFilter;
     const viewChanged = order !== committedOrder || filter !== committedFilter;
+    const sizeChanged = draftSize !== committedSize;
+    committedSize = draftSize;
     draftOrder = committedOrder = order;
     draftFilter = committedFilter = filter;
-    surfaces.close("view-options", false);
+    surfaces.close("view-options", !viewChanged);
+    if (sizeChanged) onSizeChange(committedSize);
     if (viewChanged) {
       presentViewOptionsFlag();
       send({ kind: "view-options-apply", order, selection: filter });
@@ -219,7 +227,7 @@ export function createViewOptions({
   });
   sizeSelect.addEventListener("change", () => {
     if (!alive) return;
-    onSizeChange(sizeSelect.value as ViewOptionsThumbnailSize);
+    draftSize = sizeSelect.value as ViewOptionsThumbnailSize;
   });
 
   return {
@@ -287,6 +295,7 @@ export function createViewOptions({
     },
     dispose() {
       alive = false;
+      viewOptionsDialog.removeEventListener("close", resetDraft);
     },
   };
 }

@@ -415,7 +415,7 @@ for (const firstTransport of ["https", "http"] as const) {
         await page.goto(destination);
         await waitForLoadedReviewImage(page);
         await openPhotoToolsView(page, "tools");
-        await page.getByRole("button", { name: "Reject", exact: true }).click();
+        await page.locator("[data-photo-tools-reject]").click();
         await closePhotoTools(page);
         await expect(page.locator("[data-selection]")).toHaveText("Rejected");
         await page

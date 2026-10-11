@@ -21,6 +21,12 @@ export type EditorExportViewModel = Readonly<{
     | "failed"
     | "cancelled";
   note: string;
+  output: Readonly<{
+    state: "ready" | "earlier-settings" | "expired";
+    expiresAt: string;
+    note: string;
+    evidence: string;
+  }> | null;
   canSubmit: boolean;
   canCancel: boolean;
   canRetry: boolean;
@@ -266,6 +272,13 @@ export function createComposableEditorSurface(
     if (composable.modules.some((module) => module.name === selectedModule))
       moduleSelect.value = selectedModule;
     add.disabled = blocked || !composable.canAddStep;
+    element<HTMLElement>("[data-photo-editor-start-note]").textContent =
+      composable.steps.length
+        ? "A different Engine or input starts a separate configuration. Existing settings stay available in Advanced compatibility."
+        : "No Edit State yet. Choose an available Processing Engine and compatible input to start.";
+    add.textContent = composable.steps.length
+      ? "Add configuration"
+      : "Start editing";
     moduleSelect.disabled = blocked;
     const selectedInput = newStepInput.value;
     newStepInput.replaceChildren();

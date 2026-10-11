@@ -1,28 +1,17 @@
 import {
   readMetadata,
-  type MetadataChange,
   type MetadataRead,
   type MetadataSource,
   type MetadataValue,
 } from "../api/external-metadata.js";
 import type { BrowserFetch } from "../model/access-session.js";
+import {
+  createMetadataDrafts,
+  metadataInputChange,
+  metadataFields,
+  type MetadataInput,
+} from "../model/metadata-drafts.js";
 
-const fields = [
-  ["dc:title", "Title", "languages"],
-  ["dc:description", "Description", "languages"],
-  ["photoshop:Headline", "Headline", "text"],
-  ["dc:subject", "Keywords", "list"],
-  ["xmp:Label", "Label", "text"],
-  ["xmp:Rating", "External rating", "number"],
-  ["dc:creator", "Creators (in order)", "list"],
-  ["photoshop:AuthorsPosition", "Creator job title", "text"],
-  ["photoshop:Credit", "Credit line", "text"],
-  ["photoshop:Source", "Source", "text"],
-  ["dc:rights", "Copyright notice", "languages"],
-  ["xmpRights:UsageTerms", "Rights usage terms", "languages"],
-  ["xmpRights:Marked", "Copyright status", "boolean"],
-  ["xmpRights:WebStatement", "Rights information URL", "text"],
-] as const;
 function element<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   text?: string,
@@ -48,20 +37,29 @@ function select(
   }
   return node;
 }
+function disclosure(label: string): HTMLDetailsElement {
+  const node = element("details");
+  node.append(element("summary", label));
+  return node;
+}
 function displayValue(
   parent: HTMLElement,
   value: MetadataValue | undefined,
 ): void {
   if (value === undefined) return;
   if (Array.isArray(value)) {
+    if (!value.length) parent.append(element("p", "(empty list)"));
     const list = element("ol");
-    for (const item of value) list.append(element("li", item));
+    for (const item of value)
+      list.append(element("li", item || "(empty text)"));
     parent.append(list);
   } else if (typeof value === "object") {
     const list = element("dl");
-    for (const [language, text] of Object.entries(value)) {
-      list.append(element("dt", language), element("dd", text));
-    }
+    for (const [language, text] of Object.entries(value))
+      list.append(
+        element("dt", language),
+        element("dd", text || "(empty text)"),
+      );
     parent.append(list);
   } else parent.append(element("p", String(value) || "(empty text)"));
 }
@@ -82,350 +80,409 @@ export function createMetadataPanel(
   fetcher: BrowserFetch,
   announce: (message: string) => void,
 ) {
+  const drafts = createMetadataDrafts();
+  const messages = new Map<string, string>();
   let alive = true;
   let photoId: string | undefined;
   let generation = 0;
   let controller: AbortController | undefined;
   let facts: MetadataRead | undefined;
   let evidence = "";
-  let saving = false;
-  let needsInspection = false;
-  let changes: Record<string, MetadataChange> = {};
-  let reviewed = false;
-  let updateReview = () => {};
   let status = element("p");
-  let saveButton = element("button");
-  const errorNodes = new Map<string, HTMLElement>();
-  const busyPhotos = new Set<string>();
+  let updateReview = () => {};
   const current = (id: string, epoch: number) =>
     alive && photoId === id && generation === epoch;
+  const saving = () => Boolean(photoId && drafts.isSaving(photoId));
 
   const render = () => {
     host.replaceChildren();
-    errorNodes.clear();
+    host.classList.add("external-metadata-panel");
     host.append(element("h4", "External Metadata"));
     status = element("p");
     status.dataset.externalMetadataStatus = "";
     status.setAttribute("role", "status");
     host.append(status);
-    const refresh = button("Refresh inspection", () => {
-      if (saving) return;
-      if (
-        Object.keys(changes).length &&
-        !window.confirm(
-          "Discard pending Sidecar changes and inspect current metadata?",
-        )
-      )
-        return;
-      void inspect();
-    });
+    const refresh = button("Refresh inspection", () => void inspect());
     refresh.dataset.externalMetadataRefresh = "";
-    refresh.disabled = saving;
+    refresh.disabled = saving();
     host.append(refresh);
-    if (!facts) {
+    if (!facts || !photoId) {
       status.textContent = photoId
         ? "Inspecting metadata…"
         : "No Photo selected.";
       return;
     }
-    host.append(
-      element("p", `Original: ${facts.originalLocation}`),
-      element(
-        "p",
-        `Sidecar association: ${facts.association.state}${facts.association.reason ? ` — ${facts.association.reason}` : ""}`,
-      ),
-    );
-    for (const candidate of facts.association.candidates)
-      host.append(element("p", candidate));
-    host.append(
-      element(
-        "p",
-        `Library Rating: ${facts.libraryRating} (separate from external rating)`,
-      ),
-    );
-    host.append(
-      element(
-        "p",
-        `Observed Sidecar: ${facts.evidence.sidecar.state}${facts.evidence.sidecar.location ? ` — ${facts.evidence.sidecar.location}` : ""}${facts.evidence.sidecar.reason ? ` — ${facts.evidence.sidecar.reason}` : ""}`,
-      ),
-    );
-    const reason = !facts.saveAvailable
-      ? (facts.saveUnavailableReason ??
-        "The server cannot safely save this Sidecar. Refresh after resolving server support.")
-      : needsInspection
-        ? "Fresh inspection is required before a new Save. Refresh inspection and decide again."
-        : busyPhotos.has(facts.photoId) && !saving
-          ? "An admitted Save for this Photo is still settling. Refresh after it finishes."
-          : "";
+    const id = photoId;
+    const observed = facts;
+    let draft = drafts.get(id);
+    const changedEvidence = drafts.changed(id, evidence);
+    const busy = drafts.isSaving(id);
+    const reason = !observed.saveAvailable
+      ? (observed.saveUnavailableReason ??
+        "This deployment cannot safely save Sidecars.")
+      : busy
+        ? "An admitted Save for this Photo is still settling."
+        : changedEvidence
+          ? "Metadata changed since this draft began. Compare the current sources and retained changes before using this inspection."
+          : draft?.needsInspection
+            ? "Inspect current metadata and explicitly use that inspection before a new Save."
+            : "";
+    status.textContent =
+      messages.get(id) ??
+      (draft
+        ? "Unsaved changes retained for this Photo."
+        : "Current metadata inspected. No pending Sidecar changes.");
     if (reason) host.append(element("p", reason));
-    const editors = element("div");
-    editors.className = "external-metadata-fields";
-    for (const [key, label, kind] of fields) {
-      const field = facts.fields[key];
+    const discard = button("Discard changes", () => {
+      drafts.discard(id);
+      messages.delete(id);
+      render();
+    });
+    discard.dataset.externalMetadataDiscard = "";
+    discard.hidden = !draft;
+    discard.disabled = busy;
+    host.append(discard);
+    if (draft && (changedEvidence || draft.needsInspection) && !busy) {
+      const useInspection = button(
+        "Use current inspection for retained changes",
+        () => {
+          drafts.acceptInspection(id, observed, evidence);
+          messages.set(
+            id,
+            "Current inspection accepted. Review retained changes before confirming Save.",
+          );
+          render();
+        },
+      );
+      useInspection.dataset.externalMetadataAcceptInspection = "";
+      host.append(useInspection);
+      const baseline = disclosure("Draft's initial values and sources");
+      for (const [key, label] of metadataFields) {
+        const original = draft.facts.fields[key];
+        if (!original) continue;
+        baseline.append(element("h5", label));
+        displaySource(baseline, original);
+      }
+      host.append(baseline);
+    }
+    const ensureDraft = () => {
+      draft = drafts.admit(id, observed, evidence);
+      if (!draft) {
+        status.textContent =
+          "The session holds 32 metadata drafts. Discard or save another Photo's changes before editing this Photo. This input was not retained.";
+        return undefined;
+      }
+      discard.hidden = false;
+      draft.reviewed = false;
+      return draft;
+    };
+    const ordinary = element("div");
+    ordinary.className = "external-metadata-fields";
+    const advanced = disclosure("More fields, attribution, and rights");
+    const sourceEvidence = disclosure("Sources and Sidecar evidence");
+    sourceEvidence.append(
+      element("p", `Original: ${observed.originalLocation}`),
+      element(
+        "p",
+        `Sidecar association: ${observed.association.state}${observed.association.reason ? ` — ${observed.association.reason}` : ""}`,
+      ),
+      element(
+        "p",
+        `Library Rating: ${observed.libraryRating} (separate from external rating)`,
+      ),
+      element(
+        "p",
+        `Observed Sidecar: ${observed.evidence.sidecar.state}${observed.evidence.sidecar.location ? ` — ${observed.evidence.sidecar.location}` : ""}${observed.evidence.sidecar.reason ? ` — ${observed.evidence.sidecar.reason}` : ""}`,
+      ),
+    );
+    for (const candidate of observed.association.candidates)
+      sourceEvidence.append(element("p", candidate));
+    for (const [key, label, kind] of metadataFields) {
+      const field = observed.fields[key];
       if (!field) continue;
       const section = element("section");
       section.dataset.metadataField = key;
-      section.append(element("h5", label), element("p", key));
-      displaySource(section, field);
+      section.append(element("h5", label));
+      const isOrdinary =
+        key === "dc:title" || key === "dc:description" || key === "dc:subject";
+      (isOrdinary ? ordinary : advanced).append(section);
+      const sources = disclosure(`${label}: source values`);
+      sources.append(element("p", key));
+      displaySource(sources, field);
+      for (const source of field.sources) displaySource(sources, source);
+      sourceEvidence.append(sources);
       if (field.inferredValue !== undefined) {
         section.append(element("p", "Inferred, not stored:"));
         displayValue(section, field.inferredValue);
       }
-      const sources = element("details");
-      sources.append(element("summary", "Inspect source values"));
-      for (const source of field.sources) displaySource(sources, source);
-      section.append(sources);
-      const operationLabel = element("label", "Sidecar operation");
-      const operations: [string, string][] = [
-        ["unchanged", "Unchanged"],
-        ["set", kind === "languages" ? "Edit named languages" : "Set value"],
-        ["remove", "Remove Sidecar property"],
-      ];
-      if (kind === "text" || kind === "list")
-        operations.splice(2, 0, ["clear", "Set empty value"]);
-      const pending = changes[key];
-      const operation = select(operations);
-      operation.dataset.metadataOperation = key;
-      operation.setAttribute("aria-label", `${label} Sidecar operation`);
-      operation.value =
-        pending?.op === "setLanguages" ? "set" : (pending?.op ?? "unchanged");
-      operation.disabled = !field.writable || saving || Boolean(reason);
-      operationLabel.append(operation);
-      section.append(operationLabel);
-      const controls = element("div");
-      controls.hidden = operation.value !== "set";
-      section.append(controls);
-      const error = element("p");
+      if (!observed.saveAvailable || !field.writable) {
+        displaySource(section, field);
+        continue;
+      }
+      section.append(
+        element(
+          "p",
+          `${field.state}${field.provenance ? ` · ${field.provenance}` : ""}${field.problem ? ` — ${field.problem}` : ""}`,
+        ),
+      );
+      const initial = draft?.inputs[key];
+      const languageValue = (draft?.facts ?? observed).fields[key]?.value;
+      const values =
+        languageValue &&
+        typeof languageValue === "object" &&
+        !Array.isArray(languageValue)
+          ? languageValue
+          : {};
+      const raw: MetadataInput = initial ?? {
+        operation: "unchanged",
+        text:
+          kind === "languages"
+            ? typeof languageValue === "string"
+              ? languageValue
+              : (values["x-default"] ?? "")
+            : Array.isArray(field.value)
+              ? field.value.join("\n")
+              : typeof field.value === "object"
+                ? ""
+                : String(field.value ?? ""),
+        languages: Object.entries(values).map(([name, value]) => ({
+          name,
+          value,
+          action: "unchanged",
+        })),
+      };
+      const error = element("p", draft?.errors[key]);
       error.dataset.metadataError = key;
       error.setAttribute("role", "alert");
-      section.append(error);
-      errorNodes.set(key, error);
-      let value: MetadataValue =
-        pending?.op === "set"
-          ? pending.value
-          : (field.value ??
-            (kind === "list"
-              ? []
-              : kind === "boolean"
-                ? false
-                : kind === "number"
-                  ? 0
-                  : ""));
-      const languages: Record<string, string | null> = Object.create(
-        null,
-      ) as Record<string, string | null>;
-      const languageRows: {
-        name: HTMLInputElement;
-        input: HTMLTextAreaElement;
-        action: HTMLSelectElement;
-      }[] = [];
-      const changed = () => {
-        reviewed = false;
-        error.textContent = "";
-        const op = operation.value;
-        controls.hidden = op !== "set";
-        delete changes[key];
-        if (op === "remove" || op === "clear") changes[key] = { op };
-        else if (op === "set") {
-          if (kind === "languages") {
-            for (const language of Object.keys(languages))
-              delete languages[language];
-            for (const row of languageRows) {
-              if (row.action.value === "unchanged") continue;
-              const language = row.name.value;
-              if (!language) {
-                error.textContent = "Name the language to change.";
-                break;
-              }
-              if (
-                Object.keys(languages).some(
-                  (existing) =>
-                    existing.toLowerCase() === language.toLowerCase(),
-                )
-              ) {
-                error.textContent =
-                  "Each changed language must be named only once.";
-                break;
-              }
-              languages[language] =
-                row.action.value === "remove" ? null : row.input.value;
-            }
-            if (!error.textContent && !Object.keys(languages).length)
-              error.textContent = "Choose explicit language changes.";
-            if (!error.textContent)
-              changes[key] = {
-                op: "setLanguages",
-                languages: { ...languages },
-              };
-          } else if (
-            kind === "number" &&
-            (typeof value !== "number" ||
-              !Number.isFinite(value) ||
-              (value !== -1 && (value < 0 || value > 5)))
-          )
-            error.textContent =
-              "Rating must be -1 or a number from 0 through 5.";
-          else changes[key] = { op: "set", value };
-        }
+      const operation = select([
+        ["unchanged", "Unchanged"],
+        ["set", "Set value"],
+        ...(kind === "text" || kind === "list"
+          ? [["clear", "Set empty value"] as const]
+          : []),
+        ["remove", "Remove Sidecar property"],
+      ]);
+      operation.value = raw.operation;
+      operation.dataset.metadataOperation = key;
+      operation.setAttribute("aria-label", `${label} Sidecar operation`);
+      const controls = element("div");
+      const commit = () => {
+        const owner = ensureDraft();
+        if (!owner) return;
+        owner.inputs[key] = raw;
+        delete owner.changes[key];
+        delete owner.errors[key];
+        const result = metadataInputChange(key, kind, raw);
+        if (result.error) owner.errors[key] = result.error;
+        if (result.change) owner.changes[key] = result.change;
+        error.textContent = owner.errors[key] ?? "";
+        controls.hidden = !isOrdinary && raw.operation !== "set";
         updateReview();
       };
+      const input =
+        kind === "boolean"
+          ? select([
+              ["", "Choose copyright status"],
+              ["false", "False"],
+              ["true", "True"],
+            ])
+          : kind === "number" || key === "dc:title"
+            ? element("input")
+            : element("textarea");
+      input.value = raw.text;
+      input.setAttribute("aria-label", label);
+      input.dataset.metadataValue = key;
+      if (input instanceof HTMLTextAreaElement)
+        input.rows = key === "dc:description" ? 3 : 2;
+      if (input instanceof HTMLInputElement && kind === "number") {
+        input.type = "number";
+        input.min = "-1";
+        input.max = "5";
+        input.step = "any";
+      }
+      const syncInput = () => {
+        raw.text = input.value;
+        raw.operation = "set";
+        operation.value = "set";
+        if (kind === "boolean" && !raw.text) {
+          const owner = ensureDraft();
+          if (owner) {
+            owner.inputs[key] = raw;
+            delete owner.changes[key];
+            owner.errors[key] = "Choose true or false.";
+            error.textContent = owner.errors[key];
+            updateReview();
+          }
+        } else commit();
+      };
+      input.addEventListener(
+        kind === "boolean" ? "change" : "input",
+        syncInput,
+      );
+      controls.append(input);
+      if (kind === "list")
+        controls.append(
+          element(
+            "p",
+            key === "dc:creator"
+              ? "One creator per line; order is preserved."
+              : "One keyword per line.",
+          ),
+        );
+      controls.hidden = !isOrdinary && raw.operation !== "set";
+      section.append(controls);
+      const operations = disclosure(
+        kind === "languages"
+          ? "Additional languages and removal"
+          : "Empty value and removal",
+      );
+      if (isOrdinary || kind === "languages") section.append(operations);
+      else section.append(operation);
+      if (isOrdinary || kind === "languages") operations.append(operation);
       if (kind === "languages") {
+        operations.append(
+          element(
+            "p",
+            "The ordinary field changes x-default only. Other languages remain unchanged unless selected here. Empty text is a stored value. Removing the property reveals embedded fallback.",
+          ),
+        );
         const rows = element("div");
-        controls.append(rows);
-        const addRow = (language: string, text: string) => {
-          const row = element("div");
-          row.className = "metadata-language-row";
+        const addRow = (row: MetadataInput["languages"][number]) => {
+          const node = element("div");
+          node.className = "metadata-language-row";
           const name = element("input");
-          name.value = language;
-          name.placeholder = "Language (e.g. x-default)";
+          name.value = row.name;
+          name.placeholder = "Language, e.g. fr";
           name.setAttribute("aria-label", `${label} language`);
-          const input = element("textarea");
-          input.value = text;
-          input.setAttribute("aria-label", `${label} language value`);
           const action = select([
             ["unchanged", "Unchanged"],
             ["change", "Change language"],
             ["remove", "Remove language"],
           ]);
+          action.value = row.action;
           action.setAttribute("aria-label", `${label} language operation`);
-          if (
-            pending?.op === "setLanguages" &&
-            Object.hasOwn(pending.languages, language)
-          ) {
-            action.value =
-              pending.languages[language] === null ? "remove" : "change";
-            input.value = pending.languages[language] ?? "";
-            input.disabled = action.value === "remove";
-          }
-          languageRows.push({ name, input, action });
+          const text = element("textarea");
+          text.rows = 2;
+          text.value = row.value;
+          text.setAttribute("aria-label", `${label} language value`);
           const sync = () => {
-            input.disabled = action.value === "remove";
-            changed();
+            row.name = name.value;
+            row.value = text.value;
+            row.action = action.value;
+            text.disabled = busy || action.value === "remove";
+            commit();
           };
           name.addEventListener("input", sync);
-          input.addEventListener("input", sync);
+          text.addEventListener("input", sync);
           action.addEventListener("change", sync);
-          row.append(name, action, input);
-          rows.append(row);
+          text.disabled = busy || action.value === "remove";
+          node.append(name, action, text);
+          rows.append(node);
         };
-        if (typeof field.value === "object" && !Array.isArray(field.value))
-          for (const [language, text] of Object.entries(field.value))
-            addRow(language, text);
-        if (pending?.op === "setLanguages")
-          for (const language of Object.keys(pending.languages)) {
-            if (!languageRows.some((row) => row.name.value === language))
-              addRow(language, pending.languages[language] ?? "");
-          }
-        controls.append(button("Add language", () => addRow("", "")));
-      } else if (kind === "boolean") {
-        const input = select([
-          ["false", "False"],
-          ["true", "True"],
-        ]);
-        input.value = value === true ? "true" : "false";
-        input.setAttribute("aria-label", label);
-        input.addEventListener("change", () => {
-          value = input.value === "true";
-          changed();
-        });
-        controls.append(input);
-      } else {
-        const input =
-          kind === "number" ? element("input") : element("textarea");
-        input.setAttribute("aria-label", label);
-        input.dataset.metadataValue = key;
-        input.value = Array.isArray(value)
-          ? value.join("\n")
-          : typeof value === "object"
-            ? ""
-            : String(value);
-        if (input instanceof HTMLInputElement) {
-          input.type = "number";
-          input.min = "-1";
-          input.max = "5";
-          input.step = "any";
-        }
-        if (kind === "list")
-          controls.append(
-            element(
-              "p",
-              key === "dc:creator"
-                ? "Creators, one per line, in order"
-                : "Keywords, one per line",
-            ),
-          );
-        input.addEventListener("input", () => {
-          value =
-            kind === "number"
-              ? input.value === ""
-                ? NaN
-                : Number(input.value)
-              : kind === "list"
-                ? input.value === ""
-                  ? []
-                  : key === "dc:subject"
-                    ? [...new Set(input.value.split("\n"))]
-                    : input.value.split("\n")
-                : input.value;
-          changed();
-        });
-        controls.append(input);
-      }
-      operation.addEventListener("change", changed);
-      editors.append(section);
+        for (const row of raw.languages) addRow(row);
+        operations.append(
+          rows,
+          button("Add language", () => {
+            if (!ensureDraft()) return;
+            const row = { name: "", value: "", action: "change" };
+            raw.languages.push(row);
+            addRow(row);
+            commit();
+          }),
+        );
+      } else
+        operations.append(
+          element(
+            "p",
+            "Empty values suppress embedded fallback. Removal reveals it.",
+          ),
+        );
+      operation.addEventListener("change", () => {
+        raw.operation = operation.value;
+        commit();
+      });
+      section.append(error);
+      if (busy)
+        section
+          .querySelectorAll<
+            | HTMLInputElement
+            | HTMLSelectElement
+            | HTMLTextAreaElement
+            | HTMLButtonElement
+          >("input,select,textarea,button")
+          .forEach((control) => {
+            control.disabled = true;
+          });
     }
-    host.append(editors);
-    const capture = element("details");
-    capture.append(
-      element("summary", "Original capture facts and Sidecar representations"),
+    host.append(ordinary, advanced);
+    const capture = disclosure(
+      "Original capture facts and Sidecar representations",
     );
-    for (const [key, fact] of Object.entries(facts.captureFacts)) {
+    for (const [key, fact] of Object.entries(observed.captureFacts)) {
       const row = element("section");
       row.append(element("h5", `${key} · ${fact.identifier} · ${fact.unit}`));
       displaySource(row, fact);
       capture.append(row);
     }
-    for (const [key, field] of Object.entries(facts.fields))
-      if (!fields.some(([supported]) => supported === key)) {
+    for (const [key, field] of Object.entries(observed.fields))
+      if (!metadataFields.some(([supported]) => supported === key)) {
         const row = element("section");
         row.append(element("h5", `${key} (read-only representation)`));
         displaySource(row, field);
         for (const source of field.sources) displaySource(row, source);
         capture.append(row);
       }
-    host.append(capture);
+    host.append(capture, sourceEvidence);
     const review = element("section");
     review.dataset.externalMetadataReview = "";
-    host.append(review);
     const reviewButton = button("Review pending changes", () => {
-      reviewed = true;
-      updateReview();
+      if (draft) {
+        draft.reviewed = true;
+        updateReview();
+      }
     });
     reviewButton.dataset.externalMetadataReviewButton = "";
-    host.append(reviewButton);
-    saveButton = button("Confirm and save Sidecar", () => void save());
+    const saveButton = button("Confirm and save Sidecar", () => void save());
     saveButton.dataset.externalMetadataSave = "";
-    host.append(saveButton);
+    if (observed.saveAvailable || draft)
+      host.append(review, reviewButton, saveButton);
     updateReview = () => {
-      review.replaceChildren(element("h4", "Pending Sidecar changes"));
-      for (const [key, change] of Object.entries(changes)) {
-        review.append(element("h5", `${key}: ${change.op}`));
-        if (change.op === "set") displayValue(review, change.value);
-        if (change.op === "setLanguages")
-          for (const [language, text] of Object.entries(change.languages))
-            review.append(
-              element(
-                "p",
-                `${language}: ${text === null ? "Remove alternative" : text || "(empty text)"}`,
-              ),
-            );
+      review.replaceChildren();
+      if (draft && Object.keys(draft.changes).length) {
+        review.append(
+          element(
+            "h4",
+            draft.reviewed
+              ? "Reviewed Sidecar changes"
+              : "Pending Sidecar changes",
+          ),
+        );
+        for (const [key, change] of Object.entries(draft.changes)) {
+          const label =
+            metadataFields.find(([field]) => field === key)?.[1] ?? key;
+          review.append(
+            element(
+              "h5",
+              `${label}: ${change.op === "remove" ? "Remove property" : change.op === "clear" ? "Set empty value" : "Set value"}`,
+            ),
+          );
+          if (change.op === "set") displayValue(review, change.value);
+          if (change.op === "setLanguages")
+            for (const [language, text] of Object.entries(change.languages))
+              review.append(
+                element(
+                  "p",
+                  `${language === "x-default" ? "Default language" : language}: ${text === null ? "Remove alternative" : text || "(empty text)"}`,
+                ),
+              );
+        }
       }
-      const invalid = [...errorNodes.values()].some((node) =>
-        Boolean(node.textContent),
-      );
       reviewButton.disabled =
-        saving || invalid || !Object.keys(changes).length || Boolean(reason);
-      saveButton.disabled = !reviewed || reviewButton.disabled;
+        Boolean(reason) ||
+        !draft ||
+        !Object.keys(draft.changes).length ||
+        Boolean(Object.keys(draft.errors).length);
+      saveButton.disabled = reviewButton.disabled || !draft?.reviewed;
     };
     updateReview();
   };
@@ -435,9 +492,27 @@ export function createMetadataPanel(
     const signal = controller.signal;
     const epoch = ++generation;
     const id = photoId;
+    const active = document.activeElement;
+    const focused =
+      active instanceof HTMLElement && host.contains(active)
+        ? {
+            field: active.closest<HTMLElement>("[data-metadata-field]")?.dataset
+              .metadataField,
+            label: active.getAttribute("aria-label"),
+            refresh: active.hasAttribute("data-external-metadata-refresh"),
+            start:
+              active instanceof HTMLInputElement ||
+              active instanceof HTMLTextAreaElement
+                ? active.selectionStart
+                : null,
+            end:
+              active instanceof HTMLInputElement ||
+              active instanceof HTMLTextAreaElement
+                ? active.selectionEnd
+                : null,
+          }
+        : undefined;
     facts = undefined;
-    changes = {};
-    reviewed = false;
     render();
     if (!id) return;
     try {
@@ -445,156 +520,137 @@ export function createMetadataPanel(
       if (!current(id, epoch) || signal.aborted) return;
       facts = result.facts;
       evidence = result.evidence;
-      needsInspection = false;
+      const draft = drafts.get(id);
+      if (draft) draft.reviewed = false;
       render();
-      status.textContent =
-        "Current metadata inspected. No Sidecar changes selected.";
+      if (focused && document.activeElement === document.body) {
+        const scope = focused.field
+          ? Array.from(
+              host.querySelectorAll<HTMLElement>("[data-metadata-field]"),
+            ).find((section) => section.dataset.metadataField === focused.field)
+          : host;
+        const target = focused.refresh
+          ? host.querySelector<HTMLButtonElement>(
+              "[data-external-metadata-refresh]",
+            )
+          : Array.from(
+              scope?.querySelectorAll<HTMLElement>("[aria-label]") ?? [],
+            ).find((node) => node.getAttribute("aria-label") === focused.label);
+        if (target) {
+          let ancestor = target.parentElement;
+          while (ancestor && ancestor !== host) {
+            if (ancestor instanceof HTMLDetailsElement) ancestor.open = true;
+            ancestor = ancestor.parentElement;
+          }
+        }
+        target?.focus();
+        if (
+          ((target instanceof HTMLInputElement && target.type !== "number") ||
+            target instanceof HTMLTextAreaElement) &&
+          focused.start !== null
+        )
+          target.setSelectionRange(focused.start, focused.end);
+      }
     } catch (error) {
       if (!current(id, epoch) || signal.aborted) return;
-      status.textContent =
-        error instanceof Error
-          ? error.message
-          : "Read Metadata failed. Refresh inspection.";
+      status.textContent = `${error instanceof Error ? error.message : "Read Metadata failed."}${drafts.get(id) ? " Your unsaved draft is retained. Refresh inspection to continue." : ""}`;
     }
   };
   const save = async () => {
-    if (saving || !facts || !photoId || saveButton.disabled) return;
+    if (
+      !photoId ||
+      !facts ||
+      !facts.saveAvailable ||
+      drafts.changed(photoId, evidence)
+    )
+      return;
     const id = photoId;
-    const epoch = generation;
-    const body = `{"evidence":${evidence},"changes":${JSON.stringify(changes)}}`;
-    saving = true;
-    busyPhotos.add(id);
-    saveButton.disabled = true;
-    for (const control of Array.from(
-      host.querySelectorAll<
-        | HTMLInputElement
-        | HTMLButtonElement
-        | HTMLSelectElement
-        | HTMLTextAreaElement
-      >("input,button,select,textarea"),
-    ))
-      control.disabled = true;
-    status.textContent =
-      "Saving Sidecar. The admitted save may complete even if you leave this Photo.";
+    const operation = drafts.beginSave(id);
+    if (!operation) return;
+    messages.set(
+      id,
+      "Saving Sidecar. The admitted Save may complete after navigation.",
+    );
+    render();
+    let success = false;
     let message =
       "Save outcome unknown. Refresh inspection before deciding on another Save; nothing has been retried.";
-    let success = false;
-    let errors: unknown;
     try {
       const response = await fetcher(
         `/api/photos/${encodeURIComponent(id)}/external-metadata`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body,
+          body: operation.body,
         },
       );
-      const result = (await response.json()) as {
-        photoId?: string;
-        sidecarLocation?: string;
-        affectedFields?: string[];
-        error?: { code?: string; message?: string; details?: unknown };
-      };
+      const result: unknown = await response.json();
       if (
-        response.ok &&
+        result &&
+        typeof result === "object" &&
+        "photoId" in result &&
         result.photoId === id &&
+        "sidecarLocation" in result &&
+        typeof result.sidecarLocation === "string" &&
         result.sidecarLocation &&
-        Array.isArray(result.affectedFields)
+        "affectedFields" in result &&
+        Array.isArray(result.affectedFields) &&
+        result.affectedFields.every(
+          (key: unknown) => typeof key === "string",
+        ) &&
+        response.ok
       ) {
         success = true;
-        message = `Saved Sidecar ${result.sidecarLocation}. Verified fields: ${result.affectedFields.join(", ") || "none"}.`;
-      } else if (!response.ok && result.error) {
-        message = `${result.error.code ?? "save_failed"}: ${result.error.message ?? "Save failed."} Refresh inspection before a new decision.`;
-        errors = result.error.details;
+        const labels = result.affectedFields.map(
+          (key: string) =>
+            metadataFields.find(([field]) => field === key)?.[1] ?? key,
+        );
+        message = `Saved Sidecar ${result.sidecarLocation}. Verified fields: ${labels.join(", ") || "none"}.`;
+      } else if (
+        !response.ok &&
+        result &&
+        typeof result === "object" &&
+        "error" in result &&
+        result.error &&
+        typeof result.error === "object"
+      ) {
+        const error = result.error;
+        const code =
+          "code" in error && typeof error.code === "string"
+            ? error.code
+            : "save_failed";
+        const detail =
+          "message" in error && typeof error.message === "string"
+            ? error.message
+            : "Save failed.";
+        message = `${code}: ${detail} Inspect current metadata before a new decision.`;
+        if ("details" in error)
+          message += ` Required correction: ${JSON.stringify(error.details)}`;
       }
     } catch {
       /* An admitted mutation cannot be described as unchanged. */
     }
-    busyPhotos.delete(id);
-    if (!current(id, epoch)) {
-      if (alive) {
-        if (photoId === id) {
-          needsInspection = true;
-          render();
-          status.textContent = message;
-        }
-        announce(`Metadata Save for ${id}: ${message}`);
-      }
-      return;
-    }
-    saving = false;
-    needsInspection = true;
-    reviewed = false;
-    if (success) {
-      const inspection = inspect();
-      const inspectionEpoch = generation;
-      await inspection;
-      if (current(id, inspectionEpoch))
-        status.textContent = facts
-          ? `${message} Fresh inspection establishes current content, not authorship.`
-          : `${message} Fresh inspection failed. Refresh inspection before another Save.`;
-    } else {
-      render();
-      status.textContent = message;
-      // Display structured server validation detail beside every named affected field.
-      if (errors && typeof errors === "object")
-        for (const [key, detail] of Object.entries(errors)) {
-          const node = errorNodes.get(key);
-          if (node)
-            node.textContent =
-              typeof detail === "string" ? detail : JSON.stringify(detail);
-        }
-      if (
-        errors &&
-        typeof errors === "object" &&
-        "fields" in errors &&
-        Array.isArray(errors.fields)
-      ) {
-        const languages =
-          "languages" in errors &&
-          errors.languages &&
-          typeof errors.languages === "object"
-            ? errors.languages
-            : {};
-        for (const field of errors.fields)
-          if (typeof field === "string") {
-            const node = errorNodes.get(field);
-            const required = Object.hasOwn(languages, field)
-              ? (languages as Record<string, unknown>)[field]
-              : undefined;
-            if (node)
-              node.textContent = required
-                ? `${message} Required languages: ${JSON.stringify(required)}`
-                : message;
-          }
-      }
-      if (
-        errors &&
-        typeof errors === "object" &&
-        "field" in errors &&
-        typeof errors.field === "string"
-      ) {
-        const node = errorNodes.get(errors.field);
-        if (node) node.textContent = message;
-      }
-      updateReview();
-    }
+    drafts.settle(id, operation.draft, success);
+    if (!alive) return;
+    messages.set(id, message);
+    announce(`Metadata Save for ${id}: ${message}`);
+    if (photoId === id) await inspect();
   };
   return {
     show(id: string | undefined) {
       if (id === photoId && (facts || controller)) return;
-      if (saving && photoId)
-        announce(
-          `Metadata Save for ${photoId} is still settling; leaving does not undo it. Refresh inspection before another Save.`,
-        );
-      saving = false;
       photoId = id;
       void inspect();
+    },
+    refresh() {
+      if (!saving()) void inspect();
     },
     dispose() {
       alive = false;
       generation++;
       controller?.abort();
+      drafts.clear();
+      messages.clear();
     },
   };
 }

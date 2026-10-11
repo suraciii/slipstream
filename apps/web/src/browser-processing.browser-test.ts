@@ -49,14 +49,103 @@ test("an empty recipe shows no processing result and keeps Camera Preview separa
     page.locator("[data-photo-editor-export-submit]"),
   ).toBeDisabled();
   await expect(page.locator("[data-photo-editor-preview-image]")).toBeHidden();
+  await expect(page.locator("[data-photo-editor-render-status]")).toContainText(
+    "no Edit State",
+  );
+  await expect(page.locator("[data-photo-editor-preview-note]")).toBeHidden();
+  const dialog = page.locator("[data-photo-tools]");
+  const region = page.locator(".photo-editor-image-region");
+  const controls = page.locator(".photo-editor-controls");
+  for (const viewport of [
+    { width: 1280, height: 800 },
+    { width: 768, height: 1024 },
+    { width: 390, height: 844 },
+    { width: 667, height: 375 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await expect(dialog.locator("[data-photo-tools-close]")).toBeInViewport();
+    await expect(region).toBeInViewport();
+    expect(
+      (await page.locator(".photo-editor-image-frame").boundingBox())?.height,
+    ).toBeGreaterThanOrEqual(100);
+    const geometry = await dialog.evaluate((node) => {
+      const image = node
+        .querySelector(".photo-editor-image-region")!
+        .getBoundingClientRect();
+      const controls = node
+        .querySelector(".photo-editor-controls")!
+        .getBoundingClientRect();
+      return {
+        fits: node.scrollWidth <= node.clientWidth,
+        image: { x: image.x, bottom: image.bottom, right: image.right },
+        controls: { x: controls.x, y: controls.y },
+      };
+    });
+    expect(geometry.fits).toBe(true);
+    if (viewport.width >= 900 || viewport.height <= 500)
+      expect(geometry.image.right).toBeLessThanOrEqual(geometry.controls.x);
+    else expect(geometry.image.bottom).toBeLessThanOrEqual(geometry.controls.y);
+    await expect(page.locator("[data-photo-editor-undo]")).toBeVisible();
+    expect(
+      await page
+        .locator("[data-photo-editor-undo]")
+        .evaluate((node) => node.getBoundingClientRect().height),
+    ).toBeGreaterThanOrEqual(44);
+    await page.locator("[data-photo-editor-advanced] > summary").click();
+    const before = await region.boundingBox();
+    await controls.evaluate((node) => {
+      node.scrollTop = node.scrollHeight;
+    });
+    expect(await region.boundingBox()).toEqual(before);
+    await expect(dialog.locator("[data-photo-tools-close]")).toBeInViewport();
+    expect(
+      await controls.evaluate((node) => node.scrollWidth <= node.clientWidth),
+    ).toBe(true);
+    await page.locator("[data-photo-editor-advanced] > summary").click();
+    await controls.evaluate((node) => {
+      node.scrollTop = 0;
+    });
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "200%";
+  });
+  await expect(dialog.locator("[data-photo-tools-close]")).toBeInViewport();
+  await page.locator("[data-photo-editor-refresh]").scrollIntoViewIfNeeded();
+  await expect(page.locator("[data-photo-editor-refresh]")).toBeInViewport();
+  expect(
+    await controls.evaluate((node) => node.scrollWidth <= node.clientWidth),
+  ).toBe(true);
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "";
+  });
   await reference.click();
   await expect(reference).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("[data-photo-editor-render-status]")).toContainText(
     "Camera Preview",
   );
+  const referenceImage = page.locator("[data-photo-editor-reference-image]");
+  await expect(referenceImage).toBeVisible();
+  await expect
+    .poll(() =>
+      referenceImage.evaluate(
+        (node) =>
+          node instanceof HTMLImageElement &&
+          node.complete &&
+          node.naturalWidth > 0,
+      ),
+    )
+    .toBe(true);
+  expect(await referenceImage.getAttribute("src")).toBe(
+    await page.locator("[data-stage] img").first().getAttribute("src"),
+  );
   await reference.click();
   await expect(reference).toHaveAttribute("aria-pressed", "false");
   await expect(page.locator("[data-photo-editor-preview-image]")).toBeHidden();
+  await expect(referenceImage).toBeHidden();
+  await expect(referenceImage).not.toHaveAttribute("src");
+  await dialog.locator("[data-photo-tools-close]").click();
+  await expect(dialog).toBeHidden();
   expect(work).toEqual([]);
 });
 
@@ -153,6 +242,9 @@ test("real-processing: current Edit Preview, explicit Export, retained reopen, a
   const reference = page.locator("[data-photo-editor-camera-reference]");
   await reference.click();
   await expect(page.locator("[data-photo-editor-preview-image]")).toBeHidden();
+  await expect(
+    page.locator("[data-photo-editor-reference-image]"),
+  ).toBeVisible();
   await reference.click();
   await expect(page.locator("[data-photo-editor-preview-image]")).toBeVisible();
   await page.locator("[data-photo-editor-export-submit]").click();

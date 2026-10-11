@@ -49,8 +49,23 @@ test("album management creates, renames, and deletes Albums with confirmation", 
   await expect(page.getByRole("link", { name: /Trip 0 Photos/ })).toBeVisible();
   await expect(page.getByRole("button", { name: "Rename Trip" })).toBeVisible();
 
+  await page.getByRole("button", { name: "New Album" }).click();
+  await page.getByLabel("Album name").fill("trip");
+  await page.getByRole("button", { name: "Create Album", exact: true }).click();
+  await expect(
+    page.locator("[data-album-form-dialog] [role=alert]"),
+  ).toHaveText("An Album with this name already exists.");
+  await expect(page.getByLabel("Album name")).toHaveValue("trip");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await post(running.url, "/api/albums", { name: "Other" });
   // Rename keeps membership and identity semantics on the card.
   await page.getByRole("button", { name: "Rename Trip" }).click();
+  await page.getByLabel("Album name").fill("Other");
+  await page.getByRole("button", { name: "Save Name" }).click();
+  await expect(
+    page.locator("[data-album-form-dialog] [role=alert]"),
+  ).toHaveText("An Album with this name already exists.");
+  await expect(page.getByLabel("Album name")).toHaveValue("Other");
   await page.getByLabel("Album name").fill("Journey");
   await page.getByRole("button", { name: "Save Name" }).click();
   await expect(
@@ -60,6 +75,9 @@ test("album management creates, renames, and deletes Albums with confirmation", 
 
   // Deleting requires confirmation and states the safety contract.
   await page.getByRole("button", { name: "Delete Journey" }).click();
+  await expect(
+    page.getByText("Delete “Journey”?", { exact: true }),
+  ).toBeVisible();
   await expect(
     page.getByText("Photos and Original Files remain unchanged."),
   ).toBeVisible();

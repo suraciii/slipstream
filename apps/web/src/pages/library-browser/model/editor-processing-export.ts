@@ -80,6 +80,24 @@ export function createEditorProcessingExport(
   let photo: string | null = null;
   let generation = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const maxTimerDelay = 2_147_483_647;
+  let resumeDocument: Document | undefined;
+  const onVisibilityChange = (): void => {
+    if (resumeDocument?.visibilityState === "hidden" || !photo) return;
+    publish(photo, generation);
+  };
+  const bind = (photoId: string): void => {
+    if (photo !== photoId) {
+      generation += 1;
+      clearTimeout(timer);
+      timer = undefined;
+      photo = photoId;
+    }
+    if (!resumeDocument && typeof document !== "undefined") {
+      resumeDocument = document;
+      resumeDocument.addEventListener("visibilitychange", onVisibilityChange);
+    }
+  };
   const empty = (): PhotoExports => ({
     state: "idle",
     note: "",
@@ -103,6 +121,7 @@ export function createEditorProcessingExport(
   const publish = (photoId: string, stamp: number): void => {
     if (!owns(photoId, stamp)) return;
     photo = photoId;
+    schedule(photoId);
     renderEditor();
   };
   const retain = (
@@ -149,25 +168,46 @@ export function createEditorProcessingExport(
     publish(photoId, stamp);
   };
   const schedule = (photoId: string): void => {
-    if (!editorOwnsPhoto(photoId)) return;
+    if (!editorOwnsPhoto(photoId) || photo !== photoId) return;
     clearTimeout(timer);
+    timer = undefined;
     const value = slot(photoId);
-    if (
-      !editorOwnsPhoto(photoId) ||
-      (!value.exports.some(
+    const stamp = generation;
+    const now = Date.now();
+    const polling =
+      value.exports.some(
         (item) => item.state === "accepted" || item.state === "executing",
-      ) &&
-        value.state !== "running")
-    )
-      return;
-    timer = setTimeout(() => {
-      timer = undefined;
-      if (editorOwnsPhoto(photoId)) void load(photoId);
-    }, 1500);
+      ) || value.state === "running";
+    let expiry = Infinity;
+    const considerExpiry = (expiresAt: string): void => {
+      const deadline = Date.parse(expiresAt);
+      if (deadline > now) expiry = Math.min(expiry, deadline);
+    };
+    if (value.artifact) considerExpiry(value.artifact.expiresAt);
+    for (const artifact of value.artifacts) considerExpiry(artifact.expiresAt);
+    for (const artifact of recipe.artifacts) {
+      if (artifact.photoId === photoId) considerExpiry(artifact.expiresAt);
+    }
+    for (const retained of value.historicalExports) {
+      if (retained.artifact) considerExpiry(retained.artifact.expiresAt);
+    }
+    const pollAt = polling ? now + 1500 : Infinity;
+    const deadline = Math.min(expiry, pollAt);
+    if (!Number.isFinite(deadline)) return;
+    timer = setTimeout(
+      () => {
+        if (!owns(photoId, stamp) || photo !== photoId) return;
+        timer = undefined;
+        if (Date.now() >= pollAt) void load(photoId);
+        else if (Date.now() >= expiry) publish(photoId, stamp);
+        else schedule(photoId);
+      },
+      Math.min(deadline - now, maxTimerDelay),
+    );
   };
   const load = async (photoId: string): Promise<void> => {
     if (!editorOwnsPhoto(photoId)) return;
-    photo = photoId;
+    bind(photoId);
     const stamp = generation;
     const value = slot(photoId);
     publish(photoId, stamp);
@@ -371,7 +411,7 @@ export function createEditorProcessingExport(
   };
   const submit = async (photoId: string): Promise<void> => {
     if (!editorOwnsPhoto(photoId)) return;
-    photo = photoId;
+    bind(photoId);
     const value = slot(photoId);
     if (value.pending || value.state === "submitting") return;
     const target = recipe.target();
@@ -559,6 +599,11 @@ export function createEditorProcessingExport(
       generation += 1;
       clearTimeout(timer);
       timer = undefined;
+      resumeDocument?.removeEventListener(
+        "visibilitychange",
+        onVisibilityChange,
+      );
+      resumeDocument = undefined;
       photo = null;
     },
     load,
@@ -583,7 +628,47 @@ export function createEditorProcessingExport(
         )
           artifacts.push(artifact);
       }
+      const outputArtifact = value.artifact;
+      const outputStep = recipe.read?.recipe?.steps.find(
+        (step) => step.stepId === outputArtifact?.stepId,
+      );
+      const outputWork = value.exports.find(
+        (work) => work.artifactId === outputArtifact?.artifactId,
+      );
+      const outputExpired =
+        outputArtifact !== null &&
+        Date.parse(outputArtifact.expiresAt) <= Date.now();
+      const outputEarlier = Boolean(
+        outputArtifact &&
+          (recipe.dirty() ||
+            !outputStep ||
+            outputStep.module !== outputArtifact.module ||
+            JSON.stringify(outputStep.parameters) !==
+              JSON.stringify(outputArtifact.parameters) ||
+            JSON.stringify(outputStep.input) !==
+              JSON.stringify(outputArtifact.input.binding) ||
+            (outputWork &&
+              (outputWork.recipeRevision !== recipe.read?.recipe?.revision ||
+                outputWork.sourceRevision !== recipe.read?.sourceRevision))),
+      );
       return {
+        output: outputArtifact
+          ? {
+              state: outputExpired
+                ? ("expired" as const)
+                : outputEarlier
+                  ? ("earlier-settings" as const)
+                  : ("ready" as const),
+              expiresAt: outputArtifact.expiresAt,
+              note: outputExpired
+                ? `This output expired at ${outputArtifact.expiresAt}. Export again.`
+                : `${outputEarlier ? "Output uses earlier settings." : "Output is ready to download."} Available until ${outputArtifact.expiresAt}.`,
+              evidence: describeProcessingArtifact(
+                outputArtifact,
+                formatByteCount,
+              ),
+            }
+          : null,
         historicalExports: value.historicalExports.map((item) => {
           const artifact = item.artifact;
           const canDownload =

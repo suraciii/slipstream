@@ -21,6 +21,7 @@ type Submission = Readonly<{
   draft: ComposableRecipeDraft;
   rebind: boolean;
   automatic: boolean;
+  primary?: "set" | "reset";
 }>;
 export type ComposableAutosaveState = {
   read: RecipeRead;
@@ -32,6 +33,7 @@ export type ComposableAutosaveState = {
   recovered: boolean;
   recoveryAvailable: boolean;
   note: string;
+  failedPrimary?: Submission | undefined;
   pending: Submission | undefined;
   undo: ComposableRecipeDraft[];
   redo: ComposableRecipeDraft[];
@@ -85,10 +87,14 @@ export function createComposableAutosave(
     const next = { ...recovery };
     if (
       state.pending ||
+      state.failedPrimary ||
       composableDraftDiffers(state.draft, state.read.recipe) ||
       state.conflict
     ) {
-      next[photoId] = { draft: state.draft, pending: state.pending ?? null };
+      next[photoId] = {
+        draft: state.draft,
+        pending: state.pending ?? state.failedPrimary ?? null,
+      };
     } else delete next[photoId];
     const text = JSON.stringify(next);
     state.recoveryAvailable =
@@ -119,6 +125,13 @@ export function createComposableAutosave(
           state.read.sourceAvailable !== read.sourceAvailable)
       ) {
         const dirty = composableDraftDiffers(state.draft, state.read.recipe);
+        const externalRevision =
+          state.read.recipe?.revision !== read.recipe?.revision ||
+          state.read.recipe?.sourceRevision !== read.recipe?.sourceRevision;
+        if (externalRevision) {
+          state.undo = [];
+          state.redo = [];
+        }
         state.read = read;
         if (
           dirty &&
@@ -135,8 +148,6 @@ export function createComposableAutosave(
             read.sourceRevision,
             read.recipe,
           );
-          state.undo = [];
-          state.redo = [];
         }
       }
       if (
@@ -216,6 +227,8 @@ export function createComposableAutosave(
               isRecord(request) &&
               typeof request["requestId"] === "string" &&
               (typeof request["expectedSourceRevision"] === "string" ||
+                typeof request["expectedEditRevision"] === "string" ||
+                request["expectedEditRevision"] === null ||
                 typeof request["newSourceRevision"] === "string")
             ) {
               const captured = pending["draft"];
@@ -237,12 +250,17 @@ export function createComposableAutosave(
                   ),
                   rebind: pending["rebind"],
                   automatic: isRecord(request["automaticAdjustment"]),
+                  ...(pending["primary"] === "set" ||
+                  pending["primary"] === "reset"
+                    ? { primary: pending["primary"] }
+                    : {}),
                 };
                 state.uncertain = true;
                 state.conflict = false;
               }
               const recoveredPending = state.pending;
               if (
+                !recoveredPending?.primary &&
                 state.read.recipe &&
                 recoveredPending &&
                 sameSettings(state.read.recipe, recoveredPending.draft) &&
@@ -288,18 +306,81 @@ export function createComposableAutosave(
     let response: Response;
     let value: unknown;
     try {
-      response = await saveComposableRecipeBody(
-        fetcher,
-        photoId,
-        pending.body,
-        pending.rebind,
-      );
+      response = pending.primary
+        ? await fetcher(
+            `/api/photos/${encodeURIComponent(photoId)}/edit/${pending.primary}`,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: pending.body,
+            },
+          )
+        : await saveComposableRecipeBody(
+            fetcher,
+            photoId,
+            pending.body,
+            pending.rebind,
+          );
       value = await response.json();
     } catch {
       state.saving = false;
       state.uncertain = true;
       state.note =
         "The save outcome is unknown. Check its result before further saves or exports.";
+      notify(photoId, state);
+      return;
+    }
+    if (
+      pending.primary &&
+      response.ok &&
+      isRecord(value) &&
+      ["saved", "replayed", "unchanged"].includes(String(value["outcome"])) &&
+      isRecord(value["edit"]) &&
+      typeof value["edit"]["editRevision"] === "string"
+    ) {
+      const revision = value["edit"]["editRevision"];
+      const latest = await fetchComposableRecipe(
+        fetcher,
+        photoId,
+        new AbortController().signal,
+      ).catch(() => undefined);
+      state.saving = false;
+      if (!latest) {
+        state.uncertain = true;
+        state.note =
+          "The saved exposure could not be checked. Check its result before another action.";
+        notify(photoId, state);
+        return;
+      }
+      state.pending = undefined;
+      state.uncertain = false;
+      state.failure = false;
+      state.failedPrimary = undefined;
+      state.recovered = false;
+      state.read = latest;
+      state.draft = draftFromRecipe(
+        photoId,
+        latest.sourceRevision,
+        latest.recipe,
+      );
+      if (
+        latest.recipe?.revision !== revision ||
+        (observedSourceRevision(latest) !== undefined &&
+          observedSourceRevision(latest) !== pending.draft.sourceRevision)
+      ) {
+        state.undo = [];
+        state.redo = [];
+        state.conflict = true;
+        state.note =
+          "The saved edit changed after the exposure action. Use the saved edit before continuing.";
+      } else {
+        if (!sameSettings(pending.draft, state.draft)) {
+          state.undo.push(structuredClone(pending.draft));
+          if (state.undo.length > 64) state.undo.shift();
+          state.redo = [];
+        }
+        state.note = "Saved edit.";
+      }
       notify(photoId, state);
       return;
     }
@@ -372,8 +453,10 @@ export function createComposableAutosave(
       state.pending = undefined;
       state.uncertain = false;
       state.failure = true;
+      if (pending.primary) state.failedPrimary = pending;
       state.conflict = [
         "recipe_conflict",
+        "edit_conflict",
         "source_changed",
         "requires_rebind",
         "request_conflict",
@@ -424,18 +507,27 @@ export function createComposableAutosave(
     draft: ComposableRecipeDraft,
   ): Promise<void> => {
     const state = photos.get(photoId);
-    if (!state || sameSettings(state.draft, draft)) return;
+    if (!state || state.pending?.primary || sameSettings(state.draft, draft))
+      return;
     state.undo.push(structuredClone(state.draft));
     if (state.undo.length > 64) state.undo.shift();
     state.redo = [];
     state.draft = structuredClone(draft);
     state.failure = false;
+    state.failedPrimary = undefined;
     notify(photoId, state);
     if (!state.uncertain) await flush(photoId);
   };
   const history = async (photoId: string, redo: boolean): Promise<void> => {
     const state = photos.get(photoId);
-    if (!state) return;
+    if (
+      !state ||
+      state.pending ||
+      state.saving ||
+      state.uncertain ||
+      state.conflict
+    )
+      return;
     const next = (redo ? state.redo : state.undo).pop();
     if (!next) return;
     (redo ? state.undo : state.redo).push(state.draft);
@@ -457,6 +549,7 @@ export function createComposableAutosave(
         state.read.recipe.sourceRevision !== observedSourceRevision(state.read),
     );
     state.failure = false;
+    state.failedPrimary = undefined;
     state.recovered = false;
     state.undo = [];
     state.redo = [];
@@ -480,6 +573,18 @@ export function createComposableAutosave(
       return;
     }
     if (state.pending || state.saving) return;
+    if (
+      state.failedPrimary &&
+      (state.failedPrimary.draft.baseRevision !==
+        (latest.recipe?.revision ?? null) ||
+        state.failedPrimary.draft.sourceRevision !== latest.sourceRevision ||
+        (observedSourceRevision(latest) !== undefined &&
+          state.failedPrimary.draft.sourceRevision !==
+            observedSourceRevision(latest)))
+    ) {
+      state.undo = [];
+      state.redo = [];
+    }
     state.read = latest;
     if (
       observedSourceRevision(latest) !== undefined &&
@@ -496,6 +601,28 @@ export function createComposableAutosave(
       baseRevision: latest.recipe?.revision ?? null,
     };
     state.conflict = false;
+    if (state.failedPrimary) {
+      const failed = state.failedPrimary;
+      state.failedPrimary = undefined;
+      const request = JSON.parse(failed.body) as Record<string, unknown>;
+      state.draft = draftFromRecipe(
+        photoId,
+        latest.sourceRevision,
+        latest.recipe,
+      );
+      state.pending = {
+        ...failed,
+        draft: structuredClone(state.draft),
+        body: JSON.stringify({
+          ...request,
+          requestId: randomUuid(),
+          expectedEditRevision: latest.recipe?.revision ?? null,
+        }),
+      };
+      state.failure = false;
+      await submit(photoId, state);
+      return;
+    }
     state.failure = false;
     await flush(photoId);
   };
@@ -579,6 +706,51 @@ export function createComposableAutosave(
     };
     await submit(photoId, state);
   };
+  const primary = async (photoId: string, value?: number): Promise<void> => {
+    const state = photos.get(photoId);
+    if (
+      !state ||
+      state.pending ||
+      state.saving ||
+      state.uncertain ||
+      state.conflict ||
+      composableDraftDiffers(state.draft, state.read.recipe) ||
+      (value !== undefined && !Number.isFinite(value))
+    )
+      return;
+    const current = state.read.recipe?.steps.find(
+      (step) => step.stepId === state.read.recipe?.currentStepId,
+    );
+    if (value === undefined && current?.module !== "darktable") return;
+    state.failure = false;
+    state.failedPrimary = undefined;
+    state.pending = {
+      primary: value === undefined ? "reset" : "set",
+      body: JSON.stringify({
+        requestId: randomUuid(),
+        expectedEditRevision: state.read.recipe?.revision ?? null,
+        target: "darktable.exposure",
+        control: "ev",
+        ...(value === undefined
+          ? {}
+          : {
+              value,
+              ...(current?.module === "darktable"
+                ? {}
+                : {
+                    from:
+                      current?.input.kind === "artifact"
+                        ? `artifact:${current.input.artifactId}`
+                        : "original",
+                  }),
+            }),
+      }),
+      draft: structuredClone(state.draft),
+      rebind: false,
+      automatic: false,
+    };
+    await submit(photoId, state);
+  };
   return {
     open,
     get: (photoId: string) => photos.get(photoId),
@@ -590,5 +762,6 @@ export function createComposableAutosave(
     reapply,
     rebind,
     automatic,
+    primary,
   };
 }

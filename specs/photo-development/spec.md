@@ -119,6 +119,16 @@ revision tokens, request identities, and processing reasons stays behind an
 optional details affordance. The primary flow uses editing state, editing TIFF,
 and output language.
 
+The current image and comparison controls must stay visible while the
+Photographer operates or scrolls editing controls. Wide layouts place image
+and controls beside each other; narrow layouts retain an image region above
+independently scrolling controls. Original reference must show the camera
+Preview inside this workspace at normal visibility, explicitly labelled as
+reference. No saved Edit State is a start state, not an Edit Preview failure.
+Controls and explanations must fit without horizontal scrolling or clipping.
+Undo, Redo, save feedback, and conflict recovery belong beside the primary
+controls rather than inside a technical disclosure.
+
 Edit availability rests on three independent facts: whether the selected
 Processing Engine admits the input, whether the Library is still scanning or
 recovering, and whether the Photo's Original File currently reads. A recovering
@@ -148,6 +158,10 @@ settings are local drafts until the service confirms them. A draft must not
 silently override newer service state. Undo and redo operate on edit actions in
 the current browser session and submit new guarded updates; the product does
 not promise a durable action history.
+Primary exposure changes, individual resets, and compatibility edits share
+one chronological edit history per Photo. An external revision invalidates
+history that can no longer be applied safely; it must not erase a local
+action merely because that action was confirmed by the service.
 
 If another client changes the Edit State, autosave stops for that Photo and
 retains the local draft. The Photographer can keep the confirmed state or
@@ -193,6 +207,10 @@ expired. Accepted work survives browser departure under the durable settlement
 rules. A confirmed later edit marks an earlier Artifact as based on older
 settings but does not remove or retarget it. A failed or cancelled Export
 does not publish partial output.
+The primary Download location must show whether its output uses earlier
+settings and when it expires. Expired output must be identified there and
+must not retain an enabled Download action. Provenance identifiers and image
+contract details remain available through an optional disclosure.
 
 ## Edit State File
 
