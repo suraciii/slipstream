@@ -1,5 +1,5 @@
 use super::*;
-use photo_files::{EntryKind, fingerprint, read_json};
+use photo_files::{EntryKind, WalkLimits, fingerprint, read_json, walk};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -157,7 +157,7 @@ pub(crate) fn restore(state: &Path, manifest_path: &Path) -> Result<Value> {
     }
     let mut actual = BTreeSet::new();
     for (key, root) in &roots {
-        enumerate(root, Path::new(key), &mut actual, 0)?;
+        enumerate(root, Path::new(key), &mut actual)?;
     }
     if actual != expected.keys().cloned().collect() {
         return Err(refuse(
@@ -247,37 +247,35 @@ pub(crate) fn restore(state: &Path, manifest_path: &Path) -> Result<Value> {
         json!({"stateDirectory":state,"outcome":"restored","verifiedFiles":actual.len(),"workspaces":workspace_count,"toolStates":states}),
     )
 }
-fn enumerate(
-    directory: &Directory,
-    prefix: &Path,
-    files: &mut BTreeSet<String>,
-    depth: usize,
-) -> Result<()> {
-    if depth > 64 {
-        return Err(refuse(
-            "Restore directory depth exceeds the supported bound.",
-        ));
-    }
-    for entry in directory.entries(ENTRY_MAX)? {
-        let path = prefix.join(&entry.name);
-        match entry.kind {
-            EntryKind::File => {
-                files.insert(
-                    path.to_str()
-                        .ok_or_else(|| refuse("Restore path is not UTF-8."))?
-                        .to_owned(),
-                );
+fn enumerate(directory: &Directory, prefix: &Path, files: &mut BTreeSet<String>) -> Result<()> {
+    let bound = || refuse("Restore directory depth exceeds the supported bound.");
+    let inventory = || refuse("Restore file inventory exceeds the supported bound.");
+    walk(
+        directory,
+        prefix,
+        WalkLimits::new(ENTRY_MAX),
+        bound,
+        |reported| {
+            match reported.entry.kind {
+                EntryKind::File => {
+                    files.insert(
+                        reported
+                            .path
+                            .to_str()
+                            .ok_or_else(|| refuse("Restore path is not UTF-8."))?
+                            .to_owned(),
+                    );
+                    if files.len() > ENTRY_MAX {
+                        return Err(inventory());
+                    }
+                }
+                EntryKind::Directory => {
+                    return Ok(Some(reported.directory.child(&reported.entry.name)?));
+                }
+                _ => return Err(refuse("Restore contains a symbolic link or special file.")),
             }
-            EntryKind::Directory => {
-                enumerate(&directory.child(&entry.name)?, &path, files, depth + 1)?
-            }
-            _ => return Err(refuse("Restore contains a symbolic link or special file.")),
-        }
-        if files.len() > ENTRY_MAX {
-            return Err(refuse(
-                "Restore file inventory exceeds the supported bound.",
-            ));
-        }
-    }
-    Ok(())
+            Ok(None)
+        },
+        |_| Ok(()),
+    )
 }

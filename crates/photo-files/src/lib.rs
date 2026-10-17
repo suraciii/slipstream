@@ -7,9 +7,11 @@ pub mod image;
 mod json;
 mod locking;
 mod publication;
+mod walk;
 
 pub use directory::{Directory, Entry, EntryKind, ancestor_leases};
 pub use identity::{Evidence, Observation, fingerprint, identity, timestamp};
 pub use json::{canonical_json, read_json};
 pub use locking::{FileLease, LeaseMode};
 pub use publication::{PendingFile, atomic_json};
+pub use walk::{MAXIMUM_DEPTH, Reported, WalkLimits, walk};

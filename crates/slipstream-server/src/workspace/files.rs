@@ -1,6 +1,7 @@
 use super::*;
 use photo_files::{
-    EntryKind, Evidence, FileLease, LeaseMode, Observation, PendingFile, fingerprint, identity,
+    EntryKind, Evidence, FileLease, LeaseMode, Observation, PendingFile, WalkLimits, fingerprint,
+    identity, walk,
 };
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
@@ -73,41 +74,58 @@ fn scan(
     seen: &mut BTreeSet<String>,
     count: &mut usize,
 ) -> Result<()> {
-    if prefix.components().count() > 64 {
-        return Err(WorkspaceError::new(
+    let nesting = || {
+        WorkspaceError::new(
             "resource_limit",
             413,
             "Workspace directory nesting exceeds scan limit",
-        ));
-    }
-    for entry in directory.entries(ENTRY_MAX)? {
-        *count += 1;
-        if *count > ENTRY_MAX {
-            return Err(WorkspaceError::new(
-                "resource_limit",
-                413,
-                "Workspace scan exceeds finite entry limit; no partial index is published",
-            ));
-        }
-        if entry.name.starts_with('.') {
-            continue;
-        }
-        let path = prefix.join(&entry.name);
-        match entry.kind {
-            EntryKind::File => {
-                seen.insert(
-                    path.to_str()
-                        .ok_or_else(|| {
-                            WorkspaceError::new("invalid_input", 400, "Workspace path is not UTF-8")
-                        })?
-                        .into(),
-                );
+        )
+    };
+    let inventory = || {
+        WorkspaceError::new(
+            "resource_limit",
+            413,
+            "Workspace scan exceeds finite entry limit; no partial index is published",
+        )
+    };
+    walk(
+        directory,
+        prefix,
+        WalkLimits::new(ENTRY_MAX),
+        nesting,
+        |reported| {
+            *count += 1;
+            if *count > ENTRY_MAX {
+                return Err(inventory());
             }
-            EntryKind::Directory => scan(&directory.child(&entry.name)?, &path, seen, count)?,
-            EntryKind::Symlink | EntryKind::Other => (),
-        }
-    }
-    Ok(())
+            if reported.entry.name.starts_with('.') {
+                return Ok(None);
+            }
+            match reported.entry.kind {
+                EntryKind::File => {
+                    seen.insert(
+                        reported
+                            .path
+                            .to_str()
+                            .ok_or_else(|| {
+                                WorkspaceError::new(
+                                    "invalid_input",
+                                    400,
+                                    "Workspace path is not UTF-8",
+                                )
+                            })?
+                            .into(),
+                    );
+                }
+                EntryKind::Directory => {
+                    return Ok(Some(reported.directory.child(&reported.entry.name)?));
+                }
+                EntryKind::Symlink | EntryKind::Other => (),
+            }
+            Ok(None)
+        },
+        |_| Ok(()),
+    )
 }
 
 pub(super) fn reconcile(_manager: &WorkspaceManager, session: &mut WorkspaceSession) -> Result<()> {

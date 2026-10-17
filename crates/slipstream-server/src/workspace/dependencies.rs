@@ -1,5 +1,5 @@
 use super::*;
-use photo_files::{Directory, EntryKind, LeaseMode, Observation};
+use photo_files::{Directory, EntryKind, LeaseMode, Observation, WalkLimits, walk};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{io::Read, path::Path, time::Duration};
@@ -112,84 +112,82 @@ fn manifest(
     inventory: &mut Value,
     cached: &std::collections::BTreeMap<String, photo_files::Evidence>,
 ) -> Result<()> {
-    if prefix.components().count() > 64 {
-        return Err(limit());
-    }
-    for entry in directory.entries(ENTRY_MAX)? {
-        *count += 1;
-        if *count > ENTRY_MAX {
-            return Err(limit());
-        }
-        // SQLite and its server lock are represented by the canonical index in
-        // the parent's token, not their mutable database/journal byte layout.
-        if prefix.as_os_str().is_empty() && entry.name.starts_with(".workspace") {
-            continue;
-        }
-        let path = prefix.join(&entry.name);
-        let display = path.to_string_lossy().into_owned();
-        match entry.kind {
-            EntryKind::Directory => {
-                inventory["stateFacts"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(json!({"path":display,"kind":"directory"}));
-                manifest(
-                    &directory.child(&entry.name)?,
-                    &path,
-                    count,
-                    inventory,
-                    cached,
-                )?;
+    walk(
+        directory,
+        prefix,
+        WalkLimits::new(ENTRY_MAX),
+        limit,
+        |reported| {
+            *count += 1;
+            if *count > ENTRY_MAX {
+                return Err(limit());
             }
-            EntryKind::File => {
-                let mut file = directory.open_file(&entry.name)?;
-                let observation = Observation::of(&file)?;
-                if observation.byte_length > FILE_BYTES_MAX {
-                    return Err(limit());
+            // SQLite and its server lock are represented by the canonical index in
+            // the parent's token, not their mutable database/journal byte layout.
+            if reported.depth == 0 && reported.entry.name.starts_with(".workspace") {
+                return Ok(None);
+            }
+            let display = reported.path.to_string_lossy().into_owned();
+            match reported.entry.kind {
+                EntryKind::Directory => {
+                    inventory["stateFacts"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"path":display,"kind":"directory"}));
+                    Ok(Some(reported.directory.child(&reported.entry.name)?))
                 }
-                if let Some(evidence) = cached
-                    .get(&display)
-                    .filter(|e| e.observation == observation)
-                {
-                    observation.verify(&directory.open_file(&entry.name)?)?;
-                    inventory["stateFacts"].as_array_mut().unwrap().push(json!({"path":display,"kind":"file","byteLength":evidence.byte_length,"sha256":evidence.sha256,"observation":observation}));
-                    continue;
-                }
-                let mut hash = Sha256::new();
-                let mut bytes = 0u64;
-                let mut buffer = [0u8; 65536];
-                loop {
-                    let n = file.read(&mut buffer)?;
-                    if n == 0 {
-                        break;
+                EntryKind::File => {
+                    let mut file = reported.directory.open_file(&reported.entry.name)?;
+                    let observation = Observation::of(&file)?;
+                    if observation.byte_length > FILE_BYTES_MAX {
+                        return Err(limit());
                     }
-                    bytes = bytes
-                        .checked_add(n as u64)
-                        .filter(|n| *n <= FILE_BYTES_MAX)
-                        .ok_or_else(limit)?;
-                    hash.update(&buffer[..n]);
+                    if let Some(evidence) = cached
+                        .get(&display)
+                        .filter(|e| e.observation == observation)
+                    {
+                        observation.verify(&reported.directory.open_file(&reported.entry.name)?)?;
+                        inventory["stateFacts"].as_array_mut().unwrap().push(json!({"path":display,"kind":"file","byteLength":evidence.byte_length,"sha256":evidence.sha256,"observation":observation}));
+                        return Ok(None);
+                    }
+                    let mut hash = Sha256::new();
+                    let mut bytes = 0u64;
+                    let mut buffer = [0u8; 65536];
+                    loop {
+                        let n = file.read(&mut buffer)?;
+                        if n == 0 {
+                            break;
+                        }
+                        bytes = bytes
+                            .checked_add(n as u64)
+                            .filter(|n| *n <= FILE_BYTES_MAX)
+                            .ok_or_else(limit)?;
+                        hash.update(&buffer[..n]);
+                    }
+                    observation.verify(&file)?;
+                    if bytes != observation.byte_length {
+                        return Err(WorkspaceError::new(
+                            "workspace_changed",
+                            409,
+                            "File changed while reviewing workspace inventory",
+                        ));
+                    }
+                    observation.verify(&reported.directory.open_file(&reported.entry.name)?)?;
+                    inventory["stateFacts"].as_array_mut().unwrap().push(json!({"path":display,"kind":"file","byteLength":bytes,"sha256":format!("{:x}",hash.finalize()),"observation":observation}));
+                    Ok(None)
                 }
-                observation.verify(&file)?;
-                if bytes != observation.byte_length {
-                    return Err(WorkspaceError::new(
-                        "workspace_changed",
-                        409,
-                        "File changed while reviewing workspace inventory",
-                    ));
+                EntryKind::Symlink | EntryKind::Other => {
+                    inventory["stateFacts"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"path":display,"kind":"unsafe"}));
+                    inventory["unknown"].as_array_mut().unwrap().push(json!({"kind":"unverified-use","id":null,"name":display,"action":"Remove the symbolic link or special file through its owning tool before deletion"}));
+                    Ok(None)
                 }
-                observation.verify(&directory.open_file(&entry.name)?)?;
-                inventory["stateFacts"].as_array_mut().unwrap().push(json!({"path":display,"kind":"file","byteLength":bytes,"sha256":format!("{:x}",hash.finalize()),"observation":observation}));
             }
-            EntryKind::Symlink | EntryKind::Other => {
-                inventory["stateFacts"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(json!({"path":display,"kind":"unsafe"}));
-                inventory["unknown"].as_array_mut().unwrap().push(json!({"kind":"unverified-use","id":null,"name":display,"action":"Remove the symbolic link or special file through its owning tool before deletion"}));
-            }
-        }
-    }
-    Ok(())
+        },
+        |_| Ok(()),
+    )
 }
 
 fn discover(
