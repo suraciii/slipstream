@@ -6,7 +6,15 @@ use std::{os::unix::fs::MetadataExt, path::Path, time::Duration};
 
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 fn error(code: &str, message: impl Into<String>) -> ToolError {
-    ToolError::new(code, message, if code == "cursor_expired" { 6 } else { 2 })
+    let exit = if code == "cursor_expired" { 6 } else { 2 };
+    let error = ToolError::new(code, message, exit);
+    // Only the expired continuation discloses the route's cursor kind and the
+    // reason its retained page is gone; malformed cursors are invalid input.
+    if code == "cursor_expired" {
+        error.detail(json!({"cursorKind": "darktable", "reason": "idle_or_evicted"}))
+    } else {
+        error
+    }
 }
 fn io(e: impl std::fmt::Display) -> ToolError {
     ToolError::new("cursor_io", e.to_string(), 6)

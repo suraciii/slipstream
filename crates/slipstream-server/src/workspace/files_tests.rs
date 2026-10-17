@@ -607,3 +607,36 @@ fn publish_confines_completed_files_to_the_managed_directories() {
     }
     assert!(!fixture.root.join("escape.tif").exists());
 }
+
+#[test]
+fn an_expired_workspace_file_continuation_discloses_its_route_and_reason() {
+    let fixture = Fixture::new();
+    for index in 0..3 {
+        fixture.write(&format!("file-{index}.txt"), b"complete");
+    }
+    let first = fixture
+        .manager
+        .files(Some(&fixture.workspace.id), None, 1, None)
+        .unwrap();
+    let cursor = first["nextCursor"].as_str().unwrap().to_owned();
+    let continued = fixture
+        .manager
+        .files(None, None, 50, Some(&cursor))
+        .unwrap();
+    assert_eq!(continued["total"], 3);
+    assert!(continued["nextCursor"].is_string());
+
+    // A cursor whose retained query was evicted reports the workspace route
+    // and the eviction reason, never generic empty details.
+    let absent = fixture
+        .manager
+        .files(None, None, 50, Some("absent"))
+        .unwrap_err();
+    assert_eq!(absent.code, "cursor_expired");
+    assert_eq!(
+        absent.details,
+        json!({"cursorKind": "workspace", "reason": "idle_or_evicted"}),
+    );
+    assert_eq!(absent.status, 410);
+    assert_eq!(absent.effect, "none");
+}

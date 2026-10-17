@@ -51,6 +51,10 @@ impl ServiceError {
         self.value["error"]["effect"] = json!(effect);
         self
     }
+    pub(crate) fn detail(mut self, details: Value) -> Self {
+        self.value["error"]["details"] = details;
+        self
+    }
     pub(crate) fn tool(error: Value) -> Self {
         let status = match error["code"].as_str().unwrap_or("") {
             "not_found" => 404,

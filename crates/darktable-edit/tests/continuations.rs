@@ -57,6 +57,23 @@ fn catalog_cursor_continues_in_fresh_command_with_pinned_scope_and_records() {
         .unwrap();
     let expired = command(&root, &["presets", "list", "--cursor", token]);
     assert_eq!(expired["error"]["code"], "cursor_expired");
+    assert_eq!(
+        expired["error"]["details"],
+        json!({"cursorKind": "darktable", "reason": "idle_or_evicted"}),
+        "an expired darktable continuation discloses its route and reason"
+    );
+    // A well-formed token whose retained page is gone is an expired cursor
+    // carrying its route facts; a malformed one is invalid input.
+    let unknown = command(&root, &["presets", "list", "--cursor", "absent-cursor"]);
+    assert_eq!(unknown["error"]["code"], "cursor_expired");
+    assert_eq!(
+        unknown["error"]["details"],
+        json!({"cursorKind": "darktable", "reason": "idle_or_evicted"}),
+    );
+    assert_eq!(
+        command(&root, &["presets", "list", "--cursor", "!!"])["error"]["code"],
+        "invalid_input"
+    );
     drop(retained);
     drop(db);
     std::fs::remove_dir_all(root).unwrap();

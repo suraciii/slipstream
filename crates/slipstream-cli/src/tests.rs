@@ -1622,6 +1622,21 @@ fn recovery_failure_codes_validate_their_exact_details() {
             Operation::RecoveryUnavailable,
         ),
         ("mappings", "idle_or_evicted", Operation::RecoveryPropose),
+        ("folder", "publication_replaced", Operation::FoldersList),
+        ("album", "idle_or_evicted", Operation::AlbumsList),
+        ("photo", "process_restarted", Operation::PhotosList),
+        // The darktable and workspace routes report their own cursor kinds
+        // and the same expiry exit class as the review continuations.
+        (
+            "darktable",
+            "idle_or_evicted",
+            Operation::Darktable("darktable-edit-instances-list"),
+        ),
+        (
+            "workspace",
+            "idle_or_evicted",
+            Operation::Workspace("workspace-files"),
+        ),
     ] {
         let failure = mapped(
             "cursor_expired",
@@ -1629,8 +1644,81 @@ fn recovery_failure_codes_validate_their_exact_details() {
             operation,
         )
         .expect("an expired review continuation is confirmed");
-        assert_eq!(failure.exit_code, 6);
+        assert_eq!(failure.exit_code, 6, "for {kind}/{reason}");
     }
+
+    // Every declared cursor kind and reason is accepted, and a refusal that
+    // omits either required field is never a confirmed expiry.
+    for kind in [
+        "folder",
+        "album",
+        "photo",
+        "unavailable",
+        "mappings",
+        "workspace",
+        "darktable",
+    ] {
+        assert!(
+            mapped(
+                "cursor_expired",
+                json!({"cursorKind": kind, "reason": "idle_or_evicted"}),
+                Operation::Darktable("darktable-edit-instances-list"),
+            )
+            .is_some(),
+            "for {kind}"
+        );
+        assert!(
+            mapped(
+                "cursor_expired",
+                json!({"cursorKind": kind}),
+                Operation::Darktable("darktable-edit-instances-list"),
+            )
+            .is_none(),
+            "an expiry without a reason is not confirmed: {kind}"
+        );
+        assert!(
+            mapped(
+                "cursor_expired",
+                json!({"reason": "idle_or_evicted"}),
+                Operation::Darktable("darktable-edit-instances-list"),
+            )
+            .is_none(),
+            "an expiry without a cursor kind is not confirmed: {kind}"
+        );
+    }
+    for reason in [
+        "publication_replaced",
+        "process_restarted",
+        "idle_or_evicted",
+    ] {
+        assert!(
+            mapped(
+                "cursor_expired",
+                json!({"cursorKind": "darktable", "reason": reason}),
+                Operation::Darktable("darktable-edit-instances-list"),
+            )
+            .is_some(),
+            "for {reason}"
+        );
+        assert!(
+            mapped(
+                "cursor_expired",
+                json!({"cursorKind": "darktable", "reason": "unknown_reason"}),
+                Operation::Darktable("darktable-edit-instances-list"),
+            )
+            .is_none(),
+            "an undeclared reason is not confirmed"
+        );
+    }
+    assert!(
+        mapped(
+            "cursor_expired",
+            json!({}),
+            Operation::Darktable("darktable-edit-instances-list"),
+        )
+        .is_none(),
+        "generic empty details are not a confirmed expiry"
+    );
 
     for (details, operation, ok) in [
         (

@@ -214,6 +214,7 @@ impl WorkspaceManager {
                         410,
                         "The file query is unavailable; list the workspace again.",
                     )
+                    .detail(json!({"cursorKind": "workspace", "reason": "idle_or_evicted"}))
                 })?;
             let id = queries.scopes.get(&parsed.token).cloned().ok_or_else(|| {
                 WorkspaceError::new(
@@ -221,6 +222,7 @@ impl WorkspaceManager {
                     410,
                     "The file query expired; list the workspace again.",
                 )
+                .detail(json!({"cursorKind": "workspace", "reason": "idle_or_evicted"}))
             })?;
             let page = queries
                 .registry
@@ -238,6 +240,7 @@ impl WorkspaceManager {
                         410,
                         "The file query expired; list the workspace again.",
                     )
+                    .detail(json!({"cursorKind": "workspace", "reason": "idle_or_evicted"}))
                 })?;
             let next_offset = parsed.offset + page.ids.len();
             let next = (next_offset < page.total).then(|| {

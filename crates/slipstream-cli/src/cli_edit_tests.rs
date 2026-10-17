@@ -204,6 +204,52 @@ fn domain_refusals_preserve_conflicts_and_unknown_is_never_refusal() {
     );
 }
 
+/// The exact `cursor_expired` payload the darktable and workspace routes
+/// emit, as the CLI accepts it: the route's cursor kind with the reason its
+/// retained query is gone, exit 6 and effect `none`.
+#[test]
+fn expired_continuations_disclose_route_and_reason_for_darktable_and_workspace() {
+    for (operation, cursor_kind) in [
+        (
+            Operation::Darktable("darktable-edit-instances-list"),
+            "darktable",
+        ),
+        (Operation::Workspace("workspace-files"), "workspace"),
+    ] {
+        let failure = validated_route_failure(
+            ErrorPayload {
+                code: "cursor_expired".into(),
+                message: "Cursor expired after 15 minutes idle".into(),
+                effect: "none".into(),
+                details: json!({"cursorKind": cursor_kind, "reason": "idle_or_evicted"}),
+            },
+            operation,
+            "",
+        )
+        .unwrap_or_else(|| panic!("an expired {cursor_kind} continuation is confirmed"));
+        assert_eq!(failure.exit_code, 6, "for {cursor_kind}");
+        assert_eq!(failure.payload.effect, "none");
+        assert_eq!(failure.payload.details["cursorKind"], cursor_kind);
+        assert_eq!(failure.payload.details["reason"], "idle_or_evicted");
+
+        // Generic empty details are not a confirmed expiry on either route.
+        assert!(
+            validated_route_failure(
+                ErrorPayload {
+                    code: "cursor_expired".into(),
+                    message: "Cursor expired".into(),
+                    effect: "none".into(),
+                    details: json!({}),
+                },
+                operation,
+                "",
+            )
+            .is_none(),
+            "for {cursor_kind}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn dropped_mutation_reply_is_not_retried_or_reclassified() {
     use std::io::{Read, Write};
