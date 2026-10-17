@@ -78,7 +78,7 @@ impl ToolService {
             .ok_or_else(|| ServiceError::unknown("Workspace identity missing"))?;
         let directory = self.workspaces.directory(workspace_id)?;
         let states = directory
-            .create_directory(".edits")
+            .create_directory(crate::workspace::layout::EDITS)
             .and_then(|d| d.create_directory("darktable"))
             .map_err(ServiceError::io)?;
         let id = if let Some(record) = &prior {
@@ -121,10 +121,10 @@ impl ToolService {
         let input = input.get("input").unwrap_or(&input);
         let (guard, binding) = lease_selected_input(&self.workspaces, photo, workspace_id, input)?;
         let previews = directory
-            .create_directory("previews")
+            .create_directory(crate::workspace::layout::PREVIEWS)
             .map_err(ServiceError::io)?;
         let outputs = directory
-            .create_directory("outputs")
+            .create_directory(crate::workspace::layout::OUTPUTS)
             .map_err(ServiceError::io)?;
         args = json!({"inputPath":binding["path"],"previewDirectory":previews.path(),"outputDirectory":outputs.path()});
         atomic_json(

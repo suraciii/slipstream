@@ -198,11 +198,11 @@ fn discover(
     external: bool,
     inventory: &mut Value,
 ) -> Result<()> {
-    let edits = match directory.child(".edits") {
+    let edits = match directory.child(layout::EDITS) {
         Ok(edits) => edits,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
-            unknown(inventory, workspace, ".edits", external, error.to_string());
+            unknown(inventory, workspace, layout::EDITS, external, error.to_string());
             return Ok(());
         }
     };
@@ -218,7 +218,7 @@ fn discover(
             unknown(
                 inventory,
                 workspace,
-                &format!(".edits/{}", tool.name),
+                &format!("{}/{}", layout::EDITS, tool.name),
                 external,
                 "Unsupported private tool state".into(),
             );
@@ -230,7 +230,7 @@ fn discover(
             if count > ENTRY_MAX {
                 return Err(limit());
             }
-            let name = format!(".edits/{}/{}", tool.name, state.name);
+            let name = format!("{}/{}/{}", layout::EDITS, tool.name, state.name);
             if state.kind != EntryKind::Directory || !valid_id(&state.name) {
                 unknown(
                     inventory,

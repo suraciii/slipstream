@@ -3,6 +3,7 @@
 mod completed;
 mod dependencies;
 mod files;
+pub(crate) mod layout;
 mod preparation;
 #[cfg(test)]
 mod preparation_tests;

@@ -140,13 +140,9 @@ pub(super) fn reconcile(_manager: &WorkspaceManager, session: &mut WorkspaceSess
             Some(id) => id,
             None => {
                 let id = identity("artifact")?;
-                let kind = match Path::new(&path)
-                    .components()
-                    .next()
-                    .and_then(|c| c.as_os_str().to_str())
-                {
-                    Some("previews") => "preview",
-                    Some("outputs") => "output",
+                let kind = match layout::component(&path) {
+                    Some(layout::PREVIEWS) => "preview",
+                    Some(layout::OUTPUTS) => "output",
                     _ => "file",
                 };
                 session.db.execute("INSERT INTO files(id,path,kind,state,managed,removed) VALUES(?,?,?,'checking',0,0)",params![id,path,kind])?;
@@ -325,13 +321,7 @@ pub(super) fn publish(
             "Published output is outside the workspace",
         )
     })?;
-    if !matches!(
-        relative
-            .components()
-            .next()
-            .and_then(|c| c.as_os_str().to_str()),
-        Some("outputs" | "previews")
-    ) {
+    if !layout::in_completed_directory(relative.to_str().unwrap_or("")) {
         return Err(WorkspaceError::new(
             "invalid_input",
             400,
@@ -667,7 +657,7 @@ pub(super) fn admit(
         return Ok(admission(session, &target));
     }
     manager.reserve_storage(evidence.byte_length)?;
-    let input = session.directory.create_directory("input")?;
+    let input = session.directory.create_directory(layout::INPUT)?;
     let artifact = identity("artifact")?;
     let filename = Path::new(&row.path)
         .file_name()
@@ -693,7 +683,8 @@ pub(super) fn admit(
     }
     photo_files::image::inspect_image(pending.file_mut(), FILE_BYTES_MAX)?;
     let published = pending.publish(&name, FILE_BYTES_MAX)?;
-    let path = format!("input/{name}");
+    let path = layout::managed_file(layout::INPUT, &name)
+        .ok_or_else(|| WorkspaceError::new("invalid_input", 400, "Captured input name is unusable."))?;
     session.db.execute("INSERT INTO files(id,path,kind,state,evidence,contract,managed,provenance,removed,image_facts,revision) VALUES(?,?,'input','ready',?,?,1,?,0,?,?)",params![artifact,path,serde_json::to_string(&published)?,row.contract.as_ref().map(Value::to_string),row.provenance.as_ref().map(Value::to_string),row.facts.as_ref().map(Value::to_string),published.revision()])?;
     let result = admission(session, &record(session, &artifact)?);
     session.db.execute(

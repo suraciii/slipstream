@@ -325,7 +325,11 @@ impl ToolService {
                 return Err(ServiceError::unknown("Invalid workspace edit identity"));
             }
             let state = directory
-                .child(PathBuf::from(".edits/darktable").join(&id))
+                .child(
+                    PathBuf::from(crate::workspace::layout::EDITS)
+                        .join("darktable")
+                        .join(&id),
+                )
                 .map_err(ServiceError::io)?;
             if operation == "edit rebind" {
                 let input = object.remove("input").ok_or_else(|| {
@@ -362,7 +366,11 @@ impl ToolService {
                     ));
                 }
                 let selected = directory
-                    .child(PathBuf::from(".edits/darktable").join(id))
+                    .child(
+                        PathBuf::from(crate::workspace::layout::EDITS)
+                            .join("darktable")
+                            .join(id),
+                    )
                     .map_err(ServiceError::io)?;
                 comparison.insert("stateDirectory".into(), json!(selected.path()));
             }

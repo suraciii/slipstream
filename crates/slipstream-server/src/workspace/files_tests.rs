@@ -552,3 +552,58 @@ fn film_jpeg_writer_encoding_requires_qualified_srgb_bytes() {
     row.contract = None;
     assert!(!qualified_film_contract(&row, &provenance, &asserted));
 }
+
+#[test]
+fn publish_confines_completed_files_to_the_managed_directories() {
+    let fixture = Fixture::new();
+    fixture.write("notes.txt", b"generic");
+    let mut session = fixture
+        .manager
+        .locked(&fixture.workspace.id, LeaseMode::Shared)
+        .unwrap();
+    let root = session.directory.path().to_owned();
+    // Every path that strips inside the workspace but is outside the managed
+    // completed directories is refused by the layout confinement check before
+    // any index lookup happens.
+    for relative in [
+        format!("{}/render.tif", layout::INPUT),
+        format!("{}-outside.tif", layout::OUTPUTS),
+        format!("{}/{}", layout::EDITS, "darktable/render.tif"),
+        "notes.txt".to_owned(),
+        "".to_owned(),
+    ] {
+        let error = publish(
+            &fixture.manager,
+            &mut session,
+            &root.join(Path::new(&relative)),
+            &json!({"sha256":"0".repeat(64),"byteLength":0}),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_input", "{relative}");
+        assert_eq!(
+            error.message,
+            "Completed output must be published under outputs or previews",
+            "{relative}"
+        );
+    }
+    // A path in either managed directory passes the confinement check and is
+    // refused only by its absent index row, never by the layout check.
+    for relative in [
+        format!("{}/render.tif", layout::OUTPUTS),
+        format!("{}/render.png", layout::PREVIEWS),
+    ] {
+        let error = publish(
+            &fixture.manager,
+            &mut session,
+            &root.join(Path::new(&relative)),
+            &json!({"sha256":"0".repeat(64),"byteLength":0}),
+        )
+        .unwrap_err();
+        assert_ne!(
+            error.message,
+            "Completed output must be published under outputs or previews",
+            "{relative}"
+        );
+    }
+    assert!(!fixture.root.join("escape.tif").exists());
+}
