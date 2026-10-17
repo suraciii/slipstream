@@ -5,6 +5,7 @@ mod jobs;
 mod migration;
 mod process;
 mod proxy;
+mod receipts;
 mod restore;
 mod transfer;
 pub(crate) use restore::rebase_restored_host;
