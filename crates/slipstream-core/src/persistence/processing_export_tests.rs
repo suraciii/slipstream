@@ -575,7 +575,7 @@ async fn malformed_artifact_record_is_a_storage_error() {
         .unwrap()
         .execute(
             "UPDATE library_metadata SET value=? WHERE key=?",
-            params![
+            rusqlite::params![
                 serde_json::json!({"artifact_id": "artifact-a1"}).to_string(),
                 processing_artifact_key("artifact-a1")
             ],

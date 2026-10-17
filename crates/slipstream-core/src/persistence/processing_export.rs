@@ -47,7 +47,7 @@ use crate::processing::{
     ProcessingParameterSnapshot, ProcessingStepId, SubmitProcessingExport, validate_bounded_name,
 };
 use crate::processing::{ProcessingExportList, ReplayProcessingExport, RetryProcessingExport};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -325,14 +325,11 @@ pub(super) fn read_processing_artifact(
     connection: &Connection,
     artifact_id: &str,
 ) -> Result<Option<ProcessingArtifact>, PersistenceError> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [processing_artifact_key(artifact_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
+    let value = super::metadata_store::read_value(
+        connection,
+        &processing_artifact_key(artifact_id),
+        |_| PersistenceError::Storage,
+    )?;
     value
         .map(|value| {
             parse_stored_value::<ProcessingArtifactRecord>(&value).and_then(parse_artifact_record)

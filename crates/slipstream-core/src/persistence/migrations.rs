@@ -77,14 +77,10 @@ pub(super) fn validate_root_binding(
     canonical_root: &str,
 ) -> Result<(), PersistenceError> {
     if table_exists(connection, "library_metadata")? {
-        let stored: Option<String> = connection
-            .query_row(
-                "SELECT value FROM library_metadata WHERE key='canonical_root'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|_| PersistenceError::Storage)?;
+        let stored: Option<String> =
+            super::metadata_store::read_value(connection, "canonical_root", |_| {
+                PersistenceError::Storage
+            })?;
         if stored
             .as_deref()
             .is_some_and(|stored| stored != canonical_root)
@@ -205,30 +201,19 @@ pub(super) fn startup_schema(
     if version < 15 {
         migrations_v14::migrate_v14(&transaction)?;
     }
-    let stored: Option<String> = transaction
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key='canonical_root'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
+    let stored: Option<String> =
+        super::metadata_store::read_value(&transaction, "canonical_root", |_| {
+            PersistenceError::Storage
+        })?;
     if stored.is_none() {
-        transaction
-            .execute(
-                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
-                [canonical_root],
-            )
-            .map_err(|_| PersistenceError::Storage)?;
+        super::metadata_store::insert_only(&transaction, "canonical_root", canonical_root, |_| {
+            PersistenceError::Storage
+        })?;
     }
-    let recorded_decoder: Option<String> = transaction
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key='raw_preview_decoder'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
+    let recorded_decoder: Option<String> =
+        super::metadata_store::read_value(&transaction, "raw_preview_decoder", |_| {
+            PersistenceError::Storage
+        })?;
     if recorded_decoder.as_deref() != Some(RAW_PREVIEW_DECODER_REVISION) {
         // Only active Photos whose own Original is RAW return to inspection.
         // Missing (available=0, including removed) Photos keep their state —
@@ -246,13 +231,12 @@ pub(super) fn startup_schema(
                 [],
             )
             .map_err(|_| PersistenceError::Storage)?;
-        transaction
-            .execute(
-                "INSERT INTO library_metadata(key,value) VALUES('raw_preview_decoder',?)
-                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                [RAW_PREVIEW_DECODER_REVISION],
-            )
-            .map_err(|_| PersistenceError::Storage)?;
+        super::metadata_store::upsert(
+            &transaction,
+            "raw_preview_decoder",
+            RAW_PREVIEW_DECODER_REVISION,
+            |_| PersistenceError::Storage,
+        )?;
     }
     super::composable_recipe::migrate_legacy_recipes(&transaction)?;
     validate_database(&transaction)?;

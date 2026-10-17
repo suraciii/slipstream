@@ -2432,17 +2432,11 @@ pub(super) const PERMANENT_DELETION_DELETED_ORIGINAL_PREFIX: &str =
 pub(super) fn permanently_deleted_original_ids(
     connection: &Connection,
 ) -> Result<Vec<String>, PersistenceError> {
-    let mut statement = connection
-        .prepare("SELECT key FROM library_metadata WHERE key LIKE ? ORDER BY key")
-        .map_err(|_| PersistenceError::Storage)?;
-    let keys = statement
-        .query_map(
-            [format!("{PERMANENT_DELETION_DELETED_ORIGINAL_PREFIX}%")],
-            |row| row.get::<_, String>(0),
-        )
-        .map_err(|_| PersistenceError::Storage)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| PersistenceError::Storage)?;
+    let keys = super::metadata_store::scan_keys(
+        connection,
+        PERMANENT_DELETION_DELETED_ORIGINAL_PREFIX,
+        |_| PersistenceError::Storage,
+    )?;
     Ok(keys
         .into_iter()
         .filter_map(|key| {

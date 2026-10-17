@@ -205,14 +205,11 @@ fn read_edit_recipe_receipt(
     connection: &Connection,
     request_id: &str,
 ) -> Result<Option<EditRecipeReceipt>, PersistenceError> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [edit_recipe_receipt_key(request_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
+    let value = super::metadata_store::read_value(
+        connection,
+        &edit_recipe_receipt_key(request_id),
+        |_| PersistenceError::Storage,
+    )?;
     value
         .map(|value| serde_json::from_str(&value).map_err(|_| PersistenceError::Storage))
         .transpose()
@@ -224,14 +221,12 @@ fn write_edit_recipe_receipt(
     receipt: &EditRecipeReceipt,
 ) -> Result<(), PersistenceError> {
     let value = serde_json::to_string(receipt).map_err(|_| PersistenceError::Storage)?;
-    transaction
-        .execute(
-            "INSERT INTO library_metadata(key,value) VALUES(?,?)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![edit_recipe_receipt_key(request_id), value],
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    Ok(())
+    super::metadata_store::upsert(
+        transaction,
+        &edit_recipe_receipt_key(request_id),
+        &value,
+        |_| PersistenceError::Storage,
+    )
 }
 
 fn receipt_recipe(receipt: EditRecipeReceipt) -> Result<EditRecipe, PersistenceError> {

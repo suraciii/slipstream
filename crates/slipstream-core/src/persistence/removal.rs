@@ -115,14 +115,11 @@ const REMOVAL_MARKER_HIGH_WATER: &str = "removal_marker_high_water";
 /// mark is durable, so it also holds across restarts and rescan deletions that
 /// leave no removed row behind to read a maximum from.
 fn next_removal_marker(transaction: &Transaction<'_>) -> Result<i64, MutationError> {
-    let stored: Option<String> = transaction
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [REMOVAL_MARKER_HIGH_WATER],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(mutation_error_from_sqlite)?;
+    let stored: Option<String> = super::metadata_store::read_value(
+        transaction,
+        REMOVAL_MARKER_HIGH_WATER,
+        mutation_error_from_sqlite,
+    )?;
     let high_water = match stored.and_then(|value| value.parse::<i64>().ok()) {
         Some(value) => value,
         // A Library written before this high water mark existed has no row to
@@ -136,13 +133,12 @@ fn next_removal_marker(transaction: &Transaction<'_>) -> Result<i64, MutationErr
             .unwrap_or(0),
     };
     let marker = unix_millis().max(high_water.saturating_add(1));
-    transaction
-        .execute(
-            "INSERT INTO library_metadata(key,value) VALUES(?,?)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![REMOVAL_MARKER_HIGH_WATER, marker.to_string()],
-        )
-        .map_err(mutation_error_from_sqlite)?;
+    super::metadata_store::upsert(
+        transaction,
+        REMOVAL_MARKER_HIGH_WATER,
+        &marker.to_string(),
+        mutation_error_from_sqlite,
+    )?;
     Ok(marker)
 }
 /// The largest number of Photo identities one removal or restore statement
@@ -157,14 +153,11 @@ pub(super) fn read_photo_removal_operation(
     connection: &Connection,
     operation_id: &str,
 ) -> Result<Option<PhotoRemovalReceipt>, MutationError> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [photo_removal_receipt_key(operation_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(mutation_error_from_sqlite)?;
+    let value = super::metadata_store::read_value(
+        connection,
+        &photo_removal_receipt_key(operation_id),
+        mutation_error_from_sqlite,
+    )?;
     value
         .map(|value| serde_json::from_str(&value).map_err(|_| MutationError::Persistence))
         .transpose()
@@ -174,14 +167,11 @@ fn read_photo_removal_receipt(
     transaction: &Transaction<'_>,
     operation_id: &str,
 ) -> Result<Option<PhotoRemovalReceipt>, MutationError> {
-    let value = transaction
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [photo_removal_receipt_key(operation_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(mutation_error_from_sqlite)?;
+    let value = super::metadata_store::read_value(
+        transaction,
+        &photo_removal_receipt_key(operation_id),
+        mutation_error_from_sqlite,
+    )?;
     value
         .map(|value| serde_json::from_str(&value).map_err(|_| MutationError::Persistence))
         .transpose()
@@ -193,14 +183,12 @@ fn write_photo_removal_receipt(
     receipt: &PhotoRemovalReceipt,
 ) -> Result<(), MutationError> {
     let value = serde_json::to_string(receipt).map_err(|_| MutationError::Persistence)?;
-    transaction
-        .execute(
-            "INSERT INTO library_metadata(key,value) VALUES(?,?)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![photo_removal_receipt_key(operation_id), value],
-        )
-        .map_err(mutation_error_from_sqlite)?;
-    Ok(())
+    super::metadata_store::upsert(
+        transaction,
+        &photo_removal_receipt_key(operation_id),
+        &value,
+        mutation_error_from_sqlite,
+    )
 }
 
 pub(super) fn photo_removal_result_from_receipt(
@@ -488,14 +476,11 @@ pub(super) fn read_photo_restore_operation(
     connection: &Connection,
     operation_id: &str,
 ) -> Result<Option<PhotoRestoreReceipt>, MutationError> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [photo_restore_receipt_key(operation_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(mutation_error_from_sqlite)?;
+    let value = super::metadata_store::read_value(
+        connection,
+        &photo_restore_receipt_key(operation_id),
+        mutation_error_from_sqlite,
+    )?;
     value
         .map(|value| serde_json::from_str(&value).map_err(|_| MutationError::Persistence))
         .transpose()
@@ -507,14 +492,12 @@ fn write_photo_restore_receipt(
     receipt: &PhotoRestoreReceipt,
 ) -> Result<(), MutationError> {
     let value = serde_json::to_string(receipt).map_err(|_| MutationError::Persistence)?;
-    transaction
-        .execute(
-            "INSERT INTO library_metadata(key,value) VALUES(?,?)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![photo_restore_receipt_key(operation_id), value],
-        )
-        .map_err(mutation_error_from_sqlite)?;
-    Ok(())
+    super::metadata_store::upsert(
+        transaction,
+        &photo_restore_receipt_key(operation_id),
+        &value,
+        mutation_error_from_sqlite,
+    )
 }
 
 pub(super) fn photo_restore_result_from_receipt(

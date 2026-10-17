@@ -9,6 +9,7 @@ mod edit_recipe;
 mod expansion;
 mod export;
 mod metadata;
+mod metadata_store;
 mod migrations;
 mod mutation;
 mod owner;

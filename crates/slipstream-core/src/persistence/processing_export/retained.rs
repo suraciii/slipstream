@@ -379,14 +379,11 @@ pub(in crate::persistence) fn replay_processing_export_retry(
         }
         return Ok(None);
     };
-    let value: Option<String> = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [format!("processing_export_retry:{request_id}")],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
+    let value = crate::persistence::metadata_store::read_value(
+        connection,
+        &format!("processing_export_retry:{request_id}"),
+        |_| PersistenceError::Storage,
+    )?;
     let Some(value) = value else {
         return Ok(Some(ProcessingExportSubmitOutcome::RequestConflict));
     };
