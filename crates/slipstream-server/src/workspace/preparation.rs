@@ -172,7 +172,7 @@ impl WorkspaceManager {
                 }
             }
         }
-        let input = session.directory.create_directory("input")?;
+        let input = session.directory.create_directory(layout::INPUT)?;
         let (id, path) = match prior {
             Some((_, path, id, _)) => (id, path),
             None => {
@@ -196,7 +196,13 @@ impl WorkspaceManager {
                 } else {
                     versioned_name(original_name, &id)
                 };
-                let path = format!("input/{filename}");
+                let path = layout::managed_file(layout::INPUT, &filename).ok_or_else(|| {
+                    WorkspaceError::new(
+                        "source_unavailable",
+                        409,
+                        "The Original filename cannot be represented.",
+                    )
+                })?;
                 session.db.execute("INSERT INTO preparations(request_id,intent,path,artifact_id,source_revision) VALUES(?1,?2,?3,?4,?5)",params![request,encode(&intent)?,path,id,expected_source])?;
                 (id, path)
             }

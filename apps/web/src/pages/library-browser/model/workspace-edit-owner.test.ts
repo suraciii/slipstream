@@ -211,6 +211,35 @@ test("guarded focused save preserves unexposed state and keeps conflict draft", 
   expect(owner.model.error).toBeInstanceOf(WorkspaceApiError);
   owner.dispose();
 });
+
+test("confirmed save conflict stays recoverable instead of becoming uncertain", async () => {
+  const { owner } = harness(() =>
+    Promise.resolve(
+      Response.json(
+        {
+          error: {
+            code: "state_conflict",
+            message: "Another writer saved",
+            effect: "none",
+            details: {},
+          },
+        },
+        { status: 409 },
+      ),
+    ),
+  );
+  await owner.refresh();
+  await owner.act("change", {
+    change: { type: "set", instanceId: "i", parameterId: "scalar", value: 4 },
+  });
+  await owner.settle();
+  expect(owner.model.uncertain).toBeUndefined();
+  expect(owner.model.blocked).toBe(true);
+  await owner.act("inspect-current");
+  expect(owner.model.conflictInspected).toBe(true);
+  await owner.act("reapply");
+  owner.dispose();
+});
 test("uncertain save replays exactly original request identity and payload", async () => {
   let attempts = 0;
   const { owner, bodies } = harness(() => {

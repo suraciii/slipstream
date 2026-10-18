@@ -1,5 +1,4 @@
-use super::{Result, ServiceError, ToolService, acquire_processing_admission, attach, process};
-use photo_files::{LeaseMode, atomic_json, read_json};
+use super::{Result, ServiceError, ToolService, attach, process, receipts};
 use serde_json::{Value, json};
 use std::{sync::atomic::AtomicBool, time::Duration};
 impl ToolService {
@@ -42,35 +41,15 @@ impl ToolService {
             }
         }
         let payload = args.clone();
-        let request = args["requestId"]
-            .as_str()
-            .map(str::to_owned)
-            .unwrap_or(photo_files::identity("request").map_err(ServiceError::io)?);
-        let receipts = self
-            .root
-            .create_directory("edit-requests")
-            .and_then(|d| d.create_directory(photo))
-            .map_err(ServiceError::io)?;
-        let _lease = receipts
-            .lease(LeaseMode::Exclusive, Duration::from_secs(120))
-            .map_err(ServiceError::io)?;
-        let name = format!("{request}.json");
-        let prior = match receipts.open_file(&name) {
-            Ok(f) => Some(read_json(f, 1024 * 1024).map_err(ServiceError::io)?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(ServiceError::io(e)),
-        };
-        if let Some(record) = &prior {
-            if record["payload"] != payload {
-                return Err(ServiceError::new(
-                    "request_conflict",
-                    "Create request has different intent",
-                    409,
-                ));
-            }
-            if let Some(result) = record.get("result") {
-                return Ok((201, result.clone()));
-            }
+        let request = receipts::request_identity(&args)?;
+        let receipt = receipts::Receipt::open(&self.root, "edit-requests", photo, &request)?;
+        let prior = receipt.retained(&payload, "Create request has different intent")?;
+        if let Some(result) = prior
+            .as_ref()
+            .and_then(|record| record.get("result"))
+            .cloned()
+        {
+            return Ok((201, result));
         }
         let workspace = self.workspaces.open_photo(photo)?;
         let workspace_id = workspace["workspaceId"]
@@ -78,7 +57,7 @@ impl ToolService {
             .ok_or_else(|| ServiceError::unknown("Workspace identity missing"))?;
         let directory = self.workspaces.directory(workspace_id)?;
         let states = directory
-            .create_directory(".edits")
+            .create_directory(crate::workspace::layout::EDITS)
             .and_then(|d| d.create_directory("darktable"))
             .map_err(ServiceError::io)?;
         let id = if let Some(record) = &prior {
@@ -95,12 +74,7 @@ impl ToolService {
                 Ok(_) => {
                     let mut result = process::inspect_state(&state_path)?;
                     attach(&mut result, photo, workspace_id, &id);
-                    atomic_json(
-                        &receipts,
-                        &name,
-                        &json!({"payload":payload,"editId":id,"result":result}),
-                    )
-                    .map_err(ServiceError::io)?;
+                    receipt.publish(&json!({"payload":payload,"editId":id,"result":result}))?;
                     return Ok((201, result));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
@@ -121,20 +95,16 @@ impl ToolService {
         let input = input.get("input").unwrap_or(&input);
         let (guard, binding) = lease_selected_input(&self.workspaces, photo, workspace_id, input)?;
         let previews = directory
-            .create_directory("previews")
+            .create_directory(crate::workspace::layout::PREVIEWS)
             .map_err(ServiceError::io)?;
         let outputs = directory
-            .create_directory("outputs")
+            .create_directory(crate::workspace::layout::OUTPUTS)
             .map_err(ServiceError::io)?;
         args = json!({"inputPath":binding["path"],"previewDirectory":previews.path(),"outputDirectory":outputs.path()});
-        atomic_json(
-            &receipts,
-            &name,
-            &json!({"payload":payload,"editId":id,"input":{"artifactId":binding["artifactId"],"revision":binding["revision"]}}),
-        )
-        .map_err(ServiceError::io)?;
-        let _admission = acquire_processing_admission(self.root.path().parent().unwrap())
-            .map_err(ServiceError::io)?;
+        receipt.publish(&json!({"payload":payload,"editId":id,"input":{"artifactId":binding["artifactId"],"revision":binding["revision"]}}))?;
+        let _admission =
+            super::processing_admission::acquire_blocking(self.root.path().parent().unwrap())
+                .map_err(ServiceError::io)?;
         let mut result = process::invoke(
             Some(&state_path),
             "open",
@@ -143,12 +113,7 @@ impl ToolService {
             Duration::from_secs(120),
         )?;
         attach(&mut result, photo, workspace_id, &id);
-        atomic_json(
-            &receipts,
-            &name,
-            &json!({"payload":payload,"editId":id,"result":result}),
-        )
-        .map_err(ServiceError::io)?;
+        receipt.publish(&json!({"payload":payload,"editId":id,"result":result}))?;
         drop(guard);
         Ok((201, result))
     }

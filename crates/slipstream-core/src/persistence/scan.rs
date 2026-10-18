@@ -710,15 +710,10 @@ pub(super) fn snapshot(connection: &Connection) -> Result<ScanSnapshot, Persiste
         .map_err(|_| PersistenceError::Storage)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| PersistenceError::Storage)?;
-    let published = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key='published_once'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?
-        .is_some_and(|value| value == "1");
+    let published = super::metadata_store::read_value(connection, "published_once", |_| {
+        PersistenceError::Storage
+    })?
+    .is_some_and(|value| value == "1");
     Ok(ScanSnapshot {
         published,
         originals,
@@ -1393,13 +1388,9 @@ pub(super) fn apply_scan(
                 return Err(PersistenceError::InvalidRecovery);
             }
         }
-        transaction
-            .execute(
-                "INSERT INTO library_metadata(key,value) VALUES('published_once','1')
-                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                [],
-            )
-            .map_err(|_| PersistenceError::Storage)?;
+        super::metadata_store::upsert(transaction, "published_once", "1", |_| {
+            PersistenceError::Storage
+        })?;
         Ok(())
     })?;
     let mut result = snapshot(connection)?;

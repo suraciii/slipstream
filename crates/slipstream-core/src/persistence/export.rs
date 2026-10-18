@@ -70,12 +70,12 @@ pub(super) fn claim_export_publication(
         "incarnation": incarnation,
         "sequence": sequence,
     });
-    transaction
-        .execute(
-            "INSERT OR REPLACE INTO library_metadata(key,value) VALUES(?1,?2)",
-            params![export_publication_claim_key(export_id), claim.to_string()],
-        )
-        .map_err(|_| PersistenceError::Storage)?;
+    super::metadata_store::upsert(
+        &transaction,
+        &export_publication_claim_key(export_id),
+        &claim.to_string(),
+        |_| PersistenceError::Storage,
+    )?;
     transaction
         .commit()
         .map_err(|_| PersistenceError::Storage)?;
@@ -88,15 +88,13 @@ pub(super) fn export_publication_claim(
     connection: &Connection,
     export_id: &str,
 ) -> Option<(String, u64)> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [export_publication_claim_key(export_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .ok()
-        .flatten()?;
+    let value = super::metadata_store::read_value(
+        connection,
+        &export_publication_claim_key(export_id),
+        |_| (),
+    )
+    .ok()
+    .flatten()?;
     let claim: ExportPublicationClaimRow = serde_json::from_str(&value).ok()?;
     Some((claim.incarnation, claim.sequence))
 }
@@ -121,15 +119,9 @@ fn read_export_expiry_tombstone(
     transaction: &Transaction<'_>,
     export_id: &str,
 ) -> Result<bool, PersistenceError> {
-    transaction
-        .query_row(
-            "SELECT 1 FROM library_metadata WHERE key=?",
-            [export_expiry_tombstone_key(export_id)],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
-        .map(|found| found.is_some())
-        .map_err(|_| PersistenceError::Storage)
+    super::metadata_store::exists(transaction, &export_expiry_tombstone_key(export_id), |_| {
+        PersistenceError::Storage
+    })
 }
 
 fn read_export_receipt(
@@ -137,14 +129,11 @@ fn read_export_receipt(
     photo_id: &str,
     request_id: &str,
 ) -> Result<Option<ExportReceipt>, PersistenceError> {
-    let value = transaction
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [export_receipt_key(photo_id, request_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
+    let value = super::metadata_store::read_value(
+        transaction,
+        &export_receipt_key(photo_id, request_id),
+        |_| PersistenceError::Storage,
+    )?;
     value
         .map(|value| serde_json::from_str(&value).map_err(|_| PersistenceError::Storage))
         .transpose()
@@ -157,14 +146,12 @@ fn write_export_receipt(
     receipt: &ExportReceipt,
 ) -> Result<(), PersistenceError> {
     let value = serde_json::to_string(receipt).map_err(|_| PersistenceError::Storage)?;
-    transaction
-        .execute(
-            "INSERT INTO library_metadata(key,value) VALUES(?,?)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![export_receipt_key(photo_id, request_id), value],
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    Ok(())
+    super::metadata_store::upsert(
+        transaction,
+        &export_receipt_key(photo_id, request_id),
+        &value,
+        |_| PersistenceError::Storage,
+    )
 }
 
 struct ExportRow {
@@ -558,15 +545,13 @@ pub(super) fn resolve_export_submission(
     request_id: &str,
     payload_digest: &str,
 ) -> Option<ExportSubmissionResolution> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [export_receipt_key(photo_id, request_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .ok()
-        .flatten()?;
+    let value = super::metadata_store::read_value(
+        connection,
+        &export_receipt_key(photo_id, request_id),
+        |_| (),
+    )
+    .ok()
+    .flatten()?;
     let receipt: ExportReceipt = serde_json::from_str(&value).ok()?;
     if receipt.payload_digest != payload_digest {
         return Some(ExportSubmissionResolution::Conflict);
@@ -954,12 +939,12 @@ pub(super) fn sweep_export_expiry(
                 .map_err(|_| PersistenceError::Storage)?;
             // The identity stays expired forever: it can never start new
             // work and retry keeps reporting the explicit expired outcome.
-            transaction
-                .execute(
-                    "INSERT OR REPLACE INTO library_metadata(key,value) VALUES(?1,?2)",
-                    params![export_expiry_tombstone_key(&export_id), "expired"],
-                )
-                .map_err(|_| PersistenceError::Storage)?;
+            super::metadata_store::upsert(
+                transaction,
+                &export_expiry_tombstone_key(&export_id),
+                "expired",
+                |_| PersistenceError::Storage,
+            )?;
             result.record_expiry_ids.push(export_id);
         }
         Ok(result)

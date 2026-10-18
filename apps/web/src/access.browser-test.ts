@@ -240,6 +240,7 @@ test("wrong Origin is disclosed without rewriting the browser address", async ({
     root: join(base, "originals"),
     transport: "http",
     publicOrigin: "http://127.0.0.1:1",
+    accessOrigins: ["http://127.0.0.1:1"],
   });
   const address = server.url;
   await page.goto(address);

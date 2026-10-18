@@ -46,6 +46,10 @@ pub(super) fn processing_artifact_key(artifact_id: &str) -> String {
     format!("{PROCESSING_ARTIFACT_PREFIX}{artifact_id}")
 }
 
+pub(super) fn processing_workspace_artifact_key(artifact_id: &str) -> String {
+    format!("{PROCESSING_WORKSPACE_ARTIFACT_PREFIX}{artifact_id}")
+}
+
 pub(super) fn processing_export_refusal_key(request_id: &str) -> String {
     format!("{PROCESSING_EXPORT_REFUSAL_PREFIX}{request_id}")
 }
@@ -56,6 +60,10 @@ pub(super) fn processing_export_acceptance_key(request_id: &str) -> String {
 
 pub(super) fn processing_export_work_key(request_id: &str) -> String {
     format!("{PROCESSING_EXPORT_WORK_PREFIX}{request_id}")
+}
+
+pub(super) fn processing_export_retry_key(request_id: &str) -> String {
+    format!("{PROCESSING_EXPORT_RETRY_PREFIX}{request_id}")
 }
 
 pub(super) fn processing_artifact_retention_key(artifact_id: &str) -> String {
@@ -77,14 +85,11 @@ pub(super) fn processing_export_expired(
     connection: &Connection,
     request_id: &str,
 ) -> Result<bool, PersistenceError> {
-    let stored = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [processing_export_expired_key(request_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
+    let stored = crate::persistence::metadata_store::read_value(
+        connection,
+        &processing_export_expired_key(request_id),
+        |_| PersistenceError::Storage,
+    )?;
     match stored {
         Some(value) if value == request_id => Ok(true),
         Some(_) => Err(PersistenceError::Storage),
@@ -99,14 +104,11 @@ pub(super) fn read_processing_export_work_record(
     connection: &Connection,
     request_id: &str,
 ) -> Result<Option<ProcessingExportWorkRecord>, PersistenceError> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [processing_export_work_key(request_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
+    let value = crate::persistence::metadata_store::read_value(
+        connection,
+        &processing_export_work_key(request_id),
+        |_| PersistenceError::Storage,
+    )?;
     value
         .map(|value| {
             let record: ProcessingExportWorkRecord = parse_stored_value(&value)?;
@@ -126,14 +128,11 @@ pub(super) fn read_processing_artifact_retention_record(
     connection: &Connection,
     artifact_id: &str,
 ) -> Result<Option<ProcessingArtifactRetentionRecord>, PersistenceError> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [processing_artifact_retention_key(artifact_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
+    let value = crate::persistence::metadata_store::read_value(
+        connection,
+        &processing_artifact_retention_key(artifact_id),
+        |_| PersistenceError::Storage,
+    )?;
     value
         .map(|value| {
             let record: ProcessingArtifactRetentionRecord = parse_stored_value(&value)?;
@@ -158,14 +157,11 @@ pub(super) fn read_processing_artifact_lease_record(
     connection: &Connection,
     lease_id: &str,
 ) -> Result<Option<ProcessingArtifactLeaseRecord>, PersistenceError> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [processing_artifact_lease_key(lease_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
+    let value = crate::persistence::metadata_store::read_value(
+        connection,
+        &processing_artifact_lease_key(lease_id),
+        |_| PersistenceError::Storage,
+    )?;
     value
         .map(|value| {
             let record: ProcessingArtifactLeaseRecord = parse_stored_value(&value)?;
@@ -254,16 +250,9 @@ pub(super) fn scan_metadata_records(
     connection: &Connection,
     prefix: &str,
 ) -> Result<Vec<(String, String)>, PersistenceError> {
-    let mut statement = connection
-        .prepare("SELECT key,value FROM library_metadata WHERE key LIKE ? ORDER BY key")
-        .map_err(|_| PersistenceError::Storage)?;
-    statement
-        .query_map([format!("{prefix}%")], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|_| PersistenceError::Storage)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| PersistenceError::Storage)
+    crate::persistence::metadata_store::scan_records(connection, prefix, |_| {
+        PersistenceError::Storage
+    })
 }
 
 /// The number of live — accepted or executing — composable Export work
@@ -308,14 +297,11 @@ pub(super) fn read_processing_acceptance_record(
     connection: &Connection,
     request_id: &str,
 ) -> Result<Option<ProcessingExportAcceptanceRecord>, PersistenceError> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [processing_export_acceptance_key(request_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
+    let value = crate::persistence::metadata_store::read_value(
+        connection,
+        &processing_export_acceptance_key(request_id),
+        |_| PersistenceError::Storage,
+    )?;
     value
         .map(|value| {
             let record: ProcessingExportAcceptanceRecord =
@@ -342,14 +328,11 @@ pub(super) fn read_processing_refusal_record(
     connection: &Connection,
     request_id: &str,
 ) -> Result<Option<ProcessingExportRefusalRecord>, PersistenceError> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [processing_export_refusal_key(request_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
+    let value = crate::persistence::metadata_store::read_value(
+        connection,
+        &processing_export_refusal_key(request_id),
+        |_| PersistenceError::Storage,
+    )?;
     value
         .map(|value| {
             let record: ProcessingExportRefusalRecord =
@@ -369,24 +352,16 @@ pub(super) fn write_metadata_value(
     key: &str,
     value: &str,
 ) -> Result<(), PersistenceError> {
-    transaction
-        .execute(
-            "INSERT INTO library_metadata(key,value) VALUES(?,?)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![key, value],
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    Ok(())
+    crate::persistence::metadata_store::upsert(transaction, key, value, |_| {
+        PersistenceError::Storage
+    })
 }
 
 pub(super) fn delete_metadata_value(
     transaction: &Transaction<'_>,
     key: &str,
 ) -> Result<(), PersistenceError> {
-    transaction
-        .execute("DELETE FROM library_metadata WHERE key=?", [key])
-        .map_err(|_| PersistenceError::Storage)?;
-    Ok(())
+    crate::persistence::metadata_store::delete(transaction, key, |_| PersistenceError::Storage)
 }
 
 /// Serializes one record within the metadata value bound. A value past the

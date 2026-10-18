@@ -74,15 +74,15 @@ impl ToolService {
         let directory = self.workspaces.directory(workspace_id)?;
         let id = format!("migration-{request_id}");
         let states = directory
-            .create_directory(".edits")
+            .create_directory(crate::workspace::layout::EDITS)
             .and_then(|d| d.create_directory("darktable"))
             .map_err(ServiceError::io)?;
         let state_path = states.path().join(&id);
         let previews = directory
-            .create_directory("previews")
+            .create_directory(crate::workspace::layout::PREVIEWS)
             .map_err(ServiceError::io)?;
         let outputs = directory
-            .create_directory("outputs")
+            .create_directory(crate::workspace::layout::OUTPUTS)
             .map_err(ServiceError::io)?;
         let mut args = json!({"inputPath":binding["path"],"legacy":legacy,"reviewed":reviewed,"confirm":true,"requestId":request_id,"previewDirectory":previews.path(),"outputDirectory":outputs.path()});
         if let Some(token) = if_state {

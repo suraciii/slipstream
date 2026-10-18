@@ -4,7 +4,9 @@ mod files;
 mod jobs;
 mod migration;
 mod process;
+pub(crate) mod processing_admission;
 mod proxy;
+mod receipts;
 mod restore;
 mod transfer;
 pub(crate) use restore::rebase_restored_host;
@@ -48,6 +50,10 @@ impl ServiceError {
     }
     pub(crate) fn effect(mut self, effect: &str) -> Self {
         self.value["error"]["effect"] = json!(effect);
+        self
+    }
+    pub(crate) fn detail(mut self, details: Value) -> Self {
+        self.value["error"]["details"] = details;
         self
     }
     pub(crate) fn tool(error: Value) -> Self {
@@ -325,7 +331,11 @@ impl ToolService {
                 return Err(ServiceError::unknown("Invalid workspace edit identity"));
             }
             let state = directory
-                .child(PathBuf::from(".edits/darktable").join(&id))
+                .child(
+                    PathBuf::from(crate::workspace::layout::EDITS)
+                        .join("darktable")
+                        .join(&id),
+                )
                 .map_err(ServiceError::io)?;
             if operation == "edit rebind" {
                 let input = object.remove("input").ok_or_else(|| {
@@ -362,7 +372,11 @@ impl ToolService {
                     ));
                 }
                 let selected = directory
-                    .child(PathBuf::from(".edits/darktable").join(id))
+                    .child(
+                        PathBuf::from(crate::workspace::layout::EDITS)
+                            .join("darktable")
+                            .join(id),
+                    )
                     .map_err(ServiceError::io)?;
                 comparison.insert("stateDirectory".into(), json!(selected.path()));
             }
@@ -402,7 +416,7 @@ impl ToolService {
         }
         let _admission = if operation == "edit actions run" {
             Some(
-                acquire_processing_admission(self.root.path().parent().unwrap())
+                processing_admission::acquire_blocking(self.root.path().parent().unwrap())
                     .map_err(ServiceError::io)?,
             )
         } else {
@@ -465,13 +479,6 @@ fn is_global(operation: &str) -> bool {
             | "styles export"
             | "styles remove"
     )
-}
-pub(crate) fn acquire_processing_admission(
-    state_directory: &Path,
-) -> std::result::Result<photo_files::FileLease, String> {
-    Directory::create(state_directory.join(".processing-admission"))
-        .and_then(|d| d.lease(photo_files::LeaseMode::Exclusive, Duration::from_secs(900)))
-        .map_err(|e| e.to_string())
 }
 fn forbidden_paths(value: &Value) -> bool {
     match value {

@@ -1,6 +1,7 @@
 use super::*;
 use photo_files::{
-    EntryKind, Evidence, FileLease, LeaseMode, Observation, PendingFile, fingerprint, identity,
+    EntryKind, Evidence, FileLease, LeaseMode, Observation, PendingFile, WalkLimits, fingerprint,
+    identity, walk,
 };
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
@@ -73,41 +74,58 @@ fn scan(
     seen: &mut BTreeSet<String>,
     count: &mut usize,
 ) -> Result<()> {
-    if prefix.components().count() > 64 {
-        return Err(WorkspaceError::new(
+    let nesting = || {
+        WorkspaceError::new(
             "resource_limit",
             413,
             "Workspace directory nesting exceeds scan limit",
-        ));
-    }
-    for entry in directory.entries(ENTRY_MAX)? {
-        *count += 1;
-        if *count > ENTRY_MAX {
-            return Err(WorkspaceError::new(
-                "resource_limit",
-                413,
-                "Workspace scan exceeds finite entry limit; no partial index is published",
-            ));
-        }
-        if entry.name.starts_with('.') {
-            continue;
-        }
-        let path = prefix.join(&entry.name);
-        match entry.kind {
-            EntryKind::File => {
-                seen.insert(
-                    path.to_str()
-                        .ok_or_else(|| {
-                            WorkspaceError::new("invalid_input", 400, "Workspace path is not UTF-8")
-                        })?
-                        .into(),
-                );
+        )
+    };
+    let inventory = || {
+        WorkspaceError::new(
+            "resource_limit",
+            413,
+            "Workspace scan exceeds finite entry limit; no partial index is published",
+        )
+    };
+    walk(
+        directory,
+        prefix,
+        WalkLimits::new(ENTRY_MAX),
+        nesting,
+        |reported| {
+            *count += 1;
+            if *count > ENTRY_MAX {
+                return Err(inventory());
             }
-            EntryKind::Directory => scan(&directory.child(&entry.name)?, &path, seen, count)?,
-            EntryKind::Symlink | EntryKind::Other => (),
-        }
-    }
-    Ok(())
+            if reported.entry.name.starts_with('.') {
+                return Ok(None);
+            }
+            match reported.entry.kind {
+                EntryKind::File => {
+                    seen.insert(
+                        reported
+                            .path
+                            .to_str()
+                            .ok_or_else(|| {
+                                WorkspaceError::new(
+                                    "invalid_input",
+                                    400,
+                                    "Workspace path is not UTF-8",
+                                )
+                            })?
+                            .into(),
+                    );
+                }
+                EntryKind::Directory => {
+                    return Ok(Some(reported.directory.child(&reported.entry.name)?));
+                }
+                EntryKind::Symlink | EntryKind::Other => (),
+            }
+            Ok(None)
+        },
+        |_| Ok(()),
+    )
 }
 
 pub(super) fn reconcile(_manager: &WorkspaceManager, session: &mut WorkspaceSession) -> Result<()> {
@@ -140,13 +158,9 @@ pub(super) fn reconcile(_manager: &WorkspaceManager, session: &mut WorkspaceSess
             Some(id) => id,
             None => {
                 let id = identity("artifact")?;
-                let kind = match Path::new(&path)
-                    .components()
-                    .next()
-                    .and_then(|c| c.as_os_str().to_str())
-                {
-                    Some("previews") => "preview",
-                    Some("outputs") => "output",
+                let kind = match layout::component(&path) {
+                    Some(layout::PREVIEWS) => "preview",
+                    Some(layout::OUTPUTS) => "output",
                     _ => "file",
                 };
                 session.db.execute("INSERT INTO files(id,path,kind,state,managed,removed) VALUES(?,?,?,'checking',0,0)",params![id,path,kind])?;
@@ -325,13 +339,7 @@ pub(super) fn publish(
             "Published output is outside the workspace",
         )
     })?;
-    if !matches!(
-        relative
-            .components()
-            .next()
-            .and_then(|c| c.as_os_str().to_str()),
-        Some("outputs" | "previews")
-    ) {
+    if !layout::in_completed_directory(relative.to_str().unwrap_or("")) {
         return Err(WorkspaceError::new(
             "invalid_input",
             400,
@@ -667,7 +675,7 @@ pub(super) fn admit(
         return Ok(admission(session, &target));
     }
     manager.reserve_storage(evidence.byte_length)?;
-    let input = session.directory.create_directory("input")?;
+    let input = session.directory.create_directory(layout::INPUT)?;
     let artifact = identity("artifact")?;
     let filename = Path::new(&row.path)
         .file_name()
@@ -693,7 +701,9 @@ pub(super) fn admit(
     }
     photo_files::image::inspect_image(pending.file_mut(), FILE_BYTES_MAX)?;
     let published = pending.publish(&name, FILE_BYTES_MAX)?;
-    let path = format!("input/{name}");
+    let path = layout::managed_file(layout::INPUT, &name).ok_or_else(|| {
+        WorkspaceError::new("invalid_input", 400, "Captured input name is unusable.")
+    })?;
     session.db.execute("INSERT INTO files(id,path,kind,state,evidence,contract,managed,provenance,removed,image_facts,revision) VALUES(?,?,'input','ready',?,?,1,?,0,?,?)",params![artifact,path,serde_json::to_string(&published)?,row.contract.as_ref().map(Value::to_string),row.provenance.as_ref().map(Value::to_string),row.facts.as_ref().map(Value::to_string),published.revision()])?;
     let result = admission(session, &record(session, &artifact)?);
     session.db.execute(

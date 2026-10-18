@@ -360,9 +360,10 @@ pub(crate) fn validated_route_failure(
             | "resource_in_use"
             | "incompatible_geometry"
             | "incompatible_definition"
-            | "cursor_expired"
             | "catalog_changed"
             | "file_exists" => 4,
+            // A well-formed continuation whose retained query is gone is an
+            // expired cursor, not a conflict: exit 6 with effect `none`.
             "engine_unavailable"
             | "resource_unavailable"
             | "dependency_unavailable"
@@ -371,6 +372,7 @@ pub(crate) fn validated_route_failure(
             | "disk_full"
             | "wait_timeout"
             | "execution_failed"
+            | "cursor_expired"
             | "server_busy"
             | "storage_failed"
             | "access_unavailable"
@@ -390,6 +392,40 @@ pub(crate) fn validated_route_failure(
             ]
             .iter()
             .all(|key| details.contains_key(*key))
+        {
+            return None;
+        }
+        // An expired continuation discloses the route's cursor kind and the
+        // reason its retained query is gone; an empty details object is not a
+        // confirmed refusal the caller can act on.
+        if code == "cursor_expired"
+            && !(["cursorKind", "reason"]
+                .iter()
+                .all(|key| details.contains_key(*key))
+                && details
+                    .get("cursorKind")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| {
+                        matches!(
+                            kind,
+                            "folder"
+                                | "album"
+                                | "photo"
+                                | "unavailable"
+                                | "mappings"
+                                | "workspace"
+                                | "darktable"
+                        )
+                    })
+                && details
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| {
+                        matches!(
+                            reason,
+                            "publication_replaced" | "process_restarted" | "idle_or_evicted"
+                        )
+                    }))
         {
             return None;
         }
@@ -501,7 +537,13 @@ pub(crate) fn validated_route_failure(
                 && string("cursorKind").is_some_and(|value| {
                     matches!(
                         value,
-                        "folder" | "album" | "photo" | "unavailable" | "mappings"
+                        "folder"
+                            | "album"
+                            | "photo"
+                            | "unavailable"
+                            | "mappings"
+                            | "workspace"
+                            | "darktable"
                     )
                 })
                 && string("reason").is_some_and(|value| {

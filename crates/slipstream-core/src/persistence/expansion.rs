@@ -6,7 +6,7 @@ use super::owner::PersistenceError;
 use super::{DatabaseName, SchemaVersion, StateDirectory, migrations, validate_canonical_schema};
 use crate::identity::classify_name;
 use crate::{LibraryRoot, OriginalKind, RelativeOriginalPath, ScanLimits};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
@@ -178,19 +178,16 @@ pub(crate) fn expand_library_binding(
             return Err(PersistenceError::InvalidExpansion);
         }
     }
-    if transaction
-        .execute(
-            "UPDATE library_metadata SET value=? WHERE key='canonical_root' AND value=?",
-            params![
-                proposed_root
-                    .canonical_path()
-                    .to_str()
-                    .ok_or(PersistenceError::InvalidExpansion)?,
-                stored_root
-            ],
-        )
-        .map_err(|_| PersistenceError::Storage)?
-        != 1
+    if super::metadata_store::compare_and_set(
+        &transaction,
+        "canonical_root",
+        proposed_root
+            .canonical_path()
+            .to_str()
+            .ok_or(PersistenceError::InvalidExpansion)?,
+        stored_root.as_str(),
+        |_| PersistenceError::Storage,
+    )? != 1
         || expansion_projection(&transaction)? != preserved
     {
         return Err(PersistenceError::InvalidExpansion);
@@ -202,14 +199,7 @@ pub(crate) fn expand_library_binding(
 }
 
 fn required_root_binding(connection: &Connection) -> Result<String, PersistenceError> {
-    connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key='canonical_root'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?
+    super::metadata_store::read_value(connection, "canonical_root", |_| PersistenceError::Storage)?
         .ok_or(PersistenceError::InvalidExpansion)
 }
 

@@ -1,4 +1,5 @@
 //! Canonical retained Film state and exact local request replay.
+use crate::workspace::layout;
 use photo_files::{Directory, FileLease, LeaseMode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -73,7 +74,7 @@ impl FilmState {
                 .lease(LeaseMode::Shared, LOCK_WAIT)
                 .map_err(|e| e.to_string())?,
         );
-        let directory = match workspace.child(".edits") {
+        let directory = match workspace.child(layout::EDITS) {
             Ok(edits) => match edits.child("spektrafilm") {
                 Ok(film) => match film.child("adapter") {
                     Ok(directory) => Some(directory),
@@ -117,7 +118,7 @@ impl FilmState {
         if self.directory.is_none() {
             let directory = self
                 .workspace
-                .create_directory(".edits")
+                .create_directory(layout::EDITS)
                 .and_then(|d| d.create_directory("spektrafilm"))
                 .and_then(|d| d.create_directory("adapter"))
                 .map_err(|e| e.to_string())?;
@@ -458,7 +459,7 @@ mod tests {
             json!({"test":"rejected"}),
         );
         assert!(result.is_err());
-        assert!(!path.join(".edits").exists());
+        assert!(!path.join(layout::EDITS).exists());
         drop(owner);
         drop(directory);
         std::fs::remove_dir_all(path).unwrap();
@@ -469,7 +470,7 @@ mod tests {
         let path = std::env::temp_dir().join(photo_files::identity("film-malformed").unwrap());
         let adapter = Directory::create(&path)
             .unwrap()
-            .create_directory(".edits")
+            .create_directory(layout::EDITS)
             .unwrap()
             .create_directory("spektrafilm")
             .unwrap()

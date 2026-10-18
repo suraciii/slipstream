@@ -285,7 +285,9 @@ impl ExportManager {
         parameters: Parameters,
         cancellation: Arc<AtomicBool>,
     ) -> Result<ProcessingPreviewExecution, String> {
-        let _slot = self.acquire_heavy_slot().await;
+        let _slot = self
+            .acquire_heavy_slot_cancellable(Arc::clone(&cancellation))
+            .await?;
         self.ensure_film_admissible().await?;
         if cancellation.load(Ordering::Acquire) {
             return Err("preview render cancelled".to_owned());
@@ -306,12 +308,16 @@ impl ExportManager {
         writer
             .release_temporary_path()
             .map_err(|error| format!("preview output reservation failed: {error}"))?;
-        let state_directory = self.state_directory.clone();
-        let _processing_lease = tokio::task::spawn_blocking(move || {
-            crate::darktable_service::acquire_processing_admission(&state_directory)
-        })
-        .await
-        .map_err(|error| error.to_string())??;
+        let _processing_lease = match self
+            .acquire_processing_admission(Arc::clone(&cancellation))
+            .await
+        {
+            Ok(lease) => lease,
+            Err(error) => {
+                staged.release().await;
+                return Err(error);
+            }
+        };
         let rendered = self
             .executor
             .render_film_selected_step(
@@ -418,6 +424,21 @@ impl ExportManager {
         input: ProcessingExportInput,
         parameters: Parameters,
     ) -> Result<ProcessingExportExecution, String> {
+        let cancellation = self.begin_running(request_id);
+        let result = self
+            .execute_film_export_inner(request_id, input, parameters, Arc::clone(&cancellation))
+            .await;
+        self.end_running(request_id, &cancellation);
+        result
+    }
+
+    async fn execute_film_export_inner(
+        &self,
+        request_id: &str,
+        input: ProcessingExportInput,
+        parameters: Parameters,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<ProcessingExportExecution, String> {
         let binding = match input {
             ProcessingExportInput::Artifact {
                 artifact_id,
@@ -439,7 +460,9 @@ impl ExportManager {
                 contract,
             },
         };
-        let _slot = self.admission.lock().await;
+        let _slot = self
+            .acquire_heavy_slot_cancellable(Arc::clone(&cancellation))
+            .await?;
         let artifact_id = processing_artifact_id();
         let (staged, contract, input_artifact_id) = self.stage_film_input(&binding).await?;
         let input_sha256 = staged.sha256().to_owned();
@@ -462,13 +485,17 @@ impl ExportManager {
             .release_temporary_path()
             .map_err(|error| format!("output reservation failed: {error}"))?;
 
-        let cancellation = self.begin_running(request_id);
-        let state_directory = self.state_directory.clone();
-        let _processing_lease = tokio::task::spawn_blocking(move || {
-            crate::darktable_service::acquire_processing_admission(&state_directory)
-        })
-        .await
-        .map_err(|error| error.to_string())??;
+        let _processing_lease = match self
+            .acquire_processing_admission(Arc::clone(&cancellation))
+            .await
+        {
+            Ok(lease) => lease,
+            Err(error) => {
+                staged.release().await;
+                return Err(error);
+            }
+        };
+        // The outer wrapper owns the running-token lifetime through every failure path.
         let developed = self
             .executor
             .develop_film_selected_step(
@@ -478,7 +505,6 @@ impl ExportManager {
                 Arc::clone(&cancellation),
             )
             .await;
-        self.end_running(request_id, &cancellation);
         staged.release().await;
         let identity = developed?;
 

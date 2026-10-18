@@ -55,13 +55,15 @@ impl ToolService {
                 "Cursor expired or is not authorized on this host",
                 400,
             )
+            .detail(json!({"cursorKind": "darktable", "reason": "idle_or_evicted"}))
         })?;
         if touched <= now() - 900 {
             return Err(ServiceError::new(
                 "cursor_expired",
                 "Cursor expired after 15 minutes idle",
                 400,
-            ));
+            )
+            .detail(json!({"cursorKind": "darktable", "reason": "idle_or_evicted"})));
         }
         if collection != operation {
             return Err(ServiceError::new(
@@ -197,12 +199,14 @@ mod tests {
             .unwrap()
             .execute("UPDATE continuations SET touched=0", [])
             .unwrap();
+        let expired = service
+            .continuation_scope("cursor-test", "edit instances list")
+            .unwrap_err();
+        assert_eq!(expired.value["error"]["code"], "cursor_expired");
         assert_eq!(
-            service
-                .continuation_scope("cursor-test", "edit instances list")
-                .unwrap_err()
-                .value["error"]["code"],
-            "cursor_expired"
+            expired.value["error"]["details"],
+            json!({"cursorKind": "darktable", "reason": "idle_or_evicted"}),
+            "an expired darktable continuation discloses its route and reason"
         );
         drop(service);
         std::fs::remove_dir_all(path).unwrap();

@@ -1764,7 +1764,7 @@ async fn a_timed_out_library_check_reports_the_unknown_scan_outcome() {
     std::fs::remove_file(&token).ok();
     drop(listener);
 }
-
 #[path = "cli_edit_tests.rs"]
 mod cli_edit_tests;
-mod development_proxy;
+#[path = "cursor_protocol_tests.rs"]
+mod cursor_protocol_tests;

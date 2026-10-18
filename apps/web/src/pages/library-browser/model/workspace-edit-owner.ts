@@ -20,6 +20,7 @@ import {
 import type { ProcessingModuleDescription } from "../api/processing-modules.js";
 import { coalesceChanges } from "./workspace-edit-draft.js";
 import { refreshWorkspaceFiles } from "./workspace-edit-files.js";
+import { isUnknownEffect, type UncertainRequest } from "./uncertain-request.js";
 
 export type EditChange = JsonObject & { type: string };
 export type WorkspaceEditModel = {
@@ -54,7 +55,7 @@ export type WorkspaceEditModel = {
   jobs: ToolJob[];
   history: JsonObject[];
   fileCursor: string | null;
-  uncertain?: { operation: string; args: JsonObject; editId: string | null };
+  uncertain?: UncertainRequest;
   filmElement?: HTMLElement;
   catalogElement?: HTMLElement;
   maskGraphSchema?: JsonObject;
@@ -483,8 +484,12 @@ export function createWorkspaceEditOwner(
       publish();
       void pollJobs();
     } catch (error) {
-      if (error instanceof WorkspaceApiError && error.effect === "unknown") {
-        model.uncertain = { operation, args: payload, editId: edit.editId };
+      if (isUnknownEffect(error)) {
+        model.uncertain = {
+          operation,
+          arguments: payload,
+          editId: edit.editId,
+        };
         model.blocked = true;
       }
       failure(error, operation);
@@ -564,14 +569,10 @@ export function createWorkspaceEditOwner(
               model.draft = [...changes, ...model.draft];
             model.blocked = true;
             model.conflictInspected = false;
-            if (
-              !acknowledged &&
-              (!(error instanceof WorkspaceApiError) ||
-                error.effect === "unknown")
-            )
+            if (!acknowledged && isUnknownEffect(error))
               model.uncertain = {
                 operation: "edit apply",
-                args,
+                arguments: args,
                 editId: edit.editId,
               };
             failure(
@@ -626,12 +627,12 @@ export function createWorkspaceEditOwner(
       if (guarded) await readEdit(edit.editId);
       return result;
     } catch (error) {
-      if (
-        guarded &&
-        error instanceof WorkspaceApiError &&
-        error.effect === "unknown"
-      ) {
-        model.uncertain = { operation, args: payload, editId: edit.editId };
+      if (guarded && isUnknownEffect(error)) {
+        model.uncertain = {
+          operation,
+          arguments: payload,
+          editId: edit.editId,
+        };
         model.blocked = true;
       }
       failure(error, operation);
@@ -930,15 +931,17 @@ export function createWorkspaceEditOwner(
           photoId,
           pending.editId,
           pending.operation,
-          pending.args,
+          pending.arguments,
         );
         delete model.uncertain;
         if (
           pending.operation === "edit apply" &&
-          isRecord(pending.args.input) &&
-          Array.isArray(pending.args.input.changes)
+          isRecord(pending.arguments.input) &&
+          Array.isArray(pending.arguments.input.changes)
         )
-          model.draft = model.draft.slice(pending.args.input.changes.length);
+          model.draft = model.draft.slice(
+            (pending.arguments.input.changes as unknown[]).length,
+          );
         model.blocked = model.draft.length > 0;
         if (typeof result.status === "string") {
           model.jobs.push(
@@ -946,7 +949,7 @@ export function createWorkspaceEditOwner(
               ...result,
               operation: pending.operation,
               editId: pending.editId,
-              revision: pending.args.revision,
+              revision: pending.arguments.revision,
             }),
           );
           void pollJobs();

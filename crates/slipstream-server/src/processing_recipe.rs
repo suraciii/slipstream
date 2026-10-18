@@ -60,7 +60,11 @@ pub(crate) async fn read_recipe(
             .workspaces
             .directory(&workspace.id)
             .map_err(|e| e.to_string())?;
-        match directory.child(".edits/spektrafilm/adapter") {
+        match directory
+            .child(crate::workspace::layout::EDITS)
+            .and_then(|edits| edits.child("spektrafilm"))
+            .and_then(|film| film.child("adapter"))
+        {
             Ok(_) => {
                 let owner = film_state::FilmState::open(&directory)?;
                 if let Some(recipe) = owner.recipe()? {

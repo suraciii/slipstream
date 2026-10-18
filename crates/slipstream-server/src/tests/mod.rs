@@ -17,7 +17,6 @@ mod lifecycle;
 mod metadata;
 mod preview;
 mod processing_export;
-mod processing_film_workspace;
 mod processing_preview;
 mod processing_recipe;
 mod protocol;

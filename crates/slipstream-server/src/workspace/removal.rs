@@ -1,8 +1,10 @@
 use super::*;
-use photo_files::{Directory, EntryKind, FileLease, LeaseMode, fingerprint, identity};
+use photo_files::{
+    Directory, EntryKind, FileLease, LeaseMode, WalkLimits, fingerprint, identity, walk,
+};
 use rusqlite::params;
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 impl WorkspaceManager {
     pub(crate) fn remove(
@@ -238,8 +240,7 @@ fn reclaim_result(
     barriers: &ReclamationBarriers,
 ) -> Value {
     let mut result = prior.clone();
-    match reclaim_checked(directory, 0, &mut 0, Some(barriers))
-        .and_then(|_| root.remove_directory(id))
+    match reclaim_checked(directory, &mut 0, Some(barriers)).and_then(|_| root.remove_directory(id))
     {
         Ok(()) => {
             result["reclamation"] = json!("complete");
@@ -268,114 +269,114 @@ fn reclamation_barriers(
         _leases: Vec::new(),
         files: std::collections::BTreeMap::new(),
     };
-    retain_reclamation_barriers(directory, 0, &mut 0, index_locked, &mut barriers)?;
+    retain_reclamation_barriers(directory, &mut 0, index_locked, &mut barriers)?;
     Ok(barriers)
 }
 
 fn retain_reclamation_barriers(
     directory: &Directory,
-    depth: usize,
     count: &mut usize,
     index_locked: bool,
     barriers: &mut ReclamationBarriers,
 ) -> std::io::Result<()> {
-    if depth > 64 {
-        return Err(std::io::Error::other(
-            "Workspace reclamation nesting exceeds finite limit",
-        ));
-    }
-    for entry in directory.entries(ENTRY_MAX)? {
-        *count += 1;
-        if *count > ENTRY_MAX {
-            return Err(std::io::Error::other(
-                "Workspace reclamation exceeds finite entry limit",
-            ));
-        }
-        match entry.kind {
-            EntryKind::Directory => {
-                let child = directory.child(&entry.name)?;
-                // Root-to-leaf acquisition agrees with standalone ancestor admission.
-                // Nonblocking barriers refuse existing users instead of waiting on a child.
-                barriers
-                    ._leases
-                    .push(child.lease(LeaseMode::Exclusive, Duration::ZERO)?);
-                retain_reclamation_barriers(&child, depth + 1, count, false, barriers)?;
+    let nesting = || std::io::Error::other("Workspace reclamation nesting exceeds finite limit");
+    let inventory = || std::io::Error::other("Workspace reclamation exceeds finite entry limit");
+    walk(
+        directory,
+        Path::new(""),
+        WalkLimits::new(ENTRY_MAX),
+        nesting,
+        |reported| {
+            *count += 1;
+            if *count > ENTRY_MAX {
+                return Err(inventory());
             }
-            EntryKind::File => {
-                let file = directory.open_file(&entry.name)?;
-                if !(depth == 0 && index_locked && entry.name == ".workspace-lock") {
-                    barriers._leases.push(FileLease::acquire(
-                        file.try_clone()?,
-                        LeaseMode::Exclusive,
-                        Duration::ZERO,
-                    )?);
+            match reported.entry.kind {
+                EntryKind::Directory => {
+                    let child = reported.directory.child(&reported.entry.name)?;
+                    // Root-to-leaf acquisition agrees with standalone ancestor admission.
+                    // Nonblocking barriers refuse existing users instead of waiting on a child.
+                    barriers
+                        ._leases
+                        .push(child.lease(LeaseMode::Exclusive, Duration::ZERO)?);
+                    Ok(Some(child))
                 }
-                barriers.files.insert(
-                    directory.path().join(&entry.name),
-                    photo_files::Observation::of(&file)?,
-                );
+                EntryKind::File => {
+                    let file = reported.directory.open_file(&reported.entry.name)?;
+                    if !(reported.depth == 0
+                        && index_locked
+                        && reported.entry.name == ".workspace-lock")
+                    {
+                        barriers._leases.push(FileLease::acquire(
+                            file.try_clone()?,
+                            LeaseMode::Exclusive,
+                            Duration::ZERO,
+                        )?);
+                    }
+                    barriers.files.insert(
+                        reported.directory.path().join(&reported.entry.name),
+                        photo_files::Observation::of(&file)?,
+                    );
+                    Ok(None)
+                }
+                // Reclamation reports unexpected entries after registry withdrawal;
+                // they have no regular file descriptor to lease or unlink here.
+                EntryKind::Symlink | EntryKind::Other => Ok(None),
             }
-            // Reclamation reports unexpected entries after registry withdrawal;
-            // they have no regular file descriptor to lease or unlink here.
-            EntryKind::Symlink | EntryKind::Other => (),
-        }
-    }
-    Ok(())
+        },
+        |_| Ok(()),
+    )
 }
 
 #[cfg(test)]
-fn reclaim(directory: &Directory, depth: usize, count: &mut usize) -> std::io::Result<()> {
-    reclaim_checked(directory, depth, count, None)
+fn reclaim(directory: &Directory, count: &mut usize) -> std::io::Result<()> {
+    reclaim_checked(directory, count, None)
 }
 
 fn reclaim_checked(
     directory: &Directory,
-    depth: usize,
     count: &mut usize,
     barriers: Option<&ReclamationBarriers>,
 ) -> std::io::Result<()> {
-    if depth > 64 {
-        return Err(std::io::Error::other(
-            "Workspace reclamation nesting exceeds finite limit",
-        ));
-    }
-    for entry in directory.entries(ENTRY_MAX)? {
-        *count += 1;
-        if *count > ENTRY_MAX {
-            return Err(std::io::Error::other(
-                "Workspace reclamation exceeds finite entry limit",
-            ));
-        }
-        match entry.kind {
-            EntryKind::Directory => {
-                let child = directory.child(&entry.name)?;
-                reclaim_checked(&child, depth + 1, count, barriers)?;
-                directory.remove_directory(&entry.name)?;
+    let nesting = || std::io::Error::other("Workspace reclamation nesting exceeds finite limit");
+    let inventory = || std::io::Error::other("Workspace reclamation exceeds finite entry limit");
+    walk(
+        directory,
+        Path::new(""),
+        WalkLimits::new(ENTRY_MAX),
+        nesting,
+        |reported| {
+            *count += 1;
+            if *count > ENTRY_MAX {
+                return Err(inventory());
             }
-            EntryKind::File => {
-                if let Some(barriers) = barriers {
-                    let path = directory.path().join(&entry.name);
-                    let expected = barriers.files.get(&path).ok_or_else(|| {
-                        std::io::Error::other("Unreviewed file appeared during reclamation")
-                    })?;
-                    let observed =
-                        photo_files::Observation::of(&directory.open_file(&entry.name)?)?;
-                    if observed.device != expected.device || observed.inode != expected.inode {
-                        return Err(std::io::Error::other(
-                            "File was replaced during reclamation",
-                        ));
+            match reported.entry.kind {
+                EntryKind::Directory => Ok(Some(reported.directory.child(&reported.entry.name)?)),
+                EntryKind::File => {
+                    if let Some(barriers) = barriers {
+                        let path = reported.directory.path().join(&reported.entry.name);
+                        let expected = barriers.files.get(&path).ok_or_else(|| {
+                            std::io::Error::other("Unreviewed file appeared during reclamation")
+                        })?;
+                        let observed = photo_files::Observation::of(
+                            &reported.directory.open_file(&reported.entry.name)?,
+                        )?;
+                        if observed.device != expected.device || observed.inode != expected.inode {
+                            return Err(std::io::Error::other(
+                                "File was replaced during reclamation",
+                            ));
+                        }
                     }
+                    reported.directory.remove_file(&reported.entry.name)?;
+                    Ok(None)
                 }
-                directory.remove_file(&entry.name)?;
-            }
-            EntryKind::Symlink | EntryKind::Other => {
-                return Err(std::io::Error::other(
+                EntryKind::Symlink | EntryKind::Other => Err(std::io::Error::other(
                     "Unexpected symbolic link or special file appeared during reclamation",
-                ));
+                )),
             }
-        }
-    }
-    Ok(())
+        },
+        |reported| reported.directory.remove_directory(&reported.entry.name),
+    )
 }
 
 #[cfg(test)]
@@ -426,7 +427,7 @@ mod tests {
             .rename("input.raw", &directory, "retained.raw", false)
             .unwrap();
         directory.create_file("input.raw", 0o600).unwrap();
-        assert!(reclaim_checked(&directory, 0, &mut 0, Some(&barriers)).is_err());
+        assert!(reclaim_checked(&directory, &mut 0, Some(&barriers)).is_err());
         assert!(directory.open_file("input.raw").is_ok());
         drop(barriers);
         std::fs::remove_dir_all(path).unwrap();
@@ -437,7 +438,7 @@ mod tests {
         let path = std::env::temp_dir().join(identity("workspace-reclaim-test").unwrap());
         let directory = Directory::create(&path).unwrap();
         std::os::unix::fs::symlink("/", path.join("escape")).unwrap();
-        assert!(reclaim(&directory, 0, &mut 0).is_err());
+        assert!(reclaim(&directory, &mut 0).is_err());
         directory.remove_file("escape").unwrap();
         std::fs::remove_dir(path).unwrap();
     }

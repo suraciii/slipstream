@@ -145,7 +145,11 @@ async fn workspace_film_save_uses_empty_live_source_and_persists_canonical_state
     let workspace_id = binding["workspaceId"].as_str().unwrap();
     let directory = application.workspaces.directory(workspace_id).unwrap();
     let canonical = crate::processing_recipe::inspect_film_state(
-        &directory.path().join(".edits/spektrafilm/adapter"),
+        &directory
+            .path()
+            .join(crate::workspace::layout::EDITS)
+            .join("spektrafilm")
+            .join("adapter"),
     )
     .unwrap();
     assert_eq!(canonical["recipe"], saved["recipe"]);

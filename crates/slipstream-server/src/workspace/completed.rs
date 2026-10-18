@@ -19,7 +19,7 @@ impl WorkspaceManager {
         require_id(handle)?;
         let mut session = self.locked(workspace_id, LeaseMode::Shared)?;
         let preview = provenance["kind"].as_str() == Some("preview");
-        let category = if preview { "previews" } else { "outputs" };
+        let category = layout::completed_directory(preview);
         let extension = path
             .extension()
             .and_then(|value| value.to_str())

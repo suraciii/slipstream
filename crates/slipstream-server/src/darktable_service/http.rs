@@ -145,10 +145,7 @@ async fn command(
             if parsed.operation != "preview proxy get" {
                 let stored = value.clone();
                 let receipt = tokio::task::spawn_blocking(move || {
-                    let _lease = admission.lease;
-                    photo_files::atomic_json(
-                        &admission.directory,
-                        admission.name,
+                    admission.receipt.publish(
                         &json!({"payload":admission.payload,"status":status,"result":stored}),
                     )
                 })

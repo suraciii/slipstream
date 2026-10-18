@@ -90,8 +90,8 @@ impl WorkspaceManager {
             "workspaceId":id,"photoId":session.workspace.photo_id,"path":session.directory.path(),
             "inputPath":default_path,"inputArtifactId":default,"inputRevision":input_revision,
             "inputAvailability":input_availability,
-            "previewDirectory":session.directory.path().join("previews"),"outputDirectory":session.directory.path().join("outputs"),
-            "suggestedEditStatePaths":{"darktable":session.directory.path().join(".edits/darktable/main")},
+            "previewDirectory":session.directory.path().join(layout::PREVIEWS),"outputDirectory":session.directory.path().join(layout::OUTPUTS),
+            "suggestedEditStatePaths":{"darktable":session.directory.path().join(layout::EDITS).join("darktable").join("main")},
             "execution":{"hostId":host_id,"mode":"service-host","accessibleToCaller":false,"supervisedTools":self.supervised_tools.lock().clone()},
             "observedSourceRevision":observed_source,"inputMatchesObservedSource":source_matches,
             "workspaceStateToken":token(&session,&inventory)?,"edits":edits,"files":listing,
@@ -214,6 +214,7 @@ impl WorkspaceManager {
                         410,
                         "The file query is unavailable; list the workspace again.",
                     )
+                    .detail(json!({"cursorKind": "workspace", "reason": "idle_or_evicted"}))
                 })?;
             let id = queries.scopes.get(&parsed.token).cloned().ok_or_else(|| {
                 WorkspaceError::new(
@@ -221,6 +222,7 @@ impl WorkspaceManager {
                     410,
                     "The file query expired; list the workspace again.",
                 )
+                .detail(json!({"cursorKind": "workspace", "reason": "idle_or_evicted"}))
             })?;
             let page = queries
                 .registry
@@ -238,6 +240,7 @@ impl WorkspaceManager {
                         410,
                         "The file query expired; list the workspace again.",
                     )
+                    .detail(json!({"cursorKind": "workspace", "reason": "idle_or_evicted"}))
                 })?;
             let next_offset = parsed.offset + page.ids.len();
             let next = (next_offset < page.total).then(|| {

@@ -6,20 +6,15 @@ import {
   requestIdentity,
   type JsonObject,
 } from "../api/workspace-edit.js";
+import { isUnknownEffect, type UncertainRequest } from "./uncertain-request.js";
 
-export type CatalogIntent = {
-  editId: string | null;
-  operation: string;
-  arguments: JsonObject;
-  global?: boolean;
-};
 /** An uncertain operation retains the entire original payload, including its observed guard. */
 export function createCatalogMutation(
   fetcher: BrowserFetch,
   photoId: string,
   confirmed: () => Promise<void>,
 ) {
-  let pending: CatalogIntent | undefined;
+  let pending: UncertainRequest | undefined;
   let busy = false;
   let error: WorkspaceApiError | undefined;
   async function replay(): Promise<JsonObject | undefined> {
@@ -80,7 +75,7 @@ export function createCatalogMutation(
   }
   return {
     state: () => ({ pending, busy, error }),
-    async submit(intent: CatalogIntent) {
+    async submit(intent: UncertainRequest) {
       if (busy || pending)
         throw new Error(
           "Resolve the retained catalog request before another mutation.",
@@ -96,7 +91,7 @@ export function createCatalogMutation(
     },
     replay,
     discard() {
-      if (busy || error?.effect === "unknown")
+      if (busy || isUnknownEffect(error))
         throw new Error("Replay the unknown request before discarding it.");
       pending = undefined;
       error = undefined;

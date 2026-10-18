@@ -75,7 +75,7 @@ pub(crate) struct ExportManager {
     publications: Arc<Mutex<HashMap<String, ProcessingPublicationOwner>>>,
     /// Stops new lifecycle tasks before shutdown drains the existing ones.
     tasks: Mutex<TaskState>,
-    shutting_down: AtomicBool,
+    shutting_down: Arc<AtomicBool>,
     /// How often a live download stream renews its lease liveness anchor.
     /// Periodic retention work is cancelled before the Library closes.
     sweep_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -165,7 +165,7 @@ impl ExportManager {
                 closing: false,
                 handles: Vec::new(),
             }),
-            shutting_down: AtomicBool::new(false),
+            shutting_down: Arc::new(AtomicBool::new(false)),
             lease_renewal_interval_millis: std::sync::atomic::AtomicU64::new(
                 LEASE_RENEWAL_INTERVAL,
             ),
@@ -287,6 +287,41 @@ impl ExportManager {
     /// The caller holds the returned guard for exactly one attempt.
     pub(crate) async fn acquire_heavy_slot(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.admission.lock().await
+    }
+    pub(crate) async fn acquire_heavy_slot_cancellable(
+        &self,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, String> {
+        let admission = Arc::clone(&self.admission);
+        loop {
+            if self.shutting_down.load(Ordering::Acquire) {
+                return Err("Photo Development is shutting down".to_owned());
+            }
+            if cancellation.load(Ordering::Acquire) {
+                return Err("processing admission cancelled".to_owned());
+            }
+            if let Ok(slot) = Arc::clone(&admission).try_lock_owned() {
+                return Ok(slot);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    pub(crate) async fn acquire_processing_admission(
+        &self,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<photo_files::FileLease, String> {
+        let state_directory = self.state_directory.clone();
+        let stopping = Arc::clone(&self.shutting_down);
+        tokio::task::spawn_blocking(move || {
+            crate::darktable_service::processing_admission::acquire_cancellable(
+                &state_directory,
+                &cancellation,
+                &stopping,
+            )
+            .map_err(|error| error.value.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
     /// Begins one private ephemeral preview output below the workspace's

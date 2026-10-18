@@ -139,14 +139,11 @@ fn read_permanent_deletion_receipt(
     connection: &Connection,
     operation_id: &str,
 ) -> Result<Option<PermanentDeletionReceipt>, MutationError> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [permanent_deletion_receipt_key(operation_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(mutation_error_from_sqlite)?;
+    let value = super::metadata_store::read_value(
+        connection,
+        &permanent_deletion_receipt_key(operation_id),
+        mutation_error_from_sqlite,
+    )?;
     value
         .map(|value| serde_json::from_str(&value).map_err(|_| MutationError::Persistence))
         .transpose()
@@ -156,14 +153,11 @@ fn read_permanent_deletion_receipt_transaction(
     transaction: &Transaction<'_>,
     operation_id: &str,
 ) -> Result<Option<PermanentDeletionReceipt>, MutationError> {
-    let value = transaction
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [permanent_deletion_receipt_key(operation_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(mutation_error_from_sqlite)?;
+    let value = super::metadata_store::read_value(
+        transaction,
+        &permanent_deletion_receipt_key(operation_id),
+        mutation_error_from_sqlite,
+    )?;
     value
         .map(|value| serde_json::from_str(&value).map_err(|_| MutationError::Persistence))
         .transpose()
@@ -174,14 +168,12 @@ fn write_permanent_deletion_receipt(
     receipt: &PermanentDeletionReceipt,
 ) -> Result<(), MutationError> {
     let value = serde_json::to_string(receipt).map_err(|_| MutationError::Persistence)?;
-    transaction
-        .execute(
-            "INSERT INTO library_metadata(key,value) VALUES(?,?)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![permanent_deletion_receipt_key(&receipt.operation_id), value],
-        )
-        .map_err(mutation_error_from_sqlite)?;
-    Ok(())
+    super::metadata_store::upsert(
+        transaction,
+        &permanent_deletion_receipt_key(&receipt.operation_id),
+        &value,
+        mutation_error_from_sqlite,
+    )
 }
 
 fn permanent_deletion_rejection(
@@ -303,16 +295,11 @@ fn permanent_deletion_deleted_original_key(original_id: &str) -> String {
 fn permanently_deleted_photo_ids(
     connection: &Connection,
 ) -> Result<std::collections::HashSet<String>, MutationError> {
-    let mut statement = connection
-        .prepare("SELECT key FROM library_metadata WHERE key LIKE ?")
-        .map_err(mutation_error_from_sqlite)?;
-    let keys = statement
-        .query_map([format!("{PERMANENT_DELETION_DELETED_PREFIX}%")], |row| {
-            row.get::<_, String>(0)
-        })
-        .map_err(mutation_error_from_sqlite)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(mutation_error_from_sqlite)?;
+    let keys = super::metadata_store::scan_keys(
+        connection,
+        PERMANENT_DELETION_DELETED_PREFIX,
+        mutation_error_from_sqlite,
+    )?;
     Ok(keys
         .into_iter()
         .filter_map(|key| {
@@ -327,16 +314,11 @@ fn permanently_deleted_photo_ids(
 fn unsettled_permanent_deletion_photo_ids(
     connection: &Connection,
 ) -> Result<std::collections::HashSet<String>, MutationError> {
-    let mut statement = connection
-        .prepare("SELECT key FROM library_metadata WHERE key LIKE ?")
-        .map_err(mutation_error_from_sqlite)?;
-    let keys = statement
-        .query_map([format!("{PERMANENT_DELETION_UNSETTLED_PREFIX}%")], |row| {
-            row.get::<_, String>(0)
-        })
-        .map_err(mutation_error_from_sqlite)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(mutation_error_from_sqlite)?;
+    let keys = super::metadata_store::scan_keys(
+        connection,
+        PERMANENT_DELETION_UNSETTLED_PREFIX,
+        mutation_error_from_sqlite,
+    )?;
     Ok(keys
         .into_iter()
         .filter_map(|key| {
@@ -353,15 +335,11 @@ pub(super) fn photo_is_permanently_deleted(
     connection: &Connection,
     photo_id: &str,
 ) -> Result<bool, MutationError> {
-    let found = connection
-        .query_row(
-            "SELECT 1 FROM library_metadata WHERE key=?",
-            [permanent_deletion_deleted_key(photo_id)],
-            |_| Ok(()),
-        )
-        .optional()
-        .map_err(mutation_error_from_sqlite)?;
-    Ok(found.is_some())
+    super::metadata_store::exists(
+        connection,
+        &permanent_deletion_deleted_key(photo_id),
+        mutation_error_from_sqlite,
+    )
 }
 /// The retained operation that still owes this Photo an outcome, when its
 /// deletion started and never settled. Restore and another destructive
@@ -370,14 +348,11 @@ pub(super) fn unsettled_permanent_deletion_operation(
     connection: &Connection,
     photo_id: &str,
 ) -> Result<Option<String>, MutationError> {
-    connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [permanent_deletion_unsettled_key(photo_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(mutation_error_from_sqlite)
+    super::metadata_store::read_value(
+        connection,
+        &permanent_deletion_unsettled_key(photo_id),
+        mutation_error_from_sqlite,
+    )
 }
 
 /// One reviewed item's progress. An item with no row yet has not left
@@ -387,14 +362,11 @@ fn read_permanent_deletion_item_state(
     operation_id: &str,
     photo_id: &str,
 ) -> Result<Option<PermanentDeletionStoredItemState>, MutationError> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [permanent_deletion_item_key(operation_id, photo_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(mutation_error_from_sqlite)?;
+    let value = super::metadata_store::read_value(
+        connection,
+        &permanent_deletion_item_key(operation_id, photo_id),
+        mutation_error_from_sqlite,
+    )?;
     value
         .map(|value| serde_json::from_str(&value).map_err(|_| MutationError::Persistence))
         .transpose()
@@ -407,16 +379,8 @@ fn read_permanent_deletion_item_states(
     operation_id: &str,
 ) -> Result<HashMap<String, PermanentDeletionStoredItemState>, MutationError> {
     let prefix = permanent_deletion_item_prefix(operation_id);
-    let mut statement = connection
-        .prepare("SELECT key,value FROM library_metadata WHERE key LIKE ?")
-        .map_err(mutation_error_from_sqlite)?;
-    let rows = statement
-        .query_map([format!("{prefix}%")], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(mutation_error_from_sqlite)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(mutation_error_from_sqlite)?;
+    let rows =
+        super::metadata_store::scan_records(connection, &prefix, mutation_error_from_sqlite)?;
     let mut states = HashMap::with_capacity(rows.len());
     for (key, value) in rows {
         let Some(photo_id) = key.strip_prefix(prefix.as_str()) else {
@@ -436,21 +400,12 @@ fn write_permanent_deletion_item_state(
     state: &PermanentDeletionStoredItemState,
 ) -> Result<(), MutationError> {
     let value = serde_json::to_string(state).map_err(|_| MutationError::Persistence)?;
-    transaction
-        .execute(
-            "INSERT INTO library_metadata(key,value) VALUES(?,?)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![permanent_deletion_item_key(operation_id, photo_id), value],
-        )
-        .map_err(mutation_error_from_sqlite)?;
-    Ok(())
-}
-
-fn delete_metadata_key(transaction: &Transaction<'_>, key: &str) -> Result<(), MutationError> {
-    transaction
-        .execute("DELETE FROM library_metadata WHERE key=?", [key])
-        .map_err(mutation_error_from_sqlite)?;
-    Ok(())
+    super::metadata_store::upsert(
+        transaction,
+        &permanent_deletion_item_key(operation_id, photo_id),
+        &value,
+        mutation_error_from_sqlite,
+    )
 }
 
 pub(super) fn trash_candidates(
@@ -766,13 +721,12 @@ pub(super) fn mark_permanent_deletion_deleting(
                 message: None,
             },
         )?;
-        transaction
-            .execute(
-                "INSERT INTO library_metadata(key,value) VALUES(?,?)
-                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                params![permanent_deletion_unsettled_key(photo_id), operation_id],
-            )
-            .map_err(mutation_error_from_sqlite)?;
+        super::metadata_store::upsert(
+            transaction,
+            &permanent_deletion_unsettled_key(photo_id),
+            operation_id,
+            mutation_error_from_sqlite,
+        )?;
         Ok(())
     })
 }
@@ -861,25 +815,20 @@ pub(super) fn settle_permanent_deletion(
             // The retained evidence that this Photo is permanently deleted.
             // Every surface reads this one key, so Trash and Restore never
             // rescan retained operations.
-            transaction
-                .execute(
-                    "INSERT INTO library_metadata(key,value) VALUES(?,?)
-                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    params![permanent_deletion_deleted_key(photo_id), operation_id],
-                )
-                .map_err(mutation_error_from_sqlite)?;
+            super::metadata_store::upsert(
+                transaction,
+                &permanent_deletion_deleted_key(photo_id),
+                operation_id,
+                mutation_error_from_sqlite,
+            )?;
             // The same evidence keyed by the Original, so a scan reads the
             // tombstones it must honour in one bounded pass.
-            transaction
-                .execute(
-                    "INSERT INTO library_metadata(key,value) VALUES(?,?)
-                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    params![
-                        permanent_deletion_deleted_original_key(&current.original_id),
-                        operation_id
-                    ],
-                )
-                .map_err(mutation_error_from_sqlite)?;
+            super::metadata_store::upsert(
+                transaction,
+                &permanent_deletion_deleted_original_key(&current.original_id),
+                operation_id,
+                mutation_error_from_sqlite,
+            )?;
         }
         write_permanent_deletion_item_state(
             transaction,
@@ -895,15 +844,18 @@ pub(super) fn settle_permanent_deletion(
             // The outcome is not known: the operation stays on record as the
             // one that must reconcile this Photo, and Restore plus another
             // destructive confirmation stay closed until it does.
-            transaction
-                .execute(
-                    "INSERT INTO library_metadata(key,value) VALUES(?,?)
-                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    params![permanent_deletion_unsettled_key(photo_id), operation_id],
-                )
-                .map_err(mutation_error_from_sqlite)?;
+            super::metadata_store::upsert(
+                transaction,
+                &permanent_deletion_unsettled_key(photo_id),
+                operation_id,
+                mutation_error_from_sqlite,
+            )?;
         } else {
-            delete_metadata_key(transaction, &permanent_deletion_unsettled_key(photo_id))?;
+            super::metadata_store::delete(
+                transaction,
+                &permanent_deletion_unsettled_key(photo_id),
+                mutation_error_from_sqlite,
+            )?;
         }
         Ok(())
     })

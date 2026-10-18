@@ -11,15 +11,10 @@ pub(in crate::persistence) fn retain_processing_artifact_in_workspace(
     validate_bounded_name(artifact_id, crate::processing::MAXIMUM_ARTIFACT_ID_BYTES)
         .map_err(|_| PersistenceError::Storage)?;
     write_transaction(state, database_name, connection, |transaction| {
-        let key = format!("processing_workspace_artifact:{artifact_id}");
-        let existing: Option<String> = transaction
-            .query_row(
-                "SELECT value FROM library_metadata WHERE key=?",
-                [&key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|_| PersistenceError::Storage)?;
+        let key = processing_workspace_artifact_key(artifact_id);
+        let existing = crate::persistence::metadata_store::read_value(transaction, &key, |_| {
+            PersistenceError::Storage
+        })?;
         if existing.is_none() {
             write_metadata_value(transaction, &key, &published_at.to_string())?;
         }
@@ -31,16 +26,13 @@ pub(super) fn workspace_artifact_published_at(
     connection: &Connection,
     artifact_id: &str,
 ) -> Result<Option<u64>, PersistenceError> {
-    connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [format!("processing_workspace_artifact:{artifact_id}")],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?
-        .map(|value| value.parse().map_err(|_| PersistenceError::Storage))
-        .transpose()
+    crate::persistence::metadata_store::read_value(
+        connection,
+        &processing_workspace_artifact_key(artifact_id),
+        |_| PersistenceError::Storage,
+    )?
+    .map(|value| value.parse().map_err(|_| PersistenceError::Storage))
+    .transpose()
 }
 // Durable workspace ownership is a separate metadata key, so historical record
 // bytes stay unchanged. Receipt expiry removes request state but keeps the
@@ -364,7 +356,7 @@ pub(in crate::persistence) fn sweep_processing_export_expiry(
                         )?;
                         delete_metadata_value(
                             transaction,
-                            &format!("processing_export_retry:{request_id}"),
+                            &processing_export_retry_key(request_id),
                         )?;
                         delete_metadata_value(
                             transaction,
@@ -418,7 +410,7 @@ pub(in crate::persistence) fn sweep_processing_export_expiry(
             )?;
             delete_metadata_value(
                 transaction,
-                &format!("processing_export_retry:{}", work.admission.request_id),
+                &processing_export_retry_key(&work.admission.request_id),
             )?;
             write_metadata_value(
                 transaction,
@@ -504,12 +496,11 @@ pub(in crate::persistence) fn release_processing_artifact_lease(
     lease_id: &str,
 ) -> Result<bool, PersistenceError> {
     write_transaction(state, database_name, connection, |transaction| {
-        let changed = transaction
-            .execute(
-                "DELETE FROM library_metadata WHERE key=?",
-                [processing_artifact_lease_key(lease_id)],
-            )
-            .map_err(|_| PersistenceError::Storage)?;
+        let changed = crate::persistence::metadata_store::delete_count(
+            transaction,
+            &processing_artifact_lease_key(lease_id),
+            |_| PersistenceError::Storage,
+        )?;
         Ok(changed == 1)
     })
 }

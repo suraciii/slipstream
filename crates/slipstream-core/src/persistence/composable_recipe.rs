@@ -31,7 +31,7 @@ use crate::processing::{
     ProcessingStepId, RebindComposableEditRecipe, SaveComposableEditRecipe, validate_bounded_name,
     validate_source_revision,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -160,13 +160,11 @@ fn replay_receipt(
     digest: &str,
     now: u64,
 ) -> Result<Option<ComposableEditRecipeWriteOutcome>, PersistenceError> {
-    let expired: bool = transaction
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM library_metadata WHERE key=?)",
-            [receipt_tombstone_key(photo_id, request_id)],
-            |row| row.get(0),
-        )
-        .map_err(|_| PersistenceError::Storage)?;
+    let expired = super::metadata_store::exists(
+        transaction,
+        &receipt_tombstone_key(photo_id, request_id),
+        |_| PersistenceError::Storage,
+    )?;
     if expired {
         return Ok(Some(ComposableEditRecipeWriteOutcome::ReceiptExpired));
     }
@@ -174,17 +172,17 @@ fn replay_receipt(
         return Ok(None);
     };
     if now >= receipt.settled_at.saturating_add(SAVE_RECEIPT_RETENTION_MS) {
-        write_metadata_value(
+        super::metadata_store::upsert(
             transaction,
             &receipt_tombstone_key(photo_id, request_id),
             "expired",
+            |_| PersistenceError::Storage,
         )?;
-        transaction
-            .execute(
-                "DELETE FROM library_metadata WHERE key=?",
-                [composable_recipe_receipt_key(photo_id, request_id)],
-            )
-            .map_err(|_| PersistenceError::Storage)?;
+        super::metadata_store::delete(
+            transaction,
+            &composable_recipe_receipt_key(photo_id, request_id),
+            |_| PersistenceError::Storage,
+        )?;
         return Ok(Some(ComposableEditRecipeWriteOutcome::ReceiptExpired));
     }
     if receipt.photo_id != photo_id || receipt.payload_digest != digest {
@@ -349,14 +347,10 @@ pub(super) fn read_composable_edit_recipe(
     connection: &Connection,
     photo_id: &str,
 ) -> Result<Option<ComposableEditRecipe>, PersistenceError> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [composable_recipe_key(photo_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
+    let value =
+        super::metadata_store::read_value(connection, &composable_recipe_key(photo_id), |_| {
+            PersistenceError::Storage
+        })?;
     value
         .map(|value| {
             parse_stored_value::<ComposableRecipeRecord>(&value).and_then(parse_recipe_record)
@@ -368,7 +362,10 @@ pub(super) fn read_composable_edit_recipe(
 pub(super) fn migrate_legacy_recipes(
     transaction: &Transaction<'_>,
 ) -> Result<(), PersistenceError> {
-    let migrated: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM library_metadata WHERE key='composable_recipe_migration_v1')", [], |row| row.get(0)).map_err(|_| PersistenceError::Storage)?;
+    let migrated =
+        super::metadata_store::exists(transaction, "composable_recipe_migration_v1", |_| {
+            PersistenceError::Storage
+        })?;
     if migrated {
         return Ok(());
     }
@@ -417,16 +414,16 @@ pub(super) fn migrate_legacy_recipes(
         recipe.validate().map_err(|_| PersistenceError::Storage)?;
         write_composable_recipe_record(transaction, &photo_id, &recipe)?;
     }
-    let receipts = {
-        let mut statement = transaction.prepare("SELECT key,value FROM library_metadata WHERE key LIKE 'composable_edit_recipe_receipt:%' OR key LIKE 'edit_recipe_receipt:%'").map_err(|_| PersistenceError::Storage)?;
-        statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|_| PersistenceError::Storage)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| PersistenceError::Storage)?
-    };
+    let mut receipts = super::metadata_store::scan_records(
+        transaction,
+        COMPOSABLE_EDIT_RECIPE_RECEIPT_PREFIX,
+        |_| PersistenceError::Storage,
+    )?;
+    receipts.extend(super::metadata_store::scan_records(
+        transaction,
+        "edit_recipe_receipt:",
+        |_| PersistenceError::Storage,
+    )?);
     for (key, value) in receipts {
         let mut record: Value =
             serde_json::from_str(&value).map_err(|_| PersistenceError::Storage)?;
@@ -449,24 +446,29 @@ pub(super) fn migrate_legacy_recipes(
                 .as_object_mut()
                 .ok_or(PersistenceError::Storage)?
                 .insert("settled_at".to_owned(), Value::from(now));
-            write_metadata_value(
+            super::metadata_store::upsert(
                 transaction,
                 &composable_recipe_receipt_key(&photo_id, request_id),
                 &serde_json::to_string(&record).map_err(|_| PersistenceError::Storage)?,
+                |_| PersistenceError::Storage,
             )?;
-            transaction
-                .execute("DELETE FROM library_metadata WHERE key=?", [key])
-                .map_err(|_| PersistenceError::Storage)?;
+            super::metadata_store::delete(transaction, &key, |_| PersistenceError::Storage)?;
         } else {
             // A retired two-control request cannot be replayed as a new composable write.
-            write_metadata_value(
+            super::metadata_store::upsert(
                 transaction,
                 &receipt_tombstone_key(&photo_id, request_id),
                 "expired",
+                |_| PersistenceError::Storage,
             )?;
         }
     }
-    write_metadata_value(transaction, "composable_recipe_migration_v1", "complete")
+    super::metadata_store::upsert(
+        transaction,
+        "composable_recipe_migration_v1",
+        "complete",
+        |_| PersistenceError::Storage,
+    )
 }
 
 pub(super) fn read_composable_edit_recipe_facts(
@@ -491,16 +493,11 @@ pub(super) fn replay_composable_edit_recipe_rebind(
     if let Err(error) = validate_rebind_request(&mutation) {
         return Ok(Some(ComposableEditRecipeWriteOutcome::Invalid(error)));
     }
-    let expired: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM library_metadata WHERE key=?)",
-            [receipt_tombstone_key(
-                &mutation.photo_id,
-                &mutation.request_id,
-            )],
-            |row| row.get(0),
-        )
-        .map_err(|_| PersistenceError::Storage)?;
+    let expired = super::metadata_store::exists(
+        connection,
+        &receipt_tombstone_key(&mutation.photo_id, &mutation.request_id),
+        |_| PersistenceError::Storage,
+    )?;
     if expired {
         return Ok(Some(ComposableEditRecipeWriteOutcome::ReceiptExpired));
     }
@@ -583,7 +580,7 @@ fn historical_rebind_replay_reads_only_the_retained_receipt() {
     connection
         .execute(
             "INSERT INTO library_metadata(key,value) VALUES(?,?)",
-            params![key, bytes],
+            rusqlite::params![key, bytes],
         )
         .unwrap();
     assert_eq!(
@@ -880,14 +877,11 @@ fn read_composable_recipe_receipt(
     photo_id: &str,
     request_id: &str,
 ) -> Result<Option<ComposableRecipeReceipt>, PersistenceError> {
-    let value = connection
-        .query_row(
-            "SELECT value FROM library_metadata WHERE key=?",
-            [composable_recipe_receipt_key(photo_id, request_id)],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
+    let value = super::metadata_store::read_value(
+        connection,
+        &composable_recipe_receipt_key(photo_id, request_id),
+        |_| PersistenceError::Storage,
+    )?;
     value
         .map(|value| {
             let receipt: ComposableRecipeReceipt =
@@ -906,10 +900,11 @@ fn write_composable_recipe_record(
     photo_id: &str,
     recipe: &ComposableEditRecipe,
 ) -> Result<(), PersistenceError> {
-    write_metadata_value(
+    super::metadata_store::upsert(
         transaction,
         &composable_recipe_key(photo_id),
         &serialize_record(&recipe_record(recipe))?,
+        |_| PersistenceError::Storage,
     )
 }
 
@@ -918,26 +913,12 @@ fn write_composable_recipe_receipt(
     request_id: &str,
     receipt: &ComposableRecipeReceipt,
 ) -> Result<(), PersistenceError> {
-    write_metadata_value(
+    super::metadata_store::upsert(
         transaction,
         &composable_recipe_receipt_key(&receipt.photo_id, request_id),
         &serialize_record(receipt)?,
+        |_| PersistenceError::Storage,
     )
-}
-
-fn write_metadata_value(
-    transaction: &Transaction<'_>,
-    key: &str,
-    value: &str,
-) -> Result<(), PersistenceError> {
-    transaction
-        .execute(
-            "INSERT INTO library_metadata(key,value) VALUES(?,?)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![key, value],
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    Ok(())
 }
 
 mod records;
