@@ -146,6 +146,18 @@ describe("browser access session API", () => {
       retryAfterSeconds: 86_400,
     });
   });
+  test("classifies exact Origin rejection separately from an invalid token", async () => {
+    expect(
+      await exchangeAccessToken(
+        fetcher(() =>
+          Promise.resolve(
+            Response.json({ error: "access_denied" }, { status: 403 }),
+          ),
+        ),
+        "token",
+      ),
+    ).toEqual({ kind: "origin-rejected" });
+  });
 
   test("sends logout CSRF and accepts only the specified 204 confirmation", async () => {
     const calls: Array<{

@@ -14,6 +14,7 @@ export type TokenExchange =
   | Readonly<{ kind: "rate-limited"; retryAfterSeconds: number }>
   | Readonly<{ kind: "session-capacity"; retryAfterSeconds: number }>
   | Readonly<{ kind: "unconfigured" }>
+  | Readonly<{ kind: "origin-rejected" }>
   | Readonly<{ kind: "unavailable" }>
   | Readonly<{ kind: "uncertain" }>;
 
@@ -67,14 +68,14 @@ function retryAfterSeconds(response: Response): number {
 
 async function responseErrorCode(
   response: Response,
-): Promise<string | undefined> {
+): Promise<{ code?: string; malformed: boolean }> {
   try {
     const body: unknown = await response.json();
-    return isRecord(body) && typeof body.error === "string"
-      ? body.error
-      : undefined;
+    if (!isRecord(body) || typeof body.error !== "string")
+      return { malformed: true };
+    return { code: body.error, malformed: false };
   } catch {
-    return undefined;
+    return { malformed: true };
   }
 }
 
@@ -140,24 +141,27 @@ export async function exchangeAccessToken(
 
   if (response.status === 204) return { kind: "established" };
   if (response.status === 401) return { kind: "invalid-token" };
+  if (response.status === 403) {
+    const error = await responseErrorCode(response);
+    return error.code === "access_denied"
+      ? { kind: "origin-rejected" }
+      : error.malformed
+        ? { kind: "uncertain" }
+        : { kind: "unavailable" };
+  }
   if (response.status === 429) {
     const retryAfter = retryAfterSeconds(response);
-    return (await responseErrorCode(response)) === "session_capacity"
+    return (await responseErrorCode(response)).code === "session_capacity"
       ? { kind: "session-capacity", retryAfterSeconds: retryAfter }
       : { kind: "rate-limited", retryAfterSeconds: retryAfter };
   }
   if (response.status === 503) {
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch {
-      return { kind: "unavailable" };
-    }
-    return isRecord(body) && body.error === "access_unconfigured"
-      ? { kind: "unconfigured" }
-      : { kind: "unavailable" };
+    const error = await responseErrorCode(response);
+    if (error.code === "access_unconfigured") return { kind: "unconfigured" };
+    return error.malformed ? { kind: "uncertain" } : { kind: "unavailable" };
   }
-  return { kind: "unavailable" };
+  const error = await responseErrorCode(response);
+  return error.malformed ? { kind: "uncertain" } : { kind: "unavailable" };
 }
 
 export async function revokeBrowserSession(

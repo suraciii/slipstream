@@ -47,10 +47,13 @@ function formatDelay(totalSeconds: number): string {
 const isUnencryptedHttp = (): boolean =>
   typeof window !== "undefined" && window.location.protocol === "http:";
 
-const transportNotice = (): string =>
+const transportLabel = (): string =>
+  isUnencryptedHttp() ? "Unencrypted HTTP" : "Secure HTTPS connection";
+
+const transportExplanation = (): string =>
   isUnencryptedHttp()
-    ? "Unencrypted HTTP: people on this network may read your photos and credentials, including your Access Token during login."
-    : "Secure HTTPS connection.";
+    ? "People on this network may read your photos and credentials, including your Access Token during login."
+    : "Your browser encrypts this connection to Slipstream.";
 
 export function mountAccessBoundary(
   root: HTMLElement,
@@ -136,7 +139,10 @@ export function mountAccessBoundary(
         <section class="access-panel" aria-labelledby="access-title">
           <h1 id="access-title">Slipstream</h1>
           <p class="access-subtitle">Open your photo library</p>
-          <p class="access-transport ${isUnencryptedHttp() ? "access-transport-warning" : "access-transport-secure"}" role="status">${escapeText(transportNotice())}</p>
+          <details class="access-transport ${isUnencryptedHttp() ? "access-transport-warning" : "access-transport-secure"}">
+            <summary>${escapeText(transportLabel())}</summary>
+            <p>${escapeText(transportExplanation())}</p>
+          </details>
           <p class="access-message" data-access-message role="alert" aria-live="polite" ${options.message ? "" : "hidden"}>${escapeText(options.message ?? "")}</p>
           <form data-access-form>
             <label for="access-token">Access Token</label>
@@ -282,12 +288,13 @@ export function mountAccessBoundary(
         () => {},
       ),
     );
-    const transport = document.createElement("p");
+    const transport = document.createElement("details");
     transport.className = `private-transport ${isUnencryptedHttp() ? "access-transport-warning" : "access-transport-secure"}`;
-    transport.setAttribute("role", "status");
-    transport.textContent = isUnencryptedHttp()
-      ? "Unencrypted HTTP · Photos and credentials are visible to network observers."
-      : "Secure HTTPS connection.";
+    const summary = document.createElement("summary");
+    summary.textContent = transportLabel();
+    const explanation = document.createElement("p");
+    explanation.textContent = transportExplanation();
+    transport.append(summary, explanation);
     host.prepend(transport);
   };
 
@@ -516,15 +523,23 @@ export function mountAccessBoundary(
       });
       return;
     }
-    if (result.kind === "unavailable") {
+    if (result.kind === "origin-rejected") {
       renderEntry({
         message:
-          "Slipstream is unavailable. Check the server connection and try again.",
+          "The server rejected this browser Origin. Open the configured server address or ask the operator; Slipstream will not change the host, port, or scheme automatically.",
         configured: true,
       });
       return;
     }
-
+    if (result.kind === "unavailable") {
+      renderEntry({
+        message:
+          "Access is temporarily unavailable. Check the server connection and try again.",
+        configured: true,
+        checkAgain: true,
+      });
+      return;
+    }
     // A response can be lost after the server creates a session. Check the
     // cookie once; never resend the token automatically.
     const status = await readAccessStatus(fetcher);

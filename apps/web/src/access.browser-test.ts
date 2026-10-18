@@ -230,6 +230,28 @@ test("direct HTTP keeps access, cookie lifecycle and CLI authentication", async 
   expect((await context.request.get(`${url}/api/status`)).status()).toBe(401);
 });
 
+test("wrong Origin is disclosed without rewriting the browser address", async ({
+  page,
+}) => {
+  await server.close();
+  await rm(join(base, "state"), { recursive: true, force: true });
+  server = await startBrowserServer({
+    base,
+    root: join(base, "originals"),
+    transport: "http",
+    publicOrigin: "http://127.0.0.1:1",
+  });
+  const address = server.url;
+  await page.goto(address);
+  await page.getByLabel("Access Token", { exact: true }).fill(server.token);
+  await page.getByRole("button", { name: "Open library", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText(
+    "rejected this browser Origin",
+  );
+  expect(page.url()).toBe(`${address}/`);
+  await expect(page.getByLabel("Access Token", { exact: true })).toBeVisible();
+});
+
 for (const firstTransport of ["https", "http"] as const) {
   test(`Photo handoff across both transports, starting with ${firstTransport}`, async ({
     page,

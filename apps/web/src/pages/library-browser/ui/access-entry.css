@@ -51,6 +51,18 @@
   font-size: 0.82rem;
   line-height: 1.4;
 }
+.access-transport summary,
+.private-transport summary {
+  cursor: pointer;
+}
+
+.access-transport p,
+.private-transport p {
+  max-width: 50rem;
+  margin: 0.35rem 0 0;
+  color: inherit;
+  line-height: 1.45;
+}
 
 .access-transport-warning {
   color: var(--warning);
