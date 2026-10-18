@@ -143,32 +143,39 @@ async fn current_source_revision(application: &Application, photo_id: &str) -> S
         .expect("settled Photo must have a published source revision")
 }
 
-async fn save_recipe(
+async fn seed_legacy_recipe(
     application: &Application,
+    config: &Config,
     photo_id: &str,
     request_id: &str,
-    expected_recipe_version: Option<String>,
     exposure_ev: f64,
 ) -> slipstream_core::EditRecipe {
-    let expected_source_revision = current_source_revision(application, photo_id).await;
-    let outcome = application
-        .library
-        .save_edit_recipe(slipstream_core::SaveEditRecipe {
-            photo_id: photo_id.to_owned(),
-            request_id: request_id.to_owned(),
-            expected_recipe_version,
-            expected_source_revision,
-            settings: slipstream_core::EditRecipeSettings {
+    let source_revision = current_source_revision(application, photo_id).await;
+    let revision = format!("legacy-{request_id}");
+    let connection =
+        rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO edit_recipes(photo_id,revision,source_revision,exposure_ev,white_balance_mode,temperature_kelvin,tint_milli) VALUES(?,?,?,?,?,?,?)",
+            rusqlite::params![
+                photo_id,
+                revision,
+                source_revision,
                 exposure_ev,
-                white_balance: slipstream_core::WhiteBalanceIntent::AsShot,
-            },
-        })
-        .await
+                "as-shot",
+                Option::<i32>::None,
+                Option::<i32>::None,
+            ],
+        )
         .unwrap();
-    match outcome {
-        slipstream_core::EditRecipeWriteOutcome::Saved(recipe)
-        | slipstream_core::EditRecipeWriteOutcome::Unchanged(recipe) => recipe,
-        other => panic!("the recipe must save: {other:?}"),
+    slipstream_core::EditRecipe {
+        photo_id: photo_id.to_owned(),
+        revision,
+        source_revision,
+        settings: slipstream_core::EditRecipeSettings {
+            exposure_ev,
+            white_balance: slipstream_core::WhiteBalanceIntent::AsShot,
+        },
     }
 }
 
@@ -233,7 +240,7 @@ async fn export_restart_recovers_an_already_published_artifact() {
     let (application, router) = export_application(&base, &config).await;
     let manager = Arc::clone(application.exports.as_ref().unwrap());
     let photo_id = photo_id_for(&config, "pair.ARW");
-    let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+    let recipe = seed_legacy_recipe(&application, &config, &photo_id, "save-1", 0.5).await;
     let source_revision = current_source_revision(&application, &photo_id).await;
     let export_id =
         seed_historical_export(&application, &photo_id, &recipe.revision, &source_revision).await;
@@ -309,7 +316,7 @@ async fn export_recovery_ignores_a_file_from_a_superseded_attempt() {
     let (application, router) = export_application(&base, &config).await;
     let manager = Arc::clone(application.exports.as_ref().unwrap());
     let photo_id = photo_id_for(&config, "pair.ARW");
-    let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+    let recipe = seed_legacy_recipe(&application, &config, &photo_id, "save-1", 0.5).await;
     let source_revision = current_source_revision(&application, &photo_id).await;
     let export_id =
         seed_historical_export(&application, &photo_id, &recipe.revision, &source_revision).await;
@@ -572,7 +579,8 @@ async fn historical_queued_work_settles_interrupted_without_engine_execution() {
     let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
     let (application, router) = export_application(&base, &config).await;
     let photo_id = photo_id_for(&config, "pair.ARW");
-    let recipe = save_recipe(&application, &photo_id, "historical-recipe", None, 0.5).await;
+    let recipe =
+        seed_legacy_recipe(&application, &config, &photo_id, "historical-recipe", 0.5).await;
     let source = current_source_revision(&application, &photo_id).await;
     let export_id =
         seed_historical_export(&application, &photo_id, &recipe.revision, &source).await;

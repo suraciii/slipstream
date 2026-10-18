@@ -31,10 +31,10 @@ pub use crate::domain::{
     AlbumQueryFilter, AlbumRecord, AlbumSummary, CheckedAlbumMutation, CheckedAlbumMutationResult,
     CheckedPhotoDecisionCounts, CheckedPhotoDecisionItem, CheckedPhotoDecisionItemResult,
     CheckedPhotoDecisionMutation, CheckedPhotoDecisionOutcome, EditRecipe, EditRecipeRead,
-    EditRecipeSettings, EditRecipeWriteOutcome, PhotoDecisionFacts, PhotoDecisionSnapshot,
-    PhotoQuery, PhotoQueryError, PhotoRead, PhotoStateField, PhotoStateMutation,
-    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult,
-    RebindEditRecipe, SaveEditRecipe, ScanSnapshot, SelectionState, WhiteBalanceIntent,
+    EditRecipeSettings, PhotoDecisionFacts, PhotoDecisionSnapshot, PhotoQuery, PhotoQueryError,
+    PhotoRead, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo,
+    PhotoStateValue, PreviewSeed, PreviewSeedResult, ScanSnapshot, SelectionState,
+    WhiteBalanceIntent,
 };
 pub use admission::{
     DatabaseName, StateDatabaseLock, StateDirectory, StateError, StateFileIdentity,

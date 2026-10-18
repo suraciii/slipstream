@@ -10,18 +10,17 @@ use crate::{
     AlbumMutation, AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary,
     AppliedRelocations, CheckedAlbumMutation, CheckedAlbumMutationResult,
     CheckedPhotoDecisionMutation, CheckedPhotoDecisionResult, DiscoveredOriginal, EditRecipeRead,
-    EditRecipeWriteOutcome, ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreMutation,
-    ExplicitPhotoRestoreResult, ExportAttempt, ExportLeaseOutcome, ExportRecord,
-    ExportRetryOutcome, ExportSettlement, ExportSubmission, ExportSubmissionResolution,
-    ExportSubmitOutcome, ExportSweepResult, LibraryRoot, MAXIMUM_PHOTO_RATING, OriginalFingerprint,
-    OriginalScanError, PermanentDeletionItemState, PermanentDeletionSelection,
-    PermanentDeletionTarget, PhotoAlbumMembership, PhotoOperationRemainder, PhotoQuery,
-    PhotoQueryError, PhotoQueryProjection, PhotoRead, PhotoRemovalMutation, PhotoRemovalResult,
-    PhotoRestoration, PhotoRestorationResult, PhotoStateBatchMutation, PhotoStateBatchResult,
-    PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateValue, PreviewSeed,
-    PreviewSeedResult, RebindEditRecipe, RecoveryRecord, RecoverySurvey, RemovedPhotoRecord,
-    RequestedRelocation, SaveEditRecipe, ScanSnapshot, SelectionState, WhiteBalanceIntent,
-    XmpExportRecord,
+    ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreMutation, ExplicitPhotoRestoreResult,
+    ExportAttempt, ExportLeaseOutcome, ExportRecord, ExportRetryOutcome, ExportSettlement,
+    ExportSubmission, ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult,
+    LibraryRoot, MAXIMUM_PHOTO_RATING, OriginalFingerprint, OriginalScanError,
+    PermanentDeletionItemState, PermanentDeletionSelection, PermanentDeletionTarget,
+    PhotoAlbumMembership, PhotoOperationRemainder, PhotoQuery, PhotoQueryError,
+    PhotoQueryProjection, PhotoRead, PhotoRemovalMutation, PhotoRemovalResult, PhotoRestoration,
+    PhotoRestorationResult, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField,
+    PhotoStateMutation, PhotoStateMutationResult, PhotoStateValue, PreviewSeed, PreviewSeedResult,
+    RecoveryRecord, RecoverySurvey, RemovedPhotoRecord, RequestedRelocation, ScanSnapshot,
+    SelectionState, WhiteBalanceIntent, XmpExportRecord,
 };
 
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params};
@@ -383,8 +382,6 @@ pub(super) enum Command {
         photo_id: String,
         reply: Reply<Option<EditRecipeRead>>,
     },
-    SaveEditRecipe(SaveEditRecipe, Reply<EditRecipeWriteOutcome>),
-    RebindEditRecipe(RebindEditRecipe, Reply<EditRecipeWriteOutcome>),
     Processing(processing::Command),
     ReadXmp {
         export_id: String,
@@ -806,14 +803,6 @@ impl Persistence {
         })
     }
 
-    pub(crate) fn save_edit_recipe_receiver(
-        &self,
-        mutation: SaveEditRecipe,
-    ) -> Result<oneshot::Receiver<Result<EditRecipeWriteOutcome, PersistenceError>>, PersistenceError>
-    {
-        self.submit_persistence_receiver(|reply| Command::SaveEditRecipe(mutation, reply))
-    }
-
     pub(crate) fn edit_recipe_surface_receiver(
         &self,
         photo_id: &str,
@@ -822,14 +811,6 @@ impl Persistence {
             photo_id: photo_id.to_owned(),
             reply,
         })
-    }
-
-    pub(crate) fn rebind_edit_recipe_receiver(
-        &self,
-        mutation: RebindEditRecipe,
-    ) -> Result<oneshot::Receiver<Result<EditRecipeWriteOutcome, PersistenceError>>, PersistenceError>
-    {
-        self.submit_persistence_receiver(|reply| Command::RebindEditRecipe(mutation, reply))
     }
 
     pub(crate) fn read_development_proxy_receiver(
@@ -1745,24 +1726,6 @@ fn owner_main(
             Command::AllDevelopmentProxies(reply) => {
                 let _ = reply.send(development_proxy::all_development_proxies(&connection));
             }
-            Command::SaveEditRecipe(mutation, reply) => {
-                let result = edit_recipe::save_edit_recipe(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    mutation,
-                );
-                let _ = reply.send(result);
-            }
-            Command::RebindEditRecipe(mutation, reply) => {
-                let result = edit_recipe::rebind_edit_recipe(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    mutation,
-                );
-                let _ = reply.send(result);
-            }
             Command::Processing(command) => {
                 processing::dispatch(command, &state, &database_name, &mut connection);
             }
@@ -2292,22 +2255,6 @@ pub(super) fn write_transaction<T>(
         .commit()
         .map_err(|_| PersistenceError::Storage)?;
     Ok(result)
-}
-
-pub(super) fn white_balance_intent_name(intent: WhiteBalanceIntent) -> &'static str {
-    intent.mode_name()
-}
-
-pub(super) fn white_balance_intent_values(
-    intent: WhiteBalanceIntent,
-) -> (Option<i32>, Option<i32>) {
-    match intent {
-        WhiteBalanceIntent::AsShot => (None, None),
-        WhiteBalanceIntent::TemperatureTint {
-            temperature_kelvin,
-            tint_milli,
-        } => (Some(temperature_kelvin), Some(tint_milli)),
-    }
 }
 
 pub(super) fn parse_white_balance_intent(

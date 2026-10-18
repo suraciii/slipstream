@@ -334,49 +334,6 @@ pub struct EditRecipeRead {
     pub capture: CaptureFact,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct SaveEditRecipe {
-    pub photo_id: String,
-    /// Stable caller-owned identity used to resolve a retry after a lost
-    /// response. It is not the recipe version and must not be regenerated
-    /// while retrying one save.
-    pub request_id: String,
-    pub expected_recipe_version: Option<String>,
-    pub expected_source_revision: String,
-    pub settings: EditRecipeSettings,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RebindEditRecipe {
-    pub photo_id: String,
-    /// The caller-owned identity that makes one rebind idempotent, exactly
-    /// like a save identity.
-    pub request_id: String,
-    pub expected_recipe_version: String,
-    pub new_source_revision: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum EditRecipeWriteOutcome {
-    /// A fresh commit installed a new recipe version inside the write
-    /// transaction.
-    Saved(EditRecipe),
-    /// A receipt replay of a committed write: nothing was written, and the
-    /// carried recipe is the committed receipt, whatever advanced since.
-    Replayed(EditRecipe),
-    Unchanged(EditRecipe),
-    Conflict(EditRecipeRead),
-    SourceChanged(EditRecipeRead),
-    RequiresRebind(EditRecipeRead),
-    /// The request identity was already used with a different payload.
-    RequestConflict,
-    MissingPhoto,
-    MissingRecipe,
-    UnsupportedPhoto,
-    Unavailable,
-    InvalidSettings,
-}
-
 /// A validated camera-local query boundary. It deliberately contains no
 /// timezone: persisted Capture Time ordering compares camera-local values.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -323,6 +323,71 @@ async fn pre_retention_composable_receipts_migrate_to_photo_scope() {
 }
 
 #[tokio::test]
+async fn legacy_edit_recipe_receipts_are_tombstoned_without_reuse() {
+    let seeded = seeded_persistence();
+    let key = "edit_recipe_receipt:legacy-save";
+    let legacy = serde_json::json!({
+        "photo_id": "raw-photo",
+        "payload_digest": "a".repeat(64),
+        "outcome": "Saved",
+        "revision": "legacy-recipe",
+        "source_revision": seeded.source.clone(),
+        "exposure_ev": 0.25,
+        "white_balance_mode": "as-shot"
+    });
+    let mut connection = Connection::open(&seeded.path).unwrap();
+    connection
+        .execute(
+            "DELETE FROM library_metadata WHERE key='composable_recipe_migration_v1'",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO library_metadata(key,value) VALUES(?,?)",
+            rusqlite::params![key, legacy.to_string()],
+        )
+        .unwrap();
+    let transaction = connection.transaction().unwrap();
+    super::super::migrate_legacy_recipes(&transaction).unwrap();
+    let preserved: String = transaction
+        .query_row(
+            "SELECT value FROM library_metadata WHERE key=?",
+            [key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(preserved, legacy.to_string());
+    let tombstone = super::super::receipt_tombstone_key("raw-photo", "legacy-save");
+    assert_eq!(
+        transaction
+            .query_row(
+                "SELECT value FROM library_metadata WHERE key=?",
+                [&tombstone],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "expired"
+    );
+    transaction.commit().unwrap();
+
+    assert_eq!(
+        save_recipe(
+            &seeded,
+            save(
+                "raw-photo",
+                "legacy-save",
+                None,
+                &seeded.source,
+                recipe("raw-photo", &seeded.source, vec![], None),
+            ),
+        )
+        .await,
+        ComposableEditRecipeWriteOutcome::ReceiptExpired
+    );
+}
+
+#[tokio::test]
 async fn unavailable_current_capture_preserves_saved_recipe_without_observed_binding() {
     let seeded = seeded_persistence();
     let submitted = recipe(
