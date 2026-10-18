@@ -26,6 +26,7 @@ type BrowserServerOptions = Readonly<{
   environment?: Readonly<Record<string, string | undefined>>;
   transport?: "http" | "https";
   publicOrigin?: string;
+  accessOrigins?: readonly string[];
 }>;
 
 const startupTimeoutMs = 60_000;
@@ -37,6 +38,7 @@ export async function startBrowserServer({
   environment: environmentOverride,
   transport = "https",
   publicOrigin,
+  accessOrigins: accessOriginsOverride,
 }: BrowserServerOptions): Promise<BrowserServer> {
   const webRoot = resolve(process.env.SLIPSTREAM_WEB_ROOT ?? "apps/web/dist");
   const binary = resolve(
@@ -124,7 +126,8 @@ export async function startBrowserServer({
         : undefined;
     const url = transport === "http" ? backendUrl : httpsUrl!;
     const accessOrigins = JSON.stringify(
-      transport === "http" ? [backendUrl] : [backendUrl, httpsUrl],
+      accessOriginsOverride ??
+        (transport === "http" ? [backendUrl] : [backendUrl, httpsUrl]),
     );
     const childEnvironment: NodeJS.ProcessEnv = {
       ...process.env,
