@@ -115,6 +115,7 @@ test("review controls preserve Preview space and reachable targets across rotati
   await page.locator("[data-dock-select]").click();
   await expect(page.locator("[data-selection]")).toHaveText("Picked");
   for (const { width, height, minimum } of [
+    { width: 375, height: 500, minimum: 480 },
     { width: 375, height: 667, minimum: 480 },
     { width: 390, height: 844, minimum: 650 },
     { width: 667, height: 375, minimum: 240 },

@@ -1045,6 +1045,7 @@
   grid-column: 1 / -1;
   display: grid;
   grid-template-rows: auto minmax(30rem, 1fr) auto auto;
+  overflow-y: auto;
   background: var(--canvas);
 }
 @media (min-width: 761px) and (min-height: 481px) {
@@ -1911,7 +1912,7 @@
   }
 
   .grid-header-row:has(.options-flag:not([hidden])) {
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
   }
   .grid-header-row {
     gap: 0.2rem;

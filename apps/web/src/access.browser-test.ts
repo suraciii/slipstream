@@ -969,8 +969,9 @@ test("image and history restoration share one status check", async ({
     await page.evaluate(() =>
       window.dispatchEvent(new PopStateEvent("popstate")),
     );
-    await expect(page.locator(".access-check-overlay")).toHaveCount(0);
+    await expect(page.locator(".access-check-overlay")).toBeVisible();
     release();
+    await expect(page.locator(".access-check-overlay")).toHaveCount(0);
     await expect(
       page.getByRole("navigation", { name: "Sources" }),
     ).toBeVisible();

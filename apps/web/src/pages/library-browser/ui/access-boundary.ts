@@ -74,6 +74,7 @@ export function mountAccessBoundary(
   let tokenInput: HTMLInputElement | undefined;
   let restoreFocus: HTMLElement | undefined;
   let historyTraversalPending = false;
+  let replayingHistoryTraversal = false;
 
   try {
     channel = new BroadcastChannel(ACCESS_CHANNEL);
@@ -677,23 +678,36 @@ export function mountAccessBoundary(
     if (!session || !alive || document.visibilityState === "hidden") return;
     void checkCurrentAccess(privateHost?.inert ?? false);
   };
-  const onHistoryTraversal = (): void => {
-    if (!session || !privateHost || !alive || historyTraversalPending) return;
+  const onHistoryTraversal = (event: PopStateEvent): void => {
+    if (replayingHistoryTraversal) {
+      replayingHistoryTraversal = false;
+      return;
+    }
+    if (!session || !privateHost || !alive) return;
+    event.stopImmediatePropagation();
+    if (historyTraversalPending) return;
     historyTraversalPending = true;
-    // Same-document traversal is already committed by the browser. Let the
-    // private navigation owner reconcile the rendered destination immediately;
-    // the session check runs in the background and only removes the private
-    // host when the server confirms that access is gone. A temporary
-    // unavailable result therefore cannot leave the URL on one destination
-    // while the Library renders another.
-    void checkCurrentAccess(false).then(
+    // Do not let a same-document traversal restore private content until the
+    // current Browser Session is verified. A temporary access failure keeps
+    // the session and replays the already-committed traversal; confirmed loss
+    // leaves the access entry visible instead.
+    detachPrivateHost();
+    void checkCurrentAccess().then(
       (valid) => {
         historyTraversalPending = false;
         if (!alive) return;
-        if (!valid && !session && privateHost) detachPrivateHost();
+        if (valid || (session && privateHost)) {
+          attachPrivateHost();
+          replayingHistoryTraversal = true;
+          window.dispatchEvent(new PopStateEvent("popstate"));
+        }
       },
       () => {
         historyTraversalPending = false;
+        if (!alive || !session || !privateHost) return;
+        attachPrivateHost();
+        replayingHistoryTraversal = true;
+        window.dispatchEvent(new PopStateEvent("popstate"));
       },
     );
   };
