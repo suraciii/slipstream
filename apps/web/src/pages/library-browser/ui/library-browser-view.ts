@@ -526,8 +526,8 @@ export interface LibraryBrowserView extends RecoveryReviewView {
   openRecoveryPanel(
     entries: ReadonlyArray<RecoveryEntryViewModel>,
     paging: RecoveryPagingViewModel,
+    invoker?: HTMLElement,
   ): void;
-  /// Re-renders the entries of the open review, including its paging.
   renderRecoveryEntries(
     entries: ReadonlyArray<RecoveryEntryViewModel>,
     paging: RecoveryPagingViewModel,
@@ -571,7 +571,7 @@ export function createLibraryBrowserView(
         </dialog>
         <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" tabindex="0"></div>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-          <header class="grid-header"><div class="grid-header-row"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false"><span class="source-toggle-name" data-grid-compact-title>All Photos</span><span class="source-toggle-indicator" aria-hidden="true">▾</span></button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-connection" data-grid-connection role="status" hidden></p><div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options>Options</button><span class="options-flag" data-view-options-flag hidden></span><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button></div><div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
+          <header class="grid-header"><div class="grid-header-row"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false"><span class="source-toggle-name" data-grid-compact-title>All Photos</span><span class="source-toggle-indicator" aria-hidden="true">▾</span></button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-connection" data-grid-connection role="status" hidden></p><div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options aria-label="View options">View options</button><span class="options-flag" data-view-options-flag hidden></span><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button></div><div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
           <div class="grid-batch" data-grid-batch hidden><div class="grid-batch-result" data-grid-batch-result hidden><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-select>Pick</button><button type="button" data-batch-reject>Reject</button><label for="batch-album-select">Add to</label><select id="batch-album-select" data-batch-album-select></select><button type="button" data-batch-album-add>Add to Album</button></div></div>
         </section>
@@ -613,6 +613,14 @@ ${REMOVED_PANELS_TEMPLATE}
   const photoSourceToggle = required<HTMLButtonElement>(
     root,
     "[data-photo-source-toggle]",
+  );
+  const photoStatusRecovery = required<HTMLButtonElement>(
+    root,
+    "[data-photo-status-recovery]",
+  );
+  const photoLibrary = required<HTMLButtonElement>(
+    root,
+    "[data-photo-library]",
   );
   const sourceClose = required<HTMLButtonElement>(root, "[data-source-close]");
   const gridConnection = required<HTMLElement>(root, "[data-grid-connection]");
@@ -927,8 +935,8 @@ ${REMOVED_PANELS_TEMPLATE}
   const dockRating = required<HTMLButtonElement>(root, "[data-dock-rating]");
   const dockSelect = required<HTMLButtonElement>(root, "[data-dock-select]");
   const dockUndo = required<HTMLButtonElement>(root, "[data-dock-undo]");
-  const dockMore = required<HTMLButtonElement>(root, "[data-dock-more]");
   const dockNext = required<HTMLButtonElement>(root, "[data-dock-next]");
+  const dockMore = required<HTMLButtonElement>(root, "[data-dock-more]");
   const photoToolsDialog = required<HTMLDialogElement>(
     root,
     "[data-photo-tools]",
@@ -944,18 +952,6 @@ ${REMOVED_PANELS_TEMPLATE}
   const photoToolsClear = required<HTMLButtonElement>(
     root,
     "[data-photo-tools-clear]",
-  );
-  const photoToolsUndo = required<HTMLButtonElement>(
-    root,
-    "[data-photo-tools-undo]",
-  );
-  const photoToolsPick = required<HTMLButtonElement>(
-    root,
-    "[data-photo-tools-pick]",
-  );
-  const photoToolsReject = required<HTMLButtonElement>(
-    root,
-    "[data-photo-tools-reject]",
   );
   const photoToolsEntries = required<HTMLElement>(
     root,
@@ -1003,13 +999,16 @@ ${REMOVED_PANELS_TEMPLATE}
   /// supporting surface registers its dialog here, so at most one is active
   /// and every dismissal converges on one cleanup path.
   const surfaces = createModalSurfaces();
-  /// The disclosure state of the two Photo View entries mirrors the active
+  /// The disclosure state of the Photo View entries mirrors the active
   /// surface, so every supporting-surface transition updates both controls.
   const syncSecondarySurface = () => {
     const toolsOpen = surfaces.isActive("photo-tools");
+    const optionsOpen = surfaces.isActive("view-options");
+    const ratingOpen = toolsOpen && photoToolsController.view() === "rating";
     dockMore.setAttribute("aria-expanded", String(toolsOpen));
     selectionBadge.setAttribute("aria-expanded", String(toolsOpen));
-    dockRating.setAttribute("aria-expanded", String(toolsOpen));
+    dockRating.setAttribute("aria-expanded", String(ratingOpen));
+    photoLibrary.setAttribute("aria-expanded", String(optionsOpen));
     const status = required<HTMLElement>(root, "[data-status]");
     const host = toolsOpen
       ? required<HTMLElement>(photoToolsDialog, ".photo-tools-sheet")
@@ -1186,7 +1185,6 @@ ${REMOVED_PANELS_TEMPLATE}
     openSources: () => sourceController.open(),
     openEditor: (photoId) => editorController.open(photoId),
     openDetails: openPhotoDetails,
-    navigate: (direction) => send({ kind: direction }),
   });
   const editorController = createPhotoEditorSurfaceController({
     root,
@@ -1279,6 +1277,7 @@ ${REMOVED_PANELS_TEMPLATE}
         ?.sourceModel()
         ?.albums.find((candidate) => candidate.active)?.id,
     onSizeChange: setGridThumbnailSize,
+    syncSecondarySurface,
   });
   const albumFormController = createAlbumForm({
     elements: { albumFormDialog, albumFormBody },
@@ -1477,6 +1476,14 @@ ${REMOVED_PANELS_TEMPLATE}
   retry.addEventListener("click", () => send({ kind: "retry-source" }));
   signOut.addEventListener("click", () => send({ kind: "sign-out" }));
   retryPhoto.addEventListener("click", () => send({ kind: "retry-photo" }));
+  photoStatusRecovery.addEventListener("click", () => {
+    if (photoView.hidden) return;
+    send({ kind: "recovery-entry" });
+  });
+  photoLibrary.addEventListener("click", () => {
+    if (photoView.hidden) return;
+    viewOptionsController.open();
+  });
   selectionBadge.addEventListener("click", () => photoToolsController.open());
   dockPrevious.addEventListener("click", () => send({ kind: "previous" }));
   dockNext.addEventListener("click", () => send({ kind: "next" }));
@@ -1486,6 +1493,7 @@ ${REMOVED_PANELS_TEMPLATE}
     button.addEventListener("click", () =>
       photoToolsController.returnToTools(),
     );
+  dockUndo.addEventListener("click", () => send({ kind: "undo" }));
   photoToolsClear.addEventListener("click", () =>
     send({
       kind: "photo-mutation",
@@ -1494,27 +1502,6 @@ ${REMOVED_PANELS_TEMPLATE}
       advance: false,
     }),
   );
-  photoToolsPick.addEventListener("click", () =>
-    send({
-      kind: "photo-mutation",
-      field: "selectionState",
-      value: "picked",
-      advance: false,
-    }),
-  );
-  photoToolsReject.addEventListener("click", () =>
-    send({
-      kind: "photo-mutation",
-      field: "selectionState",
-      value: "rejected",
-      advance: false,
-    }),
-  );
-  photoToolsUndo.addEventListener("click", () => {
-    photoToolsController.close();
-    send({ kind: "undo" });
-  });
-  dockUndo.addEventListener("click", () => send({ kind: "undo" }));
   dockSelect.addEventListener("click", () =>
     send({
       kind: "photo-mutation",
@@ -1649,15 +1636,12 @@ ${REMOVED_PANELS_TEMPLATE}
       ratingControls.setDecisionEnabled(model.decisionEnabled);
       dockSelect.disabled = !model.decisionEnabled;
       dockReject.disabled = !model.decisionEnabled;
-      photoToolsPick.disabled = !model.decisionEnabled;
-      photoToolsReject.disabled = !model.decisionEnabled;
       photoToolsClear.disabled = !model.clearEnabled;
       refresh.disabled = !model.refreshEnabled;
       retry.disabled = !model.recoveryEnabled;
       retryPhoto.disabled = !model.recoveryEnabled;
       dockPrevious.disabled = !model.previousEnabled;
       dockNext.disabled = !model.nextEnabled;
-      photoToolsUndo.disabled = !model.undoEnabled;
       dockUndo.disabled = !model.undoEnabled;
       removedPanels.setRemovalEnabled(model.removalEnabled);
       filmstripPresenter.setInteractive(model.filmstripEnabled);
@@ -1673,7 +1657,6 @@ ${REMOVED_PANELS_TEMPLATE}
       cancelGridRender();
       resetGestures();
       photoToolsController.close(false);
-      closeRatingChoices(false);
       stage.replaceChildren();
       zoomController?.resetForImage();
       gridView.hidden = false;
@@ -1741,6 +1724,8 @@ ${REMOVED_PANELS_TEMPLATE}
       zoomController?.resetForImage();
       photoView.hidden = true;
       gridView.hidden = false;
+      photoStatusRecovery.hidden = true;
+      photoLibrary.hidden = true;
       // Photo View detached the owner's Grid images, so the visible Grid
       // rebuilds its cells and re-attaches every thumbnail it still shows.
       clearGridCells();
@@ -1761,6 +1746,8 @@ ${REMOVED_PANELS_TEMPLATE}
       // re-render of the Photo the tools describe never dismisses them.
       gridView.hidden = true;
       photoView.hidden = false;
+      photoStatusRecovery.hidden = false;
+      photoLibrary.hidden = false;
       photoView.scrollTop = 0;
       sourceController.syncLayout();
       filmstripPresenter.syncHost();
@@ -1770,9 +1757,15 @@ ${REMOVED_PANELS_TEMPLATE}
       photoPresenter.resetForPhotoEntry();
     },
     renderFilmstrip: filmstripPresenter.render,
-    renderPhotoFacts: photoPresenter.renderPhotoFacts,
+    renderPhotoFacts(model) {
+      ratingControls.render(model.rating ?? 0);
+      photoPresenter.renderPhotoFacts(model);
+    },
     renderPhotoMetadata: photoPresenter.renderPhotoMetadata,
-    renderPhotoShell: photoPresenter.renderPhotoShell,
+    renderPhotoShell(model) {
+      ratingControls.render(model.rating ?? 0);
+      return photoPresenter.renderPhotoShell(model);
+    },
     editorVisible: () => editorController.visible(),
     renderEditor: (model) => editorController.render(model),
     presentEditorPreview: (url) => editorController.presentPreview(url),
@@ -1833,9 +1826,9 @@ ${REMOVED_PANELS_TEMPLATE}
       if (!alive) return;
       recoveryPanelController.setRecoveryNotice(model);
     },
-    openRecoveryPanel(entries, paging) {
+    openRecoveryPanel(entries, paging, invoker) {
       if (!alive) return;
-      recoveryPanelController.openRecoveryPanel(entries, paging);
+      recoveryPanelController.openRecoveryPanel(entries, paging, invoker);
     },
     renderRecoveryEntries(entries, paging) {
       if (!alive) return;

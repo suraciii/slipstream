@@ -28,7 +28,6 @@ export function createPhotoToolsController({
   openSources,
   openEditor,
   openDetails,
-  navigate,
 }: Readonly<{
   elements: Readonly<{
     photoToolsDialog: HTMLDialogElement;
@@ -46,7 +45,6 @@ export function createPhotoToolsController({
   openSources: () => void;
   openEditor: (photoId: string) => void;
   openDetails?: (photoId: string) => void;
-  navigate: (direction: "previous" | "next") => void;
 }>): PhotoToolsController {
   const {
     photoToolsDialog,
@@ -106,11 +104,7 @@ export function createPhotoToolsController({
       );
       if (!button) return;
       const entry = button.dataset.photoToolsEntry;
-      if (entry === "previous" || entry === "next") {
-        close(false);
-        navigate(entry);
-        return;
-      }
+      if (!entry) return;
       const photoId = currentPhotoId();
       if (!photoId) return;
       if (entry === "sources") {
@@ -127,8 +121,9 @@ export function createPhotoToolsController({
         entry === "details" ||
         entry === "zoom" ||
         entry === "nearby"
-      )
+      ) {
         open(entry);
+      }
     },
     { signal: listeners.signal },
   );

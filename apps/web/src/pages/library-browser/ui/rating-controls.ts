@@ -210,14 +210,14 @@ export function createRatingControls({
       currentRating = value;
       rating.textContent =
         value === 0
-          ? "No rating"
+          ? "No Rating · 0 stars"
           : `${value} ${value === 1 ? "star" : "stars"}`;
-      dockRating.textContent = value === 0 ? "Rating" : `Rating ${value}★`;
+      dockRating.textContent = value === 0 ? "Rating 0★" : `Rating ${value}★`;
       dockRating.setAttribute(
         "aria-label",
         value === 0
-          ? "Rating, no Rating; open Rating controls"
-          : `Rating ${value} stars; open Rating controls`,
+          ? "Rating, 0 stars; open Rating choices"
+          : `Rating ${value} stars; open Rating choices`,
       );
       syncRatingWheelOptions();
       for (const button of Array.from(

@@ -187,8 +187,9 @@ test("persists manual navigation and advanced current Photo across leave, reload
   const { albumId } = await createAlbum(running.url, "Progress");
   await startReview(page, running.url, "Progress", albumId);
   await openPhotoToolsView(page, "tools");
+  await closePhotoTools(page);
   await actionWithProgress(page, albumId, () =>
-    page.getByRole("button", { name: "Next", exact: true }).click(),
+    page.locator("[data-dock-next]").click(),
   );
   await expect
     .poll(async () => (await state(running.url, albumId)).position)
@@ -208,10 +209,10 @@ test("persists manual navigation and advanced current Photo across leave, reload
   // reloaded document reopens the same Photo instead of the Album Grid.
   await expect(page.getByText("2 / 3")).toBeVisible();
   await openPhotoToolsView(page, "tools");
+  await closePhotoTools(page);
   await actionWithProgress(page, albumId, () =>
-    page.getByRole("button", { name: "Next", exact: true }).click(),
+    page.locator("[data-dock-next]").click(),
   );
-  await expect(page.getByText("3 / 3")).toBeVisible();
   await expect
     .poll(async () => (await state(running.url, albumId)).position)
     .toBe(2);

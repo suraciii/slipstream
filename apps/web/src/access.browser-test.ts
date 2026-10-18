@@ -213,7 +213,7 @@ test("direct HTTP keeps access, cookie lifecycle and CLI authentication", async 
   });
   expect(denied.status()).toBe(403);
   const cli = spawnSync(
-    "target/debug/slipstream",
+    resolve(process.env.SLIPSTREAM_CLI_BINARY ?? "target/debug/slipstream"),
     ["--server", url, "--token-file", server.tokenFile, "status"],
     { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   );
@@ -474,14 +474,9 @@ for (const firstTransport of ["https", "http"] as const) {
       await expect(page.locator("[data-selection]")).toHaveText(
         index === 0 ? "Unflagged" : "Rejected",
       );
-      // The second alias observes the first alias's saved Photo decision.
-      await openPhotoToolsView(page, "tools");
+      await closePhotoTools(page);
       await page
-        .locator("[data-photo-tools]")
-        .getByRole("button", {
-          name: index === 0 ? "Reject" : "Pick",
-          exact: true,
-        })
+        .locator(index === 0 ? "[data-dock-reject]" : "[data-dock-select]")
         .click();
       await expect(page.locator("[data-selection]")).toHaveText(
         index === 0 ? "Rejected" : "Picked",
@@ -562,9 +557,7 @@ for (const firstTransport of ["https", "http"] as const) {
       if (index === 1) {
         await page.goto(destination);
         await waitForLoadedReviewImage(page);
-        await openPhotoToolsView(page, "tools");
-        await page.locator("[data-photo-tools-reject]").click();
-        await closePhotoTools(page);
+        await page.locator("[data-dock-reject]").click();
         await expect(page.locator("[data-selection]")).toHaveText("Rejected");
         await page
           .getByRole("button", { name: "Back to Grid", exact: true })
@@ -746,7 +739,7 @@ test("restored page keeps private content closed until access is verified", asyn
   await expect(sources).toBeVisible();
 });
 
-test("failed history check can retry and reopen the Library", async ({
+test("temporary history access failure keeps the current Library usable and reconciles traversal", async ({
   page,
 }) => {
   await page.goto(server.url);
@@ -754,26 +747,40 @@ test("failed history check can retry and reopen the Library", async ({
   await page.getByRole("button", { name: "Open library", exact: true }).click();
   const sources = page.getByRole("navigation", { name: "Sources" });
   await expect(sources).toBeVisible();
+  await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
+  const initialUrl = page.url();
+  await page.evaluate(() =>
+    history.pushState({ test: "next" }, "", "?selection=picked"),
+  );
   await page.route("**/api/access/session", (route) => route.abort());
   await page.evaluate(() =>
     window.dispatchEvent(new PopStateEvent("popstate")),
   );
-  await expect(sources).toBeHidden();
-  const retry = page.getByRole("button", {
-    name: "Check access again",
-    exact: true,
-  });
-  await expect(retry).toBeVisible();
-  await page.unroute("**/api/access/session");
-  await retry.click();
   await expect(sources).toBeVisible();
-  await expect(page.getByText("Checking access…", { exact: true })).toHaveCount(
-    0,
+  await expect(page.getByLabel("Access Token", { exact: true })).toHaveCount(0);
+  expect(page.url()).toContain("selection=picked");
+  expect(page.url()).not.toBe(initialUrl);
+  await page.unroute("**/api/access/session");
+  await page.evaluate(() => history.back());
+  await expect(page).toHaveURL(initialUrl);
+  await expect(sources).toBeVisible();
+  await expect(page.getByLabel("Access Token", { exact: true })).toHaveCount(0);
+});
+
+test("confirmed history rejection removes the Library", async ({ page }) => {
+  await page.goto(server.url);
+  await page.getByLabel("Access Token", { exact: true }).fill(server.token);
+  await page.getByRole("button", { name: "Open library", exact: true }).click();
+  const sources = page.getByRole("navigation", { name: "Sources" });
+  await expect(sources).toBeVisible();
+  await page.route("**/api/access/session", (route) =>
+    route.fulfill({ json: { authenticated: false, configured: true } }),
   );
-  await page.getByRole("button", { name: "New Album", exact: true }).click();
-  await expect(
-    page.getByRole("button", { name: "Create Album", exact: true }),
-  ).toBeVisible();
+  await page.evaluate(() =>
+    window.dispatchEvent(new PopStateEvent("popstate")),
+  );
+  await expect(page.getByLabel("Access Token", { exact: true })).toBeVisible();
+  await expect(sources).toHaveCount(0);
 });
 
 test("cookie writes reject missing CSRF and revoked session cannot restore private views", async ({
@@ -962,7 +969,7 @@ test("image and history restoration share one status check", async ({
     await page.evaluate(() =>
       window.dispatchEvent(new PopStateEvent("popstate")),
     );
-    await expect(page.locator(".access-check-overlay")).toBeVisible();
+    await expect(page.locator(".access-check-overlay")).toHaveCount(0);
     release();
     await expect(
       page.getByRole("navigation", { name: "Sources" }),
