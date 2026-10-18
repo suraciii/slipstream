@@ -11,7 +11,7 @@ pub(in crate::persistence) fn retain_processing_artifact_in_workspace(
     validate_bounded_name(artifact_id, crate::processing::MAXIMUM_ARTIFACT_ID_BYTES)
         .map_err(|_| PersistenceError::Storage)?;
     write_transaction(state, database_name, connection, |transaction| {
-        let key = format!("processing_workspace_artifact:{artifact_id}");
+        let key = processing_workspace_artifact_key(artifact_id);
         let existing = crate::persistence::metadata_store::read_value(transaction, &key, |_| {
             PersistenceError::Storage
         })?;
@@ -28,7 +28,7 @@ pub(super) fn workspace_artifact_published_at(
 ) -> Result<Option<u64>, PersistenceError> {
     crate::persistence::metadata_store::read_value(
         connection,
-        &format!("processing_workspace_artifact:{artifact_id}"),
+        &processing_workspace_artifact_key(artifact_id),
         |_| PersistenceError::Storage,
     )?
     .map(|value| value.parse().map_err(|_| PersistenceError::Storage))
@@ -356,7 +356,7 @@ pub(in crate::persistence) fn sweep_processing_export_expiry(
                         )?;
                         delete_metadata_value(
                             transaction,
-                            &format!("processing_export_retry:{request_id}"),
+                            &processing_export_retry_key(request_id),
                         )?;
                         delete_metadata_value(
                             transaction,
@@ -410,7 +410,7 @@ pub(in crate::persistence) fn sweep_processing_export_expiry(
             )?;
             delete_metadata_value(
                 transaction,
-                &format!("processing_export_retry:{}", work.admission.request_id),
+                &processing_export_retry_key(&work.admission.request_id),
             )?;
             write_metadata_value(
                 transaction,

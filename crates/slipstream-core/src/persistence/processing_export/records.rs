@@ -46,6 +46,10 @@ pub(super) fn processing_artifact_key(artifact_id: &str) -> String {
     format!("{PROCESSING_ARTIFACT_PREFIX}{artifact_id}")
 }
 
+pub(super) fn processing_workspace_artifact_key(artifact_id: &str) -> String {
+    format!("{PROCESSING_WORKSPACE_ARTIFACT_PREFIX}{artifact_id}")
+}
+
 pub(super) fn processing_export_refusal_key(request_id: &str) -> String {
     format!("{PROCESSING_EXPORT_REFUSAL_PREFIX}{request_id}")
 }
@@ -56,6 +60,10 @@ pub(super) fn processing_export_acceptance_key(request_id: &str) -> String {
 
 pub(super) fn processing_export_work_key(request_id: &str) -> String {
     format!("{PROCESSING_EXPORT_WORK_PREFIX}{request_id}")
+}
+
+pub(super) fn processing_export_retry_key(request_id: &str) -> String {
+    format!("{PROCESSING_EXPORT_RETRY_PREFIX}{request_id}")
 }
 
 pub(super) fn processing_artifact_retention_key(artifact_id: &str) -> String {

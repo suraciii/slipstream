@@ -1,3 +1,4 @@
+use super::processing_admission as admission;
 use super::{Result, ServiceError, process, transfer::Transfer};
 use parking_lot::{Condvar, Mutex};
 use photo_files::{Directory, atomic_json, read_json};
@@ -246,15 +247,16 @@ impl Jobs {
                         .and_then(Path::parent)
                         .unwrap();
                     let result =
-                        admission(host_state, &cancel, &inner.stopping).and_then(|_lease| {
-                            process::invoke(
-                                Some(&job.state_directory),
-                                &job.operation,
-                                args,
-                                &cancel,
-                                Duration::from_secs(15 * 60),
-                            )
-                        });
+                        admission::acquire_cancellable(host_state, &cancel, &inner.stopping)
+                            .and_then(|_lease| {
+                                process::invoke(
+                                    Some(&job.state_directory),
+                                    &job.operation,
+                                    args,
+                                    &cancel,
+                                    Duration::from_secs(15 * 60),
+                                )
+                            });
                     match result {
                         Ok(value) => settle(&mut job, value),
                         Err(error) => {
@@ -290,7 +292,20 @@ impl Jobs {
                             .parent()
                             .and_then(Path::parent)
                             .unwrap();
-                        let result=admission(host_state,&reconcile,&inner.stopping).and_then(|_lease|process::invoke(Some(&job.state_directory),&job.operation,json!({"captureId":job.capture["captureId"],"requestId":job.request_id}),&reconcile,Duration::from_secs(15*60)));
+                        let result = admission::acquire_cancellable(
+                            host_state,
+                            &reconcile,
+                            &inner.stopping,
+                        )
+                        .and_then(|_lease| {
+                            process::invoke(
+                                Some(&job.state_directory),
+                                &job.operation,
+                                json!({"captureId":job.capture["captureId"],"requestId":job.request_id}),
+                                &reconcile,
+                                Duration::from_secs(15 * 60),
+                            )
+                        });
                         match result {
                             Ok(value) => settle(&mut job, value),
                             Err(error) => {
@@ -507,36 +522,6 @@ fn settle(job: &mut Job, mut value: Value) {
         }
     }
     job.result = Some(value);
-}
-fn admission(
-    state: &Path,
-    cancel: &AtomicBool,
-    stopping: &AtomicBool,
-) -> Result<photo_files::FileLease> {
-    let directory =
-        Directory::create(state.join(".processing-admission")).map_err(ServiceError::io)?;
-    let start = std::time::Instant::now();
-    loop {
-        if cancel.load(Ordering::Acquire) || stopping.load(Ordering::Acquire) {
-            return Err(ServiceError::new(
-                "cancelled",
-                "Cancelled before execution",
-                409,
-            ));
-        }
-        match directory.lease(
-            photo_files::LeaseMode::Exclusive,
-            Duration::from_millis(100),
-        ) {
-            Ok(lease) => return Ok(lease),
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) && start.elapsed() < Duration::from_secs(900) => {}
-            Err(e) => return Err(ServiceError::io(e)),
-        }
-    }
 }
 #[cfg(test)]
 mod tests {

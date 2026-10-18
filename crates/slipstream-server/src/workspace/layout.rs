@@ -47,9 +47,10 @@ pub(crate) fn managed_file(directory: &str, name: &str) -> Option<String> {
     let name = Path::new(name);
     let mut components = name.components();
     match (components.next(), components.next()) {
-        (Some(Component::Normal(_)), None) => {
-            Some(format!("{directory}/{}", name.as_os_str().to_string_lossy()))
-        }
+        (Some(Component::Normal(_)), None) => Some(format!(
+            "{directory}/{}",
+            name.as_os_str().to_string_lossy()
+        )),
         _ => None,
     }
 }
@@ -60,9 +61,18 @@ mod tests {
 
     #[test]
     fn managed_paths_are_one_directory_and_one_name() {
-        assert_eq!(managed_file(INPUT, "DSC01234.ARW").as_deref(), Some("input/DSC01234.ARW"));
-        assert_eq!(managed_file(OUTPUTS, "a.tif").as_deref(), Some("outputs/a.tif"));
-        assert_eq!(managed_file(PREVIEWS, "a.png").as_deref(), Some("previews/a.png"));
+        assert_eq!(
+            managed_file(INPUT, "DSC01234.ARW").as_deref(),
+            Some("input/DSC01234.ARW")
+        );
+        assert_eq!(
+            managed_file(OUTPUTS, "a.tif").as_deref(),
+            Some("outputs/a.tif")
+        );
+        assert_eq!(
+            managed_file(PREVIEWS, "a.png").as_deref(),
+            Some("previews/a.png")
+        );
         assert!(managed_file(INPUT, "nested/a.raw").is_none());
         assert!(managed_file(INPUT, "../escape").is_none());
         assert!(managed_file(INPUT, "a/b").is_none());

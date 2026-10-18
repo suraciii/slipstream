@@ -312,7 +312,7 @@ pub(in crate::persistence) fn retry_processing_export(
         )?;
         write_metadata_value(
             transaction,
-            &format!("processing_export_retry:{}", request.request_id),
+            &processing_export_retry_key(&request.request_id),
             &serialize_record(&(
                 request.photo_id.clone(),
                 request.previous_request_id.clone(),
@@ -381,7 +381,7 @@ pub(in crate::persistence) fn replay_processing_export_retry(
     };
     let value = crate::persistence::metadata_store::read_value(
         connection,
-        &format!("processing_export_retry:{request_id}"),
+        &processing_export_retry_key(request_id),
         |_| PersistenceError::Storage,
     )?;
     let Some(value) = value else {

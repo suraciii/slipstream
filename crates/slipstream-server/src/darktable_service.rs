@@ -4,6 +4,7 @@ mod files;
 mod jobs;
 mod migration;
 mod process;
+pub(crate) mod processing_admission;
 mod proxy;
 mod receipts;
 mod restore;
@@ -415,7 +416,7 @@ impl ToolService {
         }
         let _admission = if operation == "edit actions run" {
             Some(
-                acquire_processing_admission(self.root.path().parent().unwrap())
+                processing_admission::acquire_blocking(self.root.path().parent().unwrap())
                     .map_err(ServiceError::io)?,
             )
         } else {
@@ -478,13 +479,6 @@ fn is_global(operation: &str) -> bool {
             | "styles export"
             | "styles remove"
     )
-}
-pub(crate) fn acquire_processing_admission(
-    state_directory: &Path,
-) -> std::result::Result<photo_files::FileLease, String> {
-    Directory::create(state_directory.join(".processing-admission"))
-        .and_then(|d| d.lease(photo_files::LeaseMode::Exclusive, Duration::from_secs(900)))
-        .map_err(|e| e.to_string())
 }
 fn forbidden_paths(value: &Value) -> bool {
     match value {

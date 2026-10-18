@@ -1,6 +1,4 @@
-use super::{
-    Result, ServiceError, ToolService, acquire_processing_admission, attach, process, receipts,
-};
+use super::{Result, ServiceError, ToolService, attach, process, receipts};
 use serde_json::{Value, json};
 use std::{sync::atomic::AtomicBool, time::Duration};
 impl ToolService {
@@ -104,8 +102,9 @@ impl ToolService {
             .map_err(ServiceError::io)?;
         args = json!({"inputPath":binding["path"],"previewDirectory":previews.path(),"outputDirectory":outputs.path()});
         receipt.publish(&json!({"payload":payload,"editId":id,"input":{"artifactId":binding["artifactId"],"revision":binding["revision"]}}))?;
-        let _admission = acquire_processing_admission(self.root.path().parent().unwrap())
-            .map_err(ServiceError::io)?;
+        let _admission =
+            super::processing_admission::acquire_blocking(self.root.path().parent().unwrap())
+                .map_err(ServiceError::io)?;
         let mut result = process::invoke(
             Some(&state_path),
             "open",

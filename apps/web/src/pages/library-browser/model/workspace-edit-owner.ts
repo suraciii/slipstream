@@ -569,7 +569,7 @@ export function createWorkspaceEditOwner(
               model.draft = [...changes, ...model.draft];
             model.blocked = true;
             model.conflictInspected = false;
-            if (!acknowledged || isUnknownEffect(error))
+            if (!acknowledged && isUnknownEffect(error))
               model.uncertain = {
                 operation: "edit apply",
                 arguments: args,

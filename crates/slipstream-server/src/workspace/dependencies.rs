@@ -200,7 +200,13 @@ fn discover(
         Ok(edits) => edits,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
-            unknown(inventory, workspace, layout::EDITS, external, error.to_string());
+            unknown(
+                inventory,
+                workspace,
+                layout::EDITS,
+                external,
+                error.to_string(),
+            );
             return Ok(());
         }
     };

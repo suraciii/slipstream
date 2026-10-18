@@ -88,6 +88,14 @@ const PROCESSING_ARTIFACT_LEASE_PREFIX: &str = "processing_artifact_lease:";
 /// the request from ever starting new work.
 const PROCESSING_EXPORT_EXPIRED_PREFIX: &str = "processing_export_expired:";
 
+/// The `library_metadata` key namespace of one retained workspace artifact's
+/// publication timestamp: `processing_workspace_artifact:<artifact_id>`.
+const PROCESSING_WORKSPACE_ARTIFACT_PREFIX: &str = "processing_workspace_artifact:";
+
+/// The `library_metadata` key namespace of one retry's captured lineage:
+/// `processing_export_retry:<request_id>`.
+const PROCESSING_EXPORT_RETRY_PREFIX: &str = "processing_export_retry:";
+
 /// A download lease whose liveness anchor is older than this window is crash
 /// debris: the sweep reclaims it, and a stream still running must have kept
 /// renewing its lease to hold the artifact against expiry cleanup.

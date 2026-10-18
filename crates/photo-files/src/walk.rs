@@ -136,9 +136,9 @@ mod tests {
     }
 
     fn directories(reported: Reported<'_>) -> Result<Option<Directory>, io::Error> {
-        Ok((reported.entry.kind == EntryKind::Directory)
+        (reported.entry.kind == EntryKind::Directory)
             .then(|| reported.directory.child(&reported.entry.name))
-            .transpose()?)
+            .transpose()
     }
 
     #[test]

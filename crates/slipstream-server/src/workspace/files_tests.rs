@@ -581,8 +581,7 @@ fn publish_confines_completed_files_to_the_managed_directories() {
         .unwrap_err();
         assert_eq!(error.code, "invalid_input", "{relative}");
         assert_eq!(
-            error.message,
-            "Completed output must be published under outputs or previews",
+            error.message, "Completed output must be published under outputs or previews",
             "{relative}"
         );
     }
@@ -600,8 +599,7 @@ fn publish_confines_completed_files_to_the_managed_directories() {
         )
         .unwrap_err();
         assert_ne!(
-            error.message,
-            "Completed output must be published under outputs or previews",
+            error.message, "Completed output must be published under outputs or previews",
             "{relative}"
         );
     }

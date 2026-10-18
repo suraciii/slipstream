@@ -701,8 +701,9 @@ pub(super) fn admit(
     }
     photo_files::image::inspect_image(pending.file_mut(), FILE_BYTES_MAX)?;
     let published = pending.publish(&name, FILE_BYTES_MAX)?;
-    let path = layout::managed_file(layout::INPUT, &name)
-        .ok_or_else(|| WorkspaceError::new("invalid_input", 400, "Captured input name is unusable."))?;
+    let path = layout::managed_file(layout::INPUT, &name).ok_or_else(|| {
+        WorkspaceError::new("invalid_input", 400, "Captured input name is unusable.")
+    })?;
     session.db.execute("INSERT INTO files(id,path,kind,state,evidence,contract,managed,provenance,removed,image_facts,revision) VALUES(?,?,'input','ready',?,?,1,?,0,?,?)",params![artifact,path,serde_json::to_string(&published)?,row.contract.as_ref().map(Value::to_string),row.provenance.as_ref().map(Value::to_string),row.facts.as_ref().map(Value::to_string),published.revision()])?;
     let result = admission(session, &record(session, &artifact)?);
     session.db.execute(
