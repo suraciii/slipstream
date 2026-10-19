@@ -1,4 +1,4 @@
-use crate::http::{HttpState, cli_error};
+use crate::http::{HttpState, cli_error_empty};
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -15,7 +15,7 @@ fn now() -> i64 {
         .as_secs() as i64
 }
 fn error(status: StatusCode, code: &'static str, message: &'static str) -> Response<Body> {
-    cli_error(status, code, message, serde_json::json!({}))
+    cli_error_empty(status, code, message)
 }
 fn timestamp(value: i64) -> String {
     OffsetDateTime::from_unix_timestamp(value)

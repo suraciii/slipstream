@@ -6,10 +6,10 @@ use axum::{
 };
 use std::sync::Arc;
 
-use super::{HttpState, cli_error};
+use super::{HttpState, cli_error_empty};
 
 fn export_error(status: StatusCode, code: &'static str, message: &'static str) -> Response<Body> {
-    cli_error(status, code, message, serde_json::json!({}))
+    cli_error_empty(status, code, message)
 }
 
 fn unix_seconds_now() -> u64 {

@@ -21,3 +21,16 @@ export async function fetchJson(
     return Object.freeze({ kind: "malformed" });
   }
 }
+
+export type JsonBody =
+  | Readonly<{ kind: "ok"; value: unknown }>
+  | Readonly<{ kind: "malformed" }>;
+
+export async function readJsonBody(response: Response): Promise<JsonBody> {
+  try {
+    const value: unknown = await response.json();
+    return Object.freeze({ kind: "ok", value });
+  } catch {
+    return Object.freeze({ kind: "malformed" });
+  }
+}

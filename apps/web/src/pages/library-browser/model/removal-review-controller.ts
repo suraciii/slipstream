@@ -1,3 +1,4 @@
+import { formatPhotoCount as photoCountText } from "./photo-count.js";
 import type { SourceAuthority } from "./source-grid-owner.js";
 import type { RemovalOwner } from "./removal-owner.js";
 
@@ -48,9 +49,6 @@ export interface RemovalReviewController {
   undo(surface: "review" | "listing"): Promise<void>;
   dispose(): void;
 }
-
-const photoCountText = (count: number): string =>
-  `${count.toLocaleString()} ${count === 1 ? "Photo" : "Photos"}`;
 
 export const restorationOutcomeMessage = (
   counts: Readonly<{

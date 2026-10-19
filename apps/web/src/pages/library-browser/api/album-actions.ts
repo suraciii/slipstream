@@ -1,4 +1,5 @@
 import type { AlbumSummary } from "./contracts.js";
+import { readJsonBody } from "./json-response.js";
 import { isRecord, validCount } from "./guards.js";
 
 export type AlbumActionFetch = (
@@ -129,12 +130,9 @@ const parseMembershipAddResult = async (
 ): Promise<AlbumWriteResult> => {
   if (!response.ok)
     return Object.freeze({ kind: "rejected", status: response.status });
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    return Object.freeze({ kind: "malformed" });
-  }
+  const result = await readJsonBody(response);
+  if (result.kind === "malformed") return Object.freeze({ kind: "malformed" });
+  const body = result.value;
   if (
     !isRecord(body) ||
     body.albumId !== albumId ||
@@ -162,12 +160,9 @@ const parseMembershipRemoveResult = async (
 ): Promise<AlbumWriteResult> => {
   if (!response.ok)
     return Object.freeze({ kind: "rejected", status: response.status });
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    return Object.freeze({ kind: "malformed" });
-  }
+  const result = await readJsonBody(response);
+  if (result.kind === "malformed") return Object.freeze({ kind: "malformed" });
+  const body = result.value;
   if (
     !isRecord(body) ||
     body.albumId !== albumId ||
@@ -195,24 +190,12 @@ export const createAlbum = async (
   const response = await requestAlbumAction(fetcher, "/api/albums", { name });
   if (!response.ok)
     return Object.freeze({ kind: "rejected", status: response.status });
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
+  const result = await readJsonBody(response);
+  if (result.kind === "malformed") return Object.freeze({ kind: "malformed" });
+  const body = result.value;
+  if (!isRecord(body) || !validAlbumSummaries(body.albums))
     return Object.freeze({ kind: "malformed" });
-  }
-  if (!isRecord(body) || !Array.isArray(body.albums))
-    return Object.freeze({ kind: "malformed" });
-  const albums = body.albums.filter(isAlbumSummary);
-  if (albums.length !== body.albums.length)
-    return Object.freeze({ kind: "malformed" });
-  if (new Set(albums.map((album) => album.id)).size !== albums.length)
-    return Object.freeze({ kind: "malformed" });
-  if (
-    new Set(albums.map((album) => albumNameKey(album.name))).size !==
-    albums.length
-  )
-    return Object.freeze({ kind: "malformed" });
+  const albums = body.albums;
   const matches = albums.filter((album) => album.name === name);
   const createdAlbum = matches[0];
   if (
