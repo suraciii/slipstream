@@ -11,7 +11,7 @@ use preview::{ReviewWarmup, ReviewWarmupRequest, ReviewWarmupState};
 
 use crate::queries::{CursorSigner, RetainedKind, RetainedQueryStore};
 use crate::recovery_review::{MAXIMUM_RECOVERY_APPLY, MAXIMUM_RECOVERY_MAPPINGS};
-use crate::wire::{CliDerivativeFacts, PhotoOperationRemainderWire};
+use crate::wire::{CliDerivativeFacts, PhotoOperationRemainderWire, original_kind};
 pub(crate) use published::*;
 pub(crate) use shared_library::*;
 
@@ -40,10 +40,7 @@ fn permanent_deletion_response(
             .map(|item| PermanentDeletionItemWire {
                 photo_id: item.photo_id,
                 original_location: item.relative_path.to_string(),
-                original_kind: match item.kind {
-                    slipstream_core::OriginalKind::Raw => "raw",
-                    slipstream_core::OriginalKind::Jpeg => "jpeg",
-                },
+                original_kind: original_kind(&item.kind),
                 state: permanent_deletion_state(item.state),
                 size: item.size,
                 message: item.message,
@@ -1154,10 +1151,7 @@ impl Application {
             else {
                 continue;
             };
-            let original_kind = match original.kind {
-                slipstream_core::OriginalKind::Raw => "raw",
-                slipstream_core::OriginalKind::Jpeg => "jpeg",
-            };
+            let original_kind = original_kind(&original.kind);
             let (preview_url, thumbnail_url) = self.derivative_urls(&facts).await;
             let originals_by_id = facts
                 .originals
@@ -1212,11 +1206,7 @@ impl Application {
                     removed_at_ms: item.removed_at_ms,
                     original_id: item.original_id,
                     original_location: item.relative_path.to_string(),
-                    original_kind: match item.kind {
-                        slipstream_core::OriginalKind::Raw => "raw",
-                        slipstream_core::OriginalKind::Jpeg => "jpeg",
-                    }
-                    .to_owned(),
+                    original_kind: original_kind(&item.kind).to_owned(),
                     size: item.size,
                     albums: item
                         .albums
