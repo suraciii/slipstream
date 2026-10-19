@@ -224,6 +224,7 @@ The first-slice gate must prove:
 - visible orientation and dimensions match the camera Preview;
 - derivatives preserve a valid ICC profile or are correctly converted to sRGB;
 - selection and Rating transactions survive restart;
+- a low-resolution source is not upscaled or misrepresented;
 - Fit horizontal decision swipes and vertical navigation swipes have distinct
   outcomes and do not fire while the Preview is manually zoomed;
 - Fit and continuous zoom keep the Preview contained by the Photo View

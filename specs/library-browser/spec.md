@@ -494,19 +494,25 @@ A horizontal or vertical gesture must not be interpreted as both a decision and
 navigation action. The gesture owner is selected before commit from the
 dominant axis; equal-axis movement has no action. On the rendered image, an
 uncommitted drag returns to its starting position without changing Photo facts.
-Letterbox and non-image Preview regions retain native Photo View scrolling and
-do not admit decision or navigation swipes. A decision swipe and a navigation
-swipe must use visible directional feedback before release and must not depend
-on haptics or animation.
-
 The rendered image and its letterbox are separate touch regions. In Fit, the
-rendered image admits the four directional accelerators, while the letterbox
-and other non-image Preview regions retain native vertical scrolling. A
-two-finger pinch always zooms the Preview, and a manual zoom state gives
-one-finger dragging to bounded panning instead of decisions or navigation.
-Rating uses the explicit controls required below and may use the touch-only
-[Rating Wheel](#rating-wheel). Slipstream must provide visible controls
-equivalent to every gesture action.
+rendered image admits the four directional accelerators; the letterbox and
+other non-image Preview regions retain native vertical scrolling. A drag below
+the commit threshold returns the rendered image to its starting position
+without changing Photo facts. A two-finger pinch always zooms the Preview, and
+a manual zoom state gives one-finger dragging to bounded panning instead of
+decisions or navigation. A decision swipe and a navigation swipe must use
+visible directional feedback before release and must not depend on haptics or
+animation. Rating uses the explicit controls required below and may use the
+touch-only [Rating Wheel](#rating-wheel). Slipstream must provide visible
+controls equivalent to every gesture action.
+On a Fit Preview, the Photographer holds a touch pointer still for 450
+milliseconds, slides to `4`, and releases. Slipstream saves exactly Rating `4`,
+leaves Selection State and Photo position unchanged, and keeps the Photo open.
+On the rendered image, moving horizontally first starts the Select / Reject
+swipe and moving vertically first starts the Next / Previous navigation swipe.
+On a letterbox or non-image Preview region, moving vertically first scrolls
+Photo View. Adding a second pointer starts Pinch Zoom. None of those handoffs
+changes Rating.
 
 ### Rating Wheel
 
@@ -647,9 +653,11 @@ centered.
 
 Zoom and pan must never record a Selection State or Rating. While the zoom
 state is manual, one-finger dragging pans the Preview and swipe decisions are
-unavailable; explicit Pick and Reject controls stay available. In Fit,
-horizontal dragging keeps the decision gesture and vertical dragging scrolls
-a short Photo View naturally.
+unavailable; explicit Pick and Reject controls stay available. In Fit, a
+horizontal-dominant drag on the rendered image is the decision gesture and a
+vertical-dominant drag is the navigation gesture; vertical movement in the
+letterbox or another non-image Preview region remains native Photo View
+scrolling.
 
 Every zoom control must be operable from the keyboard, and the current zoom
 state must be exposed programmatically. Keyboard shortcuts `+` and `-` step
@@ -884,15 +892,15 @@ The Photographer drags a Photo to the right. A picked indicator grows with the d
 On a Fit Preview, the Photographer holds a touch pointer still for 450
 milliseconds, slides to `4`, and releases. Slipstream saves exactly Rating `4`,
 leaves Selection State and Photo position unchanged, and keeps the Photo open.
-Holding while moving vertically first scrolls Photo View; moving horizontally
-first starts the existing Select / Reject swipe; adding a second pointer starts
-Pinch Zoom. None of those handoffs changes Rating.
+On the rendered image, moving horizontally first starts the Select / Reject
+swipe and moving vertically first starts the Next / Previous navigation swipe.
+On a letterbox or non-image Preview region, moving vertically first scrolls
+Photo View. Adding a second pointer starts Pinch Zoom. None of those handoffs
+changes Rating.
 
 The Photographer releases the Wheel outside all six candidates. The Wheel
 closes without saving. If the save returns a conflict or malformed response,
 the prior Rating remains visible with retry; if the Photo changes before a late
 response arrives, that response is ignored.
-
-A Library contains `shoot/A.JPG` captured at `2026:01:01 10:00:00` and `shoot/Z.JPG` captured at `2026:01:01 09:00:00`. Grid and Photo navigation show `Z`, then `A`, even though the filenames sort in the opposite order.
 
 An Album explicitly contains `shoot/A.JPG` at position 0 and `shoot/Z.JPG` at position 1, while `Z` has the earlier Capture Time. That Album shows `A`, then `Z`. `All Photos` and the `shoot` Original Folder show `Z`, then `A`.

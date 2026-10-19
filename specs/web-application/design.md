@@ -287,7 +287,6 @@ View scrolling according to the touch region and dominant axis, or Pinch Zoom
 when those gestures take ownership. After the threshold, the Wheel owns the
 pointer until release or cancellation. The state is invalidated when the Photo
 surface, current Photo, connection readiness, or UI generation changes.
-Photo surface, current Photo, connection readiness, or UI generation changes.
 
 A Wheel release emits the same Rating intent as an explicit Rating control. It
 does not issue HTTP itself, retain a second Rating value, advance the Photo, or
