@@ -15,8 +15,7 @@ failures, and Undo. Moving a control must preserve those rules.
 ```text diagram
 Library Browser
 ├── Grid: Sources · View options (incl. Album Resume) · Select mode
-│   └── Select mode: count · Done / Pick · Reject · Add to Album
-├── Photo: Back · Preview · position/state badge · Pick / Reject / Undo · More
+├── Photo: Back · Preview · position/state badge · Select / Reject / Undo · Rating · More
 │   └── Gestures: left/right navigate · up/down cycle Selection State
 └── One supporting surface: Sources, options, Rating, tools, or recovery
 ```
@@ -117,12 +116,27 @@ modal. The existing single live-region announcement rule remains in force.
 
 ## Photo View
 
-Photo View's default surface is compact: Back, the Preview, a position/state
-badge, a review strip with Pick, Reject, and Undo, and More. Back returns
-directly to the originating Grid destination. The badge communicates the
-current position and Selection State without requiring Photo tools to open.
-The review strip shares the existing decision and Undo ownership with Photo
-tools and keyboard actions. It must preserve the Preview space budgets.
+Photo View must contain a compact source-return and filename row, the Preview,
+and a primary action region. It must communicate current position, Selection
+State, and Rating without requiring Photo tools to be open. The primary region
+must present one Reject action, one Rating entry with an explicit current value
+including zero, one Select action, one Undo action, and More.
+
+Previous and Next must remain visible in a separate navigation group with the
+position and total. They must not share an activation target with Select or
+Reject. Portrait layouts may place navigation immediately above the main
+actions; short landscape must consolidate them without shrinking touch
+targets. There must be only one visible Previous/Next pair.
+
+Photo View is the continuous review surface. The Photographer must be able to
+review the current Photo and move to the previous or next Photo without
+opening a supporting surface, relying on a gesture, or memorizing a keyboard
+shortcut.
+
+Undo must remain visible in the primary action region. Its availability follows
+the Photo action owner; when no undoable change exists, the control may be
+disabled but must expose that fact without implying that a decision was
+reverted.
 
 On touch input, left and right gestures navigate to the previous and next Photo.
 Up and down gestures cycle the Selection State through Unflagged, Picked, and
@@ -131,10 +145,9 @@ position; they do not change Rating.
 
 More opens the supporting action groups:
 
-- **Review:** Pick, Reject, and Clear flag, with their existing availability rules;
-- **Rating:** explicit 0–5 Rating choices;
+- **Review:** Clear flag, with its existing availability rule;
 - **Photo:** Album membership, Capture Details, Preview Source, Preview Zoom,
-  and Nearby Photos;
+  and Nearby Photos; and
 - **Help:** the combined Preview detail-limit explanation and gesture guidance.
 
 The Preview must fit its complete composition. Empty space caused by image
@@ -150,9 +163,9 @@ Wheel, swipe decisions, pinch, pan, keyboard shortcuts, and their persistence
 rules remain unchanged.
 
 Details and membership may load when requested. Their loading or failure must
-remain local to that surface. Closing a surface while a write settles must
-not claim cancellation or success; the existing operation owner determines
-where its outcome may appear.
+remain local to that surface. Closing a surface while a write settles must not
+claim cancellation or success; the existing operation owner determines where
+its outcome may appear.
 
 ## Supporting Surfaces
 

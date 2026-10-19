@@ -61,6 +61,7 @@ export type ViewOptionsElements = Readonly<{
 }>;
 
 export interface ViewOptions {
+  open(): void;
   renderSort(model: GridSortViewModel): void;
   renderFilter(model: GridFilterViewModel): void;
   renderProgress(model: GridProgressViewModel): void;
@@ -76,6 +77,7 @@ export function createViewOptions({
   closeRatingChoices,
   activeAlbumId,
   onSizeChange,
+  syncSecondarySurface,
 }: Readonly<{
   elements: ViewOptionsElements;
   surfaces: ModalSurfaces;
@@ -85,6 +87,7 @@ export function createViewOptions({
   closeRatingChoices: (restoreFocus: boolean) => void;
   activeAlbumId: () => string | undefined;
   onSizeChange: (size: ViewOptionsThumbnailSize) => void;
+  syncSecondarySurface?: () => void;
 }>): ViewOptions {
   const {
     viewOptionsDialog,
@@ -120,7 +123,11 @@ export function createViewOptions({
     sortSelect.value = committedOrder;
     filterSelect.value = committedFilter;
   };
-  viewOptionsDialog.addEventListener("close", resetDraft);
+  viewOptionsDialog.addEventListener("close", () => {
+    resetDraft();
+    viewOptionsOpen.setAttribute("aria-expanded", "false");
+    syncSecondarySurface?.();
+  });
 
   surfaces.register("view-options", {
     dialog: viewOptionsDialog,
@@ -166,6 +173,8 @@ export function createViewOptions({
     closePhotoTools(false);
     closeRatingChoices(false);
     surfaces.open("view-options", invoker);
+    viewOptionsOpen.setAttribute("aria-expanded", "true");
+    syncSecondarySurface?.();
     viewOptionsClose.focus();
   };
 
@@ -174,6 +183,8 @@ export function createViewOptions({
     // Closing without Apply discards the draft: the selects return to the
     // committed choices the open Grid presents.
     resetDraft();
+    viewOptionsOpen.setAttribute("aria-expanded", "false");
+    syncSecondarySurface?.();
     surfaces.close("view-options", restoreFocus);
   };
 
@@ -187,6 +198,8 @@ export function createViewOptions({
     draftOrder = committedOrder = order;
     draftFilter = committedFilter = filter;
     surfaces.close("view-options", !viewChanged);
+    viewOptionsOpen.setAttribute("aria-expanded", "false");
+    syncSecondarySurface?.();
     if (sizeChanged) onSizeChange(committedSize);
     if (viewChanged) {
       presentViewOptionsFlag();
@@ -231,6 +244,7 @@ export function createViewOptions({
   });
 
   return {
+    open: openViewOptions,
     renderSort(model) {
       if (!alive) return;
       if (renderedSortKind !== model.kind) {

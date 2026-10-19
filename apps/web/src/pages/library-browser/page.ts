@@ -437,13 +437,8 @@ function mountPrivateLibraryBrowser(
     rangeStatusText = text;
     view.setGridStatus(text);
   };
-  /// Decision, Undo, and retry messages have one visible surface: the Photo
-  /// View status while it is open, and the Grid status line otherwise, so a
-  /// Grid keyboard decision reports its failure where the Photographer is.
-  const setDecisionStatus = (text: string) => {
-    if (view.gridVisible()) setGridStatusText(text);
-    else view.setPhotoStatus(text);
-  };
+  const setDecisionStatus = (text: string) =>
+    view.gridVisible() ? setGridStatusText(text) : view.setPhotoStatus(text);
   const photoRecoveryKeys = new WeakMap<object, string>();
   let nextPhotoRecoveryKey = 0;
   const photoRecoveryKey = (authority: PhotoAuthority): string => {
@@ -1579,24 +1574,20 @@ function mountPrivateLibraryBrowser(
     if (!connected || pageBusy) return;
     const admission = photoOwner.mutate(field, value, advance);
     if (!admission) return;
-    view.setPhotoStatus(
-      `Saving ${field === "rating" ? "Rating" : "Selection State"}…`,
+    setDecisionStatus(
+      `Saving ${field === "rating" ? "Rating" : "Selection State"} for the current Photo…`,
     );
     updateControls();
     const outcome = await admission.settlement;
     if (outcome.kind === "detached") return updateControls();
     if (outcome.kind === "failed") {
-      if (outcome.failure === "answered") {
-        view.setPhotoStatus(
-          outcome.status === 409
-            ? "The Photo changed elsewhere. Retry to refresh its current state."
-            : "The change could not be saved.",
-        );
-      } else {
-        view.setPhotoStatus(
-          "Connection lost before the change was confirmed. Retry to refresh.",
-        );
-      }
+      setDecisionStatus(
+        outcome.failure === "transport"
+          ? "The current Photo decision was not confirmed because the connection was lost. Retry this Photo decision after reconnecting."
+          : outcome.status === 409
+            ? "The current Photo decision changed elsewhere. Open this Photo to confirm its current state, then retry."
+            : "The current Photo decision could not be saved. Retry this Photo decision.",
+      );
       if (outcome.connectivity === "lost")
         failPhotoRecovery(outcome.authority, "photo-write");
       updateControls();
@@ -1605,8 +1596,8 @@ function mountPrivateLibraryBrowser(
     if (!outcome.applied) return;
     if (field === "selectionState" && outcome.photoId)
       gridMulti.noteExpectedSelection(outcome.photoId, value as SelectionState);
-    view.setPhotoStatus(
-      `${field === "rating" ? "Rating" : "Selection"} saved.`,
+    setDecisionStatus(
+      `${field === "rating" ? "Rating" : "Selection State"} saved for the current Photo.`,
     );
     if (outcome.advance) await moveTo(outcome.index + 1);
     else renderPhotoFacts();
@@ -1747,15 +1738,13 @@ function mountPrivateLibraryBrowser(
         );
     }
     if (outcome.kind === "failed") {
-      if (outcome.failure === "transport") {
-        setDecisionStatus("Connection lost before Undo was confirmed.");
-      } else if (outcome.status === 409) {
-        setDecisionStatus(
-          "Undo is no longer available because the Photo changed elsewhere. Retry to refresh its current state.",
-        );
-      } else {
-        setDecisionStatus("Undo could not be saved. Try Undo again.");
-      }
+      setDecisionStatus(
+        outcome.failure === "transport"
+          ? "The current Photo decision was not confirmed because the connection was lost. Retry this Photo decision after reconnecting."
+          : outcome.status === 409
+            ? "The current Photo decision changed elsewhere. Open this Photo to confirm its current state, then retry."
+            : "The current Photo decision could not be saved. Retry this Photo decision.",
+      );
       if (outcome.connectivity === "lost")
         failPhotoRecovery(outcome.authority, "undo");
       updateControls();
@@ -1804,6 +1793,7 @@ function mountPrivateLibraryBrowser(
     ) {
       recoveryGate.succeedTransition(photoTransition);
       setConnected(true);
+      renderPhotoFacts();
       view.setPhotoStatus("Last change undone.");
     }
     updateControls();
@@ -1976,13 +1966,14 @@ function mountPrivateLibraryBrowser(
 
   const recoveryReview = createRecoveryReviewOwner(fetcher, view, {
     isAlive: () => applicationAlive,
+    isPhotoVisible: () => !view.gridVisible(),
     setGridStatusText,
+    setPhotoStatusText: (text) => view.setPhotoStatus(text),
     refreshSource,
     refreshRecoveryOverview: async () => {
       await application.refreshOverview().catch(() => {});
     },
   });
-
   function handleViewIntent(intent: LibraryBrowserIntent): void {
     if (!applicationAlive) return;
     if (routeEditorIntent(editor, intent)) return;
@@ -2223,9 +2214,14 @@ function mountPrivateLibraryBrowser(
       case "membership-toggle":
         toggleMembership(intent.albumId, intent.member);
         return;
-      case "recovery-entry":
-        void recoveryReview.openRecoveryReview();
+      case "recovery-entry": {
+        const invoker =
+          document.activeElement instanceof HTMLElement
+            ? document.activeElement
+            : undefined;
+        void recoveryReview.openRecoveryReview(invoker);
         return;
+      }
       case "recovery-close":
         view.closeRecoveryPanel();
         return;

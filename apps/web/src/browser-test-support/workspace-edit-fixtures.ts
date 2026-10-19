@@ -1,12 +1,7 @@
 import { expect, type Page, type Route } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { browseIds, fixture, server, writePhotos } from "./fixtures.js";
-import {
-  startReview,
-  openPhotoTools,
-  openPhotoToolsView,
-  returnToPhotoTools,
-} from "./surfaces.js";
+import { startReview, openPhotoToolsView } from "./surfaces.js";
 import type {
   EditView,
   JsonObject,
@@ -463,9 +458,10 @@ export async function openWorkspace(page: Page, state: WorkspaceFixture) {
   ).toBeEnabled();
 }
 export async function navigate(page: Page, direction: "Next" | "Previous") {
-  await openPhotoTools(page);
-  await returnToPhotoTools(page);
-  await page.getByRole("button", { name: direction, exact: true }).click();
+  await page.locator("[data-photo-tools-close]").click();
+  await page
+    .locator(direction === "Next" ? "[data-dock-next]" : "[data-dock-previous]")
+    .click();
   await openPhotoToolsView(page, "edit");
   await expect(page.getByLabel("Exposure (EV)", { exact: true })).toBeVisible();
 }

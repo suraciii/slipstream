@@ -35,6 +35,7 @@ export interface RecoveryReviewSurface {
   openRecoveryPanel(
     entries: ReadonlyArray<RecoveryEntryViewModel>,
     paging: RecoveryPagingViewModel,
+    invoker?: HTMLElement,
   ): void;
   renderRecoveryEntries(
     entries: ReadonlyArray<RecoveryEntryViewModel>,
@@ -59,11 +60,12 @@ export interface RecoveryReviewSurface {
 /// recovery facts through.
 export type RecoveryReviewPage = Readonly<{
   isAlive(): boolean;
+  isPhotoVisible?(): boolean;
   setGridStatusText(text: string): void;
+  setPhotoStatusText?(text: string): void;
   refreshSource(): Promise<void>;
   refreshRecoveryOverview(): Promise<void>;
 }>;
-
 export interface RecoveryReviewOwner {
   presentRecoveryNotice(
     recovery:
@@ -74,7 +76,7 @@ export interface RecoveryReviewOwner {
         }>
       | undefined,
   ): void;
-  openRecoveryReview(): Promise<void>;
+  openRecoveryReview(invoker?: HTMLElement): Promise<void>;
   loadMoreRecoveryEntries(): Promise<void>;
   loadMoreRecoveryMappings(): Promise<void>;
   proposeRecoveryBatch(
@@ -157,6 +159,7 @@ export function createRecoveryReviewOwner(
   let recoveryMappingsCursor: string | null = null;
   let reviewGeneration = 0;
   let proposalGeneration = 0;
+  let recoveryInvoker: HTMLElement | undefined;
 
   const presentRecoveryEntries = (): void => {
     view.renderRecoveryEntries(recoveryEntries.map(mapRecoveryEntry), {
@@ -174,9 +177,10 @@ export function createRecoveryReviewOwner(
     });
   };
 
-  const openRecoveryReview = async (): Promise<void> => {
+  const openRecoveryReview = async (invoker?: HTMLElement): Promise<void> => {
     const generation = ++reviewGeneration;
     proposalGeneration += 1;
+    recoveryInvoker = invoker;
     view.setRecoveryPending(true);
     const result = await openUnavailableReview(
       fetcher,
@@ -190,15 +194,25 @@ export function createRecoveryReviewOwner(
       recoveryEntries = result.page.items;
       recoveryEntriesTotal = result.page.total;
       recoveryEntriesCursor = result.page.nextCursor;
-      view.openRecoveryPanel(recoveryEntries.map(mapRecoveryEntry), {
-        shown: recoveryEntries.length,
-        total: recoveryEntriesTotal,
-        more: recoveryEntriesCursor !== null,
-      });
+      view.openRecoveryPanel(
+        recoveryEntries.map(mapRecoveryEntry),
+        {
+          shown: recoveryEntries.length,
+          total: recoveryEntriesTotal,
+          more: recoveryEntriesCursor !== null,
+        },
+        recoveryInvoker,
+      );
+      recoveryInvoker = undefined;
       view.setRecoveryMessage();
       return;
     }
-    page.setGridStatusText("Could not load unavailable originals. Retry.");
+    const message = page.isPhotoVisible?.()
+      ? "Location Recovery for unavailable Originals could not be loaded. Retry from Status and Recovery."
+      : "Location Recovery for unavailable Originals could not be loaded. Close this message and retry Review unavailable Originals from Sources.";
+    if (page.isPhotoVisible?.()) page.setPhotoStatusText?.(message);
+    else page.setGridStatusText(message);
+    return;
   };
 
   /// Appends the next page of the same review. An expired review cannot be

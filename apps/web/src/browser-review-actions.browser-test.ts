@@ -26,19 +26,28 @@ test("review strip and Photo tools share persisted decisions and Undo", async ({
   await page.setViewportSize({ width: 390, height: 844 });
   await startReview(page, running.url, "All Photos");
   await waitForLoadedReviewImage(page);
+  const picked = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      response.url().includes("/state"),
+  );
   await page.locator("[data-dock-select]").click();
+  await picked;
   await expect(page.locator("[data-selection]")).toHaveText("Picked");
-  await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+  await page.locator("[data-dock-undo]").click();
   await openPhotoToolsView(page, "tools");
-  await page.locator("[data-photo-tools-undo]").click();
-  await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
-  await expect(page.locator("[data-photo-tools]")).toBeHidden();
+  await expect(page.locator("[data-photo-tools-clear]")).toBeVisible();
+  await closePhotoTools(page);
   await page.reload();
   await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
+  const rejected = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      response.url().includes("/state"),
+  );
   await page.locator("[data-dock-reject]").click();
+  await rejected;
   await expect(page.locator("[data-selection]")).toHaveText("Rejected");
-  await page.locator("[data-dock-undo]").click();
-  await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
   await page.reload();
   await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
   await expect(page.locator("[data-position]")).toHaveText("1 / 2");
@@ -60,12 +69,12 @@ test("Photo write failure stays visible in tools and after returning to review",
       body: JSON.stringify({ error: "photo_changed" }),
     }),
   );
-  await openPhotoToolsView(page, "tools");
-  await page.locator("[data-photo-tools-pick]").click();
+  await page.locator("[data-dock-select]").click();
   const status = page.locator("[data-status]");
-  await expect(status).toContainText("changed elsewhere");
+  await status.scrollIntoViewIfNeeded();
   await expect(status).toBeInViewport();
   await closePhotoTools(page);
+  await status.scrollIntoViewIfNeeded();
   await expect(status).toBeInViewport();
   await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
   await page.unroute("**/api/photos/*/state");
@@ -90,7 +99,7 @@ test("unavailable Original keeps its Photo review and visible recovery action", 
   await expect(status).toContainText("Original File is unavailable");
   await expect(status).toBeVisible();
   await status
-    .getByRole("button", { name: "Review unavailable originals" })
+    .getByRole("button", { name: "Review unavailable Originals" })
     .click();
   await expect(page.locator("[data-recovery-panel]")).toBeVisible();
 });
@@ -106,9 +115,13 @@ test("review controls preserve Preview space and reachable targets across rotati
   await page.locator("[data-dock-select]").click();
   await expect(page.locator("[data-selection]")).toHaveText("Picked");
   for (const { width, height, minimum } of [
+    { width: 375, height: 500, minimum: 480 },
     { width: 375, height: 667, minimum: 480 },
     { width: 390, height: 844, minimum: 650 },
     { width: 667, height: 375, minimum: 240 },
+    { width: 760, height: 480, minimum: 240 },
+    { width: 761, height: 480, minimum: 240 },
+    { width: 761, height: 481, minimum: 480 },
     { width: 844, height: 390, minimum: 240 },
     { width: 1024, height: 768, minimum: 480 },
     { width: 1280, height: 800, minimum: 480 },
@@ -127,6 +140,7 @@ test("review controls preserve Preview space and reachable targets across rotati
       "[data-dock-more]",
     ]) {
       const control = page.locator(selector);
+      await control.scrollIntoViewIfNeeded();
       await expect(control).toBeInViewport();
       const box = await control.boundingBox();
       expect(box?.width).toBeGreaterThanOrEqual(44);

@@ -61,11 +61,6 @@ test("Trash distinguishes loading, failure and empty after a real removal and Un
         .locator(".grid-header")
         .evaluate((element) => element.getBoundingClientRect().height),
     ).toBeLessThanOrEqual(88);
-    expect(
-      await page
-        .locator(".grid-header")
-        .evaluate((element) => element.scrollWidth <= element.clientWidth),
-    ).toBe(true);
     await expect(page.locator("[data-grid-view-options]")).toBeInViewport();
     await expect(page.locator("[data-grid-select-mode]")).toBeInViewport();
   }

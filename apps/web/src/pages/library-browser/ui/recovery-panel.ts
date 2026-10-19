@@ -59,12 +59,10 @@ export interface RecoveryReviewView {
   /// Presents the committed recovery counts of the last scan and, while
   /// Originals remain unavailable, the one bounded review entry.
   setRecoveryNotice(model: RecoveryNoticeModel): void;
-  /// Opens the recovery review with the first page of its bounded listing:
-  /// entries are the remembered facts, paging names how much of the total is
-  /// loaded and whether a continuation page remains.
   openRecoveryPanel(
     entries: ReadonlyArray<RecoveryEntryViewModel>,
     paging: RecoveryPagingViewModel,
+    invoker?: HTMLElement,
   ): void;
   /// Re-renders the entries of the open review, including its paging.
   renderRecoveryEntries(
@@ -295,15 +293,14 @@ export function createRecoveryPanel({
   return {
     setRecoveryNotice(model) {
       if (!alive) return;
-      const parts: string[] = [];
-      if (model.relocatedPhotos > 0)
-        parts.push(
-          `Updated locations for ${formatPhotoCount(model.relocatedPhotos)}.`,
-        );
-      if (model.unavailablePhotos > 0)
-        parts.push(
-          `${formatPhotoCount(model.unavailablePhotos)} still unavailable.`,
-        );
+      const parts = [
+        model.relocatedPhotos > 0
+          ? `${formatPhotoCount(model.relocatedPhotos)} locations updated.`
+          : "",
+        model.unavailablePhotos > 0
+          ? `${formatPhotoCount(model.unavailablePhotos)} remain unavailable.`
+          : "",
+      ].filter(Boolean);
       recoveryNotice.replaceChildren();
       if (parts.length === 0) {
         recoveryNotice.hidden = true;
@@ -314,7 +311,7 @@ export function createRecoveryPanel({
         const button = document.createElement("button");
         button.type = "button";
         button.className = "summary-action";
-        button.textContent = "Review unavailable originals";
+        button.textContent = "Review unavailable Originals";
         button.addEventListener("click", () =>
           send({ kind: "recovery-entry" }),
         );
@@ -322,13 +319,15 @@ export function createRecoveryPanel({
       }
       recoveryNotice.hidden = false;
     },
-    openRecoveryPanel(entries, paging) {
+    openRecoveryPanel(entries, paging, invoker) {
       if (!alive) return;
       // A new review discards the previous proposals and every choice made
       // for them; nothing carries over unreviewed.
       recoveryCurrentMappings = [];
       recoveryMappingChoices.clear();
       recoveryApplyBlocked = false;
+      recoverySingleOriginal.replaceChildren();
+      recoverySingleLocation.value = "";
       renderRecoveryEntryRows(entries, paging);
       recoveryProposalList.replaceChildren();
       recoveryProposalList.hidden = true;
@@ -337,8 +336,7 @@ export function createRecoveryPanel({
       recoveryNote.hidden = true;
       recoveryApply.hidden = true;
       recoveryMessage.hidden = true;
-      recoverySingleLocation.value = "";
-      surfaces.open("recovery");
+      surfaces.open("recovery", invoker);
       recoveryClose.focus();
     },
     renderRecoveryEntries(entries, paging) {

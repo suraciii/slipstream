@@ -101,10 +101,11 @@ export function createPhotoViewPresenter({
   const position = required<HTMLElement>(root, "[data-position]");
   const filename = required<HTMLElement>(root, "[data-photo-filename]");
   const selection = required<HTMLElement>(root, "[data-selection]");
+  const rating = required<HTMLElement>(root, "[data-rating]");
   const stage = required<HTMLElement>(root, "[data-stage]");
   const status = required<HTMLElement>(root, "[data-status]");
-  const previewSource = required<HTMLElement>(root, "[data-source]");
   const detailLimit = required<HTMLElement>(root, "[data-detail-limit]");
+  const previewSource = required<HTMLElement>(root, "[data-source]");
   const captureTime = required<HTMLElement>(
     root,
     "[data-metadata-capture-time]",
@@ -137,6 +138,8 @@ export function createPhotoViewPresenter({
       "aria-label",
       `Selection State: ${selectionLabel(currentSelection)}`,
     );
+    const currentRating = model.rating ?? 0;
+    rating.textContent = `Rating: ${currentRating} stars${currentRating === 0 ? " (no Rating)" : ""}`;
   };
   const renderPhotoMetadata = (model: PhotoMetadataViewModel = {}) => {
     if (!alive) return;
@@ -218,8 +221,7 @@ export function createPhotoViewPresenter({
     if (canReviewRecovery) {
       const button = document.createElement("button");
       button.type = "button";
-      button.className = "summary-action";
-      button.textContent = "Review unavailable originals";
+      button.textContent = "Review unavailable Originals";
       button.addEventListener("click", reviewRecovery);
       status.append(" ", button);
     }
@@ -250,7 +252,7 @@ export function createPhotoViewPresenter({
     }
     setPhotoStatus(
       model.photoId && model.available === false
-        ? "Original File is unavailable. Decisions remain available."
+        ? "Current Photo: Original File is unavailable. Decisions remain available; use Status to review Location Recovery."
         : "",
     );
     return image;

@@ -290,9 +290,10 @@ mutation.
 
 The Quick Action Dock is a responsive presentation of existing intents. It
 must not become a second page controller or a second persistence admission. The
-Photo tools surface presents existing Details, Album, Zoom, Clear, and Undo
-controls; each retains its existing owner, failure isolation, and focus
-restoration rules. Previous/Next remain in the primary navigation group.
+Photo tools surface presents existing Details, Album, Zoom, and Clear controls;
+each retains its existing owner, failure isolation, and focus restoration rules.
+Undo is presented once in the primary Photo action region and retains the same
+Photo action owner. Previous/Next remain in the primary navigation group.
 [Browser Navigation and Responsive Surfaces](../library-browser/experience/design.md#responsive-presentation-boundary)
 owns shared modal and disclosure lifecycle.
 

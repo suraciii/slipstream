@@ -687,17 +687,27 @@ export function mountAccessBoundary(
     event.stopImmediatePropagation();
     if (historyTraversalPending) return;
     historyTraversalPending = true;
+    // Do not let a same-document traversal restore private content until the
+    // current Browser Session is verified. A temporary access failure keeps
+    // the session and replays the already-committed traversal; confirmed loss
+    // leaves the access entry visible instead.
     detachPrivateHost();
     void checkCurrentAccess().then(
       (valid) => {
         historyTraversalPending = false;
-        if (!alive || !valid || !session) return;
-        attachPrivateHost();
-        replayingHistoryTraversal = true;
-        window.dispatchEvent(new PopStateEvent("popstate"));
+        if (!alive) return;
+        if (valid || (session && privateHost)) {
+          attachPrivateHost();
+          replayingHistoryTraversal = true;
+          window.dispatchEvent(new PopStateEvent("popstate"));
+        }
       },
       () => {
         historyTraversalPending = false;
+        if (!alive || !session || !privateHost) return;
+        attachPrivateHost();
+        replayingHistoryTraversal = true;
+        window.dispatchEvent(new PopStateEvent("popstate"));
       },
     );
   };
