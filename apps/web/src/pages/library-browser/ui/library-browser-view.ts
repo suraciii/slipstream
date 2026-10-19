@@ -31,7 +31,7 @@ import { createViewOptions, type ViewOptionsElements } from "./view-options.js";
 import { createRatingControls } from "./rating-controls.js";
 import { createPhotoToolsController } from "./photo-tools.js";
 import { createPhotoZoomController } from "./photo-zoom.js";
-import { createPhotoGestures } from "./photo-gestures.js";
+import * as photoGestureModule from "./photo-gestures.js";
 import { createPhotoEditorSurfaceController } from "./photo-editor-surface.js";
 import {
   createPhotoViewPresenter,
@@ -1337,7 +1337,7 @@ ${REMOVED_PANELS_TEMPLATE}
     resetGestures: () => photoGestures.reset(),
     reviewRecovery: () => send({ kind: "recovery-entry" }),
   });
-  const photoGestures = createPhotoGestures({
+  const photoGestures = photoGestureModule.createPhotoGestures({
     preview,
     stage,
     selectFeedback,
@@ -1345,13 +1345,13 @@ ${REMOVED_PANELS_TEMPLATE}
     zoom: zoomController,
     rating: ratingControls,
     isAlive: () => alive,
+    isRenderedImage: (event: PointerEvent) =>
+      photoGestureModule.isPaintedImagePointer(event, stage),
     currentPhotoId: () => photoPresenter.currentPhotoId,
-    currentSelectionState: () => photoPresenter.currentSelection,
     currentSurface: () => photoPresenter.photoSurface,
     decisionEnabled: () => decisionInteractionEnabled,
     send,
   });
-
   const scheduleGridRender = gridPresenter.schedule;
   const cancelGridRender = gridPresenter.cancel;
   const clearGridCells = gridPresenter.clear;

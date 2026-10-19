@@ -6,6 +6,7 @@ import type { LibraryBrowserIntent } from "./library-browser-view.js";
 
 class Surface extends EventTarget {
   style = { transform: "" };
+  parent: Surface | undefined;
   captured = new Set<number>();
   classes = new Set<string>();
   classList = {
@@ -21,6 +22,9 @@ class Surface extends EventTarget {
   }
   releasePointerCapture(id: number) {
     this.captured.delete(id);
+    const event = new Event("lostpointercapture");
+    Object.defineProperty(event, "pointerId", { value: id });
+    this.dispatchEvent(event);
   }
 }
 
@@ -46,15 +50,20 @@ function fixture() {
   const stage = new Surface();
   const select = new Surface();
   const reject = new Surface();
+  const imageTarget = new Surface();
+  stage.parent = preview;
+  imageTarget.parent = stage;
+  let renderedImage = true;
+  const isRenderedImage = (event: PointerEvent) =>
+    renderedImage && event.target === (imageTarget as unknown as EventTarget);
   let photoId = "photo-a";
   let surface = {};
   let enabled = true;
   let manual = false;
-  let selectionState: "unflagged" | "picked" | "rejected" = "unflagged";
-  let candidate: number | undefined = 4;
   let pinch = false;
   let wheel = false;
   let panX = 0;
+  const candidate = 4;
   const pointers = new Set<number>();
   const writes: LibraryBrowserIntent[] = [];
   const zoom = {
@@ -105,8 +114,8 @@ function fixture() {
     zoom,
     rating,
     isAlive: () => true,
+    isRenderedImage,
     currentPhotoId: () => photoId,
-    currentSelectionState: () => selectionState,
     currentSurface: () => surface,
     decisionEnabled: () => enabled,
     send: (intent) => writes.push(intent),
@@ -130,8 +139,15 @@ function fixture() {
           timer.callback();
         }
     },
-    pointer(type: string, x: number, y = 0, id = 1) {
+    pointer(
+      type: string,
+      x: number,
+      y = 0,
+      id = 1,
+      target: "image" | "letterbox" = "image",
+    ) {
       const event = new Event(type, { cancelable: true });
+      const targetNode = target === "image" ? imageTarget : stage;
       Object.defineProperties(event, {
         pointerId: { value: id },
         clientX: { value: x },
@@ -139,6 +155,7 @@ function fixture() {
         pointerType: { value: "touch" },
         isPrimary: { value: id === 1 },
         timeStamp: { value: now },
+        target: { value: targetNode },
       });
       preview.dispatchEvent(event);
     },
@@ -151,14 +168,11 @@ function fixture() {
       enabled = false;
       gestures.cancelUnavailableDecision();
     },
+    setRenderedImage(value: boolean) {
+      renderedImage = value;
+    },
     manual() {
       manual = true;
-    },
-    setSelection(value: "unflagged" | "picked" | "rejected") {
-      selectionState = value;
-    },
-    noCandidate() {
-      candidate = undefined;
     },
     dispose() {
       gestures.dispose();
@@ -168,7 +182,6 @@ function fixture() {
     },
   };
 }
-
 test("Rating hold boundary and release submit exactly once", () => {
   const f = fixture();
   try {
@@ -189,72 +202,68 @@ test("Rating hold boundary and release submit exactly once", () => {
   }
 });
 
-test("equal-axis vertical swipe cycles the current Selection State", () => {
+test("horizontal decisions use Select and Reject and advance", () => {
   const f = fixture();
   try {
-    f.pointer("pointerdown", 0);
-    f.pointer("pointermove", 9, 9);
-    f.advance(450);
-    f.pointer("pointermove", 90, 90);
-    f.pointer("pointerup", 90, 90);
-    expect(f.wheel).toBe(false);
-    expect(f.stage.style.transform).toBe("");
-    expect(f.writes).toEqual([
-      {
-        kind: "photo-mutation",
-        field: "selectionState",
-        value: "rejected",
-        advance: false,
-      },
-    ]);
-  } finally {
-    f.dispose();
-  }
-});
-
-test("below-threshold swipe returns to origin; committed swipe navigates", () => {
-  const f = fixture();
-  try {
-    f.pointer("pointerdown", 0);
-    f.pointer("pointermove", 20);
-    f.advance(500);
-    f.pointer("pointerup", 47);
-    expect(f.writes).toEqual([]);
-    expect(f.stage.style.transform).toBe("");
-    f.pointer("pointerdown", 0);
-    f.pointer("pointermove", -80);
-    f.advance(500);
-    f.pointer("pointerup", -80);
-    expect(f.writes).toEqual([{ kind: "next" }]);
-  } finally {
-    f.dispose();
-  }
-});
-
-test("vertical swipe cycles Selection State on the current Photo", () => {
-  const f = fixture();
-  try {
-    f.pointer("pointerdown", 100, 120);
-    f.pointer("pointermove", 100, 40);
-    f.pointer("pointerup", 100, 40);
+    f.pointer("pointerdown", 0, 0);
+    f.pointer("pointermove", 90, 0);
+    f.pointer("pointerup", 90, 0);
     expect(f.writes).toEqual([
       {
         kind: "photo-mutation",
         field: "selectionState",
         value: "picked",
-        advance: false,
+        advance: true,
       },
     ]);
-    f.setSelection("picked");
-    f.pointer("pointerdown", 100, 40);
-    f.pointer("pointermove", 100, 120);
-    f.pointer("pointerup", 100, 120);
+    f.pointer("pointerdown", 100, 0);
+    f.pointer("pointermove", 10, 0);
+    f.pointer("pointerup", 10, 0);
     expect(f.writes.at(-1)).toEqual({
       kind: "photo-mutation",
       field: "selectionState",
-      value: "unflagged",
-      advance: false,
+      value: "rejected",
+      advance: true,
     });
+  } finally {
+    f.dispose();
+  }
+});
+
+test("vertical decisions navigate without changing Photo facts", () => {
+  const f = fixture();
+  try {
+    f.pointer("pointerdown", 100, 120);
+    f.pointer("pointermove", 100, 30);
+    f.pointer("pointerup", 100, 30);
+    f.pointer("pointerdown", 100, 30);
+    f.pointer("pointermove", 100, 120);
+    f.pointer("pointerup", 100, 120);
+    expect(f.writes).toEqual([{ kind: "next" }, { kind: "previous" }]);
+  } finally {
+    f.dispose();
+  }
+});
+test("non-image Preview regions remain native and emit no gesture action", () => {
+  const f = fixture();
+  try {
+    f.pointer("pointerdown", 100, 120, 1, "letterbox");
+    f.pointer("pointermove", 100, 20, 1, "letterbox");
+    f.pointer("pointerup", 100, 20, 1, "letterbox");
+    expect(f.writes).toEqual([]);
+    expect(f.preview.captured.size).toBe(0);
+  } finally {
+    f.dispose();
+  }
+});
+
+test("equal-axis movement cancels without an action", () => {
+  const f = fixture();
+  try {
+    f.pointer("pointerdown", 0, 0);
+    f.pointer("pointermove", 80, 80);
+    f.pointer("pointerup", 80, 80);
+    expect(f.writes).toEqual([]);
   } finally {
     f.dispose();
   }
@@ -285,9 +294,9 @@ test("pinch handoff and remaining finger cannot become a decision swipe", () => 
   const f = fixture();
   try {
     f.pointer("pointerdown", 0);
-    f.pointer("pointerdown", 30, 0, 2);
+    f.pointer("pointerdown", 30, 0, 2, "letterbox");
     f.advance(450);
-    f.pointer("pointerup", 30, 0, 2);
+    f.pointer("pointerup", 30, 0, 2, "letterbox");
     f.pointer("pointermove", 100);
     f.pointer("pointerup", 100);
     expect(f.wheel).toBe(false);

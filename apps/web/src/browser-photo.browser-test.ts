@@ -112,7 +112,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   await expect(page.locator("[data-selection]")).toHaveText("Picked");
 });
 
-test("Photo View gestures navigate and cycle state while More owns one review sheet", async ({
+test("Photo View gestures navigate and decide while More owns one review sheet", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -212,45 +212,49 @@ test("Photo View gestures navigate and cycle state while More owns one review sh
     await page.mouse.up();
   };
 
-  await swipe(-140, 0);
+  await swipe(0, -140);
   await expect(page.locator("[data-position]")).toHaveText("2 / 3");
-  // Position text updates when navigation commits, while the destination
-  // Preview and decision admission settle afterward. Wait for both before
-  // sending a vertical decision gesture; otherwise the gesture is correctly
-  // ignored during the transition and no state request can be observed.
   await waitForLoadedReviewImage(page);
   await expect(page.locator("[data-dock-select]")).toBeEnabled();
-  const picked = page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      /\/state(?:\?|$)/.test(new URL(response.url()).pathname),
+  const picked = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      /\/state(?:\?|$)/.test(new URL(request.url()).pathname),
   );
-  await swipe(0, -140);
-  await picked;
-  await expect(page.locator("[data-selection]")).toHaveText("Picked");
-  const cleared = page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      /\/state(?:\?|$)/.test(new URL(response.url()).pathname),
-  );
-  await swipe(0, 140);
-  await cleared;
+  await swipe(140, 0);
+  expect((await picked).postDataJSON()).toMatchObject({
+    field: "selectionState",
+    value: "picked",
+  });
+  await expect(page.locator("[data-position]")).toHaveText("3 / 3");
   await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
+  await waitForLoadedReviewImage(page);
+  const rejected = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      /\/state(?:\?|$)/.test(new URL(request.url()).pathname),
+  );
+  await swipe(-140, 0);
+  expect((await rejected).postDataJSON()).toMatchObject({
+    field: "selectionState",
+    value: "rejected",
+  });
+  await expect(page.locator("[data-position]")).toHaveText("3 / 3");
+  await expect(page.locator("[data-selection]")).toHaveText("Rejected");
 });
 
 test.describe("touch Preview input", () => {
   test.use({ hasTouch: true });
 
-  test("touch upward swipe changes Selection State in fit Preview", async ({
+  test("touch upward swipe navigates to the next Photo in fit Preview", async ({
     page,
   }) => {
     const { base, root } = await fixture();
-    await writePhotos(root, 1);
+    await writePhotos(root, 2);
     const running = await server(base, root);
     await page.setViewportSize({ width: 390, height: 844 });
     await startReview(page, running.url, "All Photos");
     await waitForLoadedReviewImage(page);
-
     const stage = page.locator("[data-stage]");
     const image = page.locator("[data-stage] img");
     await expect(image).toHaveCSS("touch-action", "none");
@@ -259,11 +263,6 @@ test.describe("touch Preview input", () => {
     const x = box.x + box.width / 2;
     const y = box.y + box.height / 2;
     const client = await page.context().newCDPSession(page);
-    const picked = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        /\/state(?:\?|$)/.test(new URL(response.url()).pathname),
-    );
     await client.send("Input.dispatchTouchEvent", {
       type: "touchStart",
       touchPoints: [{ x, y, id: 1 }],
@@ -277,8 +276,58 @@ test.describe("touch Preview input", () => {
       type: "touchEnd",
       touchPoints: [],
     });
-    await picked;
-    await expect(page.locator("[data-selection]")).toHaveText("Picked");
+    await expect(page.locator("[data-position]")).toHaveText("2 / 2");
+    await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
+  });
+
+  test("touch direction mapping separates Previous from decisions", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 3);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
+    const image = page.locator("[data-stage] img");
+    const box = await image.boundingBox();
+    if (!box) throw new Error("Rendered image has no geometry");
+    const client = await page.context().newCDPSession(page);
+    const touch = async (dx: number, dy: number) => {
+      const x = box.x + box.width / 2;
+      const y = box.y + box.height / 2;
+      await client.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x, y, id: 1 }],
+      });
+      for (const step of [0.25, 0.6, 1])
+        await client.send("Input.dispatchTouchEvent", {
+          type: "touchMove",
+          touchPoints: [{ x: x + dx * step, y: y + dy * step, id: 1 }],
+        });
+      await client.send("Input.dispatchTouchEvent", {
+        type: "touchEnd",
+        touchPoints: [],
+      });
+    };
+    await touch(0, -140);
+    await expect(page.locator("[data-position]")).toHaveText("2 / 3");
+    await waitForLoadedReviewImage(page);
+    await touch(0, 140);
+    await expect(page.locator("[data-position]")).toHaveText("1 / 3");
+    await waitForLoadedReviewImage(page);
+    const state = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        /\/state(?:\?|$)/.test(new URL(request.url()).pathname),
+    );
+    await touch(140, 0);
+    expect((await state).postDataJSON()).toMatchObject({
+      field: "selectionState",
+      value: "picked",
+    });
+    await expect(page.locator("[data-position]")).toHaveText("2 / 3");
+    await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
   });
 
   test("touch from fit Preview letterbox scrolls without a decision", async ({

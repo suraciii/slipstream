@@ -1190,7 +1190,7 @@
   align-items: stretch;
   overflow: hidden;
   background: #030405;
-  touch-action: none;
+  touch-action: pan-y;
   user-select: none;
 }
 
@@ -1276,6 +1276,10 @@
      stage native lets a touch that starts in the letterboxed area continue
      scrolling compact Photo View toward the controls. */
   touch-action: none;
+}
+
+.image-stage > img[data-measured="false"] {
+  touch-action: pan-y;
 }
 
 .image-stage > p {
@@ -1836,10 +1840,6 @@
   .app-shell select {
     min-width: 2.75rem;
     min-height: 2.75rem;
-  }
-
-  .preview[data-zoom-state="fit"] {
-    touch-action: pan-y;
   }
 }
 

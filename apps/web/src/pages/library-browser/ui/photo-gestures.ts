@@ -16,11 +16,38 @@ const SWIPE_COMMIT_VELOCITY = 0.5;
 const RATING_WHEEL_HOLD_MS = 450;
 const RATING_WHEEL_MOVE_PIXELS = 12;
 
+export function isPaintedImagePointer(
+  event: PointerEvent,
+  stage: HTMLElement,
+): boolean {
+  if (
+    !(event.target instanceof HTMLImageElement) ||
+    !stage.contains(event.target)
+  )
+    return false;
+  const image = event.target;
+  const box = image.getBoundingClientRect();
+  const naturalWidth = image.naturalWidth;
+  const naturalHeight = image.naturalHeight;
+  if (!naturalWidth || !naturalHeight || !box.width || !box.height)
+    return false;
+  const scale = Math.min(box.width / naturalWidth, box.height / naturalHeight);
+  const paintedWidth = naturalWidth * scale;
+  const paintedHeight = naturalHeight * scale;
+  return (
+    event.clientX >= box.left + (box.width - paintedWidth) / 2 &&
+    event.clientX <= box.right - (box.width - paintedWidth) / 2 &&
+    event.clientY >= box.top + (box.height - paintedHeight) / 2 &&
+    event.clientY <= box.bottom - (box.height - paintedHeight) / 2
+  );
+}
+
 export interface PhotoGestures {
   reset(): void;
   cancelUnavailableDecision(): void;
   dispose(): void;
 }
+type GestureAxis = "horizontal" | "vertical";
 type PointerState = {
   id: number;
   startX: number;
@@ -28,14 +55,14 @@ type PointerState = {
   lastX: number;
   lastY: number;
   startedAt: number;
-  vertical: boolean;
+  axis: GestureAxis | undefined;
+  axisSettled: boolean;
   ratingPending: boolean;
   ratingWheel: boolean;
   pan: boolean;
   surface: object;
   photoId: string;
 };
-
 export function createPhotoGestures({
   preview,
   stage,
@@ -44,8 +71,8 @@ export function createPhotoGestures({
   zoom,
   rating,
   isAlive,
+  isRenderedImage,
   currentPhotoId,
-  currentSelectionState,
   currentSurface,
   decisionEnabled,
   send,
@@ -57,8 +84,8 @@ export function createPhotoGestures({
   zoom: PhotoZoomController;
   rating: RatingControls;
   isAlive: () => boolean;
+  isRenderedImage: (event: PointerEvent) => boolean;
   currentPhotoId: () => string | undefined;
-  currentSelectionState?: () => "unflagged" | "picked" | "rejected";
   currentSurface: () => object;
   decisionEnabled: () => boolean;
   send: (intent: PhotoGestureIntent) => void;
@@ -67,17 +94,16 @@ export function createPhotoGestures({
   let holdTimer: number | undefined;
   let alive = true;
   const listeners = new AbortController();
-
   const cancelHold = () => {
     if (holdTimer !== undefined) window.clearTimeout(holdTimer);
     holdTimer = undefined;
   };
-  const clearPointer = () => {
+  const clearPointer = (releaseCapture = true) => {
     cancelHold();
     const id = pointer?.id;
-    if (id !== undefined && preview.hasPointerCapture(id))
-      preview.releasePointerCapture(id);
     pointer = undefined;
+    if (releaseCapture && id !== undefined && preview.hasPointerCapture(id))
+      preview.releasePointerCapture(id);
     stage.style.transform = "";
     selectFeedback.classList.remove("pending");
     rejectFeedback.classList.remove("pending");
@@ -95,7 +121,9 @@ export function createPhotoGestures({
       reset();
   };
   const pointerDown = (event: PointerEvent) => {
-    if (!alive || !isAlive() || !currentPhotoId()) return;
+    const photoId = currentPhotoId();
+    if (!alive || !isAlive() || !photoId) return;
+    const secondPointer = pointer !== undefined;
     const pointerCount = zoom.trackPointer(
       event.pointerId,
       event.clientX,
@@ -105,20 +133,25 @@ export function createPhotoGestures({
       event.preventDefault();
       cancelHold();
       rating.closeWheel();
-      clearPointer();
+      clearPointer(false);
       zoom.beginPinch();
       return;
     }
-    if (pointerCount > 2 || zoom.isPinching() || pointer || !event.isPrimary)
+    if (!secondPointer && !isRenderedImage(event)) return;
+    if (
+      pointerCount > 2 ||
+      zoom.isPinching() ||
+      (pointer && !secondPointer) ||
+      !event.isPrimary
+    )
       return;
-    if (!zoom.isManual() && !zoom.hasMeasurableImage()) return;
+    if (!secondPointer && !zoom.isManual() && !zoom.hasMeasurableImage())
+      return;
     const ratingPending =
       event.pointerType === "touch" &&
       !zoom.isManual() &&
       zoom.hasMeasurableImage() &&
       decisionEnabled();
-    const photoId = currentPhotoId();
-    if (!photoId) return;
     pointer = {
       id: event.pointerId,
       startX: event.clientX,
@@ -126,7 +159,8 @@ export function createPhotoGestures({
       lastX: event.clientX,
       lastY: event.clientY,
       startedAt: event.timeStamp,
-      vertical: false,
+      axis: undefined,
+      axisSettled: false,
       ratingPending,
       ratingWheel: false,
       pan: zoom.isManual(),
@@ -138,23 +172,25 @@ export function createPhotoGestures({
     } catch {
       // Synthetic qualification events have no native pointer to capture.
     }
-    if (!ratingPending) return;
     const id = event.pointerId;
-    const surface = pointer.surface;
+    const active = pointer;
+    if (!active) return;
+    const surface = active.surface;
     holdTimer = window.setTimeout(() => {
-      holdTimer = undefined;
       const active = pointer;
+      holdTimer = undefined;
       if (
         !active ||
         active.id !== id ||
         !active.ratingPending ||
         active.surface !== surface ||
         active.photoId !== photoId ||
-        active.vertical ||
+        active.axisSettled ||
+        active.axis !== undefined ||
         active.pan ||
         zoom.isManual() ||
-        !decisionEnabled() ||
-        !currentPhotoId()
+        !currentPhotoId() ||
+        currentPhotoId() !== photoId
       )
         return;
       active.ratingPending = false;
@@ -174,10 +210,10 @@ export function createPhotoGestures({
       return;
     }
     if (!pointer || pointer.id !== event.pointerId) return;
-    const dx = event.clientX - pointer.startX,
-      dy = event.clientY - pointer.startY;
-    const stepX = event.clientX - pointer.lastX,
-      stepY = event.clientY - pointer.lastY;
+    const dx = event.clientX - pointer.startX;
+    const dy = event.clientY - pointer.startY;
+    const stepX = event.clientX - pointer.lastX;
+    const stepY = event.clientY - pointer.lastY;
     pointer.lastX = event.clientX;
     pointer.lastY = event.clientY;
     if (pointer.ratingWheel) {
@@ -188,43 +224,29 @@ export function createPhotoGestures({
       zoom.panBy(stepX, stepY);
       return;
     }
-    if (
-      pointer.ratingPending &&
-      Math.hypot(dx, dy) > RATING_WHEEL_MOVE_PIXELS
-    ) {
+    const distance = Math.hypot(dx, dy);
+    if (!pointer.axisSettled && distance > RATING_WHEEL_MOVE_PIXELS) {
       pointer.ratingPending = false;
       cancelHold();
-      // Equal movement belongs to native scrolling, not a decision swipe.
-      if (Math.abs(dy) >= Math.abs(dx)) pointer.vertical = true;
-    } else if (
-      Math.abs(dy) > Math.abs(dx) &&
-      Math.abs(dy) > RATING_WHEEL_MOVE_PIXELS
-    )
-      pointer.vertical = true;
-    if (pointer.vertical) {
-      const current = currentSelectionState?.() ?? "unflagged";
-      const forward = {
-        unflagged: "Picked",
-        picked: "Rejected",
-        rejected: "Unflagged",
-      } as const;
-      const reverse = {
-        unflagged: "Rejected",
-        picked: "Unflagged",
-        rejected: "Picked",
-      } as const;
+      pointer.axisSettled = true;
+      if (Math.abs(dx) !== Math.abs(dy))
+        pointer.axis = Math.abs(dx) > Math.abs(dy) ? "horizontal" : "vertical";
+    }
+    if (pointer.axis === "vertical") {
       stage.style.transform = `translateY(${Math.max(-140, Math.min(140, dy))}px)`;
-      selectFeedback.textContent = dy < 0 ? forward[current] : "";
-      rejectFeedback.textContent = dy > 0 ? reverse[current] : "";
+      selectFeedback.textContent = dy < 0 ? "Next" : "";
+      rejectFeedback.textContent = dy > 0 ? "Previous" : "";
       selectFeedback.classList.toggle("pending", dy < -SWIPE_PENDING_PIXELS);
       rejectFeedback.classList.toggle("pending", dy > SWIPE_PENDING_PIXELS);
       return;
     }
-    stage.style.transform = `translateX(${Math.max(-140, Math.min(140, dx))}px)`;
-    selectFeedback.textContent = "Next";
-    rejectFeedback.textContent = "Previous";
-    selectFeedback.classList.toggle("pending", dx < -SWIPE_PENDING_PIXELS);
-    rejectFeedback.classList.toggle("pending", dx > SWIPE_PENDING_PIXELS);
+    if (pointer.axis === "horizontal") {
+      stage.style.transform = `translateX(${Math.max(-140, Math.min(140, dx))}px)`;
+      selectFeedback.textContent = dx > 0 ? "Select" : "";
+      rejectFeedback.textContent = dx < 0 ? "Reject" : "";
+      selectFeedback.classList.toggle("pending", dx > SWIPE_PENDING_PIXELS);
+      rejectFeedback.classList.toggle("pending", dx < -SWIPE_PENDING_PIXELS);
+    }
   };
   const finishPointer = (event: PointerEvent, cancelled = false) => {
     if (!alive || !isAlive()) return;
@@ -262,14 +284,13 @@ export function createPhotoGestures({
       zoom.isManual() ||
       cancelled ||
       active.surface !== currentSurface() ||
-      active.photoId !== currentPhotoId()
+      active.photoId !== currentPhotoId() ||
+      active.axis === undefined
     )
       return;
     const dx = event.clientX - active.startX;
     const dy = event.clientY - active.startY;
-    const horizontal = !active.vertical;
-    if (!horizontal && !decisionEnabled()) return;
-    const distance = horizontal ? Math.abs(dx) : Math.abs(dy);
+    const distance = active.axis === "horizontal" ? Math.abs(dx) : Math.abs(dy);
     const elapsed = Math.max(1, event.timeStamp - active.startedAt);
     const velocity = distance / elapsed;
     if (
@@ -277,28 +298,17 @@ export function createPhotoGestures({
       !(distance >= 48 && velocity >= SWIPE_COMMIT_VELOCITY)
     )
       return;
-    if (horizontal) {
-      send({ kind: dx < 0 ? "next" : "previous" });
+    if (active.axis === "vertical") {
+      send({ kind: dy < 0 ? "next" : "previous" });
       return;
     }
-    const current = currentSelectionState?.() ?? "unflagged";
-    const forward = {
-      unflagged: "picked",
-      picked: "rejected",
-      rejected: "unflagged",
-    } as const;
-    const reverse = {
-      unflagged: "rejected",
-      picked: "unflagged",
-      rejected: "picked",
-    } as const;
+    if (!decisionEnabled()) return;
     send({
       kind: "photo-mutation",
       field: "selectionState",
-      value: dy < 0 ? forward[current] : reverse[current],
-      advance: false,
+      value: dx > 0 ? "picked" : "rejected",
+      advance: true,
     });
-    return;
   };
   const onContextMenu = (event: MouseEvent) => {
     if (pointer?.ratingPending || rating.isWheelOpen()) event.preventDefault();

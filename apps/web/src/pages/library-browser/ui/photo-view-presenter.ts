@@ -168,9 +168,11 @@ export function createPhotoViewPresenter({
     zoom.resetForImage();
     // Fit depends on the Preview's natural pixels, so the geometry is
     // applied when the bytes arrive.
+    image.dataset.measured = "false";
     image.addEventListener("load", () => {
       if (!alive || !image.isConnected) return;
       zoom.applyZoom();
+      image.dataset.measured = "true";
     });
     const target: ReviewImageTarget = {
       get connected() {
