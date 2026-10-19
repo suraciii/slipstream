@@ -1964,12 +1964,13 @@
      the shrinking disclosure absorbs, so every fact the row carries stays
      visible without widening the screen. */
   .grid-heading {
-    flex: 0 0 auto;
+    flex: 0 1 auto;
+    max-width: 5.5rem;
   }
 
   .grid-heading p {
     flex: none;
-    max-width: 9rem;
+    max-width: 100%;
     font-size: 0.66rem;
   }
 
