@@ -1854,6 +1854,22 @@ fn seed_fingerprint(base: &TempTree, relative_path: &str, bytes: &[u8]) {
         .unwrap();
 }
 
+fn seed_legacy_edit_recipe(
+    base: &TempTree,
+    photo_id: &str,
+    revision: &str,
+    source_revision: &str,
+    exposure_ev: f64,
+) {
+    let connection = Connection::open(base.0.join("state").join("library.sqlite")).unwrap();
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO edit_recipes(photo_id,revision,source_revision,exposure_ev,white_balance_mode) VALUES(?,?,?,?,?)",
+            params![photo_id, revision, source_revision, exposure_ev, "as-shot"],
+        )
+        .unwrap();
+}
+
 #[tokio::test]
 async fn scan_recovery_follows_a_unique_exact_candidate() {
     let (base, initial_config) = fixture();
@@ -1864,24 +1880,23 @@ async fn scan_recovery_follows_a_unique_exact_candidate() {
     let photo_id = first.photos[0].id.clone();
     let current = library.edit_recipe(&photo_id).await.unwrap().unwrap();
     let original_source_revision = current.current_source_revision.expect("published source");
-    let saved = library
-        .save_edit_recipe(crate::SaveEditRecipe {
-            photo_id: photo_id.clone(),
-            request_id: "library-first-save".to_owned(),
-            expected_recipe_version: None,
-            expected_source_revision: original_source_revision,
-            settings: crate::EditRecipeSettings {
-                exposure_ev: 0.0,
-                white_balance: crate::WhiteBalanceIntent::AsShot,
-            },
-        })
-        .await
-        .unwrap();
-    let saved = match saved {
-        crate::EditRecipeWriteOutcome::Saved(recipe) => recipe,
-        outcome => panic!("first recipe save should succeed, got {outcome:?}"),
-    };
     library.shutdown().unwrap();
+    seed_legacy_edit_recipe(
+        &base,
+        &photo_id,
+        "library-first-save",
+        &original_source_revision,
+        0.0,
+    );
+    let saved = crate::EditRecipe {
+        photo_id: photo_id.clone(),
+        revision: "library-first-save".to_owned(),
+        source_revision: original_source_revision,
+        settings: crate::EditRecipeSettings {
+            exposure_ev: 0.0,
+            white_balance: crate::WhiteBalanceIntent::AsShot,
+        },
+    };
     seed_fingerprint(&base, "a.ARW", &raw_bytes);
     fs::create_dir(base.0.join("originals/moved")).unwrap();
     fs::rename(
@@ -1917,24 +1932,6 @@ async fn scan_recovery_follows_a_unique_exact_candidate() {
         recovered.current_source_revision.as_deref(),
         Some(recovered_recipe.source_revision.as_str())
     );
-    assert!(matches!(
-        library
-            .save_edit_recipe(crate::SaveEditRecipe {
-                photo_id: photo_id.clone(),
-                request_id: "library-stale-save".to_owned(),
-                expected_recipe_version: Some(saved.revision),
-                expected_source_revision: recovered
-                    .current_source_revision
-                    .expect("recovered source"),
-                settings: crate::EditRecipeSettings {
-                    exposure_ev: 1.0,
-                    white_balance: crate::WhiteBalanceIntent::AsShot,
-                },
-            })
-            .await
-            .unwrap(),
-        crate::EditRecipeWriteOutcome::RequiresRebind(_)
-    ));
     library.shutdown().unwrap();
     drop(base);
 }
@@ -1980,3 +1977,6 @@ async fn scan_recovery_treats_unreadable_same_kind_candidates_as_ambiguous() {
     let _ = fs::set_permissions(&locked, fs::Permissions::from_mode(0o644));
     drop(base);
 }
+
+#[path = "tests/edit_recipe.rs"]
+mod edit_recipe;

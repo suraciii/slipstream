@@ -2,7 +2,7 @@ use crate::{
     AlbumBrowseTarget, AlbumCreationResult, AlbumMembershipMutation, AlbumMembershipResult,
     AlbumMutation, AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary,
     AppliedRelocations, CaptureFact, CheckedAlbumMutation, CheckedAlbumMutationResult,
-    ComposableEditRecipe, ComposableEditRecipeWriteOutcome, EditRecipeRead, EditRecipeWriteOutcome,
+    ComposableEditRecipe, ComposableEditRecipeWriteOutcome, EditRecipeRead,
     ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreMutation, ExplicitPhotoRestoreResult,
     ExportAttempt, ExportLeaseOutcome, ExportRecord, ExportRetryOutcome, ExportSettlement,
     ExportSubmission, ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult,
@@ -12,9 +12,8 @@ use crate::{
     PhotoOperationRemainder, PhotoQuery, PhotoQueryError, PhotoQueryProjection, PhotoRead,
     PhotoRemovalMutation, PhotoRemovalResult, PhotoRestoration, PhotoRestorationResult,
     PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateMutation, PhotoStateMutationResult,
-    PreviewSeed, PreviewSeedResult, RebindEditRecipe, RecoverySurvey, RemovedPhotoRecord,
-    RequestedRelocation, SaveComposableEditRecipe, SaveEditRecipe, ScanLimits, ScanResult,
-    ScanSnapshot,
+    PreviewSeed, PreviewSeedResult, RecoverySurvey, RemovedPhotoRecord, RequestedRelocation,
+    SaveComposableEditRecipe, ScanLimits, ScanResult, ScanSnapshot,
 };
 use crate::{
     capture::capture_source_revision,
@@ -655,38 +654,6 @@ impl Library {
         let receive = {
             let _admission = self.admit()?;
             self.persistence.edit_recipe_receiver(photo_id)
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
-    }
-
-    /// Saves one semantic recipe only when both the caller's recipe revision
-    /// and observed Library source revision still match current persistence.
-    pub async fn save_edit_recipe(
-        &self,
-        mutation: SaveEditRecipe,
-    ) -> Result<EditRecipeWriteOutcome, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.save_edit_recipe_receiver(mutation)
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
-    }
-
-    /// Rebinds existing settings to the current observed source revision only
-    /// after the caller confirms both the recipe and source revisions.
-    pub async fn rebind_edit_recipe(
-        &self,
-        mutation: RebindEditRecipe,
-    ) -> Result<EditRecipeWriteOutcome, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.rebind_edit_recipe_receiver(mutation)
         }?;
         receive
             .await
