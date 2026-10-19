@@ -148,19 +148,22 @@ defined by Web Async Ownership:
   status surface identity, facts and metadata rendering, and Preview image targets.
   It reads bounded presentation models without holding mutable Photo facts or
   issuing HTTP. Reset and disposal invalidate its targets and cancel gestures.
-  Modal arbitration, keyboard DOM facts and responsive placement remain in
-  the page UI composition. A pure UI-local keyboard policy chooses precedence
-  and semantic actions; native range adjustment and modal cancellation remain
-  with their surfaces, while the Grid presenter owns delegated key geometry
-  and prevent-default handling.
-  The page-local Photo gesture controller owns Preview pointer capture, pending
-  holds, horizontal swipe feedback, and the handoff to zoom panning or pinch.
-  It reads the current Photo surface and decision readiness without owning
-  Photo facts, and emits only semantic mutation intents. Resetting a Photo,
-  leaving its surface, or disposing the view cancels the hold and releases
-  capture; a canceled or stale gesture never writes a decision. Fit-state
-  vertical touch panning remains native Photo View scrolling. Manual zoom
-  owns Preview dragging and never turns it into a decision.
+  Modal arbitration, keyboard DOM facts and responsive placement remain in the
+  page UI composition. A pure UI-local keyboard policy chooses precedence and
+  semantic actions; native range adjustment and modal cancellation remain with
+  their surfaces, while the Grid presenter owns delegated key geometry and
+  prevent-default handling.
+  The page-local Photo gesture controller owns Preview pointer capture, the
+  pending hold, the horizontal decision accelerators, the vertical navigation
+  accelerators, their transient direction feedback, and the handoff to zoom
+  panning or pinch. It reads the current Photo surface and decision readiness
+  without owning Photo facts, and emits only semantic mutation or navigation
+  intents. Resetting a Photo, leaving its surface, or disposing the view
+  cancels the hold and releases capture; a canceled or stale gesture never
+  writes a decision or navigates. Fit-state vertical movement that does not
+  commit navigation remains native Photo View scrolling, including movement in
+  letterbox regions. Manual zoom owns Preview dragging and never turns it into
+  a decision or navigation action.
   Rating controls own the transient Wheel presentation and candidate; the
   page UI also owns the Quick Action Dock, Photo tools, and disclosure focus.
   None of these values become Photo owner state.
@@ -245,15 +248,17 @@ keeps the state available to assistive technology.
 
 The state is one zoom percentage plus a Fit marker rather than a mode list:
 
-- `Fit` recomputes from the Preview area and the image's natural size, owns
-  the existing horizontal decision and vertical scrolling gestures, and
-  reports the percentage it produces.
+- `Fit` recomputes from the Preview area and the image's natural size. It owns
+  horizontal decision accelerators and vertical navigation accelerators, while
+  an uncommitted vertical movement remains native Photo View scrolling. Right
+  sets `picked`, left sets `rejected`, up opens the next Photo, and down opens
+  the previous Photo; the visible controls remain equivalent fallbacks.
 - A manual zoom percentage in `[10%, 800%]` is anchored to the Preview's
-  natural pixels: `100%` maps one Preview pixel to one CSS pixel. Pointer
-  wheel and pinch zoom keep the gesture point stationary; one-finger drag
-  pans within bounded overflow and never records a decision.
-- Detail inspection is the manual zoom state rather than a separate mode,
-  so `D` toggles a 200% detail zoom inside the same continuous state.
+  natural pixels: `100%` maps one Preview pixel to one CSS pixel. Pointer wheel
+  and pinch zoom keep the gesture point stationary; one-finger drag pans within
+  bounded overflow and never records a decision or navigation action.
+- Detail inspection is the manual zoom state rather than a separate mode, so
+  `D` toggles a 200% detail zoom inside the same continuous state.
 
 This shape is selected because the Photographer must reach any
 magnification between complete composition and honest pixel inspection
@@ -277,9 +282,11 @@ The transient gesture state has three meaningful values:
 
 The pending hold uses the product contract's 12 CSS-pixel movement boundary and
 450-millisecond hold threshold. Before the threshold, the page UI hands the
-pointer to horizontal decision movement, native vertical scrolling, or Pinch
-Zoom when those gestures take ownership. After the threshold, the Wheel owns
-the pointer until release or cancellation. The state is invalidated when the
+pointer to horizontal decision movement, vertical navigation or native Photo
+View scrolling according to the touch region and dominant axis, or Pinch Zoom
+when those gestures take ownership. After the threshold, the Wheel owns the
+pointer until release or cancellation. The state is invalidated when the Photo
+surface, current Photo, connection readiness, or UI generation changes.
 Photo surface, current Photo, connection readiness, or UI generation changes.
 
 A Wheel release emits the same Rating intent as an explicit Rating control. It

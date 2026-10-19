@@ -465,16 +465,48 @@ the source is final.
 
 While the Preview zoom state is Fit:
 
-- a committed right swipe must set `picked`;
-- a drag below the commit threshold must return the Photo to its starting position without changing state; and
-- the surface must show the pending direction before release.
+- horizontal swipes are the optional decision accelerator: a committed right
+  swipe sets `picked`, and a committed left swipe sets `rejected`;
+- a committed decision advances to the next Photo only after the decision is
+  accepted;
+- a drag below the commit threshold returns the Photo to its starting position
+  without changing any Photo fact; and
+- the surface shows the pending direction before release. A device whose
+  primary pointer can hover must not show those direction labels outside an
+  in-progress decision drag.
 
-The direction labels are a touch affordance. A device whose primary pointer
-can hover must not show them outside an in-progress decision drag.
+While the Preview zoom state is Fit, a committed upward swipe opens the next
+Photo and a committed downward swipe opens the previous Photo. These are
+navigation accelerators only: they never change Selection State, Rating, Album
+membership, saved Album position, or Undo. A failed navigation retains the
+prior committed Photo and its retry target. The explicit Previous and Next
+controls remain visible and equivalent, so no gesture is required for
+navigation.
 
-A committed swipe advances to the next Photo after the decision is accepted.
+The directional mapping is fixed across All Photos, Original Folders, Albums,
+and Selection State filters. It must not reverse when source order or filter
+changes. `Up` means next and `Down` means previous because the gesture follows
+the mobile-feed convention of continuing to the next item; the source's
+ordering semantics remain represented by the visible position and
+Previous/Next labels.
 
-Vertical swipes do not record a decision. At supported narrow or short-landscape touch viewports, while the zoom state is Fit, a vertical gesture that begins on the Preview must scroll Photo View naturally. A two-finger pinch always zooms the Preview, and a manual zoom state gives one-finger dragging to bounded panning instead of decisions. Rating uses the explicit controls required below and may use the touch-only [Rating Wheel](#rating-wheel). Slipstream must provide visible controls equivalent to swipe actions.
+A horizontal or vertical gesture must not be interpreted as both a decision and
+navigation action. The gesture owner is selected before commit from the
+dominant axis; equal-axis movement has no action. On the rendered image, an
+uncommitted drag returns to its starting position without changing Photo facts.
+Letterbox and non-image Preview regions retain native Photo View scrolling and
+do not admit decision or navigation swipes. A decision swipe and a navigation
+swipe must use visible directional feedback before release and must not depend
+on haptics or animation.
+
+The rendered image and its letterbox are separate touch regions. In Fit, the
+rendered image admits the four directional accelerators, while the letterbox
+and other non-image Preview regions retain native vertical scrolling. A
+two-finger pinch always zooms the Preview, and a manual zoom state gives
+one-finger dragging to bounded panning instead of decisions or navigation.
+Rating uses the explicit controls required below and may use the touch-only
+[Rating Wheel](#rating-wheel). Slipstream must provide visible controls
+equivalent to every gesture action.
 
 ### Rating Wheel
 
@@ -491,7 +523,8 @@ stateDiagram-v2
   [*] --> Idle
   Idle --> PendingPress: touch pointerdown on Fit Preview
   PendingPress --> Swipe: horizontal movement first
-  PendingPress --> Scroll: vertical movement first
+  PendingPress --> Navigate: vertical movement on rendered image first
+  PendingPress --> Scroll: vertical movement on letterbox or non-image region
   PendingPress --> Pinch: second pointer first
   PendingPress --> WheelOpen: 450 ms hold
   WheelOpen --> WheelOpen: move across rating sector
@@ -501,6 +534,7 @@ stateDiagram-v2
   Saving --> RetryableFailure: answered error, conflict, malformed response, or transport loss
   RetryableFailure --> Saving: retry current Rating
   Swipe --> Idle
+  Navigate --> Idle
   Scroll --> Idle
   Pinch --> Idle
 ```
@@ -519,10 +553,12 @@ mutation. It leaves the existing double-tap detail-zoom behavior unchanged.
 Before the 450-millisecond threshold, once movement exceeds 12 CSS pixels, the
 larger absolute axis delta owns the gesture:
 
-- a horizontal-dominant movement cancels the candidate and gives the gesture
-  to the existing Pick / Reject swipe;
-- a vertical-dominant movement cancels the candidate and gives the gesture to
-  natural Photo View scrolling;
+- a horizontal-dominant movement on the rendered image cancels the candidate
+  and gives the gesture to the Pick / Reject swipe;
+- a vertical-dominant movement on the rendered image cancels the candidate and
+  gives the gesture to the Next / Previous navigation swipe;
+- a vertical movement on a letterbox or non-image Preview region cancels the
+  candidate and gives the gesture to natural Photo View scrolling;
 - an equal-axis movement cancels the candidate and gives the gesture to
   natural scrolling;
 - a second pointer cancels the candidate and gives the gesture to Pinch Zoom;

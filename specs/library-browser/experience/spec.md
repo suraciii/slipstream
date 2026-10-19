@@ -16,7 +16,7 @@ failures, and Undo. Moving a control must preserve those rules.
 Library Browser
 ├── Grid: Sources · View options (incl. Album Resume) · Select mode
 ├── Photo: Back · Preview · position/state badge · Select / Reject / Undo · Rating · More
-│   └── Gestures: left/right navigate · up/down cycle Selection State
+│   └── Touch accelerators in Fit: ← Reject · → Select · ↑ Next · ↓ Previous
 └── One supporting surface: Sources, options, Rating, tools, or recovery
 ```
 
@@ -138,10 +138,19 @@ the Photo action owner; when no undoable change exists, the control may be
 disabled but must expose that fact without implying that a decision was
 reverted.
 
-On touch input, left and right gestures navigate to the previous and next Photo.
-Up and down gestures cycle the Selection State through Unflagged, Picked, and
-Rejected. These gestures change only the current Photo decision or navigation
-position; they do not change Rating.
+On touch input in Fit Preview, horizontal gestures are decision accelerators:
+right sets Select and left sets Reject, then advances to the next Photo after
+the accepted decision. Vertical gestures are navigation accelerators: up opens
+the next Photo and down opens the previous Photo. They never change Selection
+State, Rating, Album membership, saved Album position, or Undo. The mapping is
+fixed across source kinds and Selection State filters. The visible Previous,
+Next, Select, and Reject controls remain the equivalent non-gesture paths.
+
+Manual Zoom gives one-finger panning priority over all four swipe actions.
+Vertical movement that does not commit navigation must retain the natural
+Photo View scroll path, including scrolling from Preview letterbox regions.
+The Preview must show transient direction feedback during an in-progress swipe;
+feedback must not rely on color, haptics, or animation alone.
 
 More opens the supporting action groups:
 
