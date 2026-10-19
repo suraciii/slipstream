@@ -238,6 +238,114 @@ test("Photo View gestures navigate and cycle state while More owns one review sh
   await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
 });
 
+test.describe("touch Preview input", () => {
+  test.use({ hasTouch: true });
+
+  test("touch upward swipe changes Selection State in fit Preview", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 1);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
+
+    const stage = page.locator("[data-stage]");
+    const image = page.locator("[data-stage] img");
+    await expect(image).toHaveCSS("touch-action", "none");
+    const box = await stage.boundingBox();
+    if (!box) throw new Error("Preview stage has no geometry");
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    const client = await page.context().newCDPSession(page);
+    const picked = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        /\/state(?:\?|$)/.test(new URL(response.url()).pathname),
+    );
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x, y, id: 1 }],
+    });
+    for (const offset of [-35, -75, -140])
+      await client.send("Input.dispatchTouchEvent", {
+        type: "touchMove",
+        touchPoints: [{ x, y: y + offset, id: 1 }],
+      });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+    await picked;
+    await expect(page.locator("[data-selection]")).toHaveText("Picked");
+  });
+
+  test("touch from fit Preview letterbox scrolls without a decision", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 1);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
+
+    const geometry = await page.evaluate(() => {
+      const stage = document.querySelector<HTMLElement>("[data-stage]");
+      const image =
+        document.querySelector<HTMLImageElement>("[data-stage] img");
+      const view = document.querySelector<HTMLElement>("[data-photo-view]");
+      if (!stage || !image || !view) throw new Error("Photo is missing");
+      const stageBox = stage.getBoundingClientRect();
+      const imageBox = image.getBoundingClientRect();
+      const topGap = imageBox.top - stageBox.top;
+      const bottomGap = stageBox.bottom - imageBox.bottom;
+      if (topGap < 8 && bottomGap < 8)
+        throw new Error("Fit Preview has no letterbox area");
+      const y = topGap >= 8 ? stageBox.top + 4 : stageBox.bottom - 4;
+      return {
+        x: stageBox.left + stageBox.width / 2,
+        y,
+        before: view.scrollTop,
+        scrollable: view.scrollHeight > view.clientHeight,
+      };
+    });
+    expect(geometry.scrollable).toBe(true);
+    let stateRequests = 0;
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        new URL(request.url()).pathname.endsWith("/state")
+      )
+        stateRequests += 1;
+    });
+    const client = await page.context().newCDPSession(page);
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x: geometry.x, y: geometry.y, id: 1 }],
+    });
+    for (const offset of [-35, -75, -140])
+      await client.send("Input.dispatchTouchEvent", {
+        type: "touchMove",
+        touchPoints: [{ x: geometry.x, y: geometry.y + offset, id: 1 }],
+      });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+    await expect
+      .poll(() =>
+        page
+          .locator("[data-photo-view]")
+          .evaluate((element) => element.scrollTop),
+      )
+      .toBeGreaterThan(geometry.before);
+    await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
+    expect(stateRequests).toBe(0);
+  });
+});
+
 test("Preview zoom is explicit, bounded, and never records a decision", async ({
   page,
 }) => {

@@ -1271,6 +1271,13 @@
   transition: transform 140ms ease-out;
 }
 
+.image-stage > img {
+  /* The image owns decision and navigation swipes. Keeping the surrounding
+     stage native lets a touch that starts in the letterboxed area continue
+     scrolling compact Photo View toward the controls. */
+  touch-action: none;
+}
+
 .image-stage > p {
   color: var(--muted);
   font-size: 0.8rem;
