@@ -108,6 +108,11 @@ describe("recovery review apply outcomes", () => {
 
     expect(view.unusable()).toBe(1);
     expect(view.message()).toContain("Review is stale.");
+    expect(view.message()).toContain("Nothing was applied.");
+    // The refusal names the condition and the count, never the internal
+    // per-mapping reason codes the Photographer cannot act on.
+    expect(view.message()).not.toContain("(stale)");
+    expect(view.message()).not.toContain("stale,");
   });
 
   test("keeps reviewed mappings visible after an unknown outcome", async () => {
@@ -121,7 +126,67 @@ describe("recovery review apply outcomes", () => {
     await owner.applyRecovery([mapping]);
 
     expect(view.unusable()).toBe(1);
-    expect(view.message()).toContain("Apply outcome is unknown.");
+    // The unknown outcome offers current-state inspection and never a retry
+    // or a completion claim, and names no internal Photo identity.
+    expect(view.message()).toContain("The apply result is unknown.");
+    expect(view.message()).toContain(
+      "Open the review of unavailable originals again",
+    );
+    expect(view.message()).not.toContain("original-1");
+  });
+});
+
+describe("recovery review open failures", () => {
+  const makeVisiblePage = (photoVisible: boolean) => {
+    let gridStatus = "";
+    let photoStatus = "";
+    const testPage: RecoveryReviewPage = {
+      isAlive: () => true,
+      isPhotoVisible: () => photoVisible,
+      setGridStatusText: (text) => {
+        gridStatus = text;
+      },
+      setPhotoStatusText: (text) => {
+        photoStatus = text;
+      },
+      refreshSource: () => Promise.resolve(),
+      refreshRecoveryOverview: () => Promise.resolve(),
+    };
+    return {
+      testPage,
+      gridStatus: () => gridStatus,
+      photoStatus: () => photoStatus,
+    };
+  };
+
+  test("reports a failed open on Photo View when Photo View is visible", async () => {
+    const view = makeSurface();
+    const { testPage, gridStatus, photoStatus } = makeVisiblePage(true);
+    const owner = createRecoveryReviewOwner(
+      () => Promise.resolve(new Response("{}", { status: 500 })),
+      view.surface,
+      testPage,
+    );
+
+    await owner.openRecoveryReview();
+
+    expect(photoStatus()).toContain("Could not open the review");
+    expect(gridStatus()).toBe("");
+  });
+
+  test("reports a failed open on the Grid status from the Grid", async () => {
+    const view = makeSurface();
+    const { testPage, gridStatus, photoStatus } = makeVisiblePage(false);
+    const owner = createRecoveryReviewOwner(
+      () => Promise.resolve(new Response("{}", { status: 500 })),
+      view.surface,
+      testPage,
+    );
+
+    await owner.openRecoveryReview();
+
+    expect(gridStatus()).toContain("Could not open the review");
+    expect(photoStatus()).toBe("");
   });
 });
 const proposal = (originalId: string) =>

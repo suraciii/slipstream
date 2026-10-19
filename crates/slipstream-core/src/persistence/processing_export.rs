@@ -681,6 +681,16 @@ pub(super) use retained::*;
 mod records;
 use records::*;
 
+/// The Photo identities every published Processing Artifact still names, read
+/// on the authoritative stored records. The recovery retire-and-bind
+/// boundary uses this instead of matching a Photo identity inside a
+/// serialized value.
+pub(in crate::persistence) use records::scan_artifact_photo_ids;
+
+/// Every durable composable Export work record, for the same retire-and-bind
+/// boundary: a live work record is a retained reference.
+pub(in crate::persistence) use records::scan_processing_export_works;
+
 /// The processing source facts of one Photo — its Original kind and joint
 /// availability — read inside a caller's transaction.
 pub(super) fn photo_processing_source(

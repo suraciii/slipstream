@@ -176,6 +176,11 @@ export function createRecoveryReviewOwner(
       more: recoveryMappingsCursor !== null,
     });
   };
+  /// Reports review failures on the surface the Photographer is looking at.
+  const reportReviewFailure = (message: string): void => {
+    if (page.isPhotoVisible?.()) page.setPhotoStatusText?.(message);
+    else page.setGridStatusText(message);
+  };
 
   const openRecoveryReview = async (invoker?: HTMLElement): Promise<void> => {
     const generation = ++reviewGeneration;
@@ -207,12 +212,9 @@ export function createRecoveryReviewOwner(
       view.setRecoveryMessage();
       return;
     }
-    const message = page.isPhotoVisible?.()
-      ? "Location Recovery for unavailable Originals could not be loaded. Retry from Status and Recovery."
-      : "Location Recovery for unavailable Originals could not be loaded. Close this message and retry Review unavailable Originals from Sources.";
-    if (page.isPhotoVisible?.()) page.setPhotoStatusText?.(message);
-    else page.setGridStatusText(message);
-    return;
+    reportReviewFailure(
+      "Could not open the review of unavailable originals. Retry it from the recovery entry.",
+    );
   };
 
   /// Appends the next page of the same review. An expired review cannot be
@@ -244,12 +246,12 @@ export function createRecoveryReviewOwner(
       presentRecoveryEntries();
       view.setRecoveryMessage(
         result.message ??
-          "This review is no longer current. Close it and review the unavailable originals again.",
+          "This review is no longer current. Close it and open the review of unavailable originals again to see the rest.",
       );
       return;
     }
     view.setRecoveryMessage(
-      "Could not load more unavailable originals. Retry.",
+      "Could not load the rest of the unavailable originals. Retry.",
     );
   };
 
@@ -283,7 +285,7 @@ export function createRecoveryReviewOwner(
       presentRecoveryMappings();
       view.setRecoveryMessage(
         recoveryMappings.length === 0
-          ? "No unavailable originals under that folder prefix."
+          ? "No unavailable original is under that folder prefix. Review the list and propose another prefix."
           : undefined,
       );
       return;
@@ -296,7 +298,7 @@ export function createRecoveryReviewOwner(
       return;
     }
     view.setRecoveryMessage(
-      "Could not propose mappings. Check the folder prefixes and retry.",
+      "Could not propose those mappings. Check the folder prefixes and retry.",
     );
   };
 
@@ -362,11 +364,11 @@ export function createRecoveryReviewOwner(
       presentRecoveryMappings();
       view.setRecoveryMessage(
         result.message ??
-          "This proposal review is no longer current. Propose the mappings again.",
+          "This proposal review is no longer current. The mappings above are still shown; propose again to review the rest.",
       );
       return;
     }
-    view.setRecoveryMessage("Could not load more mappings. Retry.");
+    view.setRecoveryMessage("Could not load the rest of the mappings. Retry.");
   };
 
   /// Commits the reviewed mappings the panel chose. A refusal names every
@@ -416,28 +418,28 @@ export function createRecoveryReviewOwner(
     }
     if (superseded) return;
     if (result.kind === "refused") {
-      const reasons = result.rejections
-        .map((rejection) => rejection.reason)
-        .join(", ");
       proposalGeneration += 1;
       view.markRecoveryProposalsUnusable();
       view.setRecoveryMessage(
-        `${result.message}${reasons ? ` (${reasons})` : ""}`,
+        `${result.message.replace(/\.?$/, ".")} Nothing was applied. ${
+          result.refusedMappings === 1
+            ? "One mapping needs"
+            : `${result.refusedMappings.toLocaleString()} mappings need`
+        } review again before another apply.`,
       );
       return;
     }
     if (result.kind === "unknown") {
-      const ids = result.mappings
-        .map((mapping) => mapping.originalId)
-        .join(", ");
       proposalGeneration += 1;
       view.markRecoveryProposalsUnusable();
       view.setRecoveryMessage(
-        `Apply outcome is unknown. Inspect these Photo identities before any new proposal: ${ids}`,
+        "The apply result is unknown. Open the review of unavailable originals again to check the current state of these Photos before proposing anything new — nothing was applied twice.",
       );
       return;
     }
-    view.setRecoveryMessage("Could not apply the mappings. Retry.");
+    view.setRecoveryMessage(
+      "Could not apply the mappings. Nothing was applied. Retry when ready.",
+    );
   };
 
   return {

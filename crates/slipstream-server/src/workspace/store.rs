@@ -333,6 +333,40 @@ impl WorkspaceManager {
         Ok(owners.into_iter().collect())
     }
 
+    /// The Photo identities every active workspace still retains, read from
+    /// the authoritative workspace registry and each workspace's own
+    /// database. An active workspace binds its Photo through the registry;
+    /// retained workspace inputs and completed outputs bind the Photos named
+    /// by their provenance, so a retire-and-bind can never replace a Photo
+    /// that a workspace still holds. Any unreadable registry or workspace
+    /// database is an error: a caller must fail closed rather than treat an
+    /// unknown reference as absent.
+    pub(crate) fn retained_photo_references(&self) -> Result<Vec<String>> {
+        let mut referenced = std::collections::BTreeSet::new();
+        for id in self.workspace_ids()? {
+            let session = self.locked(&id, LeaseMode::Shared)?;
+            referenced.insert(session.workspace.photo_id.clone());
+            let mut statement = session.db.prepare(
+                "SELECT provenance FROM files WHERE removed=0 AND provenance IS NOT NULL",
+            )?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, Option<String>>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for row in rows {
+                let Some(row) = row else { continue };
+                let Ok(provenance) = value(&row) else {
+                    return Err(WorkspaceError::new(
+                        "workspace_unavailable",
+                        503,
+                        "Retained workspace provenance could not be read.",
+                    ));
+                };
+                referenced.extend(provenance_photo_ids(&provenance));
+            }
+        }
+        Ok(referenced.into_iter().collect())
+    }
+
     pub(crate) fn record_artifact_alias(
         &self,
         id: &str,
@@ -452,4 +486,25 @@ pub(super) fn evidence(session: &WorkspaceSession, id: &str) -> Result<Evidence>
         |row| row.get(0),
     )?;
     Ok(serde_json::from_str(&encoded)?)
+}
+
+/// The Photo identities named by one retained provenance document. Both
+/// retained processing provenance shapes carry their owning Photo explicitly,
+/// so a Photo an active workspace retains is never a retireable occupant.
+fn provenance_photo_ids(provenance: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(photo_id) = provenance["photoId"].as_str().filter(|id| valid_id(id)) {
+        ids.push(photo_id.to_owned());
+    }
+    if let Some(handle) = provenance["handle"].as_object()
+        && let Some(photo_id) = handle["photoId"].as_str().filter(|id| valid_id(id))
+    {
+        ids.push(photo_id.to_owned());
+    }
+    if let Some(input) = provenance["input"]["binding"].as_object()
+        && let Some(photo_id) = input["photoId"].as_str().filter(|id| valid_id(id))
+    {
+        ids.push(photo_id.to_owned());
+    }
+    ids
 }

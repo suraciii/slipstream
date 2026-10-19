@@ -1,6 +1,25 @@
 use super::*;
 
 impl Application {
+    /// The survey the recovery review evaluates against, enriched with the
+    /// authoritative workspace references before any mapping is judged. The
+    /// Library survey covers Album, Edit Recipe, and Export references; the
+    /// workspace registry and each active workspace's own database add every
+    /// Photo a workspace still binds or retains. An unreadable workspace
+    /// reference is an error, never an absent one.
+    async fn recovery_survey_with_references(
+        &self,
+    ) -> Result<slipstream_core::RecoverySurvey, ServerError> {
+        let mut survey = self.library.recovery_survey().await?;
+        let workspaces = Arc::clone(&self.workspaces);
+        let retained = tokio::task::spawn_blocking(move || workspaces.retained_photo_references())
+            .await
+            .map_err(|error| ServerError::Join(error.to_string()))?
+            .map_err(|error| ServerError::Export(error.to_string()))?;
+        survey.referenced_photo_ids.extend(retained);
+        Ok(survey)
+    }
+
     /// One consistent read of the active unavailable Photos for the bounded
     /// review entry. The review retains this membership; later pages read
     /// current facts of it instead of re-evaluating a different set.
@@ -33,7 +52,7 @@ impl Application {
         old_prefix: &str,
         new_prefix: &str,
     ) -> Result<Vec<RecoveryMappingWire>, ServerError> {
-        let survey = self.library.recovery_survey().await?;
+        let survey = self.recovery_survey_with_references().await?;
         let evaluated = slipstream_core::count_prefix_scope(&survey, old_prefix)
             .map_err(|_| ServerError::FolderInvalid)?;
         if evaluated > MAXIMUM_RECOVERY_MAPPINGS {
@@ -72,7 +91,7 @@ impl Application {
         original_id: &str,
         new_location: &str,
     ) -> Result<RecoveryMappingWire, ServerError> {
-        let survey = self.library.recovery_survey().await?;
+        let survey = self.recovery_survey_with_references().await?;
         let snapshot = self.library.snapshot().await?;
         if !survey
             .unavailable
@@ -115,10 +134,9 @@ impl Application {
             return Err(RecoveryApplyError::Invalid);
         }
         let survey = self
-            .library
-            .recovery_survey()
+            .recovery_survey_with_references()
             .await
-            .map_err(|error| RecoveryApplyError::Server(error.into()))?;
+            .map_err(RecoveryApplyError::Server)?;
         let snapshot = self
             .library
             .snapshot()
@@ -251,6 +269,48 @@ impl Application {
                 rejections,
                 refused_mappings: submitted_mappings,
             });
+        }
+        // The workspace boundary is rechecked immediately before the reviewed
+        // batch is committed: a workspace created, or a retained reference
+        // added, while the review sat open must refuse the whole batch rather
+        // than retire a Photo a workspace now holds.
+        let retire_photo_ids = relocations
+            .iter()
+            .filter_map(|relocation| relocation.retire_photo_id.clone())
+            .collect::<Vec<_>>();
+        if !retire_photo_ids.is_empty() {
+            let workspaces = Arc::clone(&self.workspaces);
+            let retained = tokio::task::spawn_blocking(move || {
+                Ok::<_, crate::workspace::WorkspaceError>(
+                    workspaces
+                        .retained_photo_references()?
+                        .into_iter()
+                        .collect::<std::collections::HashSet<_>>(),
+                )
+            })
+            .await
+            .map_err(|error| RecoveryApplyError::Server(ServerError::Join(error.to_string())))?
+            .map_err(|error| RecoveryApplyError::Server(ServerError::Export(error.to_string())))?;
+            if retire_photo_ids.iter().any(|id| retained.contains(id)) {
+                return Err(RecoveryApplyError::Rejected {
+                    message: "Recovery batch rejected without changes",
+                    rejections: retire_photo_ids
+                        .into_iter()
+                        .filter(|id| retained.contains(id))
+                        .map(|photo_id| RecoveryRejectionWire {
+                            original_id: relocations
+                                .iter()
+                                .find(|relocation| {
+                                    relocation.retire_photo_id.as_deref() == Some(photo_id.as_str())
+                                })
+                                .map(|relocation| relocation.original_id.clone())
+                                .unwrap_or_default(),
+                            reason: "destination-in-use",
+                        })
+                        .collect(),
+                    refused_mappings: submitted_mappings,
+                });
+            }
         }
         let committed = self
             .library

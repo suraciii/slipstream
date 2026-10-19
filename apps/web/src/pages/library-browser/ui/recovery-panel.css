@@ -176,12 +176,12 @@
   font-size: 0.8rem;
 }
 
-.recovery-proposal-blocked {
+/* A blocked destination offers later work instead of an unsafe merge. */
+.recovery-proposal-later {
   margin: 0.1rem 0 0;
   font-size: 0.8rem;
-  color: var(--danger, #e5484d);
+  color: var(--muted, #9aa0aa);
 }
-
 .recovery-more {
   display: flex;
   margin: 0.25rem 0;

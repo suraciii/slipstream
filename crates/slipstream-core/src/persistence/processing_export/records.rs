@@ -42,6 +42,33 @@ pub(super) fn submit_payload_digest(
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
+/// The Photo identities every published Processing Artifact still names, read
+/// on the authoritative stored records.
+///
+/// A retire-and-bind decision reads this instead of matching a Photo identity
+/// inside a serialized value: the artifact record's own `photo_id` is the
+/// reference. A record that cannot be parsed is a storage error, so a
+/// malformed record refuses the retire instead of hiding its Photo.
+pub(in crate::persistence) fn scan_artifact_photo_ids(
+    connection: &Connection,
+) -> Result<Vec<String>, PersistenceError> {
+    let mut photo_ids = Vec::new();
+    for (key, value) in scan_metadata_records(connection, PROCESSING_ARTIFACT_PREFIX)? {
+        if key.starts_with(PROCESSING_ARTIFACT_RETENTION_PREFIX)
+            || key.starts_with(PROCESSING_ARTIFACT_LEASE_PREFIX)
+        {
+            continue;
+        }
+        let record: ProcessingArtifactRecord = parse_stored_value(&value)?;
+        let artifact = parse_artifact_record(record)?;
+        if key != processing_artifact_key(artifact.artifact_id.as_str()) {
+            return Err(PersistenceError::Storage);
+        }
+        photo_ids.push(artifact.photo_id);
+    }
+    Ok(photo_ids)
+}
+
 pub(super) fn processing_artifact_key(artifact_id: &str) -> String {
     format!("{PROCESSING_ARTIFACT_PREFIX}{artifact_id}")
 }
@@ -181,7 +208,7 @@ pub(super) fn read_processing_artifact_lease_record(
 /// Reads and strictly parses every stored work record, binding each record
 /// to its key. A malformed record under the namespace is a storage error,
 /// never a silently skipped entry.
-pub(super) fn scan_processing_export_works(
+pub(in crate::persistence) fn scan_processing_export_works(
     connection: &Connection,
 ) -> Result<Vec<ProcessingExportWork>, PersistenceError> {
     scan_metadata_records(connection, PROCESSING_EXPORT_WORK_PREFIX)?

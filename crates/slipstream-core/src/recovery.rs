@@ -50,6 +50,10 @@ impl RecoveryReporter for () {
 /// permanently deleted. They are not relocation candidates: their bytes were
 /// deleted, and a file that later occupies their reviewed Location is a new
 /// Original instead of a recovered identity.
+///
+/// Photos the Photographer moved into Trash are excluded as well, through
+/// [`ScanSnapshot`]'s removed markers: their Originals keep the Trash Restore
+/// contract and never follow a scan-discovered copy.
 pub fn plan_recovery(
     root: &crate::LibraryRoot,
     native_work: &NativeWorkBudget,
@@ -177,12 +181,26 @@ pub fn plan_recovery(
         }
     }
 
+    // A Photo the Photographer moved into Trash keeps its own Restore
+    // contract: its Original is never a relocation candidate, whatever the
+    // scan observes. The removed marker is Photo state, so it is read from
+    // the snapshot's Photos instead of inferred from availability.
+    let mut removed_original_ids = HashSet::with_capacity(previous.photos.len());
+    for photo in &previous.photos {
+        if photo.removed {
+            removed_original_ids.insert(photo.original_id.as_str());
+        }
+    }
+
     // An Original is eligible for relocation when its bytes are not at its
     // remembered Location: it is missing, or its Location now provably
     // carries other bytes. An unchanged Location or a failed hash keeps the
     // owner in place as a revision.
     let mut eligible: Vec<&OriginalRecord> = Vec::new();
     for original in &previous.originals {
+        if removed_original_ids.contains(original.id.as_str()) {
+            continue;
+        }
         let eligible_now = match discovered_by_path.get(original.relative_path.as_str()) {
             None => true,
             Some(_) => {
@@ -306,8 +324,19 @@ pub fn evidence_original_ids(
         .iter()
         .map(|original| (original.path.as_str(), original))
         .collect();
+    // A removed Photo's Original supplies no recovery evidence: Trash Restore
+    // owns its state, so its fingerprint is never relocation evidence.
+    let removed_original_ids: HashSet<&str> = previous
+        .photos
+        .iter()
+        .filter(|photo| photo.removed)
+        .map(|photo| photo.original_id.as_str())
+        .collect();
     let mut ids = Vec::new();
     for original in &previous.originals {
+        if removed_original_ids.contains(original.id.as_str()) {
+            continue;
+        }
         let changed = match discovered_by_path.get(original.relative_path.as_str()) {
             Some(item) => {
                 item.facts.size != original.facts.size
@@ -323,57 +352,8 @@ pub fn evidence_original_ids(
 }
 
 #[cfg(test)]
-mod evidence_tests {
-    use super::*;
-
-    #[test]
-    fn large_library_selects_only_missing_and_fact_changed_evidence() {
-        let facts = crate::OriginalFacts {
-            size: 10,
-            mtime_ms: 1_000.0,
-            device: 1,
-            inode: 1,
-        };
-        let mut discovered = Vec::with_capacity(20_000);
-        let mut previous = ScanSnapshot {
-            published: true,
-            originals: Vec::with_capacity(20_000),
-            photos: Vec::new(),
-            errors: Vec::new(),
-        };
-        for index in 0..20_000 {
-            let path = crate::RelativeOriginalPath::parse(format!("photos/{index}.ARW")).unwrap();
-            previous.originals.push(OriginalRecord {
-                id: index.to_string(),
-                relative_path: path.clone(),
-                kind: OriginalKind::Raw,
-                facts,
-                available: true,
-                error_category: None,
-                error_message: None,
-                capture: crate::CaptureFact::pending(),
-            });
-            if index != 19_998 {
-                discovered.push(DiscoveredOriginal {
-                    path,
-                    kind: OriginalKind::Raw,
-                    facts: if index == 19_999 {
-                        crate::OriginalFacts { size: 11, ..facts }
-                    } else {
-                        facts
-                    },
-                    error_category: None,
-                    error_message: None,
-                    capture: crate::CaptureFact::pending(),
-                });
-            }
-        }
-        assert_eq!(
-            evidence_original_ids(&discovered, &previous),
-            ["19998".to_owned(), "19999".to_owned()]
-        );
-    }
-}
+#[path = "recovery_tests.rs"]
+mod evidence_tests;
 
 /// One unavailable Photo listed by the bounded recovery review entry.
 /// Remembers the folder, filename, format, and retained decisions so the
@@ -731,7 +711,6 @@ fn evaluate_candidate(
             let retire = match occupant_photo {
                 Some(photo)
                     if !photo.removed
-                        && photo.rating == 0
                         && photo.selection_state == crate::SelectionState::Unflagged
                         && !referenced.contains(&photo.id) =>
                 {

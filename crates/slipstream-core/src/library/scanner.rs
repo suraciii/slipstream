@@ -208,7 +208,10 @@ pub(super) fn scanner_main(
                             .snapshot
                             .photos
                             .iter()
-                            .filter(|photo| !photo.available)
+                            // The reported count matches the recovery survey
+                            // and the apply result: a Trash-removed Photo is
+                            // not an active-unavailable recovery item.
+                            .filter(|photo| !photo.available && !photo.removed)
                             .count();
                         *outcome.lock().unwrap() = Some(ScanOutcome {
                             relocated_originals: applied.relocated_originals,
