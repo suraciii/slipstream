@@ -527,10 +527,7 @@ pub(crate) fn photo_summary_indexed_with_url(
         .get(&photo.original_id)
         .and_then(|position| originals.get(*position));
     let original = single.map(|original| OriginalWire {
-        kind: match original.kind {
-            slipstream_core::OriginalKind::Raw => "raw",
-            slipstream_core::OriginalKind::Jpeg => "jpeg",
-        },
+        kind: original_kind(&original.kind),
         available: original.available,
     });
     let Some(original) = original else {

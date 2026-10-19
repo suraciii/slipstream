@@ -966,6 +966,60 @@ fn require_album(transaction: &Transaction<'_>, album_id: &str) -> Result<(), Mu
         .ok_or(MutationError::NotFound)
 }
 
+/// Appends the requested photos to one album inside an open mutation
+/// transaction. Every photo identity is validated before the first membership
+/// write, new members continue from `MAX(position)+1` in request order, and an
+/// already-present member keeps its persisted position. Both add mutations
+/// share these aggregate counts.
+fn append_album_members(
+    transaction: &Transaction<'_>,
+    album_id: &str,
+    photo_ids: Vec<String>,
+) -> Result<(usize, usize), MutationError> {
+    require_album(transaction, album_id)?;
+    for photo_id in &photo_ids {
+        transaction
+            .query_row("SELECT 1 FROM photos WHERE id=?", [photo_id], |_| Ok(()))
+            .optional()
+            .map_err(mutation_error_from_sqlite)?
+            .ok_or(MutationError::NotFound)?;
+    }
+    let mut position: i64 = transaction
+        .query_row(
+            "SELECT COALESCE(MAX(position)+1,0) FROM album_members WHERE album_id=?",
+            [album_id],
+            |row| row.get(0),
+        )
+        .map_err(mutation_error_from_sqlite)?;
+    let mut added_count = 0;
+    let mut already_member_count = 0;
+    for photo_id in photo_ids {
+        let already_member = transaction
+            .query_row(
+                "SELECT 1 FROM album_members WHERE album_id=? AND photo_id=?",
+                params![album_id, photo_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(mutation_error_from_sqlite)?;
+        if already_member.is_some() {
+            // Adding an existing member is idempotent: the
+            // persisted position is kept and no row is added.
+            already_member_count += 1;
+            continue;
+        }
+        transaction
+            .execute(
+                "INSERT INTO album_members(album_id,photo_id,position) VALUES(?,?,?)",
+                params![album_id, photo_id, position],
+            )
+            .map_err(mutation_error_from_sqlite)?;
+        position = position.checked_add(1).ok_or(MutationError::Conflict)?;
+        added_count += 1;
+    }
+    Ok((added_count, already_member_count))
+}
+
 pub(super) fn mutate_album(
     state: &StateDirectory,
     database_name: &DatabaseName,
@@ -1004,93 +1058,13 @@ pub(super) fn mutate_album(
             AlbumMutation::AddMembers {
                 album_id,
                 photo_ids,
-            } => {
-                require_album(transaction, &album_id)?;
-                for photo_id in &photo_ids {
-                    transaction
-                        .query_row("SELECT 1 FROM photos WHERE id=?", [photo_id], |_| Ok(()))
-                        .optional()
-                        .map_err(mutation_error_from_sqlite)?
-                        .ok_or(MutationError::NotFound)?;
-                }
-                let mut position: i64 = transaction
-                    .query_row(
-                        "SELECT COALESCE(MAX(position)+1,0) FROM album_members WHERE album_id=?",
-                        [&album_id],
-                        |row| row.get(0),
-                    )
-                    .map_err(mutation_error_from_sqlite)?;
-                let mut added_count = 0;
-                let mut already_member_count = 0;
-                for photo_id in photo_ids {
-                    let already_member = transaction
-                        .query_row(
-                            "SELECT 1 FROM album_members WHERE album_id=? AND photo_id=?",
-                            params![album_id, photo_id],
-                            |_| Ok(()),
-                        )
-                        .optional()
-                        .map_err(mutation_error_from_sqlite)?;
-                    if already_member.is_some() {
-                        // Adding an existing member is idempotent: the
-                        // persisted position is kept and no row is added.
-                        already_member_count += 1;
-                        continue;
-                    }
-                    transaction
-                        .execute(
-                            "INSERT INTO album_members(album_id,photo_id,position) VALUES(?,?,?)",
-                            params![album_id, photo_id, position],
-                        )
-                        .map_err(mutation_error_from_sqlite)?;
-                    position = position.checked_add(1).ok_or(MutationError::Conflict)?;
-                    added_count += 1;
-                }
-                (album_id, added_count, already_member_count)
             }
-            AlbumMutation::AddFolderMembers {
+            | AlbumMutation::AddFolderMembers {
                 album_id,
                 photo_ids,
             } => {
-                require_album(transaction, &album_id)?;
-                for photo_id in &photo_ids {
-                    transaction
-                        .query_row("SELECT 1 FROM photos WHERE id=?", [photo_id], |_| Ok(()))
-                        .optional()
-                        .map_err(mutation_error_from_sqlite)?
-                        .ok_or(MutationError::NotFound)?;
-                }
-                let mut position: i64 = transaction
-                    .query_row(
-                        "SELECT COALESCE(MAX(position)+1,0) FROM album_members WHERE album_id=?",
-                        [&album_id],
-                        |row| row.get(0),
-                    )
-                    .map_err(mutation_error_from_sqlite)?;
-                let mut added_count = 0;
-                let mut already_member_count = 0;
-                for photo_id in photo_ids {
-                    let already_member = transaction
-                        .query_row(
-                            "SELECT 1 FROM album_members WHERE album_id=? AND photo_id=?",
-                            params![album_id, photo_id],
-                            |_| Ok(()),
-                        )
-                        .optional()
-                        .map_err(mutation_error_from_sqlite)?;
-                    if already_member.is_some() {
-                        already_member_count += 1;
-                        continue;
-                    }
-                    transaction
-                        .execute(
-                            "INSERT INTO album_members(album_id,photo_id,position) VALUES(?,?,?)",
-                            params![album_id, photo_id, position],
-                        )
-                        .map_err(mutation_error_from_sqlite)?;
-                    position = position.checked_add(1).ok_or(MutationError::Conflict)?;
-                    added_count += 1;
-                }
+                let (added_count, already_member_count) =
+                    append_album_members(transaction, &album_id, photo_ids)?;
                 (album_id, added_count, already_member_count)
             }
             AlbumMutation::RemoveMember { album_id, photo_id } => {
