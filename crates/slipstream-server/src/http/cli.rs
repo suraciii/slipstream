@@ -93,6 +93,14 @@ pub(crate) fn cli_error(
     )
 }
 
+pub(crate) fn cli_error_empty(
+    status: StatusCode,
+    code: &'static str,
+    message: impl Into<String>,
+) -> Response<Body> {
+    cli_error(status, code, message, serde_json::json!({}))
+}
+
 pub(crate) fn invalid_cli(argument: &'static str, reason: &'static str) -> Response<Body> {
     cli_error(
         StatusCode::BAD_REQUEST,

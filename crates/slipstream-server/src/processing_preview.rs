@@ -34,7 +34,10 @@ use std::{
 use crate::processing_policy::ProcessingModulePolicy;
 use crate::{
     export_manager::ProcessingPreviewExecution,
-    http::{CLI_CONTRACT_HEADER, HttpState, require_cli_contract, require_published, valid_id},
+    http::{
+        CLI_CONTRACT_HEADER, HttpState, cli_error_empty, require_cli_contract, require_published,
+        valid_id,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Default, serde::Deserialize)]
@@ -143,7 +146,7 @@ fn hex_bytes(value: &str) -> String {
 }
 
 fn error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
-    crate::http::cli_error(status, code, message, serde_json::json!({}))
+    cli_error_empty(status, code, message)
 }
 
 fn preview_failure(current: bool) -> Response {
