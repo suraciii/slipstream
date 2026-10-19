@@ -314,6 +314,10 @@ A rescan that relocates or still misses Original Files must report committed rec
 
 Slipstream must offer one bounded `Review unavailable originals` entry from the scan result and from an affected Photo. The entry must list remembered Locations, filenames, kinds, Ratings, Selection States, Album counts, and whether each Original has a fingerprint. It must let the Photographer propose mappings, inspect every proposal, and confirm an explicit apply under the [Photo Library and Albums](../photo-library/spec.md) manual recovery rules.
 
+The Web review presents three simple outcomes: updated automatically, ready for confirmation, or still unavailable. A confirmation item shows the remembered and proposed Locations, file kind, and its evidence state. The Photographer may confirm one item or an explicitly selected bounded set; protocol identifiers and revision facts remain behind details rather than primary controls.
+
+An occupied destination is never silently merged. When a permitted Retire and Bind action is available, the review names the record that would be retired and uses a plain-language confirmation; otherwise it offers review later. If an apply response is uncertain, the review says so, offers current-state inspection, and does not automatically retry or report completion.
+
 Unavailable Photos must stay in their Grid positions and Albums with their remembered facts. Slipstream must not remove a Photo or its decisions only because its Original File is missing.
 
 The review must keep active unavailable Photos separate from Removed Photos in Trash. It must not offer Location Recovery for a Removed Photo; restoring its Library record uses the Trash Restore contract and does not recreate missing file bytes.
