@@ -1264,6 +1264,10 @@
   min-height: 0;
   display: grid;
   place-items: center;
+  /* The image surface owns decision and navigation swipes. The surrounding
+     Preview gutters keep native vertical scrolling available in compact Photo
+     View, where the controls may continue below the viewport. */
+  touch-action: none;
   /* Centering track placement keeps an oversized Preview overflowing the
      stage symmetrically, which pan and pointer-anchored zoom rely on. */
   place-content: center;
