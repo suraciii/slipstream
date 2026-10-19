@@ -22,7 +22,7 @@ The automatic or manual restoration of a remembered Original Location for an una
 _Avoid_: relink, repair, reimport
 
 **Retire and Bind**:
-An explicit recovery action that binds an unavailable Original File to an occupied destination Location. It is available only when the destination Photo is otherwise unreferenced with default decisions and no Album membership. It shows the record that will be retired and must not delete a filesystem file.
+An explicit recovery action that binds an unavailable Original File to an occupied destination Location. It is available only when the destination Photo is otherwise unreferenced: it has default decisions, no Album membership, no Trash removal, and no retained workspace state, Edit Recipe, or referenced Processing Artifact. It shows the record that will be retired and must not delete a filesystem file.
 _Avoid_: replace, merge, overwrite
 
 **Capture Time**:

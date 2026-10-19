@@ -106,19 +106,7 @@ Original Locations and is not a second writable hierarchy. The state directory
 and derivative cache directory must be separate from the configured Library
 Folder. The supported writable schema for 0.1 is SQLite schema version 6.
 
-A rescan publishes one completed Library snapshot. It discovers new supported
-files, refreshes changed files, marks missing files unavailable, and preserves
-unaffected decisions and Album positions. Before it allocates new Photos, it
-restores a moved Original File that exact content evidence identifies as one
-globally unambiguous candidate. An unavailable Photo retains its state and its
-last successfully inspected Capture Time; an ambiguous or unprovable group
-stays unavailable, and Slipstream does not transfer state to a replacement
-file. Historical Originals without a fingerprint have an explicit batch
-recovery path under [Photo Library and Albums](../photo-library/spec.md); recovery
-revalidates every proposed mapping at commit and never deletes a filesystem
-file. Content fingerprint enrollment runs in the background after migration
-and does not block initial browsing. An open `All Photos`, Original Folder, or
-Album source retains its ordered Photo IDs while a rescan runs.
+A rescan publishes one completed Library snapshot. It discovers new supported files, refreshes changed files, marks missing files unavailable, and preserves unaffected decisions and Album positions. Before it allocates new Photos, it restores a moved Original File that exact content evidence identifies as a globally unambiguous candidate. An unavailable Photo retains its state and its last successfully inspected Capture Time; an ambiguous or unprovable group stays unavailable, and Slipstream does not transfer state to a replacement file. Historical Originals without a fingerprint have an explicit batch recovery path under [Photo Library and Albums](../photo-library/spec.md); recovery revalidates every proposed mapping at commit and never deletes a filesystem file. A recovered association changes the remembered Original Location and Photo availability; it does not copy or restore file bytes. Content fingerprint enrollment runs in the background after migration and does not block initial browsing. The active unavailable count excludes Removed Photos in Trash. An open `All Photos`, Original Folder, or Album source retains its ordered Photo IDs while a rescan runs.
 
 For a clean installation, use the repository-owned Docker procedure with a
 canonical absolute Library Folder, a persistent state directory, and a separate

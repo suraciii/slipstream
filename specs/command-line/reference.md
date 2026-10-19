@@ -544,10 +544,11 @@ association change. Separate invocations are separate commits; a later refusal
 never rolls back an earlier committed batch.
 
 Apply data contains count `appliedMappings`, count `refusedMappings`, count
-`unavailablePhotos` for the remaining Library-wide unavailable Photos, and
-`mappings` in request order. Each applied mapping contains `originalId`,
-`photoId`, `fromLocation`, `toLocation`, `webUrl`, and nullable `retired`. A
-successful mapping is not proof that missing file bytes were recreated.
+`unavailablePhotos` for the remaining active unavailable Photos (`available=0`
+and not Removed), and `mappings` in request order. Each applied mapping contains
+`originalId`, `photoId`, `fromLocation`, `toLocation`, `webUrl`, and nullable
+`retired`. A successful mapping is not proof that missing file bytes were
+recreated.
 
 Recovery reasons are `colliding`, `content-mismatch`, `content-unconfirmed`,
 `destination-in-use`, `destination-removed`, `kind-mismatch`, `missing`,
@@ -1006,7 +1007,7 @@ nullable `retire`. `verified` is true only when persisted content evidence
 matched the destination. `blockedReason` is one of `colliding`,
 `content-mismatch`, `destination-in-use`, `destination-removed`, `kind-mismatch`,
 `missing`, or `unreadable` when the mapping cannot be applied, and `null` when
-it can. `retire` is present only for a permitted retire-and-bind and contains
+it can. `retire` is present only for a permitted Retire and Bind and contains
 string `photoId`, `originalId`, and `location`.
 
 `mappingId` is opaque. It identifies the reviewed correspondence and binds a
