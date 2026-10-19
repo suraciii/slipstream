@@ -9,7 +9,7 @@ mod shutdown;
 mod startup;
 use preview::{ReviewWarmup, ReviewWarmupRequest, ReviewWarmupState};
 
-use crate::queries::{CursorSigner, QueryRegistry, RetainedKind};
+use crate::queries::{CursorSigner, RetainedKind, RetainedQueryStore};
 use crate::recovery_review::{MAXIMUM_RECOVERY_APPLY, MAXIMUM_RECOVERY_MAPPINGS};
 use crate::wire::{CliDerivativeFacts, PhotoOperationRemainderWire};
 pub(crate) use published::*;
@@ -191,11 +191,10 @@ pub struct Application {
     pub(crate) proxies: Option<Arc<crate::development_proxy::DevelopmentProxyManager>>,
     scan_cycle: ScanCycle,
     review_warmup: Mutex<ReviewWarmupState>,
-    pub(crate) retained_queries: Mutex<QueryRegistry>,
+    pub(crate) retained_queries: RetainedQueryStore,
     /// Bounded reviewed Location Recovery state.
     pub(crate) recovery_reviews: Mutex<crate::recovery_review::RecoveryReviews>,
     pub(crate) browse_namespace: u128,
-    pub(crate) browse_counter: AtomicU64,
     /// Random per-startup identifier; no metadata evidence survives a restart.
     instance_epoch: String,
     /// Unix socket of the exclusive metadata save supervisor, when deployed.
@@ -837,15 +836,11 @@ impl Application {
             .into_iter()
             .find_map(|anchor| photo_ids.iter().position(|id| id == &anchor))
             .unwrap_or(0);
-        let token = format!(
-            "b{:032x}{:016x}",
-            self.browse_namespace,
-            self.browse_counter.fetch_add(1, Ordering::Relaxed)
-        );
+        let token = self
+            .retained_queries
+            .token(self.browse_namespace, RetainedKind::Browse);
         let total = photo_ids.len();
         self.retained_queries
-            .lock()
-            .expect("retained queries poisoned")
             .insert(
                 token.clone(),
                 RetainedKind::Browse,
@@ -874,8 +869,6 @@ impl Application {
         }
         let page = self
             .retained_queries
-            .lock()
-            .expect("retained queries poisoned")
             .page(
                 token,
                 RetainedKind::Browse,
@@ -995,8 +988,6 @@ impl Application {
     ) -> Result<PhotoRemovalResponse, ServerError> {
         let (photo_ids, filter) = self
             .retained_queries
-            .lock()
-            .expect("retained queries poisoned")
             .browse_snapshot(token, Instant::now())
             .ok_or(ServerError::BrowseNotFound)?;
         if filter != Some(BrowseSelectionFilter::Rejected) {
@@ -1291,18 +1282,12 @@ impl Application {
     ) -> Result<BrowsePositionResponse, ServerError> {
         let position = self
             .retained_queries
-            .lock()
-            .expect("retained queries poisoned")
             .position(token, photo_id, Instant::now())
             .ok_or(ServerError::BrowseNotFound)?;
         Ok(BrowsePositionResponse { position })
     }
-
     pub fn browse_close(&self, token: &str) {
-        self.retained_queries
-            .lock()
-            .expect("retained queries poisoned")
-            .remove(token);
+        self.retained_queries.remove(token);
     }
 
     pub async fn albums(&self) -> Result<AlbumSummaryListResponse, ServerError> {

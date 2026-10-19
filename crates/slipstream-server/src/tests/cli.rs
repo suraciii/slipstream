@@ -397,13 +397,9 @@ async fn cli_photo_reads_keep_prior_membership_until_scan_publication() {
         ))
     ));
     assert!(
-        application
+        !application
             .retained_queries
-            .lock()
-            .unwrap()
-            .entries
-            .values()
-            .all(|query| query.kind != crate::queries::RetainedKind::Photo)
+            .contains_kind(crate::queries::RetainedKind::Photo)
     );
     let published_new = send(
         &router,
@@ -1814,8 +1810,6 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
     let evaluated_at = SystemTime::now();
     application
         .retained_queries
-        .lock()
-        .unwrap()
         .insert(
             missing_token.to_owned(),
             crate::queries::RetainedKind::Photo,
@@ -1922,15 +1916,18 @@ async fn cli_folder_cursor_maps_publication_replacement_and_query_expiry() {
     )
     .await;
     let cursor = query["nextCursor"].as_str().unwrap().to_owned();
-    {
-        let mut retained = application.retained_queries.lock().unwrap();
-        let photo = retained
-            .entries
-            .values_mut()
-            .find(|query| query.kind == crate::queries::RetainedKind::Photo)
-            .unwrap();
-        photo.last_used -= crate::queries::QUERY_IDLE + Duration::from_secs(1);
-    }
+    let parsed = application
+        .cursor_signer
+        .parse_query_cursor(
+            &cursor,
+            application.browse_namespace,
+            crate::queries::RetainedKind::Photo,
+        )
+        .unwrap();
+    application.retained_queries.age(
+        &parsed.token,
+        crate::queries::QUERY_IDLE + Duration::from_secs(1),
+    );
     let expired_query = send(
         &router,
         authenticated_request()
