@@ -1,5 +1,64 @@
 use super::*;
 
+pub(crate) struct RecoveryLifecycle {
+    pub closing: AtomicBool,
+    pub active: AtomicUsize,
+    pub idle: Notify,
+}
+
+struct RecoveryActivityGuard {
+    application: Arc<Application>,
+}
+
+impl Drop for RecoveryActivityGuard {
+    fn drop(&mut self) {
+        self.application.recovery_finished();
+    }
+}
+
+fn recovery_rejection_reason(reason: &'static str) -> &'static str {
+    match reason {
+        "colliding"
+        | "content-mismatch"
+        | "content-unconfirmed"
+        | "destination-in-use"
+        | "destination-removed"
+        | "kind-mismatch"
+        | "missing"
+        | "occupied"
+        | "retire-mismatch"
+        | "retire-unconfirmed"
+        | "reviewed-stale"
+        | "stale"
+        | "unreadable" => reason,
+        // The HTTP boundary rejects malformed Locations before this point.
+        // Keep direct callers inside the documented recovery vocabulary too.
+        _ => "stale",
+    }
+}
+
+fn complete_recovery_rejections(
+    items: &[RecoveryApplyItem],
+    partial: impl IntoIterator<Item = RecoveryRejectionWire>,
+) -> Vec<RecoveryRejectionWire> {
+    let mut reasons = partial
+        .into_iter()
+        .map(|rejection| {
+            (
+                rejection.original_id,
+                recovery_rejection_reason(rejection.reason),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    items
+        .iter()
+        .map(|item| RecoveryRejectionWire {
+            original_id: item.original_id.clone(),
+            reason: reasons.remove(&item.original_id).unwrap_or("stale"),
+        })
+        .collect()
+}
+
 impl Application {
     /// The survey the recovery review evaluates against, enriched with the
     /// authoritative workspace references before any mapping is judged. The
@@ -15,7 +74,13 @@ impl Application {
         let retained = tokio::task::spawn_blocking(move || workspaces.retained_photo_references())
             .await
             .map_err(|error| ServerError::Join(error.to_string()))?
-            .map_err(|error| ServerError::Export(error.to_string()))?;
+            .map_err(|error| {
+                if error.code == "workspace_busy" {
+                    ServerError::WorkspaceBusy
+                } else {
+                    ServerError::Export(error.to_string())
+                }
+            })?;
         survey.referenced_photo_ids.extend(retained);
         Ok(survey)
     }
@@ -122,15 +187,73 @@ impl Application {
         Ok(RecoveryMappingWire::from_proposal(&proposal))
     }
 
-    /// Commits one reviewed manual relocation batch. Every submitted mapping
-    /// is recomputed from current state and compared with the reviewed
-    /// identity the Photographer confirmed; the whole batch commits atomically
-    /// or is refused with one reason per mapping and no partial association.
+    /// Commits one reviewed manual relocation batch in an application-owned
+    /// task. Dropping the HTTP waiter must not release a cross-store guard or
+    /// abandon publication after the Library command has been accepted.
     pub(crate) async fn recovery_apply(
         self: &Arc<Self>,
         items: Vec<RecoveryApplyItem>,
     ) -> Result<RecoveryApplyResponseWire, RecoveryApplyError> {
+        if self.recovery.closing.load(Ordering::Acquire) {
+            return Err(RecoveryApplyError::Server(ServerError::Join(
+                "Recovery is shutting down; try again after restart.".to_owned(),
+            )));
+        }
+        self.recovery.active.fetch_add(1, Ordering::AcqRel);
+        let activity = RecoveryActivityGuard {
+            application: Arc::clone(self),
+        };
+        if self.recovery.closing.load(Ordering::Acquire) {
+            drop(activity);
+            return Err(RecoveryApplyError::Server(ServerError::Join(
+                "Recovery is shutting down; try again after restart.".to_owned(),
+            )));
+        }
+        let application = Arc::clone(self);
+        let (reply, receive) = oneshot::channel();
+        tokio::spawn(async move {
+            let _activity = activity;
+            let result = application.recovery_apply_operation(items).await;
+            let _ = reply.send(result);
+        });
+        receive
+            .await
+            .map_err(|error| RecoveryApplyError::Server(ServerError::Join(error.to_string())))?
+    }
+
+    fn recovery_finished(&self) {
+        if self.recovery.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.recovery.idle.notify_waiters();
+        }
+    }
+
+    pub(crate) async fn close_recovery(&self) {
+        self.recovery.closing.store(true, Ordering::Release);
+        let mut notified = std::pin::pin!(self.recovery.idle.notified());
+        loop {
+            notified.as_mut().enable();
+            if self.recovery.active.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            notified.as_mut().await;
+            notified.set(self.recovery.idle.notified());
+        }
+    }
+
+    /// The operation-owned recovery implementation. Its caller is detached
+    /// from the request above, so accepted work remains settled independently.
+    async fn recovery_apply_operation(
+        self: &Arc<Self>,
+        items: Vec<RecoveryApplyItem>,
+    ) -> Result<RecoveryApplyResponseWire, RecoveryApplyError> {
         if items.is_empty() || items.len() > MAXIMUM_RECOVERY_APPLY {
+            return Err(RecoveryApplyError::Invalid);
+        }
+        let mut submitted_originals = std::collections::HashSet::with_capacity(items.len());
+        if items
+            .iter()
+            .any(|item| !submitted_originals.insert(item.original_id.as_str()))
+        {
             return Err(RecoveryApplyError::Invalid);
         }
         let survey = self
@@ -154,6 +277,7 @@ impl Application {
                 mapping_id: item.mapping_id.clone(),
             })
             .collect::<Vec<_>>();
+        let review_items = items.clone();
         let root = self.library_root.clone();
         let worker = tokio::task::spawn_blocking(move || {
             let root =
@@ -266,79 +390,113 @@ impl Application {
         if !rejections.is_empty() {
             return Err(RecoveryApplyError::Rejected {
                 message: "Recovery batch rejected without changes",
-                rejections,
+                rejections: complete_recovery_rejections(&review_items, rejections),
                 refused_mappings: submitted_mappings,
             });
         }
-        // The workspace boundary is rechecked immediately before the reviewed
-        // batch is committed: a workspace created, or a retained reference
-        // added, while the review sat open must refuse the whole batch rather
-        // than retire a Photo a workspace now holds.
+        // Retire-and-Bind crosses the Library database and the workspace
+        // store. Keep the root exclusion inside a blocking operation that
+        // synchronously waits for the persistence owner; a dropped HTTP
+        // waiter cannot release it while the queued SQLite command commits.
         let retire_photo_ids = relocations
             .iter()
             .filter_map(|relocation| relocation.retire_photo_id.clone())
             .collect::<Vec<_>>();
-        if !retire_photo_ids.is_empty() {
-            let workspaces = Arc::clone(&self.workspaces);
-            let retained = tokio::task::spawn_blocking(move || {
-                Ok::<_, crate::workspace::WorkspaceError>(
-                    workspaces
-                        .retained_photo_references()?
-                        .into_iter()
-                        .collect::<std::collections::HashSet<_>>(),
-                )
-            })
-            .await
-            .map_err(|error| RecoveryApplyError::Server(ServerError::Join(error.to_string())))?
-            .map_err(|error| RecoveryApplyError::Server(ServerError::Export(error.to_string())))?;
-            if retire_photo_ids.iter().any(|id| retained.contains(id)) {
-                return Err(RecoveryApplyError::Rejected {
-                    message: "Recovery batch rejected without changes",
-                    rejections: retire_photo_ids
-                        .into_iter()
-                        .filter(|id| retained.contains(id))
-                        .map(|photo_id| RecoveryRejectionWire {
-                            original_id: relocations
-                                .iter()
-                                .find(|relocation| {
-                                    relocation.retire_photo_id.as_deref() == Some(photo_id.as_str())
-                                })
-                                .map(|relocation| relocation.original_id.clone())
-                                .unwrap_or_default(),
-                            reason: "destination-in-use",
-                        })
-                        .collect(),
-                    refused_mappings: submitted_mappings,
-                });
+        let commit_review_items = review_items.clone();
+        let commit_workspaces = Arc::clone(&self.workspaces);
+        let commit_library = Arc::clone(&self.library);
+        let commit_retire_photo_ids = retire_photo_ids;
+        let commit_relocations = relocations;
+        let committed = tokio::task::spawn_blocking(move || {
+            let _workspace_guard = if commit_retire_photo_ids.is_empty() {
+                None
+            } else {
+                Some(commit_workspaces.recovery_guard().map_err(|error| {
+                    RecoveryApplyError::Server(if error.code == "workspace_busy" {
+                        ServerError::WorkspaceBusy
+                    } else {
+                        ServerError::Export(error.to_string())
+                    })
+                })?)
+            };
+            if !commit_retire_photo_ids.is_empty() {
+                let retained = commit_workspaces
+                    .retained_photo_references_under_recovery_guard()
+                    .map_err(|error| {
+                        if error.code == "workspace_busy" {
+                            RecoveryApplyError::Server(ServerError::WorkspaceBusy)
+                        } else {
+                            RecoveryApplyError::Rejected {
+                                message: "Recovery batch rejected without changes",
+                                rejections: complete_recovery_rejections(
+                                    &commit_review_items,
+                                    commit_review_items.iter().map(|item| RecoveryRejectionWire {
+                                        original_id: item.original_id.clone(),
+                                        reason: "unreadable",
+                                    }),
+                                ),
+                                refused_mappings: submitted_mappings,
+                            }
+                        }
+                    })?
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>();
+                if commit_retire_photo_ids
+                    .iter()
+                    .any(|id| retained.contains(id))
+                {
+                    let partial = commit_relocations
+                        .iter()
+                        .map(|relocation| RecoveryRejectionWire {
+                            original_id: relocation.original_id.clone(),
+                            reason: if relocation
+                                .retire_photo_id
+                                .as_ref()
+                                .is_some_and(|id| retained.contains(id))
+                            {
+                                "destination-in-use"
+                            } else {
+                                "stale"
+                            },
+                        });
+                    return Err(RecoveryApplyError::Rejected {
+                        message: "Recovery batch rejected without changes",
+                        rejections: complete_recovery_rejections(&commit_review_items, partial),
+                        refused_mappings: submitted_mappings,
+                    });
+                }
             }
-        }
-        let committed = self
-            .library
-            .apply_relocations(relocations)
-            .await
-            .map_err(|error| match error {
-                LibraryError::Persistence(
-                    slipstream_core::persistence::PersistenceError::InvalidRecoveryMapping {
-                        original_id,
-                        reason,
+            commit_library
+                .apply_relocations_blocking(commit_relocations)
+                .map_err(|error| match error {
+                    LibraryError::Persistence(
+                        slipstream_core::persistence::PersistenceError::InvalidRecoveryMapping {
+                            original_id,
+                            reason,
+                        },
+                    ) => RecoveryApplyError::Rejected {
+                        message: "Recovery batch conflicts with current Library state; rescan and review again",
+                        rejections: complete_recovery_rejections(
+                            &commit_review_items,
+                            [RecoveryRejectionWire {
+                                original_id,
+                                reason,
+                            }],
+                        ),
+                        refused_mappings: submitted_mappings,
                     },
-                ) => RecoveryApplyError::Rejected {
-                    message: "Recovery batch conflicts with current Library state; rescan and review again",
-                    rejections: vec![RecoveryRejectionWire {
-                        original_id,
-                        reason,
-                    }],
-                    refused_mappings: submitted_mappings,
-                },
-                LibraryError::Persistence(
-                    slipstream_core::persistence::PersistenceError::InvalidRecovery,
-                ) => RecoveryApplyError::Rejected {
-                    message: "Recovery batch conflicts with current Library state; rescan and review again",
-                    rejections: Vec::new(),
-                    refused_mappings: submitted_mappings,
-                },
-                other => RecoveryApplyError::Server(other.into()),
-            })?;
+                    LibraryError::Persistence(
+                        slipstream_core::persistence::PersistenceError::InvalidRecovery,
+                    ) => RecoveryApplyError::Rejected {
+                        message: "Recovery batch conflicts with current Library state; rescan and review again",
+                        rejections: complete_recovery_rejections(&commit_review_items, []),
+                        refused_mappings: submitted_mappings,
+                    },
+                    other => RecoveryApplyError::Server(other.into()),
+                })
+        })
+        .await
+        .map_err(|error| RecoveryApplyError::Server(ServerError::Join(error.to_string())))??;
         // The committed counts become the recovery counts the scan status
         // reports, so the review notice stays truthful between scans even
         // when the publication that follows the commit fails.

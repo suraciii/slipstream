@@ -239,7 +239,7 @@ mod tests {
             crate::workspace::WorkspaceManager::open(
                 &state,
                 root.join("library"),
-                Arc::new(|_| None),
+                Arc::new(|_| Ok(None)),
                 1024 * 1024,
             )
             .unwrap(),

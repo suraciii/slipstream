@@ -1,5 +1,48 @@
 use super::*;
 
+fn authoritative_photo(
+    library: &Arc<Library>,
+    photo_id: &str,
+) -> Result<Option<slipstream_core::PhotoRead>, crate::workspace::WorkspaceError> {
+    let read = || {
+        library.photo_blocking(photo_id).map_err(|error| {
+            crate::workspace::WorkspaceError::new("workspace_unavailable", 503, error.to_string())
+        })
+    };
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let library = Arc::clone(library);
+        let photo_id = photo_id.to_owned();
+        std::thread::Builder::new()
+            .name("slipstream-workspace-photo-read".to_owned())
+            .spawn(move || {
+                library.photo_blocking(&photo_id).map_err(|error| {
+                    crate::workspace::WorkspaceError::new(
+                        "workspace_unavailable",
+                        503,
+                        error.to_string(),
+                    )
+                })
+            })
+            .map_err(|error| {
+                crate::workspace::WorkspaceError::new(
+                    "workspace_unavailable",
+                    503,
+                    error.to_string(),
+                )
+            })?
+            .join()
+            .map_err(|_| {
+                crate::workspace::WorkspaceError::new(
+                    "workspace_unavailable",
+                    503,
+                    "Authoritative Photo lookup stopped unexpectedly.",
+                )
+            })?
+    } else {
+        read()
+    }
+}
+
 impl Application {
     pub async fn open(config: &Config) -> Result<Arc<Self>, ServerError> {
         Self::open_with_gate(config, ScanLimits::default(), None, None).await
@@ -51,24 +94,32 @@ impl Application {
             publication: tokio::sync::Mutex::new(()),
         });
         let workspace_state = config.state_directory.clone();
-        let workspace_library = config.library_root.clone();
-        let workspace_shared = Arc::clone(&shared);
+        let workspace_library_root = config.library_root.clone();
+        let workspace_library = Arc::clone(&library);
         let workspace_resolver = Arc::new(move |photo_id: &str| {
-            let guard = workspace_shared
-                .snapshot
-                .read()
-                .expect("published Library poisoned");
-            let source = guard.as_ref()?.photo_metadata_source(photo_id)?;
-            Some(crate::workspace::Source {
-                relative_path: source.relative_path,
-                revision: source.source_revision,
-            })
+            let photo = authoritative_photo(&workspace_library, photo_id)?;
+            match photo {
+                Some(photo) => Ok(Some(crate::workspace::Source {
+                    relative_path: slipstream_core::RelativeOriginalPath::parse(
+                        photo.original_location,
+                    )
+                    .map_err(|error| {
+                        crate::workspace::WorkspaceError::new(
+                            "workspace_unavailable",
+                            503,
+                            error.to_string(),
+                        )
+                    })?,
+                    revision: photo.capture.source_revision,
+                })),
+                None => Ok(None),
+            }
         });
         let workspaces = Arc::new(
             tokio::task::spawn_blocking(move || {
                 crate::workspace::WorkspaceManager::open(
                     &workspace_state,
-                    workspace_library,
+                    workspace_library_root.clone(),
                     workspace_resolver,
                     crate::workspace::DEFAULT_STORAGE_BYTES,
                 )
@@ -193,6 +244,11 @@ impl Application {
                 let mut bytes = [0u8; 16];
                 getrandom::fill(&mut bytes).expect("system randomness is available");
                 bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+            },
+            recovery: recovery::RecoveryLifecycle {
+                closing: AtomicBool::new(false),
+                active: AtomicUsize::new(0),
+                idle: Notify::new(),
             },
             metadata_supervisor: config.metadata_supervisor.clone(),
             cursor_signer: CursorSigner::new(),

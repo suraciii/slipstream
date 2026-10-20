@@ -17,6 +17,9 @@ impl Application {
     }
 
     pub async fn shutdown(self: &Arc<Self>) -> Result<(), ServerError> {
+        // Close recovery admission first; accepted operations may still need
+        // the Library for the final commit and publication.
+        self.close_recovery().await;
         // Stop new admissions and drain the application-owned leader before
         // closing the Library, so publication and status accounting complete.
         self.scan_cycle.close();

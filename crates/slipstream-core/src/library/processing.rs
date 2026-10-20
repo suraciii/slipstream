@@ -469,3 +469,36 @@ impl Library {
             .map_err(Into::into)
     }
 }
+
+impl Library {
+    /// Commits a manual relocation batch while retaining caller coordination.
+    pub fn apply_relocations_blocking(
+        &self,
+        relocations: Vec<RequestedRelocation>,
+    ) -> Result<AppliedRelocations, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .apply_relocations_receiver(self.root.clone(), relocations)
+                .map_err(LibraryError::from)?
+        };
+        receive
+            .blocking_recv()
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Reads one current Photo while retaining caller coordination.
+    pub fn photo_blocking(&self, photo_id: &str) -> Result<Option<PhotoRead>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .photo_receiver(photo_id)
+                .map_err(LibraryError::from)?
+        };
+        receive
+            .blocking_recv()
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+}

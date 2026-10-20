@@ -701,6 +701,7 @@ pub enum ServerError {
     FileLocationWindow,
     FolderAlbumLimit,
     QueryCapacity,
+    WorkspaceBusy,
     RemovalFilter,
     RemovedWindow,
     RestorationInvalid,
@@ -745,6 +746,7 @@ impl fmt::Display for ServerError {
             Self::FileLocationWindow => formatter.write_str("File Location window is invalid"),
             Self::FolderAlbumLimit => formatter
                 .write_str("This Original Folder contains too many Photos for one Album operation"),
+            Self::WorkspaceBusy => formatter.write_str("Workspace operation is still in use"),
             Self::QueryCapacity => formatter.write_str("Retained query capacity is unavailable"),
             Self::RemovalFilter => {
                 formatter.write_str("Removal requires a Browse Snapshot filtered to Rejected")

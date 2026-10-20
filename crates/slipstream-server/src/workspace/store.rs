@@ -3,6 +3,7 @@ use photo_files::{Evidence, Observation, ancestor_leases, identity};
 use rusqlite::{OpenFlags, OptionalExtension, params};
 use std::{io::ErrorKind, path::Path};
 
+pub(super) const WORKSPACE_ADMISSION_LOCK: &str = ".workspace-admission-lock";
 const REGISTRY_SCHEMA: &str = "
 PRAGMA journal_mode=DELETE;
 PRAGMA synchronous=FULL;
@@ -34,6 +35,16 @@ fn regular_or_create(directory: &Directory, name: &str) -> Result<File> {
         Err(error) => Err(error.into()),
     }
 }
+fn existing_file(directory: &Directory, name: &str) -> Result<File> {
+    directory.open_file(name).map_err(|error| {
+        WorkspaceError::new(
+            "workspace_unavailable",
+            503,
+            format!("Required workspace file could not be opened: {error}"),
+        )
+    })
+}
+
 pub(super) fn connection(directory: &Directory, name: &str) -> Result<Connection> {
     let retained = regular_or_create(directory, name)?;
     let observation = Observation::of(&retained)?;
@@ -43,6 +54,26 @@ pub(super) fn connection(directory: &Directory, name: &str) -> Result<Connection
     )?;
     db.busy_timeout(LOCK_WAIT)?;
     let current = directory.open_file(name)?;
+    let current = Observation::of(&current)?;
+    if current.device != observation.device || current.inode != observation.inode {
+        return Err(WorkspaceError::new(
+            "workspace_unavailable",
+            409,
+            "Workspace database path changed while opening.",
+        ));
+    }
+    Ok(db)
+}
+
+fn existing_connection(directory: &Directory, name: &str) -> Result<Connection> {
+    let retained = existing_file(directory, name)?;
+    let observation = Observation::of(&retained)?;
+    let db = Connection::open_with_flags(
+        directory.path().join(name),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    db.busy_timeout(LOCK_WAIT)?;
+    let current = existing_file(directory, name)?;
     let current = Observation::of(&current)?;
     if current.device != observation.device || current.inode != observation.inode {
         return Err(WorkspaceError::new(
@@ -134,6 +165,11 @@ impl WorkspaceManager {
         require_id(photo_id)?;
         let _ancestors = ancestor_leases(self.root.path(), LOCK_WAIT)?;
         let _root = self.root.lease(LeaseMode::Shared, LOCK_WAIT)?;
+        // Resolve only after the shared root lease is held. Recovery's
+        // exclusive lease therefore wins before a new binding can be admitted.
+        (self.resolve)(photo_id)?.ok_or_else(|| {
+            WorkspaceError::new("not_found", 404, "The Photo is not in the Library.")
+        })?;
         let mut registry = self.registry.lock();
         let transaction =
             registry.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -157,6 +193,11 @@ impl WorkspaceManager {
             photo_id: photo_id.to_owned(),
         };
         let directory = self.root.create_directory(&workspace.id)?;
+        let _admission = FileLease::acquire(
+            regular_or_create(&directory, WORKSPACE_ADMISSION_LOCK)?,
+            LeaseMode::Exclusive,
+            LOCK_WAIT,
+        )?;
         let _lock = FileLease::acquire(
             regular_or_create(&directory, ".workspace-lock")?,
             LeaseMode::Exclusive,
@@ -175,24 +216,73 @@ impl WorkspaceManager {
         transaction.commit()?;
         Ok(workspace)
     }
-    pub(crate) fn directory(&self, workspace_id: &str) -> Result<Directory> {
-        let _ = self.lookup(workspace_id)?;
-        Ok(self.root.child(workspace_id)?)
+    pub(crate) fn directory(&self, workspace_id: &str) -> Result<WorkspaceDirectory> {
+        // Keep recovery and workspace withdrawal excluded for the lifetime of
+        // the returned directory; direct tool writers can mutate before a
+        // workspace session is opened.
+        let root_lease = self.root.lease(LeaseMode::Shared, LOCK_WAIT)?;
+        let workspace = self.lookup(workspace_id)?;
+        let directory = self.root.child(workspace_id)?;
+        let admission_lock = regular_or_create(&directory, WORKSPACE_ADMISSION_LOCK)?;
+        let admission_lease = FileLease::acquire(admission_lock, LeaseMode::Shared, LOCK_WAIT)?;
+        let current = self.lookup(workspace_id)?;
+        if current.photo_id != workspace.photo_id {
+            return Err(WorkspaceError::new(
+                "workspace_unavailable",
+                409,
+                "Workspace association changed while it was being opened.",
+            ));
+        }
+        Ok(WorkspaceDirectory {
+            directory,
+            _root_lease: root_lease,
+            _admission_lease: admission_lease,
+        })
     }
+
     pub(super) fn locked(&self, id: &str, mode: LeaseMode) -> Result<WorkspaceSession> {
+        self.locked_inner(id, mode, true, true)
+    }
+
+    fn locked_inner(
+        &self,
+        id: &str,
+        mode: LeaseMode,
+        include_root: bool,
+        initialize: bool,
+    ) -> Result<WorkspaceSession> {
         let workspace = self.lookup(id)?;
         let directory = self.root.child(id)?;
-        let mut leases = ancestor_leases(directory.path(), LOCK_WAIT)?;
+        let mut leases = if include_root {
+            ancestor_leases(directory.path(), LOCK_WAIT)?
+        } else {
+            Vec::new()
+        };
         leases.push(directory.lease(mode, LOCK_WAIT)?);
-        // Recheck association after acquiring removal/binding coordination.
-        let _ = self.lookup(id)?;
-        leases.push(FileLease::acquire(
-            regular_or_create(&directory, ".workspace-lock")?,
-            LeaseMode::Exclusive,
-            LOCK_WAIT,
-        )?);
-        let db = connection(&directory, ".workspace.sqlite")?;
-        db.execute_batch(WORKSPACE_SCHEMA)?;
+        // Recheck association after acquiring per-workspace coordination.
+        // A waiter must not mutate a workspace withdrawn while it waited.
+        let current = self.lookup(id)?;
+        if current.photo_id != workspace.photo_id {
+            return Err(WorkspaceError::new(
+                "workspace_unavailable",
+                409,
+                "Workspace association changed while it was being opened.",
+            ));
+        }
+        let lock = if initialize {
+            regular_or_create(&directory, ".workspace-lock")?
+        } else {
+            existing_file(&directory, ".workspace-lock")?
+        };
+        leases.push(FileLease::acquire(lock, LeaseMode::Exclusive, LOCK_WAIT)?);
+        let db = if initialize {
+            connection(&directory, ".workspace.sqlite")?
+        } else {
+            existing_connection(&directory, ".workspace.sqlite")?
+        };
+        if initialize {
+            db.execute_batch(WORKSPACE_SCHEMA)?;
+        }
         Ok(WorkspaceSession {
             workspace,
             directory,
@@ -200,6 +290,21 @@ impl WorkspaceManager {
             _leases: leases,
         })
     }
+
+    /// Takes the exclusive workspace-root lease used to coordinate a
+    /// Retire-and-Bind commit with every cooperating workspace writer.
+    pub(crate) fn recovery_guard(&self) -> Result<FileLease> {
+        self.root
+            .lease(LeaseMode::Exclusive, LOCK_WAIT)
+            .map_err(Into::into)
+    }
+
+    /// Reads authoritative workspace references while `recovery_guard` is
+    /// held. It must not reacquire the root's shared lease.
+    pub(crate) fn retained_photo_references_under_recovery_guard(&self) -> Result<Vec<String>> {
+        self.retained_photo_references_inner(false)
+    }
+
     pub(crate) fn workspace_ids(&self) -> Result<Vec<String>> {
         let registry = self.registry.lock();
         let mut statement =
@@ -341,10 +446,16 @@ impl WorkspaceManager {
     /// that a workspace still holds. Any unreadable registry or workspace
     /// database is an error: a caller must fail closed rather than treat an
     /// unknown reference as absent.
+    /// Reads references without creating a missing workspace lock or database.
+    /// A recovery survey must preserve missing state and fail closed instead.
     pub(crate) fn retained_photo_references(&self) -> Result<Vec<String>> {
+        self.retained_photo_references_inner(true)
+    }
+
+    fn retained_photo_references_inner(&self, include_root: bool) -> Result<Vec<String>> {
         let mut referenced = std::collections::BTreeSet::new();
         for id in self.workspace_ids()? {
-            let session = self.locked(&id, LeaseMode::Shared)?;
+            let session = self.locked_inner(&id, LeaseMode::Shared, include_root, false)?;
             referenced.insert(session.workspace.photo_id.clone());
             let mut statement = session.db.prepare(
                 "SELECT provenance FROM files WHERE removed=0 AND provenance IS NOT NULL",
@@ -361,7 +472,7 @@ impl WorkspaceManager {
                         "Retained workspace provenance could not be read.",
                     ));
                 };
-                referenced.extend(provenance_photo_ids(&provenance));
+                referenced.extend(provenance_photo_ids(&provenance)?);
             }
         }
         Ok(referenced.into_iter().collect())
@@ -491,20 +602,50 @@ pub(super) fn evidence(session: &WorkspaceSession, id: &str) -> Result<Evidence>
 /// The Photo identities named by one retained provenance document. Both
 /// retained processing provenance shapes carry their owning Photo explicitly,
 /// so a Photo an active workspace retains is never a retireable occupant.
-fn provenance_photo_ids(provenance: &Value) -> Vec<String> {
+fn provenance_photo_ids(provenance: &Value) -> Result<Vec<String>> {
     let mut ids = Vec::new();
-    if let Some(photo_id) = provenance["photoId"].as_str().filter(|id| valid_id(id)) {
-        ids.push(photo_id.to_owned());
+    let invalid = || {
+        WorkspaceError::new(
+            "workspace_unavailable",
+            503,
+            "Retained workspace provenance has an invalid Photo identity.",
+        )
+    };
+    if provenance.get("photoId").is_some() {
+        ids.push(
+            provenance["photoId"]
+                .as_str()
+                .filter(|id| valid_id(id))
+                .ok_or_else(invalid)?
+                .to_owned(),
+        );
     }
-    if let Some(handle) = provenance["handle"].as_object()
-        && let Some(photo_id) = handle["photoId"].as_str().filter(|id| valid_id(id))
-    {
-        ids.push(photo_id.to_owned());
+    if provenance.get("handle").is_some() {
+        let handle = provenance["handle"].as_object().ok_or_else(invalid)?;
+        if handle.get("photoId").is_some() {
+            ids.push(
+                handle["photoId"]
+                    .as_str()
+                    .filter(|id| valid_id(id))
+                    .ok_or_else(invalid)?
+                    .to_owned(),
+            );
+        }
     }
-    if let Some(input) = provenance["input"]["binding"].as_object()
-        && let Some(photo_id) = input["photoId"].as_str().filter(|id| valid_id(id))
-    {
-        ids.push(photo_id.to_owned());
+    if provenance.get("input").is_some() {
+        let input = provenance["input"].as_object().ok_or_else(invalid)?;
+        if input.get("binding").is_some() {
+            let binding = input["binding"].as_object().ok_or_else(invalid)?;
+            if binding.get("photoId").is_some() {
+                ids.push(
+                    binding["photoId"]
+                        .as_str()
+                        .filter(|id| valid_id(id))
+                        .ok_or_else(invalid)?
+                        .to_owned(),
+                );
+            }
+        }
     }
-    ids
+    Ok(ids)
 }

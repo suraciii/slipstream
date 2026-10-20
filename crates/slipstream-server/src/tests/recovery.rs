@@ -751,3 +751,30 @@ async fn recovery_http_rechecks_the_workspace_boundary_before_committing() {
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
+
+#[tokio::test]
+async fn recovery_http_rejects_duplicate_originals_before_operation_admission() {
+    let (base, config) = recovery_fixture(&[UnavailableFixture {
+        photo_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        original_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        location: "shoot/a.JPG",
+    }]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = authorized_router(Arc::clone(&application), config.web_root());
+    let response = post_json(
+        &router,
+        "/api/recovery/apply",
+        serde_json::json!({"mappings":[
+            {"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG","mappingId":"one"},
+            {"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/b.JPG","mappingId":"two"}
+        ]}),
+        Some("https://camera.local"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(response).await;
+    assert_eq!(body["error"], "Invalid recovery request");
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}

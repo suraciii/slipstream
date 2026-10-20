@@ -533,4 +533,177 @@ mod tests {
             1
         );
     }
+    #[test]
+    fn retire_and_bind_refuses_a_photo_with_a_development_proxy() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v13.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "missing-original",
+                photo_id: "missing-photo",
+                relative_path: "shoot/missing.JPG",
+                kind: "jpeg",
+                available: false,
+                size: 11,
+                mtime_ms: 1_000.0,
+            },
+        );
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "occupant-original",
+                photo_id: "occupant-photo",
+                relative_path: "moved/occupied.JPG",
+                kind: "jpeg",
+                available: true,
+                size: 11,
+                mtime_ms: 2_000.0,
+            },
+        );
+        connection
+            .execute(
+                "INSERT INTO development_proxies(
+                    photo_id,source_revision,source_relative_path,source_sha256,source_size,
+                    profile_id,pipeline_version,bundle_sha256,long_edge,width,height,
+                    artifact_sha256,artifact_bytes,created_at)
+                 VALUES('occupant-photo','source-revision','moved/occupied.JPG',?,?,?,?,?,?,?,?,?,?,?)",
+                params![
+                    "a".repeat(64),
+                    11_i64,
+                    "profile",
+                    "pipeline",
+                    "b".repeat(64),
+                    100_i64,
+                    100_i64,
+                    100_i64,
+                    "c".repeat(64),
+                    10_i64,
+                    1_i64,
+                ],
+            )
+            .unwrap();
+        fs::create_dir_all(library.canonical_path().join("moved")).unwrap();
+        fs::write(
+            library.canonical_path().join("moved/occupied.JPG"),
+            b"12345678901",
+        )
+        .unwrap();
+        let root = LibraryRoot::open(library.canonical_path()).unwrap();
+        let facts = root
+            .original(RelativeOriginalPath::parse("moved/occupied.JPG").unwrap())
+            .unwrap()
+            .facts()
+            .unwrap();
+        let result = scan::apply_manual_relocations(
+            &state,
+            &name,
+            &mut Connection::open(&path).unwrap(),
+            &root,
+            &[RequestedRelocation {
+                original_id: "missing-original".to_owned(),
+                from_location: "shoot/missing.JPG".to_owned(),
+                to_location: "moved/occupied.JPG".to_owned(),
+                mapping_id: "test-mapping".to_owned(),
+                fingerprint: None,
+                facts,
+                retire_photo_id: Some("occupant-photo".to_owned()),
+            }],
+        );
+        assert!(matches!(
+            result,
+            Err(PersistenceError::InvalidRecoveryMapping {
+                reason: "destination-in-use",
+                ..
+            })
+        ));
+        assert_eq!(
+            Connection::open(path)
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM development_proxies WHERE photo_id='occupant-photo'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+    #[test]
+    fn retire_and_bind_ignores_development_proxy_absence_in_legacy_schema() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v12.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "missing-original-v12",
+                photo_id: "missing-photo-v12",
+                relative_path: "shoot/missing.JPG",
+                kind: "jpeg",
+                available: false,
+                size: 11,
+                mtime_ms: 1_000.0,
+            },
+        );
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "occupant-original-v12",
+                photo_id: "occupant-photo-v12",
+                relative_path: "moved/occupied.JPG",
+                kind: "jpeg",
+                available: true,
+                size: 11,
+                mtime_ms: 2_000.0,
+            },
+        );
+        fs::create_dir_all(library.canonical_path().join("moved")).unwrap();
+        fs::write(
+            library.canonical_path().join("moved/occupied.JPG"),
+            b"12345678901",
+        )
+        .unwrap();
+        let root = LibraryRoot::open(library.canonical_path()).unwrap();
+        let facts = root
+            .original(RelativeOriginalPath::parse("moved/occupied.JPG").unwrap())
+            .unwrap()
+            .facts()
+            .unwrap();
+        let result = scan::apply_manual_relocations(
+            &state,
+            &name,
+            &mut Connection::open(&path).unwrap(),
+            &root,
+            &[RequestedRelocation {
+                original_id: "missing-original-v12".to_owned(),
+                from_location: "shoot/missing.JPG".to_owned(),
+                to_location: "moved/occupied.JPG".to_owned(),
+                mapping_id: "test-mapping-v12".to_owned(),
+                fingerprint: None,
+                facts,
+                retire_photo_id: Some("occupant-photo-v12".to_owned()),
+            }],
+        );
+        assert!(result.is_ok(), "legacy schemas must remain compatible");
+    }
 }

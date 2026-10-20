@@ -262,7 +262,7 @@ fn referenced_bounds(
     // Non-default decisions are user state, not scan residue.
     if count(
         "SELECT COUNT(*) FROM photos WHERE id=?
-           AND (rating != 0 OR selection_state != 'unflagged')",
+           AND (rating != 0 OR selection_state NOT IN ('unflagged','undecided'))",
     )? {
         return Ok(true);
     }
@@ -284,14 +284,20 @@ fn referenced_bounds(
     {
         return Ok(true);
     }
-    // Retained Export state: the legacy Export rows, their download leases,
-    // and the retained XMP Export documents.
+    // Retained Export and XMP state.
     if count("SELECT COUNT(*) FROM exports WHERE photo_id=?")?
         || count(
             "SELECT COUNT(*) FROM export_download_leases WHERE export_id IN
                (SELECT id FROM exports WHERE photo_id=?)",
         )?
-        || count("SELECT COUNT(*) FROM xmp_exports WHERE photo_id=?")?
+        || (_column_exists("xmp_exports", "photo_id")?
+            && count("SELECT COUNT(*) FROM xmp_exports WHERE photo_id=?")?)
+    {
+        return Ok(true);
+    }
+    // Retained Development Proxy; older schemas may omit the table.
+    if _column_exists("development_proxies", "photo_id")?
+        && count("SELECT COUNT(*) FROM development_proxies WHERE photo_id=?")?
     {
         return Ok(true);
     }

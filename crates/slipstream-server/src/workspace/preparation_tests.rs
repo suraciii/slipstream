@@ -25,7 +25,7 @@ impl Fixture {
             WorkspaceManager::open(
                 &state,
                 library.clone(),
-                Arc::new(move |_| observed.lock().clone()),
+                Arc::new(move |_| Ok(observed.lock().clone())),
                 1024 * 1024 * 1024,
             )
             .unwrap(),
@@ -192,6 +192,21 @@ fn concurrent_open_returns_one_workspace_and_one_input() {
     assert_eq!(opened.1["files"]["items"].as_array().unwrap().len(), 1);
 }
 
+#[test]
+fn an_existing_workspace_reopens_when_the_authoritative_source_is_unavailable() {
+    let fixture = Fixture::new();
+    let opened = fixture.open();
+    let workspace_id = opened["workspaceId"].as_str().unwrap().to_owned();
+    *fixture.source.lock() = None;
+
+    let reopened = fixture.open();
+    assert_eq!(reopened["workspaceId"], workspace_id);
+    assert_eq!(reopened["inputArtifactId"], opened["inputArtifactId"]);
+    assert_eq!(reopened["inputRevision"], opened["inputRevision"]);
+    assert_eq!(reopened["inputAvailability"], "ready");
+    assert!(reopened["observedSourceRevision"].is_null());
+}
+
 fn snapshot(source: &Path, destination: &Path, relative: &Path, files: &mut Vec<Value>) {
     fs::create_dir_all(destination).unwrap();
     for entry in fs::read_dir(source).unwrap() {
@@ -224,7 +239,7 @@ fn isolated_restore_preserves_file_revision_and_refuses_altered_bytes() {
     let manager = WorkspaceManager::open(
         &restored,
         fixture.root.join("missing-originals"),
-        Arc::new(|_| None),
+        Arc::new(|_| Ok(None)),
         1024 * 1024 * 1024,
     )
     .unwrap();

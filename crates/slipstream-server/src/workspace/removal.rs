@@ -1,3 +1,4 @@
+use super::store::WORKSPACE_ADMISSION_LOCK;
 use super::*;
 use photo_files::{
     Directory, EntryKind, FileLease, LeaseMode, WalkLimits, fingerprint, identity, walk,
@@ -164,8 +165,12 @@ impl WorkspaceManager {
             result["outcome"] = json!("replayed");
             return Ok(result);
         }
-        let mut session = self.locked(workspace_id, LeaseMode::Exclusive)?;
-        files::reconcile(self, &mut session)?;
+        let session = self.locked(workspace_id, LeaseMode::Exclusive)?;
+        let _admission = FileLease::acquire(
+            session.directory.open_file(WORKSPACE_ADMISSION_LOCK)?,
+            LeaseMode::Exclusive,
+            LOCK_WAIT,
+        )?;
         let inventory = dependencies::inventory(self, &session)?;
         if token(&session, &inventory)? != reviewed_token {
             return Err(WorkspaceError::new(
@@ -305,7 +310,10 @@ fn retain_reclamation_barriers(
                     let file = reported.directory.open_file(&reported.entry.name)?;
                     if !(reported.depth == 0
                         && index_locked
-                        && reported.entry.name == ".workspace-lock")
+                        && matches!(
+                            reported.entry.name.as_str(),
+                            ".workspace-lock" | ".workspace-admission-lock"
+                        ))
                     {
                         barriers._leases.push(FileLease::acquire(
                             file.try_clone()?,

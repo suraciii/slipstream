@@ -190,7 +190,7 @@ pub(crate) fn restore(state: &Path, manifest_path: &Path) -> Result<Value> {
             root: state_root.child("workspaces")?,
             registry: Mutex::new(store::connection(state_root, "workspaces.sqlite")?),
             library_root: PathBuf::from("/"),
-            resolve: Arc::new(|_| None),
+            resolve: Arc::new(|_| Ok(None)),
             allowance: DEFAULT_STORAGE_BYTES,
             queries: Mutex::new(query::Queries::new()),
             supervised_tools: Mutex::new(Vec::new()),

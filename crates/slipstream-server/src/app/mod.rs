@@ -198,7 +198,7 @@ pub struct Application {
     pub(crate) browse_counter: AtomicU64,
     /// Random per-startup identifier; no metadata evidence survives a restart.
     instance_epoch: String,
-    /// Unix socket of the exclusive metadata save supervisor, when deployed.
+    recovery: recovery::RecoveryLifecycle,
     metadata_supervisor: Option<PathBuf>,
     pub(crate) cursor_signer: CursorSigner,
     pub(crate) shutdown: Mutex<bool>,
