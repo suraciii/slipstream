@@ -40,8 +40,8 @@ An Original File that cannot be read at its remembered Original Location. Its Ph
 _Avoid_: missing Photo, deleted Photo
 
 **Unavailable Photo**:
-A Photo whose Original File is unavailable. It keeps its identity, Original Location, Selection State, Rating, Album membership, and Grid position; it is not a Removed Photo.
-_Avoid_: removed Photo, deleted Photo
+A Photo whose Original File is unavailable. It keeps its identity, Original Location, Selection State, Rating, Album membership, and Grid position; it is not a Removed Photo. The user-facing cause is **Original unavailable**; reserve **Photo unavailable** for a Photo that is not present in the current view.
+_Avoid_: removed Photo, deleted Photo; Photo unavailable as the cause
 
 **Original Location**:
 The relative directory and filename used to find an Original File beneath the current Library Folder. A Location is not Original File identity.
