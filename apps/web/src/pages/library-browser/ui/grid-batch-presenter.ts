@@ -1,7 +1,5 @@
-import type {
-  GridViewModel,
-  BatchAlbumsViewModel,
-} from "./library-browser-view.js";
+import type { GridViewModel } from "./library-browser-view.js";
+import type { BatchAlbumsViewModel } from "../model/grid-batch-albums-contract.js";
 
 type GridBatchResultViewModel = NonNullable<GridViewModel["multi"]["result"]>;
 

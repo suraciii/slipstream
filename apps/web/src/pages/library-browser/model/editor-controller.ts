@@ -1,33 +1,29 @@
-import type { BrowserFetch } from "./access-session.js";
-import type { LibraryBrowserView } from "../ui/library-browser-view.js";
+import type { BrowserFetch } from "../api/browser-fetch.js";
 import type {
+  EditorCatalogSurface,
   EditorController,
   EditorControllerDependencies,
+  EditorFilmSurface,
+  EditorSurfaceFactories,
+  EditorViewPort,
 } from "./editor-controller-contract.js";
 import {
   createWorkspaceEditOwner,
   type WorkspaceEditOwner,
 } from "./workspace-edit-owner.js";
-import {
-  createWorkspaceFilmSurface,
-  type WorkspaceFilmSurface,
-} from "../ui/workspace-film-surface.js";
 import { isRecord } from "../api/guards.js";
 import { workspacePath, workspaceRequest } from "../api/workspace-edit.js";
-import {
-  createWorkspaceCatalogSurface,
-  type WorkspaceCatalogSurface,
-} from "../ui/workspace-catalog-surface.js";
 import { fetchWorkspaceFilmModules } from "../api/workspace-film.js";
 export type { EditorController } from "./editor-controller-contract.js";
 export function createEditorController(
   fetcher: BrowserFetch,
-  view: LibraryBrowserView,
+  view: EditorViewPort,
   dependencies: EditorControllerDependencies,
+  surfaces: EditorSurfaceFactories,
 ): EditorController {
   const owners = new Map<string, WorkspaceEditOwner>();
-  const filmSurfaces = new Map<string, WorkspaceFilmSurface>();
-  const catalogSurfaces = new Map<string, WorkspaceCatalogSurface>();
+  const filmSurfaces = new Map<string, EditorFilmSurface>();
+  const catalogSurfaces = new Map<string, EditorCatalogSurface>();
   let selected: string | undefined;
   const owns = (photoId: string) =>
     selected === photoId &&
@@ -71,13 +67,12 @@ export function createEditorController(
       });
       owners.set(photoId, owner);
       if (typeof document !== "undefined") {
-        const film = createWorkspaceFilmSurface(fetcher, photoId, () => {
+        const film = surfaces.createFilm(photoId, () => {
           void owners.get(photoId)?.refresh();
         });
         owner.model.filmElement = film.element;
         filmSurfaces.set(photoId, film);
-        const catalog = createWorkspaceCatalogSurface(
-          fetcher,
+        const catalog = surfaces.createCatalog(
           photoId,
           async () => {
             const current = owners.get(photoId);

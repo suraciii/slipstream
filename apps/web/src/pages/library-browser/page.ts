@@ -9,7 +9,6 @@ import {
   type GridRangeRetry,
 } from "./model/browse-range-recovery-owner.js";
 import type { SelectionFilter, SelectionState } from "./api/contracts.js";
-import { createEditorController } from "./model/editor-controller.js";
 import { routeEditorIntent } from "./model/editor-intent-router.js";
 import { createPhotoDetailsOwner } from "./model/photo-details-owner.js";
 import { createMetadataPanel } from "./ui/external-metadata-panel.js";
@@ -73,7 +72,8 @@ import {
 } from "./ui/library-browser-view.js";
 import { formatPhotoCount } from "./ui/photo-count.js";
 import { mountLibraryBrowserAccess } from "./ui/library-browser-access.js";
-import type { BrowserFetch } from "./model/access-session.js";
+import { createPageEditorController } from "./ui/editor-controller-composition.js";
+import type { BrowserFetch } from "./api/browser-fetch.js";
 
 const SOURCE_ESTABLISHED = { kind: "established" } as const;
 const SOURCE_SUPERSEDED = { kind: "superseded" } as const;
@@ -178,14 +178,13 @@ function mountPrivateLibraryBrowser(
     total: sourceGrid.total,
     index: 0,
   });
-  const editor = createEditorController(fetcher, view, {
-    isAlive: () => applicationAlive,
-    isCurrentPhoto: (photoId) =>
-      photoOwner.isCurrent(photoOwner.authority) &&
-      photoOwner.current?.id === photoId,
-    currentPhoto: () => photoOwner.current,
-    libraryPhase: () => applicationPresentation.scanPhase,
-  });
+  const editor = createPageEditorController(
+    fetcher,
+    view,
+    () => applicationAlive,
+    photoOwner,
+    () => applicationPresentation.scanPhase,
+  );
   const { refresh: refreshEditor, leave: leaveEditor } = editor;
   const savedPositions = createSavedPositionOwner(fetcher, {
     isSourceCurrent: (authority, albumId) =>

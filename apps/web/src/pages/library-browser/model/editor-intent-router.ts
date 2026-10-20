@@ -1,18 +1,23 @@
 import type { EditorController } from "./editor-controller-contract.js";
-import type { LibraryBrowserIntent } from "../ui/library-browser-view.js";
+import type { EditorIntent } from "./editor-intent-contract.js";
 export function routeEditorIntent(
   editor: EditorController,
-  intent: LibraryBrowserIntent,
+  intent: Readonly<{ kind: string }>,
 ): boolean {
-  switch (intent.kind) {
+  const editorIntent = intent as EditorIntent;
+  switch (editorIntent.kind) {
     case "editor-open":
-      editor.open(intent.photoId);
+      editor.open(editorIntent.photoId);
       return true;
     case "editor-refresh":
-      editor.refresh(intent.photoId);
+      editor.refresh(editorIntent.photoId);
       return true;
     case "editor-workspace-action":
-      editor.act(intent.photoId, intent.action, intent.arguments);
+      editor.act(
+        editorIntent.photoId,
+        editorIntent.action,
+        editorIntent.arguments,
+      );
       return true;
     default:
       return false;

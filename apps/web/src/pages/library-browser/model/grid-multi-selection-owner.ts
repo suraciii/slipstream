@@ -16,7 +16,7 @@ import type {
   SourceGridOwner,
   SourceWindowOperation,
 } from "./source-grid-owner.js";
-import type { BatchAlbumsViewModel } from "../ui/library-browser-view.js";
+import type { BatchAlbumsViewModel } from "./grid-batch-albums-contract.js";
 
 const MULTI_SELECTION_LIMIT = 100;
 

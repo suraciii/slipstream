@@ -5,7 +5,7 @@ import {
   type ComposableRecipeDraft,
   type ComposableSaveRequest,
 } from "./composable-recipe-draft.js";
-import type { BrowserFetch } from "./access-session.js";
+import type { BrowserFetch } from "../api/browser-fetch.js";
 import type { rebindComposableRecipe } from "../api/composable-recipe.js";
 
 type SaveRequest = Extract<ComposableSaveRequest, { kind: "ok" }>["request"];
