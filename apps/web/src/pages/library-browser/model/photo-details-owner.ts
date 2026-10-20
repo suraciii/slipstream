@@ -1,6 +1,6 @@
 import type { AlbumSummary, PhotoMetadataResponse } from "../api/contracts.js";
 import { fetchPhotoAlbums, fetchPhotoMetadata } from "../api/photo.js";
-import type { BrowserFetch } from "./access-session.js";
+import type { BrowserFetch } from "../api/browser-fetch.js";
 import type { PhotoAuthority } from "./photo-owner.js";
 import type {
   AlbumActionContext,

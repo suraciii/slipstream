@@ -4,7 +4,7 @@ import {
   type MetadataSource,
   type MetadataValue,
 } from "../api/external-metadata.js";
-import type { BrowserFetch } from "../model/access-session.js";
+import type { BrowserFetch } from "../api/browser-fetch.js";
 import {
   createMetadataDrafts,
   metadataInputChange,

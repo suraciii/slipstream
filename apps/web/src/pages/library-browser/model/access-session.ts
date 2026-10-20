@@ -1,3 +1,4 @@
+import type { BrowserFetch } from "../api/browser-fetch.js";
 import { isRecord } from "../api/guards.js";
 export type BrowserSession = Readonly<{
   expiresAt: number;
@@ -20,11 +21,6 @@ export type TokenExchange =
   | Readonly<{ kind: "uncertain" }>;
 
 export type LogoutOutcome = "confirmed" | "unconfirmed";
-
-export type BrowserFetch = (
-  input: RequestInfo | URL,
-  init?: RequestInit,
-) => Promise<Response>;
 
 const ACCESS_SESSION_PATH = "/api/access/session";
 const MUTATING_METHODS = new Set(["DELETE", "PATCH", "POST", "PUT"]);

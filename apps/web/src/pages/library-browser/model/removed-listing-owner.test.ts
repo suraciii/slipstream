@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createRemovalOwner, type RemovalFetch } from "./removal-owner.js";
 import { createRemovedListingOwner } from "./removed-listing-owner.js";
-import type { RemovedPanelViewModel } from "../ui/removed-panels.js";
+import type { RemovedPanelViewModel } from "./removed-listing-contract.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

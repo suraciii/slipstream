@@ -1,11 +1,11 @@
 import "./access-entry.css";
+import type { BrowserFetch } from "../api/browser-fetch.js";
 import {
   createPrivateFetcher,
   createAuthenticatedFetcher,
   exchangeAccessToken,
   readAccessStatus,
   revokeBrowserSession,
-  type BrowserFetch,
   type BrowserSession,
 } from "../model/access-session.js";
 

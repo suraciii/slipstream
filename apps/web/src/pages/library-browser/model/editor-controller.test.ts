@@ -1,12 +1,27 @@
 import { expect, test } from "bun:test";
 import { createEditorController } from "./editor-controller.js";
-import type { LibraryBrowserView } from "../ui/library-browser-view.js";
+import type {
+  EditorViewPort,
+  EditorSurfaceFactories,
+} from "./editor-controller-contract.js";
 import type { WorkspaceEditModel } from "./workspace-edit-owner.js";
 
 test("workspace preparation responses never take over another Photo", async () => {
   const pending = Promise.withResolvers<Response>();
   let selected = "a";
   const presented: string[] = [];
+  const surfaces: EditorSurfaceFactories = {
+    createFilm: () => ({
+      element: {} as HTMLElement,
+      open: async () => {},
+      dispose() {},
+    }),
+    createCatalog: () => ({
+      element: {} as HTMLElement,
+      bind() {},
+      dispose() {},
+    }),
+  };
   const controller = createEditorController(
     async (input) => {
       const url =
@@ -38,12 +53,13 @@ test("workspace preparation responses never take over another Photo", async () =
         presented.push(model.photoId),
       clearEditorPreview() {},
       presentEditorPreview() {},
-    } as unknown as LibraryBrowserView,
+    } satisfies EditorViewPort,
     {
       isAlive: () => true,
       isCurrentPhoto: (id) => selected === id,
       currentPhoto: () => undefined,
     },
+    surfaces,
   );
   controller.open("a");
   selected = "b";

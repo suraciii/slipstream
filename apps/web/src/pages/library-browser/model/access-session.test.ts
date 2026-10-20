@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { rejects } from "node:assert/strict";
+import type { BrowserFetch } from "../api/browser-fetch.js";
 import {
   createPrivateFetcher,
   createAuthenticatedFetcher,
   exchangeAccessToken,
   readAccessStatus,
   revokeBrowserSession,
-  type BrowserFetch,
 } from "./access-session.js";
 
 const csrfToken = "A".repeat(43);
