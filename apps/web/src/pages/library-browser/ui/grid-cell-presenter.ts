@@ -75,8 +75,9 @@ function gridPhotoFacts(
   thumbnailState?: "unavailable" | "failed",
 ): string[] {
   const facts: string[] = [];
-  const originalUnavailable = !photo.available || !photo.original.available;
+  const originalUnavailable = !photo.original.available;
   if (originalUnavailable) facts.push("Original unavailable");
+  else if (!photo.available) facts.push("Photo unavailable");
   if (photo.original.kind === "raw") facts.push("RAW");
   if (photo.hasSavedEdits) facts.push("Edited");
   if (photo.preview.state === "unavailable" && !originalUnavailable)
