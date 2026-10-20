@@ -36,7 +36,6 @@ declare const photoWindowAuthorityBrand: unique symbol;
 export type PhotoWindowAuthority = Readonly<{
   [photoWindowAuthorityBrand]: true;
 }>;
-
 export type SourceGridSource =
   | Readonly<{ kind: "library" }>
   | Readonly<{
@@ -392,6 +391,7 @@ export function createSourceGridOwner(
   const thumbnails = createGridThumbnailOwner(fetcher, {
     currentAuthority: () => authority,
     isCurrent,
+    maxRetainedThumbnails: WINDOW_SIZE * 4,
   });
 
   const releaseToken = (released: string) => {

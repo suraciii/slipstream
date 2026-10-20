@@ -13,10 +13,9 @@ import { TaskScope } from "./async-ownership.js";
 import type { SourceAuthority } from "./source-grid-owner.js";
 
 /// Thumbnail retention follows the visible Grid, never the number of Photos
-/// rendered in one session: four Grid windows of retained Photos bound the
-/// rebuildable URL cache, the delivery-failure memory, and the terminal
-/// answers alike, independently of the Library total.
-const MAX_RETAINED_THUMBNAILS = 60 * 4;
+/// rendered in one session. The source supplies the retention bound for the
+/// rebuildable URL cache, delivery-failure memory, and terminal answers,
+/// independently of the Library total.
 
 export interface GridThumbnailImage {
   complete: boolean;
@@ -38,11 +37,13 @@ type ImageTransfer = Readonly<{
 
 /// The source lifetime a Thumbnail request is checked against. A request that
 /// outlives the source generation that admitted it must never mutate an image,
-/// so the owner captures the authority current when it starts one and asks the
-/// source whether that authority still owns the Grid.
+/// so the owner captures the authority current when it starts one and asks
+/// the source whether that authority still owns the Grid. The source also
+/// supplies the bounded retention assigned to its visible Grid.
 export type GridThumbnailSourcePort = Readonly<{
   currentAuthority: () => SourceAuthority;
   isCurrent: (authority: SourceAuthority) => boolean;
+  maxRetainedThumbnails: number;
 }>;
 
 export interface GridThumbnailOwner {
@@ -88,6 +89,7 @@ export function createGridThumbnailOwner(
   fetcher: SourceGridFetch,
   source: GridThumbnailSourcePort,
 ): GridThumbnailOwner {
+  const maxRetainedThumbnails = source.maxRetainedThumbnails;
   let closed = false;
   let thumbnails = new Map<string, string>();
   // null means the endpoint failed before it supplied a Thumbnail URL.
@@ -123,7 +125,7 @@ export function createGridThumbnailOwner(
     if (renderedImages.get(photoId) !== image || closed) return;
     thumbnailDeliveryFailures.delete(photoId);
     thumbnailDeliveryFailures.set(photoId, failedUrl);
-    while (thumbnailDeliveryFailures.size > MAX_RETAINED_THUMBNAILS) {
+    while (thumbnailDeliveryFailures.size > maxRetainedThumbnails) {
       const oldest = thumbnailDeliveryFailures.keys().next().value;
       if (oldest === undefined) break;
       thumbnailDeliveryFailures.delete(oldest);
@@ -181,7 +183,7 @@ export function createGridThumbnailOwner(
   const rememberThumbnail = (photoId: string, url: string) => {
     thumbnails.delete(photoId);
     thumbnails.set(photoId, url);
-    while (thumbnails.size > MAX_RETAINED_THUMBNAILS) {
+    while (thumbnails.size > maxRetainedThumbnails) {
       const oldest = thumbnails.keys().next().value;
       if (oldest === undefined) break;
       thumbnails.delete(oldest);
@@ -196,7 +198,7 @@ export function createGridThumbnailOwner(
     if (renderedImages.get(photoId) !== image || closed) return;
     thumbnailStates.delete(photoId);
     thumbnailStates.set(photoId, state);
-    while (thumbnailStates.size > MAX_RETAINED_THUMBNAILS) {
+    while (thumbnailStates.size > maxRetainedThumbnails) {
       const oldest = thumbnailStates.keys().next().value;
       if (oldest === undefined) break;
       thumbnailStates.delete(oldest);

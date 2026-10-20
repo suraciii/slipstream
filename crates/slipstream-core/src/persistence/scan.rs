@@ -1,5 +1,5 @@
-//! Scan application, recovery facts, fingerprint enrollment, snapshot decode,
-//! and Preview seeding: the persisted state a scan publishes and recovers.
+//! Scan application, snapshot decoding, and Preview seeding for the persisted
+//! state a scan publishes.
 
 use super::codecs::{
     camera_identity_name, capture_state_name, parse_camera_identity, parse_capture_fact,
