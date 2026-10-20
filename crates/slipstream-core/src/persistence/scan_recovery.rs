@@ -182,6 +182,7 @@ pub(super) fn recovery_survey(connection: &Connection) -> Result<RecoverySurvey,
             unavailable.push(row.map_err(|_| PersistenceError::Storage)?);
         }
     }
+    let processing_photo_ids = processing_reference_photo_ids(connection)?;
     let mut referenced_photo_ids = HashSet::new();
     {
         // The referenced set is the same authoritative boundary the commit
@@ -200,7 +201,7 @@ pub(super) fn recovery_survey(connection: &Connection) -> Result<RecoverySurvey,
         }
         drop(statement);
         for photo_id in photos {
-            if photo_has_retained_reference_read(connection, &photo_id)? {
+            if photo_has_retained_reference_read(connection, &photo_id, &processing_photo_ids)? {
                 referenced_photo_ids.insert(photo_id);
             }
         }
@@ -209,6 +210,22 @@ pub(super) fn recovery_survey(connection: &Connection) -> Result<RecoverySurvey,
         unavailable,
         referenced_photo_ids,
     })
+}
+/// Reads every processing record once for a survey. These records are stored
+/// in one metadata namespace, so scanning them per Photo would multiply the
+/// same parse and query work by the size of the Library.
+fn processing_reference_photo_ids(
+    connection: &Connection,
+) -> Result<HashSet<String>, PersistenceError> {
+    let mut photo_ids = super::processing_export::scan_artifact_photo_ids(connection)?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    photo_ids.extend(
+        super::processing_export::scan_processing_export_works(connection)?
+            .into_iter()
+            .map(|work| work.admission.photo_id),
+    );
+    Ok(photo_ids)
 }
 
 /// Reads the retire-and-bind boundary on a plain read handle.
@@ -219,6 +236,7 @@ pub(super) fn recovery_survey(connection: &Connection) -> Result<RecoverySurvey,
 fn photo_has_retained_reference_read(
     connection: &Connection,
     photo_id: &str,
+    processing_photo_ids: &HashSet<String>,
 ) -> Result<bool, PersistenceError> {
     if referenced_bounds(
         |table, column| {
@@ -235,7 +253,7 @@ fn photo_has_retained_reference_read(
     )? {
         return Ok(true);
     }
-    photo_has_retained_processing_reference(connection, photo_id)
+    Ok(processing_photo_ids.contains(photo_id))
 }
 
 /// The shared body of the authoritative retire-and-bind boundary.
@@ -561,13 +579,13 @@ pub(super) fn apply_manual_relocations(
             };
             let occupant = transaction
                 .query_row(
-                    "SELECT p.id FROM photos p WHERE p.original_id=?",
+                    "SELECT p.id,p.removed_at_ms FROM photos p WHERE p.original_id=?",
                     params![owner_id],
-                    |row| row.get::<_, String>(0),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
                 )
                 .optional()
                 .map_err(|_| PersistenceError::Storage)?;
-            let Some(photo_id) = occupant else {
+            let Some((photo_id, occupant_removed_at_ms)) = occupant else {
                 return Err(PersistenceError::InvalidRecoveryMapping {
                     original_id: relocation.original_id.clone(),
                     reason: "stale",
@@ -586,11 +604,16 @@ pub(super) fn apply_manual_relocations(
             // recipes, exports, retained Processing Artifacts and live Export
             // work, and the Development Proxy. A reference gained between
             // proposal and commit refuses the batch instead of retiring a
-            // used Photo.
+            // used Photo. Trash remains a distinct refusal because its own
+            // Restore contract is not interchangeable with ordinary use.
             if photo_has_retained_reference(transaction, &photo_id)? {
                 return Err(PersistenceError::InvalidRecoveryMapping {
                     original_id: relocation.original_id.clone(),
-                    reason: "destination-in-use",
+                    reason: if occupant_removed_at_ms.is_some() {
+                        "destination-removed"
+                    } else {
+                        "destination-in-use"
+                    },
                 });
             }
             transaction

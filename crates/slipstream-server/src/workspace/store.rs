@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS dependencies(owner TEXT NOT NULL,kind TEXT NOT NULL,a
 CREATE TABLE IF NOT EXISTS captures(artifact_id TEXT NOT NULL,revision TEXT NOT NULL,captured_id TEXT NOT NULL,captured_revision TEXT NOT NULL,PRIMARY KEY(artifact_id,revision));
 ";
 
-fn regular_or_create(directory: &Directory, name: &str) -> Result<File> {
+pub(super) fn regular_or_create(directory: &Directory, name: &str) -> Result<File> {
     match directory.create_file(name, 0o600) {
         Ok(file) => {
             file.sync_all()?;

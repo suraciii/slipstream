@@ -397,9 +397,9 @@ pub fn count_prefix_scope(
 /// Everything the manual planner needs from one consistent persisted read.
 pub struct RecoverySurvey {
     pub unavailable: Vec<RecoveryRecord>,
-    /// Photo IDs that keep independent user state: Album membership, saved
-    /// edit recipes, or an Export record. An explicit retire never replaces
-    /// one of these Photos.
+    /// Photo IDs that retain any state or durable reference that an explicit
+    /// retire must preserve: Albums, decisions, Trash, recipes, exports,
+    /// processing records, or other retained application bindings.
     pub referenced_photo_ids: std::collections::HashSet<String>,
 }
 

@@ -244,6 +244,36 @@ fn kept_job_blocks_removal_and_new_file_invalidates_reviewed_delete() {
     assert_eq!(replayed["outcome"], "replayed");
 }
 #[test]
+fn deletion_recreates_missing_workspace_admission_lock() {
+    let fixture = Fixture::new();
+    let reviewed = {
+        let session = fixture
+            .manager
+            .locked(&fixture.workspace.id, LeaseMode::Shared)
+            .unwrap();
+        let inventory = dependencies::inventory(&fixture.manager, &session).unwrap();
+        token(&session, &inventory).unwrap()
+    };
+    let workspace_path = fixture.root.join("workspaces").join(&fixture.workspace.id);
+    let directory = Directory::open(&workspace_path).unwrap();
+    directory
+        .remove_file(store::WORKSPACE_ADMISSION_LOCK)
+        .unwrap();
+    drop(directory);
+
+    let deleted = fixture
+        .manager
+        .delete(
+            &fixture.workspace.id,
+            &reviewed,
+            "delete-missing-admission",
+            true,
+        )
+        .unwrap();
+    assert_eq!(deleted["reclamation"], "complete");
+    assert!(fixture.manager.lookup(&fixture.workspace.id).is_err());
+}
+#[test]
 fn whole_deletion_refuses_standalone_input_lease_before_withdrawal() {
     let fixture = Fixture::new();
     fixture.write("notes.txt", b"independent input");

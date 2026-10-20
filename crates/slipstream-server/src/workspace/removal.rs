@@ -1,4 +1,4 @@
-use super::store::WORKSPACE_ADMISSION_LOCK;
+use super::store::{WORKSPACE_ADMISSION_LOCK, regular_or_create};
 use super::*;
 use photo_files::{
     Directory, EntryKind, FileLease, LeaseMode, WalkLimits, fingerprint, identity, walk,
@@ -167,7 +167,7 @@ impl WorkspaceManager {
         }
         let session = self.locked(workspace_id, LeaseMode::Exclusive)?;
         let _admission = FileLease::acquire(
-            session.directory.open_file(WORKSPACE_ADMISSION_LOCK)?,
+            regular_or_create(&session.directory, WORKSPACE_ADMISSION_LOCK)?,
             LeaseMode::Exclusive,
             LOCK_WAIT,
         )?;

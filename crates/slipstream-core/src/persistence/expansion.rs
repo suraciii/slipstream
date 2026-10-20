@@ -534,6 +534,87 @@ mod tests {
         );
     }
     #[test]
+    fn retire_and_bind_reports_removed_destination_separately() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v13.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "missing-original-removed",
+                photo_id: "missing-photo-removed",
+                relative_path: "shoot/missing.JPG",
+                kind: "jpeg",
+                available: false,
+                size: 11,
+                mtime_ms: 1_000.0,
+            },
+        );
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "occupant-original-removed",
+                photo_id: "occupant-photo-removed",
+                relative_path: "moved/occupied.JPG",
+                kind: "jpeg",
+                available: true,
+                size: 11,
+                mtime_ms: 2_000.0,
+            },
+        );
+        connection
+            .execute(
+                "UPDATE photos SET removed_at_ms=1,removed_operation='remove-op'
+                 WHERE id='occupant-photo-removed'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        fs::create_dir_all(library.canonical_path().join("moved")).unwrap();
+        fs::write(
+            library.canonical_path().join("moved/occupied.JPG"),
+            b"12345678901",
+        )
+        .unwrap();
+        let root = LibraryRoot::open(library.canonical_path()).unwrap();
+        let facts = root
+            .original(RelativeOriginalPath::parse("moved/occupied.JPG").unwrap())
+            .unwrap()
+            .facts()
+            .unwrap();
+        let result = scan_recovery::apply_manual_relocations(
+            &state,
+            &name,
+            &mut Connection::open(&path).unwrap(),
+            &root,
+            &[RequestedRelocation {
+                original_id: "missing-original-removed".to_owned(),
+                from_location: "shoot/missing.JPG".to_owned(),
+                to_location: "moved/occupied.JPG".to_owned(),
+                mapping_id: "removed-destination-mapping".to_owned(),
+                fingerprint: None,
+                facts,
+                retire_photo_id: Some("occupant-photo-removed".to_owned()),
+            }],
+        );
+        assert!(matches!(
+            result,
+            Err(PersistenceError::InvalidRecoveryMapping {
+                reason: "destination-removed",
+                ..
+            })
+        ));
+    }
+    #[test]
     fn retire_and_bind_refuses_a_photo_with_a_development_proxy() {
         let (_base, library, state, name, path) = fixture();
         seed(
