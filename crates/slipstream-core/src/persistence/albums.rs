@@ -2,9 +2,9 @@
 //! write error surface.
 
 use super::admission::{DatabaseName, StateDirectory};
+use super::codecs::parse_selection_state;
 use super::mutation::{mutation_error_from_sqlite, mutation_transaction};
 use super::owner::{MutationError, MutationVersions, PersistenceError, unix_millis, uuid_v4};
-use super::scan::parse_selection_state;
 use crate::{
     ALBUM_MEMBERSHIP_BATCH_MAX, AlbumBrowseMember, AlbumBrowseTarget, AlbumCreationResult,
     AlbumMember, AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation,

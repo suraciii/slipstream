@@ -1,7 +1,7 @@
 use super::{
     PersistenceError,
+    codecs::{parse_camera_identity, parse_capture_fact, parse_error_category, parse_kind},
     owner::parse_white_balance_intent,
-    scan::{parse_camera_identity, parse_capture_fact, parse_error_category, parse_kind},
 };
 use crate::{EditRecipe, EditRecipeRead, EditRecipeSettings};
 use rusqlite::{Connection, OptionalExtension};

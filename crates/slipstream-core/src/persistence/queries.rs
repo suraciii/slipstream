@@ -1,9 +1,11 @@
 //! Photo query, read, and projection: the SELECT shapes the Web and CLI surfaces
 //! depend on.
 
+use super::codecs::{
+    parse_camera_identity, parse_capture_fact, parse_dimension, parse_kind, parse_preview_state,
+    parse_selection_state,
+};
 use super::owner::{MutationVersions, PersistenceError};
-use super::scan;
-use super::scan::parse_selection_state;
 use crate::{
     PhotoQuery, PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder, PhotoQueryProjection,
     PhotoQuerySource, PhotoRead, PreviewState, SelectionState,
@@ -27,11 +29,11 @@ pub(super) fn read_photo(
             [photo_id],
             |row| {
                 let path = row.get::<_, String>(1)?;
-                let kind = scan::parse_kind(&row.get::<_, String>(2)?)?;
-                let preview_state = scan::parse_preview_state(&row.get::<_, String>(12)?)?;
+                let kind = parse_kind(&row.get::<_, String>(2)?)?;
+                let preview_state = parse_preview_state(&row.get::<_, String>(12)?)?;
                 let preview_source_revision: Option<String> = row.get(13)?;
-                let preview_width = scan::parse_dimension(row.get(14)?)?;
-                let preview_height = scan::parse_dimension(row.get(15)?)?;
+                let preview_width = parse_dimension(row.get(14)?)?;
+                let preview_height = parse_dimension(row.get(15)?)?;
                 let ready = preview_state == PreviewState::Ready;
                 Ok(PhotoRead {
                     decision_version: versions.photo(photo_id),
@@ -47,13 +49,13 @@ pub(super) fn read_photo(
                         .get::<_, i64>(5)?
                         .try_into()
                         .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                    capture: scan::parse_capture_fact(
+                    capture: parse_capture_fact(
                         row.get(7)?,
                         row.get(8)?,
                         row.get(9)?,
                         row.get(10)?,
                         row.get(11)?,
-                        scan::parse_camera_identity(row.get(18)?, row.get(19)?, row.get(20)?)?,
+                        parse_camera_identity(row.get(18)?, row.get(19)?, row.get(20)?)?,
                     )?,
                     preview_state,
                     preview_source: ready.then(|| kind.preview_source()),

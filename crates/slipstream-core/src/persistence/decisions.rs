@@ -1,12 +1,12 @@
 //! Photo State and checked Photo Decision mutations: compare-and-set writes
 //! with batch classification, version advancement, and undo.
 
+use super::codecs::{parse_selection_state, selection_state_value};
 use super::mutation::{mutation_error_from_sqlite, mutation_transaction};
 use super::owner::{
     MutationError, MutationVersions, PhotoDecisionWriteError,
     photo_decision_write_error_from_mutation,
 };
-use super::scan::{parse_selection_state, selection_state_value};
 use super::{DatabaseName, StateDirectory};
 use crate::{
     CheckedPhotoDecisionCounts, CheckedPhotoDecisionItemResult, CheckedPhotoDecisionMutation,

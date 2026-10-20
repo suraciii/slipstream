@@ -6,7 +6,6 @@ import type {
 import {
   fetchBrowseWindow,
   fetchBrowsePosition,
-  fetchThumbnail,
   openBrowse,
   releaseBrowse,
   type BrowseSourceRequest,
@@ -19,13 +18,16 @@ import {
   recordDeferredPhotoDecision,
   type DeferredPhotoDecision,
 } from "./deferred-photo-decision.js";
+import {
+  createGridThumbnailOwner,
+  type GridThumbnailImage,
+} from "./grid-thumbnail-owner.js";
 import { adjustedSelectionCounts } from "./selection-counts.js";
 
 const WINDOW_SIZE = 60;
 const MAX_RETAINED_FACTS = WINDOW_SIZE * 3;
 const MAX_VIEWPORT_RANGE = MAX_RETAINED_FACTS + WINDOW_SIZE * 2;
 const MAX_RETAINED_FACTS_CAP = MAX_VIEWPORT_RANGE + WINDOW_SIZE * 2;
-const MAX_RETAINED_THUMBNAILS = WINDOW_SIZE * 4;
 
 declare const sourceAuthorityBrand: unique symbol;
 export type SourceAuthority = Readonly<{ [sourceAuthorityBrand]: true }>;
@@ -147,16 +149,7 @@ export type SourcePositionOutcome =
       photoId: string;
     }>;
 
-export interface GridThumbnailImage {
-  complete: boolean;
-  isConnected: boolean;
-  src: string;
-  onload: GlobalEventHandlers["onload"];
-  onerror: GlobalEventHandlers["onerror"];
-  removeAttribute(name: string): void;
-  setDeliveryFailed(failed: boolean): void;
-  setThumbnailState(state: "unavailable" | "failed"): void;
-}
+export type { GridThumbnailImage } from "./grid-thumbnail-owner.js";
 
 export interface SourceGridOwner {
   readonly authority: SourceAuthority;
@@ -278,11 +271,6 @@ export interface SourceGridOwner {
   dispose(): void;
 }
 
-type ImageTransfer = Readonly<{
-  image: GridThumbnailImage;
-  finish: () => void;
-}>;
-
 type PhotoWindowRecord = Readonly<{
   authority: PhotoWindowAuthority;
   sourceAuthority: SourceAuthority;
@@ -387,13 +375,6 @@ export function createSourceGridOwner(
   const windowSettledHandlers = new Set<
     (outcome: SourceWindowOutcome) => void
   >();
-  let thumbnails = new Map<string, string>();
-  // null means the endpoint failed before it supplied a Thumbnail URL.
-  let thumbnailDeliveryFailures = new Map<string, string | null>();
-  // Terminal Thumbnail results are distinct from Review Preview facts.
-  let thumbnailStates = new Map<string, "unavailable" | "failed">();
-  const renderedImages = new Map<string, GridThumbnailImage>();
-  const imageTransfers = new Map<string, ImageTransfer>();
   const knownTokens = new Set<string>();
   const releasesStarted = new Set<string>();
   const photoWindows = new WeakMap<object, PhotoWindowRecord>();
@@ -404,17 +385,20 @@ export function createSourceGridOwner(
   const isCurrent = (candidate: SourceAuthority) =>
     !closed && candidate === authority;
 
+  /// The Thumbnails the Grid renders. The source supplies the lifetime every
+  /// Thumbnail request is checked against, so a request admitted by one
+  /// source generation can never mutate an image after a replacement took
+  /// over the Grid.
+  const thumbnails = createGridThumbnailOwner(fetcher, {
+    currentAuthority: () => authority,
+    isCurrent,
+  });
+
   const releaseToken = (released: string) => {
     if (!released || releasesStarted.has(released)) return;
     releasesStarted.add(released);
     knownTokens.delete(released);
     void releaseLease(released);
-  };
-
-  const detachImages = () => {
-    for (const transfer of [...imageTransfers.values()]) transfer.finish();
-    imageTransfers.clear();
-    renderedImages.clear();
   };
 
   const renewSourceWork = () => {
@@ -440,8 +424,13 @@ export function createSourceGridOwner(
     return photoAuthority;
   };
 
+  /// Stops the Grid surface's work: the rendered images are detached and the
+  /// in-flight Thumbnail transfers are dropped, so no settled request can
+  /// reach an image the Grid no longer owns, and the Grid's window scope is
+  /// renewed so a resumed Grid shares nothing with the stopped one. A caller
+  /// that resumes the Grid gets a fresh Thumbnail and window scope.
   const stopGridWork = () => {
-    detachImages();
+    thumbnails.stop();
     gridTasks.halt();
     gridTasks = new TaskScope();
   };
@@ -633,9 +622,7 @@ export function createSourceGridOwner(
         unflagged: 0,
       });
       facts = new Map();
-      thumbnails = new Map();
-      thumbnailDeliveryFailures = new Map();
-      thumbnailStates = new Map();
+      thumbnails.reset();
     }
     const task = sourceTasks.beginLatest("browse-open", {
       abortTransport: true,
@@ -669,9 +656,7 @@ export function createSourceGridOwner(
         if (mode === "reopen") {
           sourceReady = false;
           facts = new Map();
-          thumbnails = new Map();
-          thumbnailDeliveryFailures = new Map();
-          thumbnailStates = new Map();
+          thumbnails.reset();
         }
         return {
           kind: "opened",
@@ -1014,171 +999,6 @@ export function createSourceGridOwner(
     }
   }
 
-  const finishImage = (photoId: string, image: GridThumbnailImage) => {
-    const current = imageTransfers.get(photoId);
-    if (current?.image === image) imageTransfers.delete(photoId);
-  };
-
-  const registerImage = (photoId: string, image: GridThumbnailImage) => {
-    const existing = imageTransfers.get(photoId);
-    if (existing?.image !== image) existing?.finish();
-    renderedImages.set(photoId, image);
-  };
-
-  const markDeliveryFailed = (
-    photoId: string,
-    image: GridThumbnailImage,
-    failedUrl: string | null,
-  ) => {
-    if (renderedImages.get(photoId) !== image || closed) return;
-    thumbnailDeliveryFailures.delete(photoId);
-    thumbnailDeliveryFailures.set(photoId, failedUrl);
-    while (thumbnailDeliveryFailures.size > MAX_RETAINED_THUMBNAILS) {
-      const oldest = thumbnailDeliveryFailures.keys().next().value;
-      if (oldest === undefined) break;
-      thumbnailDeliveryFailures.delete(oldest);
-    }
-    image.removeAttribute("src");
-    image.setDeliveryFailed(true);
-  };
-
-  const attachThumbnail = (
-    photoId: string,
-    image: GridThumbnailImage,
-    url?: string,
-    attachDisconnected = false,
-  ) => {
-    if (!url || closed || renderedImages.get(photoId) !== image) return;
-    registerImage(photoId, image);
-    const expectedUrl = new URL(
-      url,
-      globalThis.location?.href ?? "http://slipstream.test/",
-    ).href;
-    const failedUrl = thumbnailDeliveryFailures.get(photoId);
-    if (failedUrl === expectedUrl) {
-      image.setDeliveryFailed(true);
-      return;
-    }
-    if (failedUrl !== undefined) thumbnailDeliveryFailures.delete(photoId);
-    // A real URL supersedes an earlier terminal Thumbnail answer.
-    thumbnailStates.delete(photoId);
-    image.setDeliveryFailed(false);
-    const transfer = gridTasks.beginLatest(`image:${photoId}`, {
-      abortTransport: false,
-    });
-    const finish = () => {
-      transfer.finish();
-      finishImage(photoId, image);
-    };
-    const record = { image, finish };
-    imageTransfers.set(photoId, record);
-    transfer.onCleanup(() => {
-      image.onload = null;
-      image.onerror = null;
-      if (!image.complete && (image.src === expectedUrl || image.src === url))
-        image.removeAttribute("src");
-      finishImage(photoId, image);
-    });
-    image.onload = finish;
-    image.onerror = () => {
-      if (!transfer.isCurrent()) return;
-      markDeliveryFailed(photoId, image, expectedUrl);
-      finish();
-    };
-    if (attachDisconnected || image.isConnected) image.src = url;
-  };
-
-  const rememberThumbnail = (photoId: string, url: string) => {
-    thumbnails.delete(photoId);
-    thumbnails.set(photoId, url);
-    while (thumbnails.size > MAX_RETAINED_THUMBNAILS) {
-      const oldest = thumbnails.keys().next().value;
-      if (oldest === undefined) break;
-      thumbnails.delete(oldest);
-    }
-  };
-
-  const noteTerminalThumbnailState = (
-    photoId: string,
-    image: GridThumbnailImage,
-    state: "unavailable" | "failed",
-  ) => {
-    if (renderedImages.get(photoId) !== image || closed) return;
-    thumbnailStates.delete(photoId);
-    thumbnailStates.set(photoId, state);
-    while (thumbnailStates.size > MAX_RETAINED_THUMBNAILS) {
-      const oldest = thumbnailStates.keys().next().value;
-      if (oldest === undefined) break;
-      thumbnailStates.delete(oldest);
-    }
-    image.setThumbnailState(state);
-  };
-
-  async function loadThumbnail(
-    photoId: string,
-    image: GridThumbnailImage,
-  ): Promise<void> {
-    if (closed) return;
-    registerImage(photoId, image);
-    const cached = thumbnails.get(photoId);
-    if (cached) {
-      attachThumbnail(photoId, image, cached, true);
-      return;
-    }
-    const remembered = thumbnailStates.get(photoId);
-    if (remembered) {
-      image.setThumbnailState(remembered);
-      return;
-    }
-    if (thumbnailDeliveryFailures.has(photoId)) {
-      image.setDeliveryFailed(true);
-      return;
-    }
-    const ownerAuthority = authority;
-    const tasks = gridTasks;
-    const request = tasks.joinOrStart(
-      `thumbnail:${photoId}`,
-      { abortTransport: true, onCancel: () => undefined },
-      (signal) => fetchThumbnail(fetcher, photoId, signal!),
-    );
-    const outcome = await request.promise;
-    // A cancelled request resolves with the onCancel value, no outcome.
-    if (
-      outcome === undefined ||
-      !isCurrent(ownerAuthority) ||
-      tasks !== gridTasks ||
-      request.signal?.aborted
-    )
-      return;
-    // A request may begin before the image-transfer lease exists. The latest
-    // registered image object is authoritative while the request is coalesced.
-    if (renderedImages.get(photoId) !== image) return;
-    if (outcome.kind === "ready") {
-      rememberThumbnail(photoId, outcome.url);
-      attachThumbnail(photoId, image, outcome.url);
-    } else if (outcome.kind === "not-ready") {
-      noteTerminalThumbnailState(photoId, image, outcome.state);
-    } else {
-      markDeliveryFailed(photoId, image, null);
-    }
-  }
-
-  const clearRenderedThumbnails = () => detachImages();
-
-  /// Releases the owner's hold on a Grid image the view dropped or rebuilt:
-  /// the browser-managed transfer stops owning a source and the Photo's
-  /// delivery-failure memory stays, so a re-rendered cell re-attaches from the
-  /// rebuildable URL cache. Retention follows the visible Grid, never the
-  /// number of Photos rendered in one session.
-  const releaseThumbnail = (photoId: string, image: GridThumbnailImage) => {
-    if (renderedImages.get(photoId) !== image) return;
-    renderedImages.delete(photoId);
-    const transfer = imageTransfers.get(photoId);
-    if (transfer?.image !== image) return;
-    imageTransfers.delete(photoId);
-    transfer.finish();
-  };
-
   return {
     get authority() {
       return authority;
@@ -1230,13 +1050,13 @@ export function createSourceGridOwner(
       return facts.size;
     },
     get retainedThumbnailCount() {
-      return thumbnails.size;
+      return thumbnails.retainedThumbnailCount;
     },
     get retainedThumbnailDeliveryFailureCount() {
-      return thumbnailDeliveryFailures.size;
+      return thumbnails.retainedThumbnailDeliveryFailureCount;
     },
     get retainedImageCount() {
-      return renderedImages.size;
+      return thumbnails.retainedImageCount;
     },
     isCurrent,
     isReady(candidate) {
@@ -1274,8 +1094,7 @@ export function createSourceGridOwner(
       if (!isCurrent(candidate) || index < 0 || index >= total) return false;
       const current = facts.get(index);
       if (!current || current.id !== expectedPhotoId) return false;
-      if (preview.state !== current.preview.state || preview.state === "ready")
-        thumbnailStates.delete(expectedPhotoId);
+      thumbnails.notePreviewReplaced(expectedPhotoId, current.preview, preview);
       facts.set(index, { ...current, preview });
       return true;
     },
@@ -1382,13 +1201,10 @@ export function createSourceGridOwner(
     },
     loadWindow,
     stopGridWork,
-    loadThumbnail,
-    releaseThumbnail,
-    presentThumbnail(photoId, image, url, attachDisconnected) {
-      registerImage(photoId, image);
-      attachThumbnail(photoId, image, url, attachDisconnected);
-    },
-    clearRenderedThumbnails,
+    loadThumbnail: thumbnails.loadThumbnail,
+    releaseThumbnail: thumbnails.releaseThumbnail,
+    presentThumbnail: thumbnails.presentThumbnail,
+    clearRenderedThumbnails: thumbnails.clearRenderedThumbnails,
     dispose() {
       if (closed) return;
       closed = true;
@@ -1396,9 +1212,9 @@ export function createSourceGridOwner(
       authority = makeAuthority();
       committedDecisions.clear();
       windowSettledHandlers.clear();
-      detachImages();
-      sourceTasks.halt();
+      thumbnails.dispose();
       gridTasks.halt();
+      sourceTasks.halt();
       stopPhotoWindowWork();
       token = "";
       for (const known of [...knownTokens]) releaseToken(known);
