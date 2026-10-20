@@ -3,12 +3,8 @@ import type {
   FolderAlbumViewModel,
   FolderViewModel,
   SourceListViewModel,
+  SourceReference,
 } from "./library-browser-view.js";
-
-type SourceReference =
-  | Readonly<{ kind: "library" }>
-  | Readonly<{ kind: "album"; id: string }>
-  | Readonly<{ kind: "folder"; location: string; name: string }>;
 
 type SourceIntent =
   | Readonly<{ kind: "folder-page"; location: string; direction: -1 | 1 }>
