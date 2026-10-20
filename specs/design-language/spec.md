@@ -125,8 +125,8 @@ Grid View is a field of Photos with stable cell geometry. Photo View is a focuse
 
 - Use familiar, simple icons that reinforce a visible label or state. An icon must not be the only explanation of a consequential action.
 - Keep one icon meaning stable across the product. Do not use the same symbol for Pick, Select, and a generic checkmark if their effects differ.
-- Preserve image aspect ratio and the stated Preview Source. A crop used for Grid composition must not be presented as the complete image evidence.
-- Never substitute a sibling JPEG for a RAW Photo's Preview. Never upscale or visually imply detail that the Preview does not contain.
+- Preserve the complete composition, aspect ratio, and stated Preview Source. Grid composition must not crop or stretch a Photo. Display zoom may magnify the Preview only when it reports its actual zoom and does not imply additional source detail. See [Grid Composition and Orientation](../library-browser/spec.md#grid-composition-and-orientation) and [Preview Zoom and Fit](../library-browser/spec.md#preview-zoom-and-fit).
+- Never substitute a sibling JPEG for a RAW Photo's Preview. Preview derivatives must not upscale a smaller source for storage; [Preview Normalization](../photo-library/previews/spec.md#preview-normalization) owns derivative dimensions and magnification evidence.
 - Placeholder imagery must state the unavailable or failed fact without resembling a valid Photo.
 
 ### Density, shape, and rhythm
@@ -164,38 +164,33 @@ Motion must explain continuity, spatial relationship, or state transition. It mu
 
 Every interaction belongs to one of these classes:
 
-- **Read or navigate:** changes what is viewed without changing Photo or Library facts.
+- **Read or navigate:** normally changes what is viewed without changing Photo or Library facts. A feature contract may define a continuity effect, such as saved Album position; navigation must not silently change Selection State, Rating, Album membership, or destructive state. See [Saved Position](../library-browser/spec.md#saved-position).
 - **Direct reversible decision:** records a bounded Pick, Reject, Rating, or equivalent effect and reports truthful feedback while the effect is pending and after it settles.
 - **Staged view choice:** changes filters, order, or presentation after an explicit Apply or equivalent commit; Cancel or Close discards the draft.
 - **Explicit recovery:** reviews an uncertain or unavailable state. A bounded read or retry may repeat that operation directly; a consequential recovery shows proposed effects and requires explicit Apply.
 - **Irreversible consequence:** identifies the exact scope and consequence, requires separate confirmation, and reports the final effect.
 
-A feature must not silently change action class. Navigation must not record a decision. A review shortcut must not become an irreversible operation.
+A feature must not silently change action class. Navigation must not silently record a decision; feature-defined continuity effects remain with their owning contract. A review shortcut must not become an irreversible operation.
 
 ### Visible controls and accelerators
 
-- A gesture, shortcut, keyboard action, or Agent operation may accelerate a visible capability; it must not create a hidden capability.
-- Pick and Reject must remain visible equivalents of horizontal review gestures. Previous and Next must remain visible equivalents of vertical navigation gestures.
-- One-level Undo must remain understandable as the inverse of the last eligible decision. It must not imply that it can undo an unrelated operation.
-- A control must communicate its current state and availability before activation when that state affects the outcome.
+- A gesture or keyboard shortcut may accelerate a visible capability; it must not create a hidden Web capability. Visible controls or equivalent accessible paths remain available.
+- Agent and CLI capabilities may use different affordances or support capabilities without a Web counterpart. They must be discoverable through [machine-facing help and contracts](../command-line/spec.md#starting-and-discovering-capabilities) and preserve shared domain identity, effect, scope, and outcome.
+- For Library Browser, [touch gestures](../library-browser/spec.md#touch-gestures) and [visible controls](../library-browser/experience/spec.md#photo-view) remain equivalent paths for feature-defined decisions and navigation. Other surfaces may define different accelerators.
+- Undo must identify its operation scope and remain understandable as the inverse of an eligible operation. Library Browser one-level Undo follows [Library Browser Undo](../library-browser/spec.md#undo); Photo Development Undo/Redo follows [Photo Development history](../photo-development/spec.md#autosave-and-reversible-editing).
+- A control must communicate its current client-known state and availability before activation when that state affects the outcome. Authoritative admission may still refuse or conflict, and the surface must report that outcome.
 
 ### Supporting surfaces
 
-A supporting surface must:
+A supporting responsibility may be persistent alongside content or presented as a transient or modal surface. In either mode it must have a clear name and invoker, one coherent purpose, and preserve an already admitted operation's settlement rules.
 
-1. have a clear name and invoker;
-2. contain one coherent group of secondary actions;
-3. move focus into the surface;
-4. prevent background interaction while active;
-5. provide Close or Cancel as appropriate;
-6. return focus to the invoker or nearest valid control; and
-7. preserve an already admitted operation's settlement rules when it closes.
+When a supporting surface is modal, it must move focus into the surface, prevent background interaction while active, provide Close or Cancel as appropriate, and return focus to the invoker or nearest valid control. A persistent supporting region, such as wide-screen Sources, remains usable alongside content and follows [Library Browser screen structure](../library-browser/experience/spec.md#screen-structure) rather than modal focus trapping.
 
-At most one modal supporting surface should be active. Moving between related details should replace the surface content rather than stack an unexplained modal tower.
+At most one modal supporting surface should be active. Moving between related details should replace the surface content rather than stack an unexplained modal tower. Exact modal behavior remains in [Supporting Surfaces](../library-browser/experience/spec.md#supporting-surfaces).
 
 ### Continuity and destinations
 
-A destination must be addressable when it represents a meaningful source, order, filter, or current Photo. Browser history must represent destinations, not every temporary panel. Temporary surfaces must not create history entries. Returning from Photo View must return to the meaningful source context.
+A destination must be addressable when it represents a meaningful source, order, filter, or current Photo. Browser history must represent destinations, not every temporary panel. Temporary surfaces must not create history entries. Returning from Photo View must return to the meaningful source context. Exact URL and history behavior belongs to [Destinations and Browser History](../library-browser/experience/spec.md#destinations-and-browser-history).
 
 Changing a source, order, or filter must state whether it preserves the current Photo, resets to a source default, or requires a new destination. The interface must not silently reinterpret a stale destination against new Library facts.
 
@@ -251,6 +246,8 @@ The product may use compact feedback for routine success and persistent feedback
 While a replacement Preview, source, or result is pending, keep the last trustworthy content visible when the feature contract permits it and identify it as stale or out of date. A failed refresh must not replace a valid previous state with an empty success-looking surface.
 
 A failure must stay local to the operation that failed. It must not erase unrelated Photo facts, decisions, Album membership, saved position, or retained workspace outputs. Retry must repeat only the failed or explicitly revalidated operation.
+
+Access is an explicit feature boundary: temporary unreachability may retain the current authorized view, while confirmed expiry, revocation, or rejection removes private views and offers Access entry. [Session Loss and Disconnection](../access/spec.md#session-loss-and-disconnection) owns that distinction; it is not a generic loading state.
 
 ### Reconcile uncertainty
 

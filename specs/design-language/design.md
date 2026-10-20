@@ -32,6 +32,8 @@ The two design-language documents have separate responsibilities:
 
 When a feature needs a behavior that is not covered here, its behavior contract is the acceptance authority for that behavior. The feature must preserve the shared meanings, outcome distinctions, and safety invariants unless the governing Issue records an explicit product decision to change them.
 
+The Product Design Language's shared rule is a presentation and meaning constraint, not a replacement for a feature's interaction mechanics. A feature contract may define a different carrier, scope, or lifecycle when that is part of its product behavior; the feature must link the exception and preserve the shared domain meaning.
+
 ## Selected Design
 
 Two reasonable alternatives were considered:
@@ -150,7 +152,9 @@ It emits semantic intent to the owning state boundary. It does not own durable P
 
 ### Supporting surface
 
-A supporting surface groups secondary actions such as Sources, View options, Rating choices, Photo details, Album membership, tools, or recovery review. It has a named entry, one coherent purpose, a close or cancel path, focus containment while active, and focus return after close.
+A supporting responsibility groups secondary actions such as Sources, View options, Rating choices, Photo details, Album membership, tools, or recovery review. It may be persistent alongside content or presented as a transient or modal surface. In either mode it has one coherent purpose and preserves an already admitted operation's settlement rules.
+
+When presented modally, it has a named entry, moves focus into the surface, prevents background interaction while active, provides Close or Cancel as appropriate, and returns focus to the invoker or nearest valid control. A persistent supporting region follows the owning feature's navigation and focus contract; it is not required to trap focus or block content interaction.
 
 It must not create a second navigation model, duplicate an action owner, hide the only path to a consequential operation, or claim that closing the surface cancelled an admitted operation.
 
@@ -172,7 +176,7 @@ The design language assumes the ownership model in [Foundational Architecture](.
 
 - Every mutable domain fact has one authoritative owner. A presenter, token, gesture, or supporting surface may reflect it but must not create a competing copy.
 - Every admitted operation has one settlement owner. Closing a surface, navigating away, or changing layout must not silently cancel it or claim success.
-- A visible action is enabled only when its preconditions are known to hold. An unknown precondition is not an affirmative one.
+- An action must meet known client-side readiness requirements before activation when those requirements affect the outcome. Server admission remains authoritative and may refuse, conflict, or report uncertainty; the surface must expose that outcome.
 - Before admission, an interaction may show intent or a candidate state. After admission, it must show pending until the owning operation settles.
 - A settled outcome must identify the actual effect and scope. `Applied`, `Partial`, `Refused`, `Failed`, and `Unknown` are different outcomes.
 - A stale result must not overwrite a newer result without explicit revalidation or an explicit user choice.
@@ -202,21 +206,27 @@ The mapping must be concrete. For example:
 - Domain fact: the current Photo's Selection State changes to Picked.
 - Interaction class: direct reversible decision.
 - Surface: decision group, with the current Selection State in the fact group.
-- Presentation: Picked and pending have distinct state roles; the control does not report Picked before persistence confirmation.
-- Alternatives: the visible action, its keyboard path, its touch accelerator, and the Agent/CLI operation use the same effect and settlement rules.
-- Recovery: a refused, failed, or unknown write retains the prior trustworthy state and exposes the owning retry or reconciliation path.
+- Presentation: Picked and pending have distinct state roles; the control does not report Picked before persistence confirmation. The [Library Browser Selection State contract](../library-browser/spec.md#selection-state) owns the exact write and confirmation behavior.
+- Alternatives: the visible action, its keyboard path, its touch accelerator, and the Agent/CLI operation use the same effect and settlement meaning. Their affordances and availability may differ by surface.
+- Recovery: a refused, failed, or unknown write retains the prior trustworthy state and exposes the owning [Selection State recovery rules](../library-browser/spec.md#selection-state).
 
 Pick is not Select mode, a generic checkmark, a Rating, or a destructive deletion action.
 
 ### Original unavailable
 
-- Domain fact: the Photo remains, but its Original File cannot be read at the remembered Original Location.
+- Domain fact: the Photo remains, but its Original File cannot be read at the remembered Original Location. [Photo Library availability](../photo-library/spec.md#photos) and [Manual Recovery](../photo-library/spec.md#manual-recovery) own the fact and recovery behavior.
 - Interaction class: read-state with explicit recovery.
 - Surface: content and fact groups show the Photo identity and `Original unavailable`; the recovery entry belongs to a supporting or outcome surface.
 - Presentation: the unavailable fact is not represented as a Removed Photo, Photo deletion, or valid Preview. The state has text and an accessible description in addition to any color or icon.
 - Recovery: the recovery surface names the affected identity, explains the evidence and scope, and uses the owning Location Recovery contract for any explicit apply step.
 
 `Original unavailable` is not a new Photo state model. It is a presentation of the existing Photo and Original facts.
+
+### Cross-surface examples
+
+- A CLI query may expose a filter or complete Album reorder without adding a matching Web control. Its help and reference disclose the capability, and its result uses the same Photo identity, effect, scope, and outcome language as the Web. See [Finding Photos](../command-line/spec.md#finding-photos), [Managing Albums](../command-line/spec.md#managing-albums), and [Moving Between CLI and Web](../command-line/spec.md#moving-between-cli-and-web).
+- Photo Development editing uses tool-owned state, guarded autosave, and tool-owned Undo/Redo. The design language requires visible current, stale, conflict, and failed distinctions, but does not reuse the Library Browser's one-level Undo contract. See [Autosave and Reversible Editing](../photo-development/spec.md#autosave-and-reversible-editing) and [Failure and Retention](../photo-development/spec.md#failure-and-retention).
+- Access submission may be refused, and confirmed session loss removes private views. Temporary network loss may retain an authorized view. The design language treats these as distinct outcomes and leaves the exact transition to [Browser Entry](../access/spec.md#browser-entry) and [Session Loss and Disconnection](../access/spec.md#session-loss-and-disconnection).
 
 ## Responsive Composition
 

@@ -2,7 +2,7 @@
 
 `specs/` is the authority for Slipstream's durable product behavior, design decisions, and implementation contracts. [`CONTEXT.md`](../CONTEXT.md) defines domain vocabulary. [Usage and installation guides](../docs/README.md) explain how to use the product. Follow [contract writing rules](AGENTS.md) when changing specifications.
 
-Use this index to locate the affected Feature and its contracts. Follow the [context-reading rules](../AGENTS.md#context-management) and [feature organization rules](AGENTS.md#feature-organization). Root contracts govern the product and shared system; Feature contracts own their scope, and optional capability contracts reference applicable parent constraints. Each level may have behavior, design, or both; specialist references stay beside their owner.
+Use this index to locate the affected Feature and its contracts. The Product Design Language and Design Language Contract are the authorities for future product design and Web implementation review; Feature contracts remain authoritative for exact behavior, and Web Frontend Architecture remains authoritative for code ownership and dependency direction. Follow the [context-reading rules](../AGENTS.md#context-management) and [feature organization rules](../AGENTS.md#feature-organization). Root contracts govern the product and shared system; Feature contracts own their scope, and optional capability contracts reference applicable parent constraints. Each level may have behavior, design, or both; specialist references stay beside their owner.
 
 ## Product and System
 
