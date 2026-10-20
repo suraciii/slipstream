@@ -105,6 +105,18 @@ test("unavailable Original keeps its Photo review and visible recovery action", 
   );
   await expect(status).toContainText("Original File is unavailable");
   await expect(status).toBeVisible();
+  await page.locator("[data-dock-more]").click();
+  const recoveryEntry = page
+    .locator("[data-photo-tools-entries]")
+    .getByRole("button", { name: "Review unavailable Originals", exact: true });
+  await expect(recoveryEntry).toBeVisible();
+  await recoveryEntry.click();
+  await expect(page.locator("[data-recovery-panel]")).toBeVisible();
+  await page.locator("[data-recovery-close]").click();
+  await expect(page.locator("[data-recovery-panel]")).toBeHidden();
+  await expect(page.locator("[data-photo-tools]")).toBeVisible();
+  await expect(recoveryEntry).toBeFocused();
+  await closePhotoTools(page);
   await status
     .getByRole("button", { name: "Review unavailable Originals" })
     .click();
