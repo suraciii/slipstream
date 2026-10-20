@@ -2,6 +2,7 @@
 
 mod admission;
 mod albums;
+mod codecs;
 mod composable_recipe;
 mod decisions;
 mod development_proxy;
@@ -19,6 +20,7 @@ mod processing_export;
 mod queries;
 mod removal;
 mod scan;
+mod scan_recovery;
 mod schema;
 #[cfg(test)]
 mod test_support;
@@ -47,8 +49,9 @@ pub use metadata::{
     ObservedSidecarState, RetainedOrphan,
 };
 pub use owner::{MutationError, Persistence, PersistenceError, PhotoDecisionWriteError};
-pub use scan::{
-    DiscoveredFingerprint, FingerprintCounts, FingerprintTarget, ScanApplication, ScanRecoveryPlan,
+pub use scan::ScanApplication;
+pub use scan_recovery::{
+    DiscoveredFingerprint, FingerprintCounts, FingerprintTarget, ScanRecoveryPlan,
     ScanRelocationSource,
 };
 pub use schema::{SchemaError, SchemaVersion, validate_canonical_schema};

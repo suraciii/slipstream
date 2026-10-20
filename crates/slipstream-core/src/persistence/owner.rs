@@ -1,26 +1,26 @@
 use super::albums::AlbumWriteError;
-use super::scan::{FingerprintCounts, FingerprintTarget, ScanApplication, ScanRecoveryPlan};
+use super::scan::ScanApplication;
+use super::scan_recovery::ScanRecoveryPlan;
 use super::{
     DatabaseName, StateDirectory, StateError, StateFileIdentity, admission::StateDatabaseLock,
     albums, decisions, development_proxy, edit_recipe, export, metadata, migrations, mutation,
-    queries, removal, scan, xmp,
+    owner_recovery, queries, removal, scan, xmp,
 };
 use crate::{
     AlbumBrowseTarget, AlbumCreationResult, AlbumMembershipMutation, AlbumMembershipResult,
     AlbumMutation, AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary,
-    AppliedRelocations, CheckedAlbumMutation, CheckedAlbumMutationResult,
-    CheckedPhotoDecisionMutation, CheckedPhotoDecisionResult, DiscoveredOriginal, EditRecipeRead,
-    ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreMutation, ExplicitPhotoRestoreResult,
-    ExportAttempt, ExportLeaseOutcome, ExportRecord, ExportRetryOutcome, ExportSettlement,
-    ExportSubmission, ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult,
-    LibraryRoot, MAXIMUM_PHOTO_RATING, OriginalFingerprint, OriginalScanError,
-    PermanentDeletionItemState, PermanentDeletionSelection, PermanentDeletionTarget,
-    PhotoAlbumMembership, PhotoOperationRemainder, PhotoQuery, PhotoQueryError,
-    PhotoQueryProjection, PhotoRead, PhotoRemovalMutation, PhotoRemovalResult, PhotoRestoration,
-    PhotoRestorationResult, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField,
-    PhotoStateMutation, PhotoStateMutationResult, PhotoStateValue, PreviewSeed, PreviewSeedResult,
-    RecoveryRecord, RecoverySurvey, RemovedPhotoRecord, RequestedRelocation, ScanSnapshot,
-    SelectionState, WhiteBalanceIntent, XmpExportRecord,
+    CheckedAlbumMutation, CheckedAlbumMutationResult, CheckedPhotoDecisionMutation,
+    CheckedPhotoDecisionResult, DiscoveredOriginal, EditRecipeRead, ExplicitPhotoRemovalMutation,
+    ExplicitPhotoRestoreMutation, ExplicitPhotoRestoreResult, ExportAttempt, ExportLeaseOutcome,
+    ExportRecord, ExportRetryOutcome, ExportSettlement, ExportSubmission,
+    ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult, MAXIMUM_PHOTO_RATING,
+    OriginalScanError, PermanentDeletionItemState, PermanentDeletionSelection,
+    PermanentDeletionTarget, PhotoAlbumMembership, PhotoOperationRemainder, PhotoQuery,
+    PhotoQueryError, PhotoQueryProjection, PhotoRead, PhotoRemovalMutation, PhotoRemovalResult,
+    PhotoRestoration, PhotoRestorationResult, PhotoStateBatchMutation, PhotoStateBatchResult,
+    PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateValue, PreviewSeed,
+    PreviewSeedResult, RecoveryRecord, RemovedPhotoRecord, ScanSnapshot, SelectionState,
+    WhiteBalanceIntent, XmpExportRecord,
 };
 
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params};
@@ -297,7 +297,7 @@ pub(super) fn validate_photo_state_batch_mutation(
     Ok(())
 }
 
-type Reply<T> = oneshot::Sender<Result<T, PersistenceError>>;
+pub(super) type Reply<T> = oneshot::Sender<Result<T, PersistenceError>>;
 type EditRecipeSurfaceReceiver =
     oneshot::Receiver<Result<Option<(PhotoRead, EditRecipeRead)>, PersistenceError>>;
 
@@ -337,23 +337,7 @@ pub(super) enum Command {
         failure_after_first: bool,
         reply: Reply<ScanApplication>,
     },
-    RecoveryFacts {
-        original_ids: Vec<String>,
-        reply: Reply<Vec<OriginalFingerprint>>,
-    },
-    NextFingerprintTarget(Reply<Option<FingerprintTarget>>),
-    StoreFingerprint(OriginalFingerprint, Reply<()>),
-    FingerprintCounts(Reply<FingerprintCounts>),
-    RecoverySurvey(Reply<RecoverySurvey>),
-    RecoveryRecords {
-        original_ids: Vec<String>,
-        reply: Reply<RecoveryRecords>,
-    },
-    ApplyRelocations {
-        root: LibraryRoot,
-        relocations: Vec<RequestedRelocation>,
-        reply: Reply<AppliedRelocations>,
-    },
+    Recovery(owner_recovery::RecoveryCommand),
     Preview(PreviewSeed, Reply<PreviewSeedResult>),
     ListAlbums(Reply<Vec<AlbumRecord>>),
     ListAlbumSummaries(Reply<Vec<AlbumSummary>>),
@@ -1602,50 +1586,8 @@ fn owner_main(
                 );
                 let _ = reply.send(result);
             }
-            Command::RecoveryFacts {
-                original_ids,
-                reply,
-            } => {
-                let result = scan::recovery_facts(&connection, &original_ids);
-                let _ = reply.send(result);
-            }
-            Command::NextFingerprintTarget(reply) => {
-                let result = scan::next_fingerprint_target(&connection);
-                let _ = reply.send(result);
-            }
-            Command::StoreFingerprint(fingerprint, reply) => {
-                let result =
-                    scan::store_fingerprint(&state, &database_name, &mut connection, fingerprint);
-                let _ = reply.send(result);
-            }
-            Command::FingerprintCounts(reply) => {
-                let result = scan::fingerprint_counts(&connection);
-                let _ = reply.send(result);
-            }
-            Command::RecoverySurvey(reply) => {
-                let result = scan::recovery_survey(&connection);
-                let _ = reply.send(result);
-            }
-            Command::RecoveryRecords {
-                original_ids,
-                reply,
-            } => {
-                let result = scan::recovery_records(&connection, &original_ids);
-                let _ = reply.send(result);
-            }
-            Command::ApplyRelocations {
-                root,
-                relocations,
-                reply,
-            } => {
-                let result = scan::apply_manual_relocations(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &root,
-                    &relocations,
-                );
-                let _ = reply.send(result);
+            Command::Recovery(command) => {
+                owner_recovery::dispatch(command, &state, &database_name, &mut connection);
             }
             Command::Preview(preview, reply) => {
                 let result = scan::seed_preview(&state, &database_name, &mut connection, preview);

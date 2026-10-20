@@ -1,13 +1,13 @@
 //! Photo removal and restore: durable replay receipts and monotonic markers.
 //! Every write runs on the serialized owner connection.
 
+use super::codecs::{parse_selection_state, selection_state_value};
 use super::mutation::{mutation_error_from_sqlite, mutation_transaction};
 use super::owner::{MutationError, MutationVersions, unix_millis};
 use super::permanent_deletion::{
     PERMANENT_DELETION_DELETED_PREFIX, photo_is_permanently_deleted,
     unsettled_permanent_deletion_operation,
 };
-use super::scan::{parse_selection_state, selection_state_value};
 use super::{DatabaseName, StateDirectory};
 use crate::{
     ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreCounts, ExplicitPhotoRestoreMutation,
