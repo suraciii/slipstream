@@ -66,7 +66,7 @@ type PointerState = {
 export function createPhotoGestures({
   preview,
   stage,
-  selectFeedback,
+  pickFeedback,
   rejectFeedback,
   zoom,
   rating,
@@ -79,7 +79,7 @@ export function createPhotoGestures({
 }: Readonly<{
   preview: HTMLElement;
   stage: HTMLElement;
-  selectFeedback: HTMLElement;
+  pickFeedback: HTMLElement;
   rejectFeedback: HTMLElement;
   zoom: PhotoZoomController;
   rating: RatingControls;
@@ -105,9 +105,9 @@ export function createPhotoGestures({
     if (releaseCapture && id !== undefined && preview.hasPointerCapture(id))
       preview.releasePointerCapture(id);
     stage.style.transform = "";
-    selectFeedback.classList.remove("pending");
+    pickFeedback.classList.remove("pending");
     rejectFeedback.classList.remove("pending");
-    selectFeedback.textContent = "Next";
+    pickFeedback.textContent = "Next";
     rejectFeedback.textContent = "Previous";
   };
   const reset = () => {
@@ -196,7 +196,7 @@ export function createPhotoGestures({
       active.ratingPending = false;
       active.ratingWheel = true;
       stage.style.transform = "";
-      selectFeedback.classList.remove("pending");
+      pickFeedback.classList.remove("pending");
       rejectFeedback.classList.remove("pending");
       rating.openWheel(active.lastX, active.lastY);
       rating.updateWheel(active.lastX, active.lastY);
@@ -234,17 +234,17 @@ export function createPhotoGestures({
     }
     if (pointer.axis === "vertical") {
       stage.style.transform = `translateY(${Math.max(-140, Math.min(140, dy))}px)`;
-      selectFeedback.textContent = dy < 0 ? "Next" : "";
+      pickFeedback.textContent = dy < 0 ? "Next" : "";
       rejectFeedback.textContent = dy > 0 ? "Previous" : "";
-      selectFeedback.classList.toggle("pending", dy < -SWIPE_PENDING_PIXELS);
+      pickFeedback.classList.toggle("pending", dy < -SWIPE_PENDING_PIXELS);
       rejectFeedback.classList.toggle("pending", dy > SWIPE_PENDING_PIXELS);
       return;
     }
     if (pointer.axis === "horizontal") {
       stage.style.transform = `translateX(${Math.max(-140, Math.min(140, dx))}px)`;
-      selectFeedback.textContent = dx > 0 ? "Select" : "";
+      pickFeedback.textContent = dx > 0 ? "Pick" : "";
       rejectFeedback.textContent = dx < 0 ? "Reject" : "";
-      selectFeedback.classList.toggle("pending", dx > SWIPE_PENDING_PIXELS);
+      pickFeedback.classList.toggle("pending", dx > SWIPE_PENDING_PIXELS);
       rejectFeedback.classList.toggle("pending", dx < -SWIPE_PENDING_PIXELS);
     }
   };

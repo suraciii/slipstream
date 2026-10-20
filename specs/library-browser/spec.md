@@ -312,7 +312,7 @@ On a new state store with no published Library, the browser may show initializat
 
 A rescan that relocates or still misses Original Files must report committed recovery counts on the Library status, for example `Updated locations for 126 photos. 3 originals still unavailable.` A successful recovery must stay unobtrusive: it must not open a dialog or require a path entry.
 
-Slipstream must offer one bounded `Review unavailable originals` entry from the scan result and from an affected Photo. The entry must list remembered Locations, filenames, kinds, Ratings, Selection States, Album counts, and whether each Original has a fingerprint. It must let the Photographer propose mappings, inspect every proposal, and confirm an explicit apply under the [Photo Library and Albums](../photo-library/spec.md) manual recovery rules.
+Slipstream must offer one bounded `Review unavailable Originals` entry from the scan result and from an affected Photo. The entry must list remembered Locations, filenames, kinds, Ratings, Selection States, Album counts, and whether each Original has a fingerprint. It must let the Photographer propose mappings, inspect every proposal, and confirm an explicit apply under the [Photo Library and Albums](../photo-library/spec.md) manual recovery rules.
 
 Unavailable Photos must stay in their Grid positions and Albums with their remembered facts. Slipstream must not remove a Photo or its decisions only because its Original File is missing.
 
@@ -508,7 +508,7 @@ controls equivalent to every gesture action.
 On a Fit Preview, the Photographer holds a touch pointer still for 450
 milliseconds, slides to `4`, and releases. Slipstream saves exactly Rating `4`,
 leaves Selection State and Photo position unchanged, and keeps the Photo open.
-On the rendered image, moving horizontally first starts the Select / Reject
+On the rendered image, moving horizontally first starts the Pick / Reject
 swipe and moving vertically first starts the Next / Previous navigation swipe.
 On a letterbox or non-image Preview region, moving vertically first scrolls
 Photo View. Adding a second pointer starts Pinch Zoom. None of those handoffs
@@ -574,7 +574,7 @@ larger absolute axis delta owns the gesture:
 When the threshold is reached, Slipstream opens a transient Rating Wheel near
 the starting point. The Wheel must adapt inward when the starting point is
 near an edge or safe-area inset. It must expose exactly six candidates: `0`,
-`1`, `2`, `3`, `4`, and `5`; `0` means Clear Rating. The current Rating must
+`1`, `2`, `3`, `4`, and `5`; `0` means No Rating. The current Rating must
 be highlighted, and the candidate under the pointer must be communicated with
 its numeric and star meaning. A candidate highlight is presentation only; it
 must not persist while the pointer remains down.
@@ -743,7 +743,7 @@ Grid View supports multi-selection in addition to the single open target:
   multi-select without a modifier key.
 
 One batch addresses at most 100 Photos. When **Select** mode is active, the
-Grid must show a selection tray even when it is empty, with `0 / 100 Photos`.
+Grid must show a selection tray even when it is empty, with `0 / 100 selected`.
 The Grid refuses to grow the multi-selection past that bound, names the bound
 when it does, and keeps the selection it already holds, so a batch the server
 would refuse can never be built. A refused toggle or range is one operation:
@@ -755,7 +755,7 @@ operation. It must show the active source and must distinguish the visible
 filtered result count from the Selection State counts for the complete source.
 
 The **Select** mode must be enterable and leavable from a keyboard. The clear exit labeled Done and `Escape` empty the multi-selection and leave **Select** mode, including
-when the tray currently shows `0 / 100 Photos`. Opening or reopening a source
+when the tray currently shows `0 / 100 selected`. Opening or reopening a source
 also leaves Select mode. The Grid decision and Rating keys keep
 their existing meaning for the focused Photo.
 
@@ -892,7 +892,7 @@ The Photographer drags a Photo to the right. A picked indicator grows with the d
 On a Fit Preview, the Photographer holds a touch pointer still for 450
 milliseconds, slides to `4`, and releases. Slipstream saves exactly Rating `4`,
 leaves Selection State and Photo position unchanged, and keeps the Photo open.
-On the rendered image, moving horizontally first starts the Select / Reject
+On the rendered image, moving horizontally first starts the Pick / Reject
 swipe and moving vertically first starts the Next / Previous navigation swipe.
 On a letterbox or non-image Preview region, moving vertically first scrolls
 Photo View. Adding a second pointer starts Pinch Zoom. None of those handoffs

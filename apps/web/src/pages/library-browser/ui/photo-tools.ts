@@ -28,6 +28,8 @@ export function createPhotoToolsController({
   openSources,
   openEditor,
   openDetails,
+  openViewOptions,
+  openRecovery,
 }: Readonly<{
   elements: Readonly<{
     photoToolsDialog: HTMLDialogElement;
@@ -45,6 +47,8 @@ export function createPhotoToolsController({
   openSources: () => void;
   openEditor: (photoId: string) => void;
   openDetails?: (photoId: string) => void;
+  openViewOptions: () => void;
+  openRecovery: () => void;
 }>): PhotoToolsController {
   const {
     photoToolsDialog,
@@ -105,6 +109,14 @@ export function createPhotoToolsController({
       if (!button) return;
       const entry = button.dataset.photoToolsEntry;
       if (!entry) return;
+      if (entry === "view-options") {
+        openViewOptions();
+        return;
+      }
+      if (entry === "recovery") {
+        openRecovery();
+        return;
+      }
       const photoId = currentPhotoId();
       if (!photoId) return;
       if (entry === "sources") {

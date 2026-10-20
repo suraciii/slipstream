@@ -208,7 +208,7 @@ export function createRecoveryReviewOwner(
       return;
     }
     const message = page.isPhotoVisible?.()
-      ? "Location Recovery for unavailable Originals could not be loaded. Retry from Status and Recovery."
+      ? "Location Recovery for unavailable Originals could not be loaded. Retry the review from Photo tools."
       : "Location Recovery for unavailable Originals could not be loaded. Close this message and retry Review unavailable Originals from Sources.";
     if (page.isPhotoVisible?.()) page.setPhotoStatusText?.(message);
     else page.setGridStatusText(message);

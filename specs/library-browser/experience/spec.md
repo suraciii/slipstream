@@ -15,8 +15,8 @@ failures, and Undo. Moving a control must preserve those rules.
 ```text diagram
 Library Browser
 ├── Grid: Sources · View options (incl. Album Resume) · Select mode
-├── Photo: Back · Preview · position/state badge · Select / Reject / Undo · Rating · More
-│   └── Touch accelerators in Fit: ← Reject · → Select · ↑ Next · ↓ Previous
+├── Photo: Back · Preview · position/state badge · Pick / Reject / Undo · Rating · More
+│   └── Touch accelerators in Fit: ← Reject · → Pick · ↑ Next · ↓ Previous
 └── One supporting surface: Sources, options, Rating, tools, or recovery
 ```
 
@@ -25,6 +25,11 @@ Library Browser
 The Library Browser has two views: Grid View and Photo View. Sources, View
 options, Rating choices, and Photo tools are supporting surfaces, not new
 pages or new sources.
+
+Use **Pick** for the keep decision, **Reject** for the reject decision, and
+**Unflagged** for no decision. **Select** is reserved for choosing Photos or
+sources; **Select mode** names the bounded multi-selection. These terms are
+defined in [CONTEXT.md](../../../CONTEXT.md).
 
 The interface must use one neutral dark appearance. Color communicates focus,
 Selection State, Rating, connectivity, or failure. State must also have text,
@@ -73,7 +78,7 @@ View options must group these existing controls:
 
 The header must indicate an active nondefault filter or order and the visible
 result count. Complete progress remains available in View options with the
-existing server-authoritative count rules. A consequential scan completion or
+existing server-authoritative count rules. A consequential Library check completion or
 failure must remain discoverable under Status and Recovery, even while the
 options surface is closed.
 
@@ -95,7 +100,7 @@ leaving no more than the ordinary inter-cell gap at the trailing edge.
 ## Multi-Selection
 
 Select mode must replace the normal header controls with the source name,
-`N / 100 Photos`, and Done. Done is the visible clear exit: it empties the
+`N / 100 selected`, and Done. Done is the visible clear exit: it empties the
 multi-selection and leaves Select mode without changing a Photo decision.
 Escape has the same effect. Source changes and source reopening retain their
 existing clear behavior.
@@ -120,10 +125,10 @@ Photo View must contain a compact source-return and filename row, the Preview,
 and a primary action region. It must communicate current position, Selection
 State, and Rating without requiring Photo tools to be open. The primary region
 must present one Reject action, one Rating entry with an explicit current value
-including zero, one Select action, one Undo action, and More.
+including zero, one Pick action, one Undo action, and More.
 
 Previous and Next must remain visible in a separate navigation group with the
-position and total. They must not share an activation target with Select or
+position and total. They must not share an activation target with Pick or
 Reject. Portrait layouts may place navigation immediately above the main
 actions; short landscape must consolidate them without shrinking touch
 targets. There must be only one visible Previous/Next pair.
@@ -139,12 +144,12 @@ disabled but must expose that fact without implying that a decision was
 reverted.
 
 On touch input in Fit Preview, horizontal gestures are decision accelerators:
-right sets Select and left sets Reject, then advances to the next Photo after
-the accepted decision. Vertical gestures are navigation accelerators: up opens
+right Picks and left Rejects, then advances to the next Photo after the
+accepted decision. Vertical gestures are navigation accelerators: up opens
 the next Photo and down opens the previous Photo. They never change Selection
 State, Rating, Album membership, saved Album position, or Undo. The mapping is
 fixed across source kinds and Selection State filters. The visible Previous,
-Next, Select, and Reject controls remain the equivalent non-gesture paths.
+Next, Pick, and Reject controls remain the equivalent non-gesture paths.
 
 Manual Zoom gives one-finger panning priority over all four swipe actions.
 Vertical movement that does not commit navigation must retain the natural
@@ -156,7 +161,8 @@ More opens the supporting action groups:
 
 - **Review:** Clear flag, with its existing availability rule;
 - **Photo:** Album membership, Capture Details, Preview Source, Preview Zoom,
-  and Nearby Photos; and
+  and Nearby Photos;
+- **Library:** Sources, View options, and Review unavailable Originals; and
 - **Help:** the combined Preview detail-limit explanation and gesture guidance.
 
 The Preview must fit its complete composition. Empty space caused by image
@@ -294,7 +300,7 @@ control during ordinary review.
 
 A blocking connection or decision failure must be visible beside the affected
 primary action, not only inside a closed panel. A Library-level failure or
-completed scan with an outstanding action must expose one compact status entry
+completed Library check with an outstanding action must expose one compact status entry
 from either view. Opening it reveals the current owning notice and action;
 background progress must not erase it. Expanding detailed recovery uses a
 scrolling surface rather than an unlimited header stack.

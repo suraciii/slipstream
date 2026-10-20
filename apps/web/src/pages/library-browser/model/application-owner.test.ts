@@ -561,7 +561,7 @@ describe("ApplicationOwner", () => {
       summaryEvents(events).filter(
         (event) =>
           event.summary.text ===
-          "Library check complete. Open Browse Snapshots remain unchanged.",
+          "Library check complete. This view still shows the earlier result.",
       ),
     ).toHaveLength(1);
     owner.dispose();
@@ -636,7 +636,7 @@ describe("ApplicationOwner", () => {
       summaryEvents(events).filter(
         (event) =>
           event.summary.text ===
-          "Library check complete. Open Browse Snapshots remain unchanged.",
+          "Library check complete. This view still shows the earlier result.",
       ),
     ).toHaveLength(1);
     expect(overviewRequests).toBe(4);
@@ -650,7 +650,7 @@ describe("ApplicationOwner", () => {
       summaryEvents(events).filter(
         (event) =>
           event.summary.text ===
-          "Library check complete. Open Browse Snapshots remain unchanged.",
+          "Library check complete. This view still shows the earlier result.",
       ),
     ).toHaveLength(1);
     expect(latestSummary(events)?.action?.kind).toBe("refresh-current-source");

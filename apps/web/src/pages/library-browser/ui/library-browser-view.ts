@@ -573,7 +573,7 @@ export function createLibraryBrowserView(
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
           <header class="grid-header"><div class="grid-header-row"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false"><span class="source-toggle-name" data-grid-compact-title>All Photos</span><span class="source-toggle-indicator" aria-hidden="true">▾</span></button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-connection" data-grid-connection role="status" hidden></p><div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options aria-label="View options">View options</button><span class="options-flag" data-view-options-flag hidden></span><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button></div><div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
-          <div class="grid-batch" data-grid-batch hidden><div class="grid-batch-result" data-grid-batch-result hidden><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-select>Pick</button><button type="button" data-batch-reject>Reject</button><label for="batch-album-select">Add to</label><select id="batch-album-select" data-batch-album-select></select><button type="button" data-batch-album-add>Add to Album</button></div></div>
+          <div class="grid-batch" data-grid-batch hidden><div class="grid-batch-result" data-grid-batch-result hidden><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-pick>Pick</button><button type="button" data-batch-reject>Reject</button><label for="batch-album-select">Add to</label><select id="batch-album-select" data-batch-album-select></select><button type="button" data-batch-album-add>Add to Album</button></div></div>
         </section>
 ${PHOTO_VIEW_TEMPLATE}
         <dialog class="options-dialog" data-view-options aria-labelledby="view-options-title">
@@ -613,14 +613,6 @@ ${REMOVED_PANELS_TEMPLATE}
   const photoSourceToggle = required<HTMLButtonElement>(
     root,
     "[data-photo-source-toggle]",
-  );
-  const photoStatusRecovery = required<HTMLButtonElement>(
-    root,
-    "[data-photo-status-recovery]",
-  );
-  const photoLibrary = required<HTMLButtonElement>(
-    root,
-    "[data-photo-library]",
   );
   const sourceClose = required<HTMLButtonElement>(root, "[data-source-close]");
   const gridConnection = required<HTMLElement>(root, "[data-grid-connection]");
@@ -854,7 +846,7 @@ ${REMOVED_PANELS_TEMPLATE}
     root,
     "[data-grid-batch-compensate]",
   );
-  const batchSelect = required<HTMLButtonElement>(root, "[data-batch-select]");
+  const batchPick = required<HTMLButtonElement>(root, "[data-batch-pick]");
   const batchReject = required<HTMLButtonElement>(root, "[data-batch-reject]");
   const batchAlbumSelect = required<HTMLSelectElement>(
     root,
@@ -933,7 +925,7 @@ ${REMOVED_PANELS_TEMPLATE}
   );
   const dockReject = required<HTMLButtonElement>(root, "[data-dock-reject]");
   const dockRating = required<HTMLButtonElement>(root, "[data-dock-rating]");
-  const dockSelect = required<HTMLButtonElement>(root, "[data-dock-select]");
+  const dockPick = required<HTMLButtonElement>(root, "[data-dock-pick]");
   const dockUndo = required<HTMLButtonElement>(root, "[data-dock-undo]");
   const dockNext = required<HTMLButtonElement>(root, "[data-dock-next]");
   const dockMore = required<HTMLButtonElement>(root, "[data-dock-more]");
@@ -964,7 +956,7 @@ ${REMOVED_PANELS_TEMPLATE}
     root.querySelectorAll<HTMLButtonElement>("[data-photo-tools-return]"),
   );
   const ratings = required<HTMLElement>(root, "[data-ratings]");
-  const selectFeedback = required<HTMLElement>(root, "[data-select-feedback]");
+  const pickFeedback = required<HTMLElement>(root, "[data-pick-feedback]");
   const rejectFeedback = required<HTMLElement>(root, "[data-reject-feedback]");
 
   const send = (intent: LibraryBrowserIntent): void => {
@@ -1003,12 +995,10 @@ ${REMOVED_PANELS_TEMPLATE}
   /// surface, so every supporting-surface transition updates both controls.
   const syncSecondarySurface = () => {
     const toolsOpen = surfaces.isActive("photo-tools");
-    const optionsOpen = surfaces.isActive("view-options");
     const ratingOpen = toolsOpen && photoToolsController.view() === "rating";
     dockMore.setAttribute("aria-expanded", String(toolsOpen));
     selectionBadge.setAttribute("aria-expanded", String(toolsOpen));
     dockRating.setAttribute("aria-expanded", String(ratingOpen));
-    photoLibrary.setAttribute("aria-expanded", String(optionsOpen));
     const status = required<HTMLElement>(root, "[data-status]");
     const host = toolsOpen
       ? required<HTMLElement>(photoToolsDialog, ".photo-tools-sheet")
@@ -1145,7 +1135,7 @@ ${REMOVED_PANELS_TEMPLATE}
       batchResult,
       batchResultText,
       batchCompensate,
-      batchSelect,
+      batchPick,
       batchReject,
       batchAlbumSelect,
       batchAlbumAdd,
@@ -1185,6 +1175,8 @@ ${REMOVED_PANELS_TEMPLATE}
     openSources: () => sourceController.open(),
     openEditor: (photoId) => editorController.open(photoId),
     openDetails: openPhotoDetails,
+    openViewOptions: () => viewOptionsController.open(),
+    openRecovery: () => send({ kind: "recovery-entry" }),
   });
   const editorController = createPhotoEditorSurfaceController({
     root,
@@ -1340,7 +1332,7 @@ ${REMOVED_PANELS_TEMPLATE}
   const photoGestures = photoGestureModule.createPhotoGestures({
     preview,
     stage,
-    selectFeedback,
+    pickFeedback,
     rejectFeedback,
     zoom: zoomController,
     rating: ratingControls,
@@ -1422,7 +1414,7 @@ ${REMOVED_PANELS_TEMPLATE}
             : { kind: "next" },
         );
         return;
-      case "select-photo":
+      case "photo-decision":
         send({
           kind: "photo-mutation",
           field: "selectionState",
@@ -1476,14 +1468,6 @@ ${REMOVED_PANELS_TEMPLATE}
   retry.addEventListener("click", () => send({ kind: "retry-source" }));
   signOut.addEventListener("click", () => send({ kind: "sign-out" }));
   retryPhoto.addEventListener("click", () => send({ kind: "retry-photo" }));
-  photoStatusRecovery.addEventListener("click", () => {
-    if (photoView.hidden) return;
-    send({ kind: "recovery-entry" });
-  });
-  photoLibrary.addEventListener("click", () => {
-    if (photoView.hidden) return;
-    viewOptionsController.open();
-  });
   selectionBadge.addEventListener("click", () => photoToolsController.open());
   dockPrevious.addEventListener("click", () => send({ kind: "previous" }));
   dockNext.addEventListener("click", () => send({ kind: "next" }));
@@ -1502,7 +1486,7 @@ ${REMOVED_PANELS_TEMPLATE}
       advance: false,
     }),
   );
-  dockSelect.addEventListener("click", () =>
+  dockPick.addEventListener("click", () =>
     send({
       kind: "photo-mutation",
       field: "selectionState",
@@ -1634,7 +1618,7 @@ ${REMOVED_PANELS_TEMPLATE}
       decisionInteractionEnabled = model.decisionEnabled;
       if (!model.decisionEnabled) photoGestures?.cancelUnavailableDecision();
       ratingControls.setDecisionEnabled(model.decisionEnabled);
-      dockSelect.disabled = !model.decisionEnabled;
+      dockPick.disabled = !model.decisionEnabled;
       dockReject.disabled = !model.decisionEnabled;
       photoToolsClear.disabled = !model.clearEnabled;
       refresh.disabled = !model.refreshEnabled;
@@ -1724,8 +1708,6 @@ ${REMOVED_PANELS_TEMPLATE}
       zoomController?.resetForImage();
       photoView.hidden = true;
       gridView.hidden = false;
-      photoStatusRecovery.hidden = true;
-      photoLibrary.hidden = true;
       // Photo View detached the owner's Grid images, so the visible Grid
       // rebuilds its cells and re-attaches every thumbnail it still shows.
       clearGridCells();
@@ -1746,8 +1728,6 @@ ${REMOVED_PANELS_TEMPLATE}
       // re-render of the Photo the tools describe never dismisses them.
       gridView.hidden = true;
       photoView.hidden = false;
-      photoStatusRecovery.hidden = false;
-      photoLibrary.hidden = false;
       photoView.scrollTop = 0;
       sourceController.syncLayout();
       filmstripPresenter.syncHost();

@@ -67,7 +67,7 @@ const select = (
   value: ViewSelectionState,
   advance: boolean,
 ): KeyboardIntent => ({
-  kind: "select-photo",
+  kind: "photo-decision",
   value,
   advance,
   preventDefault: false,

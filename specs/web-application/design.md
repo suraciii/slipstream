@@ -264,7 +264,7 @@ This shape is selected because the Photographer must reach any
 magnification between complete composition and honest pixel inspection
 without a second control model. The retired `Fill` cropping mode is not
 reintroduced: cropping hid composition rather than inspecting it. Explicit
-Select and Reject controls stay available in every zoom state.
+Pick and Reject controls stay available in every zoom state.
 
 ### Mobile Photo View interaction state
 

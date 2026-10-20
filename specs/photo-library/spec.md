@@ -77,7 +77,7 @@ Recovery must search only supported descendants of the admitted Library Folder. 
 
 Every unavailable Original File belonging to an active Photo must remain listed with its remembered Location, filename, kind, Rating, Selection State, Album count, and whether a fingerprint exists. Removed Photos remain in [Trash](trash/spec.md); Location Recovery must not restore them or reverse Permanent Deletion.
 
-The Photographer must be able to review unavailable Originals and propose new Locations through one bounded `Review unavailable originals` entry from the scan result or an affected Photo.
+The Photographer must be able to review unavailable Originals and propose new Locations through one bounded `Review unavailable Originals` entry from the scan result or an affected Photo.
 
 Slipstream must support two proposal forms:
 
