@@ -1,3 +1,4 @@
+import { formatPhotoCount as photoCountText } from "./photo-count.js";
 import type {
   AlbumMembershipAddResult,
   AlbumMembershipRemoveResult,
@@ -136,9 +137,6 @@ export function createGridMultiSelectionOwner(
   let batchAlbumCompensation: BatchAlbumCompensation | undefined;
   let batchAlbumPending = false;
   let closed = false;
-
-  const photoCountText = (count: number): string =>
-    `${count.toLocaleString()} ${count === 1 ? "Photo" : "Photos"}`;
 
   const renderBatchAlbums = (): void => {
     if (closed || !coordinate.alive()) return;

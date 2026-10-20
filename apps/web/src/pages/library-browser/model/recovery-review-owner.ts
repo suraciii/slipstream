@@ -212,9 +212,12 @@ export function createRecoveryReviewOwner(
       view.setRecoveryMessage();
       return;
     }
-    reportReviewFailure(
-      "Could not open the review of unavailable originals. Retry it from the recovery entry.",
-    );
+    const message = page.isPhotoVisible?.()
+      ? "Location Recovery for unavailable Originals could not be loaded. Retry the review from Photo tools."
+      : "Location Recovery for unavailable Originals could not be loaded. Close this message and retry Review unavailable Originals from Sources.";
+    if (page.isPhotoVisible?.()) page.setPhotoStatusText?.(message);
+    else page.setGridStatusText(message);
+    return;
   };
 
   /// Appends the next page of the same review. An expired review cannot be

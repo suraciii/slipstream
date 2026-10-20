@@ -10,7 +10,8 @@ mod static_web;
 mod xmp;
 
 pub(crate) use cli::{
-    CLI_CONTRACT_HEADER, cli_error, invalid_cli, require_cli_contract, require_published,
+    CLI_CONTRACT_HEADER, cli_error, cli_error_empty, invalid_cli, require_cli_contract,
+    require_published,
 };
 pub(crate) use static_web::{
     fstat, open_confined_file, open_directory_descriptor, plain_error, static_web,

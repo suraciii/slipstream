@@ -335,7 +335,7 @@ fn expansion_projection(connection: &Connection) -> Result<ExpansionProjection, 
 #[cfg(test)]
 mod tests {
     use crate::persistence::PersistenceError;
-    use crate::persistence::scan;
+    use crate::persistence::scan_recovery;
     use crate::persistence::test_support::*;
     use crate::{LibraryRoot, RelativeOriginalPath, RequestedRelocation, source_revision};
     use rusqlite::Connection;
@@ -488,7 +488,7 @@ mod tests {
             .unwrap()
             .facts()
             .unwrap();
-        let result = scan::apply_manual_relocations(
+        let result = scan_recovery::apply_manual_relocations(
             &state,
             &name,
             &mut Connection::open(&path).unwrap(),

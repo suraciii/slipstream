@@ -216,13 +216,13 @@ test("an idle browser reports a lost connection from the status probe", async ({
   const running = await server(base, root);
   await startReview(page, running.url, "All Photos");
   await expectConnection(page, "Connected");
-  await expect(page.locator("[data-dock-select]")).toBeEnabled();
+  await expect(page.locator("[data-dock-pick]")).toBeEnabled();
 
   // The Photographer takes no action here. Only the reachability probe runs,
   // and the server stops answering it.
   await page.route("**/api/status", (route) => route.abort());
   await expectConnection(page, "Disconnected");
-  await expect(page.locator("[data-dock-select]")).toBeDisabled();
+  await expect(page.locator("[data-dock-pick]")).toBeDisabled();
   await expect(page.locator("[data-dock-reject]")).toBeDisabled();
   await expect(
     page.getByRole("button", { name: "Retry", exact: true }),
@@ -238,7 +238,7 @@ test("an idle browser reports a lost connection from the status probe", async ({
   // A usable status answer confirms the connection again.
   await page.unroute("**/api/status");
   await expectConnection(page, "Connected");
-  await expect(page.locator("[data-dock-select]")).toBeEnabled();
+  await expect(page.locator("[data-dock-pick]")).toBeEnabled();
 
   // An answered status error is a server-side condition, not a lost
   // connection, so it must not report the browser disconnected.
@@ -247,7 +247,7 @@ test("an idle browser reports a lost connection from the status probe", async ({
   );
   await page.waitForTimeout(3_000);
   await expectConnection(page, "Connected");
-  await expect(page.locator("[data-dock-select]")).toBeEnabled();
+  await expect(page.locator("[data-dock-pick]")).toBeEnabled();
   await page.unroute("**/api/status");
 });
 

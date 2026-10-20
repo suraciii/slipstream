@@ -22,7 +22,7 @@ type BatchElements = Readonly<{
   batchResult: HTMLElement;
   batchResultText: HTMLElement;
   batchCompensate: HTMLButtonElement;
-  batchSelect: HTMLButtonElement;
+  batchPick: HTMLButtonElement;
   batchReject: HTMLButtonElement;
   batchAlbumSelect: HTMLSelectElement;
   batchAlbumAdd: HTMLButtonElement;
@@ -110,7 +110,7 @@ export const createGridBatchPresenter = (
       return;
     }
     const resultAction = result?.compensation ?? result?.review;
-    e.batchCount.textContent = `${count.toLocaleString()} / ${limit.toLocaleString()} Photos`;
+    e.batchCount.textContent = `${count.toLocaleString()} / ${limit.toLocaleString()} selected`;
     e.batchRetained.hidden = count === 0 || result === undefined;
     e.batchResult.hidden = result === undefined;
     e.batchResultText.textContent = result?.message ?? "";
@@ -148,7 +148,7 @@ export const createGridBatchPresenter = (
     if (!canAct && held === null) {
       const active = document.activeElement;
       if (
-        active === e.batchSelect ||
+        active === e.batchPick ||
         active === e.batchReject ||
         active === e.batchAlbumSelect ||
         active === e.batchAlbumAdd ||
@@ -158,7 +158,7 @@ export const createGridBatchPresenter = (
         e.multiDone.focus();
       }
     }
-    e.batchSelect.disabled = !canAct;
+    e.batchPick.disabled = !canAct;
     e.batchReject.disabled = !canAct;
     const hasAlbums = e.batchAlbumSelect.options.length > 0;
     e.batchAlbumSelect.disabled = !canAct || !hasAlbums;
@@ -181,8 +181,8 @@ export const createGridBatchPresenter = (
     albumSelection = e.batchAlbumSelect.value;
     renderTray();
   };
-  const onSelect = () => {
-    if (!options.alive() || e.batchSelect.disabled) return;
+  const onPick = () => {
+    if (!options.alive() || e.batchPick.disabled) return;
     options.send({ kind: "grid-batch-mutation", value: "picked" });
   };
   const onReject = () => {
@@ -202,7 +202,7 @@ export const createGridBatchPresenter = (
     );
   };
   e.batchAlbumSelect.addEventListener("change", onSelectChange);
-  e.batchSelect.addEventListener("click", onSelect);
+  e.batchPick.addEventListener("click", onPick);
   e.batchReject.addEventListener("click", onReject);
   e.batchAlbumAdd.addEventListener("click", onAdd);
   e.batchCompensate.addEventListener("click", onCompensate);
@@ -217,7 +217,7 @@ export const createGridBatchPresenter = (
     dispose: () => {
       disposed = true;
       e.batchAlbumSelect.removeEventListener("change", onSelectChange);
-      e.batchSelect.removeEventListener("click", onSelect);
+      e.batchPick.removeEventListener("click", onPick);
       e.batchReject.removeEventListener("click", onReject);
       e.batchAlbumAdd.removeEventListener("click", onAdd);
       e.batchCompensate.removeEventListener("click", onCompensate);

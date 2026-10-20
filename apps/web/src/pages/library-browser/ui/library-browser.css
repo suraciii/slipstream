@@ -1190,7 +1190,7 @@
   align-items: stretch;
   overflow: hidden;
   background: #030405;
-  touch-action: none;
+  touch-action: pan-y;
   user-select: none;
 }
 
@@ -1269,6 +1269,17 @@
   place-content: center;
   overflow: hidden;
   transition: transform 140ms ease-out;
+}
+
+.image-stage > img {
+  /* The image owns decision and navigation swipes. Keeping the surrounding
+     stage native lets a touch that starts in the letterboxed area continue
+     scrolling compact Photo View toward the controls. */
+  touch-action: none;
+}
+
+.image-stage > img[data-measured="false"] {
+  touch-action: pan-y;
 }
 
 .image-stage > p {
@@ -1394,7 +1405,7 @@
   writing-mode: vertical-rl;
 }
 
-.swipe-feedback.select {
+.swipe-feedback.pick {
   color: var(--selected);
 }
 
@@ -1585,13 +1596,13 @@
   white-space: normal;
 }
 
-.select-button {
+.pick-button {
   border-color: #33764b;
   background: var(--selected-bg);
   color: #daf5e2;
 }
 
-.select-button:hover:not(:disabled) {
+.pick-button:hover:not(:disabled) {
   border-color: var(--selected);
   background: #1d4a2f;
 }
@@ -1830,10 +1841,6 @@
     min-width: 2.75rem;
     min-height: 2.75rem;
   }
-
-  .preview[data-zoom-state="fit"] {
-    touch-action: pan-y;
-  }
 }
 
 /* The strip is supporting content: a compact layout discloses it inside Photo
@@ -2059,12 +2066,6 @@
     gap: 0.35rem;
     padding: 0.25rem 0.5rem;
   }
-  .photo-header-actions [data-photo-status-recovery],
-  .photo-header-actions [data-photo-library] {
-    min-width: 2.75rem;
-    padding-inline: 0.35rem;
-    font-size: 0.68rem;
-  }
   .photo-header {
     min-width: 0;
     grid-template-columns: minmax(2.75rem, auto) minmax(0, 1fr) minmax(0, auto);
@@ -2144,15 +2145,6 @@
   }
   .photo-header-actions {
     gap: 0.15rem;
-  }
-  .photo-header-actions button[data-photo-status-recovery],
-  .photo-header-actions button[data-photo-library] {
-    min-width: 2.75rem;
-    max-width: 6rem;
-    overflow: hidden;
-    padding-inline: 0.1rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .photo-header-actions button[data-photo-source-toggle],
   .photo-header-actions button[data-retry-photo] {

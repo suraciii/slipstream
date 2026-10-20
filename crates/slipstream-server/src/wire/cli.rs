@@ -372,10 +372,7 @@ impl From<slipstream_core::PhotoRead> for CliPhotoItemWire {
             original_id: value.original_id,
             location: value.original_location,
             filename: value.filename,
-            original_kind: match value.original_kind {
-                slipstream_core::OriginalKind::Raw => "raw",
-                slipstream_core::OriginalKind::Jpeg => "jpeg",
-            },
+            original_kind: original_kind(&value.original_kind),
             original_available: value.original_available,
             selection_state: selection_state(value.selection_state),
             rating: value.rating,

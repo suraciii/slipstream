@@ -1285,26 +1285,15 @@ async fn browse_tokens_are_process_unique_and_expiry_is_enforced() {
         application_b.browse_window(&opened_a.token, 0, 10).await,
         Err(ServerError::BrowseNotFound)
     ));
-    {
-        let mut snapshots = application_a
-            .retained_queries
-            .lock()
-            .expect("retained queries poisoned");
-        let snapshot = snapshots.entries.get_mut(&opened_a.token).unwrap();
-        snapshot.last_used -= BROWSE_SNAPSHOT_IDLE + Duration::from_secs(1);
-    }
+    application_a.retained_queries.age(
+        &opened_a.token,
+        BROWSE_SNAPSHOT_IDLE + Duration::from_secs(1),
+    );
     assert!(matches!(
         application_a.browse_window(&opened_a.token, 0, 10).await,
         Err(ServerError::BrowseNotFound)
     ));
-    assert!(
-        !application_a
-            .retained_queries
-            .lock()
-            .unwrap()
-            .entries
-            .contains_key(&opened_a.token)
-    );
+    assert!(!application_a.retained_queries.contains(&opened_a.token));
     application_a.shutdown().await.unwrap();
     application_b.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base_a);

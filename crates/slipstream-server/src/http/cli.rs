@@ -1,17 +1,4 @@
 // CLI route handlers.
-use axum::{
-    body::Body,
-    extract::State,
-    http::{Request, Response, StatusCode},
-};
-use serde::Deserialize;
-use serde_json::Value;
-use slipstream_core::{LibraryError, SelectionState};
-use std::{
-    sync::atomic::Ordering,
-    time::{Instant, SystemTime},
-};
-
 use super::browse::percent_decode;
 use super::{ALBUM_PHOTO_IDS_MAX, HttpState, json_response, read_json_body, valid_id};
 use crate::{
@@ -26,6 +13,18 @@ use crate::{
         CliListResponse, CliPhotoGetWire, CliPhotoItemWire, CliPhotoMetadataWire,
         CliScanStatusWire, CliStatusResponse, MissingItemWire, PhotoListItemWire,
     },
+};
+use axum::{
+    body::Body,
+    extract::State,
+    http::{Request, Response, StatusCode},
+};
+use serde::Deserialize;
+use serde_json::Value;
+use slipstream_core::{LibraryError, SelectionState};
+use std::{
+    sync::atomic::Ordering,
+    time::{Instant, SystemTime},
 };
 pub(crate) async fn status(
     State(state): State<HttpState>,
@@ -92,6 +91,14 @@ pub(crate) fn cli_error(
             }
         }),
     )
+}
+
+pub(crate) fn cli_error_empty(
+    status: StatusCode,
+    code: &'static str,
+    message: impl Into<String>,
+) -> Response<Body> {
+    cli_error(status, code, message, serde_json::json!({}))
 }
 
 pub(crate) fn invalid_cli(argument: &'static str, reason: &'static str) -> Response<Body> {
@@ -189,19 +196,9 @@ pub(super) fn list_limit(value: Option<&str>) -> CliBoundaryResult<usize> {
 }
 
 pub(super) fn query_token(application: &Application, kind: RetainedKind) -> String {
-    let prefix = match kind {
-        RetainedKind::Album => 'a',
-        RetainedKind::Photo => 'p',
-        RetainedKind::Browse => 'b',
-        RetainedKind::RecoveryUnavailable => 'u',
-        RetainedKind::RecoveryMappings => 'm',
-        RetainedKind::WorkspaceFiles => 'w',
-    };
-    format!(
-        "{prefix}{:032x}{:016x}",
-        application.browse_namespace,
-        application.browse_counter.fetch_add(1, Ordering::Relaxed)
-    )
+    application
+        .retained_queries
+        .token(application.browse_namespace, kind)
 }
 
 fn map_query_error(
@@ -343,8 +340,6 @@ pub(crate) async fn get_album_summaries(
         if state
             .application
             .retained_queries
-            .lock()
-            .expect("retained queries poisoned")
             .insert(
                 token.clone(),
                 RetainedKind::Album,
@@ -393,18 +388,14 @@ async fn album_query_page(application: &Application, cursor: &str) -> Response<B
         Ok(cursor) => cursor,
         Err(error) => return query_cursor_error("album", error),
     };
-    let page = application
-        .retained_queries
-        .lock()
-        .expect("retained queries poisoned")
-        .page(
-            &cursor.token,
-            RetainedKind::Album,
-            cursor.offset,
-            cursor.limit,
-            Instant::now(),
-            SystemTime::now(),
-        );
+    let page = application.retained_queries.page(
+        &cursor.token,
+        RetainedKind::Album,
+        cursor.offset,
+        cursor.limit,
+        Instant::now(),
+        SystemTime::now(),
+    );
     let Some(page) = page else {
         return cli_error(
             StatusCode::GONE,
@@ -676,8 +667,6 @@ pub(crate) async fn create_photo_query(
         if state
             .application
             .retained_queries
-            .lock()
-            .expect("retained queries poisoned")
             .insert(
                 token.clone(),
                 RetainedKind::Photo,
@@ -733,19 +722,14 @@ pub(crate) async fn get_photo_query_page(
         Ok(cursor) => cursor,
         Err(error) => return query_cursor_error("photo", error),
     };
-    let page = state
-        .application
-        .retained_queries
-        .lock()
-        .expect("retained queries poisoned")
-        .page(
-            &cursor.token,
-            RetainedKind::Photo,
-            cursor.offset,
-            cursor.limit,
-            Instant::now(),
-            SystemTime::now(),
-        );
+    let page = state.application.retained_queries.page(
+        &cursor.token,
+        RetainedKind::Photo,
+        cursor.offset,
+        cursor.limit,
+        Instant::now(),
+        SystemTime::now(),
+    );
     let Some(page) = page else {
         return cli_error(
             StatusCode::GONE,

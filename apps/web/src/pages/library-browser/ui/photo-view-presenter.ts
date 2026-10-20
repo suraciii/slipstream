@@ -101,7 +101,6 @@ export function createPhotoViewPresenter({
   const position = required<HTMLElement>(root, "[data-position]");
   const filename = required<HTMLElement>(root, "[data-photo-filename]");
   const selection = required<HTMLElement>(root, "[data-selection]");
-  const rating = required<HTMLElement>(root, "[data-rating]");
   const stage = required<HTMLElement>(root, "[data-stage]");
   const status = required<HTMLElement>(root, "[data-status]");
   const detailLimit = required<HTMLElement>(root, "[data-detail-limit]");
@@ -129,7 +128,7 @@ export function createPhotoViewPresenter({
 
   const renderPhotoFacts = (model: PhotoFactsViewModel) => {
     if (!alive) return;
-    position.textContent = `${model.index + 1} / ${model.total}`;
+    position.textContent = `${(model.index + 1).toLocaleString()} / ${model.total.toLocaleString()}`;
     filename.textContent = model.originalFilename ?? "—";
     filename.title = model.originalFilename ?? "";
     currentSelection = model.selectionState ?? "unflagged";
@@ -138,8 +137,6 @@ export function createPhotoViewPresenter({
       "aria-label",
       `Selection State: ${selectionLabel(currentSelection)}`,
     );
-    const currentRating = model.rating ?? 0;
-    rating.textContent = `Rating: ${currentRating} stars${currentRating === 0 ? " (no Rating)" : ""}`;
   };
   const renderPhotoMetadata = (model: PhotoMetadataViewModel = {}) => {
     if (!alive) return;
@@ -168,9 +165,11 @@ export function createPhotoViewPresenter({
     zoom.resetForImage();
     // Fit depends on the Preview's natural pixels, so the geometry is
     // applied when the bytes arrive.
+    image.dataset.measured = "false";
     image.addEventListener("load", () => {
       if (!alive || !image.isConnected) return;
       zoom.applyZoom();
+      image.dataset.measured = "true";
     });
     const target: ReviewImageTarget = {
       get connected() {
@@ -246,13 +245,19 @@ export function createPhotoViewPresenter({
       image = presentReviewImage(model.previewUrl, model.index, model.total);
     else {
       stage.replaceChildren(
-        paragraph(model.photoId ? "Loading Preview…" : "Photo unavailable"),
+        paragraph(
+          !model.photoId
+            ? "Photo unavailable"
+            : model.available === false
+              ? "Preview unavailable"
+              : "Loading Preview…",
+        ),
       );
       zoom.resetForImage();
     }
     setPhotoStatus(
       model.photoId && model.available === false
-        ? "Current Photo: Original File is unavailable. Decisions remain available; use Status to review Location Recovery."
+        ? "Current Photo: Original File is unavailable. Decisions remain available."
         : "",
     );
     return image;

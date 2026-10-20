@@ -2,6 +2,10 @@ use crate::wire::BrowseSelectionFilter;
 use std::{
     collections::{HashMap, hash_map::RandomState},
     hash::{BuildHasher, Hasher},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime},
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -33,6 +37,10 @@ impl RetainedKind {
             Self::RecoveryUnavailable => 'u',
             Self::RecoveryMappings => 'm',
         }
+    }
+
+    pub(crate) fn token(self, namespace: u128, counter: u64) -> String {
+        format!("{}{:032x}{counter:016x}", self.cursor_prefix(), namespace)
     }
 
     pub(crate) fn idle(self) -> Duration {
@@ -179,7 +187,6 @@ impl QueryRegistry {
     pub(crate) fn remove(&mut self, token: &str) {
         self.entries.remove(token);
     }
-
     fn prune(&mut self, now: Instant) {
         self.entries.retain(|_, query| {
             now.checked_duration_since(query.last_used)
@@ -189,6 +196,116 @@ impl QueryRegistry {
 
     fn retained_ids(&self) -> usize {
         self.entries.values().map(|query| query.ids.len()).sum()
+    }
+}
+
+/// Thread-safe ownership boundary for application-retained query snapshots.
+///
+/// The registry remains the deterministic policy object; this façade owns its
+/// synchronization so callers cannot bypass the shared eviction budget or
+/// retain a second lock convention.
+pub(crate) struct RetainedQueryStore {
+    registry: Mutex<QueryRegistry>,
+    counter: AtomicU64,
+}
+
+impl RetainedQueryStore {
+    pub(crate) fn production() -> Self {
+        Self {
+            registry: Mutex::new(QueryRegistry::production()),
+            counter: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn token(&self, namespace: u128, kind: RetainedKind) -> String {
+        kind.token(namespace, self.counter.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub(crate) fn insert(
+        &self,
+        token: String,
+        kind: RetainedKind,
+        filter: Option<BrowseSelectionFilter>,
+        ids: Vec<String>,
+        now: Instant,
+        evaluated_at: SystemTime,
+    ) -> Result<(), ()> {
+        self.registry
+            .lock()
+            .expect("retained queries poisoned")
+            .insert(token, kind, filter, ids, now, evaluated_at)
+    }
+
+    pub(crate) fn page(
+        &self,
+        token: &str,
+        kind: RetainedKind,
+        start: usize,
+        limit: usize,
+        now: Instant,
+        now_at: SystemTime,
+    ) -> Option<RetainedPage> {
+        self.registry
+            .lock()
+            .expect("retained queries poisoned")
+            .page(token, kind, start, limit, now, now_at)
+    }
+
+    pub(crate) fn position(&self, token: &str, id: &str, now: Instant) -> Option<Option<usize>> {
+        self.registry
+            .lock()
+            .expect("retained queries poisoned")
+            .position(token, id, now)
+    }
+
+    pub(crate) fn browse_snapshot(
+        &self,
+        token: &str,
+        now: Instant,
+    ) -> Option<(Vec<String>, Option<BrowseSelectionFilter>)> {
+        self.registry
+            .lock()
+            .expect("retained queries poisoned")
+            .browse_snapshot(token, now)
+    }
+
+    pub(crate) fn remove(&self, token: &str) {
+        self.registry
+            .lock()
+            .expect("retained queries poisoned")
+            .remove(token);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_kind(&self, kind: RetainedKind) -> bool {
+        self.registry
+            .lock()
+            .expect("retained queries poisoned")
+            .entries
+            .values()
+            .any(|query| query.kind == kind)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains(&self, token: &str) -> bool {
+        self.registry
+            .lock()
+            .expect("retained queries poisoned")
+            .entries
+            .contains_key(token)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn age(&self, token: &str, duration: Duration) -> bool {
+        let mut registry = self.registry.lock().expect("retained queries poisoned");
+        let Some(query) = registry.entries.get_mut(token) else {
+            return false;
+        };
+        query.last_used = query
+            .last_used
+            .checked_sub(duration)
+            .unwrap_or_else(Instant::now);
+        true
     }
 }
 

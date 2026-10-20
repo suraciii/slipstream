@@ -1,20 +1,23 @@
-//! Scan application, recovery facts, fingerprint enrollment, snapshot decode,
-//! and Preview seeding: the persisted state a scan publishes and recovers.
+//! Scan application, snapshot decoding, and Preview seeding for the persisted
+//! state a scan publishes.
 
+use super::codecs::{
+    camera_identity_name, capture_state_name, parse_camera_identity, parse_capture_fact,
+    parse_dimension, parse_error_category, parse_kind, parse_preview_state, parse_selection_state,
+    preview_state_name, validate_capture_fact,
+};
 use super::owner::{
     PERMANENT_DELETION_RETIRED_LOCATION_PREFIX, PersistenceError, allocate_library_id,
     permanently_deleted_original_ids, write_transaction,
 };
+use super::scan_recovery::{ScanRecoveryPlan, retire_sidecar_association};
 use super::{DatabaseName, StateDirectory};
-use crate::identity::classify_name;
 use crate::{
-    AppliedRelocations, CaptureFact, CaptureMetadataState, CaptureTimeField, DiscoveredOriginal,
-    LibraryRoot, OriginalErrorCategory, OriginalFacts, OriginalFingerprint, OriginalKind,
+    CaptureTimeField, DiscoveredOriginal, OriginalErrorCategory, OriginalFacts, OriginalKind,
     OriginalRecord, OriginalScanError, PhotoRecord, PreviewSeed, PreviewSeedResult, PreviewState,
-    RecoveryRecord, RecoverySurvey, RelativeOriginalPath, RequestedRelocation, ScanSnapshot,
-    SelectionState, preview_should_preserve, reconcile, selected_source,
+    ScanSnapshot, preview_should_preserve, reconcile, selected_source,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
 
 /// True when no retained reference of any kind still binds `photo_id`, read
@@ -836,294 +839,12 @@ pub(super) fn snapshot(connection: &Connection) -> Result<ScanSnapshot, Persiste
     })
 }
 
-pub(super) fn parse_kind(value: &str) -> rusqlite::Result<OriginalKind> {
-    match value {
-        "raw" => Ok(OriginalKind::Raw),
-        "jpeg" => Ok(OriginalKind::Jpeg),
-        _ => Err(rusqlite::Error::InvalidQuery),
-    }
-}
-
-pub(super) fn parse_error_category(
-    value: Option<String>,
-) -> rusqlite::Result<Option<OriginalErrorCategory>> {
-    value
-        .map(|value| match value.as_str() {
-            "unreadable" => Ok(OriginalErrorCategory::Unreadable),
-            "changed" => Ok(OriginalErrorCategory::Changed),
-            _ => Err(rusqlite::Error::InvalidQuery),
-        })
-        .transpose()
-}
-
-fn capture_state_name(state: CaptureMetadataState) -> &'static str {
-    match state {
-        CaptureMetadataState::Pending => "pending",
-        CaptureMetadataState::Known => "known",
-        CaptureMetadataState::Missing => "missing",
-        CaptureMetadataState::Invalid => "invalid",
-        CaptureMetadataState::Failed => "failed",
-    }
-}
-
-fn camera_identity_name(identity: &crate::CameraIdentity) -> &'static str {
-    match identity {
-        crate::CameraIdentity::Pending => "pending",
-        crate::CameraIdentity::Observed { .. } => "observed",
-    }
-}
-
-pub(super) fn parse_camera_identity(
-    state: String,
-    make: Option<String>,
-    model: Option<String>,
-) -> rusqlite::Result<crate::CameraIdentity> {
-    match state.as_str() {
-        "pending" if make.is_none() && model.is_none() => Ok(crate::CameraIdentity::Pending),
-        "observed" => Ok(crate::CameraIdentity::Observed { make, model }),
-        _ => Err(rusqlite::Error::InvalidQuery),
-    }
-}
-
-pub(super) fn parse_capture_fact(
-    state: String,
-    order_key: Option<String>,
-    field: Option<String>,
-    offset_minutes: Option<i64>,
-    source_revision: Option<String>,
-    identity: crate::CameraIdentity,
-) -> rusqlite::Result<CaptureFact> {
-    let state = match state.as_str() {
-        "pending" => CaptureMetadataState::Pending,
-        "known" => CaptureMetadataState::Known,
-        "missing" => CaptureMetadataState::Missing,
-        "invalid" => CaptureMetadataState::Invalid,
-        "failed" => CaptureMetadataState::Failed,
-        _ => return Err(rusqlite::Error::InvalidQuery),
-    };
-    let field = match field.as_deref() {
-        None => None,
-        Some(value) => Some(
-            CaptureTimeField::parse_database_name(value).ok_or(rusqlite::Error::InvalidQuery)?,
-        ),
-    };
-    let offset_minutes = offset_minutes
-        .map(|value| value.try_into().map_err(|_| rusqlite::Error::InvalidQuery))
-        .transpose()?;
-    let fact = CaptureFact {
-        state,
-        order_key,
-        field,
-        offset_minutes,
-        source_revision,
-        identity,
-    };
-    validate_capture_fact(&fact).map_err(|_| rusqlite::Error::InvalidQuery)?;
-    Ok(fact)
-}
-
-fn valid_capture_order_key(value: &str) -> bool {
-    value.len() == 29
-        && value.as_bytes()[4] == b'-'
-        && value.as_bytes()[7] == b'-'
-        && value.as_bytes()[10] == b'T'
-        && value.as_bytes()[13] == b':'
-        && value.as_bytes()[16] == b':'
-        && value.as_bytes()[19] == b'.'
-        && value.bytes().enumerate().all(|(index, byte)| {
-            matches!(index, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit()
-        })
-}
-
-fn validate_capture_fact(fact: &CaptureFact) -> Result<(), ()> {
-    let source_revision = fact
-        .source_revision
-        .as_deref()
-        .is_some_and(|value| !value.is_empty());
-    let known = fact
-        .order_key
-        .as_deref()
-        .is_some_and(valid_capture_order_key)
-        && fact.field.is_some()
-        && source_revision;
-    let no_derived =
-        fact.order_key.is_none() && fact.field.is_none() && fact.offset_minutes.is_none();
-    // Only a completed inspection can carry a camera identity. Rows written
-    // before the identity column existed keep `pending` identities with
-    // their completed capture states until the next scan re-inspects and
-    // publishes them.
-    let identity_consistent = match fact.state {
-        CaptureMetadataState::Pending | CaptureMetadataState::Failed => {
-            !fact.identity.is_observed()
-        }
-        CaptureMetadataState::Known
-        | CaptureMetadataState::Missing
-        | CaptureMetadataState::Invalid => true,
-    };
-    match fact.state {
-        CaptureMetadataState::Pending => no_derived && fact.source_revision.is_none(),
-        CaptureMetadataState::Known => known,
-        CaptureMetadataState::Missing | CaptureMetadataState::Invalid => {
-            no_derived && source_revision
-        }
-        CaptureMetadataState::Failed => no_derived,
-    }
-    .then_some(())
-    .ok_or(())?;
-    identity_consistent.then_some(()).ok_or(())
-}
-
-pub(super) fn parse_preview_state(value: &str) -> rusqlite::Result<PreviewState> {
-    match value {
-        "inspection-pending" => Ok(PreviewState::InspectionPending),
-        "ready" => Ok(PreviewState::Ready),
-        "failed" => Ok(PreviewState::Failed),
-        "unavailable" => Ok(PreviewState::Unavailable),
-        _ => Err(rusqlite::Error::InvalidQuery),
-    }
-}
-
-pub(super) fn parse_selection_state(value: &str) -> rusqlite::Result<SelectionState> {
-    match value {
-        "unflagged" => Ok(SelectionState::Unflagged),
-        "picked" => Ok(SelectionState::Picked),
-        "rejected" => Ok(SelectionState::Rejected),
-        _ => Err(rusqlite::Error::InvalidQuery),
-    }
-}
-
-pub(super) fn selection_state_value(value: SelectionState) -> &'static str {
-    match value {
-        SelectionState::Unflagged => "unflagged",
-        SelectionState::Picked => "picked",
-        SelectionState::Rejected => "rejected",
-    }
-}
-pub(super) fn parse_dimension(value: Option<i64>) -> rusqlite::Result<Option<u32>> {
-    value
-        .map(|value| value.try_into().map_err(|_| rusqlite::Error::InvalidQuery))
-        .transpose()
-}
-
-fn preview_state_name(state: PreviewState) -> &'static str {
-    match state {
-        PreviewState::InspectionPending => "inspection-pending",
-        PreviewState::Ready => "ready",
-        PreviewState::Failed => "failed",
-        PreviewState::Unavailable => "unavailable",
-    }
-}
-
-/// The recovery decisions proven outside the state store and applied inside
-/// one scan transaction. Relocations map a discovered Location to the
-/// persisted Original File identity whose exact content was found there.
-/// Fingerprints are keyed by the discovered Location they were computed at;
-/// the transaction resolves each to the Original that Location was assigned.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ScanRecoveryPlan {
-    pub relocations: HashMap<String, String>,
-    /// The source state each Original had when the scanner built the plan.
-    /// Applying a stale plan must not overwrite a manual recovery committed
-    /// while content inspection was in progress.
-    pub relocation_sources: HashMap<String, ScanRelocationSource>,
-    pub fingerprints: Vec<DiscoveredFingerprint>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ScanRelocationSource {
-    pub relative_path: String,
-    pub facts: crate::OriginalFacts,
-    pub available: bool,
-}
-
-/// One complete-content digest computed for the file observed at one
-/// discovered Location during this scan.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DiscoveredFingerprint {
-    pub path: String,
-    pub digest: String,
-}
-
 /// The committed result of one scan application.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScanApplication {
     pub snapshot: ScanSnapshot,
     pub relocated_originals: usize,
     pub fingerprinted_originals: usize,
-}
-
-/// One enrollment work item: the persisted Original whose current observed
-/// revision still needs a content fingerprint.
-#[derive(Clone, Debug, PartialEq)]
-pub struct FingerprintTarget {
-    pub original_id: String,
-    pub relative_path: String,
-    pub kind: crate::OriginalKind,
-    pub size: u64,
-    pub mtime_ms: f64,
-}
-
-/// Truthful enrollment counters for status reporting.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct FingerprintCounts {
-    pub enrolled: usize,
-    pub pending: usize,
-}
-
-fn retire_sidecar_association(
-    transaction: &Transaction<'_>,
-    photo_id: &str,
-    retired_original_path: &str,
-    kind: &str,
-) -> Result<(), PersistenceError> {
-    let association = transaction
-        .query_row(
-            "SELECT sidecar_path,observed_size,observed_mtime_ms,observed_digest,
-                    (SELECT association_generation FROM photos WHERE id=?)
-             FROM sidecar_associations WHERE photo_id=?",
-            params![photo_id, photo_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, Option<f64>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
-    let Some((sidecar_path, observed_size, observed_mtime_ms, observed_digest, generation)) =
-        association
-    else {
-        return Ok(());
-    };
-    transaction
-        .execute(
-            "INSERT OR REPLACE INTO retained_sidecar_orphans(
-                sidecar_path,retired_photo_id,retired_original_path,original_kind,
-                retired_generation,observed_size,observed_mtime_ms,observed_digest)
-             VALUES(?,?,?,?,?,?,?,?)",
-            params![
-                sidecar_path,
-                photo_id,
-                retired_original_path,
-                kind,
-                generation,
-                observed_size,
-                observed_mtime_ms,
-                observed_digest
-            ],
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    transaction
-        .execute(
-            "DELETE FROM sidecar_associations WHERE photo_id=?",
-            [photo_id],
-        )
-        .map_err(|_| PersistenceError::Storage)?;
-    Ok(())
 }
 
 pub(super) fn apply_scan(
@@ -1590,6 +1311,9 @@ pub(super) fn seed_preview(
 
 #[cfg(test)]
 mod tests {
+    use super::super::scan_recovery::{
+        DiscoveredFingerprint, ScanRecoveryPlan, ScanRelocationSource,
+    };
     use super::*;
     use crate::persistence::permanent_deletion::{PermanentDeletionStoredItem, reviewed_facts};
     use crate::persistence::test_support::*;

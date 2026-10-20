@@ -222,7 +222,7 @@ export function createFilmstripPresenter(
               : photo.preview.state === "unavailable"
                 ? "Preview unavailable"
                 : photo.preview.state === "inspection-pending"
-                  ? "Inspection pending"
+                  ? "Preparing Preview…"
                   : "Loading thumbnail…";
       placeholder.textContent = status;
       button.setAttribute(

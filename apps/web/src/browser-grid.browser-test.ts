@@ -316,7 +316,7 @@ test("Grid batch Select decides every multi-selected Photo and Undo restores the
   // Select mode marks three Photos, and one batch decision applies to all of
   // them through one bounded request.
   await page.locator("[data-grid-select-mode]").click();
-  await expect(count).toHaveText("0 / 100 Photos");
+  await expect(count).toHaveText("0 / 100 selected");
   await expect(page.locator("[data-grid-multi-done]")).toBeVisible();
   await expect(page.locator("[data-grid-batch]")).toBeHidden();
   await page.locator("[data-grid-multi-done]").click();
@@ -326,8 +326,8 @@ test("Grid batch Select decides every multi-selected Photo and Undo restores the
   await expect(page.locator("[data-grid-select-mode]")).toBeVisible();
   await page.locator("[data-grid-select-mode]").click();
   for (const index of [0, 1, 2]) await cell(index).click();
-  await expect(count).toHaveText("3 / 100 Photos");
-  await page.locator("[data-batch-select]").click();
+  await expect(count).toHaveText("3 / 100 selected");
+  await page.locator("[data-batch-pick]").click();
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "3 Photos Picked.",
   );
@@ -360,7 +360,7 @@ test("Grid batch Select decides every multi-selected Photo and Undo restores the
     "Source progress: 3 picked · 0 rejected · 1 unflagged",
   );
   // The multi-selection stays, so the same Photos can join an Album next.
-  await expect(count).toHaveText("3 / 100 Photos");
+  await expect(count).toHaveText("3 / 100 selected");
 
   // One Undo restores every confirmed Photo as one unit and stays in the
   // Grid, exactly as a single Grid decision does.

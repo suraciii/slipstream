@@ -236,9 +236,8 @@ impl Application {
             review_warmup: Mutex::new(ReviewWarmupState::default()),
             preview,
             shared,
-            retained_queries: Mutex::new(QueryRegistry::production()),
+            retained_queries: RetainedQueryStore::production(),
             recovery_reviews: Mutex::new(crate::recovery_review::RecoveryReviews::production()),
-            browse_counter: AtomicU64::new(0),
             browse_namespace,
             instance_epoch: {
                 let mut bytes = [0u8; 16];

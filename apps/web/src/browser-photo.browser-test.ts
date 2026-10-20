@@ -82,7 +82,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   // The decision acts on the Photo, so both surfaces close for it.
   await closePhotoSurfaces(page);
   await closePhotoTools(page);
-  await page.locator("[data-dock-select]").click();
+  await page.locator("[data-dock-pick]").click();
   await expect(page.locator("[data-selection]")).toHaveText("Picked");
   await expect(page.getByText("1 / 2")).toBeVisible();
   await page
@@ -112,7 +112,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   await expect(page.locator("[data-selection]")).toHaveText("Picked");
 });
 
-test("Photo View gestures navigate and cycle state while More owns one review sheet", async ({
+test("Photo View gestures navigate and decide while More owns one review sheet", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -124,28 +124,26 @@ test("Photo View gestures navigate and cycle state while More owns one review sh
     await expect(page.locator(selector)).toBeVisible();
   await expect(page.locator("[data-dock-previous]")).toBeDisabled();
   await expect(page.locator("[data-dock-next]")).toBeEnabled();
-  await expect(page.locator("[data-rating]")).toHaveText(
-    "Rating: 0 stars (no Rating)",
-  );
+  await expect(page.locator("[data-rating]")).toHaveText("No Rating");
   await expect(page.locator("[data-dock-rating]")).toHaveAttribute(
     "aria-controls",
     "rating-choices",
   );
   await expect(page.locator("[data-dock-rating]")).toHaveAttribute(
     "aria-label",
-    "Rating, 0 stars; open Rating choices",
+    "No Rating; open Rating choices",
   );
-  for (const name of ["Reject", "Select", "Undo", "More"])
+  for (const name of ["Reject", "Pick", "Undo", "More"])
     await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Status and Recovery" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Library management", exact: true }),
-  ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Back to Grid" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Status and Recovery" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Library management", exact: true }),
+  ).toHaveCount(0);
   await page
     .locator("[data-photo-navigation]")
     .getByRole("button", { name: "Next", exact: true })
@@ -164,11 +162,20 @@ test("Photo View gestures navigate and cycle state while More owns one review sh
     tools.getByRole("button", { name: "Clear flag", exact: true }),
   ).toBeVisible();
   await expect(
-    tools.getByRole("button", { name: "Select", exact: true }),
+    tools.getByRole("button", { name: "Pick", exact: true }),
   ).toHaveCount(0);
   await expect(
     tools.getByRole("button", { name: "Next", exact: true }),
   ).toHaveCount(0);
+  await expect(
+    tools.getByRole("button", { name: "View options", exact: true }),
+  ).toBeVisible();
+  await expect(
+    tools.getByRole("button", {
+      name: "Review unavailable Originals",
+      exact: true,
+    }),
+  ).toBeVisible();
   await page.locator("[data-photo-tools-close]").click();
   await page.locator("[data-dock-next]").click();
   await expect(page.locator("[data-position]")).toHaveText("2 / 3");
@@ -181,24 +188,25 @@ test("Photo View gestures navigate and cycle state while More owns one review sh
   ).toBeVisible();
   await expect(page.locator("#rating-choices")).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Clear Rating, 0 stars" }),
+    page.getByRole("button", { name: "No Rating", exact: true }),
   ).toHaveAttribute("aria-pressed", "true");
   await expect(
     page.getByRole("button", { name: "Rate 5 stars" }),
   ).toHaveAttribute("aria-pressed", "false");
   await returnToPhotoTools(page);
   await closePhotoTools(page);
-  await page
-    .getByRole("button", { name: "Library management", exact: true })
+  await page.getByRole("button", { name: "More", exact: true }).click();
+  await tools
+    .getByRole("button", { name: "View options", exact: true })
     .click();
   await expect(page.locator("[data-view-options]")).toBeVisible();
   await expect(page.locator("[data-removed-open]")).toBeVisible();
   await page.locator("[data-view-options-close]").click();
   await expect(page.locator("[data-view-options]")).toBeHidden();
+  await expect(tools).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Library management", exact: true }),
+    tools.getByRole("button", { name: "View options", exact: true }),
   ).toBeFocused();
-  await returnToPhotoTools(page);
   await closePhotoTools(page);
 
   const swipe = async (dx: number, dy: number) => {
@@ -212,30 +220,187 @@ test("Photo View gestures navigate and cycle state while More owns one review sh
     await page.mouse.up();
   };
 
-  await swipe(-140, 0);
-  await expect(page.locator("[data-position]")).toHaveText("2 / 3");
-  // Position text updates when navigation commits, while the destination
-  // Preview and decision admission settle afterward. Wait for both before
-  // sending a vertical decision gesture; otherwise the gesture is correctly
-  // ignored during the transition and no state request can be observed.
-  await waitForLoadedReviewImage(page);
-  await expect(page.locator("[data-dock-select]")).toBeEnabled();
-  const picked = page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      /\/state(?:\?|$)/.test(new URL(response.url()).pathname),
-  );
   await swipe(0, -140);
-  await picked;
-  await expect(page.locator("[data-selection]")).toHaveText("Picked");
-  const cleared = page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      /\/state(?:\?|$)/.test(new URL(response.url()).pathname),
+  await expect(page.locator("[data-position]")).toHaveText("2 / 3");
+  await waitForLoadedReviewImage(page);
+  await expect(page.locator("[data-dock-pick]")).toBeEnabled();
+  const picked = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      /\/state(?:\?|$)/.test(new URL(request.url()).pathname),
   );
-  await swipe(0, 140);
-  await cleared;
+  await swipe(140, 0);
+  expect((await picked).postDataJSON()).toMatchObject({
+    field: "selectionState",
+    value: "picked",
+  });
+  await expect(page.locator("[data-position]")).toHaveText("3 / 3");
   await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
+  await waitForLoadedReviewImage(page);
+  const rejected = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      /\/state(?:\?|$)/.test(new URL(request.url()).pathname),
+  );
+  await swipe(-140, 0);
+  expect((await rejected).postDataJSON()).toMatchObject({
+    field: "selectionState",
+    value: "rejected",
+  });
+  await expect(page.locator("[data-position]")).toHaveText("3 / 3");
+  await expect(page.locator("[data-selection]")).toHaveText("Rejected");
+});
+
+test.describe("touch Preview input", () => {
+  test.use({ hasTouch: true });
+
+  test("touch upward swipe navigates to the next Photo in fit Preview", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 2);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
+    const stage = page.locator("[data-stage]");
+    const image = page.locator("[data-stage] img");
+    await expect(image).toHaveCSS("touch-action", "none");
+    const box = await stage.boundingBox();
+    if (!box) throw new Error("Preview stage has no geometry");
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    const client = await page.context().newCDPSession(page);
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x, y, id: 1 }],
+    });
+    for (const offset of [-35, -75, -140])
+      await client.send("Input.dispatchTouchEvent", {
+        type: "touchMove",
+        touchPoints: [{ x, y: y + offset, id: 1 }],
+      });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+    await expect(page.locator("[data-position]")).toHaveText("2 / 2");
+    await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
+  });
+
+  test("touch direction mapping separates Previous from decisions", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 3);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
+    const image = page.locator("[data-stage] img");
+    const box = await image.boundingBox();
+    if (!box) throw new Error("Rendered image has no geometry");
+    const client = await page.context().newCDPSession(page);
+    const touch = async (dx: number, dy: number) => {
+      const x = box.x + box.width / 2;
+      const y = box.y + box.height / 2;
+      await client.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x, y, id: 1 }],
+      });
+      for (const step of [0.25, 0.6, 1])
+        await client.send("Input.dispatchTouchEvent", {
+          type: "touchMove",
+          touchPoints: [{ x: x + dx * step, y: y + dy * step, id: 1 }],
+        });
+      await client.send("Input.dispatchTouchEvent", {
+        type: "touchEnd",
+        touchPoints: [],
+      });
+    };
+    await touch(0, -140);
+    await expect(page.locator("[data-position]")).toHaveText("2 / 3");
+    await waitForLoadedReviewImage(page);
+    await touch(0, 140);
+    await expect(page.locator("[data-position]")).toHaveText("1 / 3");
+    await waitForLoadedReviewImage(page);
+    const state = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        /\/state(?:\?|$)/.test(new URL(request.url()).pathname),
+    );
+    await touch(140, 0);
+    expect((await state).postDataJSON()).toMatchObject({
+      field: "selectionState",
+      value: "picked",
+    });
+    await expect(page.locator("[data-position]")).toHaveText("2 / 3");
+    await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
+  });
+
+  test("touch from fit Preview letterbox scrolls without a decision", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 1);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
+
+    const geometry = await page.evaluate(() => {
+      const stage = document.querySelector<HTMLElement>("[data-stage]");
+      const image =
+        document.querySelector<HTMLImageElement>("[data-stage] img");
+      const view = document.querySelector<HTMLElement>("[data-photo-view]");
+      if (!stage || !image || !view) throw new Error("Photo is missing");
+      const stageBox = stage.getBoundingClientRect();
+      const imageBox = image.getBoundingClientRect();
+      const topGap = imageBox.top - stageBox.top;
+      const bottomGap = stageBox.bottom - imageBox.bottom;
+      if (topGap < 8 && bottomGap < 8)
+        throw new Error("Fit Preview has no letterbox area");
+      const y = topGap >= 8 ? stageBox.top + 4 : stageBox.bottom - 4;
+      return {
+        x: stageBox.left + stageBox.width / 2,
+        y,
+        before: view.scrollTop,
+        scrollable: view.scrollHeight > view.clientHeight,
+      };
+    });
+    expect(geometry.scrollable).toBe(true);
+    let stateRequests = 0;
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        new URL(request.url()).pathname.endsWith("/state")
+      )
+        stateRequests += 1;
+    });
+    const client = await page.context().newCDPSession(page);
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x: geometry.x, y: geometry.y, id: 1 }],
+    });
+    for (const offset of [-35, -75, -140])
+      await client.send("Input.dispatchTouchEvent", {
+        type: "touchMove",
+        touchPoints: [{ x: geometry.x, y: geometry.y + offset, id: 1 }],
+      });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+    await expect
+      .poll(() =>
+        page
+          .locator("[data-photo-view]")
+          .evaluate((element) => element.scrollTop),
+      )
+      .toBeGreaterThan(geometry.before);
+    await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
+    expect(stateRequests).toBe(0);
+  });
 });
 
 test("Preview zoom is explicit, bounded, and never records a decision", async ({

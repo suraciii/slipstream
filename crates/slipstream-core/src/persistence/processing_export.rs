@@ -704,7 +704,7 @@ pub(super) fn photo_processing_source(
             [photo_id],
             |row| {
                 Ok((
-                    super::scan::parse_kind(&row.get::<_, String>(0)?)?,
+                    super::codecs::parse_kind(&row.get::<_, String>(0)?)?,
                     row.get::<_, i64>(1)? != 0 && row.get::<_, i64>(2)? != 0,
                 ))
             },

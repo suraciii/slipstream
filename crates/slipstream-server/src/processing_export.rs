@@ -52,7 +52,8 @@ use std::sync::Arc;
 use crate::processing_policy::{NO_QUALIFIED_ADAPTER, ProcessingModulePolicy};
 
 use crate::http::{
-    CLI_CONTRACT_HEADER, HttpState, require_cli_contract, require_published, valid_id,
+    CLI_CONTRACT_HEADER, HttpState, cli_error_empty, require_cli_contract, require_published,
+    valid_id,
 };
 #[path = "processing_export_execution.rs"]
 mod execution;
@@ -89,7 +90,7 @@ fn unix_seconds_now() -> u64 {
 }
 
 fn error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
-    crate::http::cli_error(status, code, message, json!({})).into_response()
+    cli_error_empty(status, code, message).into_response()
 }
 
 fn error_details(

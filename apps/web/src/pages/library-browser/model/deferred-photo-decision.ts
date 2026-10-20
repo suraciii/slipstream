@@ -3,25 +3,13 @@ import type {
   SelectionCounts,
   SelectionState,
 } from "../api/contracts.js";
+import { adjustedSelectionCounts } from "./selection-counts.js";
 
 export type DeferredPhotoDecision = Readonly<{
   selectionState?: SelectionState;
   rating?: number;
   selectionCountsAdjusted?: boolean;
 }>;
-
-const adjustedSelectionCounts = (
-  counts: SelectionCounts,
-  prior: SelectionState,
-  next: SelectionState,
-): SelectionCounts => {
-  if (prior === next) return counts;
-  return Object.freeze({
-    ...counts,
-    [prior]: Math.max(0, counts[prior] - 1),
-    [next]: counts[next] + 1,
-  });
-};
 
 export const recordDeferredPhotoDecision = (
   decisions: Map<string, DeferredPhotoDecision>,

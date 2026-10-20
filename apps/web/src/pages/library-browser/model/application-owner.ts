@@ -474,7 +474,7 @@ export function createApplicationOwner(
       notices.present(
         notice,
         summary(
-          "Library check complete. Open Browse Snapshots remain unchanged.",
+          "Library check complete. This view still shows the earlier result.",
           summaryAction("refresh-current-source"),
           "complete",
         ),
@@ -804,20 +804,17 @@ export function createApplicationOwner(
 }
 
 function scanLabel(scan: LibraryOverviewResponse["scan"]): string {
-  const completed = scan.completed?.toLocaleString();
   switch (scan.state) {
     case "idle":
       return "Library ready";
     case "initializing":
       return "Preparing Photo Library…";
     case "discovering":
-      return completed
-        ? `Checking Library Folder… ${completed} found`
-        : "Checking Library Folder…";
+      return "Checking Library Folder…";
     case "inspecting":
-      return scan.total
-        ? `Inspecting Capture Time… ${completed ?? 0} / ${scan.total.toLocaleString()}`
-        : "Inspecting Capture Time…";
+      return scan.total && scan.completed !== undefined
+        ? `Reading Capture Time… ${scan.completed.toLocaleString()} / ${scan.total.toLocaleString()}`
+        : "Reading Capture Time…";
     case "applying":
       return "Applying Library updates…";
     case "failed":

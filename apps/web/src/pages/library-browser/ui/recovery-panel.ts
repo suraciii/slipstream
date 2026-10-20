@@ -508,7 +508,7 @@ export function createRecoveryPanel({
 /// action.
 export const RECOVERY_PANEL_TEMPLATE = `        <dialog class="recovery-dialog" data-recovery-panel aria-labelledby="recovery-title">
           <div class="recovery-sheet">
-            <header class="recovery-header"><h3 id="recovery-title">Review unavailable originals</h3><button type="button" class="quiet" data-recovery-close>Close</button></header>
+            <header class="recovery-header"><h3 id="recovery-title">Review unavailable Originals</h3><button type="button" class="quiet" data-recovery-close>Close</button></header>
             <div class="recovery-body">
               <p class="recovery-explanation">Recovery changes which file a Photo points to. No file is moved, renamed, or copied, and nothing is overwritten.</p>
               <div class="recovery-forms">

@@ -9,6 +9,10 @@ The Original Files known to Slipstream together with their Photos, Albums, and s
 The configured filesystem directory whose supported descendant files belong to the Photo Library. The Folder defines discovery and read-only containment, not Photo or Original identity.
 _Avoid_: Library Root, source root
 
+**Library Check**:
+The product operation that inspects the configured Library Folder for added, changed, and removed files and publishes a replacement Photo Library. The empty-Library action is **Check Library**; a published Library may offer **Refresh Current Source** for its open view.
+_Avoid_: scan, rescan, or inspect in user-facing language
+
 **Photo**:
 One independently managed supported Original File presented for browsing and selection. RAW and same-basename JPEG are independent Photos; their naming must not share decisions, Album membership, or Preview. A Photo keeps its identity when a supported operation changes its Original Location.
 _Avoid_: image pair, RAW/JPEG group
@@ -30,6 +34,14 @@ The optional camera-recorded local date and time used to order Photos in the Pho
 
 **Original File**:
 A RAW or JPEG file owned by the Photographer and known to Slipstream under one stable identity. Slipstream must not rewrite it; only explicit Permanent Deletion from Trash may delete it. A supported Library expansion or Location Recovery must not create a new identity for it.
+
+**Unavailable Original**:
+An Original File that cannot be read at its remembered Original Location. Its Photo remains in the Photo Library; Location Recovery may restore the Location.
+_Avoid_: missing Photo, deleted Photo
+
+**Unavailable Photo**:
+A Photo whose Original File is unavailable. It keeps its identity, Original Location, Selection State, Rating, Album membership, and Grid position; it is not a Removed Photo. The user-facing cause is **Original unavailable**; reserve **Photo unavailable** for a Photo that is not present in the current view.
+_Avoid_: removed Photo, deleted Photo; Photo unavailable as the cause
 
 **Original Location**:
 The relative directory and filename used to find an Original File beneath the current Library Folder. A Location is not Original File identity.
@@ -116,8 +128,12 @@ The focused view of one Photo with Preview, zoom, navigation, Selection State, R
 **Selection State**:
 The keep decision for a Photo: `unflagged`, `picked`, or `rejected`. `Unflagged` means no Pick or Reject flag is recorded; `Picked` and `Rejected` are mutually exclusive review decisions. Selection State is independent of Rating and is not inferred from Sidecar Metadata in the current product boundary.
 
+**Pick**:
+The explicit action that sets a Photo's Selection State to `picked`. It does not select the Photo for a multi-selection batch, change Rating, or add Album membership.
+_Avoid_: Select when the keep decision is meant
+
 **Rating**:
-An optional zero-to-five-star assessment owned by a Photo. Rating is separate from Selection State and may have a Sidecar Metadata representation.
+An optional zero-to-five-star assessment owned by a Photo. Zero Rating is shown as **No Rating** in Rating facts and accessible names; a compact Rating control may keep `0★`. Rating is separate from Selection State and may have a Sidecar Metadata representation.
 
 ## Preview
 

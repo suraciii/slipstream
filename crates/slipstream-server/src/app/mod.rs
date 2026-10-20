@@ -9,9 +9,9 @@ mod shutdown;
 mod startup;
 use preview::{ReviewWarmup, ReviewWarmupRequest, ReviewWarmupState};
 
-use crate::queries::{CursorSigner, QueryRegistry, RetainedKind};
+use crate::queries::{CursorSigner, RetainedKind, RetainedQueryStore};
 use crate::recovery_review::{MAXIMUM_RECOVERY_APPLY, MAXIMUM_RECOVERY_MAPPINGS};
-use crate::wire::{CliDerivativeFacts, PhotoOperationRemainderWire};
+use crate::wire::{CliDerivativeFacts, PhotoOperationRemainderWire, original_kind};
 pub(crate) use published::*;
 pub(crate) use shared_library::*;
 
@@ -40,10 +40,7 @@ fn permanent_deletion_response(
             .map(|item| PermanentDeletionItemWire {
                 photo_id: item.photo_id,
                 original_location: item.relative_path.to_string(),
-                original_kind: match item.kind {
-                    slipstream_core::OriginalKind::Raw => "raw",
-                    slipstream_core::OriginalKind::Jpeg => "jpeg",
-                },
+                original_kind: original_kind(&item.kind),
                 state: permanent_deletion_state(item.state),
                 size: item.size,
                 message: item.message,
@@ -191,11 +188,10 @@ pub struct Application {
     pub(crate) proxies: Option<Arc<crate::development_proxy::DevelopmentProxyManager>>,
     scan_cycle: ScanCycle,
     review_warmup: Mutex<ReviewWarmupState>,
-    pub(crate) retained_queries: Mutex<QueryRegistry>,
+    pub(crate) retained_queries: RetainedQueryStore,
     /// Bounded reviewed Location Recovery state.
     pub(crate) recovery_reviews: Mutex<crate::recovery_review::RecoveryReviews>,
     pub(crate) browse_namespace: u128,
-    pub(crate) browse_counter: AtomicU64,
     /// Random per-startup identifier; no metadata evidence survives a restart.
     instance_epoch: String,
     recovery: recovery::RecoveryLifecycle,
@@ -837,15 +833,11 @@ impl Application {
             .into_iter()
             .find_map(|anchor| photo_ids.iter().position(|id| id == &anchor))
             .unwrap_or(0);
-        let token = format!(
-            "b{:032x}{:016x}",
-            self.browse_namespace,
-            self.browse_counter.fetch_add(1, Ordering::Relaxed)
-        );
+        let token = self
+            .retained_queries
+            .token(self.browse_namespace, RetainedKind::Browse);
         let total = photo_ids.len();
         self.retained_queries
-            .lock()
-            .expect("retained queries poisoned")
             .insert(
                 token.clone(),
                 RetainedKind::Browse,
@@ -874,8 +866,6 @@ impl Application {
         }
         let page = self
             .retained_queries
-            .lock()
-            .expect("retained queries poisoned")
             .page(
                 token,
                 RetainedKind::Browse,
@@ -995,8 +985,6 @@ impl Application {
     ) -> Result<PhotoRemovalResponse, ServerError> {
         let (photo_ids, filter) = self
             .retained_queries
-            .lock()
-            .expect("retained queries poisoned")
             .browse_snapshot(token, Instant::now())
             .ok_or(ServerError::BrowseNotFound)?;
         if filter != Some(BrowseSelectionFilter::Rejected) {
@@ -1163,10 +1151,7 @@ impl Application {
             else {
                 continue;
             };
-            let original_kind = match original.kind {
-                slipstream_core::OriginalKind::Raw => "raw",
-                slipstream_core::OriginalKind::Jpeg => "jpeg",
-            };
+            let original_kind = original_kind(&original.kind);
             let (preview_url, thumbnail_url) = self.derivative_urls(&facts).await;
             let originals_by_id = facts
                 .originals
@@ -1221,11 +1206,7 @@ impl Application {
                     removed_at_ms: item.removed_at_ms,
                     original_id: item.original_id,
                     original_location: item.relative_path.to_string(),
-                    original_kind: match item.kind {
-                        slipstream_core::OriginalKind::Raw => "raw",
-                        slipstream_core::OriginalKind::Jpeg => "jpeg",
-                    }
-                    .to_owned(),
+                    original_kind: original_kind(&item.kind).to_owned(),
                     size: item.size,
                     albums: item
                         .albums
@@ -1291,18 +1272,12 @@ impl Application {
     ) -> Result<BrowsePositionResponse, ServerError> {
         let position = self
             .retained_queries
-            .lock()
-            .expect("retained queries poisoned")
             .position(token, photo_id, Instant::now())
             .ok_or(ServerError::BrowseNotFound)?;
         Ok(BrowsePositionResponse { position })
     }
-
     pub fn browse_close(&self, token: &str) {
-        self.retained_queries
-            .lock()
-            .expect("retained queries poisoned")
-            .remove(token);
+        self.retained_queries.remove(token);
     }
 
     pub async fn albums(&self) -> Result<AlbumSummaryListResponse, ServerError> {

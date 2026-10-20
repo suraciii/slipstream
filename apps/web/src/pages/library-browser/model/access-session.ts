@@ -1,3 +1,4 @@
+import { isRecord } from "../api/guards.js";
 export type BrowserSession = Readonly<{
   expiresAt: number;
   csrfToken: string;
@@ -50,11 +51,6 @@ function isSameOriginRequest(input: RequestInfo | URL): boolean {
     return false;
   }
 }
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function isCsrfToken(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
 }

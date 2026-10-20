@@ -175,9 +175,12 @@ The first implementation proves this complete path:
 5. Display all three Photos in a progressively loaded Grid without a complete-Library response.
 6. Display the JPEG Original's own Preview in Photo View.
 7. Extract and display the largest usable embedded JPEG for each RAW Photo.
-8. Swipe up on one Photo to `picked` and down on another to `rejected`.
+8. In Fit Preview, swipe right on one Photo to set `picked`, swipe left on
+   another to set `rejected`, swipe up to open the next Photo, and swipe down
+   to open the previous Photo; navigation swipes must not change Photo facts.
 9. Set one Rating and undo one decision.
-10. Restart the server and restore cached Previews, the Album, decisions, Rating, and saved position.
+10. Restart the server and restore cached Previews, the Album, decisions,
+    Rating, and saved position.
 11. Prove that Original File bytes and metadata are unchanged.
 
 Further increments reuse these ownership boundaries. [Command-Line Use](command-line/spec.md) adds the delegated-use path without replacing the visual slice.
@@ -220,12 +223,13 @@ The first-slice gate must prove:
 - embedded JPEG extraction for each supported sample camera;
 - visible orientation and dimensions match the camera Preview;
 - derivatives preserve a valid ICC profile or are correctly converted to sRGB;
-- a low-resolution source is not upscaled or misrepresented;
 - selection and Rating transactions survive restart;
-- swipe actions do not fire while the Preview is zoomed;
+- a low-resolution source is not upscaled or misrepresented;
+- Fit horizontal decision swipes and vertical navigation swipes have distinct
+  outcomes and do not fire while the Preview is manually zoomed;
 - Fit and continuous zoom keep the Preview contained by the Photo View
-  viewport, expose the current zoom state programmatically, and never
-  record a decision while zoomed;
+  viewport, expose the current zoom state programmatically, and never record a
+  decision or navigation action while zoomed;
 - failed mutations do not silently advance;
 - cache invalidation follows current Original Location, source revision, and derivative version;
 - the complete path runs through the real browser-server protocol.
