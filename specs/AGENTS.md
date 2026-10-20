@@ -2,6 +2,35 @@
 
 `specs/` defines Slipstream's durable product behavior, design decisions, and implementation contracts. Use the [index](README.md) to find the affected feature and its contracts. Follow the repository-wide context and artifact rules in [`../AGENTS.md`](../AGENTS.md).
 
+## Structure
+
+```text diagram
+specs/
+├── README.md       # Contract index
+├── AGENTS.md       # This file
+├── spec.md         # Product Vision and product-wide behavior
+├── design.md       # Shared system architecture
+├── server.md       # Root specialist contract
+└── {feature}/
+    ├── spec.md         # Observable behavior
+    ├── design.md       # Technical decisions
+    ├── {specialist}.md # Additional scoped contract or reference
+    └── {capability}/
+        ├── spec.md
+        ├── design.md
+        └── {specialist}.md
+```
+
+## Context Layers
+
+- **Product Vision** ([spec.md](spec.md)) → why the product exists.
+- **Domain Language** ([CONTEXT.md](../CONTEXT.md)) → what each term means.
+- **Spec Documents** ([index](README.md), root and nested contracts) → what the product does and which technical boundaries govern it.
+- **Usage Guidance** ([docs/](../docs/README.md)) → how a Photographer uses the product; it is not a contract authority.
+- **Implementation and Tooling** (`apps/`, `crates/`, `scripts/`, and `tools/`) → how the product and repository tooling implement the contracts.
+
+Higher layers constrain lower layers. A lower layer must not redefine or contradict a higher one.
+
 ## Feature Organization
 
 - `specs/spec.md` owns product-wide behavior; `specs/design.md` owns shared system architecture. Root specialist references, such as `specs/server.md`, stay beside these contracts.
@@ -22,6 +51,8 @@
 - Use `text diagram` for ASCII diagrams and `text literal` for other preformatted text. Do not use bare `text` fences or raw HTML.
 - Treat examples as contracts. Keep them minimal and independently checkable; they must parse or run as written when tooling exists.
 - Delete empty sections. Structure follows the contract rather than a fixed document shape.
+- **Authority** (optional): name the owning module and cross-capability dependencies at the top of a contract. This makes contract and code drift visible.
+- **Laws** (optional): end a contract with numbered invariants that are directly testable. Laws complement behavior with what must always hold.
 
 ## Product Behavior
 
