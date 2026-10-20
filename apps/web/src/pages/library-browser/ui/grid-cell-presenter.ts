@@ -75,10 +75,13 @@ function gridPhotoFacts(
   thumbnailState?: "unavailable" | "failed",
 ): string[] {
   const facts: string[] = [];
-  if (!photo.available) facts.push("Photo unavailable");
+  const originalUnavailable = !photo.original.available;
+  if (originalUnavailable) facts.push("Original unavailable");
+  else if (!photo.available) facts.push("Photo unavailable");
   if (photo.original.kind === "raw") facts.push("RAW");
   if (photo.hasSavedEdits) facts.push("Edited");
-  if (photo.preview.state === "unavailable") facts.push("Preview unavailable");
+  if (photo.preview.state === "unavailable" && !originalUnavailable)
+    facts.push("Preview unavailable");
   if (photo.preview.state === "failed") facts.push("Preview failed");
   if (thumbnailState === "unavailable" && photo.preview.state !== "unavailable")
     facts.push("Thumbnail unavailable");
@@ -254,7 +257,7 @@ export function createGridCellPresenter(options: GridCellPresenterOptions) {
               : photo.preview.state === "unavailable"
                 ? "Preview unavailable"
                 : photo.preview.state === "inspection-pending"
-                  ? "Inspection pending"
+                  ? "Preparing Preview…"
                   : "Loading thumbnail…";
     };
     presentThumbnail();

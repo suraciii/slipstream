@@ -1405,7 +1405,7 @@
   writing-mode: vertical-rl;
 }
 
-.swipe-feedback.select {
+.swipe-feedback.pick {
   color: var(--selected);
 }
 
@@ -1596,13 +1596,13 @@
   white-space: normal;
 }
 
-.select-button {
+.pick-button {
   border-color: #33764b;
   background: var(--selected-bg);
   color: #daf5e2;
 }
 
-.select-button:hover:not(:disabled) {
+.pick-button:hover:not(:disabled) {
   border-color: var(--selected);
   background: #1d4a2f;
 }
@@ -2066,12 +2066,6 @@
     gap: 0.35rem;
     padding: 0.25rem 0.5rem;
   }
-  .photo-header-actions [data-photo-status-recovery],
-  .photo-header-actions [data-photo-library] {
-    min-width: 2.75rem;
-    padding-inline: 0.35rem;
-    font-size: 0.68rem;
-  }
   .photo-header {
     min-width: 0;
     grid-template-columns: minmax(2.75rem, auto) minmax(0, 1fr) minmax(0, auto);
@@ -2151,15 +2145,6 @@
   }
   .photo-header-actions {
     gap: 0.15rem;
-  }
-  .photo-header-actions button[data-photo-status-recovery],
-  .photo-header-actions button[data-photo-library] {
-    min-width: 2.75rem;
-    max-width: 6rem;
-    overflow: hidden;
-    padding-inline: 0.1rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .photo-header-actions button[data-photo-source-toggle],
   .photo-header-actions button[data-retry-photo] {

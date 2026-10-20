@@ -46,7 +46,7 @@ test("mobile recovery keeps mapping tasks ahead of bounded lists and maps the ch
   await page.goto(running.url);
   await page.locator("[data-source-toggle]").click();
   await page
-    .getByRole("button", { name: "Review unavailable originals" })
+    .getByRole("button", { name: "Review unavailable Originals" })
     .click();
   const dialog = page.locator("[data-recovery-panel]");
   const body = dialog.locator(".recovery-body");

@@ -52,7 +52,7 @@ export function createRatingControls({
   const listeners = new AbortController();
 
   const ratingLabel = (value: number): string =>
-    value === 0 ? "Clear Rating" : `${value} ${value === 1 ? "star" : "stars"}`;
+    value === 0 ? "No Rating" : `${value} ${value === 1 ? "star" : "stars"}`;
 
   const syncRatingWheelOptions = (): void => {
     for (const button of Array.from(
@@ -160,7 +160,7 @@ export function createRatingControls({
     button.setAttribute(
       "aria-label",
       value === 0
-        ? "Clear Rating, 0 stars"
+        ? "No Rating"
         : `Rate ${value} ${value === 1 ? "star" : "stars"}`,
     );
     button.setAttribute("aria-pressed", String(value === 0));
@@ -178,9 +178,7 @@ export function createRatingControls({
     wheelButton.tabIndex = -1;
     wheelButton.setAttribute(
       "aria-label",
-      value === 0
-        ? "Clear Rating, 0 stars"
-        : `${value} ${value === 1 ? "star" : "stars"}`,
+      value === 0 ? "No Rating" : `${value} ${value === 1 ? "star" : "stars"}`,
     );
     wheelButton.setAttribute("aria-pressed", "false");
     wheelButton.textContent = value === 0 ? "0" : `${value}★`;
@@ -210,14 +208,14 @@ export function createRatingControls({
       currentRating = value;
       rating.textContent =
         value === 0
-          ? "No Rating · 0 stars"
-          : `${value} ${value === 1 ? "star" : "stars"}`;
+          ? "No Rating"
+          : `Rating: ${value} ${value === 1 ? "star" : "stars"}`;
       dockRating.textContent = value === 0 ? "Rating 0★" : `Rating ${value}★`;
       dockRating.setAttribute(
         "aria-label",
         value === 0
-          ? "Rating, 0 stars; open Rating choices"
-          : `Rating ${value} stars; open Rating choices`,
+          ? "No Rating; open Rating choices"
+          : `Rating ${value} ${value === 1 ? "star" : "stars"}; open Rating choices`,
       );
       syncRatingWheelOptions();
       for (const button of Array.from(

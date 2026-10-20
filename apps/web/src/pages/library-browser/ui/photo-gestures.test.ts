@@ -48,7 +48,7 @@ function fixture() {
   });
   const preview = new Surface();
   const stage = new Surface();
-  const select = new Surface();
+  const pick = new Surface();
   const reject = new Surface();
   const imageTarget = new Surface();
   stage.parent = preview;
@@ -109,7 +109,7 @@ function fixture() {
   const gestures = createPhotoGestures({
     preview: preview as unknown as HTMLElement,
     stage: stage as unknown as HTMLElement,
-    selectFeedback: select as unknown as HTMLElement,
+    pickFeedback: pick as unknown as HTMLElement,
     rejectFeedback: reject as unknown as HTMLElement,
     zoom,
     rating,
@@ -202,7 +202,7 @@ test("Rating hold boundary and release submit exactly once", () => {
   }
 });
 
-test("horizontal decisions use Select and Reject and advance", () => {
+test("horizontal decisions use Pick and Reject and advance", () => {
   const f = fixture();
   try {
     f.pointer("pointerdown", 0, 0);
