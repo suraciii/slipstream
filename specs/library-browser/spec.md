@@ -163,6 +163,10 @@ A Grid cell must show, when available:
 - Thumbnail unavailability or failure without changing a known Review Preview fact; and
 - thumbnail delivery failure without replacing the Photo, Preview, or Thumbnail facts above.
 
+An unavailable Original must be presented as `Original unavailable`.
+`Photo unavailable` is reserved for a Photo that is not present in the current
+view and must not label an unavailable Original.
+
 When a Photo's Preview is already known to be unavailable, the Grid must not
 request its thumbnail or report a thumbnail delivery failure for that Photo.
 A thumbnail delivery failure applies only when an otherwise available Preview
