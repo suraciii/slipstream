@@ -176,12 +176,6 @@ export function createRecoveryReviewOwner(
       more: recoveryMappingsCursor !== null,
     });
   };
-  /// Reports review failures on the surface the Photographer is looking at.
-  const reportReviewFailure = (message: string): void => {
-    if (page.isPhotoVisible?.()) page.setPhotoStatusText?.(message);
-    else page.setGridStatusText(message);
-  };
-
   const openRecoveryReview = async (invoker?: HTMLElement): Promise<void> => {
     const generation = ++reviewGeneration;
     proposalGeneration += 1;
