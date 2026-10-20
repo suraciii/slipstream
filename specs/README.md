@@ -7,6 +7,8 @@ Use this index to locate the affected Feature and its contracts. Follow the [con
 ## Product and System
 
 - [Product Vision](spec.md): audience, goals, principles, human and machine use, and product boundaries.
+- [Product Design Language](design-language/spec.md): product character, visual and interaction grammar, content, feedback and recovery, responsive composition, and accessibility.
+- [Design Language Contract](design-language/design.md): semantic layers, surface responsibilities, state ownership, carrier invariants, and design review evidence.
 - [Foundational Architecture](design.md): shared Web/CLI service boundary, file and state ownership, Photo identity, and vertical slices.
 - [Rust Server](server.md): production language, module ownership, dependency direction, compatibility, cutover, and rollback.
 
