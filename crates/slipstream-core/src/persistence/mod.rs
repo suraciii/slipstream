@@ -1,6 +1,7 @@
 //! SQLite state ownership for the production Library core.
 
 mod admission;
+mod album_write;
 mod albums;
 mod codecs;
 mod composable_recipe;
@@ -41,7 +42,7 @@ pub use crate::domain::{
 pub use admission::{
     DatabaseName, StateDatabaseLock, StateDirectory, StateError, StateFileIdentity,
 };
-pub use albums::AlbumWriteError;
+pub use album_write::AlbumWriteError;
 pub use composable_recipe::{processing_recipe_decode, processing_recipe_encode};
 pub(crate) use expansion::expand_library_binding;
 pub use metadata::{

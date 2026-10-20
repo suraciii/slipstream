@@ -5,10 +5,11 @@
 //! representation and cache keys are checked against the identity before a
 //! record can influence scheduling or publication.
 
+use super::cache_directory::no_follow_flag;
 use super::{
     CACHE_RECORD_SCHEMA_VERSION, CacheError, DERIVATIVE_ALGORITHM_VERSION, DerivativeFailureKind,
     DerivativeIdentity, DerivativeProfile, DerivativeSource, DerivativeTarget,
-    MAXIMUM_METADATA_BYTES, derivative_cache_key, is_hex_key, no_follow_flag,
+    MAXIMUM_METADATA_BYTES, derivative_cache_key, is_hex_key,
 };
 use serde::{Deserialize, Serialize};
 use std::{fs::OpenOptions, io::Read, path::Path};
