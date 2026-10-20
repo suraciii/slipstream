@@ -133,7 +133,7 @@ The explicit action that sets a Photo's Selection State to `picked`. It does not
 _Avoid_: Select when the keep decision is meant
 
 **Rating**:
-An optional zero-to-five-star assessment owned by a Photo. Zero is shown as **No Rating**. Rating is separate from Selection State and may have a Sidecar Metadata representation.
+An optional zero-to-five-star assessment owned by a Photo. Zero Rating is shown as **No Rating** in Rating facts and accessible names; a compact Rating control may keep `0★`. Rating is separate from Selection State and may have a Sidecar Metadata representation.
 
 ## Preview
 
