@@ -82,7 +82,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   // The decision acts on the Photo, so both surfaces close for it.
   await closePhotoSurfaces(page);
   await closePhotoTools(page);
-  await page.locator("[data-dock-select]").click();
+  await page.locator("[data-dock-pick]").click();
   await expect(page.locator("[data-selection]")).toHaveText("Picked");
   await expect(page.getByText("1 / 2")).toBeVisible();
   await page
@@ -124,28 +124,26 @@ test("Photo View gestures navigate and decide while More owns one review sheet",
     await expect(page.locator(selector)).toBeVisible();
   await expect(page.locator("[data-dock-previous]")).toBeDisabled();
   await expect(page.locator("[data-dock-next]")).toBeEnabled();
-  await expect(page.locator("[data-rating]")).toHaveText(
-    "Rating: 0 stars (no Rating)",
-  );
+  await expect(page.locator("[data-rating]")).toHaveText("No Rating");
   await expect(page.locator("[data-dock-rating]")).toHaveAttribute(
     "aria-controls",
     "rating-choices",
   );
   await expect(page.locator("[data-dock-rating]")).toHaveAttribute(
     "aria-label",
-    "Rating, 0 stars; open Rating choices",
+    "No Rating; open Rating choices",
   );
-  for (const name of ["Reject", "Select", "Undo", "More"])
+  for (const name of ["Reject", "Pick", "Undo", "More"])
     await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Status and Recovery" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Library management", exact: true }),
-  ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Back to Grid" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Status and Recovery" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Library management", exact: true }),
+  ).toHaveCount(0);
   await page
     .locator("[data-photo-navigation]")
     .getByRole("button", { name: "Next", exact: true })
@@ -164,11 +162,20 @@ test("Photo View gestures navigate and decide while More owns one review sheet",
     tools.getByRole("button", { name: "Clear flag", exact: true }),
   ).toBeVisible();
   await expect(
-    tools.getByRole("button", { name: "Select", exact: true }),
+    tools.getByRole("button", { name: "Pick", exact: true }),
   ).toHaveCount(0);
   await expect(
     tools.getByRole("button", { name: "Next", exact: true }),
   ).toHaveCount(0);
+  await expect(
+    tools.getByRole("button", { name: "View options", exact: true }),
+  ).toBeVisible();
+  await expect(
+    tools.getByRole("button", {
+      name: "Review unavailable Originals",
+      exact: true,
+    }),
+  ).toBeVisible();
   await page.locator("[data-photo-tools-close]").click();
   await page.locator("[data-dock-next]").click();
   await expect(page.locator("[data-position]")).toHaveText("2 / 3");
@@ -181,24 +188,25 @@ test("Photo View gestures navigate and decide while More owns one review sheet",
   ).toBeVisible();
   await expect(page.locator("#rating-choices")).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Clear Rating, 0 stars" }),
+    page.getByRole("button", { name: "No Rating", exact: true }),
   ).toHaveAttribute("aria-pressed", "true");
   await expect(
     page.getByRole("button", { name: "Rate 5 stars" }),
   ).toHaveAttribute("aria-pressed", "false");
   await returnToPhotoTools(page);
   await closePhotoTools(page);
-  await page
-    .getByRole("button", { name: "Library management", exact: true })
+  await page.getByRole("button", { name: "More", exact: true }).click();
+  await tools
+    .getByRole("button", { name: "View options", exact: true })
     .click();
   await expect(page.locator("[data-view-options]")).toBeVisible();
   await expect(page.locator("[data-removed-open]")).toBeVisible();
   await page.locator("[data-view-options-close]").click();
   await expect(page.locator("[data-view-options]")).toBeHidden();
+  await expect(tools).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Library management", exact: true }),
+    tools.getByRole("button", { name: "View options", exact: true }),
   ).toBeFocused();
-  await returnToPhotoTools(page);
   await closePhotoTools(page);
 
   const swipe = async (dx: number, dy: number) => {
@@ -215,7 +223,7 @@ test("Photo View gestures navigate and decide while More owns one review sheet",
   await swipe(0, -140);
   await expect(page.locator("[data-position]")).toHaveText("2 / 3");
   await waitForLoadedReviewImage(page);
-  await expect(page.locator("[data-dock-select]")).toBeEnabled();
+  await expect(page.locator("[data-dock-pick]")).toBeEnabled();
   const picked = page.waitForRequest(
     (request) =>
       request.method() === "POST" &&

@@ -64,7 +64,7 @@ export type KeyboardIntent =
       preventDefault: false;
     }>
   | Readonly<{
-      kind: "select-photo";
+      kind: "photo-decision";
       value: ViewSelectionState;
       advance: boolean;
       preventDefault: false;
@@ -135,21 +135,21 @@ export const resolveKeyIntent = (
     return { kind: "zoom", action: "detail", preventDefault: true };
   if (letter === "p")
     return {
-      kind: "select-photo",
+      kind: "photo-decision",
       value: "picked",
       advance: true,
       preventDefault: false,
     };
   if (letter === "x")
     return {
-      kind: "select-photo",
+      kind: "photo-decision",
       value: "rejected",
       advance: true,
       preventDefault: false,
     };
   if (letter === "u" && context.currentSelection !== "unflagged")
     return {
-      kind: "select-photo",
+      kind: "photo-decision",
       value: "unflagged",
       advance: false,
       preventDefault: false,

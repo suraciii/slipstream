@@ -84,7 +84,7 @@ test("Grid and Nearby Photos replace missing and undecodable thumbnails and reco
   for (const [index, label] of [
     [1, "Preview unavailable"],
     [2, "Thumbnail failed"],
-    [3, "Inspection pending"],
+    [3, "Preparing Preview…"],
   ] as const) {
     await expect(cell(index).locator(".thumbnail-placeholder")).toHaveText(
       label,

@@ -476,7 +476,7 @@ for (const firstTransport of ["https", "http"] as const) {
       );
       await closePhotoTools(page);
       await page
-        .locator(index === 0 ? "[data-dock-reject]" : "[data-dock-select]")
+        .locator(index === 0 ? "[data-dock-reject]" : "[data-dock-pick]")
         .click();
       await expect(page.locator("[data-selection]")).toHaveText(
         index === 0 ? "Rejected" : "Picked",
