@@ -30,7 +30,7 @@ import type { RemovalOwner } from "./removal-owner.js";
 import type {
   RemovedPanelViewModel,
   TrashReviewViewModel,
-} from "../ui/removed-panels.js";
+} from "./removed-listing-contract.js";
 
 /// One bounded page of removed Photos the listing presented.
 type RemovedPageState = Readonly<{

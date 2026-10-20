@@ -11,7 +11,7 @@ import {
   draftFromRecipe,
   type ComposableRecipeDraft,
 } from "./composable-recipe-draft.js";
-import type { BrowserFetch } from "./access-session.js";
+import type { BrowserFetch } from "../api/browser-fetch.js";
 import { randomUuid } from "./browser-crypto.js";
 import { isRecord } from "../api/guards.js";
 

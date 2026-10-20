@@ -8,10 +8,12 @@ import { gridThumbnailTarget } from "./grid-thumbnail-target.js";
 import {
   createRemovedPanels,
   REMOVED_PANELS_TEMPLATE,
-  type RemovedPanelViewModel,
-  type RemovalReviewViewModel,
-  type TrashReviewViewModel,
 } from "./removed-panels.js";
+import type {
+  RemovedPanelViewModel,
+  RemovalReviewViewModel,
+  TrashReviewViewModel,
+} from "../model/removed-listing-contract.js";
 import {
   createRecoveryPanel,
   type RecoveryReviewView,
@@ -22,7 +24,8 @@ import type {
   RecoveryEntryViewModel,
   RecoveryMappingViewModel,
   RecoveryPagingViewModel,
-} from "./recovery-view-models.js";
+} from "../model/recovery-view-models.js";
+import type { BatchAlbumsViewModel } from "../model/grid-batch-albums-contract.js";
 import {
   createMembershipPanel,
   type MembershipPanelElements,
@@ -61,7 +64,8 @@ import {
   type NavigationGridRestoration,
 } from "../model/browser-navigation.js";
 import { PHOTO_VIEW_TEMPLATE } from "./photo-view-template.js";
-import type { EditorIntent, EditorViewModel } from "./editor-view-contract.js";
+import type { EditorViewModel } from "../model/editor-controller-contract.js";
+import type { EditorIntent } from "../model/editor-intent-contract.js";
 import type { RecoveryApplyMapping } from "../model/recovery-review.js";
 export type {
   GridPhotoPreview,
@@ -72,14 +76,15 @@ export type {
 export type {
   RemovedPanelViewModel,
   RemovalReviewViewModel,
-  TrashOutcomeViewModel,
   TrashReviewViewModel,
-} from "./removed-panels.js";
+} from "../model/removed-listing-contract.js";
 export type {
   RecoveryEntryViewModel,
   RecoveryMappingViewModel,
   RecoveryPagingViewModel,
-} from "./recovery-view-models.js";
+} from "../model/recovery-view-models.js";
+export type { BatchAlbumsViewModel } from "../model/grid-batch-albums-contract.js";
+export type { EditorIntent } from "../model/editor-intent-contract.js";
 
 export type ViewSelectionState = "unflagged" | "picked" | "rejected";
 type SourceReference =
@@ -130,9 +135,7 @@ export type GridProgressViewModel = Readonly<{
   rejected: number;
   unflagged: number;
 }>;
-
-export type { EditorViewModel } from "./editor-view-contract.js";
-
+export type { EditorViewModel } from "../model/editor-controller-contract.js";
 export type LibraryBrowserIntent =
   | EditorIntent
   | Readonly<{ kind: "summary-action"; presentationId: number }>
@@ -364,12 +367,7 @@ type ControlsViewModel = Readonly<{
   removalEnabled: boolean;
 }>;
 
-/// The batch tray's Album choices. `pending` covers one Add to Album settling
-/// and the outcome is reported beside the control.
-export type BatchAlbumsViewModel = Readonly<{
-  albums: ReadonlyArray<Readonly<{ id: string; name: string }>>;
-  pending: boolean;
-}>;
+// BatchAlbumsViewModel is owned by the grid multi-selection model contract.
 
 export interface LibraryBrowserView extends RecoveryReviewView {
   readonly photoStatusSurface: object;

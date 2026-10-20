@@ -11,7 +11,7 @@ import {
   type WorkspaceFilmRead,
   type WorkspaceFilmStep,
 } from "../api/workspace-film.js";
-import type { BrowserFetch } from "./access-session.js";
+import type { BrowserFetch } from "../api/browser-fetch.js";
 import { randomUuid, blobSha256Hex } from "./browser-crypto.js";
 
 /** Discovery expresses precision in bits; inspection expresses actual sample type. */
