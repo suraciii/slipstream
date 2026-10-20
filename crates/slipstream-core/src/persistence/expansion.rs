@@ -605,7 +605,7 @@ mod tests {
             .unwrap()
             .facts()
             .unwrap();
-        let result = scan::apply_manual_relocations(
+        let result = scan_recovery::apply_manual_relocations(
             &state,
             &name,
             &mut Connection::open(&path).unwrap(),
@@ -689,7 +689,7 @@ mod tests {
             .unwrap()
             .facts()
             .unwrap();
-        let result = scan::apply_manual_relocations(
+        let result = scan_recovery::apply_manual_relocations(
             &state,
             &name,
             &mut Connection::open(&path).unwrap(),

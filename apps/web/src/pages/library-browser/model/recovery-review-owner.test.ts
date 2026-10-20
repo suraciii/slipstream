@@ -170,7 +170,9 @@ describe("recovery review open failures", () => {
 
     await owner.openRecoveryReview();
 
-    expect(photoStatus()).toContain("Could not open the review");
+    expect(photoStatus()).toContain(
+      "Location Recovery for unavailable Originals could not be loaded.",
+    );
     expect(gridStatus()).toBe("");
   });
 
@@ -185,7 +187,9 @@ describe("recovery review open failures", () => {
 
     await owner.openRecoveryReview();
 
-    expect(gridStatus()).toContain("Could not open the review");
+    expect(gridStatus()).toContain(
+      "Location Recovery for unavailable Originals could not be loaded.",
+    );
     expect(photoStatus()).toBe("");
   });
 });
