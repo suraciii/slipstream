@@ -220,7 +220,7 @@ Size and modification time alone cannot detect a same-size, same-time replacemen
 ## Compatibility Fixtures
 
 - `compatibility/metadata/capture-time.json` owns field precedence, parsing, normalization, offset, and subsecond vectors; `compatibility/metadata/capture-order.json` owns per-Original capture authority, tie, missing-partition, and camera-local-offset ordering vectors.
-- `compatibility/sqlite/schema-v3.sql` and `schema-v3.json` own the Capture Time migration shape; `schema-v4.sql` and `schema-v4.json` own the identity-fence migration input; `schema-v5.sql` and `schema-v5.json` own the Album schema migration input; `schema-v6.sql` and `schema-v6.json` own the writable independent-Photo schema, while canonical v2 remains an earlier migration input.
+- `compatibility/sqlite/schema-v3.sql` and `schema-v3.json` own the Capture Time migration shape; `schema-v4.sql` and `schema-v4.json` own the identity-fence migration input; `schema-v5.sql` and `schema-v5.json` own the Album schema migration input; `schema-v6.sql` and `schema-v6.json` own the writable independent-Photo baseline, while schema versions 7 through 15 own later writable migrations and canonical v2 remains an earlier migration input.
 - Migration fixtures prove preservation of Photo identity, Albums, membership positions, Selection State, Rating, Preview facts, and saved Album positions, including the v4-to-v5 terminology migration and the v5-to-v6 independent-Photo migration.
 - `compatibility/protocol/capture-order-omission.json` owns ordered-response and capture-field-omission vectors.
 - Browser tests own the filename-versus-capture-order example, recursive Original Folder filtering, and the explicit Album order example.

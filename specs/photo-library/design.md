@@ -202,7 +202,7 @@ An empty Album remains a valid source with total count zero and position zero. T
 
 ### Persistence Migration
 
-Canonical writable state uses independent-Photo language and Album language. SQLite schema version 6 stores exactly one `original_id` (`TEXT NOT NULL UNIQUE`) on each Photo row and adds the `original_fingerprints` table keyed by Original File ID. It replaces the v5 paired-Photo columns and the retired Preview Source names.
+The v5-to-v6 migration establishes the independent-Photo baseline. SQLite schema version 6 stores exactly one `original_id` (`TEXT NOT NULL UNIQUE`) on each Photo row and adds the `original_fingerprints` table keyed by Original File ID. It replaces the v5 paired-Photo columns and the retired Preview Source names.
 
 The admitted v5-to-v6 migration runs in one `BEGIN IMMEDIATE` transaction and preserves:
 
@@ -214,7 +214,7 @@ The admitted v5-to-v6 migration runs in one `BEGIN IMMEDIATE` transaction and pr
 
 A Preview survives the migration only when its legacy source matches the kept Original's kind and its revision matches current facts. A sibling-JPEG-derived Preview for a kept RAW is invalidated. Fingerprint enrollment starts after the migration transaction commits and never holds it open.
 
-The earlier admitted v4-to-v5 Album migration preserves every Album ID, name, and creation order, every Photo ID and Original File ID, every membership position and saved Photo, Selection State and Rating, Preview and Capture Time facts, and the admitted Library Folder binding. The v3-to-v4 identity migration remains an earlier preserved input. A v5 binary rejects v6 as newer state. Rollback restores the verified pre-migration v5 backup and compatible image. There is no in-place down migration.
+The later migrations extend the writable state through schema version 15. Older binaries reject v6 as newer state. Rollback restores the verified pre-migration backup and compatible image. There is no in-place down migration.
 
 Legacy `Photo Set` names remain only in immutable v2-v4 compatibility fixtures and the v4-to-v5 migration reader. Legacy paired-Photo values and the old Preview Source names remain only in immutable v5 fixtures and the v5-to-v6 migration reader. Active Rust, protocol, Web, tests, and documentation use Album language and independent-Photo language. Legacy HTTP routes and browse-source values return `404` or validation failure rather than becoming indefinite aliases.
 
@@ -228,11 +228,9 @@ The first management surface supports Album create, rename, delete, current-Phot
 
 A malformed or unknown Original Folder source fails without opening a different source or exposing an absolute path. A failed Folder window retains already loaded sibling navigation and identifies its failed range. An expired File Location publication replaces the retained tree with one current publication instead of mixing generations.
 
-A root-level scan or publication failure cannot replace the prior Published Library. The prior publication and its File Locations remain authoritative under the existing background-rescan contract. A per-request Folder derivation failure returns an error without mutating that publication or Album state.
-
 An Album mutation conflict or persistence failure leaves Original Files and unrelated state unchanged. The Web retains a recoverable source and identifies the failed action. It must not report a mutation as complete before confirmation.
 
-Schema migration fails closed before service admission when the source shape is not canonical, a sidecar exists, a transaction fails, or the resulting v6 shape is not exact. The pre-migration database remains recoverable from the required verified backup.
+A schema migration fails closed before service admission when the source shape is not canonical, a sidecar exists, a transaction fails, or the resulting current-schema shape is not exact. The pre-migration database remains recoverable from the required verified backup.
 
 ## Options
 
