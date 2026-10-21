@@ -5,15 +5,8 @@ impl Library {
         &self,
         mutation: SaveComposableEditRecipe,
     ) -> Result<Option<ComposableEditRecipeWriteOutcome>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .replay_composable_edit_recipe_receiver(mutation)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.replay_composable_edit_recipe_receiver(mutation))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Reads an exact historical rebind receipt without consulting live source state.
@@ -21,15 +14,10 @@ impl Library {
         &self,
         mutation: crate::processing::RebindComposableEditRecipe,
     ) -> Result<Option<ComposableEditRecipeWriteOutcome>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .replay_composable_edit_recipe_rebind_receiver(mutation)
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
+        self.admitted(|persistence| {
+            persistence.replay_composable_edit_recipe_rebind_receiver(mutation)
+        })
+        .await
     }
 
     pub async fn replay_processing_export_retry(
@@ -38,48 +26,30 @@ impl Library {
         previous_request_id: &str,
         request_id: &str,
     ) -> Result<Option<crate::processing::ProcessingExportSubmitOutcome>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.replay_processing_export_retry_receiver(
+        self.admitted(|persistence| {
+            persistence.replay_processing_export_retry_receiver(
                 photo_id,
                 previous_request_id,
                 request_id,
             )
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
+        })
+        .await
     }
 
     pub async fn composable_edit_recipe_read(
         &self,
         photo_id: &str,
     ) -> Result<Option<crate::processing::ComposableEditRecipeRead>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .composable_edit_recipe_read_receiver(photo_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.composable_edit_recipe_read_receiver(photo_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     pub async fn rebind_composable_edit_recipe(
         &self,
         mutation: crate::processing::RebindComposableEditRecipe,
     ) -> Result<ComposableEditRecipeWriteOutcome, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .rebind_composable_edit_recipe_receiver(mutation)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.rebind_composable_edit_recipe_receiver(mutation))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     pub async fn list_processing_exports(
@@ -87,29 +57,16 @@ impl Library {
         photo_id: &str,
         now: u64,
     ) -> Result<crate::processing::ProcessingExportList, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .list_processing_exports_receiver(photo_id, now)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.list_processing_exports_receiver(photo_id, now))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     pub async fn replay_processing_export(
         &self,
         mutation: crate::processing::ReplayProcessingExport,
     ) -> Result<Option<crate::processing::ProcessingExportSubmitOutcome>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.replay_processing_export_receiver(mutation)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.replay_processing_export_receiver(mutation))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     pub async fn retry_processing_export(
@@ -117,30 +74,18 @@ impl Library {
         mutation: crate::processing::RetryProcessingExport,
         now: u64,
     ) -> Result<crate::processing::ProcessingExportSubmitOutcome, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .retry_processing_export_receiver(mutation, now)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.retry_processing_export_receiver(mutation, now))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     pub async fn processing_artifact_retention(
         &self,
         artifact_id: &str,
     ) -> Result<Option<crate::processing::ProcessingArtifactRetention>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .read_processing_artifact_retention_receiver(artifact_id)
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
+        self.admitted(|persistence| {
+            persistence.read_processing_artifact_retention_receiver(artifact_id)
+        })
+        .await
     }
 
     /// Reads one Photo's retained composable recipe.
@@ -148,14 +93,8 @@ impl Library {
         &self,
         photo_id: &str,
     ) -> Result<Option<ComposableEditRecipe>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.composable_edit_recipe_receiver(photo_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.composable_edit_recipe_receiver(photo_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Saves one complete composable Edit Recipe only when both the caller's
@@ -166,15 +105,8 @@ impl Library {
         &self,
         mutation: SaveComposableEditRecipe,
     ) -> Result<ComposableEditRecipeWriteOutcome, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .save_composable_edit_recipe_receiver(mutation)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.save_composable_edit_recipe_receiver(mutation))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Reads one published immutable Processing Artifact in a single
@@ -185,15 +117,8 @@ impl Library {
         &self,
         artifact_id: &str,
     ) -> Result<Option<crate::processing::ProcessingArtifact>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .read_processing_artifact_receiver(artifact_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.read_processing_artifact_receiver(artifact_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Publishes one validated Processing Artifact insert-only inside one
@@ -204,15 +129,8 @@ impl Library {
         &self,
         artifact: crate::processing::ProcessingArtifact,
     ) -> Result<crate::processing::ProcessingArtifactPublication, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .publish_processing_artifact_receiver(artifact)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.publish_processing_artifact_receiver(artifact))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Submits the selected current Processing Step of a Photo for an
@@ -229,15 +147,8 @@ impl Library {
         mutation: crate::processing::SubmitProcessingExport,
         now: u64,
     ) -> Result<crate::processing::ProcessingExportSubmitOutcome, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .submit_processing_export_receiver(mutation, now)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.submit_processing_export_receiver(mutation, now))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Admits a recipe captured under the canonical file adapter's state locks.
@@ -247,15 +158,10 @@ impl Library {
         recipe: crate::processing::ComposableEditRecipe,
         now: u64,
     ) -> Result<crate::processing::ProcessingExportSubmitOutcome, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .submit_processing_export_with_recipe_receiver(mutation, recipe, now)
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
+        self.admitted(|persistence| {
+            persistence.submit_processing_export_with_recipe_receiver(mutation, recipe, now)
+        })
+        .await
     }
 
     /// Settles one admitted qualified composable Export inside one
@@ -272,19 +178,10 @@ impl Library {
         payload_digest: &str,
         now: u64,
     ) -> Result<crate::processing::ProcessingExportSettlement, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.settle_processing_export_receiver(
-                artifact,
-                request_id,
-                payload_digest,
-                now,
-            )
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
+        self.admitted(|persistence| {
+            persistence.settle_processing_export_receiver(artifact, request_id, payload_digest, now)
+        })
+        .await
     }
 
     /// Marks a minted artifact as durably owned by a verified workspace publication.
@@ -294,15 +191,11 @@ impl Library {
         artifact_id: &str,
         published_at: u64,
     ) -> Result<(), LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .retain_processing_artifact_in_workspace_receiver(artifact_id, published_at)
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
+        self.admitted(|persistence| {
+            persistence.retain_processing_artifact_in_workspace_receiver(artifact_id, published_at)
+        })
+        .await?;
+        Ok(())
     }
 
     /// Reads the durable work record of one admitted composable Export.
@@ -312,15 +205,8 @@ impl Library {
         &self,
         request_id: &str,
     ) -> Result<Option<crate::processing::ProcessingExportWork>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .read_processing_export_work_receiver(request_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.read_processing_export_work_receiver(request_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Durably begins one execution attempt of an accepted composable
@@ -331,15 +217,10 @@ impl Library {
         request_id: &str,
         now: u64,
     ) -> Result<crate::processing::ProcessingExportAttemptOutcome, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .begin_processing_export_attempt_receiver(request_id, now)
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
+        self.admitted(|persistence| {
+            persistence.begin_processing_export_attempt_receiver(request_id, now)
+        })
+        .await
     }
 
     /// Records one terminal execution failure of an admitted composable
@@ -351,15 +232,10 @@ impl Library {
         reason_code: &str,
         now: u64,
     ) -> Result<crate::processing::ProcessingExportFailureOutcome, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .fail_processing_export_receiver(request_id, reason_code, now)
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
+        self.admitted(|persistence| {
+            persistence.fail_processing_export_receiver(request_id, reason_code, now)
+        })
+        .await
     }
 
     /// Cancels one admitted composable Export inside one serialized
@@ -370,15 +246,8 @@ impl Library {
         request_id: &str,
         now: u64,
     ) -> Result<crate::processing::ProcessingExportCancelOutcome, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .cancel_processing_export_receiver(request_id, now)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.cancel_processing_export_receiver(request_id, now))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Every live composable Export work record — accepted or executing —
@@ -386,14 +255,8 @@ impl Library {
     pub async fn unfinished_processing_exports(
         &self,
     ) -> Result<Vec<crate::processing::ProcessingExportWork>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.unfinished_processing_exports_receiver()
-        }?;
-        receive
+        self.admitted(Persistence::unfinished_processing_exports_receiver)
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Removes expired Processing Artifacts, their retention, and their
@@ -404,15 +267,8 @@ impl Library {
         &self,
         now: u64,
     ) -> Result<Vec<String>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .sweep_processing_export_expiry_receiver(now)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.sweep_processing_export_expiry_receiver(now))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Acquires one Processing Artifact download lease inside one
@@ -423,15 +279,10 @@ impl Library {
         artifact_id: &str,
         now: u64,
     ) -> Result<crate::processing::ProcessingArtifactLeaseOutcome, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .acquire_processing_artifact_lease_receiver(artifact_id, now)
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
+        self.admitted(|persistence| {
+            persistence.acquire_processing_artifact_lease_receiver(artifact_id, now)
+        })
+        .await
     }
 
     /// Refreshes one Processing Artifact download lease's liveness anchor;
@@ -441,15 +292,10 @@ impl Library {
         lease_id: &str,
         now: u64,
     ) -> Result<bool, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .renew_processing_artifact_lease_receiver(lease_id, now)
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
+        self.admitted(|persistence| {
+            persistence.renew_processing_artifact_lease_receiver(lease_id, now)
+        })
+        .await
     }
 
     /// Releases one Processing Artifact download lease once its stream has
@@ -458,15 +304,10 @@ impl Library {
         &self,
         lease_id: &str,
     ) -> Result<bool, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .release_processing_artifact_lease_receiver(lease_id)
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
+        self.admitted(|persistence| {
+            persistence.release_processing_artifact_lease_receiver(lease_id)
+        })
+        .await
     }
 }
 

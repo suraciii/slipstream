@@ -345,6 +345,85 @@ export function selectSemanticBranch(
     : value;
 }
 
+/** How deep schema reference discovery traverses one schema tree. */
+export const maxReferenceDiscoveryDepth = 32;
+
+/// The paths of a schema tree that admit a complete resource reference.
+/// Discovery follows the exact schema semantics the edit surface presents:
+/// local `$ref` resolution, `oneOf`/`anyOf` branch traversal, `properties`
+/// descent and `items` element descent, each capped by
+/// `maxReferenceDiscoveryDepth`. A path admits the reference only when the
+/// resolved schema exposes both `resourceId` and `version` properties — or
+/// is a `oneOf`/`anyOf` node whose branches admit it — and the complete
+/// reference validates against that schema. Paths are deduplicated, so a
+/// reference admitted through several branches is reported once; the root
+/// path (`[]`) names the schema itself.
+export function admittedResourceReferencePaths(
+  schema: SemanticSchema,
+  value: unknown,
+  root: SemanticSchema,
+  reference: unknown,
+  path: SemanticPath = [],
+  depth = 0,
+): SemanticPath[] {
+  if (depth > maxReferenceDiscoveryDepth) return [];
+  const resolved = resolveSemanticSchema(schema, root),
+    paths: SemanticPath[] = [];
+  const props = schemaObject(resolved.properties) ? resolved.properties : {};
+  if (
+    (Object.hasOwn(props, "resourceId") && Object.hasOwn(props, "version")) ||
+    Array.isArray(resolved.oneOf) ||
+    Array.isArray(resolved.anyOf)
+  ) {
+    if (!validateSemanticValue(schema, reference, root).length)
+      paths.push(path);
+  }
+  for (const [key, child] of Object.entries(props))
+    if (schemaObject(child))
+      paths.push(
+        ...admittedResourceReferencePaths(
+          child,
+          schemaObject(value) ? value[key] : undefined,
+          root,
+          reference,
+          [...path, key],
+          depth + 1,
+        ),
+      );
+  if (schemaArray(value))
+    value.forEach((item, index) => {
+      const items = resolved.items;
+      if (!schemaObject(items)) return;
+      paths.push(
+        ...admittedResourceReferencePaths(
+          items,
+          item,
+          root,
+          reference,
+          [...path, index],
+          depth + 1,
+        ),
+      );
+    });
+  for (const branch of [
+    ...(schemaArray(resolved.oneOf) ? resolved.oneOf : []),
+    ...(schemaArray(resolved.anyOf) ? resolved.anyOf : []),
+  ]) {
+    if (!schemaObject(branch)) continue;
+    for (const candidate of admittedResourceReferencePaths(
+      branch,
+      value,
+      root,
+      reference,
+      path,
+      depth + 1,
+    ))
+      if (!paths.some((existing) => existing.join(".") === candidate.join(".")))
+        paths.push(candidate);
+  }
+  return paths;
+}
+
 export function validateSemanticValue(
   input: SemanticSchema | boolean,
   value: unknown,

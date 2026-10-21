@@ -79,6 +79,36 @@ pub(super) fn list_albums(connection: &Connection) -> Result<Vec<AlbumRecord>, P
     Ok(result)
 }
 
+/// The row shape both album summary reads project: identity, name, the live
+/// photo count, and whether a saved progress position exists.
+type AlbumSummaryRow = (String, String, i64, i64);
+
+fn album_summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AlbumSummaryRow> {
+    Ok((
+        row.get::<_, String>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, i64>(2)?,
+        row.get::<_, i64>(3)?,
+    ))
+}
+
+/// Projects one summary row against the mutation versions. An out-of-range
+/// count maps to the same storage error both readers use.
+fn album_summary(
+    versions: &MutationVersions,
+    (id, name, photo_count, has_saved_position): AlbumSummaryRow,
+) -> Result<AlbumSummary, PersistenceError> {
+    Ok(AlbumSummary {
+        album_version: versions.album(&id),
+        id,
+        name,
+        photo_count: photo_count
+            .try_into()
+            .map_err(|_| PersistenceError::Storage)?,
+        has_saved_position: has_saved_position != 0,
+    })
+}
+
 pub(super) fn list_album_summaries(
     connection: &Connection,
     versions: &MutationVersions,
@@ -93,29 +123,12 @@ pub(super) fn list_album_summaries(
              FROM albums a ORDER BY a.created_at, a.id",
         )
         .map_err(|_| PersistenceError::Storage)?
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })
+        .query_map([], album_summary_row)
         .map_err(|_| PersistenceError::Storage)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| PersistenceError::Storage)?;
     rows.into_iter()
-        .map(|(id, name, photo_count, has_saved_position)| {
-            Ok(AlbumSummary {
-                album_version: versions.album(&id),
-                id,
-                name,
-                photo_count: photo_count
-                    .try_into()
-                    .map_err(|_| PersistenceError::Storage)?,
-                has_saved_position: has_saved_position != 0,
-            })
-        })
+        .map(|row| album_summary(versions, row))
         .collect()
 }
 
@@ -133,29 +146,11 @@ pub(super) fn read_album(
                     EXISTS(SELECT 1 FROM album_progress p WHERE p.album_id = a.id)
              FROM albums a WHERE a.id=?",
             [album_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            },
+            album_summary_row,
         )
         .optional()
         .map_err(|_| PersistenceError::Storage)?;
-    row.map(|(id, name, photo_count, has_saved_position)| {
-        Ok(AlbumSummary {
-            album_version: versions.album(&id),
-            id,
-            name,
-            photo_count: photo_count
-                .try_into()
-                .map_err(|_| PersistenceError::Storage)?,
-            has_saved_position: has_saved_position != 0,
-        })
-    })
-    .transpose()
+    row.map(|row| album_summary(versions, row)).transpose()
 }
 
 pub(super) fn create_album_query(

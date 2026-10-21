@@ -21,6 +21,10 @@ import type { ProcessingModuleDescription } from "../api/processing-modules.js";
 import { coalesceChanges } from "./workspace-edit-draft.js";
 import { refreshWorkspaceFiles } from "./workspace-edit-files.js";
 import { isUnknownEffect, type UncertainRequest } from "./uncertain-request.js";
+import {
+  createWorkspaceJobLane,
+  type WorkspaceJobLane,
+} from "./workspace-job-lane.js";
 
 export type EditChange = JsonObject & { type: string };
 export type WorkspaceEditModel = {
@@ -103,11 +107,6 @@ export function createWorkspaceEditOwner(
   let alive = true;
   let editGeneration = 0;
   let savePromise: Promise<void> | undefined;
-  let barrier = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let wantedPreviewRequest: string | undefined;
-  let polling = false;
-  let previewAfterSave = false;
   let selectingEdit = false;
   const publish = () => {
     if (alive) notify(model);
@@ -120,6 +119,57 @@ export function createWorkspaceEditOwner(
     model.status = `${operation} failed`;
     publish();
   };
+  const lane: WorkspaceJobLane = createWorkspaceJobLane({
+    fetcher,
+    photoId,
+    model,
+    publish,
+    reportFailure: failure,
+    readFiles: async () => {
+      await readFiles();
+    },
+    render: (operation, args, captured) => {
+      void render(operation, args, captured);
+    },
+    findFile: (artifact, result) =>
+      artifact
+        ? model.files.find(
+            (item) =>
+              item.artifactId === artifact.artifactId &&
+              item.revision === artifact.revision,
+          )
+        : result
+          ? model.files.find(
+              (item) =>
+                item.relativePath === result.relativePath ||
+                (typeof result.path === "string" &&
+                  result.path.endsWith(`/${item.relativePath}`)),
+            )
+          : undefined,
+    findComparisonFile: (comparison) =>
+      model.files.find(
+        (item) =>
+          item.artifactId === comparison.artifactId ||
+          (typeof comparison.path === "string" &&
+            comparison.path.endsWith(`/${item.relativePath}`)),
+      ),
+    presentPreview: (file, revision, identity, comparisonFile) => {
+      model.preview = {
+        url: fileBytesUrl(model.workspace!.workspaceId, file),
+        revision,
+        file,
+        identity,
+        ...(comparisonFile
+          ? {
+              comparisonUrl: fileBytesUrl(
+                model.workspace!.workspaceId,
+                comparisonFile,
+              ),
+            }
+          : {}),
+      };
+    },
+  });
   const readFiles = async (continuation = false) => {
     await refreshWorkspaceFiles(fetcher, model, continuation);
     publish();
@@ -154,23 +204,28 @@ export function createWorkspaceEditOwner(
       : Array.isArray(exports.items)
         ? exports.items
         : [];
-    for (const job of retainedJobs)
-      if (
-        isRecord(job) &&
-        typeof job.requestId === "string" &&
-        typeof job.status === "string" &&
-        !model.jobs.some((existing) => existing.requestId === job.requestId)
-      )
-        model.jobs.push(
-          parseToolJob({
-            ...job,
+    lane.retain(
+      retainedJobs.flatMap((job) => {
+        if (
+          !isRecord(job) ||
+          typeof job.requestId !== "string" ||
+          typeof job.status !== "string" ||
+          model.jobs.some((existing) => existing.requestId === job.requestId)
+        )
+          return [];
+        return [
+          {
+            requestId: job.requestId,
+            body: job,
             operation: "export create",
             editId,
             revision: isRecord(job.capture)
               ? job.capture.revision
               : job.revision,
-          }),
-        );
+          },
+        ];
+      }),
+    );
     if (isRecord(kinds.maskGraphSchema))
       model.maskGraphSchema = kinds.maskGraphSchema;
     const descriptors = await Promise.all(
@@ -288,7 +343,7 @@ export function createWorkspaceEditOwner(
           (job) => !["succeeded", "failed", "cancelled"].includes(job.status),
         )
       )
-        void pollJobs();
+        void lane.poll();
       model.status = model.edit
         ? model.draft.length
           ? "Unsaved settings"
@@ -305,138 +360,11 @@ export function createWorkspaceEditOwner(
       publish();
     }
   };
-  const pollJobs = async () => {
-    if (!alive || polling) return;
-    clearTimeout(timer);
-    polling = true;
-    let pending = false;
-    for (const previous of [...model.jobs]) {
-      if (["succeeded", "failed", "cancelled"].includes(previous.status))
-        continue;
-      try {
-        const job = parseToolJob(
-          await workspaceRequest(
-            fetcher,
-            `${toolPath(photoId)}/jobs/${encodeURIComponent(previous.requestId)}`,
-          ),
-        );
-        const index = model.jobs.findIndex(
-          (item) => item.requestId === job.requestId,
-        );
-        if (index >= 0) model.jobs[index] = { ...previous, ...job };
-        if (!["succeeded", "failed", "cancelled"].includes(job.status)) {
-          pending = true;
-          continue;
-        }
-        try {
-          await readFiles();
-        } catch (error) {
-          if (
-            !(error instanceof WorkspaceApiError) ||
-            error.code !== "workspace_busy"
-          )
-            throw error;
-          model.jobs[index] = { ...previous, ...job, status: "checking" };
-          model.status = "Checking file";
-          pending = true;
-          continue;
-        }
-        if (
-          job.status === "succeeded" &&
-          previous.operation === "export create"
-        )
-          model.status = "Ready";
-        if (job.status === "failed")
-          throw new WorkspaceApiError(
-            "render_failed",
-            typeof job.failure === "string"
-              ? job.failure
-              : "Rendering failed. Retry preview or export explicitly.",
-            "none",
-            isRecord(job.failure) ? job.failure : {},
-          );
-        if (
-          job.status === "succeeded" &&
-          previous.operation === "preview render" &&
-          previous.requestId === wantedPreviewRequest &&
-          model.edit &&
-          model.edit.editId === previous.editId &&
-          model.edit.revision === previous.revision &&
-          !model.draft.length
-        ) {
-          const result = isRecord(job.result) ? job.result : job;
-          const artifact = isRecord(job.artifact)
-            ? job.artifact
-            : isRecord(result.artifact)
-              ? result.artifact
-              : undefined;
-          const file = artifact
-            ? model.files.find(
-                (item) =>
-                  item.artifactId === artifact.artifactId &&
-                  item.revision === artifact.revision,
-              )
-            : model.files.find(
-                (item) =>
-                  item.relativePath === result.relativePath ||
-                  (typeof result.path === "string" &&
-                    result.path.endsWith(`/${item.relativePath}`)),
-              );
-          if (file && file.state === "ready" && model.workspace) {
-            const comparison = isRecord(result.comparison)
-              ? result.comparison
-              : undefined;
-            const comparisonFile = comparison
-              ? model.files.find(
-                  (item) =>
-                    item.artifactId === comparison.artifactId ||
-                    (typeof comparison.path === "string" &&
-                      comparison.path.endsWith(`/${item.relativePath}`)),
-                )
-              : undefined;
-            model.preview = {
-              url: fileBytesUrl(model.workspace.workspaceId, file),
-              revision: previous.revision,
-              file,
-              identity: previous.requestId,
-              ...(comparisonFile
-                ? {
-                    comparisonUrl: fileBytesUrl(
-                      model.workspace.workspaceId,
-                      comparisonFile,
-                    ),
-                  }
-                : {}),
-            };
-            model.status = "Ready";
-          } else {
-            model.status = "Checking file";
-            pending = true;
-            model.jobs[index] = { ...previous, ...job, status: "checking" };
-          }
-        }
-      } catch (error) {
-        failure(error, "Rendering");
-      }
-    }
-    model.previewPending = model.jobs.some(
-      (job) =>
-        job.operation === "preview render" &&
-        !["succeeded", "failed", "cancelled"].includes(job.status),
-    );
-    publish();
-    polling = false;
-    if (alive) void renderPendingPreview();
-    if (alive && pending)
-      timer = setTimeout(() => {
-        void pollJobs();
-      }, 1000);
-  };
   const render = async (
     operation: string,
     args: JsonObject = {},
     captured?: EditView,
-  ) => {
+  ): Promise<void> => {
     const edit = captured ?? model.edit;
     if (
       !edit ||
@@ -444,14 +372,12 @@ export function createWorkspaceEditOwner(
       (!captured && (model.draft.length || model.saving))
     )
       return;
-    if (operation === "preview render") previewAfterSave = false;
+    if (operation === "preview render") lane.supersedePreview();
     const payload = {
       ...args,
       revision: edit.revision,
       requestId: requestIdentity(),
     };
-    if (operation === "preview render")
-      wantedPreviewRequest = String(payload.requestId);
     try {
       const result = await toolCommand(
         fetcher,
@@ -470,7 +396,7 @@ export function createWorkspaceEditOwner(
           "unknown",
           {},
         );
-      model.jobs.push(
+      lane.admit(
         parseToolJob({
           ...result,
           operation,
@@ -482,7 +408,6 @@ export function createWorkspaceEditOwner(
         operation === "preview render" ? "Rendering preview" : "Exporting";
       if (operation === "preview render") model.previewPending = true;
       publish();
-      void pollJobs();
     } catch (error) {
       if (isUnknownEffect(error)) {
         model.uncertain = {
@@ -496,7 +421,7 @@ export function createWorkspaceEditOwner(
     }
   };
   const renderPendingPreview = async () => {
-    if (previewAfterSave && !barrier && !model.previewPending)
+    if (lane.previewAfterSave && !lane.barrierHeld && !model.previewPending)
       await render("preview render");
   };
   const drain = async (force = false) => {
@@ -506,7 +431,7 @@ export function createWorkspaceEditOwner(
         model.draft.length &&
         model.edit &&
         !model.blocked &&
-        (!barrier || force)
+        (!lane.barrierHeld || force)
       ) {
         const generation = editGeneration;
         const edit = model.edit;
@@ -541,7 +466,7 @@ export function createWorkspaceEditOwner(
             );
           if (generation !== editGeneration) continue;
           acknowledged = true;
-          if (result.revision !== edit.revision) previewAfterSave = true;
+          if (result.revision !== edit.revision) lane.requestPreviewAfterSave();
           model.edit = {
             ...edit,
             stateToken: result.stateToken,
@@ -703,7 +628,7 @@ export function createWorkspaceEditOwner(
             "Save or reconcile this draft before choosing another edit.",
           );
         editGeneration++;
-        previewAfterSave = false;
+        lane.supersedePreview();
         delete model.preview;
         await readEdit(String(args.editId));
         return;
@@ -829,8 +754,8 @@ export function createWorkspaceEditOwner(
         return;
       }
       if (action === "export") {
-        if (barrier) return;
-        barrier = true;
+        if (lane.barrierHeld) return;
+        lane.holdBarrier();
         try {
           await drain(true);
           if (model.draft.length && !model.blocked) await drain(true);
@@ -838,14 +763,14 @@ export function createWorkspaceEditOwner(
           const captured = model.edit;
           await render("export create", {}, captured);
         } finally {
-          barrier = false;
+          lane.releaseBarrier();
           if (model.draft.length) void drain();
           else void renderPendingPreview();
         }
         return;
       }
       if (action === "job-check") {
-        await pollJobs();
+        await lane.poll();
         return;
       }
       if (action === "job-cancel") {
@@ -854,40 +779,11 @@ export function createWorkspaceEditOwner(
           `${toolPath(photoId)}/jobs/${encodeURIComponent(String(args.requestId))}/cancel`,
           { requestId: requestIdentity() },
         );
-        await pollJobs();
+        await lane.poll();
         return;
       }
       if (action === "job-retry" && model.edit) {
-        const result = await toolCommand(
-          fetcher,
-          photoId,
-          model.edit.editId,
-          "export retry",
-          { id: args.requestId, requestId: requestIdentity() },
-        );
-        if (
-          typeof result.requestId !== "string" ||
-          typeof result.status !== "string"
-        )
-          throw new WorkspaceApiError(
-            "outcome_unknown",
-            "Retry admission is uncertain. Inspect retained jobs.",
-            "unknown",
-            {},
-          );
-        const original = model.jobs.find(
-          (job) => job.requestId === args.requestId,
-        );
-        model.jobs.push(
-          parseToolJob({
-            ...result,
-            operation: original?.operation ?? "export create",
-            revision: isRecord(result.capture)
-              ? result.capture.revision
-              : result.revision,
-          }),
-        );
-        void pollJobs();
+        await lane.retry(args.requestId);
         return;
       }
       if (action === "inspect-current") {
@@ -944,7 +840,7 @@ export function createWorkspaceEditOwner(
           );
         model.blocked = model.draft.length > 0;
         if (typeof result.status === "string") {
-          model.jobs.push(
+          lane.admit(
             parseToolJob({
               ...result,
               operation: pending.operation,
@@ -952,7 +848,6 @@ export function createWorkspaceEditOwner(
               revision: pending.arguments.revision,
             }),
           );
-          void pollJobs();
         }
         if (model.edit) await readEdit(model.edit.editId);
         publish();
@@ -992,7 +887,7 @@ export function createWorkspaceEditOwner(
     },
     dispose() {
       alive = false;
-      clearTimeout(timer);
+      lane.dispose();
     },
   };
 }

@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
+  admittedResourceReferencePaths,
+  maxReferenceDiscoveryDepth,
   newSemanticValue,
   replaceSemanticValue,
   selectSemanticBranch,
   semanticSchemaError,
   validateSemanticValue,
 } from "./semantic-schema.js";
+import type { SemanticSchema } from "./semantic-schema.js";
 
 const nativeParameterSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -342,5 +345,151 @@ describe("semantic schema model", () => {
       },
     };
     expect(newSemanticValue(schema)).toEqual({ curve: [], mode: "linear" });
+  });
+
+  test("discovers resource reference paths through objects, arrays, refs and branches", () => {
+    const reference = { resourceId: "icc-1", version: "3" };
+    const root: SemanticSchema = {
+      type: "object",
+      properties: {
+        direct: {
+          type: "object",
+          required: ["resourceId", "version"],
+          properties: {
+            resourceId: { type: "string" },
+            version: { type: "string" },
+          },
+        },
+        nested: {
+          type: "object",
+          properties: {
+            inner: { $ref: "#/$defs/resource" },
+          },
+        },
+        list: {
+          type: "array",
+          items: { $ref: "#/$defs/resource" },
+        },
+        branched: {
+          oneOf: [
+            { type: "object", properties: { resourceId: {}, version: {} } },
+            { type: "string" },
+          ],
+        },
+        scalar: { type: "number" },
+      },
+      $defs: {
+        resource: {
+          type: "object",
+          required: ["resourceId", "version"],
+          properties: {
+            resourceId: { type: "string" },
+            version: { type: "string" },
+          },
+        },
+      },
+    };
+    const value = {
+      direct: { resourceId: "x", version: "1" },
+      nested: { inner: { resourceId: "y", version: "2" } },
+      list: [{ resourceId: "z", version: "3" }],
+      branched: { resourceId: "b", version: "1" },
+      scalar: 5,
+    };
+    expect(
+      admittedResourceReferencePaths(root, value, root, reference),
+    ).toEqual([["direct"], ["nested", "inner"], ["list", 0], ["branched"]]);
+  });
+
+  test("reports the root path and deduplicates branch-admitted paths", () => {
+    const reference = { resourceId: "icc-1", version: "3" };
+    const root: SemanticSchema = {
+      type: "object",
+      required: ["resourceId", "version"],
+      properties: {
+        resourceId: { type: "string" },
+        version: { type: "string" },
+      },
+    };
+    expect(admittedResourceReferencePaths(root, {}, root, reference)).toEqual([
+      [],
+    ]);
+    const branch: SemanticSchema = {
+      anyOf: [
+        { type: "object", properties: { resourceId: {}, version: {} } },
+        {
+          type: "object",
+          properties: { resourceId: {}, version: {} },
+        },
+      ],
+    };
+    expect(
+      admittedResourceReferencePaths(branch, {}, branch, reference),
+    ).toEqual([[]]);
+  });
+
+  test("omits paths whose schema rejects the reference and caps traversal depth", () => {
+    const reference = { resourceId: "icc-1", version: "3" };
+    const strict: SemanticSchema = {
+      type: "object",
+      required: ["resourceId", "version"],
+      additionalProperties: false,
+      properties: {
+        resourceId: { enum: ["other"] },
+        version: { type: "string" },
+      },
+    };
+    expect(
+      admittedResourceReferencePaths(strict, {}, strict, reference),
+    ).toEqual([]);
+    expect(maxReferenceDiscoveryDepth).toBe(32);
+    let deep: SemanticSchema = {
+      type: "object",
+      required: ["resourceId", "version"],
+      properties: {
+        resourceId: { type: "string" },
+        version: { type: "string" },
+      },
+    };
+    for (let level = 0; level < maxReferenceDiscoveryDepth + 5; level += 1)
+      deep = { type: "object", properties: { deeper: deep } };
+    expect(admittedResourceReferencePaths(deep, {}, deep, reference)).toEqual(
+      [],
+    );
+  });
+
+  test("replaced reference values keep unexposed siblings verbatim", () => {
+    const reference = { resourceId: "icc-1", version: "3" };
+    const root: SemanticSchema = {
+      type: "object",
+      properties: {
+        profile: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            intent: { type: "string" },
+            icc: {
+              type: "object",
+              required: ["resourceId", "version"],
+              additionalProperties: false,
+              properties: {
+                resourceId: { type: "string" },
+                version: { type: "string" },
+              },
+            },
+          },
+        },
+      },
+    };
+    const value = { profile: { intent: "relative", icc: undefined } };
+    const next = replaceSemanticValue(
+      value,
+      admittedResourceReferencePaths(root, value, root, reference)[0]!,
+      reference,
+    ) as { profile: { intent: string; icc: unknown } };
+    expect(next).toEqual({
+      profile: { intent: "relative", icc: reference },
+    });
+    expect(validateSemanticValue(root, next, root)).toEqual([]);
   });
 });
