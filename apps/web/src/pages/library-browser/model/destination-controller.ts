@@ -1,7 +1,7 @@
 import type { AlbumSummary, SelectionFilter } from "../api/contracts.js";
 import type { SourceViewOrder } from "../api/source-grid.js";
-import type { LibraryBrowserView } from "../ui/library-browser-view.js";
 import type { RecoveryGate } from "./async-ownership.js";
+import type { DestinationViewPort } from "./destination-view-port.js";
 import {
   allPhotosDestination,
   gridDestination,
@@ -83,7 +83,7 @@ type Dependencies = Readonly<{
   navigation: Pick<NavigationOwner, "replaceGrid">;
   locations: Pick<FileLocationOwner, "publication" | "window">;
   view: Pick<
-    LibraryBrowserView,
+    DestinationViewPort,
     | "prepareSourceOpen"
     | "setGridExplanation"
     | "showGrid"

@@ -1,6 +1,6 @@
 use super::*;
 use crate::persistence::admission::StateDirectory;
-use crate::persistence::albums;
+use crate::persistence::album_write::AlbumWriteError;
 use crate::persistence::test_support::*;
 use crate::{
     AlbumMembershipMutation, AlbumMutation, AlbumQueryFilter, CheckedAlbumMutation, OriginalKind,
@@ -260,7 +260,7 @@ async fn reopening_persistence_invalidates_process_epoch_versions() {
                 expected_version: album.album_version,
             })
             .await,
-        Err(albums::AlbumWriteError::VersionConflict {
+        Err(AlbumWriteError::VersionConflict {
             album_id: album.id,
             current_version: reopened_album.album_version,
         })

@@ -351,21 +351,13 @@ Without a token, only the public shell, access status, and health check are
 available. `GET /api/status` requires valid access and reports Library
 initialization, scan, and publication state.
 
-To expand a stopped schema-v5 Library to an ancestor Folder, first create and
-record a verified consistent backup with the service stopped (see
-[`specs/deployment/spec.md`](specs/deployment/spec.md)). Then set
-`SLIPSTREAM_LIBRARY_ROOT` to the proposed canonical ancestor while retaining
-the same state, cache, and database settings, and run:
+To expand a stopped Library at schema version 7 through 15 to an ancestor Folder, first create and record a verified backup with the service stopped (see [`specs/deployment/spec.md`](specs/deployment/spec.md)). Then set `SLIPSTREAM_LIBRARY_ROOT` to the proposed canonical ancestor while retaining the same state, cache, and database settings, and run:
 
 ```sh
 cargo run --locked -p slipstream-server -- expand-library
 ```
 
-The offline command rejects a running database, sidecars, non-v5 state, an
-unrelated Folder, descriptor mismatch, invalid remembered Locations, and
-scan-limit failures. It never opens HTTP and does not require
-listener configuration. It commits the binding and Location changes once, then
-completes a normal scan before reporting success.
+The offline command rejects a running database, sidecars, unsupported schema, an unrelated Folder, descriptor mismatch, invalid remembered Locations, and scan-limit failures. It never opens HTTP and does not require listener configuration. It migrates an admitted older schema to the current schema, commits the binding and Location changes once, then completes a normal scan before reporting success.
 
 ## Container verification
 

@@ -1,4 +1,4 @@
-import type { BrowserFetch } from "./access-session.js";
+import type { BrowserFetch } from "../api/browser-fetch.js";
 import type { WorkspaceEditModel } from "./workspace-edit-owner.js";
 import {
   parseFile,

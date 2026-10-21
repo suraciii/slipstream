@@ -1,4 +1,4 @@
-import type { BrowserFetch } from "../model/access-session.js";
+import type { BrowserFetch } from "./browser-fetch.js";
 import { isRecord } from "./guards.js";
 
 export type ComposableRecipeInput = Readonly<

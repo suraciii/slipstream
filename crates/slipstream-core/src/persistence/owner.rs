@@ -1,4 +1,7 @@
-use super::albums::AlbumWriteError;
+use super::album_write::{
+    AlbumWriteError, album_write_error_from_persistence, normalize_album_membership_mutation,
+    normalize_album_mutation, normalize_album_name, normalize_checked_album_mutation,
+};
 use super::scan::ScanApplication;
 use super::scan_recovery::ScanRecoveryPlan;
 use super::{
@@ -1096,7 +1099,7 @@ impl Persistence {
         &self,
         mutation: AlbumMutation,
     ) -> Result<oneshot::Receiver<Result<AlbumMutationResult, MutationError>>, MutationError> {
-        let mutation = albums::normalize_album_mutation(mutation)?;
+        let mutation = normalize_album_mutation(mutation)?;
         let (send, receive) = oneshot::channel();
         self.submit(Command::MutateAlbum(mutation, send))
             .map_err(mutation::mutation_error_from_persistence)?;
@@ -1116,7 +1119,7 @@ impl Persistence {
         mutation: AlbumMembershipMutation,
     ) -> Result<oneshot::Receiver<Result<AlbumMembershipResult, MutationError>>, MutationError>
     {
-        let mutation = albums::normalize_album_membership_mutation(mutation)?;
+        let mutation = normalize_album_membership_mutation(mutation)?;
         let (send, receive) = oneshot::channel();
         self.submit(Command::MutateAlbumMembership(mutation, send))
             .map_err(mutation::mutation_error_from_persistence)?;
@@ -1126,48 +1129,42 @@ impl Persistence {
     pub async fn create_album_checked(
         &self,
         name: String,
-    ) -> Result<AlbumCreationResult, albums::AlbumWriteError> {
+    ) -> Result<AlbumCreationResult, AlbumWriteError> {
         let receive = self.create_album_checked_receiver(name)?;
-        receive
-            .await
-            .unwrap_or(Err(albums::AlbumWriteError::Persistence))
+        receive.await.unwrap_or(Err(AlbumWriteError::Persistence))
     }
 
     pub(crate) fn create_album_checked_receiver(
         &self,
         name: String,
-    ) -> Result<
-        oneshot::Receiver<Result<AlbumCreationResult, albums::AlbumWriteError>>,
-        albums::AlbumWriteError,
-    > {
-        let name = albums::normalize_album_name(name)?;
+    ) -> Result<oneshot::Receiver<Result<AlbumCreationResult, AlbumWriteError>>, AlbumWriteError>
+    {
+        let name = normalize_album_name(name)?;
         let (send, receive) = oneshot::channel();
         self.submit(Command::CreateAlbum(name, send))
-            .map_err(albums::album_write_error_from_persistence)?;
+            .map_err(album_write_error_from_persistence)?;
         Ok(receive)
     }
 
     pub async fn mutate_album_checked(
         &self,
         mutation: CheckedAlbumMutation,
-    ) -> Result<CheckedAlbumMutationResult, albums::AlbumWriteError> {
+    ) -> Result<CheckedAlbumMutationResult, AlbumWriteError> {
         let receive = self.mutate_album_checked_receiver(mutation)?;
-        receive
-            .await
-            .unwrap_or(Err(albums::AlbumWriteError::Persistence))
+        receive.await.unwrap_or(Err(AlbumWriteError::Persistence))
     }
 
     pub(crate) fn mutate_album_checked_receiver(
         &self,
         mutation: CheckedAlbumMutation,
     ) -> Result<
-        oneshot::Receiver<Result<CheckedAlbumMutationResult, albums::AlbumWriteError>>,
-        albums::AlbumWriteError,
+        oneshot::Receiver<Result<CheckedAlbumMutationResult, AlbumWriteError>>,
+        AlbumWriteError,
     > {
-        let mutation = albums::normalize_checked_album_mutation(mutation)?;
+        let mutation = normalize_checked_album_mutation(mutation)?;
         let (send, receive) = oneshot::channel();
         self.submit(Command::MutateAlbumChecked(mutation, send))
-            .map_err(albums::album_write_error_from_persistence)?;
+            .map_err(album_write_error_from_persistence)?;
         Ok(receive)
     }
 

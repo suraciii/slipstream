@@ -100,44 +100,17 @@ Capture Time never reorders it.
 
 ## State, Rescan, and Recovery
 
-SQLite owns Photo identity, Albums, Selection State, Rating, and saved
-Album position. File Location navigation is derived from Published Library
-Original Locations and is not a second writable hierarchy. The state directory
-and derivative cache directory must be separate from the configured Library
-Folder. The supported writable schema for 0.1 is SQLite schema version 6.
+SQLite owns Photo identity, Albums, Selection State, Rating, and saved Album position. File Location navigation is derived from Published Library Original Locations and is not a second writable hierarchy. The state directory and derivative cache directory must be separate from the configured Library Folder. The supported writable schema for 0.1 is SQLite schema version 15.
 
-A rescan publishes one completed Library snapshot. It discovers new supported files, refreshes changed files, marks missing files unavailable, and preserves unaffected decisions and Album positions. Before it allocates new Photos, it restores a moved Original File that exact content evidence identifies as a globally unambiguous candidate. An unavailable Photo retains its state and its last successfully inspected Capture Time; an ambiguous or unprovable group stays unavailable, and Slipstream does not transfer state to a replacement file. Historical Originals without a fingerprint have an explicit batch recovery path under [Photo Library and Albums](../photo-library/spec.md); recovery revalidates every proposed mapping at commit and never deletes a filesystem file. A recovered association changes the remembered Original Location and Photo availability; it does not copy or restore file bytes. Content fingerprint enrollment runs in the background after migration and does not block initial browsing. The active unavailable count excludes Removed Photos in Trash. An open `All Photos`, Original Folder, or Album source retains its ordered Photo IDs while a rescan runs.
+A rescan publishes one completed Library snapshot. It discovers new supported files, refreshes changed files, marks missing files unavailable, and preserves unaffected decisions and Album positions. Before it allocates new Photos, it restores a moved Original File that exact content evidence identifies as one globally unambiguous candidate. An unavailable Photo retains its state and its last successfully inspected Capture Time; an ambiguous or unprovable group stays unavailable, and Slipstream does not transfer state to a replacement file. Historical Originals without a fingerprint have an explicit batch recovery path under [Photo Library and Albums](../photo-library/spec.md); recovery revalidates every proposed mapping at commit and never deletes a filesystem file. A recovered association changes the remembered Original Location and Photo availability; it does not copy or restore file bytes. Content fingerprint enrollment runs in the background after migration and does not block initial browsing. The active unavailable count excludes Removed Photos in Trash. An open `All Photos`, Original Folder, or Album source retains its ordered Photo IDs while a rescan runs.
 
-For a clean installation, use the repository-owned Docker procedure with a
-canonical absolute Library Folder, a persistent state directory, and a separate
-persistent cache directory. A new state store exposes initialization until its
-first scan publishes the Library. A compatible existing state store may serve
-its last complete Library while an ordinary background rescan checks for
-changes. The operator procedure, container hardening requirements, and health
-boundary are in the [deployment guide](spec.md).
+For a clean installation, use the repository-owned Docker procedure with a canonical absolute Library Folder, a persistent state directory, and a separate persistent cache directory. A new state store exposes initialization until its first scan publishes the Library. A compatible existing state store may serve its last complete Library while an ordinary background rescan checks for changes. The operator procedure, container hardening requirements, and health boundary are in the [deployment guide](spec.md).
 
-For an upgrade from schema version 5, stop the service and create a verified,
-sidecar-free, consistent state backup before starting the schema-v6 image. The
-v5-to-v6 migration splits each legacy RAW/JPEG pair into independent Photos:
-the old Photo ID and all existing user state and Album references stay with
-the RAW Original, even when it is unavailable, while the JPEG keeps its
-Original File ID and receives a new independent Photo ID with default
-decisions and no inherited Album memberships. Singleton Photos and remembered
-unavailable records keep their IDs and state. A sibling-JPEG-derived Preview
-for a kept RAW is invalidated. The migration has no in-place down migration.
-To roll back, stop the schema-v6 service and restore the verified pre-upgrade
-v5 backup before starting the compatible v5 image. A v5 binary rejects
-schema-v6 state.
+For an upgrade from schema version 14, stop the service and create a verified, sidecar-free, consistent state backup before starting the schema-v15 image. The v14-to-v15 migration rebuilds legacy Selection State values into the canonical values `unflagged`, `picked`, and `rejected` without changing Photo identity, Original identity, Rating, Album membership, saved positions, or Original Files. The migration has no in-place down migration. To roll back, stop the schema-v15 service and restore the verified pre-upgrade v14 backup before starting the compatible v14 image. A v14 binary rejects schema-v15 state.
 
-An upgrade from schema version 4 or earlier first completes the earlier
-migrations. The v4-to-v5 migration replaces legacy v4 Photo Set storage names
-with Album names and preserves every existing row, ID, membership position,
-saved position, and user-owned fact. Rollback across those earlier migrations
-uses their verified backups and compatible images.
+An upgrade from schema version 4 or earlier first completes the earlier migrations. An upgrade from schema version 5 through 13 then completes the later migrations. The v4-to-v5 migration replaces legacy v4 Photo Set storage names with Album names, and the v5-to-v6 migration establishes independent Photos; each preserves the state defined by its migration contract. Rollback across earlier migrations uses their verified backups and compatible images.
 
-A Library Expansion requires a verified schema-v6 backup after migration and
-before the offline expansion command. Rollback after expansion restores that
-pre-expansion v6 backup and the prior Library Folder configuration.
+A Library Expansion requires a verified current-schema backup after migration and before the offline expansion command. Rollback after expansion restores that pre-expansion backup and the prior Library Folder configuration.
 
 A backup is accepted only after an isolated restore starts with the same
 canonical read-only Library Folder and passes the state checks documented with

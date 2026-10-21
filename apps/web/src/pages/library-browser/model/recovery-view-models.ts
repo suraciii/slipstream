@@ -1,4 +1,7 @@
-import type { ViewSelectionState } from "./library-browser-view.js";
+/// The recovery review's view models, owned by the model that computes them:
+/// the review owner builds every entry, mapping, and paging projection the
+/// recovery panel presents. The UI imports these contracts rather than the
+/// model importing the UI.
 
 /// One item the bounded recovery review lists: the remembered facts of an
 /// Original the review opened on, with the state the Library holds now.
@@ -10,7 +13,7 @@ export type RecoveryEntryViewModel = Readonly<{
   location: string;
   kind: "raw" | "jpeg";
   rating: number;
-  selectionState: ViewSelectionState;
+  selectionState: "unflagged" | "picked" | "rejected";
   albumCount: number;
   fingerprintEnrolled: boolean;
 }>;

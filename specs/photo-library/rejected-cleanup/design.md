@@ -38,14 +38,12 @@ restored returns the original outcome without applying a second removal.
 
 Normal Library sources exclude removed Photos. That covers every Browse Snapshot source (`All Photos`, Original Folder, Album), the Library Overview Photo count, Album summaries and Album member listings, Original Folder Photo counts, the CLI Photo query, and the unavailable-Original recovery survey. Album membership rows are not deleted, so restoring a Photo re-admits it to the same Albums at the same positions.
 
-A removed Photo is not deleted state: reading it by identity still resolves, and the Removed Photos listing is its only ordinary surface. The listing is bounded and ordered newest removal first.
+A removed Photo is not deleted state: reading it by identity still resolves, and it remains available through Trash. Trash owns the recovery listing and permanent-deletion semantics.
 
-### Removed Photos Listing
+### Trash Listing
 
-The Removed Photos listing is a bounded page over removed Photos in removal order. Each item carries the Photo facts Grid and Photo View already use, so the Photographer can recognize what is recoverable before restoring it. It is not a source and does not create a second browsing model.
-The listing response also reports the newest operation that still owns a
-Removed Photo and its remaining count. The browser uses that durable summary to
-restore operation-level Undo after a reload or restart.
+The Trash listing is a bounded page over removed Photos in removal order. Each item carries the Photo facts Grid and Photo View already use, so the Photographer can recognize what is recoverable before restoring it. It is not a source and does not create a second browsing model.
+The listing response also reports the newest operation that still owns a removed Photo and its remaining count. The browser uses that durable summary to restore operation-level Undo after a reload or restart.
 
 ## Semantics
 
@@ -111,17 +109,8 @@ manages the Library and never as a Grid decision:
   its operation id, so Retry repeats one operation. A review the server refuses
   as gone is discarded: the source reads again and the Photographer reviews the
   current rejected result.
-- **Undo** restores every Photo of the confirmed operation that is still
-  removed. It is offered beside the confirmation and in the Removed Photos
-  listing, because the listing is where a Photographer returns to recover a
-  removal.
-- The **Removed Photos listing** is a bounded page over removed Photos, newest
-  removal first, with each row presenting the facts the Grid presents and its
-  own Restore. A confirmed removal or restore reads the Library again — the
-  Overview count, the Album summaries, the Folder Photo counts, and the open
-  source Snapshot — before the surface reports the outcome, so no row, count,
-  or Grid cell outlives the state it presents. An emptied source presents the
-  same explained empty state any other open presents.
+- **Undo** restores every Photo of the confirmed operation that is still removed. It is offered beside the confirmation and in the Trash listing, because Trash is where a Photographer returns to recover a removal.
+- **The Trash listing** is a bounded page over removed Photos, newest removal first, with each row presenting the facts the Grid presents and its own Restore. A confirmed removal or restore reads the Library again — the Overview count, the Album summaries, the Folder Photo counts, and the open source Snapshot — before the surface reports the outcome, so no row, count, or Grid cell outlives the state it presents. An emptied source presents the same explained empty state any other open presents.
 
 The listing is not a source: it creates no Browse Snapshot, no second browsing
 model, and no Grid position. It reads one bounded page at a time and restores
@@ -168,7 +157,7 @@ The implementation must prove that:
 - a changed, missing, or already-removed Photo is never removed by that request;
 - removed Photos leave every normal source, Album listing, Album count, Overview count, Folder count, and CLI query, while keeping their Album membership rows;
 - a removed Photo's bytes and Original Location are unchanged, and its Selection State, Rating, identity, and Album membership survive removal and restore;
-- a restart preserves removal markers, the Removed Photos listing, and operation-based Undo; and
+- a restart preserves removal markers, the Trash listing, and operation-based Undo; and
 - malformed, incomplete, stale, and transport-failed responses do not update visible state or claim success.
 
 The Web surfaces carry their own proof: the page-model unit tests characterize the removal owner's review, admission, retry, Undo, and restoration policy, and the browser suite proves against the real stack that a reviewed `Rejected` result leaves the Library in one confirmation, that the Overview count and the open source read again, that Undo restores the operation from the listing and is withdrawn once the operation is empty, and that a named Photo is restored and stays restored across a reload.

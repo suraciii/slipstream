@@ -1,4 +1,4 @@
-import type { BrowserFetch } from "../model/access-session.js";
+import type { BrowserFetch } from "../api/browser-fetch.js";
 import { releaseBrowse } from "../api/source-grid.js";
 import { mountAccessBoundary } from "./access-boundary.js";
 

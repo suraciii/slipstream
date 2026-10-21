@@ -15,7 +15,7 @@ import type {
   RecoveryEntryViewModel,
   RecoveryMappingViewModel,
   RecoveryPagingViewModel,
-} from "../ui/library-browser-view.js";
+} from "./recovery-view-models.js";
 
 export type {
   RecoveryApplyMapping,

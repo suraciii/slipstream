@@ -5,12 +5,12 @@ import {
   recoveryApplyMappings,
   type RecoveryMappingChoice,
 } from "../model/recovery-review.js";
+import type { LibraryBrowserIntent } from "./library-browser-view.js";
 import type {
-  LibraryBrowserIntent,
   RecoveryEntryViewModel,
   RecoveryMappingViewModel,
   RecoveryPagingViewModel,
-} from "./library-browser-view.js";
+} from "../model/recovery-view-models.js";
 
 type RecoveryPanelIntentKind =
   | "recovery-entry"

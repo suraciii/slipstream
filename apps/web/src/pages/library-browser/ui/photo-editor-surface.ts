@@ -6,14 +6,11 @@ import {
   type WorkspaceFile,
 } from "../api/workspace-edit.js";
 import type { EditChange } from "../model/workspace-edit-owner.js";
-import type {
-  EditorViewModel,
-  LibraryBrowserIntent,
-} from "./library-browser-view.js";
+import type { EditorViewModel } from "../model/editor-controller-contract.js";
+import type { EditorIntent } from "../model/editor-intent-contract.js";
 import "./workspace-editor.css";
 import { newSemanticValue } from "../model/semantic-schema.js";
 import { canContinueFilm } from "../model/workspace-film.js";
-type EditorIntent = Extract<LibraryBrowserIntent, { kind: `editor-${string}` }>;
 export interface PhotoEditorSurfaceController {
   open(photoId: string): void;
   visible(): boolean;

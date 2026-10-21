@@ -2,9 +2,8 @@
 //!
 //! This crate owns domain values, Linux read-only Original File confinement,
 //! Library scanning and SQLite persistence, plus bounded capture inspection,
-//! native Preview extraction, derivative processing, and cache publication.
-//! It also carries the durable vocabulary of composable photo-processing
-//! modules, which is not yet wired into the admitted production surfaces.
+//! native Preview extraction, derivative processing, cache publication, and
+//! composable processing modules used by the admitted production surfaces.
 //! Application configuration, startup and shutdown, HTTP protocol mapping, and
 //! Web delivery live in `slipstream-server`.
 
