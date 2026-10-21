@@ -9,17 +9,12 @@ impl WorkspaceManager {
         require_id(photo_id)?;
         let workspace = match self.lookup_photo(photo_id)? {
             Some(workspace) => workspace,
-            None => {
-                (self.resolve)(photo_id).ok_or_else(|| {
-                    WorkspaceError::new("not_found", 404, "The Photo is not in the Library.")
-                })?;
-                self.create_workspace(photo_id)?
-            }
+            None => self.create_workspace(photo_id)?,
         };
         {
             let mut session = self.locked(&workspace.id, LeaseMode::Shared)?;
             if setting(&session, "initialized")? != Value::Bool(true) {
-                let source = (self.resolve)(photo_id).ok_or_else(|| {
+                let source = (self.resolve)(photo_id)?.ok_or_else(|| {
                     WorkspaceError::new(
                         "source_unavailable",
                         409,
@@ -121,7 +116,7 @@ impl WorkspaceManager {
                 "created",
             );
         }
-        let source = (self.resolve)(&session.workspace.photo_id).ok_or_else(|| {
+        let source = (self.resolve)(&session.workspace.photo_id)?.ok_or_else(|| {
             WorkspaceError::new(
                 "source_unavailable",
                 409,

@@ -65,13 +65,16 @@ pub(super) fn inventory(manager: &WorkspaceManager, session: &WorkspaceSession) 
         }
         match manager.directory(&id) {
             Ok(directory) => {
-                let _workspace_guard=match directory.lease(LeaseMode::Shared,Duration::ZERO) {
-                    Ok(guard)=>guard,
-                    Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>{
+                let _workspace_guard = match directory
+                    .try_clone()
+                    .and_then(|directory| directory.lease(LeaseMode::Shared, Duration::ZERO))
+                {
+                    Ok(guard) => guard,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         result["activeOperations"].as_array_mut().unwrap().push(json!({"kind":"active-use","id":id,"name":format!("{id}/workspace"),"action":"Wait for the workspace operation to settle","external":true,"reason":error.to_string()}));
                         continue;
-                    },
-                    Err(error)=>{unknown(&mut result,&id,"workspace",true,error.to_string());continue;},
+                    }
+                    Err(error) => { unknown(&mut result, &id, "workspace", true, error.to_string()); continue; }
                 };
                 directory.verify_path()?;
                 discover(&directory, &id, true, &mut result)?;
@@ -595,7 +598,13 @@ mod tests {
         let manager = WorkspaceManager::open(
             &root,
             root.clone(),
-            std::sync::Arc::new(|_| None),
+            std::sync::Arc::new(|_| {
+                Ok(Some(Source {
+                    relative_path: slipstream_core::RelativeOriginalPath::parse("photo.jpg")
+                        .unwrap(),
+                    revision: None,
+                }))
+            }),
             1024 * 1024 * 1024,
         )
         .unwrap();

@@ -513,7 +513,13 @@ fn recovery_server_error(route: RecoveryRoute, error: ServerError) -> Response<B
             ServerError::QueryCapacity => cli_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "server_busy",
-                "Narrow the review before trying again.",
+                "Close another retained review or narrow the review before trying again.",
+                serde_json::json!({"operation": route.operation, "retryAfterSeconds": null}),
+            ),
+            ServerError::WorkspaceBusy => cli_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_busy",
+                "Wait for the current workspace operation to settle, then try again.",
                 serde_json::json!({"operation": route.operation, "retryAfterSeconds": null}),
             ),
             ServerError::RecoveryScope { evaluated } => recovery_scope_exceeded(route, *evaluated),

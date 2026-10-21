@@ -137,8 +137,13 @@ mod tests {
         let path = std::env::temp_dir().join(photo_files::identity("host-cursor-test").unwrap());
         let root = Directory::create(&path).unwrap();
         let workspaces = Arc::new(
-            WorkspaceManager::open(&path, path.clone(), Arc::new(|_| None), 1024 * 1024 * 1024)
-                .unwrap(),
+            WorkspaceManager::open(
+                &path,
+                path.clone(),
+                Arc::new(|_| Ok(None)),
+                1024 * 1024 * 1024,
+            )
+            .unwrap(),
         );
         let service = ToolService {
             workspaces,

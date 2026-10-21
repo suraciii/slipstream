@@ -5,7 +5,9 @@ import type { PhotoFetch } from "./photo.js";
 /// unavailable Original the review opened on. The state names what the
 /// Library holds now, so an entry the review still lists can already be
 /// recovered, in the Trash, or gone; only `unavailable` entries still wait
-/// for a mapping.
+/// for a mapping. A `state` other than `unavailable` means the Library
+/// settled this identity since the review opened — it is not a recovery this
+/// review performed.
 export type RecoveryItemState =
   | "unavailable"
   | "available"
@@ -36,6 +38,11 @@ export type RecoveryRetireCandidate = Readonly<{
 
 /// A blocked mapping names the reason it cannot be applied. `null` means the
 /// mapping can be applied once its required confirmations are given.
+///
+/// `destination-in-use` and `destination-removed` describe an occupied
+/// destination: the review offers an explicit retire-and-bind only for a
+/// `retire` candidate that is present, and otherwise names the destination
+/// as unavailable now with a review-later action rather than a merge.
 export type RecoveryBlockedReason =
   | "colliding"
   | "content-mismatch"
@@ -47,6 +54,13 @@ export type RecoveryBlockedReason =
 
 /// One reviewed mapping of an unavailable Original to a destination. The
 /// mappingId is the reviewed identity the apply step must repeat.
+///
+/// The user-facing review presents this as one of three simple outcomes:
+/// automatically updated locations, mappings ready for confirmation, and
+/// still unavailable. `outcome` is the inspectable evidence state behind
+/// that presentation — `matched` is ready for confirmation, everything else
+/// is still unavailable — and it never means bytes were restored or a file
+/// was moved: recovery changes only the association.
 export type RecoveryMapping = Readonly<{
   mappingId: string;
   originalId: string;
@@ -102,6 +116,15 @@ export type AppliedRecoveryMapping = Readonly<{
   retired: RecoveryRetireCandidate | null;
 }>;
 
+/// The apply outcomes the user-facing review names:
+/// - `applied`: every mapping of the batch committed. `appliedMappings`
+///   counts committed associations only — never copied or restored bytes.
+/// - `refused`: the whole batch was refused and nothing was applied; every
+///   submitted mapping carries its own reason.
+/// - `unknown`: the answer was lost or unreadable. The batch may or may not
+///   have committed, so the review must offer current-state inspection and
+///   must never retry automatically or claim completion.
+/// - `rejected`: the request itself failed before the batch was evaluated.
 export type RecoveryApplyResult =
   | Readonly<{
       kind: "applied";

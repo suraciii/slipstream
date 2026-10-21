@@ -43,7 +43,13 @@ impl Fixture {
         let manager = WorkspaceManager::open(
             &root,
             root.clone(),
-            std::sync::Arc::new(|_| None),
+            std::sync::Arc::new(|_| {
+                Ok(Some(Source {
+                    relative_path: slipstream_core::RelativeOriginalPath::parse("photo.jpg")
+                        .unwrap(),
+                    revision: None,
+                }))
+            }),
             1024 * 1024 * 1024,
         )
         .unwrap();
@@ -238,6 +244,36 @@ fn kept_job_blocks_removal_and_new_file_invalidates_reviewed_delete() {
     assert_eq!(replayed["outcome"], "replayed");
 }
 #[test]
+fn deletion_recreates_missing_workspace_admission_lock() {
+    let fixture = Fixture::new();
+    let reviewed = {
+        let session = fixture
+            .manager
+            .locked(&fixture.workspace.id, LeaseMode::Shared)
+            .unwrap();
+        let inventory = dependencies::inventory(&fixture.manager, &session).unwrap();
+        token(&session, &inventory).unwrap()
+    };
+    let workspace_path = fixture.root.join("workspaces").join(&fixture.workspace.id);
+    let directory = Directory::open(&workspace_path).unwrap();
+    directory
+        .remove_file(store::WORKSPACE_ADMISSION_LOCK)
+        .unwrap();
+    drop(directory);
+
+    let deleted = fixture
+        .manager
+        .delete(
+            &fixture.workspace.id,
+            &reviewed,
+            "delete-missing-admission",
+            true,
+        )
+        .unwrap();
+    assert_eq!(deleted["reclamation"], "complete");
+    assert!(fixture.manager.lookup(&fixture.workspace.id).is_err());
+}
+#[test]
 fn whole_deletion_refuses_standalone_input_lease_before_withdrawal() {
     let fixture = Fixture::new();
     fixture.write("notes.txt", b"independent input");
@@ -250,8 +286,10 @@ fn whole_deletion_refuses_standalone_input_lease_before_withdrawal() {
         let inventory = dependencies::inventory(&fixture.manager, &session).unwrap();
         token(&session, &inventory).unwrap()
     };
-    let directory = fixture.manager.directory(&fixture.workspace.id).unwrap();
-    // No outside state directory or dependency row: the supported input file
+    let directory =
+        Directory::open(fixture.root.join("workspaces").join(&fixture.workspace.id)).unwrap();
+    // No manager admission handle: this models an independent process that
+    // only holds the supported input file lease.
     // lease alone must prevent registry withdrawal and unlink.
     let input = photo_files::FileLease::acquire(
         directory.open_file("notes.txt").unwrap(),
@@ -307,13 +345,16 @@ fn returned_download_releases_index_lock_and_pins_workspace() {
         .locked(&fixture.workspace.id, LeaseMode::Shared)
         .unwrap();
     drop(another);
-    let directory = fixture.manager.directory(&fixture.workspace.id).unwrap();
-    assert!(
-        directory
-            .lease(LeaseMode::Exclusive, std::time::Duration::ZERO)
-            .is_err()
-    );
+    {
+        let directory = fixture.manager.directory(&fixture.workspace.id).unwrap();
+        assert!(
+            directory
+                .lease(LeaseMode::Exclusive, std::time::Duration::ZERO)
+                .is_err()
+        );
+    }
     drop(held);
+    let directory = fixture.manager.directory(&fixture.workspace.id).unwrap();
     assert!(
         directory
             .lease(LeaseMode::Exclusive, std::time::Duration::ZERO)
@@ -328,6 +369,8 @@ fn independent_binding_lease_precedes_destructive_admission() {
     let item = fixture.items().pop().unwrap();
     let directory = fixture.manager.directory(&fixture.workspace.id).unwrap();
     let admitted = directory
+        .try_clone()
+        .unwrap()
         .lease(LeaseMode::Shared, std::time::Duration::ZERO)
         .unwrap();
     let barrier = std::sync::Barrier::new(2);
@@ -637,4 +680,94 @@ fn an_expired_workspace_file_continuation_discloses_its_route_and_reason() {
     );
     assert_eq!(absent.status, 410);
     assert_eq!(absent.effect, "none");
+}
+
+#[test]
+fn retained_reference_inspection_does_not_recreate_missing_workspace_files() {
+    let fixture = Fixture::new();
+    let directory = fixture.manager.directory(&fixture.workspace.id).unwrap();
+    directory.remove_file(".workspace.sqlite").unwrap();
+    directory.remove_file(".workspace-lock").unwrap();
+
+    let error = fixture.manager.retained_photo_references().unwrap_err();
+    assert_eq!(error.code, "workspace_unavailable");
+    assert!(!directory.path().join(".workspace.sqlite").exists());
+    assert!(!directory.path().join(".workspace-lock").exists());
+}
+
+#[test]
+fn retained_reference_inspection_fails_closed_when_only_the_lock_is_missing() {
+    let fixture = Fixture::new();
+    let directory = fixture.manager.directory(&fixture.workspace.id).unwrap();
+    directory.remove_file(".workspace-lock").unwrap();
+
+    let error = fixture.manager.retained_photo_references().unwrap_err();
+    assert_eq!(error.code, "workspace_unavailable");
+    assert!(!directory.path().join(".workspace-lock").exists());
+}
+
+#[test]
+fn direct_workspace_directory_writers_wait_for_recovery_guard() {
+    let fixture = Fixture::new();
+    let guard = fixture.manager.recovery_guard().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            sender
+                .send(fixture.manager.directory(&fixture.workspace.id).is_ok())
+                .unwrap();
+        });
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        drop(guard);
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+        );
+    });
+}
+
+#[test]
+fn direct_workspace_directory_admission_blocks_withdrawal() {
+    let fixture = Fixture::new();
+    let reviewed = {
+        let session = fixture
+            .manager
+            .locked(&fixture.workspace.id, LeaseMode::Shared)
+            .unwrap();
+        let inventory = dependencies::inventory(&fixture.manager, &session).unwrap();
+        token(&session, &inventory).unwrap()
+    };
+    let directory = fixture.manager.directory(&fixture.workspace.id).unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let complete = fixture
+                .manager
+                .delete(
+                    &fixture.workspace.id,
+                    &reviewed,
+                    "delete-directory-admission",
+                    true,
+                )
+                .map(|result| result["reclamation"] == "complete")
+                .unwrap_or(false);
+            sender.send(complete).unwrap();
+        });
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        drop(directory);
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap()
+        );
+    });
 }

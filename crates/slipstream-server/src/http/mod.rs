@@ -914,6 +914,10 @@ impl From<ServerError> for ApiError {
                 status: StatusCode::PAYLOAD_TOO_LARGE,
                 message: "Original Folder contains too many Photos for one Album operation",
             },
+            ServerError::WorkspaceBusy => Self {
+                status: StatusCode::CONFLICT,
+                message: "Workspace operation is still in use; retry after it settles",
+            },
             ServerError::QueryCapacity => Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 message: "Retained query capacity is unavailable",

@@ -11,6 +11,33 @@ use crate::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::collections::{HashMap, HashSet};
+/// True when no retained reference of any kind still binds `photo_id`, read
+/// inside the caller's write transaction.
+///
+/// The commit path uses this so it observes the same consistent snapshot as
+/// the association it is about to write; the proposal path reads the identical
+/// bounds through [`photo_has_retained_reference_read`].
+pub(super) fn photo_has_retained_reference(
+    transaction: &Transaction<'_>,
+    photo_id: &str,
+) -> Result<bool, PersistenceError> {
+    if referenced_bounds(
+        |table, column| {
+            Ok(super::migrations::table_columns(transaction, table)?
+                .iter()
+                .any(|name| name == column))
+        },
+        |sql| {
+            Ok(transaction
+                .query_row(sql, [photo_id], |row| row.get::<_, i64>(0))
+                .map_err(|_| PersistenceError::Storage)?
+                > 0)
+        },
+    )? {
+        return Ok(true);
+    }
+    photo_has_retained_processing_reference(transaction, photo_id)
+}
 
 pub(super) fn recovery_facts(
     connection: &Connection,
@@ -155,24 +182,28 @@ pub(super) fn recovery_survey(connection: &Connection) -> Result<RecoverySurvey,
             unavailable.push(row.map_err(|_| PersistenceError::Storage)?);
         }
     }
+    let processing_photo_ids = processing_reference_photo_ids(connection)?;
     let mut referenced_photo_ids = HashSet::new();
     {
+        // The referenced set is the same authoritative boundary the commit
+        // revalidates, so a proposal never offers a retire the commit would
+        // refuse. Every Photo that still owns a retained reference of any
+        // kind joins it.
         let mut statement = connection
-            .prepare(
-                "SELECT DISTINCT photo_id FROM (
-                   SELECT photo_id FROM album_members
-                   UNION ALL
-                   SELECT photo_id FROM edit_recipes
-                   UNION ALL
-                   SELECT photo_id FROM exports
-                 )",
-            )
+            .prepare("SELECT id FROM photos ORDER BY id")
             .map_err(|_| PersistenceError::Storage)?;
         let rows = statement
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(|_| PersistenceError::Storage)?;
+        let mut photos = Vec::new();
         for row in rows {
-            referenced_photo_ids.insert(row.map_err(|_| PersistenceError::Storage)?);
+            photos.push(row.map_err(|_| PersistenceError::Storage)?);
+        }
+        drop(statement);
+        for photo_id in photos {
+            if photo_has_retained_reference_read(connection, &photo_id, &processing_photo_ids)? {
+                referenced_photo_ids.insert(photo_id);
+            }
         }
     }
     Ok(RecoverySurvey {
@@ -180,7 +211,134 @@ pub(super) fn recovery_survey(connection: &Connection) -> Result<RecoverySurvey,
         referenced_photo_ids,
     })
 }
+/// Reads every processing record once for a survey. These records are stored
+/// in one metadata namespace, so scanning them per Photo would multiply the
+/// same parse and query work by the size of the Library.
+fn processing_reference_photo_ids(
+    connection: &Connection,
+) -> Result<HashSet<String>, PersistenceError> {
+    let mut photo_ids = super::processing_export::scan_artifact_photo_ids(connection)?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    photo_ids.extend(
+        super::processing_export::scan_processing_export_works(connection)?
+            .into_iter()
+            .map(|work| work.admission.photo_id),
+    );
+    Ok(photo_ids)
+}
 
+/// Reads the retire-and-bind boundary on a plain read handle.
+///
+/// [`photo_has_retained_reference`] takes a transaction so the commit reads
+/// one consistent snapshot; the survey holds no transaction, so the same
+/// bounds are read through this shared body.
+fn photo_has_retained_reference_read(
+    connection: &Connection,
+    photo_id: &str,
+    processing_photo_ids: &HashSet<String>,
+) -> Result<bool, PersistenceError> {
+    if referenced_bounds(
+        |table, column| {
+            Ok(super::migrations::table_columns(connection, table)?
+                .iter()
+                .any(|name| name == column))
+        },
+        |sql| {
+            Ok(connection
+                .query_row(sql, [photo_id], |row| row.get::<_, i64>(0))
+                .map_err(|_| PersistenceError::Storage)?
+                > 0)
+        },
+    )? {
+        return Ok(true);
+    }
+    Ok(processing_photo_ids.contains(photo_id))
+}
+
+/// The shared body of the authoritative retire-and-bind boundary.
+///
+/// Every current reference boundary is checked on the record that owns it, so
+/// the answer is identical at proposal time and at commit time.
+fn referenced_bounds(
+    _column_exists: impl Fn(&str, &str) -> Result<bool, PersistenceError>,
+    count: impl Fn(&str) -> Result<bool, PersistenceError>,
+) -> Result<bool, PersistenceError> {
+    // Album membership and the retained review progress that names this Photo
+    // as the album's current position.
+    if count("SELECT COUNT(*) FROM album_members WHERE photo_id=?")?
+        || count("SELECT COUNT(*) FROM album_progress WHERE photo_id=?")?
+    {
+        return Ok(true);
+    }
+    // Non-default decisions are user state, not scan residue.
+    if count(
+        "SELECT COUNT(*) FROM photos WHERE id=?
+           AND (rating != 0 OR selection_state NOT IN ('unflagged','undecided'))",
+    )? {
+        return Ok(true);
+    }
+    // A Trash removal keeps its own Restore contract. The marker column is
+    // schema-dependent, so a schema without it cannot hold a removal.
+    if _column_exists("photos", "removed_at_ms")?
+        && count("SELECT COUNT(*) FROM photos WHERE id=? AND removed_at_ms IS NOT NULL")?
+    {
+        return Ok(true);
+    }
+    // The saved Edit Recipe: the legacy row and the current composable record
+    // the cutover migrates into, plus the save receipts that still bind it.
+    if count("SELECT COUNT(*) FROM edit_recipes WHERE photo_id=?")?
+        || count("SELECT COUNT(*) FROM library_metadata WHERE key='composable_edit_recipe:'||?")?
+        || count(
+            "SELECT COUNT(*) FROM library_metadata
+             WHERE key LIKE 'composable_edit_recipe_receipt:%' AND value LIKE '%'||?||'%'",
+        )?
+    {
+        return Ok(true);
+    }
+    // Retained Export and XMP state.
+    if count("SELECT COUNT(*) FROM exports WHERE photo_id=?")?
+        || count(
+            "SELECT COUNT(*) FROM export_download_leases WHERE export_id IN
+               (SELECT id FROM exports WHERE photo_id=?)",
+        )?
+        || (_column_exists("xmp_exports", "photo_id")?
+            && count("SELECT COUNT(*) FROM xmp_exports WHERE photo_id=?")?)
+    {
+        return Ok(true);
+    }
+    // Retained Development Proxy; older schemas may omit the table.
+    if _column_exists("development_proxies", "photo_id")?
+        && count("SELECT COUNT(*) FROM development_proxies WHERE photo_id=?")?
+    {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// The retained Processing Artifact and Export-work boundary, read on the
+/// authoritative records rather than a substring of a serialized value.
+///
+/// One published Processing Artifact and every durable composable Export work
+/// record name their Photo exactly, so the comparison parses the record the
+/// same way the surface that wrote it does. A record that cannot be read or
+/// parsed is a refusal, never a permission to retire.
+fn photo_has_retained_processing_reference(
+    connection: &Connection,
+    photo_id: &str,
+) -> Result<bool, PersistenceError> {
+    for artifact_photo_id in super::processing_export::scan_artifact_photo_ids(connection)? {
+        if artifact_photo_id == photo_id {
+            return Ok(true);
+        }
+    }
+    for work in super::processing_export::scan_processing_export_works(connection)? {
+        if work.admission.photo_id == photo_id {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 /// Resolves current facts for one retained review membership. Every
 /// requested Original ID gets its slot: `None` means the record no longer
 /// exists. The order of `original_ids` is preserved so a reviewed result set
@@ -421,39 +579,13 @@ pub(super) fn apply_manual_relocations(
             };
             let occupant = transaction
                 .query_row(
-                    "SELECT p.id,p.rating,p.selection_state,p.removed_at_ms,
-                        EXISTS(SELECT 1 FROM edit_recipes e WHERE e.photo_id=p.id),
-                        (SELECT COUNT(*) FROM album_members m WHERE m.photo_id=p.id),
-                        (SELECT COUNT(*) FROM exports x WHERE x.photo_id=p.id),
-                        EXISTS(SELECT 1 FROM development_proxies d WHERE d.photo_id=p.id)
-                     FROM photos p WHERE p.original_id=?",
+                    "SELECT p.id,p.removed_at_ms FROM photos p WHERE p.original_id=?",
                     params![owner_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, i64>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, Option<i64>>(3)?,
-                            row.get::<_, i64>(4)? != 0,
-                            row.get::<_, i64>(5)?,
-                            row.get::<_, i64>(6)?,
-                            row.get::<_, i64>(7)? != 0,
-                        ))
-                    },
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
                 )
                 .optional()
                 .map_err(|_| PersistenceError::Storage)?;
-            let Some((
-                photo_id,
-                rating,
-                selection_state,
-                removed_at_ms,
-                has_saved_edits,
-                members,
-                exports,
-                has_proxy,
-            )) = occupant
-            else {
+            let Some((photo_id, occupant_removed_at_ms)) = occupant else {
                 return Err(PersistenceError::InvalidRecoveryMapping {
                     original_id: relocation.original_id.clone(),
                     reason: "stale",
@@ -467,22 +599,21 @@ pub(super) fn apply_manual_relocations(
                     reason: "reviewed-stale",
                 });
             }
-            if removed_at_ms.is_some() {
+            // Every current reference boundary decides this: Album
+            // membership, non-default decisions, Trash removal, saved edit
+            // recipes, exports, retained Processing Artifacts and live Export
+            // work, and the Development Proxy. A reference gained between
+            // proposal and commit refuses the batch instead of retiring a
+            // used Photo. Trash remains a distinct refusal because its own
+            // Restore contract is not interchangeable with ordinary use.
+            if photo_has_retained_reference(transaction, &photo_id)? {
                 return Err(PersistenceError::InvalidRecoveryMapping {
                     original_id: relocation.original_id.clone(),
-                    reason: "destination-removed",
-                });
-            }
-            if rating != 0
-                || selection_state != "unflagged"
-                || has_saved_edits
-                || members != 0
-                || exports != 0
-                || has_proxy
-            {
-                return Err(PersistenceError::InvalidRecoveryMapping {
-                    original_id: relocation.original_id.clone(),
-                    reason: "destination-in-use",
+                    reason: if occupant_removed_at_ms.is_some() {
+                        "destination-removed"
+                    } else {
+                        "destination-in-use"
+                    },
                 });
             }
             transaction
@@ -593,10 +724,15 @@ pub(super) fn apply_manual_relocations(
                 )
                 .map_err(|_| PersistenceError::Storage)?;
         }
+        // The remaining count uses the same active-unavailable predicate as
+        // the recovery survey: a Trash-removed Photo keeps its own Restore
+        // contract and is never a Location Recovery item.
         let unavailable = transaction
-            .query_row("SELECT COUNT(*) FROM photos WHERE available=0", [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM photos WHERE available=0 AND removed_at_ms IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
             .map_err(|_| PersistenceError::Storage)?;
         Ok(AppliedRelocations {
             relocated_photos: relocations.len() as u64,
@@ -627,7 +763,6 @@ pub(super) fn fingerprint_counts(
         )
         .map_err(|_| PersistenceError::Storage)
 }
-
 /// The recovery decisions proven outside the state store and applied inside
 /// one scan transaction. Relocations map a discovered Location to the
 /// persisted Original File identity whose exact content was found there.

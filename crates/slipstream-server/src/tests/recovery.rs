@@ -508,3 +508,273 @@ async fn recovery_http_reports_a_fingerprinted_absent_destination_as_missing() {
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
+
+/// Seeds the default-state occupant of one destination Location: no Rating,
+/// no Selection State, no Album membership, and no retained references, so
+/// an explicit retire-and-bind may offer to replace it.
+fn seed_retireable_occupant(config: &Config, photo_id: &str, original_id: &str, location: &str) {
+    open_state(config)
+        .execute(
+            "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,\
+             capture_metadata_state,capture_source_revision) \
+             VALUES(?,?,'jpeg',11,1.0,1,'missing','remembered-revision')",
+            rusqlite::params![original_id, location],
+        )
+        .unwrap();
+    open_state(config)
+        .execute(
+            "INSERT INTO photos(id,original_id,available,preview_state,sort_path,\
+             selection_state,rating) VALUES(?,?,1,'unavailable',?,'undecided',0)",
+            rusqlite::params![photo_id, original_id, location],
+        )
+        .unwrap();
+}
+
+/// Opens one Photo Workspace for the given Photo identity, exactly as the
+/// Edit route does, so the workspace registry holds an active binding.
+fn open_photo_workspace(application: &Application, photo_id: &str) -> String {
+    let workspace = application.workspaces.open_photo(photo_id).unwrap();
+    workspace["workspaceId"]
+        .as_str()
+        .expect("workspace identity")
+        .to_owned()
+}
+
+/// An active workspace binding alone never allows the retire-and-bind it
+/// holds to be replaced: the destination Photo is offered as blocked at
+/// proposal, and an apply naming it is refused without changes.
+#[tokio::test]
+async fn recovery_http_refuses_a_retire_bound_to_an_active_workspace() {
+    let (base, config) = recovery_fixture(&[UnavailableFixture {
+        photo_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        original_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        location: "shoot/a.JPG",
+    }]);
+    write_destination(&config, "moved/a.JPG", b"jpeg-bytes-a");
+    seed_retireable_occupant(
+        &config,
+        "22222222-2222-4222-8222-222222222222",
+        "11111111-1111-4111-8111-111111111111",
+        "moved/a.JPG",
+    );
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = authorized_router(Arc::clone(&application), config.web_root());
+
+    // Without a workspace the occupant is a reviewable retire candidate.
+    let proposal = response_json(
+        post_json(
+            &router,
+            "/api/recovery/propose",
+            serde_json::json!({
+                "originalId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "newLocation": "moved/a.JPG",
+            }),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let mapping = &proposal["items"][0];
+    assert_eq!(mapping["outcome"], "occupied");
+    let retireable = mapping["retire"]["photoId"]
+        .as_str()
+        .expect("default-state occupant is retireable")
+        .to_owned();
+    assert_eq!(retireable, "22222222-2222-4222-8222-222222222222");
+
+    // Opening that Photo's workspace retains it, so the same review is
+    // re-evaluated against the authoritative workspace registry.
+    open_photo_workspace(&application, &retireable);
+    let proposal = response_json(
+        post_json(
+            &router,
+            "/api/recovery/propose",
+            serde_json::json!({
+                "originalId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "newLocation": "moved/a.JPG",
+            }),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let mapping = &proposal["items"][0];
+    assert_eq!(mapping["outcome"], "occupied");
+    assert_eq!(mapping["retire"], serde_json::Value::Null);
+    assert_eq!(mapping["blockedReason"], "destination-in-use");
+    // The reviewed identity is now blocked by the workspace boundary, so
+    // applying it is refused as destination-in-use without any changes.
+    let refused = post_json(
+        &router,
+        "/api/recovery/apply",
+        serde_json::json!({"mappings":[{
+            "originalId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "newLocation": "moved/a.JPG",
+            "mappingId": mapping["mappingId"],
+            "confirmUnverifiedContent": true,
+            "retirePhotoId": retireable,
+        }]}),
+        Some("https://camera.local"),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let refused = response_json(refused).await;
+    assert_eq!(refused["appliedMappings"], 0);
+    assert_eq!(refused["refusedMappings"], 1);
+    assert_eq!(refused["rejections"][0]["reason"], "destination-in-use");
+    // Both Photos keep their state: the workspace holder was not retired and
+    // the unavailable Original is still unavailable.
+    let database = open_state(&config);
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT COUNT(*) FROM photos WHERE id='22222222-2222-4222-8222-222222222222'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT available FROM photos WHERE id='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// A workspace opened while a review sat open rechecks the boundary at apply:
+/// the batch that reviewed a retireable occupant is refused whole before any
+/// association is committed.
+#[tokio::test]
+async fn recovery_http_rechecks_the_workspace_boundary_before_committing() {
+    let (base, config) = recovery_fixture(&[UnavailableFixture {
+        photo_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        original_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        location: "shoot/a.JPG",
+    }]);
+    write_destination(&config, "moved/a.JPG", b"jpeg-bytes-a");
+    seed_retireable_occupant(
+        &config,
+        "22222222-2222-4222-8222-222222222222",
+        "11111111-1111-4111-8111-111111111111",
+        "moved/a.JPG",
+    );
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = authorized_router(Arc::clone(&application), config.web_root());
+
+    // The review is evaluated while the occupant is still retireable.
+    let proposal = response_json(
+        post_json(
+            &router,
+            "/api/recovery/propose",
+            serde_json::json!({
+                "originalId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "newLocation": "moved/a.JPG",
+            }),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let mapping = &proposal["items"][0];
+    let retireable = mapping["retire"]["photoId"]
+        .as_str()
+        .expect("default-state occupant is retireable")
+        .to_owned();
+    let reviewed_id = mapping["mappingId"].as_str().unwrap().to_owned();
+
+    // A workspace for the occupant opens before the confirmation is applied.
+    open_photo_workspace(&application, &retireable);
+    let refused = post_json(
+        &router,
+        "/api/recovery/apply",
+        serde_json::json!({"mappings":[{
+            "originalId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "newLocation": "moved/a.JPG",
+            "mappingId": reviewed_id,
+            "confirmUnverifiedContent": true,
+            "retirePhotoId": retireable,
+        }]}),
+        Some("https://camera.local"),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let refused = response_json(refused).await;
+    assert_eq!(refused["appliedMappings"], 0);
+    assert_eq!(refused["refusedMappings"], 1);
+    assert_eq!(refused["rejections"][0]["reason"], "destination-in-use");
+
+    // Nothing committed: the occupant Photo, its Original, and the
+    // unavailable record are all still exactly as they were.
+    let database = open_state(&config);
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT COUNT(*) FROM photos WHERE id='22222222-2222-4222-8222-222222222222'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT COUNT(*) FROM original_files WHERE id='11111111-1111-4111-8111-111111111111'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT available FROM photos WHERE id='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn recovery_http_rejects_duplicate_originals_before_operation_admission() {
+    let (base, config) = recovery_fixture(&[UnavailableFixture {
+        photo_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        original_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        location: "shoot/a.JPG",
+    }]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = authorized_router(Arc::clone(&application), config.web_root());
+    let response = post_json(
+        &router,
+        "/api/recovery/apply",
+        serde_json::json!({"mappings":[
+            {"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG","mappingId":"one"},
+            {"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/b.JPG","mappingId":"two"}
+        ]}),
+        Some("https://camera.local"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(response).await;
+    assert_eq!(body["error"], "Invalid recovery request");
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}

@@ -403,6 +403,42 @@ describe("recovery apply API", () => {
       refusedMappings: 2,
     });
   });
+  test("a short or misordered refusal is unknown", async () => {
+    const short = await applyRecoveryMappings(
+      () =>
+        jsonResponse(
+          {
+            message: "Nothing was applied.",
+            rejections: [{ originalId: "orig-1", reason: "stale" }],
+            appliedMappings: 0,
+            refusedMappings: 2,
+          },
+          409,
+        ),
+      applyItems,
+      new AbortController().signal,
+    );
+    expect(short).toEqual({ kind: "unknown", mappings: applyItems });
+
+    const misordered = await applyRecoveryMappings(
+      () =>
+        jsonResponse(
+          {
+            message: "Nothing was applied.",
+            rejections: [
+              { originalId: "orig-2", reason: "stale" },
+              { originalId: "orig-1", reason: "destination-in-use" },
+            ],
+            appliedMappings: 0,
+            refusedMappings: 2,
+          },
+          409,
+        ),
+      applyItems,
+      new AbortController().signal,
+    );
+    expect(misordered).toEqual({ kind: "unknown", mappings: applyItems });
+  });
 
   test("a non-conflict response remains unknown after submission", async () => {
     const result = await applyRecoveryMappings(

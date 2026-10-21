@@ -49,7 +49,7 @@ impl WorkspaceManager {
             .and_then(|item| item["relativePath"].as_str())
             .map(|path| session.directory.path().join(path));
         let observed_source =
-            (self.resolve)(&session.workspace.photo_id).and_then(|source| source.revision);
+            (self.resolve)(&session.workspace.photo_id)?.and_then(|source| source.revision);
         let source_matches = default_item
             .and_then(|item| item["sourceRevision"].as_str())
             .zip(observed_source.as_deref())

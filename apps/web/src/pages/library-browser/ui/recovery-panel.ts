@@ -126,31 +126,43 @@ export function createRecoveryPanel({
   /// The explicit per-mapping choices the Photographer made. Both start
   /// unchosen; a default-selected control is not an explicit choice.
   const recoveryMappingChoices = new Map<string, RecoveryMappingChoice>();
-  const recoveryOutcomeLabel = (
-    outcome: RecoveryMappingViewModel["outcome"],
-  ): string =>
-    ({
-      matched: "Ready to recover",
-      "content-mismatch": "Content differs from the remembered fingerprint",
-      missing: "No file at the destination",
-      "kind-mismatch": "Destination format differs",
-      unreadable: "Destination cannot be read",
-      occupied: "Destination already holds another Photo",
-      colliding: "Another mapping targets this destination",
-    })[outcome];
+  /// Why one mapping stays unavailable. The occupied reasons are named by
+  /// `recoveryEvidenceState`, which also offers the replace or later action;
+  /// this table covers the rest.
   const recoveryBlockedLabel = (
     reason: Exclude<RecoveryMappingViewModel["blockedReason"], null>,
   ): string =>
     ({
-      colliding: "Blocked: another mapping targets this destination",
+      colliding: "Another mapping in this set targets the same destination",
       "content-mismatch":
-        "Blocked: destination content differs from the remembered fingerprint",
-      "destination-in-use": "Blocked: destination already holds another Photo",
-      "destination-removed": "Blocked: the destination Photo was removed",
-      "kind-mismatch": "Blocked: destination format differs",
-      missing: "Blocked: no file at the destination",
-      unreadable: "Blocked: destination cannot be read",
+        "Content at the destination differs from the remembered fingerprint",
+      "destination-in-use": "Destination already holds another Photo",
+      "destination-removed": "The destination Photo was removed",
+      "kind-mismatch": "Destination format differs from this Original",
+      missing: "No file at the destination yet",
+      unreadable: "Destination cannot be read",
     })[reason];
+  /// The plain-language evidence state of one proposed mapping. The review
+  /// presents exactly three outcomes — updated automatically, ready for
+  /// confirmation, still unavailable — so the evidence state below names what
+  /// the Photographer can do next, never an internal reason code and never a
+  /// claim that file bytes were restored.
+  const recoveryEvidenceState = (mapping: RecoveryMappingViewModel): string => {
+    if (mapping.blockedReason === "destination-in-use")
+      return "Destination already holds another Photo";
+    if (mapping.blockedReason === "destination-removed")
+      return "The destination Photo was removed";
+    if (mapping.blockedReason !== null)
+      return recoveryBlockedLabel(mapping.blockedReason);
+    if (mapping.outcome === "occupied")
+      return mapping.retire === null
+        ? "Destination already holds another Photo"
+        : "Destination holds another Photo you can replace";
+    // Ready for confirmation: content confirmed when the persisted
+    // fingerprint matched, otherwise content not confirmed — the absence of
+    // a fingerprint is never presented as a content match.
+    return mapping.verified ? "Content confirmed" : "Content not confirmed";
+  };
   const recoveryEntryStateLabel = (
     state: RecoveryEntryViewModel["state"],
   ): string =>
@@ -364,19 +376,20 @@ export function createRecoveryPanel({
         heading.textContent = `${mapping.fromLocation} → ${mapping.toLocation}`;
         const facts = document.createElement("p");
         facts.className = "recovery-proposal-facts";
-        facts.textContent = `${recoveryOutcomeLabel(mapping.outcome)} · ${
-          mapping.verified
-            ? "Content verified"
-            : "Old content cannot be verified"
-        }`;
+        // One plain-language evidence state per mapping: content confirmed,
+        // content not confirmed, or destination occupied. The absence of a
+        // fingerprint is never presented as a content match.
+        facts.textContent = recoveryEvidenceState(mapping);
         item.append(heading, facts);
         if (mapping.blockedReason !== null) {
-          // A blocked mapping presents its reason and offers no control: it
-          // can never join an apply batch.
-          const blocked = document.createElement("p");
-          blocked.className = "recovery-proposal-blocked";
-          blocked.textContent = recoveryBlockedLabel(mapping.blockedReason);
-          item.append(blocked);
+          // A blocked mapping offers no apply control: it can never join a
+          // batch. The evidence state already names why; this names only the
+          // next safe action.
+          const later = document.createElement("p");
+          later.className = "recovery-proposal-later";
+          later.textContent =
+            "This mapping cannot be applied now. Leave it and review it later.";
+          item.append(later);
           return item;
         }
         const choice = (): RecoveryMappingChoice =>
@@ -408,7 +421,7 @@ export function createRecoveryPanel({
           retireLabel.append(
             checkbox,
             document.createTextNode(
-              `Replace the discovered Photo at ${mapping.retire.location}`,
+              `Replace the Photo the Library discovered at ${mapping.retire.location} with this one`,
             ),
           );
           item.append(retireLabel);
@@ -429,7 +442,7 @@ export function createRecoveryPanel({
           confirmLabel.append(
             checkbox,
             document.createTextNode(
-              "Apply even though the old content cannot be verified",
+              "Use this location even though the old content cannot be verified",
             ),
           );
           item.append(confirmLabel);
@@ -497,7 +510,7 @@ export const RECOVERY_PANEL_TEMPLATE = `        <dialog class="recovery-dialog" 
           <div class="recovery-sheet">
             <header class="recovery-header"><h3 id="recovery-title">Review unavailable Originals</h3><button type="button" class="quiet" data-recovery-close>Close</button></header>
             <div class="recovery-body">
-              <p class="recovery-explanation">Propose mappings to read and review new locations before Apply. Recovery changes associations; files are never moved or renamed.</p>
+              <p class="recovery-explanation">Recovery changes which file a Photo points to. No file is moved, renamed, or copied, and nothing is overwritten.</p>
               <div class="recovery-forms">
                 <section class="recovery-batch" aria-labelledby="recovery-batch-title">
                   <h4 id="recovery-batch-title">Map a moved folder</h4>

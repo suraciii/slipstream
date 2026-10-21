@@ -172,7 +172,7 @@ mod tests {
         let workspaces = crate::workspace::WorkspaceManager::open(
             &state,
             library.clone(),
-            Arc::new(move |_| observed.lock().clone()),
+            Arc::new(move |_| Ok(observed.lock().clone())),
             1024 * 1024,
         )
         .unwrap();

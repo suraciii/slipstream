@@ -87,9 +87,9 @@ A completed rescan may add or remove Folder nodes and may change newly opened Fo
 
 Automatic Location Recovery runs inside the scan application, before any new Original or Photo is allocated. Manual Location Recovery reuses the same rules from an explicit Photographer-approved batch.
 
-A recovery batch runs in one `BEGIN IMMEDIATE` transaction. Before writing, it revalidates every remembered Original File, its kind, and its destination Location against current state. It then moves affected Originals to temporary unique Locations and assigns their final Locations, so known Originals may exchange Locations without violating the unique Location constraint. A batch is all-or-nothing: a stale, colliding, or occupied destination without a permitted retire rejects the whole batch with per-mapping reasons and no partial association.
+A recovery batch runs in one `BEGIN IMMEDIATE` transaction. Before writing, it revalidates every remembered Original File, its kind, and its destination Location against current state. It assigns affected Original associations through temporary unique Location values, so known associations may exchange Locations without violating the unique Location constraint; it never moves the filesystem files. A batch is all-or-nothing: a stale, colliding, or occupied destination without a permitted Retire and Bind rejects the whole batch with per-mapping reasons and no partial association.
 
-A destination Location may already belong to a Photo discovered by an earlier scan. Retire-and-bind is allowed only when that destination Photo is otherwise unreferenced with default decisions, no Album membership, and no Trash removal, and the transaction removes exactly that record before binding the recovered Original. It must not delete a filesystem file. When the destination Photo has independent user state or a removal, the transaction preserves both records and reports the conflict.
+A destination Location may already belong to a Photo discovered by an earlier scan. Retire and Bind is allowed only when that destination Photo is otherwise unreferenced: it has default decisions, no Album membership, no Trash removal, and no retained workspace state, Edit Recipe, or referenced Processing Artifact. The eligibility check reads the authoritative workspace and processing records at proposal and commit, not only a scan-time summary. The transaction removes exactly that record before binding the recovered Original. It must not delete a filesystem file. When the destination Photo has independent user state, a retained development reference, or a removal, the transaction preserves both records and reports the conflict.
 
 A moving record must be an active Photo of the Library. Location Recovery never restores a Photo from Trash and never reverses Permanent Deletion; a removed record keeps its own restore contract.
 
@@ -101,13 +101,13 @@ Web and CLI share one review-and-confirm protocol over the same rules. A Photogr
 
 Unavailable Photos are inspected through bounded reviews. Opening a review evaluates the current set of active unavailable Photos once and retains the ordered Original IDs with their Photo IDs. Later pages resolve current facts for the retained identities, so a recovered, newly unavailable, or removed Photo cannot silently shift another item out of its reviewed position. A review reports its evaluated total, evaluation time, and continuation. A continuation expires after the advertised idle period and then fails explicitly instead of returning a different set.
 
-A proposal is read-only. It evaluates one correspondence per unavailable Original: a remembered Location under one Folder prefix mapped onto another prefix with the same suffix, or one remembered Original File mapped onto one Location. Every evaluated mapping carries an opaque reviewed mapping identity. That identity is a deterministic function of the reviewed facts: Original File and Photo identity, remembered and proposed Location, kind, content evidence, the observed destination revision, the identified destination Photo a retire-and-bind may replace, and any reason that blocks the mapping. Equal facts produce an equal identity, so no durable proposal record is required: a reviewed mapping stays confirmable across a service restart and loses validity when any reviewed fact changes.
+A proposal is read-only. It evaluates one correspondence per unavailable Original: a remembered Location under one Folder prefix mapped onto another prefix with the same suffix, or one remembered Original File mapped onto one Location. Every evaluated mapping carries an opaque reviewed mapping identity. That identity is a deterministic function of the reviewed facts: Original File and Photo identity, remembered and proposed Location, kind, content evidence, the observed destination revision, the identified destination Photo a Retire and Bind may replace, and any reason that blocks the mapping. Equal facts produce an equal identity, so no durable proposal record is required: a reviewed mapping stays confirmable across a service restart and loses validity when any reviewed fact changes.
 
 Confirmation names the reviewed mapping identity of every submitted mapping. Apply recomputes each mapping from current facts and refuses the complete submitted batch when a recomputed identity differs from the submitted one. This single rule binds confirmation to the reviewed Original, Location, content evidence, and destination revision, and it prevents a retired permission from transferring to a different Photo that later occupies the same Location.
 
 A destination that holds no readable file has no content evidence. Its reviewed revision is the observed destination state, and the corresponding confirmation must explicitly acknowledge that historical content cannot be verified. A destination that changes after review refuses the mapping instead of inheriting that acknowledgement. A missing, unreadable, wrong-kind, or content-mismatched destination is never an acceptable unverified match.
 
-Retire-and-bind requires one explicit choice for the identified destination Photo. The request names that Photo, and apply refuses an absent or different occupant even when the mapping identity matches. A destination Photo with independent decisions, Album membership, saved editing intent, retained Exports, or a Trash removal is never disposable, and its conflict is reported instead of resolved.
+Retire and Bind requires one explicit choice for the identified destination Photo. The request names that Photo, and apply refuses an absent or different occupant even when the mapping identity matches. A destination Photo with independent decisions, Album membership, saved Edit Recipe, retained workspace state, referenced Processing Artifacts, or a Trash removal is never disposable, and its conflict is reported instead of resolved.
 
 A Folder-prefix proposal reports its complete evaluated scope. A scope larger than the advertised mapping bound is refused before any continuation is issued instead of being truncated to one page or one apply operation. Apply accepts only the explicit confirmed mappings of one request and commits them atomically; separate requests are separate commits, and a later refusal never rolls back an earlier committed batch.
 
@@ -287,6 +287,18 @@ not need. Current-state reconciliation through the same Photo identities is
 sufficient and cheaper to reason about, and it does not promise exactly-once
 history that the product does not provide.
 
+### Selected: Library-Scoped Recovery and Transient Results
+
+Location Recovery stays within the admitted Library Folder and changes only the association owned by Slipstream. Scan status, bounded reviews, and apply results expose current facts without adding an external-file index or a durable recovery ledger. This preserves one Library boundary and keeps recovery reconciliation tied to stable Photo and Original File identities.
+
+### Rejected: External Candidate Search and File Restoration
+
+Searching recycle areas, backups, or unrelated directories would create a second storage boundary and require rules for arbitrary paths, admission, and file ownership. Copying a candidate back into the Library would make Slipstream a filesystem mutation tool and violate Original safety. The Photographer or an operator may restore a file outside Slipstream; a later Library Check can then evaluate it.
+
+### Rejected: Durable Recovery Dashboard
+
+A retained recovery history would add proposal, attempt, expiry, cleanup, and historical-attribution semantics. Current scan status and the reviewed apply result identify committed effects without another durable state owner.
+
 ### Rejected: Boolean Confirmation Alone
 
 A bare retirement boolean cannot prove which destination Photo the caller
@@ -303,9 +315,8 @@ Verification must prove:
 
 - exact v5-to-v6 migration and rollback preservation, including the RAW-first pair split, independent JPEG defaults, singleton and unavailable records, and invalidated sibling-derived Previews;
 - exact v4-to-v5 and v3-to-v4 migration and rollback preservation;
-- automatic recovery restores one unambiguous candidate, refuses copies and ambiguous groups, and never transfers state to a duplicate;
-- a recovery batch is atomic, revalidates at commit, refuses stale, colliding, or occupied destinations without a permitted retire, retires only an unreferenced default destination, and never deletes a filesystem file;
-- a reviewed confirmation refuses the complete batch when any recomputed mapping identity differs from the submitted one, when unverifiable content was not explicitly acknowledged, when the named retire Photo is absent or different, when the destination Photo is removed into Trash, and when the moving Photo is no longer active;
+- a recovery batch is atomic, revalidates at commit using authoritative workspace and processing records, refuses stale, colliding, or occupied destinations without a permitted Retire and Bind, retires only a destination with default decisions and no Album, Trash, workspace, Edit Recipe, or Processing Artifact references, and never deletes a filesystem file;
+- a reviewed confirmation refuses the complete batch when any recomputed mapping identity differs from the submitted one, when unverifiable content was not explicitly acknowledged, when the named retire Photo is absent or different, when the destination entered Trash, or when the moving Photo is no longer active;
 - unavailable inspection and Folder-prefix proposals page over retained membership with an explicit total and continuation, keep a recovered or removed item in its evaluated position, fail an expired continuation explicitly, and refuse an over-bound prefix scope instead of truncating it;
 - a lost apply response is reported as an unknown outcome whose caller inspects the same Photo identities; current Location and availability are not presented as historical success;
 - a relocation resets Capture Time facts and invalidates location-derived Preview facts while preserving user state;

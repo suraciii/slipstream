@@ -82,7 +82,7 @@ pub(crate) struct Source {
     pub relative_path: slipstream_core::RelativeOriginalPath,
     pub revision: Option<String>,
 }
-pub(crate) type SourceResolver = Arc<dyn Fn(&str) -> Option<Source> + Send + Sync>;
+pub(crate) type SourceResolver = Arc<dyn Fn(&str) -> Result<Option<Source>> + Send + Sync>;
 
 pub(crate) struct WorkspaceManager {
     root: Directory,
@@ -98,6 +98,23 @@ pub(crate) struct WorkspaceManager {
 pub(crate) struct Workspace {
     pub id: String,
     pub photo_id: String,
+}
+
+/// A directory admitted under the shared workspace-root and admission-lock
+/// leases. Keeping both leases on the returned value excludes recovery and
+/// workspace withdrawal while direct tool writers create or inspect files.
+pub(crate) struct WorkspaceDirectory {
+    directory: Directory,
+    _root_lease: FileLease,
+    _admission_lease: FileLease,
+}
+
+impl std::ops::Deref for WorkspaceDirectory {
+    type Target = Directory;
+
+    fn deref(&self) -> &Self::Target {
+        &self.directory
+    }
 }
 pub(crate) struct WorkspaceSession {
     pub workspace: Workspace,

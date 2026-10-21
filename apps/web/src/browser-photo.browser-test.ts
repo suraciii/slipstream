@@ -403,6 +403,176 @@ test.describe("touch Preview input", () => {
   });
 });
 
+test("Preview wheel zoom owns the image and does not scroll Photo View", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  const image = page.locator("[data-stage] img");
+  const view = page.locator("[data-photo-view]");
+  const box = await image.boundingBox();
+  if (!box) throw new Error("Rendered image has no geometry");
+  const beforeScroll = await view.evaluate((element) => element.scrollTop);
+  const beforeZoom = await zoomLevel(page);
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.wheel(0, -120);
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
+  expect(await zoomLevel(page)).toBeGreaterThan(beforeZoom);
+  expect(await view.evaluate((element) => element.scrollTop)).toBe(
+    beforeScroll,
+  );
+  await page.mouse.wheel(0, 120);
+  expect(await zoomLevel(page)).toBe(beforeZoom);
+});
+
+test("Preview wheel preserves native scrolling without image pixels", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  const view = page.locator("[data-photo-view]");
+  const previewBox = await preview.boundingBox();
+  if (!previewBox) throw new Error("Preview has no geometry");
+  await page.evaluate(() => {
+    const stage = document.querySelector<HTMLElement>("[data-stage]");
+    if (!stage) throw new Error("Preview stage is missing");
+    stage.replaceChildren(document.createElement("p"));
+  });
+  await view.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await page.mouse.move(
+    previewBox.x + previewBox.width / 2,
+    previewBox.y + previewBox.height / 2,
+  );
+  await page.mouse.wheel(0, 500);
+  await expect
+    .poll(() => view.evaluate((element) => element.scrollTop))
+    .toBeGreaterThan(0);
+});
+
+test.describe("touch Rating Wheel and Pinch", () => {
+  test.use({ hasTouch: true });
+
+  test("Rating Wheel saves one candidate without navigation or Selection State", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 2);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
+    const image = page.locator("[data-stage] img");
+    const box = await image.boundingBox();
+    if (!box) throw new Error("Rendered image has no geometry");
+    const client = await page.context().newCDPSession(page);
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x, y, id: 1 }],
+    });
+    await page.waitForTimeout(500);
+    await expect(page.locator("[data-rating-wheel]")).toBeVisible();
+    const wheel = await page.locator("[data-rating-wheel]").boundingBox();
+    if (!wheel) throw new Error("Rating Wheel has no geometry");
+    const centerX = wheel.x + wheel.width / 2;
+    const centerY = wheel.y + wheel.height / 2;
+    const angle = ((4 * 60 - 90) * Math.PI) / 180;
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [
+        {
+          x: centerX + Math.cos(angle) * 78,
+          y: centerY + Math.sin(angle) * 78,
+          id: 1,
+        },
+      ],
+    });
+    await expect(page.locator("[data-rating-wheel]")).toHaveAttribute(
+      "data-rating-wheel-candidate",
+      "4",
+    );
+    const ratingRequest = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        /\/state(?:\?|$)/.test(new URL(request.url()).pathname),
+    );
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+    expect((await ratingRequest).postDataJSON()).toMatchObject({
+      field: "rating",
+      value: 4,
+    });
+    await expect(page.locator("[data-rating]")).toHaveText("Rating: 4 stars");
+    await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+    await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
+  });
+
+  test("two-finger Pinch enters manual zoom without decision or navigation", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 2);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
+    const image = page.locator("[data-stage] img");
+    const box = await image.boundingBox();
+    if (!box) throw new Error("Rendered image has no geometry");
+    let stateRequests = 0;
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        new URL(request.url()).pathname.endsWith("/state")
+      )
+        stateRequests += 1;
+    });
+    const client = await page.context().newCDPSession(page);
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [
+        { x: x - 25, y, id: 1 },
+        { x: x + 25, y, id: 2 },
+      ],
+    });
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [
+        { x: x - 90, y, id: 1 },
+        { x: x + 90, y, id: 2 },
+      ],
+    });
+    await expect(page.locator("[data-preview]")).toHaveAttribute(
+      "data-zoom-state",
+      "manual",
+    );
+    await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+    await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
+    expect(stateRequests).toBe(0);
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+  });
+});
+
 test("Preview zoom is explicit, bounded, and never records a decision", async ({
   page,
 }) => {

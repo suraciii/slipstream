@@ -591,6 +591,33 @@ async fn malformed_artifact_record_is_a_storage_error() {
 }
 
 #[tokio::test]
+async fn recovery_survey_marks_processing_artifacts_and_live_work_as_references() {
+    let seeded = seeded();
+    publish(&seeded, artifact()).await;
+    let connection = Connection::open(&seeded.path).unwrap();
+    let survey = super::super::scan_recovery::recovery_survey(&connection).unwrap();
+    assert!(survey.referenced_photo_ids.contains("raw-photo"));
+
+    let recipe_revision = save_recipe(
+        &seeded,
+        "survey-recipe",
+        None,
+        original_step_input("raw-photo", &seeded.source),
+    )
+    .await;
+    assert!(matches!(
+        submit(
+            &seeded,
+            qualified_submission(&seeded, "survey-work", "develop-1", &recipe_revision),
+        )
+        .await,
+        ProcessingExportSubmitOutcome::Admitted(_)
+    ));
+    let survey = super::super::scan_recovery::recovery_survey(&connection).unwrap();
+    assert!(survey.referenced_photo_ids.contains("raw-photo"));
+}
+
+#[tokio::test]
 async fn refusal_replays_by_request_identity_and_conflicts_on_other_payloads() {
     let seeded = seeded();
     let recipe_revision = save_recipe(

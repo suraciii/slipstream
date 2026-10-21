@@ -53,3 +53,6 @@ async fn legacy_edit_recipe_read_model_preserves_persisted_settings() {
     );
     library.shutdown().unwrap();
 }
+
+#[path = "recovery_safety.rs"]
+mod recovery_safety;

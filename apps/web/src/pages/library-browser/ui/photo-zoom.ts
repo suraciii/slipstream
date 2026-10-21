@@ -266,6 +266,8 @@ export function createPhotoZoomController({
   };
   const onWheel = (event: WheelEvent): void => {
     if (!alive || !isAlive() || !hasMeasurableImage()) return;
+    // A measurable Preview owns the wheel and prevents native Photo View
+    // scrolling while the pointer-wheel zoom keeps its anchor stationary.
     event.preventDefault();
     const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
     const base = zoomManual

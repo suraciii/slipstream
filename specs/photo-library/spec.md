@@ -71,11 +71,15 @@ If the old Original File remains and an equal copy appears, Slipstream must disc
 
 Changed content plus a changed Location is not guaranteed to recover automatically. Incomplete traversal, inaccessible storage, uncertain candidate revisions, and unreadable candidates must not be treated as proof of absence or uniqueness.
 
-Recovery must search only supported descendants of the admitted Library Folder. Moving the configured Library Folder itself remains a Library Expansion.
+Location Recovery searches only supported descendants of the admitted Library Folder. A file in an external directory, operating-system recycle area, backup, or unrelated Library Folder is not a recovery candidate. If the Photographer restores such a file under the Library Folder outside Slipstream, a later Library Check may discover it and evaluate it under the normal recovery rules. Slipstream must not copy, move, rename, upload, overwrite, or delete that file. Moving the configured Library Folder itself remains a Library Expansion.
+
+A fingerprint match, a proposed mapping, or an occupied candidate is not a recovery. Scan status and apply results must report only associations that were actually committed. Slipstream must not create a persistent recovery-history or recovery-dashboard surface; current scan status, the bounded review, and the current apply result are sufficient.
+
+The recovery review must not classify a matching fingerprint as an automatic recovery or as a duplicate merge. A candidate already owned by another Photo is an occupied or independently owned mapping that remains unresolved unless the Photographer explicitly confirms a permitted Retire and Bind. Multiple unavailable Photos sharing one fingerprint must remain separate records until the Photographer selects an explicit mapping; Slipstream must not choose by order, filename, Capture Time, or visual similarity.
 
 ## Manual Recovery
 
-Every unavailable Original File belonging to an active Photo must remain listed with its remembered Location, filename, kind, Rating, Selection State, Album count, and whether a fingerprint exists. Removed Photos remain in [Trash](trash/spec.md); Location Recovery must not restore them or reverse Permanent Deletion.
+Every unavailable Original File belonging to an active Photo must remain listed with its remembered Location, filename, kind, Rating, Selection State, Album count, and whether a fingerprint exists. Here active means the Photo is not Removed and its Original is currently unavailable. Removed Photos remain in [Trash](trash/spec.md); Location Recovery must not restore them or reverse Permanent Deletion.
 
 The Photographer must be able to review unavailable Originals and propose new Locations through one bounded `Review unavailable Originals` entry from the scan result or an affected Photo.
 
@@ -88,10 +92,11 @@ The Web recovery surface must present these mapping actions before its progressi
 
 Every proposed mapping must be inspectable before it is applied, and proposal must never write. A proposal for an Original File without a persisted fingerprint must state that the old content cannot be verified and must require explicit confirmation. A fingerprinted Original File must be verified against its persisted fingerprint at proposal and at commit.
 
-Slipstream must apply a batch atomically with revalidation at commit. It must reject the whole batch with per-mapping reasons when any mapping is stale, colliding, or occupied without a permitted retire, and it must not apply a partial association.
+The user-facing review presents each proposal as an old Location and a new Location, with one plain-language evidence state: content confirmed, content not confirmed, or destination occupied. It must not require the Photographer to understand mapping identities, revision facts, or internal reason codes.
 
-A destination Location may already belong to a Photo discovered by an earlier scan. Slipstream must not silently merge the two Photos, and default Rating or Selection State must not be proof that the destination Photo is disposable. Slipstream may offer an explicit retire-and-bind action only when the destination Photo is otherwise unreferenced with no non-default decisions and no Album membership, and it must show which record will be retired. If the destination Photo has independent user state, Slipstream must preserve both Photos and report the conflict. Recovery must not delete any filesystem file.
+Slipstream must apply a batch atomically with revalidation at commit. It must reject the whole batch with per-mapping reasons when any mapping is stale, colliding, or occupied without a permitted Retire and Bind, and it must not apply a partial association.
 
+A destination Location may already belong to a Photo discovered by an earlier scan. Slipstream must not silently merge the two Photos, and default Rating or Selection State must not be proof that the destination Photo is disposable. Slipstream may offer an explicit Retire and Bind action only when the destination Photo is otherwise unreferenced: it has default decisions, no Album membership, no Trash removal, no retained workspace state, no Edit Recipe, and no referenced Processing Artifact. The eligibility check must use the authoritative workspace and processing records, not only a scan-time summary. It must show which record will be retired. If the destination Photo has independent user state or a retained development reference, Slipstream must preserve both Photos and report the conflict. Recovery must not delete any filesystem file.
 Recovery must use server-relative Library Locations. It must not require a client file upload or expose an arbitrary server path. Recovery must not import or write an XMP Sidecar and must preserve the Photo's Rating in Slipstream.
 
 ### Human and Agent Access
@@ -160,7 +165,8 @@ one atomic operation over an arbitrarily large prefix result.
 A successful result must identify each recovered Photo and Original File, its
 previous and current Location, and any explicitly retired destination record.
 Applied and refused counts must describe that submitted batch. Any remaining
-Library-wide unavailable count must be identified separately. The same Photo
+active unavailable count must be identified separately; it counts only Photos
+that are not Removed and whose Original is unavailable. The same Photo
 must keep its Selection State, Rating, Album membership and order, and saved
 Album positions. Other Photos must remain unchanged except for the explicitly
 permitted retirement.

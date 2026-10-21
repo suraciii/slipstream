@@ -487,18 +487,17 @@ renamed Original File. It never moves, renames, uploads, or deletes file bytes,
 never restores a Photo from Trash, and never writes a Sidecar. A Photo in Trash
 uses `photos restore`.
 
-`recovery unavailable` opens one bounded review of the active unavailable
-Photos. Its data is a list result whose items are `RecoveryItem` records. An
-empty result means that no active unavailable Photo needs recovery in the
-evaluated scope; it is not evidence that any missing file was restored.
+`recovery unavailable` opens one bounded review of active unavailable Photos.
+`recovery propose` is read-only and returns the remembered and proposed
+Locations, the file kind, and a plain-language evidence state. The Folder form
+keeps relative suffixes; the single form evaluates one Original. A scope beyond
+the advertised bound is refused rather than silently truncated.
 
-`recovery propose` is read-only. The Folder-prefix form maps every unavailable
-Original whose remembered Location is under `--old-prefix` onto `--new-prefix`
-with the same relative suffix. The single form evaluates exactly one mapping for
-`--original-id`. Both return a list result whose items are `RecoveryMapping`
-records; the single form has `total: 1` and no continuation. A prefix scope
-larger than the advertised mapping bound is refused as `recovery_scope_exceeded`
-before any continuation is issued; no truncated proposal is returned.
+The review and apply commands retain opaque mapping identities and bounded
+continuations for automation. These fields are opaque to Photographers; the
+CLI may display them in structured output for an Agent or scripted workflow.
+Unverified content requires explicit confirmation; an occupied destination is
+never merged silently.
 
 `PREFIX` is a Library-relative Folder Location with no leading or trailing
 separator; the empty value addresses the Library Folder. `--new-location` names
@@ -544,10 +543,11 @@ association change. Separate invocations are separate commits; a later refusal
 never rolls back an earlier committed batch.
 
 Apply data contains count `appliedMappings`, count `refusedMappings`, count
-`unavailablePhotos` for the remaining Library-wide unavailable Photos, and
-`mappings` in request order. Each applied mapping contains `originalId`,
-`photoId`, `fromLocation`, `toLocation`, `webUrl`, and nullable `retired`. A
-successful mapping is not proof that missing file bytes were recreated.
+`unavailablePhotos` for the remaining active unavailable Photos (`available=0`
+and not Removed), and `mappings` in request order. Each applied mapping contains
+`originalId`, `photoId`, `fromLocation`, `toLocation`, `webUrl`, and nullable
+`retired`. A successful mapping is not proof that missing file bytes were
+recreated.
 
 Recovery reasons are `colliding`, `content-mismatch`, `content-unconfirmed`,
 `destination-in-use`, `destination-removed`, `kind-mismatch`, `missing`,
@@ -1006,7 +1006,7 @@ nullable `retire`. `verified` is true only when persisted content evidence
 matched the destination. `blockedReason` is one of `colliding`,
 `content-mismatch`, `destination-in-use`, `destination-removed`, `kind-mismatch`,
 `missing`, or `unreadable` when the mapping cannot be applied, and `null` when
-it can. `retire` is present only for a permitted retire-and-bind and contains
+it can. `retire` is present only for a permitted Retire and Bind and contains
 string `photoId`, `originalId`, and `location`.
 
 `mappingId` is opaque. It identifies the reviewed correspondence and binds a
