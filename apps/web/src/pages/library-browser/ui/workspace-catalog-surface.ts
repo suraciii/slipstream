@@ -15,9 +15,8 @@ import {
 } from "../model/workspace-catalog.js";
 import {
   validateSemanticValue,
-  resolveSemanticSchema,
+  admittedResourceReferencePaths,
   replaceSemanticValue,
-  schemaArray,
 } from "../model/semantic-schema.js";
 import {
   objects,
@@ -559,63 +558,6 @@ export function createWorkspaceCatalogSurface(
       ),
     );
     const candidates: { label: string; change: () => JsonObject }[] = [];
-    function admittedReferences(
-      schema: JsonObject,
-      value: unknown,
-      root: JsonObject,
-      path: (string | number)[] = [],
-      depth = 0,
-    ): (string | number)[][] {
-      if (depth > 32) return [];
-      const resolved = resolveSemanticSchema(schema, root),
-        paths: (string | number)[][] = [];
-      const props = object(resolved.properties);
-      if (
-        ((Object.hasOwn(props, "resourceId") &&
-          Object.hasOwn(props, "version")) ||
-          Array.isArray(resolved.oneOf) ||
-          Array.isArray(resolved.anyOf)) &&
-        !validateSemanticValue(schema, reference, root).length
-      )
-        paths.push(path);
-      for (const [key, child] of Object.entries(props))
-        if (isRecord(child))
-          paths.push(
-            ...admittedReferences(
-              child,
-              object(value)[key],
-              root,
-              [...path, key],
-              depth + 1,
-            ),
-          );
-      if (Array.isArray(value) && isRecord(resolved.items))
-        value.forEach((item, index) =>
-          paths.push(
-            ...admittedReferences(
-              resolved.items as JsonObject,
-              item,
-              root,
-              [...path, index],
-              depth + 1,
-            ),
-          ),
-        );
-      for (const branch of [
-        ...(schemaArray(resolved.oneOf) ? resolved.oneOf : []),
-        ...(schemaArray(resolved.anyOf) ? resolved.anyOf : []),
-      ])
-        if (isRecord(branch))
-          paths.push(
-            ...admittedReferences(branch, value, root, path, depth + 1).filter(
-              (candidate) =>
-                !paths.some(
-                  (existing) => existing.join(".") === candidate.join("."),
-                ),
-            ),
-          );
-      return paths;
-    }
     for (const instance of instances) {
       const descriptor = object(details[instance.instanceId]?.descriptor),
         properties = object(object(descriptor.parameters).properties);
@@ -624,10 +566,11 @@ export function createWorkspaceCatalogSurface(
           const current = object(details[instance.instanceId]?.parameters)[
             parameterId
           ];
-          for (const path of admittedReferences(
+          for (const path of admittedResourceReferencePaths(
             schema,
             current,
             object(descriptor.parameters),
+            reference,
           ))
             candidates.push({
               label: `${instance.name} · ${instance.instanceId} · ${parameterId}${path.length ? `.${path.join(".")}` : ""}`,
@@ -658,10 +601,11 @@ export function createWorkspaceCatalogSurface(
         }
       if (isRecord(descriptor.blendSchema)) {
         const current = details[instance.instanceId]?.blend;
-        for (const path of admittedReferences(
+        for (const path of admittedResourceReferencePaths(
           descriptor.blendSchema,
           current,
           descriptor.blendSchema,
+          reference,
         ))
           candidates.push({
             label: `${instance.name} · ${instance.instanceId} · Blend ${path.join(".")}`,
@@ -692,10 +636,11 @@ export function createWorkspaceCatalogSurface(
     ))
       if (isRecord(schema) && edit) {
         const current = edit.output.settings[fieldId];
-        for (const path of admittedReferences(
+        for (const path of admittedResourceReferencePaths(
           schema,
           current,
           edit.output.schema,
+          reference,
         ))
           candidates.push({
             label: `Output · ${fieldId}${path.length ? `.${path.join(".")}` : ""}`,

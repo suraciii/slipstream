@@ -33,11 +33,13 @@ use std::{
 
 #[cfg(test)]
 use std::sync::OnceLock;
+mod enrollment;
 mod processing;
 mod scanner;
 #[cfg(test)]
 mod tests;
 mod xmp;
+use enrollment::{EnrollmentState, enrollment_main};
 #[cfg(test)]
 use scanner::inspect_capture_facts;
 use scanner::{ScanCommand, ScanState, Scanner, ScannerShared, scanner_main};
@@ -258,12 +260,6 @@ pub struct Library {
     fingerprint_counts: Arc<Mutex<crate::persistence::FingerprintCounts>>,
     lifecycle: Mutex<Lifecycle>,
     shutdown: Mutex<Option<Result<(), LibraryError>>>,
-}
-
-#[derive(Default)]
-struct EnrollmentState {
-    stopped: bool,
-    scan_running: bool,
 }
 
 pub fn expand_library(config: LibraryConfig) -> Result<(), LibraryError> {
@@ -497,27 +493,13 @@ impl Library {
     }
 
     pub async fn list_albums(&self) -> Result<Vec<AlbumRecord>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.list_albums_receiver()
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
+        self.admitted(Persistence::list_albums_receiver).await
     }
 
     /// One consistent read of unavailable Photos and Album memberships for
     /// the manual recovery review entry.
     pub async fn recovery_survey(&self) -> Result<RecoverySurvey, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.recovery_survey_receiver()
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
+        self.admitted(Persistence::recovery_survey_receiver).await
     }
 
     /// Current facts of the retained review memberships, in the requested
@@ -526,14 +508,8 @@ impl Library {
         &self,
         original_ids: Vec<String>,
     ) -> Result<Vec<Option<crate::recovery::RecoveryRecord>>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.recovery_records_receiver(original_ids)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.recovery_records_receiver(original_ids))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Revalidates and commits one confirmed manual relocation batch
@@ -544,39 +520,22 @@ impl Library {
         &self,
         relocations: Vec<RequestedRelocation>,
     ) -> Result<AppliedRelocations, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .apply_relocations_receiver(self.root.clone(), relocations)
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
+        self.admitted(|persistence| {
+            persistence.apply_relocations_receiver(self.root.clone(), relocations)
+        })
+        .await
     }
 
     pub async fn list_album_summaries(&self) -> Result<Vec<AlbumSummary>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.list_album_summaries_receiver()
-        }?;
-        receive
+        self.admitted(Persistence::list_album_summaries_receiver)
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Reads one current Album summary and its mutation guard in one owner
     /// operation. `None` means the Album no longer exists.
     pub async fn album(&self, album_id: &str) -> Result<Option<AlbumSummary>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.album_receiver(album_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.album_receiver(album_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Reads current Album facts for fixed query IDs, preserving input order
@@ -585,14 +544,8 @@ impl Library {
         &self,
         album_ids: Vec<String>,
     ) -> Result<Vec<Option<AlbumSummary>>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.albums_by_id_receiver(album_ids)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.albums_by_id_receiver(album_ids))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Creates one bounded, fixed Album-ID membership for server-retained
@@ -616,14 +569,8 @@ impl Library {
     /// Reads one current Photo and its decision mutation guard in one owner
     /// operation. `None` means the Photo no longer exists.
     pub async fn photo(&self, photo_id: &str) -> Result<Option<PhotoRead>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.photo_receiver(photo_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.photo_receiver(photo_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Reads the Photo facts and the recipe read of one Photo in a single
@@ -635,14 +582,8 @@ impl Library {
         &self,
         photo_id: &str,
     ) -> Result<Option<(PhotoRead, EditRecipeRead)>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.edit_recipe_surface_receiver(photo_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.edit_recipe_surface_receiver(photo_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Reads the current saved recipe and the Library source revision in one
@@ -651,14 +592,8 @@ impl Library {
         &self,
         photo_id: &str,
     ) -> Result<Option<EditRecipeRead>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.edit_recipe_receiver(photo_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.edit_recipe_receiver(photo_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Reads the recorded Development Proxy of one Photo. `None` means no
@@ -667,14 +602,8 @@ impl Library {
         &self,
         photo_id: &str,
     ) -> Result<Option<crate::DevelopmentProxyRecord>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.read_development_proxy_receiver(photo_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.read_development_proxy_receiver(photo_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Records the publication of one Development Proxy. The artifact file
@@ -684,27 +613,15 @@ impl Library {
         &self,
         record: crate::DevelopmentProxyRecord,
     ) -> Result<bool, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.record_development_proxy_receiver(record)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.record_development_proxy_receiver(record))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Removes the Development Proxy record of one Photo; the caller owns
     /// removing the artifact after the row is gone.
     pub async fn remove_development_proxy(&self, photo_id: &str) -> Result<bool, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.remove_development_proxy_receiver(photo_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.remove_development_proxy_receiver(photo_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Every recorded Development Proxy, for startup reconciliation between
@@ -712,14 +629,8 @@ impl Library {
     pub async fn all_development_proxies(
         &self,
     ) -> Result<Vec<crate::DevelopmentProxyRecord>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.all_development_proxies_receiver()
-        }?;
-        receive
+        self.admitted(Persistence::all_development_proxies_receiver)
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Validates both expected revisions inside one serialized transaction,
@@ -730,27 +641,15 @@ impl Library {
         &self,
         submission: ExportSubmission,
     ) -> Result<ExportSubmitOutcome, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.submit_export_receiver(submission)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.submit_export_receiver(submission))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Reads one Export record. `None` means the identity is unknown or its
     /// retention window has passed.
     pub async fn export(&self, export_id: &str) -> Result<Option<ExportRecord>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.export_receiver(export_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.export_receiver(export_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Bounded most-recent list of one Photo's retained Exports. `None` means
@@ -759,14 +658,8 @@ impl Library {
         &self,
         photo_id: &str,
     ) -> Result<Option<Vec<ExportRecord>>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.photo_exports_receiver(photo_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.photo_exports_receiver(photo_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Cancels one Export exactly once against its actual completion state;
@@ -775,14 +668,8 @@ impl Library {
         &self,
         export_id: &str,
     ) -> Result<Option<ExportRecord>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.cancel_export_receiver(export_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.cancel_export_receiver(export_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Applies one terminal settlement exactly once; an already settled
@@ -792,15 +679,8 @@ impl Library {
         export_id: &str,
         settlement: ExportSettlement,
     ) -> Result<Option<ExportRecord>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .settle_export_receiver(export_id, settlement)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.settle_export_receiver(export_id, settlement))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Persists the executor attempt identity before any work starts. A
@@ -810,15 +690,8 @@ impl Library {
         export_id: &str,
         attempt: ExportAttempt,
     ) -> Result<Option<ExportRecord>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .begin_export_attempt_receiver(export_id, attempt)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.begin_export_attempt_receiver(export_id, attempt))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Records verified staged source evidence between acceptance and launch.
@@ -828,15 +701,10 @@ impl Library {
         size: u64,
         sha256: &str,
     ) -> Result<Option<ExportRecord>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .record_export_source_receiver(export_id, size, sha256)
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
+        self.admitted(|persistence| {
+            persistence.record_export_source_receiver(export_id, size, sha256)
+        })
+        .await
     }
 
     /// Re-arms a failed or cancelled Export against its retained snapshot
@@ -851,19 +719,10 @@ impl Library {
         expected_bundle_id: &str,
         allowance: u64,
     ) -> Result<ExportRetryOutcome, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.retry_export_receiver(
-                export_id,
-                request_id,
-                expected_bundle_id,
-                allowance,
-            )
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
+        self.admitted(|persistence| {
+            persistence.retry_export_receiver(export_id, request_id, expected_bundle_id, allowance)
+        })
+        .await
     }
 
     /// Resolves a request identity without admission or state change: a
@@ -875,18 +734,10 @@ impl Library {
         request_id: &str,
         payload_digest: &str,
     ) -> Result<Option<ExportSubmissionResolution>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.resolve_export_submission_receiver(
-                photo_id,
-                request_id,
-                payload_digest,
-            )
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
+        self.admitted(|persistence| {
+            persistence.resolve_export_submission_receiver(photo_id, request_id, payload_digest)
+        })
+        .await
     }
 
     /// Durably claims the publication of one export attempt before its
@@ -897,15 +748,10 @@ impl Library {
         incarnation: &str,
         sequence: u64,
     ) -> Result<(), LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .claim_export_publication_receiver(export_id, incarnation, sequence)
-        }?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(LibraryError::from)?;
+        self.admitted(|persistence| {
+            persistence.claim_export_publication_receiver(export_id, incarnation, sequence)
+        })
+        .await?;
         Ok(())
     }
 
@@ -915,53 +761,28 @@ impl Library {
         &self,
         export_id: &str,
     ) -> Result<Option<(String, u64)>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .export_publication_claim_receiver(export_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.export_publication_claim_receiver(export_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Refreshes a download lease's liveness anchor while its stream runs.
     /// `false` means the lease is gone and the stream must stop renewing.
     pub async fn renew_export_lease(&self, lease_id: &str, now: u64) -> Result<bool, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.renew_export_lease_receiver(lease_id, now)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.renew_export_lease_receiver(lease_id, now))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Removes expired artifacts, records, and stale leases. The caller
     /// removes the named artifact files after the deletions commit.
     pub async fn sweep_export_expiry(&self, now: u64) -> Result<ExportSweepResult, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.sweep_export_expiry_receiver(now)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.sweep_export_expiry_receiver(now))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Lists unfinished Exports for restart reconciliation.
     pub async fn unfinished_exports(&self) -> Result<Vec<ExportRecord>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.unfinished_exports_receiver()
-        }?;
-        receive
+        self.admitted(Persistence::unfinished_exports_receiver)
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Holds one Export's artifact and snapshot against expiry cleanup until
@@ -971,27 +792,14 @@ impl Library {
         export_id: &str,
         now: u64,
     ) -> Result<ExportLeaseOutcome, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .acquire_export_lease_receiver(export_id, now)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.acquire_export_lease_receiver(export_id, now))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Releases a download lease once its response stream has settled.
     pub async fn release_export_lease(&self, lease_id: &str) -> Result<bool, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.release_export_lease_receiver(lease_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.release_export_lease_receiver(lease_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Reads current decision facts and versions for fixed Published Photo
@@ -1002,15 +810,8 @@ impl Library {
         photo_ids: Vec<String>,
         projection: Arc<PhotoQueryProjection>,
     ) -> Result<Vec<Option<PhotoRead>>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .photos_by_id_receiver(photo_ids, projection)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.photos_by_id_receiver(photo_ids, projection))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Evaluates source, filters, and ordering in the serialized owner and
@@ -1039,28 +840,16 @@ impl Library {
         &self,
         photo_id: &str,
     ) -> Result<Option<Vec<PhotoAlbumMembership>>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.photo_albums_receiver(photo_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.photo_albums_receiver(photo_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     pub async fn album_browse_target(
         &self,
         album_id: &str,
     ) -> Result<Option<AlbumBrowseTarget>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.album_browse_target_receiver(album_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.album_browse_target_receiver(album_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     pub async fn mutate_album(
@@ -1314,14 +1103,8 @@ impl Library {
         ),
         LibraryError,
     > {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.removed_photos_receiver(start, limit)?
-        };
-        receive
+        self.admitted(|persistence| persistence.removed_photos_receiver(start, limit))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
     /// Captures a fixed Permanent Deletion review from the current Trash
     /// selection. Filesystem facts are read before the owner persists the
@@ -1541,6 +1324,31 @@ impl Library {
         }
     }
 
+    /// Admits one persistence-owner operation and resolves its reply: the
+    /// admission guard is taken first, the receiver is created synchronously
+    /// while it is held, and it is released before the reply is awaited, so a
+    /// busy owner never blocks other Library admission. A disconnected reply
+    /// resolves to `PersistenceError::OwnerStopped`, and a refused submission
+    /// keeps its own persistence error.
+    async fn admitted<T>(
+        &self,
+        submit: impl FnOnce(
+            &Persistence,
+        ) -> Result<
+            tokio::sync::oneshot::Receiver<Result<T, PersistenceError>>,
+            PersistenceError,
+        >,
+    ) -> Result<T, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            submit(&self.persistence)?
+        };
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
     pub fn shutdown(&self) -> Result<(), LibraryError> {
         let mut shutdown = self.shutdown.lock().unwrap();
         if let Some(result) = shutdown.clone() {
@@ -1592,107 +1400,5 @@ impl Library {
             first_error.get_or_insert(error.into());
         }
         first_error.map_or(Ok(()), Err)
-    }
-}
-
-/// Background enrollment of content fingerprints for available Originals.
-/// One bounded worker reads each Original once; scans pause it so candidate
-/// hashing and enrollment never compete for storage.
-fn enrollment_main(
-    root: LibraryRoot,
-    native_work: NativeWorkBudget,
-    persistence: Persistence,
-    enrollment: Arc<(Mutex<EnrollmentState>, Condvar)>,
-    fingerprint_counts: Arc<Mutex<crate::persistence::FingerprintCounts>>,
-) {
-    let refresh_counts = |persistence: &Persistence| {
-        if let Ok(counts) = persistence.fingerprint_counts_blocking() {
-            *fingerprint_counts.lock().unwrap() = counts;
-        }
-    };
-    refresh_counts(&persistence);
-    let mut deferred: std::collections::HashMap<String, std::time::Instant> =
-        std::collections::HashMap::new();
-    loop {
-        {
-            let mut state = enrollment.0.lock().unwrap();
-            if state.stopped {
-                return;
-            }
-            while state.scan_running && !state.stopped {
-                state = enrollment
-                    .1
-                    .wait_timeout(state, std::time::Duration::from_secs(5))
-                    .unwrap()
-                    .0;
-            }
-            if state.stopped {
-                return;
-            }
-        }
-        let target = match persistence.next_fingerprint_target_blocking() {
-            Ok(target) => target,
-            Err(_) => {
-                thread::sleep(std::time::Duration::from_secs(1));
-                continue;
-            }
-        };
-        let Some(target) = target else {
-            let state = enrollment.0.lock().unwrap();
-            if state.stopped {
-                return;
-            }
-            drop(state);
-            let (lock, signal) = &*enrollment;
-            let state = lock.lock().unwrap();
-            if state.stopped {
-                return;
-            }
-            let _unused = signal
-                .wait_timeout(state, std::time::Duration::from_secs(5))
-                .unwrap()
-                .0;
-            continue;
-        };
-        if let Some(deferred_at) = deferred.get(&target.original_id)
-            && deferred_at.elapsed() < std::time::Duration::from_secs(60)
-        {
-            thread::sleep(std::time::Duration::from_millis(250));
-            continue;
-        }
-        let relative = match crate::RelativeOriginalPath::parse(target.relative_path.clone()) {
-            Ok(relative) => relative,
-            Err(_) => {
-                deferred.insert(target.original_id.clone(), std::time::Instant::now());
-                continue;
-            }
-        };
-        let permit = native_work.acquire();
-        let digest = root
-            .original(relative)
-            .and_then(|capability| capability.digest_file());
-        drop(permit);
-        match digest {
-            Ok(checked)
-                if checked.facts.size == target.size
-                    && checked.facts.mtime_ms == target.mtime_ms =>
-            {
-                let fingerprint = crate::OriginalFingerprint {
-                    original_id: target.original_id.clone(),
-                    digest: checked.digest,
-                    size: checked.facts.size,
-                    mtime_ms: checked.facts.mtime_ms,
-                };
-                if persistence.store_fingerprint_blocking(fingerprint).is_ok() {
-                    deferred.remove(&target.original_id);
-                    refresh_counts(&persistence);
-                } else {
-                    deferred.insert(target.original_id.clone(), std::time::Instant::now());
-                }
-            }
-            _ => {
-                deferred.insert(target.original_id.clone(), std::time::Instant::now());
-            }
-        }
     }
 }

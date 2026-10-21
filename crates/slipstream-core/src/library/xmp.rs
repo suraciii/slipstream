@@ -6,14 +6,8 @@ impl Library {
         &self,
         export_id: &str,
     ) -> Result<Option<crate::XmpExportRecord>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.read_xmp_receiver(export_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.read_xmp_receiver(export_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 
     /// Lists one Photo's persisted XMP snapshots, newest first. `None`
@@ -22,13 +16,7 @@ impl Library {
         &self,
         photo_id: &str,
     ) -> Result<Option<Vec<crate::XmpExportRecord>>, LibraryError> {
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence.list_xmp_receiver(photo_id)
-        }?;
-        receive
+        self.admitted(|persistence| persistence.list_xmp_receiver(photo_id))
             .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
-            .map_err(Into::into)
     }
 }
