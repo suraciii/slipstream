@@ -626,10 +626,8 @@ unrelated move, multiple roots, or per-file relinking.
 
 1. Stop every Slipstream process using the state database. Preserve sidecars
    for recovery instead of deleting them.
-2. Create and record a verified canonical schema-v6 backup (see Backup).
-3. Change `SLIPSTREAM_LIBRARY_ROOT` to the proposed canonical ancestor. Keep
-   the state directory and database basename unchanged. Ensure the proposed
-   Folder is mounted read-only at the same absolute path inside the container.
+2. Create and record a verified backup of the current canonical schema (see Backup).
+3. Change `SLIPSTREAM_LIBRARY_ROOT` to the proposed canonical ancestor. Keep the state directory and database basename unchanged. Ensure the proposed Folder is mounted read-only at the same absolute path inside the container.
 4. Run the candidate image once without starting the service:
 
    ```sh
@@ -637,12 +635,7 @@ unrelated move, multiple roots, or per-file relinking.
      run --rm --no-deps slipstream expand-library
    ```
 
-The offline command rejects a running database, sidecars, non-v6 state, an
-unrelated Folder, descriptor mismatch, invalid remembered Locations, and
-scan-limit failures. It commits the binding and Location changes in one
-admitted transaction, then completes a normal scan before reporting success.
-It never binds HTTP and uses the same storage configuration regardless of
-listener settings.
+The offline command rejects a running database, sidecars, unsupported schema, an unrelated Folder, descriptor mismatch, invalid remembered Locations, and scan-limit failures. It commits the binding and Location changes in one admitted transaction, then completes a normal scan before reporting success. It never binds HTTP and uses the same storage configuration regardless of listener settings.
 
 If preflight or the transaction fails, the prior Folder binding is unchanged.
 If the post-commit scan fails, do not expose the service as ready: correct the
