@@ -11,6 +11,7 @@ use std::{
 };
 
 mod browse;
+mod browse_selection;
 mod cli;
 mod cli_preview;
 #[path = "cli_selection.rs"]
