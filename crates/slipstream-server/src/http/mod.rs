@@ -6,9 +6,13 @@ mod export;
 mod mutations;
 mod photo;
 mod recovery;
+#[cfg(test)]
+#[path = "selection_tests.rs"]
+mod selection_tests;
 mod static_web;
 mod xmp;
 
+use crate::wire::valid_selection_state;
 pub(crate) use cli::{
     CLI_CONTRACT_HEADER, cli_error, cli_error_empty, invalid_cli, require_cli_contract,
     require_published,
@@ -726,14 +730,11 @@ pub(crate) fn valid_removal_markers(
 }
 
 pub(crate) fn valid_selection(value: &Value) -> Option<SelectionState> {
-    match value.as_str()? {
-        "unflagged" => Some(SelectionState::Unflagged),
-        "picked" => Some(SelectionState::Picked),
-        "rejected" => Some(SelectionState::Rejected),
-        _ => None,
-    }
+    valid_selection_state(value.as_str()?)
 }
 
+/// Batch admission admits only the two decision states; Unflagged carries no
+/// decision, so one batch write can never target it.
 fn valid_batch_selection(value: &Value) -> Option<SelectionState> {
     match valid_selection(value) {
         Some(SelectionState::Picked) => Some(SelectionState::Picked),

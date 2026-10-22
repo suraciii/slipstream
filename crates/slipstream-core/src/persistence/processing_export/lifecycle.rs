@@ -34,6 +34,26 @@ pub(super) fn workspace_artifact_published_at(
     .map(|value| value.parse().map_err(|_| PersistenceError::Storage))
     .transpose()
 }
+
+/// True when one artifact's finite retention has passed and no durable
+/// workspace publication reprieves it: the artifact is no longer
+/// selectable as an input and no new download lease may be granted for it.
+/// An artifact with no retention record, a retention deadline still ahead,
+/// or a retained workspace publication is not expired. The sweep keeps its
+/// own held-lease and tombstone logic outside this predicate; this is only
+/// the shared expiry decision the input handoff and lease acquisition make.
+pub(super) fn artifact_retention_expired(
+    connection: &Connection,
+    artifact_id: &str,
+    now: u64,
+) -> Result<bool, PersistenceError> {
+    let retention_passed = read_processing_artifact_retention_record(connection, artifact_id)?
+        .is_some_and(|retention| retention.retain_until <= now);
+    if !retention_passed {
+        return Ok(false);
+    }
+    Ok(workspace_artifact_published_at(connection, artifact_id)?.is_none())
+}
 // Durable workspace ownership is a separate metadata key, so historical record
 // bytes stay unchanged. Receipt expiry removes request state but keeps the
 // immutable artifact provenance and publication timestamp for workspace files.
@@ -439,11 +459,7 @@ pub(in crate::persistence) fn acquire_processing_artifact_lease(
         let Some(artifact) = read_processing_artifact(transaction, artifact_id)? else {
             return Ok(ProcessingArtifactLeaseOutcome::Unknown);
         };
-        if let Some(retention) =
-            read_processing_artifact_retention_record(transaction, artifact_id)?
-            && retention.retain_until <= now
-            && workspace_artifact_published_at(transaction, artifact_id)?.is_none()
-        {
+        if artifact_retention_expired(transaction, artifact_id, now)? {
             return Ok(ProcessingArtifactLeaseOutcome::Expired);
         }
         let lease_id = format!("lease-{}", random_uuid_v4()?);

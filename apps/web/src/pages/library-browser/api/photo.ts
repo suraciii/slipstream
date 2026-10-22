@@ -6,6 +6,7 @@ import type {
   UndoDescription,
 } from "./contracts.js";
 import { hasExactKeys, isRecord, validOptional } from "./guards.js";
+import { fetchJson } from "./json-response.js";
 
 export type PhotoFetch = (
   input: string,
@@ -162,31 +163,27 @@ export async function fetchPhotoAlbums(
   photoId: string,
   signal: AbortSignal,
 ): Promise<PhotoAlbumsResult> {
-  let response: Response;
-  try {
-    response = await fetcher(`/api/photos/${photoId}/albums`, {
+  const result = await fetchJson(() =>
+    fetcher(`/api/photos/${photoId}/albums`, {
       signal,
       priority: "high",
-    });
-  } catch {
+    }),
+  );
+  if (result.kind === "rejected")
+    return result.transport
+      ? Object.freeze({ kind: "failed" })
+      : Object.freeze({ kind: "failed", status: result.status });
+  if (result.kind === "malformed" || !validPhotoAlbums(result.value))
     return Object.freeze({ kind: "failed" });
-  }
-  if (!response.ok)
-    return Object.freeze({ kind: "failed", status: response.status });
-  try {
-    const value: unknown = await response.json();
-    if (!validPhotoAlbums(value)) return Object.freeze({ kind: "failed" });
-    return Object.freeze({
-      kind: "ok",
-      value: Object.freeze({
-        albums: value.albums.map((album) =>
-          Object.freeze({ id: album.id, name: album.name }),
-        ),
-      }),
-    });
-  } catch {
-    return Object.freeze({ kind: "failed" });
-  }
+  const albums = result.value.albums;
+  return Object.freeze({
+    kind: "ok",
+    value: Object.freeze({
+      albums: albums.map((album) =>
+        Object.freeze({ id: album.id, name: album.name }),
+      ),
+    }),
+  });
 }
 
 export async function fetchPhotoMetadata(
@@ -194,25 +191,22 @@ export async function fetchPhotoMetadata(
   photoId: string,
   signal: AbortSignal,
 ): Promise<PhotoMetadataResult> {
-  let response: Response;
-  try {
-    response = await fetcher(`/api/photos/${photoId}/metadata`, {
+  const result = await fetchJson(() =>
+    fetcher(`/api/photos/${photoId}/metadata`, {
       signal,
       priority: "high",
-    });
-  } catch {
+    }),
+  );
+  if (result.kind === "rejected")
+    return result.transport
+      ? Object.freeze({ kind: "failed" })
+      : Object.freeze({ kind: "failed", status: result.status });
+  if (result.kind === "malformed" || !validMetadata(result.value))
     return Object.freeze({ kind: "failed" });
-  }
-  if (!response.ok)
-    return Object.freeze({ kind: "failed", status: response.status });
-  try {
-    const value: unknown = await response.json();
-    return validMetadata(value)
-      ? Object.freeze({ kind: "ok", value: Object.freeze(value) })
-      : Object.freeze({ kind: "failed" });
-  } catch {
-    return Object.freeze({ kind: "failed" });
-  }
+  return Object.freeze({
+    kind: "ok",
+    value: Object.freeze(result.value),
+  });
 }
 
 export async function fetchPreview(

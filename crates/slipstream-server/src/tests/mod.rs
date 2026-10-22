@@ -12,6 +12,8 @@ use std::{
 
 mod browse;
 mod cli;
+#[path = "cli_selection.rs"]
+mod cli_selection;
 mod export_routes;
 mod lifecycle;
 mod metadata;

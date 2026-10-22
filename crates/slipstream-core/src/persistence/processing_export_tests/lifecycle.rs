@@ -28,7 +28,7 @@ async fn qualified_decision_must_name_the_stored_parameter_schema() {
 }
 
 /// One qualified submission admitted under the seeded recipe.
-async fn admitted(seeded: &Seeded, request_id: &str) -> ProcessingExportAdmission {
+pub(super) async fn admitted(seeded: &Seeded, request_id: &str) -> ProcessingExportAdmission {
     let current = seeded
         .persistence
         .composable_edit_recipe_receiver("raw-photo")
@@ -55,7 +55,7 @@ async fn admitted(seeded: &Seeded, request_id: &str) -> ProcessingExportAdmissio
 }
 
 /// The artifact a validated execution of one admission publishes.
-fn settled_artifact(admission: &ProcessingExportAdmission) -> ProcessingArtifact {
+pub(super) fn settled_artifact(admission: &ProcessingExportAdmission) -> ProcessingArtifact {
     let mut artifact = artifact();
     artifact.input.input = admission.input.clone();
     artifact.bundle_id = admission.bundle_id.clone();

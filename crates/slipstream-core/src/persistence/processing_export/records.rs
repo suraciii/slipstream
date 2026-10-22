@@ -391,26 +391,25 @@ pub(super) fn delete_metadata_value(
     crate::persistence::metadata_store::delete(transaction, key, |_| PersistenceError::Storage)
 }
 
-/// Serializes one record within the metadata value bound. A value past the
-/// bound is refused as a storage error rather than written oversized or
-/// truncated; admitted records cannot reach it.
+/// Serializes one record within the processing-export metadata value bound. A
+/// value past the bound is refused as a storage error rather than written
+/// oversized or truncated; admitted records cannot reach it.
 pub(super) fn serialize_record<T: Serialize>(record: &T) -> Result<String, PersistenceError> {
-    let serialized = serde_json::to_string(record).map_err(|_| PersistenceError::Storage)?;
-    if serialized.len() > MAXIMUM_PROCESSING_EXPORT_RECORD_BYTES {
-        return Err(PersistenceError::Storage);
-    }
-    Ok(serialized)
+    crate::persistence::retained_record::serialize_record_within_bound(
+        record,
+        MAXIMUM_PROCESSING_EXPORT_RECORD_BYTES,
+    )
 }
 
-/// Parses one stored metadata value strictly: bounded, unknown fields
-/// refused.
+/// Parses one stored metadata value strictly within the processing-export
+/// bound: bounded and unknown fields refused.
 pub(super) fn parse_stored_value<T: for<'de> Deserialize<'de>>(
     value: &str,
 ) -> Result<T, PersistenceError> {
-    if value.len() > MAXIMUM_PROCESSING_EXPORT_RECORD_BYTES {
-        return Err(PersistenceError::Storage);
-    }
-    serde_json::from_str(value).map_err(|_| PersistenceError::Storage)
+    crate::persistence::retained_record::parse_stored_value_within_bound(
+        value,
+        MAXIMUM_PROCESSING_EXPORT_RECORD_BYTES,
+    )
 }
 
 pub(super) fn contract_record(contract: &ProcessingImageContract) -> ContractRecord {

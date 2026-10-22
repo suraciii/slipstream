@@ -54,6 +54,7 @@ pub mod metadata_wire;
 mod photo_executor;
 mod preview_render;
 mod processing_export;
+mod processing_export_wire;
 mod processing_modules;
 mod processing_policy;
 mod processing_preview;

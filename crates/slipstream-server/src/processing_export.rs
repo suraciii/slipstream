@@ -55,6 +55,7 @@ use crate::http::{
     CLI_CONTRACT_HEADER, HttpState, cli_error_empty, require_cli_contract, require_published,
     valid_id,
 };
+pub(crate) use crate::processing_export_wire::input_json;
 #[path = "processing_export_execution.rs"]
 mod execution;
 use execution::{execute_admitted_export, fail_admitted_export, terminal_work_response};
@@ -146,56 +147,6 @@ fn valid_export_request_id(request_id: &str) -> bool {
         && request_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-}
-
-pub(crate) fn input_json(input: &ProcessingInput) -> Value {
-    match input {
-        ProcessingInput::Original {
-            photo_id,
-            source_revision,
-        } => json!({
-            "kind": "original",
-            "photoId": photo_id,
-            "sourceRevision": source_revision,
-        }),
-        ProcessingInput::Artifact {
-            artifact_id,
-            contract,
-        } => json!({
-            "kind": "artifact",
-            "artifactId": artifact_id.as_str(),
-            "contract": {
-                "format": contract.format,
-                "precision": contract.precision,
-                "colorSpace": contract.color_space,
-                "transfer": contract.transfer,
-                "geometry": {
-                    "width": contract.geometry.width,
-                    "height": contract.geometry.height,
-                },
-                "encoding": contract.encoding,
-            },
-        }),
-        ProcessingInput::WorkspaceArtifact {
-            workspace_id,
-            artifact_id,
-            revision,
-            contract,
-        } => json!({
-            "kind": "workspace-artifact",
-            "workspaceId": workspace_id,
-            "artifactId": artifact_id,
-            "revision": revision,
-            "contract": {
-                "format": contract.format,
-                "precision": contract.precision,
-                "colorSpace": contract.color_space,
-                "transfer": contract.transfer,
-                "geometry": {"width": contract.geometry.width, "height": contract.geometry.height},
-                "encoding": contract.encoding,
-            },
-        }),
-    }
 }
 
 fn refusal_json(refusal: &slipstream_core::ProcessingExportRefusal) -> Value {

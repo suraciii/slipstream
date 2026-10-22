@@ -230,6 +230,26 @@ fn retained_orphan_blocks(inspection: &Inspection, evidence: &MetadataSidecarEvi
     orphan.sidecar_path == *location && orphan.observed_digest.as_deref() == Some(sha256.as_str())
 }
 
+/// Applies the retained-orphan association policy: one retained orphan
+/// whose observed Sidecar still matches the current observation blocks the
+/// association, so both the Read and the Save report the same Unresolved
+/// state with the same reason. Every other association — the eligible,
+/// ambiguous, ineligible, and absent observations, and an orphan whose
+/// Sidecar changed — is returned unchanged.
+fn retained_orphan_association(
+    inspection: &Inspection,
+    evidence: &MetadataSidecarEvidence,
+    association: MetadataAssociation,
+) -> MetadataAssociation {
+    if !retained_orphan_blocks(inspection, evidence) {
+        return association;
+    }
+    let mut association = association;
+    association.state = MetadataAssociationState::Unresolved;
+    association.reason = Some("retained-orphan".into());
+    association
+}
+
 fn record_observation(
     context: &MetadataContext<'_>,
     observation: &SidecarObservation,
@@ -416,11 +436,8 @@ fn read_metadata_in_context(
 ) -> Result<MetadataReadResult, MetadataError> {
     let photo_id = &context.record().photo_id;
     let mut inspection = inspect_files(context.record(), library_root)?;
-    let (sidecar, mut association) = sidecar_evidence(&inspection.observation);
-    if retained_orphan_blocks(&inspection, &sidecar) {
-        association.state = MetadataAssociationState::Unresolved;
-        association.reason = Some("retained-orphan".into());
-    }
+    let (sidecar, association) = sidecar_evidence(&inspection.observation);
+    let association = retained_orphan_association(&inspection, &sidecar, association);
     let embedded = embedded_metadata(library_root, &inspection.original, inspection.kind)?;
     let fields = metadata_fields::read_fields(
         &sidecar_source(&inspection.observation, &inspection.bytes),
@@ -529,11 +546,8 @@ fn save_metadata_in_context(
             "The Photo is removed. Restore it before saving metadata.",
         ));
     }
-    let (sidecar, mut association) = sidecar_evidence(&inspection.observation);
-    if retained_orphan_blocks(&inspection, &sidecar) {
-        association.state = MetadataAssociationState::Unresolved;
-        association.reason = Some("retained-orphan".into());
-    }
+    let (sidecar, association) = sidecar_evidence(&inspection.observation);
+    let association = retained_orphan_association(&inspection, &sidecar, association);
     let current = MetadataEvidence {
         photo_id: photo_id.to_owned(),
         original_location: inspection.original_location.clone(),
@@ -911,3 +925,6 @@ fn run_helper(root: Option<&str>, lease_fd: Option<i32>) -> Result<Value, String
         }
     }))
 }
+#[cfg(test)]
+#[path = "metadata_service_retained_orphan_tests.rs"]
+mod retained_orphan_policy_tests;
