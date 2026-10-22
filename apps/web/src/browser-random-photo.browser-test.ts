@@ -321,8 +321,11 @@ test("a narrow Grid moves the action into View options under Browse actions", as
     page.locator("[data-browse-actions] [data-random-photo]"),
   ).toHaveCount(1);
   await expect(page.getByText("Browse actions", { exact: true })).toBeVisible();
-  // Activating it closes the surface it was reached through.
-  await randomAction(page).click();
+  // The moved control keeps its keyboard path: it is the surface's one
+  // activation target and carries focus while it is the action.
+  await randomAction(page).focus();
+  await expect(randomAction(page)).toBeFocused();
+  await page.keyboard.press("Enter");
   await expect(page.locator("[data-view-options]")).toBeHidden();
   await reviewVisible(page);
 });
