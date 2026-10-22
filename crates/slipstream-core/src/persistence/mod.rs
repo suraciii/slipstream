@@ -20,6 +20,7 @@ mod permanent_deletion;
 mod processing_export;
 mod queries;
 mod removal;
+mod retained_record;
 mod scan;
 mod scan_recovery;
 mod schema;
