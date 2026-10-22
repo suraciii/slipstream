@@ -86,9 +86,12 @@ random Photo from the current source and filter.
 The action is enabled only when the current Browse Snapshot is ready and has a
 nonzero result count, and while no source or Photo transition is pending. While
 it resolves, the button must expose a pending state and must not admit a second
-attempt. Its placement and pending presentation follow [Random
-Photo](../spec.md#random-photo); it must not change the current Grid into a
-different source or filter.
+attempt. Grid cells must present as unavailable until that attempt settles;
+they must not appear actionable when opening them would be refused. A successful
+range Retry must clear the failed status while keeping the Grid, not reopen the
+unresolved Photo automatically. The action's placement and pending presentation
+follow [Random Photo](../spec.md#random-photo); it must not change the current
+Grid into a different source or filter.
 
 The header must indicate an active nondefault filter or order and the visible
 result count. Complete progress remains available in View options with the

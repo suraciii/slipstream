@@ -603,7 +603,7 @@ function mountPrivateLibraryBrowser(
   const updateControls = () => {
     if (!applicationAlive) return;
     const photo = currentPhoto();
-    const gridEnabled = canOpenGridPhoto();
+    const gridEnabled = canOpenGridPhoto() && !gridPhotoNavigation?.pending;
     const filmstripEnabled = gridEnabled;
     const interactionBusy =
       pageBusy ||
@@ -1814,7 +1814,8 @@ function mountPrivateLibraryBrowser(
         pageBusy = true;
         updateControls();
         try {
-          await retryCurrentSourceRanges(rangeRetries);
+          if (await retryCurrentSourceRanges(rangeRetries))
+            presentRangeStatus();
         } finally {
           if (sourceGrid.isCurrent(retryAuthority)) {
             pageBusy = false;

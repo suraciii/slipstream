@@ -57,13 +57,12 @@ const stubDrawToSecondWindow = async (page: Page): Promise<void> => {
   });
 };
 
-/// One bounded read the test owns. A 404 expires the Snapshot and must never
-/// reach the window the ordinary source open already admitted, while a 503
-/// leaves that window in place and fails only the drawn window. Both stop
-/// answering after the first match, so later reads reach the real service.
+/// Fails only the first drawn-window read: 404 expires the Snapshot, 503
+/// rejects the read, and 0 aborts its transport. Later reads reach the real
+/// service so the test can exercise recovery without replacing the fixture.
 const answerFirstBrowseRead = (
   page: Page,
-  status: 404 | 503,
+  status: 0 | 404 | 503,
 ): { requests: string[] } => {
   // The drawn window is never the opening window, so the read the test owns is
   // the one after the ordinary source open.
@@ -79,6 +78,10 @@ const answerFirstBrowseRead = (
       return;
     }
     first = false;
+    if (status === 0) {
+      await route.abort("failed");
+      return;
+    }
     await route.fulfill({
       status,
       contentType: "application/json",
@@ -330,37 +333,45 @@ test("a narrow Grid moves the action into View options under Browse actions", as
   await reviewVisible(page);
 });
 
-test("a bounded read that fails while resolving keeps the Grid and offers Retry", async ({
-  page,
-}) => {
-  const { base, root } = await fixture();
-  await writePhotos(root, 120);
-  const running = await server(base, root);
-  await wide(page);
-  await stubDrawToSecondWindow(page);
-  await page.goto(running.url);
-  await expect(page.locator("[data-grid-status]")).toHaveText(
-    "Ready · 120 Photos",
-  );
-  await waitForGridFrame(page);
+for (const status of [503, 0] as const) {
+  test(`a bounded read failure (${status}) keeps the Grid and retries its exact window`, async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 120);
+    const running = await server(base, root);
+    await wide(page);
+    await stubDrawToSecondWindow(page);
+    await page.goto(running.url);
+    await expect(page.locator("[data-grid-status]")).toHaveText(
+      "Ready · 120 Photos",
+    );
+    await waitForGridFrame(page);
 
-  const { requests } = answerFirstBrowseRead(page, 503);
-  await randomAction(page).click();
-  // The Grid stays, no Photo is claimed, and no Photo entry enters History.
-  await expect(page.locator("[data-review]")).toBeHidden();
-  await expect(page.locator("[data-grid-status]")).toHaveText(
-    "Photos 61–120 could not be loaded (HTTP 503). Retry this range.",
-  );
-  expect(page.url()).toBe(running.url + "/");
-  expect(requests).toEqual(["60"]);
+    const { requests } = answerFirstBrowseRead(page, status);
+    await randomAction(page).click();
+    // The Grid stays, no Photo is claimed, and no Photo entry enters History.
+    await expect(page.locator("[data-review]")).toBeHidden();
+    await expect(page.locator("[data-grid-status]")).toHaveText(
+      status === 0
+        ? "Connection lost while loading Photos 61–120. Retry this range."
+        : "Photos 61–120 could not be loaded (HTTP 503). Retry this range.",
+    );
+    expect(page.url()).toBe(running.url + "/");
+    expect(requests).toEqual(["60"]);
 
-  await openViewOptions(page);
-  await page.locator("[data-refresh]").click();
-  await expect(page.locator("[data-grid-status]")).toHaveText(
-    "Ready · 120 Photos",
-  );
-  await expect(randomAction(page)).toBeEnabled();
-});
+    await openSources(page);
+    await expect(page.locator("[data-retry]")).toBeVisible();
+    await page.locator("[data-retry]").click();
+    await expect(page.locator("[data-grid-status]")).toHaveText(
+      "Ready · 120 Photos",
+    );
+    await expect(randomAction(page)).toBeEnabled();
+    expect(requests).toEqual(["60", "60"]);
+    expect(page.url()).toBe(running.url + "/");
+    await expect(page.locator("[data-review]")).toBeHidden();
+  });
+}
 
 test("an expired Snapshot keeps the Grid and names Refresh Current Source", async ({
   page,
@@ -431,12 +442,14 @@ test("the action admits one attempt and presents its pending state", async ({
   await expect(randomAction(page)).toHaveAttribute("aria-busy", "true");
   await expect(randomAction(page)).toHaveText("Opening random Photo…");
   await expect(page.locator("[data-review]")).toBeHidden();
+  await expect(page.locator('[data-photo-index="0"]')).toBeDisabled();
   release();
   await reviewVisible(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.locator("[data-review]")).toBeHidden();
   await expect(randomAction(page)).toHaveText("Open a random Photo");
   await expect(randomAction(page)).toBeEnabled();
+  await expect(page.locator('[data-photo-index="0"]')).toBeEnabled();
 });
 
 test("an Original Folder names itself and keeps the action beside its source actions", async ({
