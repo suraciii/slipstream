@@ -59,6 +59,7 @@ import {
   type OpenSourceOptions,
 } from "./model/destination-controller.js";
 import { createBrowseWindowController } from "./model/browse-window-controller.js";
+import { createGridPhotoNavigation } from "./model/grid-photo-navigation.js";
 import {
   liveDestination,
   resolveRestorationIndex,
@@ -421,6 +422,9 @@ function mountPrivateLibraryBrowser(
   let connectionEstablished = false;
   let pageBusy = false;
   let photoRetryPending = false;
+  /// Whether the Grid may start a new open now. The one random attempt owns its
+  /// own pending guard, so this predicate stays the ordinary Grid admission and
+  /// the attempt's hand-off admits itself by ownership.
   const canOpenGridPhoto = () =>
     sourceGrid.isReady(sourceGrid.authority) &&
     !pageBusy &&
@@ -503,6 +507,31 @@ function mountPrivateLibraryBrowser(
     },
   });
   const loadWindow = browseWindows.load;
+  // The ordinary Grid→Photo path and the one random attempt share this owner:
+  // both resolve a target through the current Snapshot's bounded windows and
+  // commit the same ordinary Photo destination, so History, the Photo owner,
+  // and Grid restoration behave identically. Everything it calls is resolved
+  // when an open runs, so the later declarations below need no rebinding.
+  const gridPhotoNavigation = createGridPhotoNavigation({
+    applicationAlive: () => applicationAlive,
+    source: sourceGrid,
+    photo: photoOwner,
+    view,
+    navigationSession,
+    recoveryGate,
+    photoRecoveryKey,
+    canOpenGridPhoto,
+    loadWindow,
+    destinationFor: (photoId) => liveDestination(sourceGrid, photoId),
+    recordPhotoAddress: (photoId, address) =>
+      recordPhotoAddress(photoId, address),
+    renderPhotoShell: (authority) => renderPhotoShell(authority),
+    showPreview: (authority, transition) => showPreview(authority, transition),
+    persistPosition: (authority) => persistPosition(authority),
+    syncConnection: () => syncConnection(),
+    updateControls: () => updateControls(),
+    setGridStatus: setGridStatusText,
+  });
   const failPhotoRecovery = (
     authority: PhotoAuthority,
     kind: string,
@@ -577,9 +606,14 @@ function mountPrivateLibraryBrowser(
     const gridEnabled = canOpenGridPhoto();
     const filmstripEnabled = gridEnabled;
     const interactionBusy =
-      pageBusy || photoRetryPending || photoOwner.busy || removal.busy;
+      pageBusy ||
+      (gridPhotoNavigation?.pending ?? false) ||
+      photoRetryPending ||
+      photoOwner.busy ||
+      removal.busy;
     const recoveryEnabled =
       !pageBusy &&
+      !(gridPhotoNavigation?.pending ?? false) &&
       !photoRetryPending &&
       !photoOwner.busy &&
       !photoOwner.opening;
@@ -592,6 +626,18 @@ function mountPrivateLibraryBrowser(
       backEnabled: !interactionBusy,
       refreshEnabled: !interactionBusy,
       recoveryEnabled,
+      random: {
+        visible: view.gridVisible(),
+        enabled:
+          view.gridVisible() &&
+          sourceGrid.isReady(sourceGrid.authority) &&
+          sourceGrid.total > 0 &&
+          !interactionBusy &&
+          !photoOwner.opening,
+        pending: gridPhotoNavigation?.pending ?? false,
+        sourceName: sourceGrid.name,
+        filter: sourceGrid.selection,
+      },
       removalEnabled:
         connected &&
         !interactionBusy &&
@@ -1227,85 +1273,6 @@ function mountPrivateLibraryBrowser(
     updateControls();
   };
 
-  const openPhoto = async (
-    index: number,
-    address: "push" | "replace" | "none" = "push",
-    intent?: DestinationEstablishment,
-  ): Promise<boolean> => {
-    if (!canOpenGridPhoto()) return false;
-    // The anchor is read from the Grid before anything re-keys its focus or
-    // hides its layout, so the Grid entry records where the Photographer left.
-    const destinationIntent =
-      intent ??
-      navigationSession.begin(
-        liveDestination(sourceGrid, sourceGrid.photoAt(index)?.id),
-      );
-    const destinationCurrent = () =>
-      applicationAlive && navigationSession.isCurrent(destinationIntent);
-    if (!destinationCurrent()) return false;
-    navigationSession.captureGrid(view.captureGridRestoration());
-    const navigation = photoOwner.beginOpen(index);
-    if (!navigation) return false;
-    const photoTransition = recoveryGate.beginTransition(
-      "photo",
-      photoRecoveryKey(navigation.authority),
-    );
-    syncConnection();
-    sourceGrid.stopGridWork();
-    view.enterPhoto();
-    let windowReady = true;
-    try {
-      if (!sourceGrid.photoAt(index))
-        windowReady = await loadWindow(
-          index,
-          {
-            kind: "photo",
-            authority: navigation.windowAuthority,
-          },
-          true,
-          "high",
-          photoTransition,
-          navigation.authority,
-        );
-      if (
-        !destinationCurrent() ||
-        !photoOwner.isCurrent(navigation.authority) ||
-        !windowReady
-      )
-        return false;
-      const current = photoOwner.commitOpen(navigation);
-      if (!current) return false;
-      // The Photo address is committed only after the Photo owner commits its
-      // bounded facts, so a failed step creates no new Photo address and keeps
-      // the existing Photo Retry target.
-      recordPhotoAddress(current.id, address);
-      const hasKnownPreview = renderPhotoShell(navigation.authority);
-      updateControls();
-      const previewRequest = showPreview(navigation.authority, photoTransition);
-      const previewReady = hasKnownPreview || (await previewRequest);
-      // Only the current destination may persist its Photo position.
-      if (!destinationCurrent() || !photoOwner.isCurrent(navigation.authority))
-        return false;
-      const positionReady = await persistPosition(navigation.authority);
-      if (
-        previewReady &&
-        positionReady &&
-        destinationCurrent() &&
-        photoOwner.isCurrent(navigation.authority)
-      ) {
-        recoveryGate.succeedTransition(photoTransition);
-        setConnected(true);
-      }
-    } finally {
-      // Back to Grid or a superseding view may end this request while an
-      // unloaded boundary window is still loading. A committed navigation has
-      // already cleared this gate; every other path abandons its pending target.
-      photoOwner.cancelOpen(navigation.authority);
-      navigationSession.captureGrid(undefined);
-      updateControls();
-    }
-    return true;
-  };
   const renderPhotoFacts = () => {
     const photo = currentPhoto();
     view.renderPhotoFacts({
@@ -1563,7 +1530,7 @@ function mountPrivateLibraryBrowser(
       target >= sourceGrid.total
     )
       return;
-    await openPhoto(target, "replace");
+    await gridPhotoNavigation?.openPhoto(target, "replace");
   };
   const mutate = async (
     field: "selectionState" | "rating",
@@ -1973,6 +1940,7 @@ function mountPrivateLibraryBrowser(
       await application.refreshOverview().catch(() => {});
     },
   });
+
   function handleViewIntent(intent: LibraryBrowserIntent): void {
     if (!applicationAlive) return;
     if (routeEditorIntent(editor, intent)) return;
@@ -1989,6 +1957,9 @@ function mountPrivateLibraryBrowser(
         return;
       case "view-options-apply":
         void applyViewOptions(intent.order, intent.selection);
+        return;
+      case "random-photo":
+        gridPhotoNavigation?.openRandomPhoto();
         return;
       case "source-open": {
         // Choosing a source creates one Grid destination with that source's
@@ -2095,7 +2066,7 @@ function mountPrivateLibraryBrowser(
           gridMulti.toggle(photo.id);
           return;
         }
-        void openPhoto(intent.index);
+        void gridPhotoNavigation?.openPhoto(intent.index);
         return;
       }
       case "grid-select-mode":
@@ -2309,40 +2280,6 @@ function mountPrivateLibraryBrowser(
     updateControls,
   });
 
-  const destinations = createDestinationController({
-    source: sourceGrid,
-    session: navigationSession,
-    navigation,
-    locations: fileLocations,
-    view,
-    gate: recoveryGate,
-    albums: () => application.albums,
-    canResume: () => applicationAlive && !pageBusy && !photoOwner.busy,
-    openSource,
-    reopen: (photoId, intent) =>
-      reopenExpired(
-        photoOwner.currentIndex,
-        sourceGrid.generation,
-        photoId,
-        undefined,
-        intent,
-      ),
-    openPhoto,
-    leavePhoto: () => leavePhotoView(),
-    bindRoot: awaitRootBinding,
-    loadWindow: (index, authority) =>
-      loadWindow(index, { kind: "source", authority }, false, "high"),
-    renderGrid,
-    presentRangeStatus,
-    setGridStatus: setGridStatusText,
-    syncConnection,
-    updateControls,
-  });
-  const establishDestination = destinations.establish;
-  const applyTraversal = destinations.applyTraversal;
-  const resumeAlbum = destinations.resumeAlbum;
-  const openCurrentFolder = destinations.openCurrentFolder;
-
   /// Records the Photo destination this navigation committed. A repeated
   /// activation of the current destination records nothing, so duplicate
   /// activation creates no duplicate history entry.
@@ -2364,6 +2301,41 @@ function mountPrivateLibraryBrowser(
     navigation.openPhoto(destination);
   };
 
+  const destinations = createDestinationController({
+    source: sourceGrid,
+    session: navigationSession,
+    navigation,
+    locations: fileLocations,
+    view,
+    gate: recoveryGate,
+    albums: () => application.albums,
+    canResume: () => applicationAlive && !pageBusy && !photoOwner.busy,
+    openSource,
+    reopen: (photoId, intent) =>
+      reopenExpired(
+        photoOwner.currentIndex,
+        sourceGrid.generation,
+        photoId,
+        undefined,
+        intent,
+      ),
+    openPhoto: (index, address, intent) =>
+      gridPhotoNavigation?.openPhoto(index, address, intent) ??
+      Promise.resolve(false),
+    leavePhoto: () => leavePhotoView(),
+    bindRoot: awaitRootBinding,
+    loadWindow: (index, authority) =>
+      loadWindow(index, { kind: "source", authority }, false, "high"),
+    renderGrid,
+    presentRangeStatus,
+    setGridStatus: setGridStatusText,
+    syncConnection,
+    updateControls,
+  });
+  const establishDestination = destinations.establish;
+  const applyTraversal = destinations.applyTraversal;
+  const resumeAlbum = destinations.resumeAlbum;
+  const openCurrentFolder = destinations.openCurrentFolder;
   /// The in-app source return from Photo View. It traverses one entry only
   /// when the current Photo has a known parent Grid entry; a directly loaded
   /// Photo replaces its entry with its source Grid instead of risking
@@ -2394,6 +2366,7 @@ function mountPrivateLibraryBrowser(
     navigation.dispose();
     navigationSession.dispose();
     albumMutations.dispose();
+    gridPhotoNavigation?.dispose();
     gridMulti.dispose();
     albumActions.dispose();
     savedPositions.dispose();

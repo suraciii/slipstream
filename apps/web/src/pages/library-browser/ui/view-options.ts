@@ -8,7 +8,10 @@ import type {
   ViewSourceOrder,
 } from "./library-browser-view.js";
 
-type ViewOptionsIntentKind = "album-resume" | "view-options-apply";
+type ViewOptionsIntentKind =
+  | "album-resume"
+  | "view-options-apply"
+  | "random-photo";
 
 export type ViewOptionsIntent = Extract<
   LibraryBrowserIntent,
@@ -60,15 +63,28 @@ export type ViewOptionsElements = Readonly<{
   sizeSelect: HTMLSelectElement;
 }>;
 
+/// The one Grid action View options presents: it samples the current Browse
+/// Snapshot, so its accessible name names the source and committed filter the
+/// Photographer is sampling from rather than restating them as "current".
+export type RandomPhotoViewModel = Readonly<{
+  visible: boolean;
+  enabled: boolean;
+  pending: boolean;
+  sourceName: string;
+  filter: ViewSelectionFilter;
+}>;
+
 export interface ViewOptions {
   open(): void;
   renderSort(model: GridSortViewModel): void;
   renderFilter(model: GridFilterViewModel): void;
   renderProgress(model: GridProgressViewModel): void;
+  renderRandom(model: RandomPhotoViewModel): void;
   dispose(): void;
 }
 
 export function createViewOptions({
+  root,
   elements,
   surfaces,
   send,
@@ -77,8 +93,10 @@ export function createViewOptions({
   closeRatingChoices,
   activeAlbumId,
   onSizeChange,
+  compact,
   syncSecondarySurface,
 }: Readonly<{
+  root: ParentNode;
   elements: ViewOptionsElements;
   surfaces: ModalSurfaces;
   send: (intent: ViewOptionsIntent) => void;
@@ -87,6 +105,7 @@ export function createViewOptions({
   closeRatingChoices: (restoreFocus: boolean) => void;
   activeAlbumId: () => string | undefined;
   onSizeChange: (size: ViewOptionsThumbnailSize) => void;
+  compact: MediaQueryList;
   syncSecondarySurface?: () => void;
 }>): ViewOptions {
   const {
@@ -103,6 +122,17 @@ export function createViewOptions({
     filterSelect,
     sizeSelect,
   } = elements;
+  const randomPhoto = required<HTMLButtonElement>(root, "[data-random-photo]");
+  const gridTools = required<HTMLElement>(root, "[data-grid-tools]");
+  const browseActions = required<HTMLElement>(root, "[data-browse-actions]");
+  const syncRandomHost = () => {
+    const host = compact.matches ? browseActions : gridTools;
+    if (randomPhoto.parentElement !== host) host.append(randomPhoto);
+  };
+  const onCompactChange = () => syncRandomHost();
+  compact.addEventListener("change", onCompactChange);
+  syncRandomHost();
+
   let alive = true;
   let committedOrder: ViewSourceOrder = "source-default";
   let committedFilter: ViewSelectionFilter = "all";
@@ -229,6 +259,11 @@ export function createViewOptions({
     const albumId = activeAlbumId();
     if (albumId) send({ kind: "album-resume", albumId });
   });
+  randomPhoto.addEventListener("click", () => {
+    if (!alive || randomPhoto.disabled) return;
+    if (viewOptionsDialog.open) closeViewOptions(false);
+    send({ kind: "random-photo" });
+  });
   sortSelect.addEventListener("change", () => {
     if (!alive) return;
     // View options holds a draft until Apply commits it.
@@ -307,9 +342,36 @@ export function createViewOptions({
       optionsVisibleResults.textContent = visibleText;
       optionsProgress.textContent = sourceText;
     },
+    renderRandom(model) {
+      if (!alive) return;
+      randomPhoto.hidden = !model.visible;
+      randomPhoto.disabled = !model.enabled;
+      randomPhoto.textContent = model.pending
+        ? "Opening random Photo…"
+        : "Open a random Photo";
+      randomPhoto.setAttribute("aria-busy", String(model.pending));
+      const filterLabel = FILTER_OPTIONS.find(
+        (option) => option.value === model.filter,
+      )?.label;
+      const filterSuffix =
+        model.filter === "all" || !filterLabel
+          ? ""
+          : ` · ${filterLabel} filter`;
+      randomPhoto.setAttribute(
+        "aria-label",
+        `Open a random Photo from ${model.sourceName}${filterSuffix}`,
+      );
+    },
     dispose() {
       alive = false;
       viewOptionsDialog.removeEventListener("close", resetDraft);
+      compact.removeEventListener("change", onCompactChange);
     },
   };
+}
+
+function required<T extends Element>(root: ParentNode, selector: string): T {
+  const value = root.querySelector<T>(selector);
+  if (!value) throw new Error(`Missing ${selector}`);
+  return value;
 }

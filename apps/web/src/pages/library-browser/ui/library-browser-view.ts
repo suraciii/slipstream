@@ -30,8 +30,13 @@ import {
   createMembershipPanel,
   type MembershipPanelElements,
 } from "./membership-panel.js";
-import { createViewOptions, type ViewOptionsElements } from "./view-options.js";
+import {
+  createViewOptions,
+  type RandomPhotoViewModel,
+  type ViewOptionsElements,
+} from "./view-options.js";
 import { createRatingControls } from "./rating-controls.js";
+import { createConnectionPresenter } from "./connection-presenter.js";
 import { createPhotoToolsController } from "./photo-tools.js";
 import { createPhotoZoomController } from "./photo-zoom.js";
 import * as photoGestureModule from "./photo-gestures.js";
@@ -124,6 +129,9 @@ type ControlsViewModel = Readonly<{
   previousEnabled: boolean;
   nextEnabled: boolean;
   undoEnabled: boolean;
+  /// The one Grid browse action, whose accessible name and placement View
+  /// options owns because it presents the button in both layouts.
+  random: RandomPhotoViewModel;
   /// Whether the current source is a `Rejected` result a removal could be
   /// reviewed against. The review is offered only where it can be admitted.
   removalEnabled: boolean;
@@ -346,7 +354,7 @@ ${PHOTO_VIEW_TEMPLATE}
               <div class="options-field"><label for="view-sort-select">Source order</label><select id="view-sort-select" data-sort-select></select></div>
               <div class="options-field"><label for="view-size-select">Thumbnail size</label><select id="view-size-select" data-size-select></select></div>
               <div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div>
-              <div class="options-source-actions" data-options-source-actions><button type="button" data-album-resume hidden>Resume</button><button type="button" data-refresh>Refresh Current Source</button><button type="button" class="quiet" data-removal-open hidden>Remove rejected Photos</button><button type="button" class="quiet" data-removed-open>Trash</button></div>
+              <div class="options-browse-actions" data-browse-actions><h3>Browse actions</h3><button type="button" data-random-photo aria-label="Open a random Photo from the current source and filter">Open a random Photo</button></div><div class="options-source-actions" data-options-source-actions><button type="button" data-album-resume hidden>Resume</button><button type="button" data-refresh>Refresh Current Source</button><button type="button" class="quiet" data-removal-open hidden>Remove rejected Photos</button><button type="button" class="quiet" data-removed-open>Trash</button></div>
             </div>
             <footer class="options-footer"><button type="button" data-view-options-apply>Apply</button><button type="button" class="quiet" data-view-options-cancel>Cancel</button></footer>
           </div>
@@ -548,40 +556,6 @@ ${REMOVED_PANELS_TEMPLATE}
     "[data-grid-select-mode]",
   );
   const gridTools = required<HTMLElement>(root, "[data-grid-tools]");
-  /// Presents the connection state. A wide layout keeps it in the application
-  /// header. A narrow layout has no dedicated brand or connected-status row,
-  /// so the normal state shows no permanent connection text at all and the
-  /// open view's own header carries the state beside its primary actions only
-  /// while it is a failure. Exactly one indicator holds the text at a time.
-  let connectionState = true;
-  const presentConnection = () => {
-    const failed = !connectionState;
-    const state = failed ? "Disconnected" : "Connected";
-    gridConnection.classList.toggle("offline", failed);
-    photoConnection.classList.toggle("offline", failed);
-    // A compact layout has no dedicated brand or connected-status row. A short
-    // viewport gives its whole height to the open Photo View, so the Photo
-    // header carries the state there exactly as a narrow layout does.
-    const compactChrome =
-      compactSources.matches || (!photoView.hidden && shortViewport.matches);
-    if (!compactChrome) {
-      connection.textContent = state;
-      connection.classList.toggle("offline", failed);
-      gridConnection.textContent = "";
-      gridConnection.hidden = true;
-      photoConnection.textContent = "";
-      photoConnection.hidden = true;
-      return;
-    }
-    connection.textContent = "";
-    // A narrow normal state presents no connection text: the compact header
-    // keeps its row for the source, the count, and the two tool entries.
-    const inPhoto = !photoView.hidden;
-    gridConnection.textContent = inPhoto || !failed ? "" : state;
-    gridConnection.hidden = inPhoto || !failed;
-    photoConnection.textContent = !inPhoto || !failed ? "" : state;
-    photoConnection.hidden = !inPhoto || !failed;
-  };
   /// Presents the current source in both views. The narrow disclosure's
   /// accessible name identifies both Sources and the current source, so a
   /// screen reader names the destination the control opens, while the visible
@@ -848,6 +822,15 @@ ${REMOVED_PANELS_TEMPLATE}
   // decision controls keep their space; the view mirrors that condition so a
   // hidden strip binds no thumbnails and rebuilds when the space returns.
   const shortViewport = window.matchMedia("(max-height: 480px)");
+  const connectionPresenter = createConnectionPresenter({
+    connection,
+    gridConnection,
+    photoConnection,
+    compact: compactSources,
+    shortViewport,
+    photoVisible: () => !photoView.hidden,
+  });
+  const presentConnection = () => connectionPresenter.present();
   const stripInTools = () => photoToolsController.isNearbyOpen();
   const filmstripPresenter: FilmstripPresenter = createFilmstripPresenter({
     elements: { photoView, filmstrip, filmstripHost, filmstripTools },
@@ -984,6 +967,7 @@ ${REMOVED_PANELS_TEMPLATE}
     filmstripPresenter.syncHost();
   };
   const viewOptionsController = createViewOptions({
+    root,
     elements: {
       viewOptionsDialog: required<HTMLDialogElement>(
         root,
@@ -1029,6 +1013,7 @@ ${REMOVED_PANELS_TEMPLATE}
         ?.sourceModel()
         ?.albums.find((candidate) => candidate.active)?.id,
     onSizeChange: setGridThumbnailSize,
+    compact: compactSources,
     syncSecondarySurface,
   });
   const albumFormController = createAlbumForm({
@@ -1315,8 +1300,7 @@ ${REMOVED_PANELS_TEMPLATE}
     setConnection(isConnected, sourceRetryVisible, photoRetryVisible) {
       if (!alive) return;
       if (!isConnected) resetGestures();
-      connectionState = isConnected;
-      presentConnection();
+      connectionPresenter.setConnected(isConnected);
       retry.hidden = !sourceRetryVisible;
       retryPhoto.hidden = !photoRetryVisible;
     },
@@ -1390,6 +1374,7 @@ ${REMOVED_PANELS_TEMPLATE}
       removedPanels.setRemovalEnabled(model.removalEnabled);
       filmstripPresenter.setInteractive(model.filmstripEnabled);
       zoomController?.applyZoom();
+      viewOptionsController.renderRandom(model.random);
     },
     renderMembership(model) {
       if (!alive) return;
