@@ -6,17 +6,15 @@ use super::scan::ScanApplication;
 use super::scan_recovery::ScanRecoveryPlan;
 use super::{
     DatabaseName, StateDirectory, StateError, StateFileIdentity, admission::StateDatabaseLock,
-    albums, decisions, development_proxy, edit_recipe, export, metadata, migrations, mutation,
-    owner_recovery, queries, removal, scan, xmp,
+    album_queries, albums, decisions, development_proxy, edit_recipe, metadata, migrations,
+    mutation, owner_export, owner_recovery, queries, removal, scan, xmp,
 };
 use crate::{
     AlbumBrowseTarget, AlbumCreationResult, AlbumMembershipMutation, AlbumMembershipResult,
     AlbumMutation, AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary,
     CheckedAlbumMutation, CheckedAlbumMutationResult, CheckedPhotoDecisionMutation,
     CheckedPhotoDecisionResult, DiscoveredOriginal, EditRecipeRead, ExplicitPhotoRemovalMutation,
-    ExplicitPhotoRestoreMutation, ExplicitPhotoRestoreResult, ExportAttempt, ExportLeaseOutcome,
-    ExportRecord, ExportRetryOutcome, ExportSettlement, ExportSubmission,
-    ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult, MAXIMUM_PHOTO_RATING,
+    ExplicitPhotoRestoreMutation, ExplicitPhotoRestoreResult, MAXIMUM_PHOTO_RATING,
     OriginalScanError, PermanentDeletionItemState, PermanentDeletionSelection,
     PermanentDeletionTarget, PhotoAlbumMembership, PhotoOperationRemainder, PhotoQuery,
     PhotoQueryError, PhotoQueryProjection, PhotoRead, PhotoRemovalMutation, PhotoRemovalResult,
@@ -310,9 +308,6 @@ type AlbumReadWindow = Result<Vec<Option<AlbumSummary>>, PersistenceError>;
 type AlbumReadWindowReceiver = oneshot::Receiver<AlbumReadWindow>;
 type PhotoReadWindow = Result<Vec<Option<PhotoRead>>, PersistenceError>;
 type PhotoReadWindowReceiver = oneshot::Receiver<PhotoReadWindow>;
-type PhotoExports = Result<Option<Vec<ExportRecord>>, PersistenceError>;
-type PhotoExportsReceiver = oneshot::Receiver<PhotoExports>;
-pub(super) type ExportPublicationClaimReply = Result<Option<(String, u64)>, PersistenceError>;
 /// One bounded page of removed Photos with the complete removed count and the
 /// newest removal operation that still owns at least one Photo.
 type RemovedPhotoPage = (
@@ -492,77 +487,7 @@ pub(super) enum Command {
         reply: oneshot::Sender<removal::PermanentDeletionResultReply>,
     },
     WriteProbe(Reply<()>),
-    SubmitExport(ExportSubmission, Reply<ExportSubmitOutcome>),
-    ReadExport {
-        export_id: String,
-        reply: Reply<Option<ExportRecord>>,
-    },
-    ListPhotoExports {
-        photo_id: String,
-        reply: Reply<Option<Vec<ExportRecord>>>,
-    },
-    CancelExport {
-        export_id: String,
-        reply: Reply<Option<ExportRecord>>,
-    },
-    SettleExport {
-        export_id: String,
-        settlement: ExportSettlement,
-        reply: Reply<Option<ExportRecord>>,
-    },
-    BeginExportAttempt {
-        export_id: String,
-        attempt: ExportAttempt,
-        reply: Reply<Option<ExportRecord>>,
-    },
-    RecordExportSource {
-        export_id: String,
-        size: u64,
-        sha256: String,
-        reply: Reply<Option<ExportRecord>>,
-    },
-    RetryExport {
-        export_id: String,
-        request_id: String,
-        expected_bundle_id: String,
-        allowance: u64,
-        reply: Reply<ExportRetryOutcome>,
-    },
-    ResolveExportSubmission {
-        photo_id: String,
-        request_id: String,
-        payload_digest: String,
-        reply: Reply<Option<ExportSubmissionResolution>>,
-    },
-    ClaimExportPublication {
-        export_id: String,
-        incarnation: String,
-        sequence: u64,
-        reply: Reply<bool>,
-    },
-    ExportPublicationClaim {
-        export_id: String,
-        reply: Reply<Option<(String, u64)>>,
-    },
-    RenewExportLease {
-        lease_id: String,
-        now: u64,
-        reply: Reply<bool>,
-    },
-    SweepExportExpiry {
-        now: u64,
-        reply: Reply<ExportSweepResult>,
-    },
-    UnfinishedExports(Reply<Vec<ExportRecord>>),
-    AcquireExportLease {
-        export_id: String,
-        now: u64,
-        reply: Reply<ExportLeaseOutcome>,
-    },
-    ReleaseExportLease {
-        lease_id: String,
-        reply: Reply<bool>,
-    },
+    Export(owner_export::ExportCommand),
     #[cfg(test)]
     Configuration(Reply<(String, u8)>),
     #[cfg(test)]
@@ -837,200 +762,6 @@ impl Persistence {
         PersistenceError,
     > {
         self.submit_persistence_receiver(Command::AllDevelopmentProxies)
-    }
-    pub(crate) fn submit_export_receiver(
-        &self,
-        submission: ExportSubmission,
-    ) -> Result<oneshot::Receiver<Result<ExportSubmitOutcome, PersistenceError>>, PersistenceError>
-    {
-        self.submit_persistence_receiver(|reply| Command::SubmitExport(submission, reply))
-    }
-
-    pub(crate) fn export_receiver(
-        &self,
-        export_id: &str,
-    ) -> Result<oneshot::Receiver<Result<Option<ExportRecord>, PersistenceError>>, PersistenceError>
-    {
-        self.submit_persistence_receiver(|reply| Command::ReadExport {
-            export_id: export_id.to_owned(),
-            reply,
-        })
-    }
-
-    pub(crate) fn photo_exports_receiver(
-        &self,
-        photo_id: &str,
-    ) -> Result<PhotoExportsReceiver, PersistenceError> {
-        self.submit_persistence_receiver(|reply| Command::ListPhotoExports {
-            photo_id: photo_id.to_owned(),
-            reply,
-        })
-    }
-
-    pub(crate) fn cancel_export_receiver(
-        &self,
-        export_id: &str,
-    ) -> Result<oneshot::Receiver<Result<Option<ExportRecord>, PersistenceError>>, PersistenceError>
-    {
-        self.submit_persistence_receiver(|reply| Command::CancelExport {
-            export_id: export_id.to_owned(),
-            reply,
-        })
-    }
-
-    pub(crate) fn settle_export_receiver(
-        &self,
-        export_id: &str,
-        settlement: ExportSettlement,
-    ) -> Result<oneshot::Receiver<Result<Option<ExportRecord>, PersistenceError>>, PersistenceError>
-    {
-        self.submit_persistence_receiver(|reply| Command::SettleExport {
-            export_id: export_id.to_owned(),
-            settlement,
-            reply,
-        })
-    }
-
-    pub(crate) fn begin_export_attempt_receiver(
-        &self,
-        export_id: &str,
-        attempt: ExportAttempt,
-    ) -> Result<oneshot::Receiver<Result<Option<ExportRecord>, PersistenceError>>, PersistenceError>
-    {
-        self.submit_persistence_receiver(|reply| Command::BeginExportAttempt {
-            export_id: export_id.to_owned(),
-            attempt,
-            reply,
-        })
-    }
-
-    pub(crate) fn record_export_source_receiver(
-        &self,
-        export_id: &str,
-        size: u64,
-        sha256: &str,
-    ) -> Result<oneshot::Receiver<Result<Option<ExportRecord>, PersistenceError>>, PersistenceError>
-    {
-        self.submit_persistence_receiver(|reply| Command::RecordExportSource {
-            export_id: export_id.to_owned(),
-            size,
-            sha256: sha256.to_owned(),
-            reply,
-        })
-    }
-
-    pub(crate) fn retry_export_receiver(
-        &self,
-        export_id: &str,
-        request_id: &str,
-        expected_bundle_id: &str,
-        allowance: u64,
-    ) -> Result<oneshot::Receiver<Result<ExportRetryOutcome, PersistenceError>>, PersistenceError>
-    {
-        self.submit_persistence_receiver(|reply| Command::RetryExport {
-            export_id: export_id.to_owned(),
-            request_id: request_id.to_owned(),
-            expected_bundle_id: expected_bundle_id.to_owned(),
-            allowance,
-            reply,
-        })
-    }
-
-    /// Resolves a request identity without any admission or state change: a
-    /// recorded identity replays, expires, or conflicts before the submit
-    /// transaction ever runs.
-    pub(crate) fn resolve_export_submission_receiver(
-        &self,
-        photo_id: &str,
-        request_id: &str,
-        payload_digest: &str,
-    ) -> Result<
-        oneshot::Receiver<Result<Option<ExportSubmissionResolution>, PersistenceError>>,
-        PersistenceError,
-    > {
-        self.submit_persistence_receiver(|reply| Command::ResolveExportSubmission {
-            photo_id: photo_id.to_owned(),
-            request_id: request_id.to_owned(),
-            payload_digest: payload_digest.to_owned(),
-            reply,
-        })
-    }
-
-    /// Claims publication before the staged artifact is renamed into place.
-    pub(crate) fn claim_export_publication_receiver(
-        &self,
-        export_id: &str,
-        incarnation: &str,
-        sequence: u64,
-    ) -> Result<oneshot::Receiver<Result<bool, PersistenceError>>, PersistenceError> {
-        self.submit_persistence_receiver(|reply| Command::ClaimExportPublication {
-            export_id: export_id.to_owned(),
-            incarnation: incarnation.to_owned(),
-            sequence,
-            reply,
-        })
-    }
-
-    /// Reads the durable publication claim of an Export, if any.
-    pub(crate) fn export_publication_claim_receiver(
-        &self,
-        export_id: &str,
-    ) -> Result<oneshot::Receiver<ExportPublicationClaimReply>, PersistenceError> {
-        self.submit_persistence_receiver(|reply| Command::ExportPublicationClaim {
-            export_id: export_id.to_owned(),
-            reply,
-        })
-    }
-
-    /// Refreshes a download lease's liveness anchor while its stream runs.
-    pub(crate) fn renew_export_lease_receiver(
-        &self,
-        lease_id: &str,
-        now: u64,
-    ) -> Result<oneshot::Receiver<Result<bool, PersistenceError>>, PersistenceError> {
-        self.submit_persistence_receiver(|reply| Command::RenewExportLease {
-            lease_id: lease_id.to_owned(),
-            now,
-            reply,
-        })
-    }
-
-    pub(crate) fn sweep_export_expiry_receiver(
-        &self,
-        now: u64,
-    ) -> Result<oneshot::Receiver<Result<ExportSweepResult, PersistenceError>>, PersistenceError>
-    {
-        self.submit_persistence_receiver(|reply| Command::SweepExportExpiry { now, reply })
-    }
-
-    pub(crate) fn unfinished_exports_receiver(
-        &self,
-    ) -> Result<oneshot::Receiver<Result<Vec<ExportRecord>, PersistenceError>>, PersistenceError>
-    {
-        self.submit_persistence_receiver(Command::UnfinishedExports)
-    }
-
-    pub(crate) fn acquire_export_lease_receiver(
-        &self,
-        export_id: &str,
-        now: u64,
-    ) -> Result<oneshot::Receiver<Result<ExportLeaseOutcome, PersistenceError>>, PersistenceError>
-    {
-        self.submit_persistence_receiver(|reply| Command::AcquireExportLease {
-            export_id: export_id.to_owned(),
-            now,
-            reply,
-        })
-    }
-
-    pub(crate) fn release_export_lease_receiver(
-        &self,
-        lease_id: &str,
-    ) -> Result<oneshot::Receiver<Result<bool, PersistenceError>>, PersistenceError> {
-        self.submit_persistence_receiver(|reply| Command::ReleaseExportLease {
-            lease_id: lease_id.to_owned(),
-            reply,
-        })
     }
 
     pub(crate) fn photos_by_id_receiver(
@@ -1591,18 +1322,18 @@ fn owner_main(
                 let _ = reply.send(result);
             }
             Command::ListAlbums(reply) => {
-                let _ = reply.send(albums::list_albums(&connection));
+                let _ = reply.send(album_queries::list_albums(&connection));
             }
             Command::ListAlbumSummaries(reply) => {
-                let _ = reply.send(albums::list_album_summaries(&connection, &versions));
+                let _ = reply.send(album_queries::list_album_summaries(&connection, &versions));
             }
             Command::ReadAlbum { album_id, reply } => {
-                let _ = reply.send(albums::read_album(&connection, &versions, &album_id));
+                let _ = reply.send(album_queries::read_album(&connection, &versions, &album_id));
             }
             Command::ReadAlbums { album_ids, reply } => {
                 let result = album_ids
                     .iter()
-                    .map(|album_id| albums::read_album(&connection, &versions, album_id))
+                    .map(|album_id| album_queries::read_album(&connection, &versions, album_id))
                     .collect();
                 let _ = reply.send(result);
             }
@@ -1611,7 +1342,7 @@ fn owner_main(
                 maximum_results,
                 reply,
             } => {
-                let _ = reply.send(albums::create_album_query(
+                let _ = reply.send(album_queries::create_album_query(
                     &connection,
                     filter,
                     maximum_results,
@@ -1701,10 +1432,10 @@ fn owner_main(
                 ));
             }
             Command::PhotoAlbums { photo_id, reply } => {
-                let _ = reply.send(albums::photo_albums(&connection, &photo_id));
+                let _ = reply.send(album_queries::photo_albums(&connection, &photo_id));
             }
             Command::AlbumBrowseTarget { album_id, reply } => {
-                let _ = reply.send(albums::album_browse_target(&connection, &album_id));
+                let _ = reply.send(album_queries::album_browse_target(&connection, &album_id));
             }
             Command::MutateAlbum(mutation, reply) => {
                 let plan = albums::album_version_plan(&connection, &mutation);
@@ -1893,18 +1624,6 @@ fn owner_main(
             } => {
                 let _ = reply.send(removal::removed_photos(&connection, start, limit));
             }
-            Command::WriteProbe(reply) => {
-                let result = write_transaction(&state, &database_name, &mut connection, |_| Ok(()));
-                let _ = reply.send(result);
-            }
-            Command::SubmitExport(submission, reply) => {
-                let result =
-                    export::submit_export(&state, &database_name, &mut connection, submission);
-                let _ = reply.send(result);
-            }
-            Command::ReadExport { export_id, reply } => {
-                let _ = reply.send(export::export_record(&connection, &export_id));
-            }
             Command::TrashCandidates { selection, reply } => {
                 let _ = reply.send(removal::trash_candidates(&connection, selection));
             }
@@ -1974,149 +1693,12 @@ fn owner_main(
             } => {
                 let _ = reply.send(removal::read_permanent_deletion(&connection, &operation_id));
             }
-            Command::ListPhotoExports { photo_id, reply } => {
-                let _ = reply.send(export::list_photo_exports(&connection, &photo_id));
-            }
-            Command::CancelExport { export_id, reply } => {
-                let result =
-                    export::cancel_export(&state, &database_name, &mut connection, &export_id);
+            Command::WriteProbe(reply) => {
+                let result = write_transaction(&state, &database_name, &mut connection, |_| Ok(()));
                 let _ = reply.send(result);
             }
-            Command::SettleExport {
-                export_id,
-                settlement,
-                reply,
-            } => {
-                let result = export::settle_export(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &export_id,
-                    settlement,
-                );
-                let _ = reply.send(result);
-            }
-            Command::BeginExportAttempt {
-                export_id,
-                attempt,
-                reply,
-            } => {
-                let result = export::begin_export_attempt(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &export_id,
-                    attempt,
-                );
-                let _ = reply.send(result);
-            }
-            Command::RecordExportSource {
-                export_id,
-                size,
-                sha256,
-                reply,
-            } => {
-                let result = export::record_export_source(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &export_id,
-                    size,
-                    &sha256,
-                );
-                let _ = reply.send(result);
-            }
-            Command::RetryExport {
-                export_id,
-                request_id,
-                expected_bundle_id,
-                allowance,
-                reply,
-            } => {
-                let result = export::retry_export(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &export_id,
-                    &request_id,
-                    &expected_bundle_id,
-                    allowance,
-                );
-                let _ = reply.send(result);
-            }
-            Command::ResolveExportSubmission {
-                photo_id,
-                request_id,
-                payload_digest,
-                reply,
-            } => {
-                let _ = reply.send(Ok(export::resolve_export_submission(
-                    &connection,
-                    &photo_id,
-                    &request_id,
-                    &payload_digest,
-                )));
-            }
-            Command::ClaimExportPublication {
-                export_id,
-                incarnation,
-                sequence,
-                reply,
-            } => {
-                let _ = reply.send(export::claim_export_publication(
-                    &mut connection,
-                    &export_id,
-                    &incarnation,
-                    sequence,
-                ));
-            }
-            Command::ExportPublicationClaim { export_id, reply } => {
-                let _ = reply.send(Ok(export::export_publication_claim(
-                    &connection,
-                    &export_id,
-                )));
-            }
-            Command::RenewExportLease {
-                lease_id,
-                now,
-                reply,
-            } => {
-                let _ = reply.send(Ok(export::renew_export_lease(
-                    &mut connection,
-                    &lease_id,
-                    now,
-                )));
-            }
-            Command::SweepExportExpiry { now, reply } => {
-                let result =
-                    export::sweep_export_expiry(&state, &database_name, &mut connection, now);
-                let _ = reply.send(result);
-            }
-            Command::UnfinishedExports(reply) => {
-                let _ = reply.send(export::unfinished_exports(&connection));
-            }
-            Command::AcquireExportLease {
-                export_id,
-                now,
-                reply,
-            } => {
-                let result = export::acquire_export_lease(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &export_id,
-                    now,
-                );
-                let _ = reply.send(result);
-            }
-            Command::ReleaseExportLease { lease_id, reply } => {
-                let result = export::release_export_lease(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &lease_id,
-                );
-                let _ = reply.send(result);
+            Command::Export(command) => {
+                owner_export::dispatch(command, &state, &database_name, &mut connection);
             }
             #[cfg(test)]
             Command::Configuration(reply) => {

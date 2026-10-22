@@ -1,6 +1,7 @@
 //! SQLite state ownership for the production Library core.
 
 mod admission;
+mod album_queries;
 mod album_write;
 mod albums;
 mod codecs;
@@ -15,6 +16,7 @@ mod metadata_store;
 mod migrations;
 mod mutation;
 mod owner;
+mod owner_export;
 mod owner_recovery;
 mod permanent_deletion;
 mod processing_export;
