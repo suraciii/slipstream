@@ -309,6 +309,33 @@ The saved position applies only to an Album open that requests Resume and suppli
 
 Every source open requires the published Library. An Album open reads the same Published snapshot as `library` and `folder` sources for its anchor, filter membership, and counts, and `album-order` is no exception even though its order comes from persisted membership position. An Album open therefore fails with the not-published response before any Snapshot exists instead of failing later at its first window.
 
+### Random Position Selection
+
+The random action samples one position from the current Browse Snapshot rather
+than creating a second source query. For a Snapshot with total `N`, the target
+position is one integer in the inclusive range `0` through `N - 1`, and every
+position has equal probability. The source/Grid owner admits the target through
+the same bounded window path used by Grid range loading and Photo navigation.
+
+The random operation therefore has these boundaries:
+
+- it reads the Snapshot's total and frozen order, not the rendered Grid cells;
+- it does not copy every Photo ID or Photo fact to the browser;
+- it keeps the source, order, and Selection State filter of the current
+  Snapshot;
+- it may select a Photo whose Original or Preview is unavailable; and
+- it does not retain a no-repeat set, random seed, or random history.
+
+The target's current bounded Photo facts come from the Library owner. A target
+may become the ordinary Photo destination once those facts are ready; Preview
+bytes are not an additional random-selection boundary. If the Snapshot expires
+before the target is admitted, the operation returns the distinct expired
+outcome and the browser keeps the Grid for the existing refresh or retry path.
+It must not silently draw from a replacement Snapshot. The source/Grid owner
+owns the Snapshot and bounded target read, the navigation owner owns the
+ordinary Photo destination, and the Photo owner owns Photo commitment and any
+normal Album saved-position settlement. No random-selection state is durable.
+
 ### Grid Loading
 
 The source/Grid owner owns one range admission path. The visible range plus
@@ -597,6 +624,27 @@ complete source and stored in the Snapshot. Every position, window, and
 identity lookup keeps one meaning for the life of the open view, a filter
 change reuses the existing reopen and anchor paths, and the browser never
 derives membership from loaded windows.
+
+### Selected: Sample a Position from the Current Snapshot
+
+Random selection uses the current Snapshot's total and admits one bounded
+window for the chosen position. This preserves source, order, filter, frozen
+membership, and the existing Photo destination path without transferring the
+complete sequence or adding durable random state.
+
+### Rejected: Add a Full-Library Random Route
+
+A route that chooses from the whole Library would bypass the current Folder,
+Album, order, and Selection State filter. Passing those choices back into a
+second query would create two source owners and could select from a different
+Snapshot than the open Grid. The current Snapshot already contains the exact
+bounded source sequence needed for this action.
+
+### Rejected: Keep a No-Repeat Random Session
+
+A no-repeat set would add browser state, exhaustion behavior, and reload
+semantics without a current Photographer task requiring them. Independent
+uniform draws are sufficient and make repeated activation explainable.
 
 ### Rejected: Filter as a Per-Window Request Parameter
 

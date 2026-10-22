@@ -120,6 +120,28 @@ order. Committed order survives reload through the destination URL under
 Album saved positions restore by Photo identity and are unaffected by the
 selected view order.
 
+## Random Photo
+
+Photographers sometimes want an unexpected Photo from the work they are already viewing without choosing a position manually. Grid View must provide an explicit **Open a random Photo** action when the current Browse Snapshot is ready and contains at least one Photo. The action is read or navigate behavior: it must not record a Photo decision.
+
+The action must sample from the complete ordered sequence of the current Browse Snapshot:
+
+- its source is the current `All Photos`, Original Folder, or Album;
+- its order is the committed order of that open view; and
+- its Selection State filter is the committed filter of that open view.
+
+Every position in that sequence must have the same chance of being chosen. The action must not sample only rendered cells, loaded windows, Photos with ready Previews, or available Originals. An unavailable Original or unavailable Preview remains eligible when its Photo is in the sequence. A result may be chosen again on a later activation; Slipstream must not maintain a hidden no-repeat list or a session random history.
+
+When the sequence is empty, the action must not start. The interface must distinguish an empty source from a source whose committed filter has no matches. A random activation must use the current Snapshot's bounded position or window behavior and must not transfer the complete source to the browser.
+
+While a random Photo is being resolved, the current Grid remains visible, the action admits at most one pending attempt, and repeated activation is unavailable. Slipstream must not commit a Photo destination or claim that a Photo opened before the target's bounded Photo facts are ready. Once those facts are ready, it opens the target through the ordinary Photo View path; Preview bytes may load under the existing Photo View rules.
+
+The successful destination is an ordinary Photo destination containing the current source, order, Selection State filter, and target Photo identity. It must not contain a random flag or seed. Browser Back returns to the Grid context that started the action, with its existing source, order, filter, and Grid restoration rules. Reloading the committed address opens that Photo and must not perform a new random draw.
+
+An expired Snapshot, failed bounded read, or lost connection must leave the Grid context intact and expose the applicable Retry or Refresh Current Source path. Slipstream must not silently replace the Snapshot, choose from a different source, show a different Photo as success, or create a Photo history entry for an unresolved attempt.
+
+Opening a random Photo must not change Selection State, Rating, Album membership, Undo, an Original File, or any other Photo fact. When the target belongs to an Album, becoming current in Photo View follows the existing Album saved-position contract; returning to a Grid does not write a saved position. Photo View does not expose a separate random action in the first product; Previous, Next, and the existing review actions remain its continuous-review controls.
+
 ## Progressive Grid Loading
 
 Grid View must become interactive from a bounded first window of Photos. It must not wait for the entire source to transfer, parse, or render.

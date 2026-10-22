@@ -66,15 +66,29 @@ remaining area. Routine progress must not create another toolbar row. The
 Library refresh action is a recovery action and must not occupy a
 permanently prominent primary slot.
 
-View options must group these existing controls:
+View options must group these controls:
 
 - Selection State filter;
 - source order;
 - Small, Medium, and Large thumbnail size;
 - complete source decision counts, distinct from the filtered result count;
+- Browse actions, including **Open a random Photo**;
 - source-specific actions, including Add Folder for an Original Folder and
   Resume for an Album with a saved position; and
 - Refresh Current Source when it is available.
+
+On a wide Grid, **Open a random Photo** must appear in the normal header's
+secondary action group without creating another toolbar row. On a narrow Grid,
+it must appear in View options under a named Browse actions group and must not
+add a permanent header row. Its accessible name must identify that it opens a
+random Photo from the current source and filter.
+
+The action is enabled only when the current Browse Snapshot is ready and has a
+nonzero result count, and while no source or Photo transition is pending. While
+it resolves, the button must expose a pending state and must not admit a second
+attempt. Its placement and pending presentation follow [Random
+Photo](../spec.md#random-photo); it must not change the current Grid into a
+different source or filter.
 
 The header must indicate an active nondefault filter or order and the visible
 result count. Complete progress remains available in View options with the
@@ -176,6 +190,12 @@ Photo tool. Only the entry or its active choice surface owns explicit Rating
 interaction at one time. Rating saves keep the current Photo open. The Rating
 Wheel, swipe decisions, pinch, pan, keyboard shortcuts, and their persistence
 rules remain unchanged.
+
+Photo View does not expose **Open a random Photo** in the first product. Its
+navigation group remains the single visible Previous/Next pair, and the More
+surface does not create a second random-navigation path. Random selection
+starts from Grid View so the source, committed order, and Selection State
+filter remain explicit context.
 
 Details and membership may load when requested. Their loading or failure must
 remain local to that surface. Closing a surface while a write settles must not
