@@ -12,6 +12,7 @@ use std::{
 
 mod browse;
 mod cli;
+mod cli_preview;
 #[path = "cli_selection.rs"]
 mod cli_selection;
 mod export_routes;
