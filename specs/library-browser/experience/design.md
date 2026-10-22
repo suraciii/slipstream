@@ -303,6 +303,10 @@ Focused automated coverage must derive from the product examples and prove:
 - one initial source bootstrap, delayed facts, rapid Back/Forward, stale
   success/failure, expired snapshots, removed targets, and Folder publication
   confirmation without an unbounded read;
+- **Open a random Photo** uses the current source, order, and Selection State
+  filter, can target an unloaded bounded window, commits one ordinary Photo
+  destination only after target facts are ready, allows repeated results, and
+  leaves no history entry after an expired or failed attempt;
 - Grid anchor and focus restoration across resize and eviction in a generated
   Library of at least 40,000 Photos, with no retained historical Snapshots;
 - no decision or membership replay, no aborted admitted write, no stale

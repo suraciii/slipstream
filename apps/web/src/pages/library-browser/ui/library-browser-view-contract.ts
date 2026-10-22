@@ -89,6 +89,11 @@ export type LibraryBrowserIntent =
       formId: string;
       name?: string;
     }>
+  /// Opens one random Photo of the current Browse Snapshot: the source, the
+  /// committed order, and the committed Selection State filter of the open
+  /// view, sampled through its bounded windows. It carries no position, seed,
+  /// or source of its own, so the page model owns the whole decision.
+  | Readonly<{ kind: "random-photo" }>
   | Readonly<{ kind: "grid-render" | "grid-resize" }>
   | Readonly<{ kind: "filmstrip-resize" }>
   | Readonly<{ kind: "grid-range"; start: number; end: number }>

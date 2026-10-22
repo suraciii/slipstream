@@ -25,6 +25,7 @@ export interface BrowseWindowController {
     priority?: "high" | "low",
     transition?: RecoveryTransition,
     photoAuthority?: PhotoAuthority,
+    reopenExpired?: boolean,
   ): Promise<boolean>;
   retryCurrentRanges(
     this: void,
@@ -82,6 +83,7 @@ export function createBrowseWindowController(
     priority = quiet ? "low" : "high",
     transition,
     photoAuthority = photo.authority,
+    reopenExpired = true,
   ) => {
     if (!alive) return false;
     if (source.total === 0) return true;
@@ -117,7 +119,8 @@ export function createBrowseWindowController(
             String(outcome.owner.generation) === ownerGeneration);
       if (!exactOwner || outcome.kind === "detached") return false;
       if (outcome.kind === "expired") {
-        await deps.reopenExpired(outcome.index, source.generation);
+        if (reopenExpired)
+          await deps.reopenExpired(outcome.index, source.generation);
         return false;
       }
       if (outcome.kind === "failed") {

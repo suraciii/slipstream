@@ -628,14 +628,30 @@
   font-size: 0.78rem;
 }
 
+.options-browse-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.options-browse-actions h3 {
+  flex: 1 1 100%;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.options-browse-actions button,
+.options-source-actions button {
+  min-height: 2.75rem;
+}
+
 .options-source-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem;
-}
-
-.options-source-actions button {
-  min-height: 2.75rem;
 }
 
 .options-footer {
