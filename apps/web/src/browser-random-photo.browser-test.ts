@@ -401,6 +401,7 @@ test("the action admits one attempt and presents its pending state", async ({
   await writePhotos(root, 120);
   const running = await server(base, root);
   await wide(page);
+  await stubDrawToSecondWindow(page);
   await page.goto(running.url);
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 120 Photos",
@@ -409,15 +410,18 @@ test("the action admits one attempt and presents its pending state", async ({
 
   const { promise: held, resolve: release } = Promise.withResolvers<void>();
   let first = true;
-  await page.route(/\/api\/browse\/[^/?#]+\?start=/, async (route) => {
-    if (!first) {
+  await page.route(
+    /\/api\/browse\/[^/?#]+\?start=(?!0(?:&|$))/,
+    async (route) => {
+      if (!first) {
+        await route.continue();
+        return;
+      }
+      first = false;
+      await held;
       await route.continue();
-      return;
-    }
-    first = false;
-    await held;
-    await route.continue();
-  });
+    },
+  );
 
   await randomAction(page).click();
   await expect(randomAction(page)).toBeDisabled();
