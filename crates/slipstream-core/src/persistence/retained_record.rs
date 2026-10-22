@@ -52,9 +52,12 @@ mod tests {
 
     #[test]
     fn value_within_bound_round_trips() {
-        let serialized = serialize_record_within_bound(&Shape {
-            label: "recipe".to_owned(),
-        }, 64)
+        let serialized = serialize_record_within_bound(
+            &Shape {
+                label: "recipe".to_owned(),
+            },
+            64,
+        )
         .unwrap();
         assert_eq!(
             parse_stored_value_within_bound::<Shape>(&serialized, 64).unwrap(),
@@ -109,11 +112,13 @@ mod tests {
         // A value whose length equals the bound is admitted; one byte past is
         // refused. This pins the boundary so the wrappers cannot drift.
         let exact = "{\"label\":\"x\"}";
-        assert!(serialize_record_within_bound(
-            &parse_stored_value_within_bound::<Shape>(exact, exact.len()).unwrap(),
-            exact.len(),
-        )
-        .is_ok());
+        assert!(
+            serialize_record_within_bound(
+                &parse_stored_value_within_bound::<Shape>(exact, exact.len()).unwrap(),
+                exact.len(),
+            )
+            .is_ok()
+        );
         let over = format!("{{\"label\":\"{}\"}}", "x".repeat(exact.len()));
         assert!(matches!(
             parse_stored_value_within_bound::<Shape>(&over, exact.len()),

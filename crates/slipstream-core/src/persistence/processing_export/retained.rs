@@ -267,10 +267,7 @@ pub(in crate::persistence) fn retry_processing_export(
                         ProcessingInputHandoffError::ArtifactMissing,
                     ));
                 };
-                if read_processing_artifact_retention_record(transaction, artifact_id.as_str())?
-                    .is_some_and(|record| now >= record.retain_until)
-                    && workspace_artifact_published_at(transaction, artifact_id.as_str())?.is_none()
-                {
+                if artifact_retention_expired(transaction, artifact_id.as_str(), now)? {
                     return Ok(ProcessingExportSubmitOutcome::IncompatibleInput(
                         ProcessingInputHandoffError::ArtifactMissing,
                     ));

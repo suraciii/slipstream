@@ -7,7 +7,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use slipstream_core::{LibraryError, SelectionState};
+use slipstream_core::LibraryError;
 
 use super::{
     ALBUM_PHOTO_IDS_MAX, ApiError, CLI_CONTRACT_HEADER, HttpState, api_error, cli_error,
@@ -17,7 +17,9 @@ use super::{
 };
 use crate::{
     folders::valid_folder_location,
-    wire::{CliAlbumChangeWire, CliAlbumCreationWire, CliPhotoDecisionResultWire},
+    wire::{
+        CliAlbumChangeWire, CliAlbumCreationWire, CliPhotoDecisionResultWire, valid_selection_state,
+    },
 };
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -354,12 +356,7 @@ impl CliPhotoDecisionBody {
             slipstream_core::PhotoStateField::SelectionState => self
                 .value
                 .as_str()
-                .and_then(|value| match value {
-                    "unflagged" => Some(SelectionState::Unflagged),
-                    "picked" => Some(SelectionState::Picked),
-                    "rejected" => Some(SelectionState::Rejected),
-                    _ => None,
-                })
+                .and_then(valid_selection_state)
                 .map(slipstream_core::PhotoStateValue::Selection),
             slipstream_core::PhotoStateField::Rating => self
                 .value
@@ -842,5 +839,77 @@ pub(crate) fn rating_value(value: slipstream_core::PhotoStateValue) -> Value {
     match value {
         slipstream_core::PhotoStateValue::Rating(value) => Value::from(value),
         slipstream_core::PhotoStateValue::Selection(_) => Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PHOTO_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+    fn decision(field: &str, value: Value) -> CliPhotoDecisionBody {
+        serde_json::from_value(serde_json::json!({
+            "field": field,
+            "value": value,
+            "photos": [{"photoId": PHOTO_ID, "ifVersion": "v1"}],
+        }))
+        .expect("valid body")
+    }
+
+    fn mutation_error(body: CliPhotoDecisionBody) -> String {
+        let response = *body.into_mutation().expect_err("rejected body");
+        let bytes = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(axum::body::to_bytes(response.into_body(), 1024))
+            .expect("response body");
+        let error =
+            serde_json::from_slice::<serde_json::Value>(&bytes).expect("response serializes");
+        error["error"]["details"]["argument"]
+            .as_str()
+            .expect("invalid_cli argument")
+            .to_owned()
+    }
+
+    #[test]
+    fn decision_value_accepts_every_canonical_selection_state() {
+        for name in ["unflagged", "picked", "rejected"] {
+            let expected = slipstream_core::PhotoStateValue::Selection(
+                valid_selection_state(name).expect("canonical name"),
+            );
+            let mutation = decision("selectionState", Value::String(name.to_owned()))
+                .into_mutation()
+                .expect("accepted body");
+            assert_eq!(mutation.value, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn decision_value_rejects_unknown_selection_names_with_the_same_error() {
+        for name in ["selected", "undecided", "Picked", ""] {
+            assert_eq!(
+                mutation_error(decision("selectionState", Value::String(name.to_owned()))),
+                "value",
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn decision_value_rejects_non_string_selection_input() {
+        assert_eq!(
+            mutation_error(decision("selectionState", Value::from(1))),
+            "value"
+        );
+    }
+
+    #[test]
+    fn decision_value_accepts_the_rating_range() {
+        let mutation = decision("rating", Value::from(5))
+            .into_mutation()
+            .expect("accepted body");
+        assert_eq!(mutation.value, slipstream_core::PhotoStateValue::Rating(5));
+        assert_eq!(mutation_error(decision("rating", Value::from(6))), "value");
     }
 }

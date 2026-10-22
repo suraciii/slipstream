@@ -603,6 +603,54 @@ pub(crate) fn selection_state(state: SelectionState) -> &'static str {
     }
 }
 
+/// The one server-private Selection State parser. Every client-supplied
+/// Selection State name resolves here; batch admission rejects Unflagged
+/// separately, and `selection_state` above serializes the exact inverse.
+pub(crate) fn valid_selection_state(value: &str) -> Option<SelectionState> {
+    match value {
+        "unflagged" => Some(SelectionState::Unflagged),
+        "picked" => Some(SelectionState::Picked),
+        "rejected" => Some(SelectionState::Rejected),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parser_accepts_every_canonical_selection_state() {
+        assert_eq!(
+            valid_selection_state("unflagged"),
+            Some(SelectionState::Unflagged)
+        );
+        assert_eq!(
+            valid_selection_state("picked"),
+            Some(SelectionState::Picked)
+        );
+        assert_eq!(
+            valid_selection_state("rejected"),
+            Some(SelectionState::Rejected)
+        );
+    }
+
+    #[test]
+    fn parser_rejects_unknown_and_legacy_state_names() {
+        for value in ["", "selected", "undecided", "Picked", "pick", " rejected"] {
+            assert_eq!(valid_selection_state(value), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn serialization_is_the_exact_inverse_of_parsing() {
+        for name in ["unflagged", "picked", "rejected"] {
+            let state = valid_selection_state(name).expect("canonical name");
+            assert_eq!(selection_state(state), name);
+        }
+    }
+}
+
 pub(crate) fn preview_state(state: PreviewState) -> &'static str {
     match state {
         PreviewState::InspectionPending => "inspection-pending",

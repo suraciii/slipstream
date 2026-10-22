@@ -20,6 +20,7 @@ use slipstream_processing::modules::{
 };
 
 use crate::http::HttpState;
+pub(crate) use crate::processing_export_wire::{contract_json, input_json};
 #[path = "processing_recipe_admission.rs"]
 mod admission;
 #[path = "processing_recipe_state.rs"]
@@ -321,49 +322,6 @@ fn recipe_from_body(
     };
     recipe.validate().map_err(|error| error.to_string())?;
     Ok((recipe, automatic_adjustment))
-}
-
-fn input_json(input: &ProcessingInput) -> Value {
-    match input {
-        ProcessingInput::Original {
-            photo_id,
-            source_revision,
-        } => json!({
-            "kind": "original",
-            "photoId": photo_id,
-            "sourceRevision": source_revision,
-        }),
-        ProcessingInput::Artifact {
-            artifact_id,
-            contract,
-        } => json!({
-            "kind": "artifact",
-            "artifactId": artifact_id.as_str(),
-            "contract": contract_json(contract),
-        }),
-        ProcessingInput::WorkspaceArtifact {
-            workspace_id,
-            artifact_id,
-            revision,
-            contract,
-        } => {
-            json!({"kind":"workspace-artifact","workspaceId":workspace_id,"artifactId":artifact_id,"revision":revision,"contract":contract_json(contract)})
-        }
-    }
-}
-
-fn contract_json(contract: &ProcessingImageContract) -> Value {
-    json!({
-        "format": contract.format,
-        "precision": contract.precision,
-        "colorSpace": contract.color_space,
-        "transfer": contract.transfer,
-        "geometry": {
-            "width": contract.geometry.width,
-            "height": contract.geometry.height,
-        },
-        "encoding": contract.encoding,
-    })
 }
 
 pub(crate) fn recipe_json(recipe: &ComposableEditRecipe) -> Value {

@@ -12,6 +12,7 @@ use crate::{
         AlbumListItemWire, CapabilitiesResponse, CapabilityLimitsWire, CliAlbumSummaryWire,
         CliListResponse, CliPhotoGetWire, CliPhotoItemWire, CliPhotoMetadataWire,
         CliScanStatusWire, CliStatusResponse, MissingItemWire, PhotoListItemWire,
+        valid_selection_state,
     },
 };
 use axum::{
@@ -21,7 +22,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use slipstream_core::{LibraryError, SelectionState};
+use slipstream_core::LibraryError;
 use std::{
     sync::atomic::Ordering,
     time::{Instant, SystemTime},
@@ -562,10 +563,10 @@ pub(crate) async fn create_photo_query(
     }
     let selection = match body.selection.as_deref() {
         None | Some("all") => None,
-        Some("unflagged") => Some(SelectionState::Unflagged),
-        Some("picked") => Some(SelectionState::Picked),
-        Some("rejected") => Some(SelectionState::Rejected),
-        Some(_) => return invalid_cli("selection", "The Selection State filter is invalid."),
+        Some(value) => match valid_selection_state(value) {
+            Some(state) => Some(state),
+            None => return invalid_cli("selection", "The Selection State filter is invalid."),
+        },
     };
     let original_kind = match body.kind.as_deref() {
         None => None,

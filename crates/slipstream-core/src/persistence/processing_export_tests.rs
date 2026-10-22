@@ -945,3 +945,5 @@ async fn qualified_submission_admits_settles_and_replays_the_artifact() {
 
 #[path = "processing_export_tests/lifecycle.rs"]
 mod lifecycle;
+#[path = "processing_export_tests/lifecycle_expiry.rs"]
+mod lifecycle_expiry;
