@@ -43,10 +43,10 @@ The native Preview boundary is currently verified on Linux only.
 - `pkg-config`, LibRaw, libjpeg-turbo, libvips, and LittleCMS development headers
 
 Both Just gates use Docker Compose only for its daemon-free configuration
-parser check; neither requires a running Docker daemon. `just ci-fast` needs
-Bun, Just, Python 3, and the host tooling used by the repository checks, but no
-native compiler, native runtime libraries, Chromium, or engine image. The native
-prerequisites above are required for `just ci-full`.
+parser check; neither requires a running Docker daemon. Both need Rust and the
+native Preview prerequisites above to compile and run workspace unit tests.
+`just ci-fast` does not need the Film submodule or its additional native
+dependencies, Chromium, production Web assets, or an engine image.
 
 On Debian/Ubuntu, install native dependencies with:
 
@@ -128,23 +128,27 @@ just ci-fast
 just ci-full
 ```
 
-`ci-fast` runs the low-cost static checks, Web unit tests, and host-side
-repository tooling contracts, including the daemon-free Docker Compose check.
-It does not compile native code, need native runtime libraries, launch a
-browser, or build or run an engine image. `check:static` runs formatting, lint,
-type checking, Album language, FSD, and file-size checks first, so a static
-error stops the gate before tests.
+`ci-fast` runs static checks, Web unit tests, host-side repository tooling
+contracts, and all Rust workspace library and binary unit-test targets. Rust
+tests run serially after building their process-group supervisor helper. These
+targets include native Preview and in-module service scenarios, so fast requires
+native compilation and libraries; it is not a pure or environment-free gate.
+It does not build production artifacts, launch a browser, or run an engine image.
+`check:static` runs formatting, lint, type checking, Album language, FSD, and
+file-size checks first, so a static error stops the gate before tests.
 
-`ci-full` runs `ci-fast`, then the Rust checks, RAW scenario discovery, one
-production build of the Rust workspace, pinned SpektraFilm CLI, and Web assets,
-and the complete browser smoke suite against those built artifacts. A failed
-stage stops the gate. Use the prerequisites above, including the initialized
-submodule and installed Chromium.
+`ci-full` runs `ci-fast`, then Rust formatting and Clippy, standalone integration
+tests and doctests, RAW scenario discovery, one production build of the Rust
+workspace, pinned SpektraFilm CLI, and Web assets, and the complete browser smoke
+suite against those built artifacts. Unit tests run once, through fast. A failed
+stage stops the gate. Full additionally needs the initialized Film submodule,
+its native dependencies, and installed Chromium.
 
 `just ci-full` remains required before local handoff, including Web changes.
-`just ci-fast` is not native, production-build, or browser qualification. The
-documented real-camera and processing scenarios remain opt-in; skipped scenarios
-do not establish their qualification.
+`just ci-fast` qualifies the default Rust unit targets but not standalone Rust
+integration tests, production builds, or browser behavior. The documented
+real-camera and processing scenarios remain opt-in; skipped scenarios do not
+establish their qualification.
 
 Individual focused commands remain available for development:
 
@@ -152,6 +156,9 @@ Individual focused commands remain available for development:
 bun run check:static
 bun run check:fsd
 bun run test:fsd
+bun run check:rust
+bun run test:rust:unit
+bun run test:rust:integration
 bun run test:rust
 bun run test:cli
 bun run test:cli-package
@@ -167,10 +174,11 @@ artifacts or launching Chromium. Cargo still compiles its test targets before
 listing them. An actual opt-in `test:raw` run prepares production artifacts
 before executing its browser scenario.
 
-The GitHub Actions full gate runs as the runner user in a systemd scope with a
-6 GiB memory limit. Film admission requires this verifiable finite environment;
-an unbounded host refuses processing. For local processing checks, run the full
-gate in a finite container or systemd scope sized for the qualified fixture.
+Both GitHub Actions gates run as the runner user in a systemd scope with a
+6 GiB memory limit. Unit tests include processing-admission scenarios that need
+this verifiable finite environment; an unbounded host refuses processing.
+Run either gate locally in a finite container or systemd scope sized for the
+qualified fixture.
 
 `check:fsd` parses the Web TypeScript project and enforces the current FSD
 boundary: app and page public APIs, downward dependencies, slice and segment
@@ -214,7 +222,7 @@ If the host platform is newer than the Playwright browser installer supports, po
 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/absolute/path/to/chrome bun run test:browser
 ```
 
-`test:browser` runs the browser smoke suite against the Rust `slipstream-server` binary. It builds the Rust workspace, pinned SpektraFilm CLI, and Web assets, starts the server on a private loopback TCP port behind a local HTTPS proxy, and gives it independent temporary state and cache directories. Fixtures provision a generated Access Token and establish real sessions; the checked-in test certificate and key under `tools/test-tls/` are for synthetic fixtures only. The combined CLI-to-Web scenario runs the compiled `slipstream` client the same way. Use `SLIPSTREAM_SERVER_BINARY`, `SLIPSTREAM_CLI_BINARY`, or `SLIPSTREAM_WEB_ROOT` only when testing separately built Rust binaries or a Web directory. `test:rust` checks formatting, denies Clippy warnings, and runs Rust tests serially because the native Preview stack has one process-global libvips lifecycle. `just ci-full` composes the complete low-cost and native stages.
+`test:browser` runs the browser smoke suite against the Rust `slipstream-server` binary. It builds the Rust workspace, pinned SpektraFilm CLI, and Web assets, starts the server on a private loopback TCP port behind a local HTTPS proxy, and gives it independent temporary state and cache directories. Fixtures provision a generated Access Token and establish real sessions; the checked-in test certificate and key under `tools/test-tls/` are for synthetic fixtures only. The combined CLI-to-Web scenario runs the compiled `slipstream` client the same way. Use `SLIPSTREAM_SERVER_BINARY`, `SLIPSTREAM_CLI_BINARY`, or `SLIPSTREAM_WEB_ROOT` only when testing separately built Rust binaries or a Web directory. `check:rust` checks formatting and denies Clippy warnings. `test:rust:unit` builds the supervisor and runs `--lib --bins`; `test:rust:integration` runs standalone `--test '*'` targets and doctests. `test:rust` composes all three for focused Rust verification. Rust tests remain serial because the native Preview stack has one process-global libvips lifecycle. `just ci-full` composes the complete repository gate without repeating the unit targets.
 
 The Rust workspace contains the production Library/Preview core and HTTP server in `crates/slipstream-server`. The production-language contract is in [`specs/server.md`](specs/server.md). Shared JSON and SQL vectors live in [`compatibility/`](compatibility/); Rust compatibility tests consume them.
 
@@ -231,22 +239,25 @@ downloadable by artifact identity, and replay without another engine run.
 pull requests run `just ci-fast`; pushes to `main` and manual
 `workflow_dispatch` runs execute `just ci-full`.
 
-Fast pull-request feedback intentionally does not qualify native code,
-production builds, or browser behavior. Without a manual full run on the
-pull-request branch, regressions in those stages are detected only after a
-push to `main`. The full local handoff requirement still applies.
+Fast pull-request feedback includes Rust unit tests but intentionally does not
+qualify Clippy, standalone Rust integration tests, production builds, or browser
+behavior. Without a manual full run on the pull-request branch, regressions in
+those stages may be detected only after a push to `main`. Rust compilation and
+native package installation still affect PR latency. The full local handoff
+requirement still applies.
 
 - A newer run of the same pull request cancels its superseded run. Each
   `main` run has an independent concurrency group and is not canceled by a
   later push or a pull request.
-- The job installs Bun dependencies and the pinned Just `1.45.0` release,
-  checks Docker Compose capability, and invokes the appropriate Just gate.
-  Only full runs install the native dependencies, Rust toolchain, and Chromium,
-  and enter the systemd resource scope.
-- Native APT installation excludes recommended packages but retains every
-  declared development dependency. Every full run fetches and SHA-256-checks
-  the pinned LibRaw source archive, then builds and installs it fresh. No
-  installed LibRaw cache is restored.
+- Both event paths install Bun dependencies, pinned Just `1.45.0`, the Rust
+  toolchain, and native Preview dependencies, restore the ordinary Cargo cache,
+  check Docker Compose capability, and run the selected gate in the finite
+  systemd scope. PRs use the distribution LibRaw development package and do not
+  initialize the Film submodule or install Chromium.
+- Native APT installation excludes recommended packages. Full runs additionally
+  install Film's native dependencies and Chromium, and fetch and SHA-256-check
+  the pinned LibRaw source archive before building and installing it fresh.
+  No installed LibRaw cache is restored.
 - Standard Cargo dependency and target caching is the only native build cache.
   Every full run builds the pinned SpektraFilm CLI through its original Cargo
   command; there is no separate Film executable artifact or reuse protocol.

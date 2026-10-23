@@ -130,7 +130,7 @@ criterion and limits but does not measure visual quality or declare acceptance.
 
 These expensive probes are separate from `just ci-full`, like the existing
 real-camera safety gate. Run that full repository gate before handing off a
-harness change as well; `just ci-fast` alone does not qualify the native stack.
+harness change as well; `just ci-fast` does not qualify the production engine runtime.
 
 The host-side failure and signal-settlement checks use a controlled Docker
 stand-in and need no engine image:

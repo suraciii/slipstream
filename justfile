@@ -1,4 +1,4 @@
-# Low-cost checks: no native build, browser runtime, or engine image.
+# Static, unit, and host-tool checks; no production build or browser runtime.
 ci-fast:
     bun run check:static
     bun run --cwd apps/web test:unit
@@ -13,10 +13,12 @@ ci-fast:
     bun run test:raw-contract
     bun run test:development-runner
     bun run test:processing-tools
+    bun run test:rust:unit
 
 # Complete repository gate, including every fast check.
 ci-full: ci-fast
-    bun run test:rust
+    bun run check:rust
+    bun run test:rust:integration
     bun run test:raw-discovery
     bun run build
     bun run test:browser:prebuilt

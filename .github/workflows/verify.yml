@@ -49,15 +49,10 @@ jobs:
         run: |
           timeout -k 10s 30s docker compose version
           timeout -k 10s 30s docker compose config --help | grep -Fq -- "--format"
-      - name: Run fast verification for pull requests
-        if: github.event_name == 'pull_request'
-        run: just ci-fast
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
-        if: github.event_name != 'pull_request'
         with:
           components: clippy,rustfmt
       - name: Restore Rust dependencies and build cache
-        if: github.event_name != 'pull_request'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -68,17 +63,24 @@ jobs:
           restore-keys: |
             cargo-verify-${{ runner.os }}-
       - name: Install native dependencies
-        if: github.event_name != 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
           # Fail rather than install against partial package metadata.
           sudo apt-get update --error-on=any
-          sudo apt-get install --yes --no-install-recommends \
-            build-essential ca-certificates curl libexiv2-dev libglib2.0-dev \
-            libjpeg-dev liblcms2-dev liblensfun-dev libopenblas-dev \
-            libopenimageio-dev libvips-dev \
-            pkg-config
+          packages=(
+            build-essential ca-certificates curl libjpeg-dev liblcms2-dev
+            libvips-dev pkg-config
+          )
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            packages+=(libraw-dev)
+          else
+            packages+=(
+              libexiv2-dev libglib2.0-dev liblensfun-dev libopenblas-dev
+              libopenimageio-dev
+            )
+          fi
+          sudo apt-get install --yes --no-install-recommends "${packages[@]}"
       - name: Install Chromium
         if: github.event_name != 'pull_request'
         run: bun x playwright install --with-deps chromium
@@ -113,14 +115,15 @@ jobs:
             printf 'PKG_CONFIG_PATH=%s\n' "$PKG_CONFIG_PATH"
             printf 'LD_LIBRARY_PATH=%s\n' "$LD_LIBRARY_PATH"
           } >> "$GITHUB_ENV"
-      - name: Run full verification with finite processing memory
-        if: github.event_name != 'pull_request'
+      - name: Run verification with finite processing memory
+        env:
+          CI_GATE: ${{ github.event_name == 'pull_request' && 'ci-fast' || 'ci-full' }}
         run: |
           sudo systemd-run --scope --quiet -p MemoryMax=6G \
             sudo -u "$(id -un)" env "PATH=$PATH" \
-            "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" \
+            "PKG_CONFIG_PATH=${PKG_CONFIG_PATH:-}" "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}" \
             CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
-            CARGO_INCREMENTAL=0 CI=true GITHUB_ACTIONS=true just ci-full
+            CARGO_INCREMENTAL=0 CI=true GITHUB_ACTIONS=true just "$CI_GATE"
       - name: Preserve browser failure evidence
         if: failure() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
