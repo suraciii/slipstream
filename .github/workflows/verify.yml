@@ -2,6 +2,7 @@ name: Verify
 
 on:
   pull_request:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -9,25 +10,45 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   verify:
     runs-on: ubuntu-latest
     env:
-      # This job never sets RUST_BACKTRACE, so nothing reads debug
-      # information. Leaving it out shortens compilation and linking and
-      # keeps the Rust cache near 220 MB compressed instead of 530 MB.
+      # Use the same compiler profile for cache restoration and native verification.
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          submodules: recursive
+          submodules: ${{ github.event_name != 'pull_request' && 'recursive' || 'false' }}
           # The file-size ratchet resolves its base as HEAD^1 here, so the
           # checkout must carry the merge commit and its parents.
           fetch-depth: 2
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - name: Install pinned Just
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/just-1.45.0-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" \
+            https://github.com/casey/just/releases/download/1.45.0/just-1.45.0-x86_64-unknown-linux-musl.tar.gz
+          printf 'dc3f958aaf8c6506dd90426e9b03f86dd15e74a6467ee0e54929f750af3d9e49  %s\n' "$archive" \
+            | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/just"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/just"
+          printf '%s/just\n' "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Verify Docker Compose config capability
+        run: |
+          timeout -k 10s 30s docker compose version
+          timeout -k 10s 30s docker compose config --help | grep -Fq -- "--format"
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
         with:
           components: clippy,rustfmt
@@ -41,53 +62,64 @@ jobs:
           key: cargo-verify-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             cargo-verify-${{ runner.os }}-
+      - name: Run low-cost PR verification
+        if: github.event_name == 'pull_request'
+        run: just ci-fast
       - name: Install native dependencies
+        if: github.event_name != 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --yes \
+          # Fail rather than install against partial package metadata.
+          sudo apt-get update --error-on=any
+          sudo apt-get install --yes --no-install-recommends \
             build-essential ca-certificates curl libexiv2-dev libglib2.0-dev \
             libjpeg-dev liblcms2-dev liblensfun-dev libopenblas-dev \
-            libopenimageio-dev libvips-dev \
-            pkg-config
+            libopenimageio-dev libvips-dev pkg-config
+      - name: Install Chromium
+        if: github.event_name != 'pull_request'
+        run: bun x playwright install --with-deps chromium
+      - name: Build and verify LibRaw 0.22.2
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
           prefix="$RUNNER_TEMP/libraw-022"
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/LibRaw-0.22.2.tar.gz" \
-            https://www.libraw.org/data/LibRaw-0.22.2.tar.gz
-          echo "de86b035655accff8d4010f1a221fdf50d353cb7b1422ba26f14a0db92612cfa  $RUNNER_TEMP/LibRaw-0.22.2.tar.gz" \
+          archive="$RUNNER_TEMP/LibRaw-0.22.2.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" https://www.libraw.org/data/LibRaw-0.22.2.tar.gz
+          printf 'de86b035655accff8d4010f1a221fdf50d353cb7b1422ba26f14a0db92612cfa  %s\n' "$archive" \
             | sha256sum -c -
-          tar -xzf "$RUNNER_TEMP/LibRaw-0.22.2.tar.gz" -C "$RUNNER_TEMP"
-          cd "$RUNNER_TEMP/LibRaw-0.22.2"
-          ./configure \
-            --prefix="$prefix" \
-            --disable-static \
-            --disable-examples \
-            --disable-openmp \
-            --disable-lcms
-          make -j"$(nproc)"
-          make install
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          (
+            cd "$RUNNER_TEMP/LibRaw-0.22.2"
+            ./configure \
+              --prefix="$prefix" \
+              --disable-static \
+              --disable-examples \
+              --disable-openmp \
+              --disable-lcms
+            make -j"$(nproc)"
+            make install
+          )
           export PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
           export LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          pkg-config --atleast-version=0.22.0 libraw libraw_r
+          for package in libraw libraw_r; do
+            pkg-config --exact-version=0.22.2 "$package"
+          done
           {
             printf 'PKG_CONFIG_PATH=%s\n' "$PKG_CONFIG_PATH"
             printf 'LD_LIBRARY_PATH=%s\n' "$LD_LIBRARY_PATH"
           } >> "$GITHUB_ENV"
-      - run: bun install --frozen-lockfile
-      - run: bun x playwright install --with-deps chromium
-      - name: Verify Docker Compose config capability
-        run: |
-          timeout -k 10s 30s docker compose version
-          timeout -k 10s 30s docker compose config --help | grep -Fq -- "--format"
       - name: Run verification with finite processing memory
+        if: github.event_name != 'pull_request'
         run: |
           sudo systemd-run --scope --quiet -p MemoryMax=6G \
             sudo -u "$(id -un)" env "PATH=$PATH" \
-            "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" \
+            "PKG_CONFIG_PATH=${PKG_CONFIG_PATH:-}" "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}" \
             CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
-            CARGO_INCREMENTAL=0 CI=true GITHUB_ACTIONS=true bun run verify
+            CARGO_INCREMENTAL=0 CI=true GITHUB_ACTIONS=true just ci-full
       - name: Preserve browser failure evidence
-        if: failure()
+        if: failure() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: browser-failure-evidence

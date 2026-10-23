@@ -1,6 +1,7 @@
 export type RawGateStep = Readonly<{
   kind: "cargo" | "playwright";
   label: string;
+  prepare?: readonly string[];
   command: readonly string[];
   expectedTests: readonly string[];
 }>;
@@ -42,11 +43,12 @@ export const rawGatePlan: readonly RawGateStep[] = [
   {
     kind: "playwright",
     label: "real-camera browser scenarios",
+    prepare: ["bun", "run", "build"],
     command: [
       "bun",
-      "run",
-      "test:browser",
-      "--",
+      "x",
+      "playwright",
+      "test",
       "--grep",
       "real-camera",
       "--workers=1",
