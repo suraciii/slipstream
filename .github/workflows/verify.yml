@@ -2,6 +2,7 @@ name: Verify
 
 on:
   pull_request:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -24,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          submodules: recursive
+          submodules: ${{ github.event_name != 'pull_request' && 'recursive' || 'false' }}
           # The file-size ratchet resolves its base as HEAD^1 here, so the
           # checkout must carry the merge commit and its parents.
           fetch-depth: 2
@@ -32,16 +33,31 @@ jobs:
         with:
           bun-version: 1.4.0
       - run: bun install --frozen-lockfile
+      - name: Install pinned Just
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/just-1.45.0-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" \
+            https://github.com/casey/just/releases/download/1.45.0/just-1.45.0-x86_64-unknown-linux-musl.tar.gz
+          printf 'dc3f958aaf8c6506dd90426e9b03f86dd15e74a6467ee0e54929f750af3d9e49  %s\n' "$archive" \
+            | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/just"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/just"
+          printf '%s/just\n' "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - name: Verify Docker Compose config capability
         run: |
           timeout -k 10s 30s docker compose version
           timeout -k 10s 30s docker compose config --help | grep -Fq -- "--format"
-      - name: Run lightweight verification before native setup
-        run: bun run verify:light
+      - name: Run fast verification for pull requests
+        if: github.event_name == 'pull_request'
+        run: just ci-fast
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+        if: github.event_name != 'pull_request'
         with:
           components: clippy,rustfmt
       - name: Restore Rust dependencies and build cache
+        if: github.event_name != 'pull_request'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -52,6 +68,7 @@ jobs:
           restore-keys: |
             cargo-verify-${{ runner.os }}-
       - name: Install native dependencies
+        if: github.event_name != 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
@@ -62,55 +79,50 @@ jobs:
             libjpeg-dev liblcms2-dev liblensfun-dev libopenblas-dev \
             libopenimageio-dev libvips-dev \
             pkg-config
-      - run: bun x playwright install --with-deps chromium
-      - name: Resolve native environment inputs
-        id: native-environment
+      - name: Install Chromium
+        if: github.event_name != 'pull_request'
+        run: bun x playwright install --with-deps chromium
+      - name: Build and verify LibRaw 0.22.2
+        if: github.event_name != 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
-          native="$({
-            printf 'prefix=%s/libraw-022\n' "$RUNNER_TEMP"
-            dpkg-query -W -f='${binary:Package}=${Version}\n' | LC_ALL=C sort
-          } | sha256sum | cut -d ' ' -f1)"
+          prefix="$RUNNER_TEMP/libraw-022"
+          archive="$RUNNER_TEMP/LibRaw-0.22.2.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" https://www.libraw.org/data/LibRaw-0.22.2.tar.gz
+          printf 'de86b035655accff8d4010f1a221fdf50d353cb7b1422ba26f14a0db92612cfa  %s\n' "$archive" \
+            | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          (
+            cd "$RUNNER_TEMP/LibRaw-0.22.2"
+            ./configure \
+              --prefix="$prefix" \
+              --disable-static \
+              --disable-examples \
+              --disable-openmp \
+              --disable-lcms
+            make -j"$(nproc)"
+            make install
+          )
+          export PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          export LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          for package in libraw libraw_r; do
+            pkg-config --exact-version=0.22.2 "$package"
+          done
           {
-            echo "image=${ImageOS:?}-${ImageVersion:?}"
-            echo "native=$native"
-          } >> "$GITHUB_OUTPUT"
-      - name: Restore LibRaw installation
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/libraw-022
-          key: libraw-verify-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-environment.outputs.image }}-${{ steps.native-environment.outputs.native }}-${{ hashFiles('scripts/prepare-ci-libraw.sh') }}
-      - name: Prepare and verify LibRaw installation
-        run: scripts/prepare-ci-libraw.sh
-      - name: Resolve Film artifact inputs
-        id: film-artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-          key="$(sudo -u "$(id -un)" env "PATH=$PATH" \
-            "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" \
-            "ImageOS=${ImageOS:?}" "ImageVersion=${ImageVersion:?}" \
-            CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
-            CARGO_INCREMENTAL=0 CI=true GITHUB_ACTIONS=true \
-            python3 scripts/build-spektrafilm.py --cache-key)"
-          echo "key=$key" >> "$GITHUB_OUTPUT"
-      - name: Restore Film executable artifact
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/film-artifact
-          key: film-artifact-${{ runner.os }}-${{ runner.arch }}-${{ steps.film-artifact.outputs.key }}
-      - name: Run native verification with finite processing memory
+            printf 'PKG_CONFIG_PATH=%s\n' "$PKG_CONFIG_PATH"
+            printf 'LD_LIBRARY_PATH=%s\n' "$LD_LIBRARY_PATH"
+          } >> "$GITHUB_ENV"
+      - name: Run full verification with finite processing memory
+        if: github.event_name != 'pull_request'
         run: |
           sudo systemd-run --scope --quiet -p MemoryMax=6G \
             sudo -u "$(id -un)" env "PATH=$PATH" \
             "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" \
-            "SLIPSTREAM_CI_FILM_ARTIFACT=$RUNNER_TEMP/film-artifact" \
-            "ImageOS=${ImageOS:?}" "ImageVersion=${ImageVersion:?}" \
             CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
-            CARGO_INCREMENTAL=0 CI=true GITHUB_ACTIONS=true bun run verify:native
+            CARGO_INCREMENTAL=0 CI=true GITHUB_ACTIONS=true just ci-full
       - name: Preserve browser failure evidence
-        if: failure()
+        if: failure() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: browser-failure-evidence

@@ -105,7 +105,7 @@ image's native inputs.
 ## Verification
 
 `bun run test:container-input` verifies the checked-in input contract. It runs
-through the existing `test:fast` and `verify` gates. The Compose focused
+through `just ci-fast` and `just ci-full`. The Compose focused
 contract verifies the digest-only service wiring. Release qualification builds
 the same Dockerfile for Linux amd64 and records output traceability separately
 from source reproducibility, as defined by the

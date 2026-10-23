@@ -462,7 +462,7 @@ limits instead of allocating million-item fixtures.
 
 The client release gate must also prove a clean Linux amd64 install without
 native server libraries, reject incompatible services before writes, and verify
-checksums and offline help. The canonical repository gate remains
-`bun run verify`; exact new focused script names must be added to
-`CONTRIBUTING.md` with implementation rather than invented as executable commands
-in this design-only change.
+checksums and offline help. The complete repository handoff gate remains
+`just ci-full`; `CONTRIBUTING.md` owns the gate commands and CI event schedule.
+Exact new focused script names must be added there with implementation rather
+than invented as executable commands in this design-only change.
