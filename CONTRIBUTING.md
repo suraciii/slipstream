@@ -240,11 +240,23 @@ No currently executing test moves behind merge.
   environment. An incomplete or corrupt restored installation fails; it does
   not silently rebuild.
 - The Rust workspace cache restores the Cargo registry, Git dependencies,
-  and root `target` directory. A separate exact-input cache restores the
-  independent SpektraFilm target directory. Its key includes the platform,
-  runner image, installed native package versions, Rust toolchain, pinned
-  submodule commit, LibRaw preparation, and build policy. Cargo still checks and
-  builds Film on every run. No cache skips Rust checks or tests.
+  and root `target` directory. A separate exact-input cache stores only the
+  completed SpektraFilm executable and its manifest, not its Cargo target
+  directory. Its identity includes the pinned commit and actual source bytes
+  and modes, build script/configuration, toolchain and compiler versions, build
+  environment, runner image, installed native packages, and verified LibRaw
+  installation and pkg-config selection. The full native gate still invokes
+  `build:spektrafilm`: an exact artifact hit validates identity, executable
+  hash, runtime libraries, and Film introspection before reusing it, avoiding
+  only the Film compile. An absent artifact builds with Cargo; a mismatched,
+  corrupt, or incomplete artifact fails without rebuilding. Standalone/local
+  builds without `SLIPSTREAM_CI_FILM_ARTIFACT` still run the original Cargo
+  build. No cache skips Rust checks or tests. Artifact identity and runtime
+  validation do not establish image equivalence or real-camera qualification.
+  Artifact mode accepts only the canonical compiler and output layout. It
+  refuses Cargo configuration files, compiler/wrapper overrides, custom native
+  flags, and target/release overrides instead of claiming those builds are
+  interchangeable. The default local Cargo path keeps supporting such inputs.
 - `CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` are `0`, and
   `CARGO_INCREMENTAL` is `0` throughout native preparation and verification.
   The job does not request backtraces. To debug a CI-only Rust failure,

@@ -17,7 +17,7 @@
   "scripts": {
     "build": "bun run build:rust && bun run build:workspace",
     "build:rust": "cargo build --workspace --locked && bun run build:spektrafilm",
-    "build:spektrafilm": "cargo build --manifest-path third_party/spektrafilm-rs/Cargo.toml --locked --release --features precision-f64 -p spektrafilm-cli --bin spektrafilm-f64",
+    "build:spektrafilm": "python3 scripts/build-spektrafilm.py",
     "build:workspace": "bun run --workspaces --if-present build",
     "format": "prettier --write .github apps compatibility specs scripts tools CONTRIBUTING.md README.md THIRD-PARTY-NOTICES.md eslint.config.js package.json playwright.config.ts tsconfig.json",
     "format:check": "prettier --check .github apps compatibility specs scripts tools CONTRIBUTING.md README.md THIRD-PARTY-NOTICES.md eslint.config.js package.json playwright.config.ts tsconfig.json",

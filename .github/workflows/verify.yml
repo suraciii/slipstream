@@ -83,20 +83,30 @@ jobs:
           key: libraw-verify-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-environment.outputs.image }}-${{ steps.native-environment.outputs.native }}-${{ hashFiles('scripts/prepare-ci-libraw.sh') }}
       - name: Prepare and verify LibRaw installation
         run: scripts/prepare-ci-libraw.sh
-      - name: Resolve Film source
-        id: film-source
-        run: echo "commit=$(git rev-parse HEAD:third_party/spektrafilm-rs)" >> "$GITHUB_OUTPUT"
-      - name: Restore Film build cache
+      - name: Resolve Film artifact inputs
+        id: film-artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          key="$(sudo -u "$(id -un)" env "PATH=$PATH" \
+            "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" \
+            "ImageOS=${ImageOS:?}" "ImageVersion=${ImageVersion:?}" \
+            CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+            CARGO_INCREMENTAL=0 CI=true GITHUB_ACTIONS=true \
+            python3 scripts/build-spektrafilm.py --cache-key)"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - name: Restore Film executable artifact
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: third_party/spektrafilm-rs/target
-          # Native packages and runner image join the pinned source/build policy.
-          key: film-verify-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-environment.outputs.image }}-${{ steps.native-environment.outputs.native }}-${{ hashFiles('rust-toolchain.toml', '.github/workflows/verify.yml', 'package.json', 'scripts/prepare-ci-libraw.sh') }}-${{ steps.film-source.outputs.commit }}
+          path: ${{ runner.temp }}/film-artifact
+          key: film-artifact-${{ runner.os }}-${{ runner.arch }}-${{ steps.film-artifact.outputs.key }}
       - name: Run native verification with finite processing memory
         run: |
           sudo systemd-run --scope --quiet -p MemoryMax=6G \
             sudo -u "$(id -un)" env "PATH=$PATH" \
             "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" \
+            "SLIPSTREAM_CI_FILM_ARTIFACT=$RUNNER_TEMP/film-artifact" \
+            "ImageOS=${ImageOS:?}" "ImageVersion=${ImageVersion:?}" \
             CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
             CARGO_INCREMENTAL=0 CI=true GITHUB_ACTIONS=true bun run verify:native
       - name: Preserve browser failure evidence
