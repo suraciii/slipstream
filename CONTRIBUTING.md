@@ -231,14 +231,20 @@ No currently executing test moves behind merge.
   native build caches, or installing native libraries and Chromium. A
   lightweight failure avoids that preparation work.
 - Native APT installation excludes recommended packages but retains every
-  declared development dependency. LibRaw remains built from its SHA-256-pinned
-  archive and checked through `pkg-config` before Rust verification.
+  declared development dependency. `scripts/prepare-ci-libraw.sh` builds
+  LibRaw from its SHA-256-pinned archive when its installation is absent.
+  An exact-input cache reuses that installation, keyed by platform, runner
+  image, installed package versions, absolute prefix, and preparation script.
+  Every run verifies installed file checksums, both exact LibRaw versions,
+  include/library paths, and linker/runtime symlinks before publishing the
+  environment. An incomplete or corrupt restored installation fails; it does
+  not silently rebuild.
 - The Rust workspace cache restores the Cargo registry, Git dependencies,
   and root `target` directory. A separate exact-input cache restores the
   independent SpektraFilm target directory. Its key includes the platform,
   runner image, installed native package versions, Rust toolchain, pinned
-  submodule commit, and build policy. Cache hits never skip compilation
-  checks or tests.
+  submodule commit, LibRaw preparation, and build policy. Cargo still checks and
+  builds Film on every run. No cache skips Rust checks or tests.
 - `CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` are `0`, and
   `CARGO_INCREMENTAL` is `0` throughout native preparation and verification.
   The job does not request backtraces. To debug a CI-only Rust failure,

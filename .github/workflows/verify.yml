@@ -62,47 +62,36 @@ jobs:
             libjpeg-dev liblcms2-dev liblensfun-dev libopenblas-dev \
             libopenimageio-dev libvips-dev \
             pkg-config
-          prefix="$RUNNER_TEMP/libraw-022"
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/LibRaw-0.22.2.tar.gz" \
-            https://www.libraw.org/data/LibRaw-0.22.2.tar.gz
-          echo "de86b035655accff8d4010f1a221fdf50d353cb7b1422ba26f14a0db92612cfa  $RUNNER_TEMP/LibRaw-0.22.2.tar.gz" \
-            | sha256sum -c -
-          tar -xzf "$RUNNER_TEMP/LibRaw-0.22.2.tar.gz" -C "$RUNNER_TEMP"
-          cd "$RUNNER_TEMP/LibRaw-0.22.2"
-          ./configure \
-            --prefix="$prefix" \
-            --disable-static \
-            --disable-examples \
-            --disable-openmp \
-            --disable-lcms
-          make -j"$(nproc)"
-          make install
-          export PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-          export LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          pkg-config --atleast-version=0.22.0 libraw libraw_r
-          {
-            printf 'PKG_CONFIG_PATH=%s\n' "$PKG_CONFIG_PATH"
-            printf 'LD_LIBRARY_PATH=%s\n' "$LD_LIBRARY_PATH"
-          } >> "$GITHUB_ENV"
       - run: bun x playwright install --with-deps chromium
-      - name: Resolve Film cache inputs
-        id: film-source
+      - name: Resolve native environment inputs
+        id: native-environment
         shell: bash
         run: |
           set -euo pipefail
-          commit="$(git rev-parse HEAD:third_party/spektrafilm-rs)"
-          native="$(dpkg-query -W -f='${binary:Package}=${Version}\n' | LC_ALL=C sort | sha256sum | cut -d ' ' -f1)"
+          native="$({
+            printf 'prefix=%s/libraw-022\n' "$RUNNER_TEMP"
+            dpkg-query -W -f='${binary:Package}=${Version}\n' | LC_ALL=C sort
+          } | sha256sum | cut -d ' ' -f1)"
           {
-            echo "commit=$commit"
             echo "image=${ImageOS:?}-${ImageVersion:?}"
             echo "native=$native"
           } >> "$GITHUB_OUTPUT"
+      - name: Restore LibRaw installation
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/libraw-022
+          key: libraw-verify-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-environment.outputs.image }}-${{ steps.native-environment.outputs.native }}-${{ hashFiles('scripts/prepare-ci-libraw.sh') }}
+      - name: Prepare and verify LibRaw installation
+        run: scripts/prepare-ci-libraw.sh
+      - name: Resolve Film source
+        id: film-source
+        run: echo "commit=$(git rev-parse HEAD:third_party/spektrafilm-rs)" >> "$GITHUB_OUTPUT"
       - name: Restore Film build cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: third_party/spektrafilm-rs/target
           # Native packages and runner image join the pinned source/build policy.
-          key: film-verify-${{ runner.os }}-${{ runner.arch }}-${{ steps.film-source.outputs.image }}-${{ steps.film-source.outputs.native }}-${{ hashFiles('rust-toolchain.toml', '.github/workflows/verify.yml', 'package.json') }}-${{ steps.film-source.outputs.commit }}
+          key: film-verify-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-environment.outputs.image }}-${{ steps.native-environment.outputs.native }}-${{ hashFiles('rust-toolchain.toml', '.github/workflows/verify.yml', 'package.json', 'scripts/prepare-ci-libraw.sh') }}-${{ steps.film-source.outputs.commit }}
       - name: Run native verification with finite processing memory
         run: |
           sudo systemd-run --scope --quiet -p MemoryMax=6G \
