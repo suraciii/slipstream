@@ -126,6 +126,8 @@ bun run test:cli
 bun run test:cli-package
 bun run test:file-size
 bun run test:container-input
+bun run verify:light
+bun run verify:native
 bun run test:fast
 bun run verify
 ```
@@ -142,9 +144,20 @@ submodule and installed Chromium. The documented real-camera and processing
 scenarios remain opt-in; skipped scenarios do not establish their qualification.
 
 `verify` remains the full repository gate required before handoff and in CI.
-Its `test:fast` stage includes the shared static checks, Web unit tests, all
-repository tooling and Rust checks, RAW discovery, and the browser suite. The
-browser stage owns the production build; the gate does not build again after it.
+Its `test:fast` command runs two ordered phases. `verify:light` runs the shared
+static checks, Web unit tests, and all repository tooling contracts, including
+the daemon-free Docker Compose check. It needs no native build or Chromium.
+`verify:native` runs the Rust checks, RAW scenario discovery, one production
+build, and the complete browser smoke suite against those built artifacts.
+Neither phase substitutes for the full gate. A failed phase stops the gate.
+
+`test:browser` remains the standalone build-and-test command.
+`test:browser:prebuilt` runs the same complete suite without rebuilding; use it
+only after a successful production build from the same checkout. RAW discovery
+lists the actual Cargo and Playwright scenarios without preparing production
+artifacts or launching Chromium. Cargo still compiles its test targets before
+listing them. An actual opt-in `test:raw` run prepares production artifacts
+before executing its browser scenario.
 
 The GitHub Actions gate runs as the runner user in a systemd scope with a 6 GiB
 memory limit. Film admission requires this verifiable finite environment; an
@@ -193,7 +206,7 @@ If the host platform is newer than the Playwright browser installer supports, po
 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/absolute/path/to/chrome bun run test:browser
 ```
 
-`test:browser` runs the browser smoke suite against the Rust `slipstream-server` binary. It builds the Web assets, starts the binary on a private loopback TCP port behind a local HTTPS proxy, and gives it independent temporary state and cache directories. Fixtures provision a generated Access Token and establish real sessions; the checked-in test certificate and key under `tools/test-tls/` are for synthetic fixtures only. The combined CLI-to-Web scenario runs the compiled `slipstream` client the same way. Use `SLIPSTREAM_SERVER_BINARY`, `SLIPSTREAM_CLI_BINARY`, or `SLIPSTREAM_WEB_ROOT` only when testing separately built Rust binaries or a Web directory. `test:rust` checks formatting, denies Clippy warnings, and runs Rust tests serially because the native Preview stack has one process-global libvips lifecycle. `test:fast` adds Bun/TypeScript linting and type checking plus the Rust-only browser suite. `verify` also checks repository formatting and builds Rust plus the Web application. GitHub Actions invokes the same `verify` command.
+`test:browser` runs the browser smoke suite against the Rust `slipstream-server` binary. It builds the Rust workspace, pinned SpektraFilm CLI, and Web assets, starts the server on a private loopback TCP port behind a local HTTPS proxy, and gives it independent temporary state and cache directories. Fixtures provision a generated Access Token and establish real sessions; the checked-in test certificate and key under `tools/test-tls/` are for synthetic fixtures only. The combined CLI-to-Web scenario runs the compiled `slipstream` client the same way. Use `SLIPSTREAM_SERVER_BINARY`, `SLIPSTREAM_CLI_BINARY`, or `SLIPSTREAM_WEB_ROOT` only when testing separately built Rust binaries or a Web directory. `test:rust` checks formatting, denies Clippy warnings, and runs Rust tests serially because the native Preview stack has one process-global libvips lifecycle. `test:fast` and `verify` compose the complete lightweight and native phases.
 
 The Rust workspace contains the production Library/Preview core and HTTP server in `crates/slipstream-server`. The production-language contract is in [`specs/server.md`](specs/server.md). Shared JSON and SQL vectors live in [`compatibility/`](compatibility/); Rust compatibility tests consume them.
 
@@ -205,20 +218,31 @@ downloadable by artifact identity, and replay without another engine run.
 
 ### Continuous integration
 
-[`verify.yml`](.github/workflows/verify.yml) runs `bun run verify` once on a
-GitHub-hosted `ubuntu-latest` runner. That single job is the required `verify`
-check, so the gate keeps one runner and reuses work instead of adding runners:
+[`verify.yml`](.github/workflows/verify.yml) runs the same two phases as
+`bun run verify` on one GitHub-hosted `ubuntu-latest` runner. That single job
+remains the required `verify` check for pull requests and pushes to `main`.
+No currently executing test moves behind merge.
 
-- The job restores a Rust cache keyed on `Cargo.lock` and
-  `rust-toolchain.toml`: `~/.cargo/registry`, `~/.cargo/git`, and `target`.
-  A restored cache removes dependency compilation, which is worth about 50s of
-  the Rust stage on the runner. Formatting, Clippy, every test, the Web build,
-  and the browser suite still run in full.
-- `CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` are `0`. The job
-  never sets `RUST_BACKTRACE`, so nothing there reads debug information;
-  leaving it out shortens compilation and linking and keeps the cache near
-  280 MB compressed instead of 530 MB. To debug a CI-only Rust failure with
-  backtraces, reproduce it locally without those variables.
+- A newer run of the same pull request cancels its superseded run. Each
+  `main` run has an independent concurrency group and is not canceled by a
+  later push or a pull request.
+- The job installs Bun dependencies and checks Docker Compose capability,
+  then runs `verify:light` before installing the Rust toolchain, restoring
+  native build caches, or installing native libraries and Chromium. A
+  lightweight failure avoids that preparation work.
+- Native APT installation excludes recommended packages but retains every
+  declared development dependency. LibRaw remains built from its SHA-256-pinned
+  archive and checked through `pkg-config` before Rust verification.
+- The Rust workspace cache restores the Cargo registry, Git dependencies,
+  and root `target` directory. A separate exact-input cache restores the
+  independent SpektraFilm target directory. Its key includes the platform,
+  runner image, installed native package versions, Rust toolchain, pinned
+  submodule commit, and build policy. Cache hits never skip compilation
+  checks or tests.
+- `CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` are `0`, and
+  `CARGO_INCREMENTAL` is `0` throughout native preparation and verification.
+  The job does not request backtraces. To debug a CI-only Rust failure,
+  reproduce it locally without these profile overrides.
 - The bundled browser suite is a smoke gate over the real stack and runs with
   `fullyParallel` on the runner's four CPUs. The behavior and race scenarios
   that could not tolerate concurrent load were removed by the smoke-suite
