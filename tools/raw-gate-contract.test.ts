@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { cp, mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   rawGateListCommand,
@@ -45,77 +48,70 @@ test("test:raw rejects a path that is not a regular file", async () => {
   );
 });
 
-test("the RAW plan keeps the exact serial native, service, and browser gate", () => {
-  expect(rawGatePlan).toEqual([
-    {
-      kind: "cargo",
-      label: "native and service scenarios",
-      command: [
-        "cargo",
-        "test",
-        "--workspace",
-        "--locked",
-        "--",
-        "--ignored",
-        "--test-threads=1",
-        "--skip",
-        "development_tiff_derivative_handles_a_real_artifact",
-        "--skip",
-        "ilce_7cm2_embedded_preview_delivers_both_derivatives_without_changing_original",
-      ],
-      expectedTests: [
-        "confinement::tests::sony_original_remains_unchanged",
-        "native::tests::sony_embedded_preview_is_largest_usable_candidate_and_original_is_unchanged",
-        "preview::tests::raw_photo_previews_from_embedded_jpeg_independent_of_sibling_jpeg",
-        "preview::tests::sony_opt_in_service_uses_largest_embedded_candidate_without_mutating_original",
-      ],
-    },
-    {
-      kind: "playwright",
-      label: "real-camera browser scenarios",
-      command: [
-        "bun",
-        "run",
-        "test:browser",
-        "--",
-        "--grep",
-        "real-camera",
-        "--workers=1",
-      ],
-      expectedTests: [
-        "real-camera: shows matching JPEG then RAW embedded JPEG through the mobile production Review Session",
-      ],
-    },
-  ]);
+test("browser discovery lists the real camera scenario without production artifacts or a build", async () => {
+  const root = await mkdtemp(join(tmpdir(), "slipstream-raw-discovery-"));
+  try {
+    await cp(
+      new URL("../apps/web/src", import.meta.url),
+      join(root, "apps/web/src"),
+      { recursive: true },
+    );
+    await cp(
+      new URL("../playwright.config.ts", import.meta.url),
+      join(root, "playwright.config.ts"),
+    );
+    await symlink(
+      new URL("../node_modules", import.meta.url).pathname,
+      join(root, "node_modules"),
+      "dir",
+    );
+    const manifest = (await Bun.file(
+      new URL("../package.json", import.meta.url),
+    ).json()) as { scripts: Record<string, string> };
+    manifest.scripts.build = `bun -e 'await Bun.write("production-build-invoked", "unexpected build"); process.exit(29)'`;
+    await Bun.write(join(root, "package.json"), JSON.stringify(manifest));
 
-  expect(rawGateListCommand(rawGatePlan[0]!)).toEqual([
-    "cargo",
-    "test",
-    "--workspace",
-    "--locked",
-    "--",
-    "--ignored",
-    "--test-threads=1",
-    "--skip",
-    "development_tiff_derivative_handles_a_real_artifact",
-    "--skip",
-    "ilce_7cm2_embedded_preview_delivers_both_derivatives_without_changing_original",
-    "--list",
-  ]);
-  expect(rawGateListCommand(rawGatePlan[1]!)).toEqual([
-    "bun",
-    "run",
-    "test:browser",
-    "--",
-    "--grep",
-    "real-camera",
-    "--workers=1",
-    "--list",
-  ]);
-});
+    const browser = rawGatePlan.find((step) => step.kind === "playwright")!;
+    const child = Bun.spawn(rawGateListCommand(browser), {
+      cwd: root,
+      env: {
+        ...process.env,
+        SLIPSTREAM_RAW_SAMPLE: undefined,
+        SLIPSTREAM_SERVER_BINARY: join(root, "target/debug/slipstream-server"),
+        SLIPSTREAM_CLI_BINARY: join(root, "target/debug/slipstream"),
+        SLIPSTREAM_WEB_ROOT: join(root, "apps/web/dist"),
+        PLAYWRIGHT_BROWSERS_PATH: join(root, "missing-browsers"),
+        PLAYWRIGHT_CHROMIUM_EXECUTABLE: join(root, "missing-chromium"),
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+
+    expect(
+      await Bun.file(join(root, "production-build-invoked")).exists(),
+    ).toBe(false);
+    expect(
+      validateRawGateDiscovery(browser, {
+        output: `${stdout}\n${stderr}`,
+        exitCode,
+      }).tests,
+    ).toEqual([
+      "real-camera: shows matching JPEG then RAW embedded JPEG through the mobile production Review Session",
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30_000);
 
 test("discovery parses exactly four native/service and one browser scenario", () => {
   const [native, browser] = rawGatePlan;
+  expect(native!.expectedTests).toHaveLength(4);
+  expect(browser!.expectedTests).toHaveLength(1);
   const nativeOutput = native!.expectedTests
     .map((name) => `${name}: test`)
     .join("\n");
@@ -135,20 +131,26 @@ test("discovery parses exactly four native/service and one browser scenario", ()
 });
 
 test("discovery fails when its command fails", () => {
-  expect(() =>
-    validateRawGateDiscovery(rawGatePlan[0]!, {
-      output: "cargo failed",
-      exitCode: 17,
-    }),
-  ).toThrow(
-    "native and service scenarios discovery failed with exit code 17: cargo failed",
-  );
+  for (const step of rawGatePlan) {
+    expect(() =>
+      validateRawGateDiscovery(step, {
+        output: "discovery command failed",
+        exitCode: 17,
+      }),
+    ).toThrow(
+      `${step.label} discovery failed with exit code 17: discovery command failed`,
+    );
+  }
 });
 
 test("discovery fails instead of accepting zero intended scenarios", () => {
-  expect(() =>
-    validateRawGateDiscovery(rawGatePlan[0]!, { output: "", exitCode: 0 }),
-  ).toThrow("discovery expected 4 tests but found 0");
+  for (const step of rawGatePlan) {
+    expect(() =>
+      validateRawGateDiscovery(step, { output: "", exitCode: 0 }),
+    ).toThrow(
+      `discovery expected ${step.expectedTests.length} tests but found 0`,
+    );
+  }
 });
 
 test("discovery fails instead of accepting an extra scenario", () => {

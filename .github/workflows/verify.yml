@@ -9,15 +9,18 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   verify:
     runs-on: ubuntu-latest
     env:
-      # This job never sets RUST_BACKTRACE, so nothing reads debug
-      # information. Leaving it out shortens compilation and linking and
-      # keeps the Rust cache near 220 MB compressed instead of 530 MB.
+      # Use the same compiler profile for cache restoration and native verification.
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -28,6 +31,13 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - name: Verify Docker Compose config capability
+        run: |
+          timeout -k 10s 30s docker compose version
+          timeout -k 10s 30s docker compose config --help | grep -Fq -- "--format"
+      - name: Run lightweight verification before native setup
+        run: bun run verify:light
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
         with:
           components: clippy,rustfmt
@@ -45,8 +55,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --yes \
+          # Fail rather than install against partial package metadata.
+          sudo apt-get update --error-on=any
+          sudo apt-get install --yes --no-install-recommends \
             build-essential ca-certificates curl libexiv2-dev libglib2.0-dev \
             libjpeg-dev liblcms2-dev liblensfun-dev libopenblas-dev \
             libopenimageio-dev libvips-dev \
@@ -73,19 +84,32 @@ jobs:
             printf 'PKG_CONFIG_PATH=%s\n' "$PKG_CONFIG_PATH"
             printf 'LD_LIBRARY_PATH=%s\n' "$LD_LIBRARY_PATH"
           } >> "$GITHUB_ENV"
-      - run: bun install --frozen-lockfile
       - run: bun x playwright install --with-deps chromium
-      - name: Verify Docker Compose config capability
+      - name: Resolve Film cache inputs
+        id: film-source
+        shell: bash
         run: |
-          timeout -k 10s 30s docker compose version
-          timeout -k 10s 30s docker compose config --help | grep -Fq -- "--format"
-      - name: Run verification with finite processing memory
+          set -euo pipefail
+          commit="$(git rev-parse HEAD:third_party/spektrafilm-rs)"
+          native="$(dpkg-query -W -f='${binary:Package}=${Version}\n' | LC_ALL=C sort | sha256sum | cut -d ' ' -f1)"
+          {
+            echo "commit=$commit"
+            echo "image=${ImageOS:?}-${ImageVersion:?}"
+            echo "native=$native"
+          } >> "$GITHUB_OUTPUT"
+      - name: Restore Film build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: third_party/spektrafilm-rs/target
+          # Native packages and runner image join the pinned source/build policy.
+          key: film-verify-${{ runner.os }}-${{ runner.arch }}-${{ steps.film-source.outputs.image }}-${{ steps.film-source.outputs.native }}-${{ hashFiles('rust-toolchain.toml', '.github/workflows/verify.yml', 'package.json') }}-${{ steps.film-source.outputs.commit }}
+      - name: Run native verification with finite processing memory
         run: |
           sudo systemd-run --scope --quiet -p MemoryMax=6G \
             sudo -u "$(id -un)" env "PATH=$PATH" \
             "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" \
             CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
-            CARGO_INCREMENTAL=0 CI=true GITHUB_ACTIONS=true bun run verify
+            CARGO_INCREMENTAL=0 CI=true GITHUB_ACTIONS=true bun run verify:native
       - name: Preserve browser failure evidence
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

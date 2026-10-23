@@ -73,4 +73,7 @@ async function run(label: string, command: readonly string[]): Promise<void> {
   }
 }
 
-for (const step of rawGatePlan) await run(step.label, step.command);
+for (const step of rawGatePlan) {
+  if (step.prepare) await run(`${step.label} preparation`, step.prepare);
+  await run(step.label, step.command);
+}
