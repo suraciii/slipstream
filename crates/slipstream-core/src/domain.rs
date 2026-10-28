@@ -912,119 +912,105 @@ pub struct PhotoRestorationResult {
 pub struct RemovedPhotoRecord {
     pub photo_id: String,
     pub removed_at_ms: i64,
-    /// The retained Permanent Deletion operation that still owes this Photo an
-    /// outcome. Present only while its deletion is unresolved, so a surface can
-    /// refuse Restore and a second destructive confirmation and can reopen that
-    /// operation after a reload.
+    /// Reserved for compatibility; legacy deletion attempts no longer lock Restore.
     pub pending_verification: Option<String>,
 }
 
-/// Maximum Photos one explicit Permanent Deletion review may capture. A
-/// review is a fixed set, so this bound protects the durable receipt and the
-/// confirmation response without changing the ordinary Trash page size.
-pub const PERMANENT_DELETION_MAX: usize = 5_000;
+pub const TRASH_CLEANUP_MAX: usize = 5_000;
 
-/// The current Trash set a Permanent Deletion review may capture.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PermanentDeletionSelection {
+pub enum TrashSelection {
     Photos(Vec<String>),
     All { exclude_photo_ids: Vec<String> },
 }
 
-/// Persisted facts needed to resolve one current Trash item before a review.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TrashPhotoCandidate {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrashInspectionRecord {
     pub photo_id: String,
     pub removed_at_ms: i64,
     pub original_id: String,
     pub relative_path: RelativeOriginalPath,
     pub kind: OriginalKind,
     pub size: u64,
-    pub mtime_ms: f64,
     pub available: bool,
-    /// The Photo's own deletion has not settled, so a review refuses it until
-    /// its outcome is known instead of capturing it again.
-    pub unsettled: bool,
 }
 
-/// Current confined facts supplied by the Library owner to a deletion review.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PermanentDeletionTarget {
-    pub photo_id: String,
-    pub removed_at_ms: i64,
-    pub facts: Option<OriginalFacts>,
-}
-
-/// Why a selected Trash item could not enter a Permanent Deletion review.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PermanentDeletionRejection {
-    Missing,
-    ChangedElsewhere,
-    /// The Photo's own deletion has not settled, so it cannot take part in
-    /// another destructive confirmation until its outcome is known.
-    PendingVerification,
+pub enum TrashAbsence {
+    Absent,
+    Present,
+    Uninspectable,
 }
 
-/// One Original admitted to a fixed Permanent Deletion review.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PermanentDeletionReviewItem {
+pub struct TrashCleanupBlocker {
+    pub kind: String,
+    pub name: String,
+    pub action: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrashCleanupTarget {
     pub photo_id: String,
     pub removed_at_ms: i64,
     pub original_id: String,
     pub relative_path: RelativeOriginalPath,
-    pub kind: OriginalKind,
-    pub size: u64,
-    pub albums: Vec<PhotoAlbumMembership>,
+    pub absence: TrashAbsence,
+    pub blockers: Vec<TrashCleanupBlocker>,
 }
 
-/// The fixed set and explicit rejections produced by a review.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PermanentDeletionReview {
-    pub operation_id: String,
-    pub items: Vec<PermanentDeletionReviewItem>,
-    pub rejected: Vec<(String, PermanentDeletionRejection)>,
-}
-
-/// Durable state of one reviewed Original deletion item.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PermanentDeletionItemState {
-    Pending,
-    Deleting,
-    Deleted,
-    Missing,
+pub enum TrashCleanupItemState {
+    Cleaned,
     Changed,
-    Failed,
-    Uncertain,
+    Present,
+    Blocked,
+    Unavailable,
+    InspectionFailed,
 }
 
-/// One unresolved item handed to the confined filesystem boundary.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PermanentDeletionWorkItem {
-    pub operation_id: String,
-    pub photo_id: String,
-    pub relative_path: RelativeOriginalPath,
-    pub facts: OriginalFacts,
-    pub state: PermanentDeletionItemState,
-}
-
-/// One settled or still-verifying item in a Permanent Deletion result.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PermanentDeletionItemResult {
+pub struct TrashCleanupItemResult {
     pub photo_id: String,
     pub relative_path: RelativeOriginalPath,
     pub kind: OriginalKind,
-    pub state: PermanentDeletionItemState,
-    pub size: Option<u64>,
+    pub state: TrashCleanupItemState,
     pub message: Option<String>,
+    pub blockers: Vec<TrashCleanupBlocker>,
 }
 
-/// Durable result of one Permanent Deletion operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PermanentDeletionResult {
+pub struct TrashCleanupPreview {
+    pub items: Vec<TrashCleanupPreviewItem>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrashCleanupPreviewItem {
+    pub photo_id: String,
+    pub relative_path: RelativeOriginalPath,
+    pub kind: OriginalKind,
+    pub state: TrashCleanupItemState,
+    pub absence: TrashAbsence,
+    pub message: Option<String>,
+    pub blockers: Vec<TrashCleanupBlocker>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TrashCleanupCounts {
+    pub cleaned: usize,
+    pub changed: usize,
+    pub present: usize,
+    pub blocked: usize,
+    pub unavailable: usize,
+    pub inspection_failed: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrashCleanupResult {
     pub operation_id: String,
     pub reviewed: usize,
-    pub logical_bytes_deleted: u64,
-    pub items: Vec<PermanentDeletionItemResult>,
+    pub counts: TrashCleanupCounts,
+    pub items: Vec<TrashCleanupItemResult>,
 }
 
 /// The largest Rating a Photo decision may carry.

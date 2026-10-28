@@ -59,8 +59,9 @@ server instance, and the bounded Sidecar content:
   because an external tool can edit a Sidecar in place while preserving its
   size and modification time;
 - the Association generation: a persisted monotonic counter for the Photo that
-  every removal, restore, Permanent Deletion, ownership transition, Location
-  change, or Library expansion increments; and
+  every removal, restore, ownership transition, Location change, or Library
+  expansion increments; Trash Record Cleanup invalidates the Photo's evidence
+  when it removes the record; and
 - the server instance epoch: a random identifier generated at startup from
   state that survives restarts of the operating system process.
 
@@ -74,8 +75,11 @@ server restart.
 The Library state store persists one Sidecar Association record per retained
 Sidecar: its relative path, the owning Photo, the Sidecar revision last
 observed, and a state of `active` or `retained-orphan`. When the owning
-Original leaves its Location through Permanent Deletion or a recovery
-relocation, the record becomes `retained-orphan` instead of being deleted.
+Original is confirmed absent from its Location or leaves it through a recovery
+relocation, the record becomes `retained-orphan` instead of being deleted. Trash
+Record Cleanup retains the minimal orphan evidence needed to prevent silent
+re-association, including the path, last observed Sidecar revision, and former
+owner's historical identity, without a live foreign key to the removed Photo.
 
 A later eligible Original at the same basename does not inherit the Sidecar.
 Read reports the Association as unresolved while a `retained-orphan` record
@@ -121,7 +125,7 @@ transfers the association atomically and advances the displaced Photo's
 association generation. An unchanged retained orphan still blocks Save.
 
 Metadata work runs under the state owner's serialization with scan, recovery,
-removal, and restore. One queued Save operation covers inspection, evidence
+removal, restore, and Trash Record Cleanup. One queued Save operation covers inspection, evidence
 comparison, supervisor admission and publication, and association recording;
 the operation continues even if its caller disconnects. Remove either commits
 before Save, causing `photo_removed`, or after the admitted Save settles.
@@ -363,7 +367,7 @@ advanced controls; there is no separate simplified save operation.
 
 The database remains the owner of Library decisions and Photo identity. It
 does not cache Sidecar fields; the Sidecar Association record is ownership and
-conflict state, not metadata. Scan, Restore, Permanent Deletion, and Location
+conflict state, not metadata. Scan, Restore, Trash Record Cleanup, and Location
 Recovery do not apply Sidecar values to Library decisions. The confined
 publishing operation is reachable only through the metadata service's
 association owner, which derives the Sidecar destination from an admitted
@@ -425,7 +429,7 @@ Permanent tests must prove observable behavior rather than parser wiring:
 - RAW/JPEG association cases, duplicate Sidecars, retained orphan records, and
   moved Originals refuse unsafe writes, and the `retained-orphan` state blocks
   and clears through fresh inspection only;
-- evidence tokens are rejected after removal, restore, Permanent Deletion,
+- evidence tokens are rejected after removal, restore, Trash Record Cleanup,
   relocation that returns to the same Location, Association generation bumps,
   and server restart;
 - unknown XMP structures survive saves, every construct outside the document

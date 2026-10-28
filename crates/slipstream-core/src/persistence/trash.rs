@@ -1,39 +1,27 @@
-//! Bounded Trash listing and pending-deletion status.
+//! Bounded Trash listing.
 
 use super::owner::{PersistenceError, RemovedPhotoPageResult};
-use super::permanent_deletion::{
-    PERMANENT_DELETION_DELETED_PREFIX, unsettled_permanent_deletion_operation,
-};
+use super::trash_cleanup::PERMANENT_DELETION_DELETED_PREFIX;
 use crate::{PhotoOperationRemainder, RemovedPhotoRecord};
 use rusqlite::{Connection, OptionalExtension, params};
 
-/// Removed Photos whose Originals were not confirmed permanently deleted.
-fn trash_rows() -> String {
-    format!(
-        "FROM photos p
-         WHERE p.removed_at_ms IS NOT NULL
-           AND p.id NOT IN (SELECT substr(m.key, {offset}) FROM library_metadata m
-                            WHERE m.key LIKE '{prefix}%')",
-        offset = PERMANENT_DELETION_DELETED_PREFIX.len() + 1,
-        prefix = PERMANENT_DELETION_DELETED_PREFIX,
-    )
-}
+const TRASH_ROWS: &str = "FROM photos p WHERE p.removed_at_ms IS NOT NULL";
 
 pub(super) fn removed_photos(
     connection: &Connection,
     start: usize,
     limit: usize,
 ) -> RemovedPhotoPageResult {
-    let remaining = trash_rows();
+    let remaining = TRASH_ROWS;
     let total: i64 = connection
         .query_row(&format!("SELECT COUNT(*) {remaining}"), [], |row| {
             row.get(0)
         })
         .map_err(|_| PersistenceError::Storage)?;
     let total = usize::try_from(total).map_err(|_| PersistenceError::Storage)?;
-    let rows = connection
+    let records = connection
         .prepare(&format!(
-            "SELECT p.id,p.removed_at_ms,p.removed_operation {remaining}
+            "SELECT p.id,p.removed_at_ms {remaining}
              ORDER BY p.removed_at_ms DESC,p.id
              LIMIT ? OFFSET ?"
         ))
@@ -44,38 +32,28 @@ pub(super) fn removed_photos(
                 i64::try_from(start).map_err(|_| PersistenceError::Storage)?,
             ],
             |row| {
-                Ok((
-                    RemovedPhotoRecord {
-                        photo_id: row.get(0)?,
-                        removed_at_ms: row.get(1)?,
-                        pending_verification: None,
-                    },
-                    row.get::<_, Option<String>>(2)?,
-                ))
+                Ok(RemovedPhotoRecord {
+                    photo_id: row.get(0)?,
+                    removed_at_ms: row.get(1)?,
+                    pending_verification: None,
+                })
             },
         )
         .map_err(|_| PersistenceError::Storage)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| PersistenceError::Storage)?;
-    let mut records = Vec::with_capacity(rows.len());
-    for (mut record, _) in rows {
-        record.pending_verification =
-            unsettled_permanent_deletion_operation(connection, &record.photo_id)
-                .map_err(|_| PersistenceError::Storage)?;
-        records.push(record);
-    }
-    // The remainder surface names the newest removal operation that still owns
-    // Trash items, and counts exactly those Photos.
+    // Undo counts only records Restore can recover, not confirmed legacy deletions.
     let operation = connection
         .query_row(
             &format!(
                 "SELECT p.removed_operation,COUNT(*),MAX(p.removed_at_ms) {remaining}
                    AND p.removed_operation IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM library_metadata m WHERE m.key = ? || p.id)
                  GROUP BY p.removed_operation
                  ORDER BY MAX(p.removed_at_ms) DESC,p.removed_operation DESC
                  LIMIT 1"
             ),
-            [],
+            [PERMANENT_DELETION_DELETED_PREFIX],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,

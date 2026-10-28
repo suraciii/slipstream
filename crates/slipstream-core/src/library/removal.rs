@@ -76,7 +76,7 @@ impl Library {
     pub async fn restore_trash(
         &self,
         operation_id: String,
-        selection: PermanentDeletionSelection,
+        selection: TrashSelection,
     ) -> Result<ExplicitPhotoRestoreResult, LibraryError> {
         let receive = {
             let _admission = self.admit()?;

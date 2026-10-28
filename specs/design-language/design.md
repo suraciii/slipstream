@@ -108,7 +108,7 @@ Surface tokens must satisfy all of these rules:
 
 ### Token invariants
 
-- One token has one meaning. A token must not mean both focus and success, or both Picked and permanent deletion.
+- One token has one meaning. A token must not mean both focus and success, or both Picked and irreversible Trash Record Cleanup.
 - Every state that affects a decision has a non-color channel: visible text, icon, geometry, position, or an exposed accessible state.
 - `pending`, `stale`, `failed`, `unavailable`, and `unknown` must not collapse into one generic muted treatment.
 - Destructive consequence tokens are reserved for effects that can remove or permanently alter data. Reject is a reversible Selection State and is not itself a destructive consequence.

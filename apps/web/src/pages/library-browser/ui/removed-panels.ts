@@ -1,6 +1,4 @@
-/// The Library browser page's Removed Photos projections: the removal
-/// review, the bounded Removed Photos listing (the Trash), and the
-/// permanent-deletion review above it.
+/// The Library browser's removal review, Trash listing, and record-cleanup review.
 ///
 /// The controller owns presentation only. It binds the surfaces' controls,
 /// presents the view models the page model builds, and emits the intents the
@@ -23,9 +21,7 @@ import type {
   TrashReviewViewModel,
 } from "../model/removed-listing-contract.js";
 
-/// The intents the Removed Photos surfaces emit, as the page model names
-/// them: the review, listing, and permanent-deletion actions of the removal
-/// path and nothing else.
+/// Intents emitted by the removal, Trash listing, and record-cleanup surfaces.
 type RemovedPanelIntentKind =
   | "removal-review-open"
   | "removal-review-close"
@@ -38,15 +34,13 @@ type RemovedPanelIntentKind =
   | "removed-select-all"
   | "removed-clear-selection"
   | "removed-toggle"
-  | "removed-delete"
+  | "removed-cleanup"
+  | "removed-copy-locations"
   | "removed-restore-selected"
   | "removed-restore"
   | "trash-review-confirm"
   | "trash-review-cancel"
-  | "trash-check-result"
-  | "trash-retry-delete"
-  | "trash-row-check"
-  | "trash-row-resume";
+  | "trash-check-result";
 
 export type RemovedPanelIntent = Extract<
   LibraryBrowserIntent,
@@ -57,8 +51,7 @@ export type RemovedPanelIntent = Extract<
 // renders them and emits the page intent union.
 
 /// The Removed Photos surfaces' controls, looked up by the view that owns the
-/// markup: the removal review, the listing, the Trash outcome, and the
-/// permanent-deletion review.
+/// markup: the removal review, the listing, the Trash outcome, and cleanup review.
 export type RemovedPanelsElements = Readonly<{
   removalOpen: HTMLButtonElement;
   removalDialog: HTMLDialogElement;
@@ -80,29 +73,21 @@ export type RemovedPanelsElements = Readonly<{
   removedSelectAll: HTMLButtonElement;
   removedClearSelection: HTMLButtonElement;
   removedSelectionCount: HTMLElement;
+  trashLibraryFolder: HTMLElement;
+  trashCopyLocations: HTMLButtonElement;
   removedDelete: HTMLButtonElement;
   removedRestoreSelection: HTMLButtonElement;
   removedUndo: HTMLButtonElement;
   trashOutcome: HTMLElement;
   trashOutcomeTitle: HTMLElement;
   trashOutcomeCounts: HTMLElement;
-  trashOutcomeDeleted: HTMLElement;
-  trashOutcomeChanged: HTMLElement;
-  trashOutcomeMissing: HTMLElement;
-  trashOutcomeFailed: HTMLElement;
-  trashOutcomePending: HTMLElement;
-  trashOutcomeBytes: HTMLElement;
   trashOutcomeItems: HTMLElement;
   trashOutcomeActions: HTMLElement;
   trashOutcomeCheck: HTMLButtonElement;
-  trashOutcomeRetry: HTMLButtonElement;
   trashReviewDialog: HTMLDialogElement;
   trashReviewSummary: HTMLElement;
   trashReviewAlbums: HTMLElement;
   trashReviewItems: HTMLElement;
-  trashReviewRejected: HTMLElement;
-  trashReviewRejectedHeading: HTMLElement;
-  trashReviewRejectedList: HTMLElement;
   trashReviewConfirm: HTMLButtonElement;
   trashReviewCancel: HTMLButtonElement;
   trashReviewClose: HTMLButtonElement;
@@ -142,8 +127,7 @@ export interface RemovedPanels {
   openRemovedPanel(model: RemovedPanelViewModel): void;
   renderRemovedPanel(model: RemovedPanelViewModel): void;
   closeRemovedPanel(): void;
-  /// Opens the permanent-deletion review above the Trash listing. Opening it
-  /// deletes nothing; only its confirmation reaches the delete route.
+  /// Opens the record-cleanup review above the Trash listing.
   openTrashReview(model: TrashReviewViewModel): void;
   /// Updates the open review without reopening it, so a settling confirmation
   /// reaches the surface the Photographer is looking at.
@@ -183,29 +167,21 @@ export function createRemovedPanels({
     removedSelectAll,
     removedClearSelection,
     removedSelectionCount,
+    trashLibraryFolder,
+    trashCopyLocations,
     removedDelete,
     removedRestoreSelection,
     removedUndo,
     trashOutcome,
     trashOutcomeTitle,
     trashOutcomeCounts,
-    trashOutcomeDeleted,
-    trashOutcomeChanged,
-    trashOutcomeMissing,
-    trashOutcomeFailed,
-    trashOutcomePending,
-    trashOutcomeBytes,
     trashOutcomeItems,
     trashOutcomeActions,
     trashOutcomeCheck,
-    trashOutcomeRetry,
     trashReviewDialog,
     trashReviewSummary,
     trashReviewAlbums,
     trashReviewItems,
-    trashReviewRejected,
-    trashReviewRejectedHeading,
-    trashReviewRejectedList,
     trashReviewConfirm,
     trashReviewCancel,
     trashReviewClose,
@@ -265,7 +241,10 @@ export function createRemovedPanels({
     send({ kind: "removed-restore-selected" }),
   );
   removedDelete.addEventListener("click", () =>
-    send({ kind: "removed-delete" }),
+    send({ kind: "removed-cleanup" }),
+  );
+  trashCopyLocations.addEventListener("click", () =>
+    send({ kind: "removed-copy-locations" }),
   );
   removedPrevious.addEventListener("click", () =>
     send({ kind: "removed-page", direction: -1 }),
@@ -286,13 +265,17 @@ export function createRemovedPanels({
   trashOutcomeCheck.addEventListener("click", () =>
     send({ kind: "trash-check-result" }),
   );
-  trashOutcomeRetry.addEventListener("click", () =>
-    send({ kind: "trash-retry-delete" }),
-  );
   // A close the controller did not start — a native close request, an Escape
   // from a surface this one yielded to, a destination change — releases the
   // listing's thumbnails the same way an explicit Close does.
-  removedPanel.addEventListener("close", releaseRemovedRows);
+  removedPanel.addEventListener("close", () => {
+    if (removedPanel.open) return;
+    releaseRemovedRows();
+    if (!trashReviewDialog.open) send({ kind: "removed-list-close" });
+  });
+  trashReviewDialog.addEventListener("close", () => {
+    if (!trashReviewDialog.open) send({ kind: "trash-review-cancel" });
+  });
 
   const presentRemovalReview = (model: RemovalReviewViewModel) => {
     removalSummary.textContent = `${formatPhotoCount(
@@ -316,88 +299,53 @@ export function createRemovedPanels({
     if (model.tone) removalMessage.dataset.tone = model.tone;
     else removalMessage.removeAttribute("data-tone");
   };
-  /// The outcome label one non-deleted operation item presents. The states
-  /// whose outcome is not settled yet all present as pending verification.
-  const TRASH_OUTCOME_STATE_LABELS: Record<
-    "pending" | "deleting" | "missing" | "changed" | "failed" | "uncertain",
-    string
-  > = {
-    pending: "Pending verification",
-    deleting: "Pending verification",
-    uncertain: "Pending verification",
-    changed: "Changed",
-    missing: "Missing",
-    failed: "Failed",
-  };
   const presentTrashOutcome = (model: RemovedPanelViewModel) => {
     const outcome = model.outcome;
-    const busy =
-      model.outcomeBusy !== undefined || model.pending || model.deleting;
-    trashOutcomeCheck.disabled = busy;
-    trashOutcomeRetry.disabled = busy;
-    if (outcome === undefined) {
-      trashOutcome.hidden = true;
-      trashOutcomeTitle.textContent = "";
-      trashOutcomeCounts.hidden = true;
-      trashOutcomeBytes.hidden = true;
-      trashOutcomeItems.replaceChildren();
-      trashOutcomeActions.hidden = true;
-      return;
-    }
-    trashOutcome.hidden = false;
+    const wasHidden = trashOutcome.hidden;
+    trashOutcomeCheck.disabled =
+      model.outcomeBusy !== undefined || model.pending || model.cleaning;
+    trashOutcome.hidden = outcome === undefined;
+    if (!outcome) return;
     trashOutcomeTitle.textContent = outcome.unconfirmed
-      ? "The deletion result could not be confirmed."
-      : "Deletion outcome";
-    // Recovery stays offered while the response is lost or any item is still
-    // pending verification: retry reconciles prior effects before it repeats
-    // the unresolved items.
-    trashOutcomeActions.hidden = !(
-      outcome.unconfirmed || outcome.pendingVerification > 0
-    );
+      ? "The cleanup result could not be confirmed."
+      : "Cleanup outcome";
+    trashOutcomeActions.hidden = !outcome.unconfirmed;
+    trashOutcomeCounts.hidden = outcome.unconfirmed === true;
     if (outcome.unconfirmed) {
-      trashOutcomeCounts.hidden = true;
-      trashOutcomeBytes.hidden = true;
       trashOutcomeItems.replaceChildren();
+      if (wasHidden) trashOutcome.scrollIntoView({ block: "nearest" });
       return;
     }
-    trashOutcomeCounts.hidden = false;
-    trashOutcomeDeleted.textContent = `Deleted ${outcome.deleted.toLocaleString()}`;
-    trashOutcomeChanged.textContent = `Changed ${outcome.changed.toLocaleString()}`;
-    trashOutcomeMissing.textContent = `Missing ${outcome.missing.toLocaleString()}`;
-    trashOutcomeFailed.textContent = `Failed ${outcome.failed.toLocaleString()}`;
-    trashOutcomePending.textContent = `Pending verification ${outcome.pendingVerification.toLocaleString()}`;
-    trashOutcomeBytes.hidden = false;
-    trashOutcomeBytes.textContent = `Logical bytes deleted: ${outcome.logicalBytesDeleted.toLocaleString()}`;
+    const counts = outcome.counts;
+    trashOutcomeCounts.textContent = `Cleaned ${counts.cleaned.toLocaleString()} · Changed ${counts.changed.toLocaleString()} · Present ${counts.present.toLocaleString()} · Blocked ${counts.blocked.toLocaleString()} · Unavailable ${counts.unavailable.toLocaleString()} · Inspection failed ${counts.inspectionFailed.toLocaleString()}`;
     trashOutcomeItems.replaceChildren(
       ...outcome.items.map((item) => {
         const row = document.createElement("li");
         row.className = "trash-outcome-item";
         row.dataset.trashOutcomeItem = "";
-        row.textContent = `${TRASH_OUTCOME_STATE_LABELS[item.state]} · ${item.originalKind.toUpperCase()} · ${item.originalLocation} · ${
-          item.size === null
-            ? "Size unavailable"
-            : `${item.size.toLocaleString()} bytes`
-        }${item.message ? ` · ${item.message}` : ""}`;
+        const labels = {
+          cleaned: "Cleaned",
+          changed: "Changed",
+          present: "Original present",
+          blocked: "Blocked",
+          unavailable: "Record unavailable",
+          "inspection-failed": "Inspection failed",
+        };
+        row.textContent = `${labels[item.state]} · ${item.photoId} · ${item.originalKind.toUpperCase()} · ${item.originalLocation}${item.message ? ` · ${item.message}` : ""}${item.blockers.map((blocker) => ` · ${blocker.kind}: ${blocker.name} — ${blocker.action}`).join("")}`;
         return row;
       }),
     );
+    if (wasHidden) trashOutcome.scrollIntoView({ block: "nearest" });
   };
   const presentTrashReview = (model: TrashReviewViewModel) => {
-    trashReviewSummary.textContent =
-      model.itemCount === 0
-        ? "None of the selected Trash items can be deleted."
-        : `${formatPhotoCount(model.itemCount)} selected for permanent deletion · ${model.totalBytes.toLocaleString()} logical bytes.`;
-    // The confirmation names exactly the captured set: every item the review
-    // admitted, and nothing else. An excluded item never appears here.
-    trashReviewConfirm.textContent = model.deleting
-      ? "Permanently deleting…"
-      : model.confirmLabel;
-    trashReviewAlbums.textContent =
-      model.albumCount === 0
-        ? "No Album is affected."
-        : `${model.albumCount.toLocaleString()} ${
-            model.albumCount === 1 ? "Album" : "Albums"
-          } affected: ${model.albumNames.join(", ")}.`;
+    trashReviewSummary.textContent = `${formatPhotoCount(model.itemCount)} selected for record cleanup.`;
+    if (!model.canConfirm && !model.cleaning) {
+      trashReviewSummary.textContent +=
+        " Confirmation requires readable Album membership for every selected Photo.";
+    }
+    trashReviewAlbums.textContent = model.albumNames.length
+      ? `Affected Albums: ${model.albumNames.join(", ")}.`
+      : "Album membership is shown for each Photo below.";
     trashReviewItems.replaceChildren(
       ...model.items.map((item) => {
         const row = document.createElement("li");
@@ -410,47 +358,63 @@ export function createRemovedPanels({
         const kind = document.createElement("span");
         kind.className = "trash-review-kind";
         kind.dataset.trashReviewKind = "";
-        kind.textContent = item.originalKind.toUpperCase();
+        kind.textContent = `${item.originalKind.toUpperCase()} · ${item.photoId}`;
         const size = document.createElement("span");
         size.className = "trash-review-size";
         size.dataset.trashReviewSize = "";
-        size.textContent = `${item.size.toLocaleString()} bytes`;
+        size.textContent =
+          item.originalSize === null
+            ? "Size unavailable"
+            : `${item.originalSize.toLocaleString()} bytes`;
+        const evidence = document.createElement("span");
+        const blockerText = item.blockers
+          .map((blocker) => `${blocker.kind}: ${blocker.name}`)
+          .join(", ");
+        evidence.textContent = [
+          item.previewState === "changed"
+            ? "Changed since capture; cleanup will be refused."
+            : item.previewState === "unavailable"
+              ? "Photo record unavailable; cleanup will be refused."
+              : item.absence === "absent"
+                ? item.blockers.length
+                  ? "Original absent, but retained work blocks cleanup."
+                  : "Original absent; eligible for cleanup."
+                : item.absence === "present"
+                  ? "Original present; cleanup will be refused."
+                  : item.absence === "uninspectable"
+                    ? "Original could not be inspected; cleanup will be refused."
+                    : "Absence evidence unavailable.",
+          item.message ?? "",
+          blockerText ? `Blockers: ${blockerText}` : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
         const albums = document.createElement("span");
         albums.className = "trash-review-albums";
         albums.dataset.trashReviewItemAlbums = "";
         albums.textContent =
-          item.albumNames.length === 0
-            ? "No Albums"
-            : item.albumNames.join(", ");
-        row.append(location, kind, size, albums);
-        return row;
-      }),
-    );
-    trashReviewRejected.hidden = model.rejected.length === 0;
-    trashReviewRejectedHeading.textContent = `${model.rejected.length.toLocaleString()} ${
-      model.rejected.length === 1 ? "item" : "items"
-    } could not be reviewed:`;
-    trashReviewRejectedList.replaceChildren(
-      ...model.rejected.map((item) => {
-        const row = document.createElement("li");
-        row.className = "trash-review-rejected-item";
-        row.dataset.trashReviewRejectedItem = "";
-        const photo = document.createElement("span");
-        photo.dataset.trashReviewRejectedPhoto = "";
-        photo.textContent = item.photoId;
-        const reason = document.createElement("span");
-        reason.dataset.trashReviewRejectedReason = "";
-        reason.textContent = item.reasonLabel;
-        row.append(photo, reason);
+          item.albumNames === null
+            ? "Album membership unavailable"
+            : item.albumNames.length
+              ? item.albumNames.join(", ")
+              : "No Albums";
+        row.append(location, kind, size, evidence, albums);
         return row;
       }),
     );
     trashReviewConfirm.hidden = !model.canConfirm;
-    trashReviewConfirm.disabled = model.deleting;
-    trashReviewConfirm.textContent = model.deleting
-      ? "Permanently deleting…"
+    trashReviewConfirm.disabled = model.cleaning;
+    trashReviewConfirm.textContent = model.cleaning
+      ? "Cleaning up records…"
       : model.confirmLabel;
-    trashReviewCancel.disabled = model.deleting;
+    trashReviewCancel.disabled = model.cleaning;
+    if (
+      model.cleaning &&
+      (document.activeElement === trashReviewConfirm ||
+        document.activeElement === document.body)
+    ) {
+      trashReviewClose.focus();
+    }
   };
   const presentRemovedPanel = (model: RemovedPanelViewModel) => {
     releaseRemovedRows();
@@ -469,24 +433,20 @@ export function createRemovedPanels({
                   model.start + 1
                 ).toLocaleString()}–${shown.toLocaleString()}.`;
     removedList.setAttribute("aria-busy", String(model.status === "loading"));
+    const singleRestore = model.restoringPhotoId !== undefined;
     const rows = (ready ? model.items : []).map((item) => {
       const row = document.createElement("li");
       row.className = "removed-item";
-      const pending = item.pendingVerificationOperationId !== null;
-      if (pending) row.dataset.trashPendingItem = "true";
       if (item.excluded) row.dataset.trashExcludedItem = "true";
-      const retainedBusy =
-        model.pending || model.deleting || model.outcomeBusy !== undefined;
       const select = document.createElement("input");
       select.type = "checkbox";
       select.checked = item.selected;
       select.ariaLabel = `Select ${item.filename}`;
       select.disabled =
         model.pending ||
-        model.deleting ||
+        model.cleaning ||
         model.restoringSelection ||
-        Boolean(model.restoreUnconfirmed) ||
-        pending;
+        singleRestore;
       select.addEventListener("change", () =>
         send({
           kind: "removed-toggle",
@@ -520,11 +480,7 @@ export function createRemovedPanels({
       location.textContent = item.originalLocation;
       const details = document.createElement("p");
       details.className = "removed-when";
-      details.textContent = `${item.originalKind.toUpperCase()} · ${
-        item.originalSize === null
-          ? "Size unavailable"
-          : `${item.originalSize.toLocaleString()} bytes`
-      }`;
+      details.textContent = `${item.originalKind.toUpperCase()} · ${item.photoId} · ${item.originalSize === null ? "Size unavailable" : `${item.originalSize.toLocaleString()} bytes`} · Last known Original: ${item.originalAvailable ? "available" : "unavailable"} · ${item.state}`;
       const when = document.createElement("p");
       when.className = "removed-when";
       when.textContent = `Removed ${removalTimestamp(item.removedAtMs)}`;
@@ -536,11 +492,11 @@ export function createRemovedPanels({
       restore.textContent = restoring ? "Restoring…" : "Restore";
       restore.disabled =
         model.pending ||
-        model.deleting ||
+        model.cleaning ||
         model.restoringSelection ||
-        model.restoreUnconfirmed ||
+        singleRestore ||
         restoring ||
-        pending;
+        item.state !== "captured";
       restore.addEventListener("click", () =>
         send({
           kind: "removed-restore",
@@ -549,46 +505,13 @@ export function createRemovedPanels({
         }),
       );
       row.append(select, thumbnail, facts, restore);
-      if (pending) {
-        // The item's permanent-deletion outcome is not settled. Its row
-        // names the pending state and offers the recovery that names the
-        // retained operation id; Restore and selection stay unavailable.
-        const note = document.createElement("div");
-        note.className = "removed-pending";
-        note.dataset.trashPending = "";
-        const marker = document.createElement("p");
-        marker.className = "removed-pending-marker";
-        marker.textContent =
-          "Pending verification — the deletion outcome is still being verified.";
-        const check = document.createElement("button");
-        check.type = "button";
-        check.className = "quiet";
-        check.dataset.trashRowCheck = "";
-        check.textContent = "Check result";
-        check.disabled = retainedBusy;
-        check.addEventListener("click", () =>
-          send({ kind: "trash-row-check", photoId: item.photoId }),
-        );
-        const resume = document.createElement("button");
-        resume.type = "button";
-        resume.className = "quiet";
-        resume.dataset.trashRowResume = "";
-        resume.textContent = "Resume";
-        resume.disabled = retainedBusy;
-        resume.addEventListener("click", () =>
-          send({ kind: "trash-row-resume", photoId: item.photoId }),
-        );
-        note.append(marker, check, resume);
-        row.append(note);
-      }
       if (item.excluded) {
-        // An excluded item was deliberately left out of the selection, so the
-        // row says so: it is never named as reviewed, counted, or deleted.
+        // Excluded records stay visible without joining the captured selection.
         const excluded = document.createElement("p");
         excluded.className = "removed-excluded";
         excluded.dataset.trashExcluded = "";
         excluded.textContent =
-          "Excluded — this item is not part of the selection and will not be deleted.";
+          "Excluded — this item is not part of the selection and will not be cleaned up.";
         row.append(excluded);
       }
       const binding: GridThumbnailBinding = {
@@ -621,48 +544,52 @@ export function createRemovedPanels({
     removedSelectionCount.textContent = !ready
       ? ""
       : model.allSelected
-        ? "All current Trash items, except exclusions."
+        ? `${model.selectionCount.toLocaleString()} captured items selected, except exclusions.`
         : model.selectionCount === 0
           ? "Nothing selected."
           : `${model.selectionCount.toLocaleString()} selected.`;
     removedSelectAll.disabled =
       !ready ||
       model.pending ||
-      model.deleting ||
+      model.cleaning ||
       model.restoringSelection ||
-      Boolean(model.restoreUnconfirmed) ||
+      singleRestore ||
       model.total === 0;
     removedClearSelection.disabled =
       !ready ||
       model.pending ||
-      model.deleting ||
+      model.cleaning ||
       model.restoringSelection ||
-      Boolean(model.restoreUnconfirmed) ||
+      singleRestore ||
       model.selectionCount === 0;
     removedRestoreSelection.disabled =
       !ready ||
       model.pending ||
-      model.deleting ||
+      model.cleaning ||
       model.restoringSelection ||
+      singleRestore ||
       !model.canRestore;
     removedRestoreSelection.textContent = model.restoringSelection
       ? "Restoring selected…"
-      : model.restoreUnconfirmed
-        ? "Retry Restore result"
-        : "Restore selected";
+      : "Restore selected";
     removedDelete.disabled =
       !ready ||
       model.pending ||
-      model.deleting ||
+      model.cleaning ||
       model.restoringSelection ||
-      model.restoreUnconfirmed ||
-      !model.canDelete;
-    removedDelete.textContent = "Review permanent deletion";
-    const shownEnd = shown >= model.total;
+      singleRestore ||
+      !model.canCleanup;
+    removedDelete.textContent = "Clean up records";
+    trashCopyLocations.disabled = !ready || !model.canCopy;
+    trashLibraryFolder.textContent = ready
+      ? `Library Folder: ${model.libraryRoot} (service filesystem namespace) · Captured ${model.evaluatedAt}${model.expiresAt ? ` · Expires ${model.expiresAt}` : ""}`
+      : "";
     removedPrevious.hidden = !ready || model.total === 0;
     removedNext.hidden = !ready || model.total === 0;
-    removedPrevious.disabled = !ready || model.pending || model.start === 0;
-    removedNext.disabled = !ready || model.pending || shownEnd;
+    removedPrevious.disabled =
+      !ready || model.pending || singleRestore || !model.hasPrevious;
+    removedNext.disabled =
+      !ready || model.pending || singleRestore || !model.hasNext;
     removedRetry.hidden = model.status !== "failed" || !model.canRetry;
     removedRetry.disabled = model.pending;
     removedUndo.hidden =
@@ -670,9 +597,9 @@ export function createRemovedPanels({
     removedUndo.disabled =
       !ready ||
       model.pending ||
-      model.deleting ||
+      model.cleaning ||
       model.restoringSelection ||
-      Boolean(model.restoreUnconfirmed);
+      singleRestore;
     removedUndo.textContent =
       model.undo === undefined
         ? "Undo the last removal"
@@ -727,7 +654,7 @@ export function createRemovedPanels({
       presentRemovedPanel(model);
     },
     closeRemovedPanel() {
-      if (!alive) return;
+      if (!alive || !removedPanel.open) return;
       surfaces.close("removed-panel");
     },
     openTrashReview(model) {
@@ -741,7 +668,7 @@ export function createRemovedPanels({
       presentTrashReview(model);
     },
     closeTrashReview() {
-      if (!alive) return;
+      if (!alive || !trashReviewDialog.open) return;
       surfaces.close("trash-review");
     },
     dispose() {
@@ -775,22 +702,21 @@ export const REMOVED_PANELS_TEMPLATE = `
         <dialog class="removed-dialog" data-removed-panel aria-labelledby="removed-title">
           <div class="removed-sheet">
             <header class="removed-header"><h3 id="removed-title">Trash</h3><button type="button" class="quiet" data-removed-close>Close</button></header>
-            <p class="removed-status" data-removed-status role="status"></p>
+            <p class="removed-status" data-removed-status role="status"></p><p class="removed-status" data-trash-library-folder></p>
             <div class="removed-selection" data-removed-selection>
               <button type="button" class="quiet" data-removed-select-all>Select all Trash</button>
               <button type="button" class="quiet" data-removed-clear-selection>Clear selection</button>
               <span data-removed-selection-count></span>
               <button type="button" class="removed-restore-selection" data-removed-restore-selection>Restore selected</button>
-              <button type="button" class="quiet removed-delete-review" data-removed-delete>Review permanent deletion</button>
+              <button type="button" class="quiet" data-trash-copy-locations>Copy file locations</button><button type="button" class="quiet removed-delete-review" data-removed-delete>Clean up records</button>
             </div>
             <div class="removed-scroll">
             <ul class="removed-list" data-removed-list></ul>
             <section class="trash-outcome" data-trash-outcome hidden>
               <p class="trash-outcome-title" data-trash-outcome-title role="status"></p>
-              <p class="trash-outcome-counts" data-trash-outcome-counts hidden><span data-trash-outcome-deleted></span> <span data-trash-outcome-changed></span> <span data-trash-outcome-missing></span> <span data-trash-outcome-failed></span> <span data-trash-outcome-pending></span></p>
-              <p class="trash-outcome-bytes" data-trash-outcome-bytes hidden></p>
+              <p class="trash-outcome-counts" data-trash-outcome-counts hidden></p>
               <ul class="trash-outcome-items" data-trash-outcome-items></ul>
-              <div class="trash-outcome-actions" data-trash-outcome-actions hidden><button type="button" class="quiet" data-trash-check-result>Check result</button><button type="button" class="quiet" data-trash-retry-delete>Retry</button></div>
+              <div class="trash-outcome-actions" data-trash-outcome-actions hidden><button type="button" class="quiet" data-trash-check-result>Check result</button></div>
             </section>
             </div>
             <p class="removed-message" data-removed-message role="alert" hidden></p>
@@ -799,16 +725,12 @@ export const REMOVED_PANELS_TEMPLATE = `
         </dialog>
         <dialog class="removal-dialog trash-review-dialog" data-trash-review aria-labelledby="trash-review-title">
           <div class="removal-sheet">
-            <header class="removal-header"><h3 id="trash-review-title">Permanently delete from Trash</h3><button type="button" class="quiet" data-trash-review-close>Close</button></header>
+            <header class="removal-header"><h3 id="trash-review-title">Clean up Trash records</h3><button type="button" class="quiet" data-trash-review-close>Close</button></header>
             <div class="removal-body">
               <p class="removal-summary" data-trash-review-summary></p>
-              <p class="removal-message trash-review-warning">Permanently deletes the selected Original Files from disk and removes each Photo from every Album that contains it. Slipstream cannot undo it.</p>
+              <p class="removal-message trash-review-warning">Cleanup discards Photo records, Library decisions, and Album memberships. Slipstream cannot undo it. No files are deleted. Absence at the remembered Location does not prove that all copies were deleted or that space was reclaimed.</p>
               <p class="removal-summary" data-trash-review-albums></p>
               <ul class="trash-review-items" data-trash-review-items></ul>
-              <div class="trash-review-rejected" data-trash-review-rejected hidden>
-                <p class="removal-summary" data-trash-review-rejected-heading></p>
-                <ul class="trash-review-rejected-list" data-trash-review-rejected-list></ul>
-              </div>
             </div>
             <footer class="removal-actions"><button type="button" class="trash-confirm-danger" data-trash-confirm hidden></button><button type="button" class="quiet" data-trash-cancel>Cancel</button></footer>
           </div>

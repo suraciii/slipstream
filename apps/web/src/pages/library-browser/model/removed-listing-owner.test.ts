@@ -1,61 +1,69 @@
 import { expect, test } from "bun:test";
-import { createRemovalOwner, type RemovalFetch } from "./removal-owner.js";
+import type { RemovalFetch } from "../api/removal.js";
+import { createRemovalOwner } from "./removal-owner.js";
 import { createRemovedListingOwner } from "./removed-listing-owner.js";
-import type { RemovedPanelViewModel } from "./removed-listing-contract.js";
+import type {
+  RemovedPanelViewModel,
+  TrashReviewViewModel,
+} from "./removed-listing-contract.js";
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((accept) => {
-    resolve = accept;
-  });
-  return { promise, resolve };
-}
+const item = (index: number) => ({
+  photoId: `photo-${index}`,
+  removedAtMs: 1000 + index,
+  originalId: `original-${index}`,
+  originalLocation:
+    index === 0 ? 'folder/a "quote"\n.jpg' : `folder/${index}.jpg`,
+  originalKind: "jpeg",
+  originalSize: 100,
+  originalAvailable: false,
+  state: "captured",
+  photo: null,
+});
+const page = (start = 0, total = 1) => ({
+  start,
+  limit: 50,
+  total,
+  cleanupMaximum: 5000,
+  restoreMaximum: 100,
+  evaluatedAt: "2026-10-28T00:00:00Z",
+  expiresAt: start + 50 < total ? "2026-10-28T01:00:00Z" : null,
+  nextCursor: start + 50 < total ? "next" : null,
+  libraryRoot: "/srv/photos",
+  namespace: "service",
+  operation: null,
+  photos: Array.from({ length: Math.min(50, total - start) }, (_, offset) =>
+    item(start + offset),
+  ),
+});
 
-function listing(operation: { operationId: string; removed: number } | null) {
-  return Response.json({
-    start: 0,
-    limit: 50,
-    total: operation ? 1 : 0,
-    operation,
-    reviewMaximum: 50,
-    photos: operation
-      ? [
-          {
-            removedAtMs: 100,
-            originalLocation: "photo.jpg",
-            originalKind: "jpeg",
-            originalSize: 100,
-            pendingVerificationOperationId: null,
-            photo: {
-              id: "photo-1",
-              available: true,
-              original: { kind: "jpeg", available: true },
-              originalFilename: "photo.jpg",
-              selectionState: "rejected",
-              rating: 0,
-              hasSavedEdits: false,
-              preview: { state: "unavailable" },
-            },
-          },
-        ]
-      : [],
-  });
-}
-
-function fixture(answers: Array<Response | Promise<Response>>) {
-  const fetcher: RemovalFetch = async () => {
-    const answer = answers.shift();
-    if (!answer) throw new Error("Unexpected request");
-    return answer;
+const previewResponse = (init?: RequestInit) => {
+  const raw = typeof init?.body === "string" ? init.body : "{}";
+  const body = JSON.parse(raw) as {
+    items: Array<{ photoId: string; originalLocation: string }>;
   };
+  return Response.json({
+    items: body.items.map((entry) => ({
+      photoId: entry.photoId,
+      originalLocation: entry.originalLocation,
+      originalKind: "jpeg",
+      state: "captured",
+      absence: "absent",
+      message: null,
+      blockers: [],
+    })),
+  });
+};
+
+function fixture(fetcher: RemovalFetch) {
   const removal = createRemovalOwner(fetcher);
   let model!: RemovedPanelViewModel;
-  let settled = deferred<RemovedPanelViewModel>();
-  const selectionSettled = deferred<RemovedPanelViewModel>();
+  let review: TrashReviewViewModel | undefined;
+  let waitFor: ((model: RemovedPanelViewModel) => void) | undefined;
+  let refreshes = 0;
+  let reopens = 0;
   const present = (next: RemovedPanelViewModel) => {
     model = next;
-    if (next.status !== "loading") settled.resolve(next);
-    if (next.allSelected && !next.pending) selectionSettled.resolve(next);
+    waitFor?.(next);
   };
   const owner = createRemovedListingOwner(fetcher, {
     removal,
@@ -63,477 +71,360 @@ function fixture(answers: Array<Response | Promise<Response>>) {
       openPanel: present,
       renderPanel: present,
       closePanel() {},
-      openReview() {},
-      renderReview() {},
-      closeReview() {},
+      openReview(next) {
+        review = next;
+      },
+      renderReview(next) {
+        review = next;
+      },
+      closeReview() {
+        review = undefined;
+      },
       controlsChanged() {},
     },
     coordinate: {
-      refreshLibrary: async () => {},
-      reopenSourceAfterRestore: async () => {},
+      refreshLibrary: () => {
+        refreshes++;
+        return Promise.resolve();
+      },
+      reopenSourceAfterRestore: () => {
+        reopens++;
+        return Promise.resolve();
+      },
       restorationMessage: () => "Restored.",
     },
   });
   return {
     owner,
-    removal,
-    fetcher,
-    present: {
-      openPanel: present,
-      renderPanel: present,
-      closePanel() {},
-      openReview() {},
-      renderReview() {},
-      closeReview() {},
-      controlsChanged() {},
-    },
-    coordinate: {
-      refreshLibrary: async () => {},
-      reopenSourceAfterRestore: async () => {},
-      restorationMessage: () => "Restored.",
-    },
     get model() {
       return model;
     },
-    settlement: () => settled.promise,
-    selectionSettlement: () => selectionSettled.promise,
-    nextRead() {
-      settled = deferred<RemovedPanelViewModel>();
+    get review() {
+      return review;
+    },
+    get refreshes() {
+      return refreshes;
+    },
+    get reopens() {
+      return reopens;
+    },
+    until(predicate: (model: RemovedPanelViewModel) => boolean) {
+      if (model && predicate(model)) return Promise.resolve();
+      const { promise, resolve } = Promise.withResolvers<void>();
+      waitFor = (next) => {
+        if (predicate(next)) {
+          waitFor = undefined;
+          resolve();
+        }
+      };
+      return promise;
     },
   };
 }
 
-test("Trash loading and failed reads never expose a previous operation as current Undo", async () => {
-  const held = deferred<Response>();
-  const f = fixture([
-    held.promise,
-    listing(null),
-    listing({ operationId: "new", removed: 1 }),
-  ]);
-  f.removal.rememberOperation({ operationId: "old", removed: 23 });
-  f.owner.openPanel();
-  expect(f.model.status).toBe("loading");
-  expect(f.model.undo).toBeUndefined();
-  held.resolve(new Response(null, { status: 503 }));
-  const failed = await f.settlement();
-  expect(failed.status).toBe("failed");
-  expect(failed.canRetry).toBe(true);
-  expect(failed.undo).toBeUndefined();
-  f.nextRead();
-  f.owner.retry();
-  const empty = await f.settlement();
-  expect(empty.status).toBe("ready");
-  expect(empty.total).toBe(0);
-  expect(empty.undo).toBeUndefined();
-  expect(f.removal.operation).toBeUndefined();
-  f.nextRead();
-  f.owner.closePanel();
-  f.owner.openPanel();
-  const populated = await f.settlement();
-  expect(populated.total).toBe(1);
-  expect(populated.undo).toEqual({ removed: 1 });
-  expect(f.removal.operation?.operationId).toBe("new");
-  f.owner.dispose();
-});
-
-test("late Trash read cannot replace the reopened listing or resurrect Undo", async () => {
-  const oldRead = deferred<Response>();
-  const f = fixture([listing(null), oldRead.promise, listing(null)]);
-  f.owner.openPanel();
-  await f.settlement();
-  const staleRead = f.owner.reloadAfterUndo("Restored.");
-  f.owner.closePanel();
-  f.nextRead();
-  f.owner.openPanel();
-  await f.settlement();
-  oldRead.resolve(listing({ operationId: "stale", removed: 1 }));
-  await staleRead;
-  expect(f.model.status).toBe("ready");
-  expect(f.model.total).toBe(0);
-  expect(f.model.undo).toBeUndefined();
-  expect(f.removal.operation).toBeUndefined();
-  f.owner.dispose();
-});
-
-/// A multi-item Trash listing whose rows the exclusion tests toggle. The
-/// pending-verification row is never selectable, exactly as the listing
-/// contract says.
-function exclusionListing(
-  photoIds: ReadonlyArray<string>,
-  pendingId: string | null = null,
-  start = 0,
-  reviewMaximum = 50,
-) {
-  return Response.json({
-    start,
-    limit: 50,
-    total: photoIds.length,
-    operation: null,
-    reviewMaximum,
-    photos: photoIds.slice(start, start + 50).map((photoId, offset) => ({
-      removedAtMs: 1000 - start - offset,
-      originalLocation: `${photoId}.jpg`,
-      originalKind: "jpeg",
-      originalSize: 100,
-      pendingVerificationOperationId:
-        photoId === pendingId ? "operation-9" : null,
-      photo: {
-        id: photoId,
-        available: true,
-        original: { kind: "jpeg", available: true },
-        originalFilename: `${photoId}.jpg`,
-        selectionState: "rejected",
-        rating: 0,
-        hasSavedEdits: false,
-        preview: { state: "unavailable" },
+function installStorage() {
+  const values = new Map<string, string>();
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      localStorage: {
+        get length() {
+          return values.size;
+        },
+        key: (index: number) => [...values.keys()][index] ?? null,
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          values.set(key, value);
+        },
+        removeItem: (key: string) => {
+          values.delete(key);
+        },
       },
-    })),
+    },
   });
+  return {
+    values,
+    restore() {
+      if (previous) Object.defineProperty(globalThis, "window", previous);
+      else Reflect.deleteProperty(globalThis, "window");
+    },
+  };
 }
 
-test("select all submits every current Trash item minus the exclusions, and an excluded row is never counted as reviewed", async () => {
-  const reviewBodies: unknown[] = [];
-  const f = fixture([
-    exclusionListing(["photo-1", "photo-2", "photo-3"]),
-    exclusionListing(["photo-1", "photo-2", "photo-3"]),
-    Response.json({
-      operationId: "operation-review",
-      items: [
-        {
-          photoId: "photo-1",
-          removedAtMs: 1000,
-          originalId: "original-1",
-          originalLocation: "photo-1.jpg",
-          originalKind: "jpeg",
-          size: 100,
-          albums: [],
-        },
-      ],
-      rejected: [],
-    }),
-  ]);
-  // Record the identities sent to review before any response is processed.
-  const recording: RemovalFetch = async (path, init) => {
-    if (path === "/api/trash/review")
-      reviewBodies.push(
-        typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+test("select all follows the retained cursor, excludes a row, and reviews captured evidence without mutation", async () => {
+  const calls: string[] = [];
+  const f = fixture((path, init) => {
+    calls.push(path);
+    if (path.includes("cursor="))
+      return Promise.resolve(Response.json(page(50, 51)));
+    if (path.startsWith("/api/trash?"))
+      return Promise.resolve(Response.json(page(0, 51)));
+    if (path.includes("/albums"))
+      return Promise.resolve(
+        Response.json({ albums: [{ id: "album", name: "Keepers" }] }),
       );
-    return f.fetcher(path, init);
-  };
-  const owner = createRemovedListingOwner(recording, {
-    removal: f.removal,
-    present: f.present,
-    coordinate: f.coordinate,
+    if (path === "/api/trash/cleanup-preview")
+      return Promise.resolve(previewResponse(init));
+    throw new Error(`Unexpected request: ${path}`);
   });
-  owner.openPanel();
-  await f.settlement();
-  expect(f.model.total).toBe(3);
-
-  // Select all names the complete selection, not only the visible cells.
-  owner.selectAll();
-  await f.selectionSettlement();
-  expect(f.model.selectionCount).toBe(3);
-  expect(f.model.allSelected).toBe(true);
-  expect(f.model.canDelete).toBe(true);
-  expect(f.model.message).toBe(
-    "Review scope: all current Trash items except 0 excluded.",
-  );
-
-  // Excluding one row before capture removes it from the captured set.
-  owner.toggle("photo-2", false);
-  expect(f.model.selectionCount).toBe(2);
-  const excludedRow = f.model.items.find((item) => item.photoId === "photo-2");
-  expect(excludedRow?.excluded).toBe(true);
-  expect(excludedRow?.selected).toBe(false);
-  expect(f.model.message).toBe(
-    "Review scope: all current Trash items except 1 excluded. 1 item excluded from the selection and never deleted.",
-  );
-
-  // The server resolves all current Trash minus the named exclusion.
-  await owner.deleteSelection();
-  const captured = reviewBodies as ReadonlyArray<{
-    all?: boolean;
-    photoIds?: string[];
-    excludePhotoIds?: string[];
-  }>;
-  expect(captured).toHaveLength(1);
-  const submission = captured[0];
-  expect(submission?.all).toBe(true);
-  expect(submission?.photoIds).toEqual([]);
-  expect(submission?.excludePhotoIds).toEqual(["photo-2"]);
-  // The listing row still shows the item — it is in Trash — but marked
-  // excluded, never selected.
-  const rowAfterCapture = f.model.items.find(
-    (item) => item.photoId === "photo-2",
-  );
-  expect(rowAfterCapture?.excluded).toBe(true);
-  expect(rowAfterCapture?.selected).toBe(false);
-  owner.dispose();
-});
-
-test("select all reports the review bound without claiming a truncated capture", async () => {
-  const ids = Array.from({ length: 120 }, (_, index) => `photo-${index}`);
-  const f = fixture([
-    exclusionListing(ids),
-    exclusionListing(ids, null, 50),
-    exclusionListing(ids, null, 100),
-  ]);
   f.owner.openPanel();
-  await f.settlement();
+  await f.until((model) => model.status === "ready");
   f.owner.selectAll();
-  await f.selectionSettlement();
-  expect(f.model.allSelected).toBe(true);
-  expect(f.model.message).toBe(
-    "Review scope: all current Trash items except 0 excluded. Selecting all current Trash exceeds the 50-item review bound. Narrow the selection by excluding items, then review this batch.",
+  await f.until((model) => model.allSelected && !model.pending);
+  expect(f.model.selectionCount).toBe(51);
+  f.owner.turnPage(1);
+  f.owner.toggle("photo-50", false);
+  expect(f.model.selectionCount).toBe(50);
+  await f.owner.cleanupSelection();
+  expect(f.review?.itemCount).toBe(50);
+  expect(f.review?.items.some((entry) => entry.photoId === "photo-50")).toBe(
+    false,
   );
-  expect(f.model.selectionCount).toBe(120);
-  expect(f.model.canRestore).toBe(true);
+  expect(f.review?.items[0]?.albumNames).toEqual(["Keepers"]);
+  expect(calls.filter((path) => path.includes("cursor="))).toEqual([
+    "/api/trash?cursor=next",
+  ]);
+  expect(calls.some((path) => path === "/api/trash/cleanup")).toBe(false);
+  f.owner.cancelReview();
+  expect(f.review).toBeUndefined();
   f.owner.dispose();
 });
 
-test("select all never selects an item whose deletion outcome is not settled", async () => {
-  const f = fixture([
-    exclusionListing(["photo-1", "photo-pending"], "photo-pending"),
-  ]);
-  f.owner.openPanel();
-  await f.settlement();
-
-  f.owner.selectAll();
-  await f.selectionSettlement();
-  const pendingRow = f.model.items.find(
-    (item) => item.photoId === "photo-pending",
-  );
-  expect(pendingRow?.selected).toBe(false);
-  expect(pendingRow?.excluded).toBe(false);
-  expect(f.model.selectionCount).toBe(1);
-  expect(f.model.canRestore).toBe(true);
-  expect(f.model.message).toBe(
-    "Review scope: all current Trash items except 1 excluded. 1 item pending verification was not selected.",
-  );
-  f.owner.dispose();
-});
-
-test("later Trash arrivals stay unselected until all-mode capture", async () => {
-  const f = fixture([
-    exclusionListing(["photo-1", "photo-2"]),
-    exclusionListing(["photo-1", "photo-2", "photo-3"]),
-  ]);
-  f.owner.openPanel();
-  await f.settlement();
-  f.owner.selectAll();
-  await f.selectionSettlement();
-  expect(f.model.selectionCount).toBe(2);
-
-  // Before review, all mode still resolves current Trash at admission.
-  f.nextRead();
-  await f.owner.reloadAfterUndo("Restored.");
-  expect(f.model.total).toBe(3);
-  expect(f.model.allSelected).toBe(true);
-  expect(f.model.selectionCount).toBe(2);
-  expect(
-    f.model.items.find((item) => item.photoId === "photo-3")?.selected,
-  ).toBe(false);
-  f.owner.toggle("photo-3", true);
-  expect(
-    f.model.items.find((item) => item.photoId === "photo-3")?.selected,
-  ).toBe(true);
-  expect(f.model.selectionCount).toBe(3);
-  f.owner.toggle("photo-3", false);
-  expect(f.model.selectionCount).toBe(2);
-  expect(
-    f.model.items.find((item) => item.photoId === "photo-3")?.excluded,
-  ).toBe(true);
-  f.owner.dispose();
-});
-
-test("all-mode review captures current Trash minus exclusions and reports the resolved count", async () => {
-  const items = ["photo-1", "photo-3"].map((photoId, index) => ({
-    photoId,
-    removedAtMs: 1000 - index * 2,
-    originalId: `original-${index}`,
-    originalLocation: `${photoId}.jpg`,
-    originalKind: "jpeg",
-    size: 100,
-    albums: [],
-  }));
-  const f = fixture([
-    exclusionListing(["photo-1", "photo-2"]),
-    exclusionListing(["photo-1", "photo-2", "photo-3"]),
-    exclusionListing(["photo-1", "photo-2", "photo-3"]),
-  ]);
-  let request: unknown;
-  let reviewed = 0;
-  const owner = createRemovedListingOwner(
-    async (path, init) => {
-      if (path === "/api/trash/review") {
-        const body: unknown = JSON.parse(
-          typeof init?.body === "string" ? init.body : "",
-        );
-        if (!body || typeof body !== "object" || !("operationId" in body))
-          throw new Error("Missing review operation identity");
-        request = body;
-        return Response.json({
-          operationId: body.operationId,
-          items,
-          rejected: [],
-        });
+test("a definitive cleanup refusal releases the attempt identity for a new review", async () => {
+  const storage = installStorage();
+  try {
+    let posts = 0;
+    const fetcher: RemovalFetch = (path, init) => {
+      if (path.startsWith("/api/trash?"))
+        return Promise.resolve(Response.json(page()));
+      if (path.includes("/albums"))
+        return Promise.resolve(Response.json({ albums: [] }));
+      if (path === "/api/trash/cleanup-preview")
+        return Promise.resolve(previewResponse(init));
+      if (path === "/api/trash/cleanup") {
+        posts++;
+        return Promise.resolve(new Response(null, { status: 413 }));
       }
-      return f.fetcher(path, init);
-    },
-    {
-      removal: f.removal,
-      present: {
-        ...f.present,
-        openReview(model) {
-          reviewed = model.itemCount;
-        },
-      },
-      coordinate: f.coordinate,
-    },
-  );
-  owner.openPanel();
-  await f.settlement();
-  owner.selectAll();
-  await f.selectionSettlement();
-  owner.toggle("photo-2", false);
-  await owner.reloadAfterUndo("Restored.");
-  expect(f.model.selectionCount).toBe(1);
-  expect(
-    f.model.items.find((item) => item.photoId === "photo-3")?.selected,
-  ).toBe(false);
-  await owner.deleteSelection();
-  expect(request).toMatchObject({
-    all: true,
-    photoIds: [],
-    excludePhotoIds: ["photo-2"],
-  });
-  expect(reviewed).toBe(2);
-  owner.dispose();
+      throw new Error(`Unexpected request: ${path}`);
+    };
+    const f = fixture(fetcher);
+    f.owner.openPanel();
+    await f.until((model) => model.status === "ready");
+    f.owner.toggle("photo-0", true);
+    await f.owner.cleanupSelection();
+    await f.owner.confirmReview();
+    expect(posts).toBe(1);
+    expect(
+      [...storage.values.keys()].some((key) =>
+        key.startsWith("slipstream:trash-cleanup-attempt:"),
+      ),
+    ).toBe(false);
+    expect(f.model.outcome).toBeUndefined();
+    expect(f.model.canCleanup).toBe(true);
+    await f.owner.cleanupSelection();
+    await f.owner.confirmReview();
+    expect(posts).toBe(2);
+  } finally {
+    storage.restore();
+  }
 });
 
-test("clearing the selection drops the exclusions with it", async () => {
-  const f = fixture([exclusionListing(["photo-1", "photo-2"])]);
+test("cleanup persists its identity before sending and checks a lost result without resubmission", async () => {
+  const storage = installStorage();
+  try {
+    let request:
+      | {
+          operationId: string;
+          items: Array<{
+            photoId: string;
+            removedAtMs: number;
+            originalId: string;
+            originalLocation: string;
+          }>;
+        }
+      | undefined;
+    let posts = 0;
+    const fetcher: RemovalFetch = (path, init) => {
+      if (path.startsWith("/api/trash?"))
+        return Promise.resolve(Response.json(page()));
+      if (path.includes("/albums"))
+        return Promise.resolve(Response.json({ albums: [] }));
+      if (path === "/api/trash/cleanup-preview")
+        return Promise.resolve(previewResponse(init));
+      if (path === "/api/trash/cleanup") {
+        posts++;
+        expect(typeof init?.body).toBe("string");
+        if (typeof init?.body !== "string")
+          throw new Error("cleanup request body is not JSON text");
+        request = JSON.parse(init.body) as typeof request;
+        expect(
+          storage.values.get(
+            `slipstream:trash-cleanup-attempt:${request?.operationId}`,
+          ),
+        ).toContain(request?.operationId);
+        throw new Error("lost response");
+      }
+      if (path.startsWith("/api/trash/cleanup-operations/"))
+        return Promise.resolve(
+          Response.json({
+            operationId: request!.operationId,
+            reviewed: 1,
+            counts: {
+              cleaned: 0,
+              changed: 0,
+              present: 0,
+              blocked: 1,
+              unavailable: 0,
+              inspectionFailed: 0,
+            },
+            items: [
+              {
+                photoId: "photo-0",
+                originalLocation: item(0).originalLocation,
+                originalKind: "jpeg",
+                state: "blocked",
+                message: null,
+                blockers: [
+                  { kind: "workspace", name: "work", action: "Remove work" },
+                ],
+              },
+            ],
+          }),
+        );
+      throw new Error(`Unexpected request: ${path}`);
+    };
+    const f = fixture(fetcher);
+    f.owner.openPanel();
+    await f.until((model) => model.status === "ready");
+    f.owner.toggle("photo-0", true);
+    await f.owner.cleanupSelection();
+    await f.owner.confirmReview();
+    expect(request?.items).toEqual([
+      {
+        photoId: "photo-0",
+        removedAtMs: 1000,
+        originalId: "original-0",
+        originalLocation: item(0).originalLocation,
+      },
+    ]);
+    expect(f.model.outcome).toEqual({ unconfirmed: true });
+    f.owner.closePanel();
+    f.owner.openPanel();
+    await f.until((model) => model.status === "ready");
+    expect(f.model.outcome).toEqual({ unconfirmed: true });
+    await f.owner.checkOutcome();
+    expect(posts).toBe(1);
+    expect(f.model.outcome).toMatchObject({
+      counts: { blocked: 1 },
+      items: [{ blockers: [{ name: "work" }] }],
+    });
+    expect(f.refreshes).toBe(1);
+    expect(f.reopens).toBe(1);
+    expect(
+      [...storage.values.keys()].some((key) =>
+        key.startsWith("slipstream:trash-cleanup-attempt:"),
+      ),
+    ).toBe(false);
+    f.owner.dispose();
+  } finally {
+    storage.restore();
+  }
+});
+
+test("pending intent is recovered under the same operation identity after reload", async () => {
+  const storage = installStorage();
+  try {
+    const operationId = "00000000-0000-4000-8000-000000000777";
+    const target = {
+      photoId: item(0).photoId,
+      removedAtMs: item(0).removedAtMs,
+      originalId: item(0).originalId,
+      originalLocation: item(0).originalLocation,
+    };
+    storage.values.set(
+      `slipstream:trash-cleanup-attempt:${operationId}`,
+      JSON.stringify({ operationId, items: [target] }),
+    );
+    let posts = 0;
+    const fetcher: RemovalFetch = (path, init) => {
+      if (path.startsWith("/api/trash?"))
+        return Promise.resolve(Response.json(page()));
+      if (path.includes("/albums"))
+        return Promise.resolve(Response.json({ albums: [] }));
+      if (path.startsWith("/api/trash/cleanup-operations/"))
+        return Promise.resolve(new Response(null, { status: 404 }));
+      if (path === "/api/trash/cleanup") {
+        posts++;
+        const raw = typeof init?.body === "string" ? init.body : "{}";
+        expect(JSON.parse(raw)).toEqual({
+          operationId,
+          items: [target],
+        });
+        return Promise.resolve(
+          Response.json({
+            operationId,
+            reviewed: 1,
+            counts: {
+              cleaned: 1,
+              changed: 0,
+              present: 0,
+              blocked: 0,
+              unavailable: 0,
+              inspectionFailed: 0,
+            },
+            items: [
+              {
+                photoId: target.photoId,
+                originalLocation: target.originalLocation,
+                originalKind: "jpeg",
+                state: "cleaned",
+                message: null,
+                blockers: [],
+              },
+            ],
+          }),
+        );
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    };
+    const f = fixture(fetcher);
+    f.owner.openPanel();
+    await f.until((model) => {
+      const outcome = model.outcome;
+      return (
+        outcome !== undefined &&
+        !("unconfirmed" in outcome) &&
+        outcome.counts.cleaned === 1 &&
+        !model.cleaning
+      );
+    });
+    expect(posts).toBe(1);
+    expect(
+      [...storage.values.keys()].some((key) =>
+        key.startsWith("slipstream:trash-cleanup-attempt:"),
+      ),
+    ).toBe(false);
+    expect(f.model.outcome).toMatchObject({ counts: { cleaned: 1 } });
+    f.owner.dispose();
+  } finally {
+    storage.restore();
+  }
+});
+
+test("a failed continuation does not claim a complete selection", async () => {
+  const f = fixture((path) =>
+    Promise.resolve(
+      path.includes("cursor=")
+        ? new Response(null, { status: 410 })
+        : Response.json(page(0, 51)),
+    ),
+  );
   f.owner.openPanel();
-  await f.settlement();
+  await f.until((model) => model.status === "ready");
   f.owner.selectAll();
-  await f.selectionSettlement();
-  f.owner.clearSelection();
+  await f.until((model) => !model.pending && Boolean(model.message));
   expect(f.model.selectionCount).toBe(0);
   expect(f.model.allSelected).toBe(false);
-  expect(f.model.items.every((item) => !item.excluded)).toBe(true);
   f.owner.dispose();
-});
-
-test("new cross-page pending items are excluded and duplicate review is refused", async () => {
-  const ids = Array.from({ length: 51 }, (_, index) => `photo-${index}`);
-  const f = fixture([
-    exclusionListing(ids),
-    exclusionListing(ids, null, 50),
-    exclusionListing(ids, "photo-50"),
-    exclusionListing(ids, "photo-50", 50),
-  ]);
-  const held = deferred<Response>();
-  const started = deferred<void>();
-  const bodies: Array<{
-    all: boolean;
-    photoIds: string[];
-    excludePhotoIds: string[];
-  }> = [];
-  const fetcher: RemovalFetch = async (path, init) => {
-    if (path === "/api/trash/review") {
-      bodies.push(
-        JSON.parse(typeof init?.body === "string" ? init.body : "") as {
-          all: boolean;
-          photoIds: string[];
-          excludePhotoIds: string[];
-        },
-      );
-      started.resolve();
-      return held.promise;
-    }
-    return f.fetcher(path, init);
-  };
-  const owner = createRemovedListingOwner(fetcher, {
-    removal: f.removal,
-    present: f.present,
-    coordinate: f.coordinate,
-  });
-  owner.openPanel();
-  await f.settlement();
-  owner.selectAll();
-  await f.selectionSettlement();
-  expect(f.model.selectionCount).toBe(51);
-  const first = owner.deleteSelection();
-  await owner.deleteSelection();
-  await started.promise;
-  expect(bodies).toHaveLength(1);
-  expect(bodies[0]?.all).toBe(true);
-  expect(bodies[0]?.photoIds).toEqual([]);
-  expect(bodies[0]?.excludePhotoIds).toContain("photo-50");
-  held.resolve(new Response(null, { status: 503 }));
-  await first;
-  owner.dispose();
-});
-
-test("all-mode Restore excludes pending and unchecked rows and retries the same intent", async () => {
-  const ids = ["photo-1", "photo-2", "photo-pending"];
-  const f = fixture([
-    exclusionListing(ids, "photo-pending"),
-    exclusionListing(ids, "photo-pending"),
-    exclusionListing(["photo-2", "photo-pending"], "photo-pending"),
-  ]);
-  const requests: Array<{
-    operationId: string;
-    all: boolean;
-    photoIds: string[];
-    excludePhotoIds: string[];
-  }> = [];
-  const fetcher: RemovalFetch = async (path, init) => {
-    if (path !== "/api/trash/restore") return f.fetcher(path, init);
-    const body = JSON.parse(
-      typeof init?.body === "string" ? init.body : "",
-    ) as {
-      operationId: string;
-      all: boolean;
-      photoIds: string[];
-      excludePhotoIds: string[];
-    };
-    requests.push(body);
-    if (requests.length === 1) throw new Error("response lost");
-    return Response.json({
-      operationId: body.operationId,
-      counts: {
-        restored: 1,
-        alreadyActive: 0,
-        changedElsewhere: 0,
-        missing: 0,
-      },
-      results: [{ photoId: "photo-1", outcome: "restored" }],
-    });
-  };
-  const owner = createRemovedListingOwner(fetcher, {
-    removal: f.removal,
-    present: f.present,
-    coordinate: f.coordinate,
-  });
-  owner.openPanel();
-  await f.settlement();
-  owner.selectAll();
-  await f.selectionSettlement();
-  owner.toggle("photo-2", false);
-  await owner.restoreSelection();
-  expect(f.model.restoreUnconfirmed).toBe(true);
-  expect(f.model.canRestore).toBe(true);
-  owner.toggle("photo-2", true);
-  await owner.restoreSelection();
-  expect(requests).toHaveLength(2);
-  expect(requests[1]).toEqual(requests[0]);
-  expect(requests[0]?.all).toBe(true);
-  expect(requests[0]?.photoIds).toEqual([]);
-  expect(requests[0]?.excludePhotoIds).toEqual(["photo-2", "photo-pending"]);
-  expect(f.model.restoreUnconfirmed).toBeUndefined();
-  expect(f.model.message).toBe(
-    "1 Photo restored. Restore resolved 1 item: 0 already active, 0 changed, 0 unavailable.",
-  );
-  owner.dispose();
 });

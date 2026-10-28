@@ -83,11 +83,12 @@ pub fn fixture_config(base: &std::path::Path, library_root: PathBuf, web_root: P
 pub fn capabilities_body() -> Value {
     json!({
         "serverVersion": "0.0.0",
-        "supportedCliContractVersions": [1],
+        "supportedCliContractVersions": [2],
         "limits": {
             "listPageMaximum": 60,
             "mutationPhotoIdsMaximum": 100,
             "removalPhotoIdsMaximum": 100,
+            "trashCleanupMaximum": 5000,
             "albumReorderMembersMaximum": 100,
             "retainedQueryIdsMaximum": 1000000,
             "retainedQueryIdleSeconds": 900,
@@ -115,10 +116,13 @@ pub async fn command(server: &str, arguments: &[&str]) -> (u8, Value) {
             .args(arguments)
             .output()
             .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            output.stderr.is_empty(),
-            "unexpected CLI stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
+            stderr.is_empty()
+                || stderr
+                    .lines()
+                    .all(|line| line.starts_with("Cleanup operation ID: ")),
+            "unexpected CLI stderr: {stderr}"
         );
         (
             output.status.code().unwrap() as u8,
@@ -151,10 +155,13 @@ pub async fn command_with_stdin(server: &str, arguments: &[&str], stdin: &str) -
             .unwrap();
         let _ = child.stdin.as_mut().unwrap().write_all(stdin.as_bytes());
         let output = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            output.stderr.is_empty(),
-            "unexpected CLI stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
+            stderr.is_empty()
+                || stderr
+                    .lines()
+                    .all(|line| line.starts_with("Cleanup operation ID: ")),
+            "unexpected CLI stderr: {stderr}"
         );
         (
             output.status.code().unwrap() as u8,

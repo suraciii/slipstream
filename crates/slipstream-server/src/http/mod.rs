@@ -10,6 +10,7 @@ mod recovery;
 #[path = "selection_tests.rs"]
 mod selection_tests;
 mod static_web;
+mod trash;
 mod trash_restore;
 mod xmp;
 
@@ -26,11 +27,8 @@ pub(crate) use static_web::{
 /// at the HTTP boundary.
 const ALBUM_PHOTO_IDS_MAX: usize = 100;
 
-fn parse_permanent_deletion_ids(
-    body: &serde_json::Map<String, Value>,
-    key: &str,
-) -> Option<Vec<String>> {
-    valid_ids(body.get(key), slipstream_core::PERMANENT_DELETION_MAX)
+fn parse_trash_ids(body: &serde_json::Map<String, Value>, key: &str) -> Option<Vec<String>> {
+    valid_ids(body.get(key), slipstream_core::TRASH_CLEANUP_MAX)
 }
 
 #[derive(Clone)]
@@ -419,14 +417,11 @@ pub(crate) fn create_router_with_processing(
             get(browse::get_photo_restore_operation),
         )
         .route("/api/photos/removed", get(browse::get_removed_photos))
-        .route("/api/trash", get(browse::get_removed_photos))
+        .route("/api/trash", get(trash::list))
         .route("/api/trash/restore", post(trash_restore::restore_trash))
-        .route("/api/trash/review", post(browse::review_permanent_deletion))
-        .route("/api/trash/delete", post(browse::permanently_delete))
-        .route(
-            "/api/trash/operations/{id}",
-            get(browse::get_permanent_deletion),
-        )
+        .route("/api/trash/cleanup", post(trash::cleanup))
+        .route("/api/trash/cleanup-preview", post(trash::preview))
+        .route("/api/trash/cleanup-operations/{id}", get(trash::operation))
         .route(
             "/api/photos/{id}/state",
             get(browse::method_not_allowed).post(mutations::mutate_photo_state),

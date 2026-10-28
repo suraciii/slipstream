@@ -16,7 +16,7 @@ for (const viewport of [
   { width: 667, height: 375 },
 ]) {
   const { width, height } = viewport;
-  test(`Trash keeps recovery controls reachable and deletion consent separate at ${width}×${height}`, async ({
+  test(`Trash keeps recovery controls reachable and cleanup consent separate at ${width}×${height}`, async ({
     page,
   }) => {
     const { base, root } = await fixture();
@@ -25,11 +25,14 @@ for (const viewport of [
     const location =
       "2026/photography-session-with-a-long-directory-name/another-long-directory/photograph-with-a-long-filename.jpg";
     const rows = Array.from({ length: 20 }, (_, index) => ({
+      photoId: `removed-${index}`,
+      originalId: `original-${index}`,
+      originalAvailable: true,
+      state: "captured",
       removedAtMs: 1000 + index,
       originalLocation: location,
       originalKind: "jpeg",
       originalSize: 1024,
-      pendingVerificationOperationId: null,
       photo: {
         id: `removed-${index}`,
         available: true,
@@ -41,7 +44,7 @@ for (const viewport of [
         preview: { state: "unavailable" },
       },
     }));
-    let deleteRequests = 0;
+    let cleanupRequests = 0;
     await page.route(/\/api\/trash(?:\?|\/|$)/, async (route) => {
       const pathname = new URL(route.request().url()).pathname;
       if (pathname === "/api/trash") {
@@ -51,36 +54,39 @@ for (const viewport of [
             limit: 50,
             total: rows.length,
             operation: { operationId: "removal-1", removed: rows.length },
-            reviewMaximum: 50,
+            cleanupMaximum: 5000,
+            restoreMaximum: 100,
+            evaluatedAt: "2026-01-01T00:00:00Z",
+            expiresAt: null,
+            nextCursor: null,
+            libraryRoot: root,
+            namespace: "service",
             photos: rows,
           },
         });
         return;
       }
-      if (pathname === "/api/trash/review") {
+      if (pathname === "/api/trash/cleanup-preview") {
         const body = route.request().postDataJSON() as {
-          operationId: string;
-          photoIds: string[];
+          items: Array<{ photoId: string; originalLocation: string }>;
         };
         await route.fulfill({
           json: {
-            operationId: body.operationId,
-            items: body.photoIds.map((photoId) => ({
-              photoId,
-              removedAtMs: 1000,
-              originalId: `original-${photoId}`,
-              originalLocation: location,
+            items: body.items.map((item) => ({
+              photoId: item.photoId,
+              originalLocation: item.originalLocation,
               originalKind: "jpeg",
-              size: 1024,
-              albums: [{ id: "album-1", name: "Family photographs" }],
+              state: "captured",
+              absence: "absent",
+              message: null,
+              blockers: [],
             })),
-            rejected: [],
           },
         });
         return;
       }
-      if (pathname === "/api/trash/delete") {
-        deleteRequests += 1;
+      if (pathname === "/api/trash/cleanup") {
+        cleanupRequests += 1;
         await route.abort();
         return;
       }
@@ -164,9 +170,9 @@ for (const viewport of [
     await expect(review.locator("[data-trash-review-location]")).toHaveText(
       location,
     );
-    await expect(review.locator("[data-trash-review-item-albums]")).toHaveText(
-      "Family photographs",
-    );
+    await expect(
+      review.locator("[data-trash-review-item-albums]"),
+    ).toBeVisible();
     await expect(review.locator(".trash-review-warning")).toBeVisible();
     await expect(review.locator(".trash-review-warning")).toContainText(
       "cannot undo",
@@ -186,11 +192,11 @@ for (const viewport of [
         .locator("[data-trash-cancel]")
         .evaluate((element) => getComputedStyle(element).backgroundColor),
     );
-    expect(deleteRequests).toBe(0);
+    expect(cleanupRequests).toBe(0);
     await review.locator("[data-trash-cancel]").click();
     await expect(review).toBeHidden();
     await expect(reviewEntry).toBeFocused();
     await expect(panel.locator(".removed-item")).toHaveCount(20);
-    expect(deleteRequests).toBe(0);
+    expect(cleanupRequests).toBe(0);
   });
 }

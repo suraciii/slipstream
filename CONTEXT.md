@@ -33,7 +33,7 @@ _Avoid_: replace, merge, overwrite
 The optional camera-recorded local date and time used to order Photos in the Photo Library. Capture Time comes from the Photo's own Original File and does not come from filesystem modification time. It does not determine Album membership order.
 
 **Original File**:
-A RAW or JPEG file owned by the Photographer and known to Slipstream under one stable identity. Slipstream must not rewrite it; only explicit Permanent Deletion from Trash may delete it. A supported Library expansion or Location Recovery must not create a new identity for it.
+A RAW or JPEG file owned by the Photographer and known to Slipstream under one stable identity. Slipstream must not rewrite, move, rename, or delete it; Library Expansion and Location Recovery preserve its identity.
 
 **Unavailable Original**:
 An Original File that cannot be read at its remembered Original Location. Its Photo remains in the Photo Library; Location Recovery may restore the Location.
@@ -76,11 +76,12 @@ The removal action that clears removal markers through a compare-and-set, return
 _Avoid_: undelete, relink, reimport
 
 **Trash**:
-The Library-wide view of Removed Photos that remain available for Restore or explicit Permanent Deletion. Trash retains Original Files in place and includes removals from all sessions. It is not operating-system trash.
+The Library-wide view of Removed Photos retained for Restore, inspection of their Original Locations, or explicit Trash Record Cleanup after external file deletion. It includes removals from all sessions and is not operating-system trash.
 _Avoid_: Recovery Area, Removed Photos listing as a separate destination
 
-**Permanent Deletion**:
-The separately confirmed deletion of a reviewed Original File belonging to a Photo in Trash. It cannot be undone by Slipstream and is distinct from Remove from Library and Restore.
+**Trash Record Cleanup**:
+The explicitly confirmed removal of selected Slipstream records for Photos still in Trash whose Originals are confirmed absent at their remembered Locations. It does not delete files and cannot restore the discarded Library decisions or Album memberships.
+_Avoid_: Permanent Deletion, Delete Original Files, Empty Trash
 
 ## Metadata
 

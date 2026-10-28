@@ -5,13 +5,12 @@ use crate::{
     ComposableEditRecipe, ComposableEditRecipeWriteOutcome, EditRecipeRead, ExportAttempt,
     ExportLeaseOutcome, ExportRecord, ExportRetryOutcome, ExportSettlement, ExportSubmission,
     ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult, LibraryRoot,
-    NativeWorkBudget, NativeWorkPermit, OriginalCapability, OriginalDeletionOutcome,
-    PermanentDeletionItemState, PermanentDeletionResult, PermanentDeletionReview,
-    PermanentDeletionSelection, PermanentDeletionTarget, PhotoAlbumMembership, PhotoQuery,
+    NativeWorkBudget, NativeWorkPermit, OriginalCapability, PhotoAlbumMembership, PhotoQuery,
     PhotoQueryError, PhotoQueryProjection, PhotoRead, PhotoStateBatchMutation,
     PhotoStateBatchResult, PhotoStateMutation, PhotoStateMutationResult, PreviewSeed,
     PreviewSeedResult, RecoverySurvey, RequestedRelocation, SaveComposableEditRecipe, ScanLimits,
-    ScanResult, ScanSnapshot,
+    ScanResult, ScanSnapshot, TrashCleanupPreview, TrashCleanupResult, TrashCleanupTarget,
+    TrashInspectionRecord, TrashSelection,
 };
 use crate::{
     capture::capture_source_revision,
@@ -988,181 +987,71 @@ impl Library {
         .unwrap_or(Err(crate::persistence::MetadataStoreError::Storage))
     }
 
-    /// Captures a fixed Permanent Deletion review from the current Trash
-    /// selection. Filesystem facts are read before the owner persists the
-    /// receipt, so the review and later unlink share one exact identity.
-    pub async fn prepare_permanent_deletion(
-        &self,
-        operation_id: String,
-        selection: PermanentDeletionSelection,
-    ) -> Result<PermanentDeletionReview, LibraryError> {
-        let requested_ids = match &selection {
-            PermanentDeletionSelection::Photos(photo_ids) => photo_ids.clone(),
-            PermanentDeletionSelection::All { .. } => Vec::new(),
-        };
+    /// Captures the current Trash records without modifying the Library or files.
+    pub async fn trash_inspection(&self) -> Result<Vec<TrashInspectionRecord>, LibraryError> {
         let receive = {
             let _admission = self.admit()?;
             self.persistence
-                .trash_candidates_receiver(selection)
-                .map_err(LibraryError::from)?
-        };
-        let candidates = receive
-            .await
-            .unwrap_or(Err(MutationError::Persistence))
-            .map_err(LibraryError::from)?;
-        let mut targets = Vec::with_capacity(
-            candidates
-                .len()
-                .saturating_add(requested_ids.len().saturating_sub(candidates.len())),
-        );
-        let mut seen = std::collections::HashSet::with_capacity(candidates.len());
-        for candidate in candidates {
-            let facts = self
-                .root
-                .original(candidate.relative_path.clone())
-                .ok()
-                .and_then(|original| original.facts_if_present().ok().flatten());
-            seen.insert(candidate.photo_id.clone());
-            targets.push(PermanentDeletionTarget {
-                photo_id: candidate.photo_id,
-                removed_at_ms: candidate.removed_at_ms,
-                facts,
-            });
-        }
-        for photo_id in requested_ids {
-            if seen.insert(photo_id.clone()) {
-                targets.push(PermanentDeletionTarget {
-                    photo_id,
-                    removed_at_ms: 0,
-                    facts: None,
-                });
-            }
-        }
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .prepare_permanent_deletion_receiver(operation_id, targets)
+                .trash_inspection_receiver()
                 .map_err(LibraryError::from)?
         };
         receive
             .await
             .unwrap_or(Err(MutationError::Persistence))
-            .map_err(LibraryError::from)
+            .map_err(Into::into)
     }
 
-    /// Applies a previously reviewed Permanent Deletion one Original at a
-    /// time. A durable `deleting` state makes a crash recoverable as
-    /// `uncertain` rather than silently retrying an unlink.
-    pub async fn permanently_delete(
+    /// Cleans only explicitly reviewed records after fresh confined absence inspection.
+    /// The caller must add retained workspace blockers; the server does so under
+    /// its recovery guard. The core cannot inspect workspace-owned state.
+    pub async fn cleanup_trash(
         &self,
         operation_id: String,
-    ) -> Result<PermanentDeletionResult, LibraryError> {
-        let retry_unresolved = self
-            .read_permanent_deletion(operation_id.clone())
-            .await?
-            .items
-            .iter()
-            .any(|item| {
-                matches!(
-                    item.state,
-                    PermanentDeletionItemState::Failed | PermanentDeletionItemState::Uncertain
-                )
-            });
+        targets: Vec<TrashCleanupTarget>,
+    ) -> Result<TrashCleanupResult, LibraryError> {
         let receive = {
             let _admission = self.admit()?;
             self.persistence
-                .permanent_deletion_work_receiver(operation_id.clone(), retry_unresolved)
-                .map_err(LibraryError::from)?
-        };
-        let work = receive
-            .await
-            .unwrap_or(Err(MutationError::Persistence))
-            .map_err(LibraryError::from)?;
-        for item in work {
-            // The durable mark names the unresolved item to every other
-            // surface before the confined unlink is attempted.
-            let receive = {
-                let _admission = self.admit()?;
-                self.persistence
-                    .mark_permanent_deletion_deleting_receiver(
-                        operation_id.clone(),
-                        item.photo_id.clone(),
-                    )
-                    .map_err(LibraryError::from)?
-            };
-            match receive.await.unwrap_or(Err(MutationError::Persistence)) {
-                Ok(()) => {}
-                // Another confirmation settled this item first; its own result
-                // is authoritative and this attempt changes nothing.
-                Err(MutationError::Conflict) => continue,
-                Err(error) => return Err(LibraryError::from(error)),
-            }
-            let (state, message) = match self.root.original(item.relative_path.clone()) {
-                Err(error) => (PermanentDeletionItemState::Failed, Some(error.to_string())),
-                Ok(original) => match original.delete_if_unchanged(item.facts) {
-                    Ok(OriginalDeletionOutcome::Deleted) => {
-                        (PermanentDeletionItemState::Deleted, None)
-                    }
-                    Ok(OriginalDeletionOutcome::Missing) => (
-                        if item.state == PermanentDeletionItemState::Deleting {
-                            PermanentDeletionItemState::Uncertain
-                        } else {
-                            PermanentDeletionItemState::Missing
-                        },
-                        Some("Original was missing before deletion completed".to_owned()),
-                    ),
-                    Ok(OriginalDeletionOutcome::Changed) => (
-                        PermanentDeletionItemState::Changed,
-                        Some("Original facts changed after review".to_owned()),
-                    ),
-                    Ok(OriginalDeletionOutcome::Failed(error)) => {
-                        (PermanentDeletionItemState::Failed, Some(error))
-                    }
-                    Err(error) => (PermanentDeletionItemState::Failed, Some(error.to_string())),
-                },
-            };
-            let receive = {
-                let _admission = self.admit()?;
-                self.persistence
-                    .settle_permanent_deletion_receiver(
-                        operation_id.clone(),
-                        item.photo_id,
-                        state,
-                        message,
-                    )
-                    .map_err(LibraryError::from)?
-            };
-            receive
-                .await
-                .unwrap_or(Err(MutationError::Persistence))
-                .map_err(LibraryError::from)?;
-        }
-        let receive = {
-            let _admission = self.admit()?;
-            self.persistence
-                .read_permanent_deletion_receiver(operation_id)
+                .cleanup_trash_receiver(self.root.clone(), operation_id, targets)
                 .map_err(LibraryError::from)?
         };
         receive
             .await
             .unwrap_or(Err(MutationError::Persistence))
-            .map_err(LibraryError::from)
+            .map_err(Into::into)
     }
 
-    pub async fn read_permanent_deletion(
+    /// Revalidates selected records and current absence without changing state.
+    pub async fn preview_trash_cleanup(
         &self,
-        operation_id: String,
-    ) -> Result<PermanentDeletionResult, LibraryError> {
+        targets: Vec<TrashCleanupTarget>,
+    ) -> Result<TrashCleanupPreview, LibraryError> {
         let receive = {
             let _admission = self.admit()?;
             self.persistence
-                .read_permanent_deletion_receiver(operation_id)
+                .preview_trash_cleanup_receiver(self.root.clone(), targets)
                 .map_err(LibraryError::from)?
         };
         receive
             .await
             .unwrap_or(Err(MutationError::Persistence))
-            .map_err(LibraryError::from)
+            .map_err(Into::into)
+    }
+
+    pub async fn read_trash_cleanup(
+        &self,
+        operation_id: String,
+    ) -> Result<TrashCleanupResult, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .read_trash_cleanup_receiver(operation_id)
+                .map_err(LibraryError::from)?
+        };
+        receive
+            .await
+            .unwrap_or(Err(MutationError::Persistence))
+            .map_err(Into::into)
     }
 
     pub(crate) fn seed_preview_blocking(

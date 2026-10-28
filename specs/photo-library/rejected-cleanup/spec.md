@@ -12,12 +12,11 @@ A Photographer may mark each Photo as `unflagged`, `picked`, or `rejected`. Mark
 
 The `Rejected` filter shows Photos whose current Selection State is `rejected`. The filtered result count is distinct from the source's complete Selection State counts. Marking and filtering are separate from deletion.
 
-### Delete Photos
+### Remove Photos and clean up records
 
-Deleting a Photo is a separate capability from marking it. It has two distinct outcomes:
+Removing a Photo is separate from marking it. **Remove from Library** removes a Photo from normal Slipstream Library views while preserving its Photo record and Original File for recovery. This is the capability specified here.
 
-- **Remove from Library** removes a Photo from normal Slipstream Library views while preserving a recoverable Photo record and its Original File. This is the capability specified here.
-- **Delete Original Files** physically deletes the Photographer's Original File only through [Trash and Permanent Deletion](../trash/spec.md). It is separate from reversible removal. Marking a Photo or removing it from the Library must never trigger it implicitly.
+[Trash Record Cleanup](../trash/spec.md) is a separate, explicit action on eligible removed records after the Photographer deletes Originals externally. Slipstream never deletes Original Files. Marking or removing a Photo must not implicitly clean up its record.
 
 ## Remove Rejected Photos
 
@@ -28,7 +27,7 @@ must enforce the same removal eligibility and preservation rules.
 
 ### Entry and review
 
-The user-facing destination for removed Photos is **Trash**, governed by [Trash and Permanent Deletion](../trash/spec.md). Removal places Photos there; it never deletes their Original Files.
+The user-facing destination for removed Photos is **Trash**, governed by [Trash](../trash/spec.md). Removal places Photos there; it never deletes their Original Files.
 
 When the `Rejected` filter is active, the Library Browser may offer **Remove rejected Photos**. The action is unavailable for other filters and does not appear as a general delete action.
 
@@ -46,9 +45,9 @@ The result must report the number removed and identify Photos that could not be 
 
 ### Restore
 
-The completed result provides **Undo** while the result remains available. Undo restores every Photo removed by that operation, including its prior Selection State and other retained facts, as one unit.
+The completed result provides **Undo** while the result remains available. Undo restores every Photo removed by that operation that is still eligible, including its prior Selection State and other retained facts, as one unit. Trash Record Cleanup removes the affected records from Undo; it cannot restore them.
 
-Durable single and batch Restore follow [Trash and Permanent Deletion](../trash/spec.md#selection-and-restore).
+Durable single and batch Restore follow [Trash](../trash/spec.md#selection-and-restore).
 
 ### Failure behavior
 

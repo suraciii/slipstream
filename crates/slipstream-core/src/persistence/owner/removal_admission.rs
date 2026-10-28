@@ -102,17 +102,17 @@ impl Persistence {
     pub(crate) fn restore_trash_receiver(
         &self,
         operation_id: String,
-        selection: PermanentDeletionSelection,
+        selection: TrashSelection,
     ) -> Result<oneshot::Receiver<Result<ExplicitPhotoRestoreResult, MutationError>>, MutationError>
     {
         let (ids, valid_count) = match &selection {
-            PermanentDeletionSelection::Photos(ids) => (
+            TrashSelection::Photos(ids) => (
                 ids,
                 !ids.is_empty() && ids.len() <= crate::PHOTO_REMOVAL_MAX,
             ),
-            PermanentDeletionSelection::All { exclude_photo_ids } => (
+            TrashSelection::All { exclude_photo_ids } => (
                 exclude_photo_ids,
-                exclude_photo_ids.len() <= crate::PERMANENT_DELETION_MAX,
+                exclude_photo_ids.len() <= crate::TRASH_CLEANUP_MAX,
             ),
         };
         if operation_id.is_empty()
@@ -179,35 +179,5 @@ impl Persistence {
             limit,
             reply,
         })
-    }
-
-    pub(crate) fn trash_candidates_receiver(
-        &self,
-        selection: PermanentDeletionSelection,
-    ) -> Result<oneshot::Receiver<removal::TrashCandidateResult>, MutationError> {
-        let valid = match &selection {
-            PermanentDeletionSelection::Photos(photo_ids) => {
-                !photo_ids.is_empty()
-                    && photo_ids.len() <= crate::PERMANENT_DELETION_MAX
-                    && photo_ids.iter().all(|id| !id.is_empty())
-                    && photo_ids.iter().collect::<HashSet<_>>().len() == photo_ids.len()
-            }
-            PermanentDeletionSelection::All { exclude_photo_ids } => {
-                exclude_photo_ids.len() <= crate::PERMANENT_DELETION_MAX
-                    && exclude_photo_ids.iter().all(|id| !id.is_empty())
-                    && exclude_photo_ids.iter().collect::<HashSet<_>>().len()
-                        == exclude_photo_ids.len()
-            }
-        };
-        if !valid {
-            return Err(MutationError::Invalid);
-        }
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::TrashCandidates {
-            selection,
-            reply: send,
-        })
-        .map_err(mutation::mutation_error_from_persistence)?;
-        Ok(receive)
     }
 }

@@ -586,46 +586,12 @@ mod tests {
         DiscoveredFingerprint, ScanRecoveryPlan, ScanRelocationSource,
     };
     use super::*;
-    use crate::persistence::permanent_deletion::{PermanentDeletionStoredItem, reviewed_facts};
     use crate::persistence::test_support::*;
     use crate::persistence::{Persistence, PersistenceError};
     use crate::{
         OriginalFacts, OriginalKind, PreviewSeed, PreviewSeedResult, PreviewState, source_revision,
     };
     use std::fs;
-
-    /// The retained review is read back from its own JSON row, so the facts it
-    /// compares against the filesystem must survive that round trip exactly.
-    /// A milliseconds mtime needs 17 significant digits for some files, and a
-    /// decimal parse of those returns a neighboring f64, so the row keeps the
-    /// bits.
-    #[test]
-    fn reviewed_facts_survive_the_retained_review_round_trip() {
-        let reviewed = OriginalFacts {
-            size: 629,
-            mtime_ms: 1_790_379_911_790.761_5,
-            device: 64_513,
-            inode: 21_758_498,
-        };
-        let stored = PermanentDeletionStoredItem {
-            photo_id: "photo".to_owned(),
-            removed_at_ms: 1_790_379_911_955,
-            original_id: "original".to_owned(),
-            relative_path: "b.jpg".to_owned(),
-            kind: "jpeg".to_owned(),
-            size: reviewed.size,
-            mtime_bits: reviewed.mtime_ms.to_bits(),
-            device: reviewed.device,
-            inode: reviewed.inode,
-            albums: Vec::new(),
-        };
-        let row = serde_json::to_string(&stored).unwrap();
-        let read: PermanentDeletionStoredItem = serde_json::from_str(&row).unwrap();
-        assert_eq!(
-            reviewed_facts(read.size, read.mtime_bits, read.device, read.inode),
-            reviewed
-        );
-    }
 
     #[tokio::test]
     async fn scan_relocation_retires_sidecar_association() {

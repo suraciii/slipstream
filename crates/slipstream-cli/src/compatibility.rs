@@ -66,7 +66,27 @@ impl ServiceClient {
             }
             return Err(CommandFailure::incompatible(Vec::new()));
         }
-        validate_capabilities(&bytes)
+        let limits = validate_capabilities(&bytes)?;
+        if matches!(
+            operation,
+            Operation::TrashList
+                | Operation::TrashEmpty
+                | Operation::TrashCleanup
+                | Operation::TrashCleanupReceipt
+        ) {
+            let capabilities: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| capability_shape_failure(Vec::new(), "invalid-json", None))?;
+            if capabilities["limits"]["trashCleanupMaximum"].as_u64()
+                != Some(crate::MAXIMUM_TRASH_IDS as u64)
+            {
+                return Err(capability_shape_failure(
+                    vec![CLI_CONTRACT_VERSION],
+                    "missing-or-invalid-field",
+                    Some("limits.trashCleanupMaximum"),
+                ));
+            }
+        }
+        Ok(limits)
     }
 }
 

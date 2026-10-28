@@ -12,7 +12,7 @@ The design must preserve the existing browser route and its rejected-result revi
 - bounded, all-or-nothing admission validation before any Photo changes;
 - durable attempt receipts and read-only outcome inspection;
 - compare-and-set Restore using the removal marker;
-- no authority or workflow coupling to permanent deletion.
+- no authority or workflow coupling to Trash Record Cleanup.
 
 The existing process-local Photo decision version is the caller's evidence token. It changes on every successful decision, removal, and Restore mutation; a restarted owner starts a new version epoch, so pre-restart evidence is stale rather than silently reusable.
 
@@ -29,7 +29,9 @@ The owner checks the attempt receipt first. A known attempt replays its historic
 
 Each newly removed target receives one monotonic removal marker. The persisted receipt stores the marker and outcome for every target, so an explicit response and later outcome read can name the exact removal that Restore must compare against.
 
-A Restore attempt has its own caller-supplied operation ID and an ordered set of `{photoId, removedAtMs}` markers. Its receipt follows the same replay rule. Restore clears only a matching marker; an active, changed, missing, permanently deleted, or unsettled target is reported without claiming a restore. The owner serializes Restore with permanent deletion, so both cannot claim success for one removal.
+A Restore attempt has its own caller-supplied operation ID and an ordered set of `{photoId, removedAtMs}` markers. Its receipt follows the same replay rule, even after the target record is cleaned up. Restore clears only a matching marker; an active, changed, missing, or cleaned-up target is reported without claiming a restore. The owner serializes Restore with Trash Record Cleanup, so both cannot claim success for one removal.
+
+Select-all Restore first captures Trash identities and their removal markers, then applies exclusions and binds the resulting set to the attempt identity before mutation. It never resolves that set again on retry or substitutes a newer removal marker. An earlier inspected selection is submitted through its explicit observed markers, not a new select-all invocation.
 
 ## Boundary and ownership
 
@@ -64,7 +66,7 @@ This adds three small routes but keeps authorization, request validation, browse
 - A known operation ID with changed intent is a conflict; a known operation ID with the same intent replays the stored result.
 - A response timeout, malformed result, missing result entry, or unknown receipt is uncertain. The caller must inspect the original operation before submitting replacement mutations.
 - Stale decision or removal evidence is a per-Photo no-effect outcome. It cannot be repaired by checking only the current Selection State.
-- Permanent deletion remains a separate reviewed capability. Pending or unresolved deletion takes precedence over Restore and removal classification.
+- [Trash Record Cleanup](../trash/spec.md) remains a separate reviewed capability. Restore observes its committed result through owner serialization; uncertainty about a lost response or historical deletion does not impose an indefinite lock.
 - Successful removal and Restore never modify Original Files, Album membership, rating, or decision values.
 
 ## Observable contract

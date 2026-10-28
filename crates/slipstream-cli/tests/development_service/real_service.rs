@@ -29,7 +29,7 @@ async fn wait_until_idle(server: &str) {
     for _ in 0..400 {
         let response = client
             .get(format!("{server}/api/status"))
-            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "2")
             .bearer_auth(common::ACCESS_TOKEN)
             .send()
             .await

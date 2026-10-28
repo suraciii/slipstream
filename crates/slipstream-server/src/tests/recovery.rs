@@ -332,7 +332,7 @@ async fn recovery_http_expires_an_evicted_review_continuation() {
             .uri(format!(
                 "https://camera.local/api/recovery/unavailable/{evicted}"
             ))
-            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "2")
             .body(Body::empty())
             .unwrap(),
     )

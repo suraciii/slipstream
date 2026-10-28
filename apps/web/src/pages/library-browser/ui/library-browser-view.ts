@@ -279,8 +279,7 @@ export interface LibraryBrowserView extends RecoveryReviewView {
   openRemovedPanel(model: RemovedPanelViewModel): void;
   renderRemovedPanel(model: RemovedPanelViewModel): void;
   closeRemovedPanel(): void;
-  /// Opens the permanent-deletion review above the Trash listing. Opening it
-  /// deletes nothing; only its confirmation reaches the delete route.
+  /// Opens the record-cleanup review above the Trash listing.
   openTrashReview(model: TrashReviewViewModel): void;
   /// Updates the open review without reopening it, so a settling
   /// confirmation reaches the surface the Photographer is looking at.
@@ -465,6 +464,14 @@ export function createLibraryBrowserView(
     root,
     "[data-removed-selection-count]",
   );
+  const trashLibraryFolder = required<HTMLElement>(
+    root,
+    "[data-trash-library-folder]",
+  );
+  const trashCopyLocations = required<HTMLButtonElement>(
+    root,
+    "[data-trash-copy-locations]",
+  );
   const removedDelete = required<HTMLButtonElement>(
     root,
     "[data-removed-delete]",
@@ -483,30 +490,6 @@ export function createLibraryBrowserView(
     root,
     "[data-trash-outcome-counts]",
   );
-  const trashOutcomeDeleted = required<HTMLElement>(
-    root,
-    "[data-trash-outcome-deleted]",
-  );
-  const trashOutcomeChanged = required<HTMLElement>(
-    root,
-    "[data-trash-outcome-changed]",
-  );
-  const trashOutcomeMissing = required<HTMLElement>(
-    root,
-    "[data-trash-outcome-missing]",
-  );
-  const trashOutcomeFailed = required<HTMLElement>(
-    root,
-    "[data-trash-outcome-failed]",
-  );
-  const trashOutcomePending = required<HTMLElement>(
-    root,
-    "[data-trash-outcome-pending]",
-  );
-  const trashOutcomeBytes = required<HTMLElement>(
-    root,
-    "[data-trash-outcome-bytes]",
-  );
   const trashOutcomeItems = required<HTMLElement>(
     root,
     "[data-trash-outcome-items]",
@@ -518,10 +501,6 @@ export function createLibraryBrowserView(
   const trashOutcomeCheck = required<HTMLButtonElement>(
     root,
     "[data-trash-check-result]",
-  );
-  const trashOutcomeRetry = required<HTMLButtonElement>(
-    root,
-    "[data-trash-retry-delete]",
   );
   const trashReviewDialog = required<HTMLDialogElement>(
     root,
@@ -538,18 +517,6 @@ export function createLibraryBrowserView(
   const trashReviewItems = required<HTMLElement>(
     root,
     "[data-trash-review-items]",
-  );
-  const trashReviewRejected = required<HTMLElement>(
-    root,
-    "[data-trash-review-rejected]",
-  );
-  const trashReviewRejectedHeading = required<HTMLElement>(
-    root,
-    "[data-trash-review-rejected-heading]",
-  );
-  const trashReviewRejectedList = required<HTMLElement>(
-    root,
-    "[data-trash-review-rejected-list]",
   );
   const trashReviewConfirm = required<HTMLButtonElement>(
     root,
@@ -769,8 +736,8 @@ export function createLibraryBrowserView(
     surfaces,
     selectionLabel,
   });
-  /// The removal review, the Removed Photos listing, and the
-  /// permanent-deletion review present through their own controller, which
+  /// The removal review, the Trash listing, and the record-cleanup review
+  /// present through their own controller, which
   /// registers its surfaces here so the one active-surface order the page
   /// keeps is unchanged.
   const removedPanels = createRemovedPanels({
@@ -795,29 +762,21 @@ export function createLibraryBrowserView(
       removedSelectAll,
       removedClearSelection,
       removedSelectionCount,
+      trashLibraryFolder,
+      trashCopyLocations,
       removedDelete,
       removedRestoreSelection,
       removedUndo,
       trashOutcome,
       trashOutcomeTitle,
       trashOutcomeCounts,
-      trashOutcomeDeleted,
-      trashOutcomeChanged,
-      trashOutcomeMissing,
-      trashOutcomeFailed,
-      trashOutcomePending,
-      trashOutcomeBytes,
       trashOutcomeItems,
       trashOutcomeActions,
       trashOutcomeCheck,
-      trashOutcomeRetry,
       trashReviewDialog,
       trashReviewSummary,
       trashReviewAlbums,
       trashReviewItems,
-      trashReviewRejected,
-      trashReviewRejectedHeading,
-      trashReviewRejectedList,
       trashReviewConfirm,
       trashReviewCancel,
       trashReviewClose,

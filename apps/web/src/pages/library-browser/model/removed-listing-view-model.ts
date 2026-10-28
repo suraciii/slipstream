@@ -1,224 +1,188 @@
-import type { RemovedPhotoItem } from "../api/removal.js";
-import {
-  confirmTrashLabel,
-  trashBoundNotice,
-  type TrashOutcomePartition,
-  type TrashReviewPlan,
+import type {
+  TrashCleanupOperation,
+  TrashCleanupPreviewItem,
+  TrashListingItem,
+  TrashListingPage,
 } from "../api/trash.js";
 import type {
   RemovedPanelViewModel,
   TrashReviewViewModel,
 } from "./removed-listing-contract.js";
-import type { PendingTrashRestore } from "./trash-restore-storage.js";
 
-/// One bounded page of removed Photos the listing presented.
-export type RemovedPageState = Readonly<{
-  start: number;
-  total: number;
-  /// The maximum number of Photos one permanent-deletion review can capture.
-  reviewMaximum: number;
-  operation: Readonly<{ operationId: string; removed: number }> | undefined;
-  items: ReadonlyArray<RemovedPhotoItem>;
-}>;
-
-/// The permanent-deletion review currently presented. It names the one
-/// operation id the confirmation may use; Cancel discards it and deletes
-/// nothing.
+export type RemovedPageState = TrashListingPage;
 export type TrashReviewState = Readonly<{
   operationId: string;
-  plan: TrashReviewPlan;
-  deleting: boolean;
+  items: ReadonlyArray<TrashListingItem>;
+  albums: ReadonlyMap<string, ReadonlyArray<string> | null>;
+  preview?: ReadonlyMap<string, TrashCleanupPreviewItem>;
+  cleaning: boolean;
 }>;
-
-/// The Trash deletion operation this listing confirmed or is recovering: its
-/// partition once a validated response named it, only its id while the
-/// response is lost. A lost response is never presented as proof of
-/// failure or success.
 export type TrashOperationState = Readonly<{
   operationId: string;
-  partition?: TrashOutcomePartition;
+  result?: TrashCleanupOperation;
 }>;
 
 type RemovedPanelState = Readonly<{
-  removedPage: RemovedPageState | undefined;
-  removedPending: boolean;
-  removedSelectionPending: boolean;
-  removedLoadFailed: boolean;
-  removedAllSelected: boolean;
-  removedAllMarkers: ReadonlyMap<string, number>;
-  removedExcludedIds: ReadonlySet<string>;
-  removedPendingIds: ReadonlySet<string>;
-  removedAllCount: number;
-  removedMessage: string | undefined;
-  pendingRestore: PendingTrashRestore | undefined;
-  removedDeleting: boolean;
-  removedSelectedIds: ReadonlySet<string>;
-  removedSelectedMarkers: ReadonlyMap<string, number>;
-  removedRestoringSelection: boolean;
-  removedRestoringId: string | undefined;
-  trashOutcomeBusy: "check" | "resume" | undefined;
-  trashOperation: TrashOperationState | undefined;
+  page: RemovedPageState | undefined;
+  pageIndex: number;
+  pending: boolean;
+  failed: boolean;
+  cleaning: boolean;
+  selected: ReadonlyMap<string, TrashListingItem>;
+  allSelected: boolean;
+  excluded: ReadonlySet<string>;
+  restoringSelection: boolean;
+  restoringId: string | undefined;
+  message: string | undefined;
+  operation: TrashOperationState | undefined;
+  outcomeBusy: boolean;
   pageLimit: number;
 }>;
 
 export function trashReviewModel(
   review: TrashReviewState | undefined,
 ): TrashReviewViewModel {
-  if (!review)
+  const items = review?.items ?? [];
+  const albumNames = new Set<string>();
+  const projected = items.map((item) => {
+    const albums = review?.albums.get(item.photoId) ?? null;
+    albums?.forEach((name) => albumNames.add(name));
+    const preview = review?.preview?.get(item.photoId);
     return {
-      itemCount: 0,
-      totalBytes: 0,
-      albumCount: 0,
-      albumNames: [],
-      items: [],
-      rejected: [],
-      canConfirm: false,
-      confirmLabel: confirmTrashLabel(0),
-      deleting: false,
+      photoId: item.photoId,
+      originalLocation: item.originalLocation,
+      originalKind: item.originalKind,
+      originalSize: item.originalSize,
+      originalAvailable: item.originalAvailable,
+      state: item.state,
+      previewState: preview?.state,
+      absence: preview?.absence,
+      blockers: preview?.blockers ?? [],
+      message: preview?.message ?? null,
+      albumNames: albums,
     };
+  });
+  const albumsComplete = items.every((item) => {
+    const albums = review?.albums.get(item.photoId);
+    return albums !== undefined && albums !== null;
+  });
+  const previewComplete =
+    items.length > 0 &&
+    review?.preview !== undefined &&
+    items.every((item) => review.preview?.has(item.photoId));
   return {
-    itemCount: review.plan.itemCount,
-    totalBytes: review.plan.totalBytes,
-    albumCount: review.plan.albumCount,
-    albumNames: [...review.plan.albumNames],
-    items: review.plan.items.map((item) => ({ ...item })),
-    rejected: review.plan.rejected.map((item) => ({ ...item })),
-    canConfirm: review.plan.canConfirm,
-    confirmLabel: confirmTrashLabel(review.plan.itemCount),
-    deleting: review.deleting,
+    itemCount: items.length,
+    albumNames: [...albumNames],
+    items: projected,
+    canConfirm:
+      items.length > 0 &&
+      albumsComplete &&
+      previewComplete &&
+      !review?.cleaning,
+    confirmLabel: `Clean up ${items.length.toLocaleString()} Photo records`,
+    cleaning: review?.cleaning ?? false,
   };
 }
 
-export function removedPanelModel({
-  removedPage,
-  removedPending,
-  removedSelectionPending,
-  removedLoadFailed,
-  removedAllSelected,
-  removedAllMarkers,
-  removedExcludedIds,
-  removedPendingIds,
-  removedAllCount,
-  removedMessage,
-  pendingRestore,
-  removedDeleting,
-  removedSelectedIds,
-  removedSelectedMarkers,
-  removedRestoringSelection,
-  removedRestoringId,
-  trashOutcomeBusy,
-  trashOperation,
-  pageLimit,
-}: RemovedPanelState): RemovedPanelViewModel {
-  const pending = removedPending || removedSelectionPending;
-  const status = removedPending
+export function removedPanelModel(
+  state: RemovedPanelState,
+): RemovedPanelViewModel {
+  const {
+    page,
+    pending,
+    failed,
+    cleaning,
+    selected,
+    allSelected,
+    excluded,
+    restoringSelection,
+    restoringId,
+    message,
+    operation,
+    outcomeBusy,
+    pageLimit,
+    pageIndex,
+  } = state;
+  const status = pending
     ? "loading"
-    : removedLoadFailed
+    : failed
       ? "failed"
-      : removedPage
+      : page
         ? "ready"
         : "loading";
-  const notices: string[] = [];
-  if (removedAllSelected) {
-    const excluded = new Set([...removedExcludedIds, ...removedPendingIds])
-      .size;
+  const cleanupBounded =
+    page !== undefined && selected.size <= page.cleanupMaximum;
+  const restoreBounded =
+    page !== undefined && selected.size <= page.restoreMaximum;
+  const busy =
+    pending || cleaning || restoringSelection || restoringId !== undefined;
+  const notices = [message];
+  if (selected.size > (page?.cleanupMaximum ?? Infinity))
     notices.push(
-      `Review scope: all current Trash items except ${excluded.toLocaleString()} excluded.`,
+      `Select at most ${page?.cleanupMaximum.toLocaleString()} Photos for one cleanup.`,
     );
-    if (removedPendingIds.size > 0)
-      notices.push(
-        `${removedPendingIds.size.toLocaleString()} ${removedPendingIds.size === 1 ? "item" : "items"} pending verification ${removedPendingIds.size === 1 ? "was" : "were"} not selected.`,
-      );
-    if (removedAllCount > (removedPage?.reviewMaximum ?? 0))
-      notices.push(
-        trashBoundNotice({
-          excludedPhotoIds: [...removedExcludedIds],
-          reviewMaximum: removedPage?.reviewMaximum ?? 0,
-        }),
-      );
-  }
-  if (removedMessage) notices.push(removedMessage);
-  if (pendingRestore)
+  if (selected.size > (page?.restoreMaximum ?? Infinity))
     notices.push(
-      "Restore outcome is unconfirmed. Retry the same operation to recover its result.",
+      `Select at most ${page?.restoreMaximum.toLocaleString()} Photos for one Restore.`,
     );
   return {
     status,
-    start: removedPage?.start ?? 0,
-    total: removedPage?.total ?? 0,
+    start: page?.start ?? 0,
+    total: page?.total ?? 0,
     limit: pageLimit,
-    pending,
-    deleting: removedDeleting,
-    selectionCount: removedAllSelected
-      ? removedAllCount
-      : removedSelectedIds.size,
-    allSelected: removedAllSelected,
-    canDelete:
-      !pendingRestore &&
-      (removedAllSelected
-        ? removedAllCount > 0
-        : removedSelectedIds.size > 0) &&
-      !pending &&
-      !removedDeleting &&
-      !removedRestoringSelection,
-    canRestore:
-      (pendingRestore !== undefined ||
-        (removedAllSelected
-          ? removedAllCount > 0
-          : removedSelectedIds.size > 0)) &&
-      !pending &&
-      !removedDeleting &&
-      !removedRestoringSelection,
-    canRetry: removedLoadFailed,
-    restoringSelection: removedRestoringSelection,
-    ...(pendingRestore ? { restoreUnconfirmed: true } : {}),
-    ...(status === "ready" && removedPage?.operation
-      ? { undo: { removed: removedPage.operation.removed } }
-      : {}),
-    ...(removedRestoringId ? { restoringPhotoId: removedRestoringId } : {}),
-    ...(notices.length ? { message: notices.join(" ") } : {}),
-    ...(trashOutcomeBusy ? { outcomeBusy: trashOutcomeBusy } : {}),
-    ...(trashOperation
+    ...(page
       ? {
-          outcome: trashOperation.partition
-            ? {
-                deleted: trashOperation.partition.deleted,
-                changed: trashOperation.partition.changed,
-                missing: trashOperation.partition.missing,
-                failed: trashOperation.partition.failed,
-                pendingVerification:
-                  trashOperation.partition.pendingVerification,
-                logicalBytesDeleted:
-                  trashOperation.partition.logicalBytesDeleted,
-                items: trashOperation.partition.unresolved.map((item) => ({
-                  ...item,
-                })),
-              }
+          libraryRoot: page.libraryRoot,
+          namespace: page.namespace,
+          evaluatedAt: page.evaluatedAt,
+          expiresAt: page.expiresAt,
+        }
+      : {}),
+    hasPrevious: pageIndex > 0,
+    hasNext: page?.nextCursor !== null && page !== undefined,
+    pending,
+    cleaning,
+    selectionCount: selected.size,
+    allSelected,
+    canCleanup:
+      selected.size > 0 &&
+      cleanupBounded &&
+      !busy &&
+      (!operation || operation.result !== undefined),
+    canCopy: selected.size > 0 && !pending,
+    canRestore: selected.size > 0 && restoreBounded && !busy,
+    canRetry: failed,
+    restoringSelection,
+    ...(restoringId ? { restoringPhotoId: restoringId } : {}),
+    ...(notices.filter(Boolean).length
+      ? { message: notices.filter(Boolean).join(" ") }
+      : {}),
+    ...(status === "ready" && page?.operation
+      ? { undo: { removed: page.operation.removed } }
+      : {}),
+    ...(outcomeBusy ? { outcomeBusy: "check" as const } : {}),
+    ...(operation
+      ? {
+          outcome: operation.result
+            ? { counts: operation.result.counts, items: operation.result.items }
             : { unconfirmed: true as const },
         }
       : {}),
-    items: (removedPage?.items ?? []).map((item) => {
-      const excluded =
-        removedAllSelected && removedExcludedIds.has(item.photo.id);
-      return {
-        photoId: item.photo.id,
-        filename: item.photo.originalFilename ?? item.photo.id,
-        originalLocation: item.originalLocation,
-        originalKind: item.originalKind,
-        originalSize: item.originalSize,
-        removedAtMs: item.removedAtMs,
-        pendingVerificationOperationId: item.pendingVerificationOperationId,
-        selected: removedAllSelected
-          ? !excluded &&
-            removedAllMarkers.get(item.photo.id) === item.removedAtMs &&
-            item.pendingVerificationOperationId === null &&
-            !removedPendingIds.has(item.photo.id)
-          : removedSelectedIds.has(item.photo.id) &&
-            item.pendingVerificationOperationId === null &&
-            removedSelectedMarkers.get(item.photo.id) === item.removedAtMs,
-        excluded,
-        preview: item.photo.preview,
-      };
-    }),
+    items: (page?.photos ?? []).map((item) => ({
+      photoId: item.photoId,
+      filename:
+        item.photo?.originalFilename ??
+        item.originalLocation.split("/").at(-1) ??
+        item.photoId,
+      originalLocation: item.originalLocation,
+      originalKind: item.originalKind,
+      originalSize: item.originalSize,
+      originalAvailable: item.originalAvailable,
+      state: item.state,
+      removedAtMs: item.removedAtMs,
+      selected: selected.has(item.photoId),
+      excluded: allSelected && excluded.has(item.photoId),
+      preview: item.photo?.preview ?? { state: "unavailable" as const },
+    })),
   };
 }

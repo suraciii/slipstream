@@ -1,17 +1,31 @@
-//! Persistence tests for Photo removal, restore, Trash, and permanent deletion.
+//! Persistence tests for Photo removal, restore, Trash, and record cleanup.
 use super::*;
 use crate::persistence::Persistence;
 use crate::persistence::owner::unix_millis;
 use crate::persistence::test_support::*;
 use crate::{
-    AlbumMutation, LibraryRoot, PermanentDeletionItemState, PermanentDeletionSelection,
-    PhotoOperationRemainder, PhotoQuery, PhotoQueryOrder, PhotoQuerySource, PhotoRemovalCounts,
-    PhotoRemovalMarker, PhotoRemovalMutation, PhotoRestoration, PhotoStateField,
-    PhotoStateMutation, PhotoStateValue, SelectionState,
+    AlbumMutation, LibraryRoot, PhotoOperationRemainder, PhotoQuery, PhotoQueryOrder,
+    PhotoQuerySource, PhotoRemovalCounts, PhotoRemovalMarker, PhotoRemovalMutation,
+    PhotoRestoration, PhotoStateField, PhotoStateMutation, PhotoStateValue, SelectionState,
+    TrashAbsence, TrashCleanupBlocker, TrashCleanupItemState, TrashCleanupTarget,
 };
 use rusqlite::Connection;
 use rusqlite::params;
 use std::{collections::HashSet, fs};
+
+fn cleanup_target(record: &crate::TrashInspectionRecord) -> TrashCleanupTarget {
+    TrashCleanupTarget {
+        photo_id: record.photo_id.clone(),
+        removed_at_ms: record.removed_at_ms,
+        original_id: record.original_id.clone(),
+        relative_path: record.relative_path.clone(),
+        // The Library must replace this caller-supplied observation with fresh facts.
+        absence: TrashAbsence::Absent,
+        blockers: Vec::new(),
+    }
+}
+
+mod cleanup_tests;
 
 #[tokio::test]
 async fn removal_and_restore_bump_association_generation() {
@@ -43,51 +57,7 @@ async fn removal_and_restore_bump_association_generation() {
 }
 
 #[tokio::test]
-async fn permanent_deletion_retirement_and_expansion() {
-    let (_base, parent_root, state, name, path) = fixture();
-    fs::create_dir(parent_root.canonical_path().join("shoot")).unwrap();
-    let root = LibraryRoot::open(parent_root.canonical_path().join("shoot")).unwrap();
-    fs::write(root.canonical_path().join("one.JPG"), b"one").unwrap();
-    fs::write(root.canonical_path().join("two.JPG"), b"two").unwrap();
-    let config = sidecar_config(&root, &state, &name);
-    let library = crate::Library::open(config.clone()).unwrap();
-    let snapshot = library.scan().await.unwrap();
-    let photo = &snapshot.photos[0].id;
-    let sibling = &snapshot.photos[1].id;
-    let original = &snapshot
-        .originals
-        .iter()
-        .find(|o| o.id == snapshot.photos[0].original_id)
-        .unwrap()
-        .relative_path;
-    seed_sidecar(&path, photo, "dir/photo.xmp");
-    seed_sidecar(&path, sibling, "dir/sibling.xmp");
-    reject_and_remove(&library, photo).await;
-    library
-        .prepare_permanent_deletion(
-            "delete-sidecar".to_owned(),
-            PermanentDeletionSelection::Photos(vec![photo.clone()]),
-        )
-        .await
-        .unwrap();
-    let deleted = library
-        .permanently_delete("delete-sidecar".to_owned())
-        .await
-        .unwrap();
-    assert_eq!(deleted.items[0].state, PermanentDeletionItemState::Deleted);
-    let before = association_generation(&path, photo);
-    fs::write(
-        root.canonical_path().join(original.as_str()),
-        b"replacement",
-    )
-    .unwrap();
-    library.scan().await.unwrap();
-    let retired = association_generation(&path, photo);
-    assert!(retired > before);
-    assert_retired(&path, photo, original.as_str(), "dir/photo.xmp", retired);
-    library.shutdown().unwrap();
-
-    // Expansion requires supported Original paths, unlike deletion's reserved Locations.
+async fn expansion_preserves_retired_sidecar_associations() {
     let (_expansion_base, parent_root, state, name, path) = fixture();
     fs::create_dir(parent_root.canonical_path().join("shoot")).unwrap();
     let root = LibraryRoot::open(parent_root.canonical_path().join("shoot")).unwrap();

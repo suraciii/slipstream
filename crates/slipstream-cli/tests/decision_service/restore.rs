@@ -418,3 +418,325 @@ async fn tls_proxy_delivers_complete_response_before_upstream_closes() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert_eq!(response.text().await.unwrap(), "{}");
 }
+
+const PHOTO: &str = "00000000-0000-4000-8000-000000000001";
+const ORIGINAL: &str = "00000000-0000-4000-8000-000000000002";
+const OPERATION: &str = "00000000-0000-4000-8000-000000000003";
+
+#[tokio::test]
+async fn trash_listing_cleanup_and_receipt_use_exact_reviewed_evidence() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let location = "folder/space \"\n雪.jpg";
+    let item = json!({"photoId": PHOTO, "removedAtMs": 42, "originalId": ORIGINAL, "originalLocation": location});
+    let first_listing = json!({
+        "photoId": PHOTO, "removedAtMs": 42, "originalId": ORIGINAL,
+        "originalLocation": location, "originalKind": "jpeg",
+        "originalSize": 10, "originalAvailable": true,
+        "state": "captured", "photo": null
+    });
+    let second_listing = json!({
+        "photoId": "00000000-0000-4000-8000-000000000004", "removedAtMs": 41,
+        "originalId": "00000000-0000-4000-8000-000000000005",
+        "originalLocation": "folder/b.jpg", "originalKind": "jpeg",
+        "originalSize": 10, "originalAvailable": false,
+        "state": "captured", "photo": null
+    });
+    let receipt = json!({"operationId": OPERATION, "reviewed": 1,
+        "counts": {"cleaned": 1, "changed": 0, "present": 0, "blocked": 0, "unavailable": 0, "inspectionFailed": 0},
+        "items": [{"photoId": PHOTO, "originalLocation": location, "originalKind": "jpeg", "state": "cleaned", "message": null, "blockers": []}]});
+    let reply = receipt.clone();
+    let handle = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        for index in 0..4 {
+            let (mut stream, _) = common::accept_tls(&listener);
+            let (head, _) = common::read_http_message(&mut stream).unwrap();
+            common::assert_bearer(head.as_bytes());
+            write_json_response(&mut stream, 200, &capabilities_body());
+            let (mut stream, _) = common::accept_tls(&listener);
+            let (head, body) = common::read_http_message(&mut stream).unwrap();
+            common::assert_bearer(head.as_bytes());
+            let response = match index {
+                0 => {
+                    json!({"start":0,"limit":1,"total":2,"cleanupMaximum":5000,"evaluatedAt":"2026-01-01T00:00:00Z","expiresAt":"2026-01-01T00:15:00Z","operation":null,"nextCursor":"opaque","libraryRoot":"/service/photos","namespace":"service","photos":[first_listing.clone()]})
+                }
+                1 => {
+                    json!({"start":1,"limit":1,"total":2,"cleanupMaximum":5000,"evaluatedAt":"2026-01-01T00:00:00Z","expiresAt":null,"operation":null,"nextCursor":null,"libraryRoot":"/service/photos","namespace":"service","photos":[second_listing.clone()]})
+                }
+                _ => reply.clone(),
+            };
+            write_json_response(&mut stream, 200, &response);
+            requests.push((head, body));
+        }
+        requests
+    });
+    let server = format!("https://127.0.0.1:{}", address.port());
+    let (exit, first) = command(&server, &["trash", "list", "--start", "0", "--limit", "1"]).await;
+    assert_eq!(exit, 0);
+    assert_eq!(first["data"]["nextCursor"], "opaque");
+    let (exit, second) = command(&server, &["trash", "list", "--cursor", "opaque"]).await;
+    assert_eq!(exit, 0);
+    assert!(second["data"]["nextCursor"].is_null());
+    let input = json!({"items": [item.clone()]}).to_string();
+    let (exit, result) = common::command_with_stdin(
+        &server,
+        &["trash", "cleanup", OPERATION, "--input", "-"],
+        &input,
+    )
+    .await;
+    assert_eq!(exit, 0, "{result}");
+    assert_eq!(result["data"], receipt);
+    let (exit, result) = command(&server, &["trash", "cleanup-operation", OPERATION]).await;
+    assert_eq!(exit, 0, "{result}");
+    assert_eq!(result["data"], receipt);
+    let requests = handle.join().unwrap();
+    assert!(requests[0].0.starts_with("GET /api/trash?start=0&limit=1 "));
+    assert!(requests[1].0.starts_with("GET /api/trash?cursor=opaque "));
+    assert!(requests[2].0.starts_with("POST /api/trash/cleanup "));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&requests[2].1).unwrap(),
+        json!({"operationId":OPERATION,"items":[item]})
+    );
+    assert!(
+        requests[3]
+            .0
+            .starts_with(&format!("GET /api/trash/cleanup-operations/{OPERATION} "))
+    );
+}
+
+#[tokio::test]
+async fn malformed_or_oversized_cleanup_input_fails_before_network() {
+    let bad = json!({"items":[{"photoId":PHOTO,"originalId":ORIGINAL,"removedAtMs":42,"originalLocation":"../outside"}]}).to_string();
+    let (exit, response) = common::command_with_stdin(
+        "https://127.0.0.1:9",
+        &["trash", "cleanup", OPERATION, "--input", "-"],
+        &bad,
+    )
+    .await;
+    assert_eq!(exit, 2, "{response}");
+    assert_eq!(response["error"]["code"], "invalid_input");
+    let oversized = " ".repeat(1024 * 1024 + 1);
+    let (exit, response) = common::command_with_stdin(
+        "https://127.0.0.1:9",
+        &["trash", "cleanup", OPERATION, "--input", "-"],
+        &oversized,
+    )
+    .await;
+    assert_eq!(exit, 2, "{response}");
+    assert_eq!(response["error"]["code"], "limit_exceeded");
+    assert_eq!(response["error"]["details"]["limit"], 1024 * 1024);
+}
+
+#[tokio::test]
+async fn lost_cleanup_response_is_recovered_with_the_same_operation() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let receipt = json!({"operationId":OPERATION,"reviewed":1,
+        "counts":{"cleaned":0,"changed":0,"present":1,"blocked":0,"unavailable":0,"inspectionFailed":0},
+        "items":[{"photoId":PHOTO,"originalLocation":"a.jpg","originalKind":"jpeg","state":"present","message":null,"blockers":[]}]});
+    let reply = receipt.clone();
+    let handle = std::thread::spawn(move || {
+        for index in 0..2 {
+            let (mut stream, _) = common::accept_tls(&listener);
+            let _ = common::read_http_message(&mut stream).unwrap();
+            write_json_response(&mut stream, 200, &capabilities_body());
+            let (mut stream, _) = common::accept_tls(&listener);
+            let (head, _) = common::read_http_message(&mut stream).unwrap();
+            if index == 0 {
+                assert!(head.starts_with("POST /api/trash/cleanup "));
+                drop(stream);
+            } else {
+                assert!(
+                    head.starts_with(&format!("GET /api/trash/cleanup-operations/{OPERATION} "))
+                );
+                write_json_response(&mut stream, 200, &reply);
+            }
+        }
+    });
+    let server = format!("https://127.0.0.1:{}", address.port());
+    let input = json!({"items":[{"photoId":PHOTO,"originalId":ORIGINAL,"removedAtMs":42,"originalLocation":"a.jpg"}]}).to_string();
+    let (exit, unknown) = common::command_with_stdin(
+        &server,
+        &["trash", "cleanup", OPERATION, "--input", "-"],
+        &input,
+    )
+    .await;
+    assert_eq!(exit, 7, "{unknown}");
+    assert_eq!(unknown["error"]["code"], "outcome_unknown");
+    assert_eq!(unknown["error"]["details"]["operationId"], OPERATION);
+    let (exit, recovered) = command(&server, &["trash", "cleanup-operation", OPERATION]).await;
+    assert_eq!(exit, 4, "{recovered}");
+    assert_eq!(recovered["error"]["code"], "conflict");
+    assert_eq!(recovered["data"], receipt);
+    handle.join().unwrap();
+}
+
+#[tokio::test]
+async fn trash_rejects_a_service_without_cleanup_capability() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = common::accept_tls(&listener);
+        let _ = common::read_http_message(&mut stream).unwrap();
+        let mut capabilities = capabilities_body();
+        capabilities["limits"]
+            .as_object_mut()
+            .unwrap()
+            .remove("trashCleanupMaximum");
+        write_json_response(&mut stream, 200, &capabilities);
+    });
+    let server = format!("https://127.0.0.1:{}", address.port());
+    let (exit, response) = command(&server, &["trash", "list"]).await;
+    assert_eq!(exit, 6, "{response}");
+    assert_eq!(response["error"]["code"], "incompatible_server");
+    assert_eq!(
+        response["error"]["details"]["field"],
+        "limits.trashCleanupMaximum"
+    );
+    handle.join().unwrap();
+}
+
+#[tokio::test]
+async fn mixed_cleanup_reports_partial_with_the_complete_receipt() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let second_photo = "00000000-0000-4000-8000-000000000004";
+    let second_original = "00000000-0000-4000-8000-000000000005";
+    let first = json!({"photoId": PHOTO, "removedAtMs": 42, "originalId": ORIGINAL, "originalLocation": "a.jpg"});
+    let second = json!({"photoId": second_photo, "removedAtMs": 41, "originalId": second_original, "originalLocation": "b.jpg"});
+    let receipt = json!({
+        "operationId": OPERATION, "reviewed": 2,
+        "counts": {"cleaned": 1, "changed": 0, "present": 1, "blocked": 0, "unavailable": 0, "inspectionFailed": 0},
+        "items": [
+            {"photoId": PHOTO, "originalLocation": "a.jpg", "originalKind": "jpeg", "state": "cleaned", "message": null, "blockers": []},
+            {"photoId": second_photo, "originalLocation": "b.jpg", "originalKind": "jpeg", "state": "present", "message": null, "blockers": []}
+        ]
+    });
+    let reply = receipt.clone();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = common::accept_tls(&listener);
+        let _ = common::read_http_message(&mut stream).unwrap();
+        write_json_response(&mut stream, 200, &capabilities_body());
+        let (mut stream, _) = common::accept_tls(&listener);
+        let (head, body) = common::read_http_message(&mut stream).unwrap();
+        assert!(head.starts_with("POST /api/trash/cleanup "));
+        write_json_response(&mut stream, 200, &reply);
+        serde_json::from_slice::<Value>(&body).unwrap()
+    });
+    let server = format!("https://127.0.0.1:{}", address.port());
+    let input = json!({"items": [first, second]}).to_string();
+    let (exit, result) = common::command_with_stdin(
+        &server,
+        &["trash", "cleanup", OPERATION, "--input", "-"],
+        &input,
+    )
+    .await;
+    assert_eq!(exit, 5, "{result}");
+    assert_eq!(result["status"], "partial");
+    assert_eq!(result["error"]["code"], "trash_cleanup_partial");
+    assert_eq!(result["error"]["effect"], "partial");
+    assert_eq!(result["data"], receipt);
+    let request = handle.join().unwrap();
+    assert_eq!(request["items"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn trash_empty_captures_every_record_and_submits_one_cleanup() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let second_photo = "00000000-0000-4000-8000-000000000004";
+    let second_original = "00000000-0000-4000-8000-000000000005";
+    let first = json!({"photoId": PHOTO, "removedAtMs": 42, "originalId": ORIGINAL, "originalLocation": "a.jpg", "originalKind": "jpeg", "originalSize": 10, "originalAvailable": false, "state": "captured", "photo": null});
+    let second = json!({"photoId": second_photo, "removedAtMs": 41, "originalId": second_original, "originalLocation": "b.jpg", "originalKind": "jpeg", "originalSize": 10, "originalAvailable": false, "state": "captured", "photo": null});
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = common::accept_tls(&listener);
+        let _ = common::read_http_message(&mut stream).unwrap();
+        write_json_response(&mut stream, 200, &capabilities_body());
+        let (mut stream, _) = common::accept_tls(&listener);
+        let (head, _) = common::read_http_message(&mut stream).unwrap();
+        assert!(head.starts_with("GET /api/trash?start=0&limit=60 "));
+        write_json_response(
+            &mut stream,
+            200,
+            &json!({
+                "start": 0, "limit": 60, "total": 2, "cleanupMaximum": 5000,
+                "evaluatedAt": "2026-01-01T00:00:00Z", "expiresAt": null,
+                "nextCursor": null, "libraryRoot": "/service/photos",
+                "namespace": "service", "operation": null, "photos": [first, second]
+            }),
+        );
+        let (mut stream, _) = common::accept_tls(&listener);
+        let (head, body) = common::read_http_message(&mut stream).unwrap();
+        assert!(head.starts_with("POST /api/trash/cleanup "));
+        let request: Value = serde_json::from_slice(&body).unwrap();
+        let operation_id = request["operationId"].as_str().unwrap().to_owned();
+        let items: Vec<_> = request["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                json!({
+                    "photoId": item["photoId"],
+                    "originalLocation": item["originalLocation"],
+                    "originalKind": "jpeg",
+                    "state": "cleaned",
+                    "message": null,
+                    "blockers": []
+                })
+            })
+            .collect();
+        let receipt = json!({
+            "operationId": operation_id,
+            "reviewed": 2,
+            "counts": {"cleaned": 2, "changed": 0, "present": 0, "blocked": 0, "unavailable": 0, "inspectionFailed": 0},
+            "items": items
+        });
+        write_json_response(&mut stream, 200, &receipt);
+        (request, receipt)
+    });
+    let server = format!("https://127.0.0.1:{}", address.port());
+    let (exit, result) = command(&server, &["trash", "empty"]).await;
+    assert_eq!(exit, 0, "{result}");
+    assert_eq!(result["data"]["counts"]["cleaned"], 2);
+    assert_eq!(result["data"]["reviewed"], 2);
+    let (request, receipt) = handle.join().unwrap();
+    assert_eq!(request["items"].as_array().unwrap().len(), 2);
+    assert_eq!(result["data"], receipt);
+    let operation_id = result["data"]["operationId"].as_str().unwrap();
+    assert!((36..=64).contains(&operation_id.len()));
+    assert!(
+        operation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) || byte == b'-')
+    );
+}
+
+#[tokio::test]
+async fn trash_empty_reports_an_empty_recycle_bin_without_a_cleanup_request() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = common::accept_tls(&listener);
+        let _ = common::read_http_message(&mut stream).unwrap();
+        write_json_response(&mut stream, 200, &capabilities_body());
+        let (mut stream, _) = common::accept_tls(&listener);
+        let (head, _) = common::read_http_message(&mut stream).unwrap();
+        assert!(head.starts_with("GET /api/trash?start=0&limit=60 "));
+        write_json_response(
+            &mut stream,
+            200,
+            &json!({
+                "start": 0, "limit": 60, "total": 0, "cleanupMaximum": 5000,
+                "evaluatedAt": "2026-01-01T00:00:00Z", "expiresAt": null,
+                "nextCursor": null, "libraryRoot": "/service/photos",
+                "namespace": "service", "operation": null, "photos": []
+            }),
+        );
+    });
+    let server = format!("https://127.0.0.1:{}", address.port());
+    let (exit, result) = command(&server, &["trash", "empty"]).await;
+    assert_eq!(exit, 0, "{result}");
+    assert_eq!(result["data"]["reviewed"], 0);
+    assert!(result["data"]["operationId"].is_null());
+    handle.join().unwrap();
+}

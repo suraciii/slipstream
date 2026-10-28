@@ -115,8 +115,9 @@ directory. Existing candidates must be inspected before creation; an existing
 supply arbitrary filesystem destinations.
 
 Original Location, Original identity, or association changes must invalidate prior
-read evidence. A retained Sidecar whose known owner was removed by Permanent
-Deletion or moved by Location Recovery must not silently transfer to another
+read evidence. A retained Sidecar whose known owner's Original has disappeared
+from its Location, whose Photo record is removed by Trash Record Cleanup, or
+whose Original moved by Location Recovery must not silently transfer to another
 Photo. Read must identify this unresolved association and Save must refuse it;
 external correction followed by a fresh inspection may establish an unambiguous
 association. Slipstream must not move or rename the Sidecar automatically.
@@ -190,7 +191,7 @@ nothing happened. A new Save requires fresh evidence. No operation ledger or
 exactly-once delivery is implied.
 
 Two concurrent saves based on the same evidence must not silently lose one
-another's changes. Restore, removal, Permanent Deletion, or Location Recovery
+another's changes. Restore, removal, Trash Record Cleanup, or Location Recovery
 must not let Save target another Original or a retired association. A successful
 save may precede a later removal; that ordering must not be described as both
 operations operating on an unchanged Photo.

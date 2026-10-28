@@ -146,30 +146,19 @@ export type LibraryBrowserIntent =
   | Readonly<{ kind: "removed-select-all" }>
   | Readonly<{ kind: "removed-clear-selection" }>
   | Readonly<{ kind: "removed-toggle"; photoId: string; selected: boolean }>
-  | Readonly<{ kind: "removed-delete" }>
+  | Readonly<{ kind: "removed-cleanup" }>
+  | Readonly<{ kind: "removed-copy-locations" }>
   | Readonly<{ kind: "removed-restore-selected" }>
   | Readonly<{
       kind: "removed-restore";
       photoId: string;
       removedAtMs: number;
     }>
-  /// Confirms the open permanent-deletion review. The review, not the
-  /// listing, is the only surface that deletes Original Files.
+  /// Confirm or cancel the explicit record-only cleanup review.
   | Readonly<{ kind: "trash-review-confirm" }>
-  /// Closes the permanent-deletion review. Cancel deletes nothing: no
-  /// delete route is called.
   | Readonly<{ kind: "trash-review-cancel" }>
-  /// Fetches the retained result of the Trash deletion operation whose
-  /// response was lost.
+  /// Read the retained cleanup outcome without repeating the mutation.
   | Readonly<{ kind: "trash-check-result" }>
-  /// Re-POSTs the retained Trash deletion operation: the server repeats only
-  /// its unresolved items and never widens the reviewed set.
-  | Readonly<{ kind: "trash-retry-delete" }>
-  /// Fetches the retained result of one listing item's pending
-  /// permanent-deletion operation.
-  | Readonly<{ kind: "trash-row-check"; photoId: string }>
-  /// Re-POSTs one listing item's pending permanent-deletion operation.
-  | Readonly<{ kind: "trash-row-resume"; photoId: string }>
   | Readonly<{
       kind:
         | "show-grid"

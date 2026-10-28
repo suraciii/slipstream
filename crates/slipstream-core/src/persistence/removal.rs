@@ -4,10 +4,7 @@
 use super::codecs::{parse_selection_state, selection_state_value};
 use super::mutation::{mutation_error_from_sqlite, mutation_transaction};
 use super::owner::{MutationError, MutationVersions, unix_millis};
-use super::permanent_deletion::{
-    PERMANENT_DELETION_DELETED_PREFIX, photo_is_permanently_deleted,
-    unsettled_permanent_deletion_operation,
-};
+use super::trash_cleanup::{PERMANENT_DELETION_DELETED_PREFIX, photo_is_permanently_deleted};
 use super::{DatabaseName, StateDirectory};
 use crate::{
     ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreCounts, ExplicitPhotoRestoreMutation,
@@ -18,12 +15,6 @@ use crate::{
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
-pub(super) use super::permanent_deletion::{
-    PermanentDeletionResultReply, PermanentDeletionReviewResult, PermanentDeletionWorkResult,
-    TrashCandidateResult, mark_permanent_deletion_deleting, permanent_deletion_work,
-    prepare_permanent_deletion, read_permanent_deletion, settle_permanent_deletion,
-    trash_candidates,
-};
 pub(super) use super::trash::removed_photos;
 const PHOTO_REMOVAL_RECEIPT_PREFIX: &str = "photo_removal_receipt:";
 
@@ -78,7 +69,7 @@ pub(super) enum PhotoRestoreRequest {
     Explicit(ExplicitPhotoRestoreMutation),
     Trash {
         operation_id: String,
-        selection: crate::PermanentDeletionSelection,
+        selection: crate::TrashSelection,
     },
 }
 
@@ -392,11 +383,6 @@ pub(super) fn remove_photos(
                     result.missing.push(photo_id.clone());
                     continue;
                 };
-                if photo_is_permanently_deleted(transaction, photo_id)? {
-                    outcomes.push(PhotoRemovalOutcome::AlreadyRemoved);
-                    result.already_removed.push(photo_id.clone());
-                    continue;
-                }
                 if removed_at.is_some() {
                     if removed_operation.as_deref() == Some(operation_id.as_str()) {
                         outcomes.push(PhotoRemovalOutcome::Removed);
@@ -567,10 +553,8 @@ pub(super) fn restore_photos_explicit(
             selection,
         } => {
             let intent = match selection {
-                crate::PermanentDeletionSelection::Photos(ids) => {
-                    RestoreSelectionIntent::Photos(ids)
-                }
-                crate::PermanentDeletionSelection::All { exclude_photo_ids } => {
+                crate::TrashSelection::Photos(ids) => RestoreSelectionIntent::Photos(ids),
+                crate::TrashSelection::All { exclude_photo_ids } => {
                     RestoreSelectionIntent::All(exclude_photo_ids)
                 }
             };
@@ -622,18 +606,31 @@ pub(super) fn restore_photos_explicit(
                 }
                 photos
             }
-            (None, Some(RestoreSelectionIntent::All(exclusions))) => trash_candidates(
-                transaction,
-                crate::PermanentDeletionSelection::All {
-                    exclude_photo_ids: exclusions.clone(),
-                },
-            )?
-            .into_iter()
-            .map(|candidate| PhotoRemovalMarker {
-                photo_id: candidate.photo_id,
-                removed_at_ms: candidate.removed_at_ms,
-            })
-            .collect(),
+            (None, Some(RestoreSelectionIntent::All(exclusions))) => {
+                let exclusions = exclusions.iter().collect::<std::collections::HashSet<_>>();
+                let mut statement = transaction
+                    .prepare("SELECT id,removed_at_ms FROM photos WHERE removed_at_ms IS NOT NULL ORDER BY removed_at_ms DESC,id")
+                    .map_err(mutation_error_from_sqlite)?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok(PhotoRemovalMarker {
+                            photo_id: row.get(0)?,
+                            removed_at_ms: row.get(1)?,
+                        })
+                    })
+                    .map_err(mutation_error_from_sqlite)?;
+                let mut photos = Vec::new();
+                for row in rows {
+                    let photo = row.map_err(mutation_error_from_sqlite)?;
+                    if !exclusions.contains(&photo.photo_id) {
+                        photos.push(photo);
+                        if photos.len() > crate::TRASH_CLEANUP_MAX {
+                            return Err(MutationError::Conflict);
+                        }
+                    }
+                }
+                photos
+            }
             (None, None) => unreachable!(),
         };
         let photo_ids = photos
@@ -669,9 +666,7 @@ pub(super) fn restore_photos_explicit(
                 result.missing.push(photo.photo_id);
                 continue;
             };
-            if photo_is_permanently_deleted(transaction, &photo.photo_id)?
-                || unsettled_permanent_deletion_operation(transaction, &photo.photo_id)?.is_some()
-            {
+            if photo_is_permanently_deleted(transaction, &photo.photo_id)? {
                 outcomes.push(PhotoRestoreOutcome::ChangedElsewhere);
                 result.changed_elsewhere.push(photo.photo_id);
                 continue;
@@ -799,12 +794,8 @@ pub(super) fn restore_photos(
                     result.missing.push(photo_id.clone());
                     continue;
                 };
-                // A permanently deleted Photo is evidence, and one whose own
-                // deletion has not settled has no known outcome to reverse;
-                // neither may be restored.
-                if photo_is_permanently_deleted(transaction, photo_id)?
-                    || unsettled_permanent_deletion_operation(transaction, photo_id)?.is_some()
-                {
+                // Confirmed legacy deletions remain historical tombstones.
+                if photo_is_permanently_deleted(transaction, photo_id)? {
                     result.changed_elsewhere.push(photo_id.clone());
                     continue;
                 }

@@ -2,7 +2,7 @@
 
 [The product spec](spec.md) defines the observable behavior of this capability. This spec records the design that provides it.
 
-A Photographer reviews a filtered `Rejected` result and decides to take those Photos out of the Library while keeping every Original File untouched and every removal recoverable. The reviewed result can be larger than the ordinary 100-Photo Grid multi-selection, and Photo facts can change between the review and the confirmation. The design must therefore remove exactly what was reviewed, make concurrent changes inspectable instead of silently deleting, and survive a reload or restart.
+A Photographer reviews a filtered `Rejected` result and decides to take those Photos out of the Library while keeping every Original File untouched and each removal recoverable until a separate Trash Record Cleanup. The reviewed result can be larger than the ordinary 100-Photo Grid multi-selection, and Photo facts can change between the review and the confirmation. The design must therefore remove exactly what was reviewed, make concurrent changes inspectable instead of silently deleting, and survive a reload or restart.
 
 [Photo Library Design](../design.md) owns the Photo and Album state retained during removal.
 
@@ -24,7 +24,7 @@ Removal is application-owned Photo state: a Photo is either part of the Library 
 - `removed_at_ms`: when the removal was confirmed; and
 - `removed_operation`: the removal operation that removed it.
 
-Both are null together or set together. A removed Photo keeps its row, so every retained fact — identity, Original Location, Rating, Album membership, Album position, saved-position eligibility, and Selection State — is still the one the Photographer had before the removal. There is no separate recovery record to keep in sync, and restoring a Photo never rewrites facts it never lost.
+Both are null together or set together. A removed Photo keeps its row, so every retained fact — identity, Original Location, Rating, Album membership, Album position, saved-position eligibility, and Selection State — is still the one the Photographer had before the removal. There is no separate recovery record to keep in sync, and restoring a Photo never rewrites facts it never lost. A separate eligible Trash Record Cleanup discards the record and its recoverable facts.
 
 ### Removal Operation
 
@@ -32,13 +32,13 @@ A Removal Operation is one confirmed removal of one reviewed result. Its identit
 The operation outcome is also recorded durably as an idempotency receipt. The
 receipt keeps the reviewed Photo sequence and its immutable outcomes; it is not
 a second copy of Photo recovery state. A retry after the Photos have been
-restored returns the original outcome without applying a second removal.
+restored or their records cleaned up returns the original outcome without applying a second removal.
 
 ### Removed Source Materialization
 
 Normal Library sources exclude removed Photos. That covers every Browse Snapshot source (`All Photos`, Original Folder, Album), the Library Overview Photo count, Album summaries and Album member listings, Original Folder Photo counts, the CLI Photo query, and the unavailable-Original recovery survey. Album membership rows are not deleted, so restoring a Photo re-admits it to the same Albums at the same positions.
 
-A removed Photo is not deleted state: reading it by identity still resolves, and it remains available through Trash. Trash owns the recovery listing and permanent-deletion semantics.
+A removed Photo is not deleted state: reading it by identity still resolves, and it remains available through Trash until restored or its record is cleaned up. [Trash](../trash/spec.md) owns the recovery listing and Trash Record Cleanup semantics.
 
 ### Trash Listing
 
@@ -57,7 +57,7 @@ The browser supplies the operation id. The server resolves the Snapshot's comple
 
 Each requested Photo yields exactly one outcome:
 
-- `removed`: the Photo was `rejected` and is now removed by this operation, including a Photo this same operation already removed on a retried request;
+- `removed`: the Photo was `rejected` and was removed by this operation; a retried request replays that historical outcome even if it has since been restored or cleaned up;
 - `changedElsewhere`: the Photo is no longer `rejected`, so it stays in the Library;
 - `missing`: the Photo row no longer exists; or
 - `alreadyRemoved`: another operation had already removed the Photo, so this operation does not adopt it.
@@ -68,7 +68,7 @@ The operation is one transaction: a persistence failure leaves the whole request
 
 ### Undo and Restore
 
-Undo restores every Photo of one operation that is still removed, in one transaction. It is a compare-and-set against the removal marker: a Photo that another action already restored is simply no longer part of the operation and is not overwritten.
+Undo restores every Photo of one operation that is still removed, in one transaction. It is a compare-and-set against the removal marker: a Photo that another action already restored is simply no longer part of the operation and is not overwritten. A cleaned-up record cannot be restored; cleanup and Undo serialize under the Trash contract.
 
 The durable Restore action restores named Photos through the same compare-and-set, and reports one outcome per requested Photo: `restored`, `changedElsewhere`, or `missing`. Each named Photo carries the removal marker the listing presented, and the compare-and-set is against that marker: a Photo removed again since the listing was read is reported as `changedElsewhere` instead of being restored past its newer removal, and a marker that does not match the current removal is refused before any state changes. A request naming neither one operation nor a bounded non-empty list of markers is refused.
 
@@ -143,7 +143,7 @@ A dedicated table could copy the Photo's pre-removal facts. It would duplicate s
 
 ### Rejected: Delete Original Files immediately
 
-Immediate filesystem deletion is irreversible, violates the Original File safety boundary, and gives a concurrent state change no recovery path. Removal keeps the file in place and leaves physical deletion to its own future capability.
+Filesystem deletion is irreversible, violates the Original File safety boundary, and gives a concurrent state change no recovery path. Slipstream never deletes Originals; the Photographer may do so externally before separately requesting Trash Record Cleanup.
 
 ## Verification
 
@@ -151,7 +151,7 @@ The implementation must prove that:
 
 - a rejected Snapshot can remove a result larger than one Grid window in one confirmation;
 - removal is refused for a Snapshot whose filter is not `Rejected`, and for an expired or unknown token;
-- every requested Photo yields exactly one `removed`, `changedElsewhere`, `missing`, or `alreadyRemoved` outcome, and a retried request with the same operation id adopts what it already removed;
+- every requested Photo yields exactly one `removed`, `changedElsewhere`, `missing`, or `alreadyRemoved` outcome, and a retried request with the same operation id replays its immutable historical outcome even after Restore or cleanup;
 - a restore names the removal marker each Photo was listed under, so a stale marker is refused and a Photo removed again since is reported as `changedElsewhere` rather than cleared;
 - a restore reports what each operation it touched still owns, including a zero remainder for one it emptied, so Undo is withdrawn when the operation is empty and keeps its remaining count otherwise;
 - a changed, missing, or already-removed Photo is never removed by that request;

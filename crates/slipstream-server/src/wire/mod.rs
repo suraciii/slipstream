@@ -250,8 +250,7 @@ pub struct RemovedPhotosResponse {
     pub start: usize,
     pub limit: usize,
     pub total: usize,
-    /// The most Photos one Permanent Deletion review may capture. A surface
-    /// that selects every Trash result must not exceed it.
+    /// The most Photos one bounded Trash selection may capture.
     pub review_maximum: usize,
     pub operation: Option<PhotoOperationRemainderWire>,
     pub photos: Vec<RemovedPhotoWire>,
@@ -267,60 +266,97 @@ pub struct RemovedPhotoWire {
     pub original_location: String,
     pub original_kind: &'static str,
     pub original_size: Option<u64>,
-    /// The retained Permanent Deletion operation whose outcome for this Photo
-    /// is still unresolved. While it is present, Restore and another
-    /// destructive confirmation are unavailable and the surface can reopen
-    /// that operation.
+    /// Historical compatibility field, always empty.
     pub pending_verification_operation_id: Option<String>,
     pub photo: PhotoSummary,
 }
 
-/// Fixed review facts and explicit refusals for one Permanent Deletion.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PermanentDeletionReviewResponse {
-    pub operation_id: String,
-    pub items: Vec<PermanentDeletionReviewItemWire>,
-    pub rejected: Vec<PermanentDeletionRejectionWire>,
+pub struct TrashListResponse {
+    pub start: usize,
+    pub limit: usize,
+    pub total: usize,
+    pub cleanup_maximum: usize,
+    pub restore_maximum: usize,
+    pub evaluated_at: String,
+    pub expires_at: Option<String>,
+    pub next_cursor: Option<String>,
+    pub library_root: String,
+    pub namespace: &'static str,
+    pub operation: Option<PhotoOperationRemainderWire>,
+    pub photos: Vec<TrashItemWire>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PermanentDeletionReviewItemWire {
+pub struct TrashItemWire {
     pub photo_id: String,
     pub removed_at_ms: i64,
     pub original_id: String,
     pub original_location: String,
-    pub original_kind: String,
-    pub size: u64,
-    pub albums: Vec<PhotoAlbumMembershipWire>,
+    pub original_kind: &'static str,
+    pub original_size: Option<u64>,
+    pub original_available: bool,
+    pub state: &'static str,
+    pub photo: Option<PhotoSummary>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PermanentDeletionRejectionWire {
-    pub photo_id: String,
-    pub reason: &'static str,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PermanentDeletionResponse {
+pub struct TrashCleanupResponse {
     pub operation_id: String,
     pub reviewed: usize,
-    pub logical_bytes_deleted: u64,
-    pub items: Vec<PermanentDeletionItemWire>,
+    pub counts: TrashCleanupCountsWire,
+    pub items: Vec<TrashCleanupItemWire>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PermanentDeletionItemWire {
+pub struct TrashCleanupCountsWire {
+    pub cleaned: usize,
+    pub changed: usize,
+    pub present: usize,
+    pub blocked: usize,
+    pub unavailable: usize,
+    pub inspection_failed: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashCleanupPreviewResponse {
+    pub items: Vec<TrashCleanupPreviewItemWire>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashCleanupPreviewItemWire {
     pub photo_id: String,
     pub original_location: String,
     pub original_kind: &'static str,
     pub state: &'static str,
-    pub size: Option<u64>,
+    pub absence: &'static str,
     pub message: Option<String>,
+    pub blockers: Vec<TrashCleanupBlockerWire>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashCleanupItemWire {
+    pub photo_id: String,
+    pub original_location: String,
+    pub original_kind: &'static str,
+    pub state: &'static str,
+    pub message: Option<String>,
+    pub blockers: Vec<TrashCleanupBlockerWire>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashCleanupBlockerWire {
+    pub kind: String,
+    pub name: String,
+    pub action: String,
 }
 
 #[derive(Clone, Debug)]

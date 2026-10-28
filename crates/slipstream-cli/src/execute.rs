@@ -11,6 +11,12 @@ pub(crate) async fn execute(
     if matches!(&cli.command, Command::Auth { .. }) {
         return auth::execute_auth(cli, environment, deadline).await;
     }
+    let pending_trash_cleanup = match &cli.command {
+        Command::Trash {
+            command: TrashCommand::Cleanup(args),
+        } => Some(read_trash_cleanup_input(&args.input).await?),
+        _ => None,
+    };
     let pending_workspace = match &cli.command {
         Command::Workspace { command } => Some(workspace::prepare(command)?),
         _ => None,
@@ -80,31 +86,6 @@ pub(crate) async fn execute(
         Command::Photos {
             command: PhotoCommand::MetadataSave(args),
         } => Some(prepare_metadata_save(&args.photo_id, &args.input).await?),
-        _ => None,
-    };
-    let pending_trash_review = match &cli.command {
-        Command::Trash {
-            command: TrashCommand::Review(args),
-        } => {
-            let photo_ids = match (&args.all, &args.input) {
-                (true, None) => Vec::new(),
-                (false, Some(input)) => read_trash_ids(input).await?,
-                _ => {
-                    return Err(CommandFailure::invalid(
-                        "input",
-                        "Trash review requires --all or --input, but not both.",
-                    ));
-                }
-            };
-            let exclude_photo_ids = match &args.exclude_input {
-                Some(input) => read_trash_ids(input).await?,
-                None => Vec::new(),
-            };
-            Some(PendingTrashReview {
-                photo_ids,
-                exclude_photo_ids,
-            })
-        }
         _ => None,
     };
     let pending_processing_recipe = match &cli.command {
@@ -789,71 +770,61 @@ pub(crate) async fn execute(
                 command: TrashCommand::List(args),
             } => {
                 let mut url = client.endpoint(&["api", "trash"]);
-                url.query_pairs_mut()
-                    .append_pair("start", &args.start.to_string())
-                    .append_pair("limit", &args.limit.to_string());
+                if let Some(cursor) = &args.cursor {
+                    url.query_pairs_mut().append_pair("cursor", cursor);
+                } else {
+                    url.query_pairs_mut()
+                        .append_pair("start", &args.start.unwrap_or(0).to_string())
+                        .append_pair("limit", &args.limit.unwrap_or(60).to_string());
+                }
                 let data: Value = client.json(operation, Method::GET, url, None).await?;
-                if !data.is_object() {
-                    return Err(CommandFailure::transport(operation));
-                }
-                Ok(data)
-            }
-            Command::Trash {
-                command: TrashCommand::Review(args),
-            } => {
-                let pending = pending_trash_review
-                    .as_ref()
-                    .expect("Trash review input was prepared");
-                let data: Value = client
-                    .json(
-                        operation,
-                        Method::POST,
-                        client.endpoint(&["api", "trash", "review"]),
-                        Some(json!({
-                            "operationId": args.operation_id,
-                            "all": args.all,
-                            "photoIds": pending.photo_ids,
-                            "excludePhotoIds": pending.exclude_photo_ids,
-                        })),
+                let expected = if args.cursor.is_some() {
+                    (None, None)
+                } else {
+                    (
+                        Some(args.start.unwrap_or(0) as u64),
+                        Some(u64::from(args.limit.unwrap_or(60))),
                     )
-                    .await?;
-                if !data.is_object() {
-                    return Err(CommandFailure::transport(operation));
-                }
-                Ok(data)
-            }
-            Command::Trash {
-                command: TrashCommand::Delete { operation_id },
-            } => {
-                let identity = MutationIdentity {
-                    operation,
-                    photo_ids: Vec::new(),
-                    album_id: None,
-                    album_name: None,
-                    mappings: Vec::new(),
                 };
-                client
-                    .mutation(
-                        &identity,
-                        admission,
-                        client.endpoint(&["api", "trash", "delete"]),
-                        json!({ "operationId": operation_id }),
-                    )
-                    .await
+                if !trash::valid_trash_page(&data, expected.0, expected.1) {
+                    return Err(CommandFailure::transport(operation));
+                }
+                Ok(data)
             }
             Command::Trash {
-                command: TrashCommand::Operation { operation_id },
+                command: TrashCommand::Empty { operation_id },
+            } => trash::execute_empty(&client, admission, operation, operation_id.as_deref()).await,
+            Command::Trash {
+                command: TrashCommand::Cleanup(args),
+            } => {
+                let pending = pending_trash_cleanup
+                    .as_ref()
+                    .expect("prepared Trash cleanup");
+                trash::execute_cleanup(&client, admission, operation, args, pending).await
+            }
+            Command::Trash {
+                command: TrashCommand::CleanupOperation { operation_id },
             } => {
                 let data: Value = client
                     .json(
                         operation,
                         Method::GET,
-                        client.endpoint(&["api", "trash", "operations", operation_id]),
+                        client.endpoint(&["api", "trash", "cleanup-operations", operation_id]),
                         None,
                     )
-                    .await?;
-                if !data.is_object() {
-                    return Err(CommandFailure::transport(operation));
+                    .await
+                    .map_err(|failure| {
+                        if failure.payload.code == "transport_failed" {
+                            trash::unknown_receipt(operation_id)
+                        } else {
+                            failure
+                        }
+                    })?;
+                if !trash::valid_cleanup_result(&data, operation_id, None) {
+                    return Err(trash::unknown_receipt(operation_id));
+                }
+                if let Some(failure) = trash::cleanup_failure(&data) {
+                    return Err(failure.with_data(data));
                 }
                 Ok(data)
             }
@@ -1148,22 +1119,22 @@ pub(crate) fn validate_command(command: &Command) -> Result<(), CommandFailure> 
             Ok(())
         }
         Command::Trash {
-            command: TrashCommand::Review(args),
-        } => {
-            if args.all == args.input.is_some() {
-                return Err(CommandFailure::invalid(
-                    "arguments",
-                    "trash review needs exactly one of --all or --input.",
-                ));
-            }
-            if args.exclude_input.is_some() && !args.all {
-                return Err(CommandFailure::invalid(
-                    "exclude-input",
-                    "--exclude-input requires --all.",
-                ));
-            }
-            Ok(())
-        }
+            command:
+                TrashCommand::Cleanup(TrashCleanupArgs { operation_id, .. })
+                | TrashCommand::CleanupOperation { operation_id },
+        } if !valid_library_id(operation_id) => Err(CommandFailure::invalid(
+            "operation-id",
+            "The operation ID must be a valid Library identity.",
+        )),
+        Command::Trash {
+            command:
+                TrashCommand::Empty {
+                    operation_id: Some(operation_id),
+                },
+        } if !valid_library_id(operation_id) => Err(CommandFailure::invalid(
+            "operation-id",
+            "The operation ID must be a valid Library identity.",
+        )),
         Command::Recovery {
             command: RecoveryCommand::Propose(args),
         } if args.cursor.is_none() => {

@@ -22,7 +22,7 @@ fn capabilities() -> Value {
 fn status() -> Value {
     json!({
         "serverVersion": "0.0.0",
-        "cliContractVersion": 1,
+        "cliContractVersion": 2,
         "published": true,
         "publication": "publication",
         "photoCount": 0,

@@ -139,7 +139,7 @@ actions on named Photos:
 Normal Grid multi-selection remains bounded by the existing 100-Photo
 contract. A batch action reports each requested Photo as confirmed, changed
 elsewhere, or missing and never treats a partial result as complete. A filter
-does not automatically mark, rate, add, remove, restore, or permanently delete
+does not automatically mark, rate, add, remove, Restore, or clean up records for
 any Photo.
 
 ## Rejected Review and Cleanup
@@ -158,8 +158,11 @@ Rejected is the first complete end-to-end filter workflow:
    the reviewed evidence enter Trash. Changed, missing, or uncertain Photos
    remain visible in the outcome and are not called removed.
 6. Undo or Restore returns confirmed removals to normal Library sources with
-   their Photo identity and retained facts. Permanent Deletion remains a
-   separate confirmation inside Trash.
+   their Photo identity and retained facts. Trash allows the Photographer to
+   inspect Original Locations for external file removal. Separately confirmed
+   [Trash Record Cleanup](../../photo-library/trash/spec.md) removes only
+   eligible application records after absence is confirmed; Slipstream never
+   deletes Originals.
 
 The full review, operation, stale-state, retry, and Original File rules are
 defined in [Remove Rejected Photos](../../photo-library/rejected-cleanup/spec.md). This filter

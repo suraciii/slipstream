@@ -11,8 +11,8 @@ use std::time::SystemTime;
 
 use super::{
     ApiError, CLI_CONTRACT_HEADER, HttpState, api_error, cli_error, has_exact_keys, invalid_cli,
-    json_response, parse_permanent_deletion_ids, read_json_body, require_cli_contract,
-    require_published, valid_id, valid_removal_markers, valid_selection,
+    json_response, read_json_body, require_cli_contract, require_published, valid_id,
+    valid_removal_markers, valid_selection,
 };
 use crate::{
     Application, BrowseSelectionFilter, BrowseSourceRequest, BrowseViewOrder, ServerError,
@@ -502,125 +502,6 @@ pub(crate) async fn get_removed_photos(
         return api_error(StatusCode::BAD_REQUEST, "Removed Photos window is invalid");
     };
     match state.application.removed_photos(start, limit).await {
-        Ok(result) => json_response(StatusCode::OK, &result),
-        Err(error) => ApiError::from(error).into_response(),
-    }
-}
-
-/// Captures a fixed Trash selection and returns the exact files and affected
-/// Albums that require confirmation before deletion.
-pub(crate) async fn review_permanent_deletion(
-    State(state): State<HttpState>,
-    request: Request<Body>,
-) -> Response<Body> {
-    let (operation_id, selection) = {
-        let body = match read_json_body(request).await {
-            Ok(body) => body,
-            Err(response) => return response,
-        };
-        let Some(body) = body.as_object() else {
-            return api_error(StatusCode::BAD_REQUEST, "Invalid Trash review request");
-        };
-        if !has_exact_keys(body, &["operationId", "all", "photoIds", "excludePhotoIds"]) {
-            return api_error(StatusCode::BAD_REQUEST, "Invalid Trash review request");
-        }
-        let Some(operation_id) = body
-            .get("operationId")
-            .and_then(Value::as_str)
-            .filter(|value| valid_id(value))
-        else {
-            return api_error(StatusCode::BAD_REQUEST, "Invalid Trash review request");
-        };
-        let Some(all) = body.get("all").and_then(Value::as_bool) else {
-            return api_error(StatusCode::BAD_REQUEST, "Invalid Trash review request");
-        };
-        let Some(photo_ids) = parse_permanent_deletion_ids(body, "photoIds") else {
-            return api_error(StatusCode::BAD_REQUEST, "Invalid Trash review request");
-        };
-        let Some(exclude_photo_ids) = parse_permanent_deletion_ids(body, "excludePhotoIds") else {
-            return api_error(StatusCode::BAD_REQUEST, "Invalid Trash review request");
-        };
-        let selection = if all {
-            if !photo_ids.is_empty() {
-                return api_error(StatusCode::BAD_REQUEST, "Invalid Trash review request");
-            }
-            slipstream_core::PermanentDeletionSelection::All { exclude_photo_ids }
-        } else {
-            if photo_ids.is_empty() || !exclude_photo_ids.is_empty() {
-                return api_error(StatusCode::BAD_REQUEST, "Invalid Trash review request");
-            }
-            slipstream_core::PermanentDeletionSelection::Photos(photo_ids)
-        };
-        (operation_id.to_owned(), selection)
-    };
-    match state
-        .application
-        .prepare_permanent_deletion(operation_id, selection)
-        .await
-    {
-        Ok(result) => json_response(StatusCode::OK, &result),
-        Err(error) => ApiError::from(error).into_response(),
-    }
-}
-
-pub(crate) async fn permanently_delete(
-    State(state): State<HttpState>,
-    request: Request<Body>,
-) -> Response<Body> {
-    let operation_id = {
-        let body = match read_json_body(request).await {
-            Ok(body) => body,
-            Err(response) => return response,
-        };
-        let Some(body) = body.as_object() else {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "Invalid Permanent Deletion request",
-            );
-        };
-        if !has_exact_keys(body, &["operationId"]) {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "Invalid Permanent Deletion request",
-            );
-        }
-        let Some(operation_id) = body
-            .get("operationId")
-            .and_then(Value::as_str)
-            .filter(|value| valid_id(value))
-        else {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "Invalid Permanent Deletion request",
-            );
-        };
-        operation_id.to_owned()
-    };
-    match state
-        .application
-        .permanently_delete(operation_id.to_owned())
-        .await
-    {
-        Ok(result) => json_response(StatusCode::OK, &result),
-        Err(error) => ApiError::from(error).into_response(),
-    }
-}
-
-pub(crate) async fn get_permanent_deletion(
-    State(state): State<HttpState>,
-    axum::extract::Path(operation_id): axum::extract::Path<String>,
-) -> Response<Body> {
-    if !valid_id(&operation_id) {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "Invalid Permanent Deletion operation",
-        );
-    }
-    match state
-        .application
-        .read_permanent_deletion(operation_id)
-        .await
-    {
         Ok(result) => json_response(StatusCode::OK, &result),
         Err(error) => ApiError::from(error).into_response(),
     }

@@ -38,6 +38,12 @@ pub async fn invoke_until(
             command: workspace::WorkspaceCommand::Download { .. }
         }
     ) || matches!(&cli.command, Command::Darktable(command) if command.operation.ends_with("download") || command.operation.ends_with("wait") || command.operation.ends_with(" export"));
+    let cleanup_receipt = match &cli.command {
+        Command::Trash {
+            command: TrashCommand::CleanupOperation { operation_id },
+        } => Some(operation_id.clone()),
+        _ => None,
+    };
     let command = execute(&cli, environment, &admission, &publication, deadline);
     tokio::pin!(command);
     let deadline_signal = async {
@@ -62,7 +68,10 @@ pub async fn invoke_until(
             }
         },
         _ = &mut deadline_signal => {
-            let failure = deadline_failure(operation, &publication, &admission);
+            let failure = match cleanup_receipt.as_deref() {
+                Some(operation_id) => crate::trash::unknown_receipt(operation_id),
+                None => deadline_failure(operation, &publication, &admission),
+            };
             let envelope = match failure.data {
                 Some(data) => Envelope::partial(*data, failure.payload),
                 None => Envelope::error(failure.payload),
@@ -129,8 +138,138 @@ pub(crate) fn render_invocation(
     }
 }
 
+fn render_cleanup_text(data: &Value, error: Option<&ErrorPayload>) -> Option<String> {
+    let counts = data.get("counts")?.as_object()?;
+    let reviewed = data.get("reviewed")?.as_u64()?;
+    if reviewed == 0 {
+        return Some("Trash is empty.\n".to_owned());
+    }
+    let mut text = String::new();
+    if let Some(error) = error {
+        text.push_str(&format!("{}: {}\n", error.code, error.message));
+    } else {
+        text.push_str("Cleanup complete.\n");
+    }
+    if let Some(operation) = data.get("operationId").and_then(Value::as_str) {
+        text.push_str(&format!("Operation: {}\n", operation.escape_debug()));
+    }
+    let count = |name: &str| counts.get(name).and_then(Value::as_u64).unwrap_or(0);
+    text.push_str(&format!(
+        "Cleaned {} · Present {} · Blocked {} · Changed {} · Unavailable {} · Inspection failed {}\n",
+        count("cleaned"),
+        count("present"),
+        count("blocked"),
+        count("changed"),
+        count("unavailable"),
+        count("inspectionFailed"),
+    ));
+    if let Some(items) = data.get("items").and_then(Value::as_array) {
+        for item in items {
+            let state = item
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let location = item
+                .get("originalLocation")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let message = item.get("message").and_then(Value::as_str).unwrap_or("");
+            let blockers = item
+                .get("blockers")
+                .and_then(Value::as_array)
+                .map(|blockers| {
+                    blockers
+                        .iter()
+                        .filter_map(|blocker| {
+                            Some(format!(
+                                "{}:{}",
+                                blocker.get("kind")?.as_str()?,
+                                blocker.get("name")?.as_str()?
+                            ))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            text.push_str(&format!(
+                "{} {}{}{}\n",
+                state.escape_debug(),
+                serde_json::to_string(location).expect("location serialization is infallible"),
+                if message.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", message.escape_debug())
+                },
+                if blockers.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", blockers.join(", "))
+                },
+            ));
+        }
+    }
+    Some(text)
+}
+
 pub(crate) fn render_text(envelope: &Envelope) -> String {
+    if let Some(data) = &envelope.data
+        && let Some(text) = render_cleanup_text(data, envelope.error.as_ref())
+    {
+        return text;
+    }
     match (&envelope.data, &envelope.error) {
+        (Some(data), None)
+            if data.get("namespace").and_then(Value::as_str) == Some("service")
+                && data.get("libraryRoot").and_then(Value::as_str).is_some()
+                && data.get("photos").and_then(Value::as_array).is_some() =>
+        {
+            let root = data["libraryRoot"].as_str().unwrap();
+            let mut text = format!("Success\nLibrary Folder: {}\n", root.escape_debug());
+            for item in data["photos"].as_array().unwrap() {
+                let kind = item
+                    .get("originalKind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                let marker = item
+                    .get("removedAtMs")
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| "null".to_owned());
+                let location = item
+                    .get("originalLocation")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let id = item.get("photoId").and_then(Value::as_str).unwrap_or("");
+                let original = item.get("originalId").and_then(Value::as_str).unwrap_or("");
+                let available = item
+                    .get("originalAvailable")
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| "null".to_owned());
+                let state = item
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                text.push_str(&format!(
+                    "{} {} marker={} location={} original={} available={} state={}\n",
+                    id.escape_debug(),
+                    kind.escape_debug(),
+                    marker,
+                    serde_json::to_string(location).expect("location serialization is infallible"),
+                    original.escape_debug(),
+                    available,
+                    state.escape_debug()
+                ));
+            }
+            let mut summary = data.clone();
+            summary
+                .as_object_mut()
+                .expect("Trash listing is an object")
+                .remove("photos");
+            text.push_str(
+                &serde_json::to_string_pretty(&summary)
+                    .expect("result serialization is infallible"),
+            );
+            text.push('\n');
+            text
+        }
         (Some(data), None) => format!(
             "Success\n{}\n",
             serde_json::to_string_pretty(data).expect("result serialization is infallible")

@@ -279,7 +279,7 @@ fn fake_service_with(steps: Vec<Step>, rendition: Arc<Vec<u8>>) -> FakeService {
                         common::assert_bearer(wire.as_bytes());
                         assert!(
                             wire.to_ascii_lowercase()
-                                .contains("slipstream-cli-contract: 1"),
+                                .contains("slipstream-cli-contract: 2"),
                             "CLI request did not frame the contract header"
                         );
                         let header = |name: &str| {
@@ -598,7 +598,7 @@ fn write_rendition(
 fn capabilities_body() -> Value {
     json!({
         "serverVersion": "0.0.0",
-        "supportedCliContractVersions": [1],
+        "supportedCliContractVersions": [2],
         "limits": {
             "listPageMaximum": 60,
             "mutationPhotoIdsMaximum": 100,
@@ -701,7 +701,7 @@ async fn recipe_save_writes_nothing_when_the_capability_report_is_incomplete() {
     assert_eq!(envelope["error"]["code"], "incompatible_server");
     assert_eq!(
         envelope["error"]["details"]["supportedContractVersions"],
-        json!([1])
+        json!([2])
     );
     assert_eq!(
         envelope["error"]["details"]["field"],

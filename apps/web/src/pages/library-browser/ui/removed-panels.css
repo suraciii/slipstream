@@ -102,6 +102,7 @@
   margin: 0;
   color: var(--muted);
   font-size: 0.78rem;
+  overflow-wrap: anywhere;
 }
 
 .removed-selection {
@@ -203,8 +204,7 @@
   color: var(--warning);
 }
 
-/* The permanent-deletion review names the reviewed files before the one
-   confirmation that cannot be undone. */
+/* The cleanup review names records before irreversible confirmation. */
 .trash-review-dialog .removal-sheet {
   width: 100%;
 }
@@ -231,8 +231,7 @@
   border-color: #912018;
 }
 
-.trash-review-items,
-.trash-review-rejected-list {
+.trash-review-items {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -261,24 +260,15 @@
 .trash-review-kind,
 .trash-review-size {
   color: var(--muted);
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .trash-review-albums {
   color: var(--muted);
 }
 
-.trash-review-rejected-item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 0.25rem;
-  overflow-wrap: anywhere;
-  color: var(--warning);
-}
-
-/* The Trash deletion outcome: one partition of the operation's items, the
-   logical bytes of the confirmed deletions only, and the recovery actions a
-   lost response offers. */
+/* A settled record outcome or read-only recovery for a lost response. */
 .trash-outcome {
   display: grid;
   gap: 0.3rem;
@@ -292,8 +282,7 @@
   margin: 0;
 }
 
-.trash-outcome-counts,
-.trash-outcome-bytes {
+.trash-outcome-counts {
   margin: 0;
   color: var(--muted);
 }
@@ -317,23 +306,7 @@
   flex-wrap: wrap;
 }
 
-/* One listing item whose permanent-deletion outcome is not settled yet. */
-.removed-pending {
-  grid-column: 1 / -1;
-  display: grid;
-  gap: 0.3rem;
-  justify-items: start;
-}
-
-.removed-pending-marker {
-  margin: 0;
-  font-size: 0.72rem;
-  color: var(--warning);
-}
-
-/* One item the Photographer excluded from a Select all selection. It is
-   never named as reviewed, counted, or deleted, so its row says so instead
-   of relying on the checkbox alone. */
+/* Exclusions remain visible without becoming part of the captured selection. */
 .removed-item[data-trash-excluded-item] {
   opacity: 0.72;
 }

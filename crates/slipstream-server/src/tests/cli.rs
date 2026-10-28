@@ -72,7 +72,7 @@ async fn cli_direct_photo_metadata_stays_with_its_published_revision() {
             &router,
             authenticated_request()
                 .uri(format!("https://camera.local/api/photos/{photo_id}"))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -132,7 +132,7 @@ async fn cli_direct_photo_metadata_stays_with_its_published_revision() {
             &router,
             authenticated_request()
                 .uri(format!("https://camera.local/api/photos/{photo_id}"))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -201,7 +201,7 @@ async fn cli_direct_photo_metadata_stays_with_its_published_revision() {
             &router,
             authenticated_request()
                 .uri(format!("https://camera.local/api/photos/{photo_id}"))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -309,7 +309,7 @@ async fn cli_photo_reads_keep_prior_membership_until_scan_publication() {
             authenticated_request()
                 .method("POST")
                 .uri("https://camera.local/api/photo-queries")
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"selection":"picked","limit":60}"#))
                 .unwrap(),
@@ -328,7 +328,7 @@ async fn cli_photo_reads_keep_prior_membership_until_scan_publication() {
         &router,
         authenticated_request()
             .uri(format!("https://camera.local/api/photos/{new_id}"))
-            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "2")
             .body(Body::empty())
             .unwrap(),
     )
@@ -339,7 +339,7 @@ async fn cli_photo_reads_keep_prior_membership_until_scan_publication() {
         authenticated_request()
             .method("POST")
             .uri("https://camera.local/api/photo-queries")
-            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "2")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
                 r#"{"source":{"kind":"folder","location":"New"}}"#,
@@ -357,7 +357,7 @@ async fn cli_photo_reads_keep_prior_membership_until_scan_publication() {
             authenticated_request()
                 .method("POST")
                 .uri("https://camera.local/api/photo-queries")
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"limit":60}"#))
                 .unwrap(),
@@ -405,7 +405,7 @@ async fn cli_photo_reads_keep_prior_membership_until_scan_publication() {
         &router,
         authenticated_request()
             .uri(format!("https://camera.local/api/photos/{new_id}"))
-            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "2")
             .body(Body::empty())
             .unwrap(),
     )
@@ -445,7 +445,7 @@ async fn cli_contract_header_rejects_reused_writes_before_domain_admission() {
         authenticated_request()
             .method("POST")
             .uri(format!("https://camera.local/api/photos/{photo_id}/state"))
-            .header("Slipstream-CLI-Contract", "2")
+            .header("Slipstream-CLI-Contract", "1")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(r#"{"field":"rating","value":4}"#))
             .unwrap(),
@@ -807,7 +807,7 @@ async fn cli_album_routes_reject_unnegotiated_unbounded_and_open_object_input() 
             authenticated_request()
                 .method("POST")
                 .uri("https://camera.local/api/albums")
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body))
                 .unwrap(),
@@ -844,7 +844,7 @@ async fn cli_album_routes_reject_unnegotiated_unbounded_and_open_object_input() 
             .uri(format!(
                 "https://camera.local/api/albums/{album_id}/changes"
             ))
-            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "2")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(format!(
                 r#"{{"operation":"add","photoIds":["{photo_id}"],"photoIds":["{photo_id}"],"ifVersion":"{version}"}}"#
@@ -1240,7 +1240,7 @@ async fn cli_photo_decisions_route_rejects_unnegotiated_open_and_over_limit_inpu
             authenticated_request()
                 .method("POST")
                 .uri("http://camera.local/api/photo-decisions")
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body))
                 .unwrap(),
@@ -1371,7 +1371,7 @@ async fn cli_photo_decisions_route_rejects_unnegotiated_open_and_over_limit_inpu
         authenticated_request()
             .method("POST")
             .uri("http://camera.local/api/photo-decisions")
-            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "2")
             .header(header::CONTENT_TYPE, "application/json")
             .header(
                 header::CONTENT_LENGTH,
@@ -1457,7 +1457,7 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
         authenticated_request()
             .method("POST")
             .uri("https://camera.local/api/photo-queries")
-            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "2")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(r#"{"capturedFrom":"0000-01-01T00:00:00"}"#))
             .unwrap(),
@@ -1473,7 +1473,7 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
         &router,
         authenticated_request()
             .uri("https://camera.local/api/capabilities")
-            .header("Slipstream-CLI-Contract", "2")
+            .header("Slipstream-CLI-Contract", "1")
             .body(Body::empty())
             .unwrap(),
     )
@@ -1487,8 +1487,8 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
                 "message": "The server does not support the requested CLI contract; use a compatible client or server.",
                 "effect": "none",
                 "details": {
-                    "requestedContractVersion": 2,
-                    "supportedContractVersions": [1]
+                    "requestedContractVersion": 1,
+                    "supportedContractVersions": [2]
                 }
             }
         })
@@ -1499,7 +1499,7 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
             &router,
             authenticated_request()
                 .uri("https://camera.local/api/capabilities")
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1510,12 +1510,12 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
         capabilities,
         serde_json::json!({
             "serverVersion": "0.0.0",
-            "supportedCliContractVersions": [1],
+            "supportedCliContractVersions": [2],
             "limits": {
                 "listPageMaximum": 60,
                 "mutationPhotoIdsMaximum": 100,
                 "albumReorderMembersMaximum": 100,
-                "removalPhotoIdsMaximum": 100,
+                "removalPhotoIdsMaximum": 100, "trashCleanupMaximum": 5000,
                 "retainedQueryIdsMaximum": 1_000_000,
                 "retainedQueryIdleSeconds": 900,
                 "recoveryPageMaximum": 60,
@@ -1544,7 +1544,7 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
             &router,
             authenticated_request()
                 .uri("https://camera.local/api/status")
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1552,7 +1552,7 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
     )
     .await;
     assert_eq!(status["serverVersion"], "0.0.0");
-    assert_eq!(status["cliContractVersion"], 1);
+    assert_eq!(status["cliContractVersion"], 2);
     assert_eq!(status["published"], true);
     assert_eq!(status["photoCount"], 5);
     assert_eq!(status["scan"]["state"], "idle");
@@ -1564,7 +1564,7 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
             &router,
             authenticated_request()
                 .uri("https://camera.local/api/album-summaries?limit=1")
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1613,7 +1613,7 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
                 .uri(format!(
                     "https://camera.local/api/album-summaries?cursor={album_cursor}"
                 ))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1644,7 +1644,7 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
             authenticated_request()
                 .method("POST")
                 .uri("https://camera.local/api/photo-queries")
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::json!({
@@ -1728,7 +1728,7 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
                 .uri(format!(
                     "https://camera.local/api/photo-queries/{photo_cursor}"
                 ))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1746,7 +1746,7 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
                 .uri(format!(
                     "https://camera.local/api/photo-queries/{photo_cursor_two}"
                 ))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1774,7 +1774,7 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
             &router,
             authenticated_request()
                 .uri(format!("https://camera.local/api/photos/{}", ids[2]))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1794,7 +1794,7 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
             &router,
             authenticated_request()
                 .uri(format!("https://camera.local/api/albums/{retained_album}"))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1833,7 +1833,7 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
                 .uri(format!(
                     "https://camera.local/api/photo-queries/{missing_cursor}"
                 ))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1871,7 +1871,7 @@ async fn cli_folder_cursor_maps_publication_replacement_and_query_expiry() {
             &router,
             authenticated_request()
                 .uri("https://camera.local/api/file-locations?limit=1")
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1890,7 +1890,7 @@ async fn cli_folder_cursor_maps_publication_replacement_and_query_expiry() {
             .uri(format!(
                 "https://camera.local/api/file-locations?cursor={folder_cursor}"
             ))
-            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "2")
             .body(Body::empty())
             .unwrap(),
     )
@@ -1907,7 +1907,7 @@ async fn cli_folder_cursor_maps_publication_replacement_and_query_expiry() {
             authenticated_request()
                 .method("POST")
                 .uri("https://camera.local/api/photo-queries")
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"limit":1}"#))
                 .unwrap(),
@@ -1932,7 +1932,7 @@ async fn cli_folder_cursor_maps_publication_replacement_and_query_expiry() {
         &router,
         authenticated_request()
             .uri(format!("https://camera.local/api/photo-queries/{cursor}"))
-            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "2")
             .body(Body::empty())
             .unwrap(),
     )
@@ -1981,7 +1981,7 @@ async fn cli_scan_check_reports_service_state_after_an_interrupted_request() {
             authenticated_request()
                 .method("POST")
                 .uri("https://camera.local/api/scan")
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .header(header::ORIGIN, "https://camera.local")
                 .body(Body::empty())
                 .unwrap(),
@@ -2006,7 +2006,7 @@ async fn cli_scan_check_reports_service_state_after_an_interrupted_request() {
             &router,
             authenticated_request()
                 .uri("https://camera.local/api/status")
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2028,7 +2028,7 @@ async fn cli_scan_check_reports_service_state_after_an_interrupted_request() {
             authenticated_request()
                 .method("POST")
                 .uri("https://camera.local/api/scan")
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .header(header::ORIGIN, "https://camera.local")
                 .body(Body::empty())
                 .unwrap(),

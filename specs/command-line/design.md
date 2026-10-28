@@ -118,10 +118,11 @@ The [retained exchange contract](reference.md#retained-processing-adapter-exchan
 
 Migration preserves historical identities, native state, XMP/image receipts and retained bytes non-destructively. A supported state is materialized once into tool-owned state, with retained source record/dependencies; unsupported versions remain inspectable rather than silently converted. Current needed input/state/output files persist until explicit safe removal; transient receipt/cache retention is separate. Incomplete historical provenance stays labeled historical. [Retention and Cutover](../photo-development/workspace/design.md#retention-and-cutover) is authoritative. Retired fixed routes remain retired; this boundary change does not delete retained data or purge compatible existing processing adapters.
 
-Every CLI request identifies contract version 1 through
-`Slipstream-CLI-Contract: 1`. A server that advertises version 1 must validate
+Every CLI request identifies contract version 2 through
+`Slipstream-CLI-Contract: 2`. A server that advertises version 2 must validate
 that header on CLI requests, including reused mutation routes, before domain
-admission. An unsupported value fails without a mutation. The client checks
+admission. An unsupported value fails without a mutation. Version 2 retires the
+physical-deletion commands; a version 1 client is incompatible. The client checks
 capabilities before its command's operational request. An older service that
 lacks capabilities is incompatible; the client must not guess based on HTML,
 a health response, or a version string.
