@@ -227,6 +227,13 @@ Order defaults to `album-order` for an Album and `capture-time-asc` otherwise.
 [Source Ordering Selection](../library-browser/spec.md#source-ordering-selection).
 Filters never rewrite Album order. The list pagination rules above apply.
 
+The Web exposes exactly these Photo facts with the same meaning. It must not
+add a second vocabulary, a renamed field, or a Web-only value for a fact the CLI
+already names. A Preview fact, including `detailLimited`, keeps its
+viewport- and zoom-agnostic source meaning on every surface; the Web may add a
+local display condition for its own presentation, but that condition is never a
+CLI fact and never renames the capability.
+
 Each ordinary Photo item uses the `PhotoItem` shape defined under
 [Result Schemas](#result-schemas), including the complete `preview` object and
 nullable `removedAtMs`. An active Library Photo has `removedAtMs: null`.
@@ -267,7 +274,7 @@ or current Selection State. Query the Photos first and preserve the returned
 ```text literal
 slipstream photos remove OPERATION_ID --input FILE
 slipstream photos removal-operation OPERATION_ID
-slipstream photos restore OPERATION_ID --input FILE
+slipstream photos restore OPERATION_ID [--input FILE | --all [--exclude-input FILE]]
 slipstream photos restore-operation OPERATION_ID
 ```
 
@@ -294,6 +301,25 @@ The target list must be nonempty, distinct, and no larger than the advertised
 before network access. The service validates all request-wide constraints
 before admitting the attempt. A stale decision or removal marker affects only
 that target; valid siblings may still be removed.
+
+`photos restore` accepts one of three forms:
+
+- With `--input FILE`, the input holds exactly one `photos` array whose items
+  have exactly `photoId` and `removedAtMs`, using the evidence observed in a
+  removal result or Trash listing. The command restores exactly those markers
+  and `OPERATION_ID` is the caller-generated identity of this Restore attempt.
+- With `--all`, the command restores every current Trash item except the
+  identities in `--exclude-input FILE`. The remaining identities are resolved
+  at admission under `OPERATION_ID`, and Trash items that arrive later never
+  join the captured set. `--exclude-input` requires `--all` and holds
+  `{"photoIds": [...]}` or a bare array of Photo IDs. `--all` and `--input` are
+  mutually exclusive.
+- With neither flag, `OPERATION_ID` names the removal operation whose complete
+  removed set is restored.
+
+The explicit-set and select-all forms report the same result partition and
+retain their own operation identity. `photos restore-operation` reopens that
+result without changing Library state.
 
 Removal returns one result per requested Photo in request order. Outcomes are
 `removed`, `changed-elsewhere`, `unavailable`, or `already-removed`.
@@ -337,6 +363,39 @@ unavailable, the CLI returns `partial_result` with the complete result in
 `data`. An all-conflict result uses `conflict`; an all-unavailable result uses
 `not_found`. Inspect the original operation before retrying either command.
 
+## Trash and Permanent Deletion
+
+The Trash commands inspect the persistent Trash and perform the reviewed second
+deletion. Selection is shared with Restore: an explicit set names exact Photo
+IDs, and a select-all set is every current Trash item minus explicit
+exclusions. Permanent deletion is available only after a Trash review.
+
+```text literal
+slipstream trash list [--start N] [--limit N]
+slipstream trash review OPERATION_ID (--input FILE | --all [--exclude-input FILE])
+slipstream trash delete OPERATION_ID
+slipstream trash operation OPERATION_ID
+```
+
+`trash list` pages Trash items newest removal first. `--limit` accepts 1
+through 60 items and `--start` skips items.
+
+`trash review` captures one fixed reviewed set. `--input FILE` names the exact
+Photos to review and holds `{"photoIds": [...]}` or a bare array of Photo IDs.
+`--all` reviews every current Trash item except the identities in
+`--exclude-input FILE`; `--exclude-input` requires `--all` and uses the same
+file format. `--all` and `--input` are mutually exclusive. `OPERATION_ID` is a
+nonempty caller-generated identifier, and repeating it with the same intent
+reopens the original review instead of capturing a second set. A selection
+beyond the published review bound is refused, never truncated.
+
+`trash delete` permanently deletes the Original Files of exactly that reviewed
+operation and reports each reviewed Photo as `deleted`, `changed`, `missing`,
+`failed`, or `pendingVerification`. It never widens the reviewed set, never
+touches a Photo the review excluded, and never deletes a sibling, Sidecar,
+export, or directory. `trash operation` reopens the durable result without
+changing Library state. Permanent deletion has no Undo.
+
 ## Preview Download
 
 ```text literal
@@ -348,6 +407,15 @@ it may wait for generation within the command timeout. It returns `photoId`,
 `path`, `source`, `sourceRevision`, `width`, `height`, `detailLimited`, and
 `webUrl`. `source` uses `jpeg-original` or `raw-embedded-jpeg`. These facts must
 refer to the actual downloaded image. No arbitrary remote URL is accepted.
+
+`detailLimited` is viewport- and zoom-agnostic. It reports the source capability:
+`true` when the delivered dimensions are below the review target the requested
+size asks for, and `false` when they reach it. It is derived from the delivered
+Preview dimensions and the review target, never from a browser viewport, Preview
+area, or zoom state, because the CLI has none. The CLI must not invent a browser
+viewport or a zoom condition, and no CLI command accepts a viewport, window, or
+zoom parameter. The Web may additionally report a local display condition, but
+that presentation fact is not part of any CLI result.
 
 PATH is local to the CLI host, must be valid UTF-8, must have an existing parent
 directory, and must not exist. A non-UTF-8 value is `invalid_input` and must fail
@@ -913,6 +981,9 @@ has the same five keys with Photo list `items`. For Album and Photo lists,
 - `width` and `height`: positive integers or `null`; and
 - `detailLimited`: a boolean or `null`.
 
+`detailLimited` is the source capability, not a display measurement. It is
+`true` when the delivered dimensions are below the review target and `false`
+when they reach it, so it never depends on a viewport, Preview area, or zoom.
 All five nullable Preview fact fields are non-null when `state` is `ready`.
 They are null when no current derivative facts exist. `PhotoItem` contains
 string `id` and `filename`, string `originalId` with the associated Original
@@ -938,6 +1009,8 @@ when state is `known`; absent facts remain null.
 `sourceRevision`, positive integer `width` and `height`, boolean
 `detailLimited`, absolute HTTP or HTTPS string `webUrl`, and
 `fileCommitted: true`. These facts describe the bytes published at `path`.
+`detailLimited` compares those delivered `width` and `height` against the review
+target of the requested size; it carries no viewport or zoom meaning.
 
 A Photo decision object contains `selectionState`, integer `rating` from 0
 through 5, and opaque string `decisionVersion`. Photo decision data contains

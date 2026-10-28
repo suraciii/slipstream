@@ -154,6 +154,9 @@ Present independent axes with concise actionable labels:
 - **File:** checking, ready, changed or unavailable under the workspace contract.
 - **Web run:** queued, running, succeeded, failed, cancelled or outcome-unknown.
 - **Connection:** service reachability, independent of saved state and file existence.
+- **Library:** scanning, recovering, published or failed, reported as the Library's own state.
+
+A recovering Library must never be presented as an unreadable Original. Library scanning or recovery states describe the Library's own work; the live Original's readability is a separate axis with its own reason. Editing and Export stay available while the workspace input snapshot remains intact and the selected Processing Engine admits it, so a Library that is still recovering does not disable the workspace.
 
 Saved settings with a failed Preview are still saved. A newly discovered file
 is downloadable when ready even if no supervised task exists. It must not be
@@ -246,3 +249,12 @@ replay, exact Export barriers, partial/disk-full failures and cancellation races
 Verify separate camera reference, saved-state preservation, unchanged Library
 facts and no need to navigate internal step IDs, download/submit each iteration,
 or register ordinary completed files.
+
+Session Undo and Redo evidence must show that each of them performs its own edit
+operation and persists it: invoking session Undo or Redo sends one new guarded
+write with its own request identity through the per-edit queue, the write settles
+as an ordinary save with its own outcome, and the resulting state is readable
+after reopening the workspace from the tool's confirmed state rather than from a
+browser-local list. The evidence must also show that a revision restore from the
+tool's retained history is presented and executed as its own operation with its
+own label, never as Undo or Redo.

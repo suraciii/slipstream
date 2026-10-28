@@ -10,7 +10,7 @@ interpretation. Slipstream supplies facts and checked operations.
    contract and `published` state before starting work.
 2. Discover an existing Album with `albums list --name NAME`. Query picked
    Photos in that Album using `photos list --album ALBUM_ID --selection picked
-   --rating-min 4 --order capture-time-asc --limit 60`. Follow each
+--rating-min 4 --order capture-time-asc --limit 60`. Follow each
    `nextCursor` with `photos list --cursor CURSOR` until it is `null`. Preserve
    the returned order and report the total; later Photo facts can change.
 3. Create the destination with `albums create --name NAME`. Use its returned ID
@@ -38,6 +38,13 @@ Write only those exact evidence records to a bounded removal input file:
 4. Run `photos restore OPERATION_ID --input FILE`, then inspect
    `photos restore-operation OPERATION_ID` and query the Photos again. A
    `changed-elsewhere` or `unavailable` result is not proof of restoration.
+
+To restore the complete current Trash instead, run `photos restore OPERATION_ID
+--all`, optionally with `--exclude-input FILE` naming the `photoIds` to keep.
+The remaining identities are resolved when the Restore is admitted, and Trash
+items that arrive later never join it. `--all` and `--input` are mutually
+exclusive. The [CLI Reference](../specs/command-line/reference.md) owns the
+exact syntax and result shapes.
 
 Permanent deletion is a separate reviewed Trash operation. Do not substitute
 current query membership, filenames, paths, Album names, or a retry with a new

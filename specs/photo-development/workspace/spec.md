@@ -154,6 +154,31 @@ input files, previews, and outputs without requiring a separate workflow screen.
 The initial view must not be a general file manager or a blank stage editor.
 The user must see a prepared RAW and the available editing action immediately.
 
+### Primary action strip
+
+One primary action strip carries the actions that belong to every editing task:
+
+- save state, with its current saving, saved, conflict, failure, or unknown
+  status;
+- session Undo;
+- session Redo;
+- Preview; and
+- Export.
+
+These five are the strip's peers. The strip stays with the image rather than
+inside a tool panel, so the Photographer never scrolls editing controls or opens
+a technical disclosure to save, reverse an edit, render a Preview, or start an
+Export. A narrow layout may compress or regroup the strip, but it must not
+remove an action from the primary level.
+
+Files, jobs, catalogs, resources, and raw technical details are supporting
+disclosures. They have a clear name and invoker, but they are not peers of the
+strip: moving between them must not replace the strip, and the strip must not be
+represented as one more disclosure beside them. A revision restore from the
+tool's retained history remains a separate operation with its own label, as
+[Autosave and Reversible Editing](../spec.md#autosave-and-reversible-editing)
+requires.
+
 A file card must show a thumbnail when displayable, filename, file role, size,
 and readiness. Dimensions and relevant output characteristics must be available
 without exposing internal IDs. Provenance, full execution paths, revisions, and

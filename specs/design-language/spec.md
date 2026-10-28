@@ -154,6 +154,8 @@ Every interactive object must have a distinguishable presentation for the states
 
 A pending state must not look like a committed state. A stale result must not look current. An unavailable Original must not look like a Removed Photo.
 
+A resting state is not a disabled or unavailable state. A control that is merely waiting for the Photographer must keep an ordinary enabled presentation, its ordinary label weight, and its accessible state; dimming, muting, or hiding it to suggest unavailability is a false statement about a control that is ready. A resting control must meet the same contrast requirement as ordinary text, so a quiet control never becomes an unreadable one.
+
 ### Motion
 
 Motion must explain continuity, spatial relationship, or state transition. It must be short, interruptible, and unnecessary for understanding the outcome. Loading motion must not imply progress that the product cannot measure. Reduced-motion preferences must remove nonessential movement without removing state or feedback.

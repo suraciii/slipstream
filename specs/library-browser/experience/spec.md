@@ -34,7 +34,10 @@ defined in [CONTEXT.md](../../../CONTEXT.md).
 The interface must use one neutral dark appearance. Color communicates focus,
 Selection State, Rating, connectivity, or failure. State must also have text,
 an icon, or another non-color indication. Required text must meet WCAG AA
-contrast. There must be exactly one main landmark.
+contrast. There must be exactly one application-level main landmark. The
+Access entry screen renders inside that landmark and must not create a nested
+main landmark. The current Grid or Photo view supplies the single `h1` inside
+it, as defined by [Instance Access](../../access/spec.md#browser-entry).
 
 A narrow layout applies at widths up to 760 CSS pixels. Photo View also uses
 compact controls at heights up to 480 CSS pixels. Layout must follow available
@@ -69,6 +72,10 @@ permanently prominent primary slot.
 View options must group these controls:
 
 - Selection State filter;
+- Rating minimum and maximum;
+- Original kind;
+- Original availability;
+- Capture Time range;
 - source order;
 - Small, Medium, and Large thumbnail size;
 - complete source decision counts, distinct from the filtered result count;
@@ -76,6 +83,16 @@ View options must group these controls:
 - source-specific actions, including Add Folder for an Original Folder and
   Resume for an Album with a saved position; and
 - Refresh Current Source when it is available.
+
+The additional conditions share the meanings of [Source-Scoped Library
+Filters](../filters/spec.md#defined-conditions). View options and Select mode
+must keep their complete labels at every supported width. The header must name
+each active non-default condition in text, not by color alone. The source name
+and the result count share one disclosure: only a long source name may be
+visually truncated, and the complete name must then remain available to
+assistive technology and on pointer hover. No Grid control may be clipped at
+320, 360, 390, 420, or 760 CSS pixels wide, and no supported width may accept a
+clipped or relabeled control as the correct presentation.
 
 On a wide Grid, **Open a random Photo** must appear in the normal header's
 secondary action group without creating another toolbar row. On a narrow Grid,
@@ -94,10 +111,12 @@ follow [Random Photo](../spec.md#random-photo); it must not change the current
 Grid into a different source or filter.
 
 The header must indicate an active nondefault filter or order and the visible
-result count. Complete progress remains available in View options with the
-existing server-authoritative count rules. A consequential Library check completion or
-failure must remain discoverable under Status and Recovery, even while the
-options surface is closed.
+result count. Every active non-default condition, including Rating bounds,
+Original kind, Original availability, and a Capture Time range, must be named
+in text and must not be communicated by color alone. Complete progress remains
+available in View options with the existing server-authoritative count rules.
+A consequential Library check completion or failure must remain discoverable
+under Status and Recovery, even while the options surface is closed.
 
 Trash and the current Rejected result's removal review belong in View options, beside source management actions. They must not add a permanent row to the narrow Grid header. Trash remains reachable regardless of the active source or filter. Removal review must retain its current-source and reviewed-result scope.
 
@@ -155,6 +174,15 @@ review the current Photo and move to the previous or next Photo without
 opening a supporting surface, relying on a gesture, or memorizing a keyboard
 shortcut.
 
+One composition satisfies that review at every supported viewport. The context
+row, one navigation group, and one review dock stay together inside the safe
+viewport at 375 by 667, 390 by 844, and the named short-landscape viewports.
+Selection State is presented with the Photo identity in that context row and
+must not occupy its own forced row. Short landscape consolidates the layout by
+moving content, never by shrinking a 44 by 44 CSS pixel target below that size.
+Pick, Reject, Rating, the gestures, zoom, history, and their writes keep their
+existing behavior in every layout.
+
 Undo must remain visible in the primary action region. Its availability follows
 the Photo action owner; when no undoable change exists, the control may be
 disabled but must expose that fact without implying that a decision was
@@ -181,6 +209,11 @@ More opens the supporting action groups:
   and Nearby Photos;
 - **Library:** Sources, View options, and Review unavailable Originals; and
 - **Help:** the combined Preview detail-limit explanation and gesture guidance.
+
+The combined Preview detail evidence must be programmatically available beside
+the Preview without opening the Help disclosure. Opening Help may repeat the
+explanation and add gesture guidance, but Help must not be the only way to
+read it.
 
 The Preview must fit its complete composition. Empty space caused by image
 aspect ratio is acceptable. Closed supporting groups must occupy no space and
@@ -325,8 +358,10 @@ A blocking connection or decision failure must be visible beside the affected
 primary action, not only inside a closed panel. A Library-level failure or
 completed Library check with an outstanding action must expose one compact status entry
 from either view. Opening it reveals the current owning notice and action;
-background progress must not erase it. Expanding detailed recovery uses a
-scrolling surface rather than an unlimited header stack.
+background progress must not erase it. Opening the compact status entry must
+not discard the current Photo, its zoom state, or the Grid anchor. Expanding
+detailed recovery uses a scrolling surface rather than an unlimited header
+stack.
 
 A removed Album or Folder destination must return to All Photos with an
 explanation. A Photo no longer in the requested source or current filter must
@@ -366,6 +401,12 @@ budgets, but must retain a reachable close/recovery action. With text enlarged
 to 200%, content may reflow vertically and need not meet those pixel budgets;
 controls and required facts must remain reachable without page-level
 horizontal overflow.
+
+A Preview minimum must not push the primary review controls below the safe
+viewport. The budgets rank the Preview above supporting content, not above the
+controls that operate it. When a Preview minimum and the primary review
+controls cannot both hold at a supported viewport, the primary review controls
+and Preview inspection remain and supporting content yields first.
 
 Desktop verification must cover 1280 by 800; touch-tablet verification must
 cover 1024 by 768. Rotation must preserve source, Photo, committed decisions,

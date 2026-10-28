@@ -26,6 +26,8 @@ Items must remain in Trash across reload and restart. There is no automatic expi
 
 The Photographer must be able to select individual items, select all current Trash results across pages, exclude individual items, and clear the selection. The selected count must describe the complete selection, not only visible cells. Later arrivals must not join an existing selection automatically. Leaving Trash must clear its unsubmitted selection.
 
+Select all is submitted as all current Trash results minus the exclusions. The excluded items are removed from the selection before the set is captured, so the captured set is complete on its own and the surface does not need to remember which visible cells were unchecked. When the review bound truncates what the interface can select, the interface must name the captured count and the remainder rather than presenting the truncated set as the complete Trash. Items that arrive in Trash after the set was captured never join it.
+
 **Restore** must support one or multiple selected items. It returns Photos with the same identities, Selection States, Ratings, and membership positions in Albums that still exist. It must not recreate deleted Albums or erase newer decisions. A missing Original remains unavailable after Restore; restoring a Library record must not claim to recover missing file bytes.
 
 Restore must report successful, changed, and failed items separately. Restored items leave Trash and return to applicable normal views. The existing immediate removal Undo remains available under the removal contract until its items are restored or permanently deleted. Neither Restore nor Undo can recover a permanently deleted Original.
@@ -35,6 +37,8 @@ Restore must report successful, changed, and failed items separately. Restored i
 Only items currently in Trash are eligible. A rejected Selection State is not an additional requirement. Permanent deletion must not be available from a normal Grid, Photo View, an Album removal action, or a marking shortcut.
 
 The review must identify the selected files, count, relative Locations, and affected Albums. It must show the total logical file size when known and identify unknown sizes. It must explain that deletion affects every Album containing that Photo and that Slipstream cannot Undo it. The final action must say **Permanently delete N Original Files**. Cancel must delete nothing. No automatic retry may widen the reviewed set.
+
+The count in the confirmation names the captured set: every item the review admitted, and nothing else. An excluded item is never named as reviewed, never counted, and never deleted, so an exclusion must not appear in the confirmation as though it had been selected and then declined.
 
 A Photo restored, removed again, or changed since review must be skipped and require fresh review. A moved or replaced Original must not be deleted using the old review; Slipstream must not delete another file merely because it occupies the reviewed Location. If it cannot establish that the target is still the reviewed Original, it must refuse that item.
 

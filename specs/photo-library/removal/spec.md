@@ -18,6 +18,8 @@ Photo queries or a Photo-scoped read must provide all current-state evidence nee
 
 The application must expose the maximum accepted set size. Malformed, duplicate, empty, or over-limit requests must fail before changing any Photo. It must not truncate a set, process its first page, or reinterpret an omitted set as all Photos.
 
+A select-all-minus-exclusions set is still an explicit reviewed set. The exclusions are evidence-bearing Photo identities that the caller reviewed and deliberately left out, not a display filter or an unchecked-cell list. The application resolves the remaining identities itself and records the result under that attempt's own operation identity, so the excluded Photos are named in the request, are never deleted, and can be reviewed in a separate operation with their own evidence. An exclusion must not be inferable from a query, a source, or the current selection.
+
 A caller may compose multiple bounded operations. Each operation must retain its own effects and outcome; Slipstream must not promise one atomic action or global Undo across caller-composed batches. Later query matches must not join a previously submitted set. Changes to the query source must never substitute different targets.
 
 ## Remove from Library
