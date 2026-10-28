@@ -1,7 +1,8 @@
 //! Historical XMP snapshots remain readable; generic processing no longer generates them.
 use super::owner::{Command, Persistence, PersistenceError};
 use crate::{WhiteBalanceIntent, XmpExportRecord};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 type PhotoXmpExportsReceiver =
@@ -35,6 +36,7 @@ impl Persistence {
     }
 }
 
+const RETAINED_PREFIX: &str = "retained_xmp_export:";
 const COLUMNS: &str = "id,photo_id,recipe_revision,source_revision,created_at,expires_at,white_balance_mode,temperature_kelvin,tint_milli,exposure_ev,filename,document,byte_length,sha256";
 
 fn balance(
@@ -86,18 +88,138 @@ fn record(row: &rusqlite::Row<'_>) -> rusqlite::Result<XmpExportRecord> {
     })
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RetainedXmp {
+    export_id: String,
+    photo_id: String,
+    recipe_revision: String,
+    source_revision: String,
+    created_at: i64,
+    expires_at: i64,
+    white_balance_mode: String,
+    temperature_kelvin: Option<i32>,
+    tint_milli: Option<i32>,
+    exposure_ev: f64,
+    filename: String,
+    byte_length: i64,
+    sha256: String,
+}
+
+impl RetainedXmp {
+    fn into_record(self) -> Result<XmpExportRecord, PersistenceError> {
+        let byte_length =
+            usize::try_from(self.byte_length).map_err(|_| PersistenceError::Storage)?;
+        if self.expires_at < self.created_at || byte_length == 0 || self.sha256.len() != 64 {
+            return Err(PersistenceError::Storage);
+        }
+        let white_balance = match (
+            self.white_balance_mode.as_str(),
+            self.temperature_kelvin,
+            self.tint_milli,
+        ) {
+            ("as-shot", None, None) => WhiteBalanceIntent::AsShot,
+            ("temperature-tint", Some(temperature_kelvin), Some(tint_milli)) => {
+                WhiteBalanceIntent::TemperatureTint {
+                    temperature_kelvin,
+                    tint_milli,
+                }
+            }
+            _ => return Err(PersistenceError::Storage),
+        };
+        Ok(XmpExportRecord {
+            export_id: self.export_id,
+            photo_id: self.photo_id,
+            recipe_version: self.recipe_revision,
+            source_revision: self.source_revision,
+            created_at: self.created_at,
+            expires_at: self.expires_at,
+            byte_length,
+            sha256: self.sha256,
+            filename: self.filename,
+            document: Vec::new(),
+            exposure_ev: self.exposure_ev,
+            white_balance,
+        })
+    }
+}
+
+/// Preserve an expired snapshot's provenance before the Photo row is removed.
+/// The transient document bytes are already swept; no Photo FK remains.
+pub(super) fn archive_for_photo(
+    transaction: &Transaction<'_>,
+    photo_id: &str,
+) -> Result<(), PersistenceError> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT id,photo_id,recipe_revision,source_revision,created_at,expires_at,
+                    white_balance_mode,temperature_kelvin,tint_milli,exposure_ev,
+                    filename,byte_length,sha256
+             FROM xmp_exports WHERE photo_id=? AND expires_at <= ?",
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    let now = super::export::export_unix_seconds() as i64;
+    let retained = statement
+        .query_map(params![photo_id, now], |row| {
+            Ok(RetainedXmp {
+                export_id: row.get(0)?,
+                photo_id: row.get(1)?,
+                recipe_revision: row.get(2)?,
+                source_revision: row.get(3)?,
+                created_at: row.get(4)?,
+                expires_at: row.get(5)?,
+                white_balance_mode: row.get(6)?,
+                temperature_kelvin: row.get(7)?,
+                tint_milli: row.get(8)?,
+                exposure_ev: row.get(9)?,
+                filename: row.get(10)?,
+                byte_length: row.get(11)?,
+                sha256: row.get(12)?,
+            })
+        })
+        .map_err(|_| PersistenceError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PersistenceError::Storage)?;
+    for snapshot in retained {
+        let value = serde_json::to_string(&snapshot).map_err(|_| PersistenceError::Storage)?;
+        super::metadata_store::upsert(
+            transaction,
+            &format!("{RETAINED_PREFIX}{}", snapshot.export_id),
+            &value,
+            |_| PersistenceError::Storage,
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) fn read(
     connection: &Connection,
     id: &str,
 ) -> Result<Option<XmpExportRecord>, PersistenceError> {
-    connection
+    let live = connection
         .query_row(
             &format!("SELECT {COLUMNS} FROM xmp_exports WHERE id=?"),
             [id],
             record,
         )
         .optional()
-        .map_err(|_| PersistenceError::Storage)
+        .map_err(|_| PersistenceError::Storage)?;
+    if live.is_some() {
+        return Ok(live);
+    }
+    let Some(value) =
+        super::metadata_store::read_value(connection, &format!("{RETAINED_PREFIX}{id}"), |_| {
+            PersistenceError::Storage
+        })?
+    else {
+        return Ok(None);
+    };
+    let retained: RetainedXmp =
+        serde_json::from_str(&value).map_err(|_| PersistenceError::Storage)?;
+    if retained.export_id != id {
+        return Err(PersistenceError::Storage);
+    }
+    retained.into_record().map(Some)
 }
 pub(super) fn list(
     connection: &Connection,

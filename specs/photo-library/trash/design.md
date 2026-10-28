@@ -60,8 +60,9 @@ For each admitted target, remove the Photo's decisions, Album memberships, and o
 
 Retain only the history and conflict evidence required by their owners:
 immutable operation outcomes and retained-orphan Sidecar association evidence.
-A Photo-owned historical XMP export snapshot is removed with that Photo; the
-snapshot is not retained workspace and must not block record cleanup forever. An orphan association retains its former owner as historical identity, not a live foreign-key dependency. It must continue to prevent an adjacent JPEG or later occupant from inheriting the Sidecar silently.
+A Photo-owned historical XMP export snapshot is retained as photo-independent
+provenance evidence; its expired document bytes remain swept. It is not
+retained workspace and must not block record cleanup forever. An orphan association retains its former owner as historical identity, not a live foreign-key dependency. It must continue to prevent an adjacent JPEG or later occupant from inheriting the Sidecar silently.
 
 Cleanup must not erase retained workspace or processing state to satisfy its own preconditions. That work must first be handled through its separately confirmed safe removal lifecycle. Cleanup performs no filesystem mutation, including deletion of workspace files or derivative cache bytes. Ordinary independent cache retention remains its own capability.
 

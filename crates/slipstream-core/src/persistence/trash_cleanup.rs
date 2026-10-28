@@ -531,8 +531,13 @@ fn remove_photo(
         }
         affected_albums.insert(album_id);
     }
+    super::xmp::archive_for_photo(transaction, photo_id)
+        .map_err(mutation_error_from_persistence)?;
     transaction
-        .execute("DELETE FROM xmp_exports WHERE photo_id=?", [photo_id])
+        .execute(
+            "DELETE FROM xmp_exports WHERE photo_id=? AND expires_at <= ?",
+            params![photo_id, super::export::export_unix_seconds() as i64],
+        )
         .map_err(mutation_error_from_sqlite)?;
     transaction
         .execute("DELETE FROM photos WHERE id=?", [photo_id])
