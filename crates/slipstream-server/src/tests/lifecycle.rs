@@ -67,7 +67,7 @@ async fn metadata_saturation_uses_shared_admission_and_safe_capture_fallback() {
             &router,
             authenticated_request()
                 .uri(format!("https://camera.local/api/photos/{known_id}"))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         ),

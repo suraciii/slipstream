@@ -205,35 +205,48 @@ impl SharedLibrary {
         published.invalidate_folder_index();
         published.rebuild_query_projection();
     }
-    /// Permanently deleted Originals leave the published Photo identity
-    /// unavailable and invalidate every derived source without rebuilding the
-    /// whole snapshot.
-    pub(super) fn patch_permanently_deleted(&self, photo_ids: &[String]) {
+    /// Remove cleaned records from every published identity index and source.
+    pub(super) fn patch_trash_cleanup(&self, photo_ids: &[String]) {
         let mut guard = self.snapshot.write().expect("published Library poisoned");
         let Some(published) = guard.as_mut() else {
             return;
         };
-        for photo_id in photo_ids {
-            let Some(position) = published.photos_by_id.get(photo_id).copied() else {
-                continue;
-            };
-            let Some(photo) = published.snapshot.photos.get_mut(position) else {
-                continue;
-            };
-            photo.available = false;
-            photo.preview_state = slipstream_core::PreviewState::Unavailable;
-            photo.preview_source_revision = None;
-            photo.preview_width = None;
-            photo.preview_height = None;
-            photo.cache_revision = None;
-            if let Some(original_position) = published.originals_by_id.get(&photo.original_id)
-                && let Some(original) = published.snapshot.originals.get_mut(*original_position)
-            {
-                original.available = false;
-                original.error_category = Some(slipstream_core::OriginalErrorCategory::Unreadable);
-                original.error_message = Some("Original permanently deleted".to_owned());
-            }
-        }
+        let removed: std::collections::HashSet<_> = photo_ids.iter().map(String::as_str).collect();
+        let original_ids: std::collections::HashSet<_> = published
+            .snapshot
+            .photos
+            .iter()
+            .filter(|photo| removed.contains(photo.id.as_str()))
+            .map(|photo| photo.original_id.clone())
+            .collect();
+        published
+            .snapshot
+            .photos
+            .retain(|photo| !removed.contains(photo.id.as_str()));
+        let retained_originals: std::collections::HashSet<_> = published
+            .snapshot
+            .photos
+            .iter()
+            .map(|photo| photo.original_id.as_str())
+            .collect();
+        published.snapshot.originals.retain(|original| {
+            !original_ids.contains(&original.id)
+                || retained_originals.contains(original.id.as_str())
+        });
+        published.photos_by_id = published
+            .snapshot
+            .photos
+            .iter()
+            .enumerate()
+            .map(|(index, photo)| (photo.id.clone(), index))
+            .collect();
+        published.originals_by_id = published
+            .snapshot
+            .originals
+            .iter()
+            .enumerate()
+            .map(|(index, original)| (original.id.clone(), index))
+            .collect();
         published.invalidate_folder_index();
         published.rebuild_query_projection();
     }

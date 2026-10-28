@@ -58,7 +58,7 @@ One Photo Library Scope owns:
 - derived read-only Original Folder navigation;
 - Preview requests.
 
-Every Original File read must resolve beneath the current Library Folder. Slipstream must reject traversal and symbolic-link escape. The Original File interface exposes no write or delete operation.
+Every Original File read must resolve beneath the current Library Folder. Slipstream must reject traversal and symbolic-link escape. The Original File interface exposes no write or delete operation, including for Trash Record Cleanup. Trash inspection exposes remembered Locations for external user action; cleanup changes only eligible application records under the [Trash contract](photo-library/trash/spec.md), never filesystem files.
 
 The Library Folder is a location and discovery boundary, not Photo Library identity. Persisted Original File and Photo IDs are opaque after creation. Ordinary rescan restores a moved Original only from exact content-fingerprint evidence. The explicit ancestor-expansion contract in [Photo Library Identity and Expansion](photo-library/identity.md) is the only first-product operation that may change remembered Original Locations while preserving identity.
 

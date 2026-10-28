@@ -91,7 +91,7 @@ A recovery batch runs in one `BEGIN IMMEDIATE` transaction. Before writing, it r
 
 A destination Location may already belong to a Photo discovered by an earlier scan. Retire and Bind is allowed only when that destination Photo is otherwise unreferenced: it has default decisions, no Album membership, no Trash removal, and no retained workspace state, Edit Recipe, or referenced Processing Artifact. The eligibility check reads the authoritative workspace and processing records at proposal and commit, not only a scan-time summary. The transaction removes exactly that record before binding the recovered Original. It must not delete a filesystem file. When the destination Photo has independent user state, a retained development reference, or a removal, the transaction preserves both records and reports the conflict.
 
-A moving record must be an active Photo of the Library. Location Recovery never restores a Photo from Trash and never reverses Permanent Deletion; a removed record keeps its own restore contract.
+A moving record must be an active Photo of the Library. Location Recovery never restores a Photo from Trash and never reverses Trash Record Cleanup; a removed record keeps its own restore contract. A file discovered after cleanup first follows normal Location Recovery for other retained identities; only an unclaimed file receives a new identity. Neither case recovers the cleaned-up Photo's identity or state.
 
 A relocation resets the affected Original's derived Capture Time facts to `pending` and invalidates location-derived Preview facts. Selection State, Rating, Album membership and order, and saved Album positions remain unchanged.
 

@@ -1,3 +1,5 @@
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import {
   setupBrowserSmoke,
@@ -199,31 +201,36 @@ test("rejected Photos leave the Library, return from Undo, and are restored from
   await page.unroute("**/api/photos/restore");
 });
 
-test("Trash permanent deletion reviews the files, reports outcomes, and blocks pending verification", async ({
+test("Trash cleanup reviews records and recovers a lost mixed outcome", async ({
   page,
 }) => {
   test.setTimeout(180_000);
   const { base, root } = await fixture();
-  await writePhotos(root, 3);
+  await writePhotos(root, 2);
   const running = await server(base, root);
-  const ids = await browseIds(running.url);
-  expect(ids).toHaveLength(3);
 
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: {
+        writeText: (text: string) => {
+          sessionStorage.setItem("test-copied-trash", text);
+          return Promise.resolve();
+        },
+      },
+    });
+  });
   await page.setViewportSize({ width: 1000, height: 700 });
   await page.goto(running.url);
-  await expect(page.getByText(/^Ready · 3 Photos$/)).toBeVisible();
+  await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
   await waitForGridFrame(page);
-
-  // Two Photos are rejected and removed into Trash through the real flow.
-  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
   await page.locator("[data-grid-viewport]").focus();
-  await page.keyboard.press("ArrowRight");
-  await expect(cell(0)).toBeEnabled();
-  await page.keyboard.press("x");
-  await expect(cell(0).locator(".cell-state.rejected")).toHaveText("×");
-  await page.keyboard.press("ArrowRight");
-  await page.keyboard.press("x");
-  await expect(cell(1).locator(".cell-state.rejected")).toHaveText("×");
+  for (const index of [0, 1]) {
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("x");
+    await expect(
+      page.locator(`[data-photo-index="${index}"] .cell-state.rejected`),
+    ).toHaveText("×");
+  }
   await openViewOptions(page);
   await page.locator("[data-filter-select]").selectOption("rejected");
   await applyViewOptions(page);
@@ -233,363 +240,220 @@ test("Trash permanent deletion reviews the files, reports outcomes, and blocks p
   await openViewOptions(page);
   await page.locator("[data-removal-open]").click();
   await page.locator("[data-removal-confirm]").click();
-  await expect(page.locator("[data-removal-message]")).toHaveText(
-    /^2 Photos removed from the Library\./,
+  await expect(page.locator("[data-removal-message]")).toContainText(
+    "2 Photos removed",
   );
   await page.locator("[data-removal-close]").click();
 
-  // Every Trash route below is a scenario stub against the frozen contract:
-  // the listing names the review maximum, one item is still pending
-  // verification with its retained operation id, and the review, delete, and
-  // operation responses are controlled so the outcomes are deterministic.
-  const first = ids[0]!;
-  const second = ids[1]!;
-  const pendingId = "photo-pending";
-  const pendingOperationId = "operation-pending";
-  const storageKey = "slipstream:trash-deletion-operation";
-  const facts = (photoId: string) =>
-    photoId === second
-      ? { location: "2024/b.cr2", kind: "raw" as const, size: 2048 }
-      : { location: `2024/${photoId}.jpg`, kind: "jpeg" as const, size: 1024 };
-  let trashRows = [first, second, pendingId];
-  let reviewCalls = 0;
-  let deleteCalls = 0;
-  const listingPhoto = (photoId: string) => ({
-    removedAtMs: photoId === first ? 3000 : photoId === second ? 2000 : 1000,
-    originalLocation: facts(photoId).location,
-    originalKind: facts(photoId).kind,
-    originalSize: facts(photoId).size,
-    pendingVerificationOperationId:
-      photoId === pendingId ? pendingOperationId : null,
-    photo: {
-      id: photoId,
-      available: true,
-      original: { kind: facts(photoId).kind, available: true },
-      originalFilename: photoId === second ? "b.cr2" : `${photoId}.jpg`,
-      selectionState: "unflagged",
-      rating: 0,
-      hasSavedEdits: false,
-      preview: { state: "unavailable" },
-    },
-  });
-  const reviewItem = (photoId: string) => ({
-    photoId,
-    removedAtMs: 2000,
-    originalId: `original-${photoId}`,
-    originalLocation: facts(photoId).location,
-    originalKind: facts(photoId).kind,
-    size: facts(photoId).size,
-    albums: [{ id: "album-1", name: "Keepers" }],
-  });
-  const operationItem = (
-    photoId: string,
-    state: string,
-    message: string | null = null,
-  ) => ({
-    photoId,
-    state,
-    originalLocation: facts(photoId).location,
-    originalKind: facts(photoId).kind,
-    size: facts(photoId).size,
-    message,
-  });
-  await page.route(/\/api\/trash/, async (route) => {
-    const request = route.request();
-    const pathname = new URL(request.url()).pathname;
-    if (pathname === "/api/trash") {
-      const url = new URL(request.url());
-      const start = Number(url.searchParams.get("start") ?? "0");
-      const limit = Number(url.searchParams.get("limit") ?? "50");
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          start,
-          limit,
-          total: trashRows.length,
-          operation: null,
-          reviewMaximum: 50,
-          photos: trashRows.slice(start, start + limit).map(listingPhoto),
-        }),
-      });
-      return;
-    }
-    if (pathname === "/api/trash/review") {
-      const body = JSON.parse(request.postData() ?? "{}") as {
-        operationId?: string;
-        all?: boolean;
-        photoIds?: string[];
-        excludePhotoIds?: string[];
-      };
-      const selected = body.all
-        ? trashRows.filter(
-            (photoId) => !body.excludePhotoIds?.includes(photoId),
-          )
-        : (body.photoIds ?? []);
-      expect(selected).toEqual([first, second]);
-      reviewCalls += 1;
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(
-          reviewCalls === 1
-            ? {
-                operationId: body.operationId,
-                items: [],
-                rejected: [
-                  { photoId: first, reason: "missing" },
-                  { photoId: second, reason: "changed-elsewhere" },
-                ],
-              }
-            : {
-                operationId: body.operationId,
-                items: selected.map(reviewItem),
-                rejected: [],
-              },
-        ),
-      });
-      return;
-    }
-    if (pathname === "/api/trash/delete") {
-      const body = JSON.parse(request.postData() ?? "{}") as {
-        operationId?: string;
-      };
-      deleteCalls += 1;
-      if (deleteCalls === 1) {
-        // The first confirmation loses its response: nothing is claimed.
-        // The delay keeps the in-flight presentation observable.
-        const settled = Promise.withResolvers<void>();
-        setTimeout(settled.resolve, 500);
-        await settled.promise;
-        await route.abort("connectionreset");
-        return;
-      }
-      // The retry repeats only the unresolved items of the same operation.
-      trashRows = trashRows.filter((photoId) => photoId !== first);
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          operationId: body.operationId,
-          reviewed: 2,
-          logicalBytesDeleted: 1024,
-          items: [
-            operationItem(first, "deleted"),
-            operationItem(second, "missing", "No such file"),
-          ],
-        }),
-      });
-      return;
-    }
-    if (pathname.startsWith("/api/trash/operations/")) {
-      const operationId = decodeURIComponent(pathname.split("/").pop() ?? "");
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(
-          operationId === pendingOperationId
-            ? {
-                operationId,
-                reviewed: 1,
-                logicalBytesDeleted: 0,
-                items: [operationItem(pendingId, "deleting")],
-              }
-            : {
-                operationId,
-                reviewed: 2,
-                logicalBytesDeleted: 1024,
-                items: [
-                  operationItem(first, "deleted"),
-                  operationItem(second, "deleting"),
-                ],
-              },
-        ),
-      });
-      return;
-    }
-    throw new Error(`Unexpected Trash route ${pathname}`);
-  });
-
+  // This is a disposable fixture; the filesystem owner removes one file
+  // outside the application before explicitly requesting record cleanup.
+  await rm(join(root, "000.jpg"));
   await openViewOptions(page);
   await page.locator("[data-removed-open]").click();
-  const removed = page.locator("[data-removed-panel]");
-  await expect(page.locator("[data-removed-status]")).toHaveText(
-    "3 Photos in Trash. Showing 1–3.",
-  );
-
-  // The pending-verification item cannot be selected or restored, and its
-  // row explains why.
-  const pendingRow = page.locator(
-    "[data-removed-list] .removed-item[data-trash-pending-item]",
-  );
-  await expect(pendingRow).toHaveCount(1);
-  await expect(pendingRow.locator("input[type=checkbox]")).toBeDisabled();
-  await expect(
-    pendingRow.getByRole("button", { name: "Restore" }),
-  ).toBeDisabled();
-  await expect(
-    pendingRow.locator("[data-trash-pending] .removed-pending-marker"),
-  ).toHaveText(
-    "Pending verification — the deletion outcome is still being verified.",
-  );
-
-  // Check result fetches the retained operation and presents its state.
-  await pendingRow.locator("[data-trash-row-check]").click();
-  await expect(page.locator("[data-trash-outcome-title]")).toHaveText(
-    "Deletion outcome",
-  );
-  await expect(page.locator("[data-trash-outcome-pending]")).toHaveText(
-    "Pending verification 1",
-  );
-  await expect(page.locator("[data-trash-outcome-deleted]")).toHaveText(
-    "Deleted 0",
-  );
-
-  // Select all skips the pending-verification item.
-  await page.locator("[data-removed-select-all]").click();
-  await expect(page.locator("[data-removed-selection-count]")).toHaveText(
-    "All current Trash items, except exclusions.",
-  );
-  await expect(page.locator("[data-removed-message]")).toHaveText(
-    "Review scope: all current Trash items except 1 excluded. 1 item pending verification was not selected.",
-  );
-
-  // A review that rejected every selected item offers no delete action.
-  const review = page.locator("[data-trash-review]");
-  await page.locator("[data-removed-delete]").click();
-  await expect(review).toBeVisible();
-  await expect(page.locator("[data-trash-review-rejected]")).toBeVisible();
-  await expect(page.locator("[data-trash-review-rejected-heading]")).toHaveText(
-    "2 items could not be reviewed:",
-  );
-  const rejectedItems = page.locator("[data-trash-review-rejected-item]");
-  await expect(rejectedItems).toHaveCount(2);
-  await expect(
-    rejectedItems.nth(0).locator("[data-trash-review-rejected-reason]"),
-  ).toHaveText("Original missing");
-  await expect(
-    rejectedItems.nth(1).locator("[data-trash-review-rejected-reason]"),
-  ).toHaveText("Original changed since it was removed");
-  await expect(page.locator("[data-trash-confirm]")).toBeHidden();
-  // Cancel deletes nothing: the delete route is never called.
-  await page.locator("[data-trash-cancel]").click();
-  await expect(review).toBeHidden();
-  expect(deleteCalls).toBe(0);
-
-  // The full review names the count, the logical bytes, the Album, and each
-  // file's Location, kind, and size before the one irreversible action.
-  await page.locator("[data-removed-delete]").click();
-  await expect(review).toBeVisible();
-  await expect(page.locator("[data-trash-review-summary]")).toHaveText(
-    "2 Photos selected for permanent deletion · 3,072 logical bytes.",
-  );
-  await expect(page.locator("[data-trash-review-albums]")).toHaveText(
-    "1 Album affected: Keepers.",
-  );
-  const reviewItems = page.locator("[data-trash-review-item]");
-  await expect(reviewItems).toHaveCount(2);
-  await expect(
-    reviewItems.nth(0).locator("[data-trash-review-location]"),
-  ).toHaveText(`2024/${first}.jpg`);
-  await expect(
-    reviewItems.nth(0).locator("[data-trash-review-kind]"),
-  ).toHaveText("JPEG");
-  await expect(
-    reviewItems.nth(0).locator("[data-trash-review-size]"),
-  ).toHaveText("1,024 bytes");
-  await expect(
-    reviewItems.nth(0).locator("[data-trash-review-item-albums]"),
-  ).toHaveText("Keepers");
-  await expect(
-    reviewItems.nth(1).locator("[data-trash-review-location]"),
-  ).toHaveText("2024/b.cr2");
-  await expect(
-    reviewItems.nth(1).locator("[data-trash-review-kind]"),
-  ).toHaveText("RAW");
-  await expect(
-    reviewItems.nth(1).locator("[data-trash-review-size]"),
-  ).toHaveText("2,048 bytes");
-  await expect(page.locator("[data-trash-confirm]")).toHaveText(
-    "Permanently delete 2 Original Files",
-  );
-  await page.locator("[data-trash-cancel]").click();
-  await expect(review).toBeHidden();
-  expect(deleteCalls).toBe(0);
-
-  // Confirming opens the delete route. The response is lost, so the surface
-  // offers recovery instead of claiming failure or success.
-  await page.locator("[data-removed-delete]").click();
-  await expect(review).toBeVisible();
-  await page.locator("[data-trash-confirm]").click();
-  await expect(page.locator("[data-trash-confirm]")).toHaveText(
-    "Permanently deleting…",
-  );
-  await expect(review).toBeHidden();
-  await expect(page.locator("[data-trash-outcome-title]")).toHaveText(
-    "The deletion result could not be confirmed.",
-  );
-  await expect(page.locator("[data-trash-check-result]")).toBeVisible();
-  await expect(page.locator("[data-trash-retry-delete]")).toBeVisible();
-  expect(
-    await page.evaluate((key) => window.localStorage.getItem(key), storageKey),
-  ).toBeTruthy();
-
-  // Check result recovers the operation: one deletion is confirmed, one item
-  // is still pending verification, and the retained id stays.
-  await page.locator("[data-trash-check-result]").click();
-  await expect(page.locator("[data-trash-outcome-title]")).toHaveText(
-    "Deletion outcome",
-  );
-  await expect(page.locator("[data-trash-outcome-deleted]")).toHaveText(
-    "Deleted 1",
-  );
-  await expect(page.locator("[data-trash-outcome-pending]")).toHaveText(
-    "Pending verification 1",
-  );
-  await expect(page.locator("[data-trash-outcome-bytes]")).toHaveText(
-    "Logical bytes deleted: 1,024",
-  );
-  expect(
-    await page.evaluate((key) => window.localStorage.getItem(key), storageKey),
-  ).toBeTruthy();
-
-  // Retry repeats only the unresolved items and settles the operation.
-  await page.locator("[data-trash-retry-delete]").click();
-  await expect(page.locator("[data-trash-outcome-title]")).toHaveText(
-    "Deletion outcome",
-  );
-  await expect(page.locator("[data-trash-outcome-deleted]")).toHaveText(
-    "Deleted 1",
-  );
-  await expect(page.locator("[data-trash-outcome-missing]")).toHaveText(
-    "Missing 1",
-  );
-  await expect(page.locator("[data-trash-outcome-bytes]")).toHaveText(
-    "Logical bytes deleted: 1,024",
-  );
-  const outcomeItems = page.locator("[data-trash-outcome-item]");
-  await expect(outcomeItems).toHaveCount(1);
-  await expect(outcomeItems.first()).toHaveText(
-    "Missing · RAW · 2024/b.cr2 · 2,048 bytes · No such file",
-  );
-  // The listing refreshes with the confirmed deletions: the deleted item
-  // leaves Trash while the missing one stays inspectable.
-  await expect(page.locator("[data-removed-status]")).toHaveText(
-    "2 Photos in Trash. Showing 1–2.",
-  );
-  await expect(page.locator("[data-removed-list] .removed-item")).toHaveCount(
+  const panel = page.locator("[data-removed-panel]");
+  await expect(panel.locator("[data-removed-list] .removed-item")).toHaveCount(
     2,
   );
-  expect(deleteCalls).toBe(2);
-  // A settled operation releases the retained id.
+  await expect(panel.locator("[data-trash-library-folder]")).toContainText(
+    root,
+  );
+  await expect(panel.locator("[data-trash-copy-locations]")).toHaveText(
+    "Copy file locations",
+  );
+  await panel.locator("[data-removed-select-all]").click();
+  await panel.locator("[data-trash-copy-locations]").click();
+  const copied = await page.evaluate(() =>
+    sessionStorage.getItem("test-copied-trash"),
+  );
+  expect(copied).toContain(root);
+  expect(copied).toContain("service");
+  expect(copied).toContain("000.jpg");
+  expect(copied).toContain("001.jpg");
+
+  const review = page.locator("[data-trash-review]");
+  await panel.locator("[data-removed-delete]").click();
+  await expect(review).toBeVisible();
+  await expect(
+    review.getByRole("heading", { name: "Clean up Trash records" }),
+  ).toBeVisible();
+  await expect(review).toContainText(/no files are deleted/i);
+  await expect(review).toContainText(/cannot undo|cannot be undone/i);
+  await expect(review.locator("[data-trash-review-location]")).toHaveCount(2);
+  await expect(review.locator("[data-trash-confirm]")).toHaveText(
+    "Clean up 2 Photo records",
+  );
+  await page.keyboard.press("Escape");
+  await expect(review).toBeHidden();
+  await expect(panel.locator("[data-removed-list] .removed-item")).toHaveCount(
+    2,
+  );
+
+  let cleanupCalls = 0;
+  let operationId = "";
+  let reviewedLocations: string[] = [];
+  const receipts: Array<{
+    counts: { cleaned: number; present: number };
+    items: Array<{ originalLocation: string; state: string }>;
+  }> = [];
+  await page.route("**/api/trash/cleanup", async (route) => {
+    cleanupCalls += 1;
+    const body = route.request().postDataJSON() as {
+      operationId: string;
+      items: Array<{
+        photoId: string;
+        removedAtMs: number;
+        originalId: string;
+        originalLocation: string;
+      }>;
+    };
+    operationId = body.operationId;
+    reviewedLocations = body.items.map((item) => item.originalLocation).sort();
+    expect(reviewedLocations).toEqual(["000.jpg", "001.jpg"]);
+    expect(
+      body.items.every(
+        (item) => item.photoId && item.originalId && item.removedAtMs >= 0,
+      ),
+    ).toBe(true);
+    expect(
+      await page.evaluate(
+        (id) =>
+          Array.from({ length: localStorage.length }, (_, index) =>
+            localStorage.key(index),
+          ).some(
+            (key) =>
+              key !== null && (localStorage.getItem(key) ?? "").includes(id),
+          ),
+        operationId,
+      ),
+    ).toBe(true);
+    const response = await route.fetch();
+    expect(response.ok()).toBe(true);
+    receipts.push(
+      (await response.json()) as {
+        counts: { cleaned: number; present: number };
+        items: Array<{ originalLocation: string; state: string }>;
+      },
+    );
+    await route.abort("connectionreset");
+  });
+  await panel.locator("[data-removed-delete]").click();
+  await review.locator("[data-trash-confirm]").click();
+  await expect(page.locator("[data-trash-check-result]")).toBeVisible();
+  expect(receipts[0]?.counts.cleaned).toBe(1);
+  expect(receipts[0]?.counts.present).toBe(1);
   expect(
-    await page.evaluate((key) => window.localStorage.getItem(key), storageKey),
-  ).toBeNull();
-  await page.locator("[data-removed-close]").click();
-  await expect(removed).toBeHidden();
+    receipts[0]?.items.find((item) => item.originalLocation === "000.jpg")
+      ?.state,
+  ).toBe("cleaned");
+  expect(
+    receipts[0]?.items.find((item) => item.originalLocation === "001.jpg")
+      ?.state,
+  ).toBe("present");
+
+  // Recovery reads the original operation and converges without another cleanup.
+  await page.reload();
+  await openViewOptions(page);
+  await page.locator("[data-removed-open]").click();
+  await expect(panel.locator("[data-removed-list] .removed-item")).toHaveCount(
+    1,
+  );
+  await expect(panel.locator(".removed-location")).toHaveText("001.jpg");
+  await expect(page.locator("[data-trash-outcome]")).toContainText(/present/i);
+  await expect(page.locator("[data-trash-outcome]")).toBeInViewport();
+  expect(cleanupCalls).toBe(1);
 });
 
-test("excluding a Trash row before capture changes the submitted selection truthfully", async ({
+test("Trash cleanup displays a named retained-work blocker", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
+  await waitForGridFrame(page);
+  await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("x");
+  await expect(
+    page.locator('[data-photo-index="0"] .cell-state.rejected'),
+  ).toHaveText("×");
+  await openViewOptions(page);
+  await page.locator("[data-filter-select]").selectOption("rejected");
+  await applyViewOptions(page);
+  await openViewOptions(page);
+  await page.locator("[data-removal-open]").click();
+  await page.locator("[data-removal-confirm]").click();
+  await expect(page.locator("[data-removal-message]")).toContainText(
+    "1 Photo removed",
+  );
+  await page.locator("[data-removal-close]").click();
+
+  // The transport fixture supplies a retained-work refusal; no cleanup is
+  // forwarded, so the real Photo record remains available for Restore.
+  await page.route("**/api/trash/cleanup", async (route) => {
+    const body = route.request().postDataJSON() as {
+      operationId: string;
+      items: Array<{ photoId: string; originalLocation: string }>;
+    };
+    expect(body.items).toHaveLength(1);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        operationId: body.operationId,
+        reviewed: 1,
+        counts: {
+          cleaned: 0,
+          changed: 0,
+          present: 0,
+          blocked: 1,
+          unavailable: 0,
+          inspectionFailed: 0,
+        },
+        items: [
+          {
+            photoId: body.items[0]!.photoId,
+            originalLocation: body.items[0]!.originalLocation,
+            originalKind: "jpeg",
+            state: "blocked",
+            message: null,
+            blockers: [
+              {
+                kind: "workspace",
+                name: "workspace-keeper",
+                action:
+                  "Remove this retained work before cleaning up the record.",
+              },
+            ],
+          },
+        ],
+      }),
+    });
+  });
+  await openViewOptions(page);
+  await page.locator("[data-removed-open]").click();
+  const panel = page.locator("[data-removed-panel]");
+  await panel.locator("[data-removed-select-all]").click();
+  await panel.locator("[data-removed-delete]").click();
+  await page.locator("[data-trash-confirm]").click();
+  await expect(page.locator("[data-trash-outcome]")).toContainText(/blocked/i);
+  await expect(page.locator("[data-trash-outcome]")).toBeInViewport();
+  await expect(page.locator("[data-trash-outcome]")).toContainText(
+    "workspace-keeper",
+  );
+  await expect(page.locator("[data-trash-outcome]")).toContainText(
+    "Remove this retained work before cleaning up the record.",
+  );
+  await expect(panel.locator("[data-removed-list] .removed-item")).toHaveCount(
+    1,
+  );
+  await expect(
+    panel.getByRole("button", { name: "Restore", exact: true }),
+  ).toBeEnabled();
+});
+
+test("captured Trash selection follows a retained cursor and excludes a row", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -628,90 +492,188 @@ test("excluding a Trash row before capture changes the submitted selection truth
   await removal.locator("[data-removal-close]").click();
   await expect(page.locator("[data-grid-status]")).toHaveText("0 Photos");
 
-  // Trash opens on the inventory of what was removed.
+  // Split a disposable listing fixture over two cursor pages. A later live
+  // offset read would include an arrival that was not in this capture.
+  type ListingItem = {
+    photoId: string;
+    removedAtMs: number;
+    originalId: string;
+    originalLocation: string;
+    originalKind: string;
+    originalSize: number | null;
+    originalAvailable: boolean;
+    state: string;
+    photo: Record<string, unknown>;
+  };
+  let captured: ListingItem[] = [];
+  let firstPageReads = 0;
+  const cursors: string[] = [];
+  await page.route(/\/api\/trash(?:\?|$)/, async (route) => {
+    const url = new URL(route.request().url());
+    const cursor = url.searchParams.get("cursor");
+    if (captured.length === 0) {
+      const response = await route.fetch();
+      const listing = (await response.json()) as { photos: ListingItem[] };
+      const template = listing.photos[0]!;
+      captured = Array.from({ length: 51 }, (_, index) => {
+        const photoId = `captured-${index}`;
+        return {
+          ...template,
+          photoId,
+          originalId: `original-${index}`,
+          originalLocation: `fixture/${index}.jpg`,
+          photo: {
+            ...template.photo,
+            id: photoId,
+            originalFilename: `${index}.jpg`,
+          },
+        };
+      });
+    }
+    if (cursor) cursors.push(cursor);
+    else firstPageReads += 1;
+    const start = cursor ? 50 : 0;
+    const rows = cursor
+      ? captured.slice(50)
+      : firstPageReads === 1
+        ? captured.slice(0, 50)
+        : [
+            {
+              ...captured[0]!,
+              photoId: "later-arrival",
+              originalId: "later-original",
+              originalLocation: "fixture/later.jpg",
+              photo: { ...captured[0]!.photo, id: "later-arrival" },
+            },
+            ...captured.slice(1, 50),
+          ];
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        start,
+        limit: 50,
+        total: 51,
+        cleanupMaximum: 5000,
+        restoreMaximum: 100,
+        evaluatedAt: "2026-01-01T00:00:00Z",
+        expiresAt: cursor ? null : "2099-01-01T00:00:00Z",
+        nextCursor: cursor ? null : "retained-page-2",
+        libraryRoot: root,
+        namespace: "service",
+        operation: null,
+        photos: rows,
+      }),
+    });
+  });
+
+  await page.route(/\/api\/photos\/[^/]+\/albums$/, (route) =>
+    route.fulfill({ json: { albums: [] } }),
+  );
   await openViewOptions(page);
   await page.locator("[data-removed-open]").click();
   const panel = page.locator("[data-removed-panel]");
-  await expect(panel).toBeVisible();
-  await expect(panel.locator("[data-removed-selection-count]")).toHaveText(
-    "Nothing selected.",
+  await expect(panel.locator("[data-removed-list] .removed-item")).toHaveCount(
+    50,
   );
-
-  // Select all describes its current Trash scope across pages, rather than
-  // reporting an exact count before the server captures the review.
   await panel.locator("[data-removed-select-all]").click();
-  await expect(panel.locator("[data-removed-selection-count]")).toHaveText(
-    "All current Trash items, except exclusions.",
-  );
-  await expect(panel.locator("[data-removed-message]")).toHaveText(
-    "Review scope: all current Trash items except 0 excluded.",
-  );
+  await expect.poll(() => cursors).toContain("retained-page-2");
+  const excluded = panel.locator("[data-removed-list] .removed-item").first();
+  await excluded.locator("input[type=checkbox]").uncheck();
 
-  // Excluding one row before capture changes the review scope and marks the
-  // row excluded, so it is never counted as reviewed or deleted.
-  const rows = panel.locator("[data-removed-list] li");
-  await expect(rows).toHaveCount(3);
-  const secondRow = rows.nth(1);
-  const excludedLocation = await secondRow
-    .locator(".removed-location")
-    .textContent();
-  await secondRow.locator("input[type=checkbox]").uncheck();
-  await expect(panel.locator("[data-removed-selection-count]")).toHaveText(
-    "All current Trash items, except exclusions.",
-  );
-  await expect(panel.locator("[data-removed-message]")).toHaveText(
-    "Review scope: all current Trash items except 1 excluded. 1 item excluded from the selection and never deleted.",
-  );
-  await expect(secondRow).toHaveAttribute("data-trash-excluded-item", "true");
-  await expect(secondRow.locator("[data-trash-excluded]")).toHaveText(
-    "Excluded — this item is not part of the selection and will not be deleted.",
-  );
-
-  // Restore and deletion review accept the same all-minus-exclusions scope.
-  await expect(panel.locator("[data-removed-restore-selection]")).toBeEnabled();
-
-  // The review names the captured count and the captured set. The excluded
-  // Original is not among the reviewed files, and the confirmation names that
-  // same count.
+  await page.route("**/api/trash/cleanup-preview", async (route) => {
+    const body = route.request().postDataJSON() as {
+      items: Array<{ photoId: string; originalLocation: string }>;
+    };
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: body.items.map((item) => ({
+          photoId: item.photoId,
+          originalLocation: item.originalLocation,
+          originalKind: "jpeg",
+          state: "captured",
+          absence: "absent",
+          message: null,
+          blockers: [],
+        })),
+      }),
+    });
+  });
   await panel.locator("[data-removed-delete]").click();
   const review = page.locator("[data-trash-review]");
   await expect(review).toBeVisible();
-  await expect(review.locator("[data-trash-review-summary]")).toHaveText(
-    /^2 Photos selected for permanent deletion · /,
-  );
-  const reviewedNames = await review
-    .locator("[data-trash-review-items] .trash-review-location")
-    .allTextContents();
-  expect(reviewedNames.join(" ")).not.toContain(excludedLocation ?? "");
-  expect(reviewedNames).toHaveLength(2);
+  await expect(review.locator("[data-trash-review-location]")).toHaveCount(50);
+  expect(
+    await review.locator("[data-trash-review-location]").allTextContents(),
+  ).not.toContain("fixture/0.jpg");
   await expect(review.locator("[data-trash-confirm]")).toHaveText(
-    /^Permanently delete 2 /,
+    "Clean up 50 Photo records",
   );
-  // Cancel deletes nothing, and the excluded item stays in Trash.
+  // Opening and dismissing the review never submits anything.
   await review.locator("[data-trash-cancel]").click();
   await expect(review).toBeHidden();
-  await expect(panel.locator("[data-removed-list] li")).toHaveCount(3);
-  await expect(secondRow).toHaveAttribute("data-trash-excluded-item", "true");
+  expect(firstPageReads).toBe(1);
+  await expect(panel.locator("[data-removed-list] .removed-item")).toHaveCount(
+    50,
+  );
 
-  // The same excluded scope is valid for Restore, without reopening or
-  // reconstructing the selection. Only the two admitted Photos return.
-  const restoreRequest = page.waitForRequest(
-    (request) =>
-      new URL(request.url()).pathname === "/api/trash/restore" &&
-      request.method() === "POST",
+  let submitted = false;
+  await page.route("**/api/trash/cleanup", async (route) => {
+    submitted = true;
+    const body = route.request().postDataJSON() as {
+      operationId: string;
+      items: Array<{
+        photoId: string;
+        removedAtMs: number;
+        originalId: string;
+        originalLocation: string;
+      }>;
+    };
+    expect(body.items).toHaveLength(50);
+    expect(body.items.map((item) => item.photoId)).toEqual(
+      captured.slice(1).map((item) => item.photoId),
+    );
+    expect(body.items).toEqual(
+      captured
+        .slice(1)
+        .map(({ photoId, removedAtMs, originalId, originalLocation }) => ({
+          photoId,
+          removedAtMs,
+          originalId,
+          originalLocation,
+        })),
+    );
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        operationId: body.operationId,
+        reviewed: 50,
+        counts: {
+          cleaned: 0,
+          changed: 0,
+          present: 50,
+          blocked: 0,
+          unavailable: 0,
+          inspectionFailed: 0,
+        },
+        items: body.items.map((item) => ({
+          photoId: item.photoId,
+          originalLocation: item.originalLocation,
+          originalKind: "jpeg",
+          state: "present",
+          message: null,
+          blockers: [],
+        })),
+      }),
+    });
+  });
+  await panel.locator("[data-removed-delete]").click();
+  await review.locator("[data-trash-confirm]").click();
+  await expect(page.locator("[data-trash-outcome-counts]")).toContainText(
+    "Present 50",
   );
-  await panel.locator("[data-removed-restore-selection]").click();
-  const requestBody = (await restoreRequest).postDataJSON() as {
-    all: boolean;
-    excludePhotoIds: string[];
-  };
-  expect(requestBody.all).toBe(true);
-  expect(requestBody.excludePhotoIds).toHaveLength(1);
-  await expect(panel.locator("[data-removed-message]")).toContainText(
-    "2 Photos restored",
-  );
-  await expect(panel.locator("[data-removed-list] li")).toHaveCount(1);
-  await expect(
-    panel.locator("[data-removed-list] .removed-location"),
-  ).toHaveText(excludedLocation ?? "");
+  expect(submitted).toBe(true);
 });

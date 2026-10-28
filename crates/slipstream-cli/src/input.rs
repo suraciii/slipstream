@@ -109,24 +109,32 @@ pub(crate) fn album_value(album: AlbumSummary, origin: &Url) -> Result<Value, ()
 /// executable-boundary terminal exit publishes the envelope and abandons a
 /// still-blocked read.
 pub(crate) async fn read_input_bytes(input: &str) -> Result<Vec<u8>, CommandFailure> {
+    read_input_bytes_with_limit(input, MAXIMUM_INPUT_BYTES).await
+}
+
+pub(crate) async fn read_input_bytes_with_limit(
+    input: &str,
+    limit: usize,
+) -> Result<Vec<u8>, CommandFailure> {
     let owned = input.to_owned();
     tokio::task::spawn_blocking(move || {
         if owned == "-" {
             let mut stdin = std::io::stdin().lock();
-            read_bounded(&mut stdin, None)
+            read_bounded_with_limit(&mut stdin, None, limit)
         } else {
             let mut file = std::fs::File::open(&owned)
                 .map_err(|_| CommandFailure::local_input(Some(&owned)))?;
-            read_bounded(&mut file, Some(&owned))
+            read_bounded_with_limit(&mut file, Some(&owned), limit)
         }
     })
     .await
     .map_err(|_| CommandFailure::local_input(None))?
 }
 
-pub(crate) fn read_bounded(
+fn read_bounded_with_limit(
     source: &mut dyn std::io::Read,
     path: Option<&str>,
+    limit: usize,
 ) -> Result<Vec<u8>, CommandFailure> {
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 8192];
@@ -137,11 +145,11 @@ pub(crate) fn read_bounded(
         if count == 0 {
             return Ok(bytes);
         }
-        if bytes.len().saturating_add(count) > MAXIMUM_INPUT_BYTES {
+        if bytes.len().saturating_add(count) > limit {
             return Err(CommandFailure::limit_exceeded(
                 "inputBytesMaximum",
-                MAXIMUM_INPUT_BYTES,
-                MAXIMUM_INPUT_BYTES + 1,
+                limit,
+                limit + 1,
             ));
         }
         bytes.extend_from_slice(&buffer[..count]);
@@ -332,7 +340,7 @@ pub(crate) async fn read_trash_ids(input: &str) -> Result<Vec<String>, CommandFa
     })?;
     if photo_ids.len() > MAXIMUM_TRASH_IDS {
         return Err(CommandFailure::limit_exceeded(
-            "permanentDeletionPhotoIdsMaximum",
+            "trashPhotoIdsMaximum",
             MAXIMUM_TRASH_IDS,
             photo_ids.len(),
         ));
@@ -350,6 +358,60 @@ pub(crate) async fn read_trash_ids(input: &str) -> Result<Vec<String>, CommandFa
         ));
     }
     Ok(photo_ids)
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct TrashCleanupInput {
+    pub(crate) items: Vec<TrashCleanupInputItem>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct TrashCleanupInputItem {
+    pub(crate) photo_id: String,
+    pub(crate) removed_at_ms: i64,
+    pub(crate) original_id: String,
+    pub(crate) original_location: String,
+}
+
+pub(crate) fn parse_trash_cleanup_input(bytes: &[u8]) -> Result<TrashCleanupInput, CommandFailure> {
+    let invalid = || {
+        CommandFailure::invalid(
+            "input",
+            "The cleanup input must contain only valid, distinct reviewed Trash items.",
+        )
+    };
+    let document: TrashCleanupInput = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    if document.items.is_empty() {
+        return Err(invalid());
+    }
+    if document.items.len() > MAXIMUM_TRASH_IDS {
+        return Err(CommandFailure::limit_exceeded(
+            "trashCleanupMaximum",
+            MAXIMUM_TRASH_IDS,
+            document.items.len(),
+        ));
+    }
+    let mut ids = std::collections::HashSet::new();
+    for item in &document.items {
+        if !valid_library_id(&item.photo_id)
+            || !valid_library_id(&item.original_id)
+            || item.removed_at_ms < 0
+            || !valid_original_location(&item.original_location)
+            || !ids.insert(&item.photo_id)
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(document)
+}
+
+pub(crate) async fn read_trash_cleanup_input(
+    input: &str,
+) -> Result<TrashCleanupInput, CommandFailure> {
+    let bytes = read_input_bytes_with_limit(input, 1024 * 1024).await?;
+    parse_trash_cleanup_input(&bytes)
 }
 
 /// Validates the complete decision document before any write is attempted.

@@ -143,7 +143,7 @@ facts are the Library axis only; Processing Module availability and a Photo's
 input support are separate axes that a recovering or saturated scan does not change.
 
 Compatibility is checked before any operational request. Use a client and service
-built from the same candidate source revision. Contract version 1 alone does not
+built from the same candidate source revision. Contract version 2 alone does not
 prove that a service implements all required capability fields. An invalid or
 incomplete capability response is `incompatible_server`, exit 6, effect `none`.
 The diagnostic preserves any valid advertised versions and identifies the
@@ -179,13 +179,13 @@ A continuation accepts only `--cursor` and global options. Its cursor carries
 the original query and page size. Callers must not combine it with new filters.
 Every cursor is opaque and bound to its endpoint kind.
 
-Album and Photo cursors refer to retained ordered-ID collections in one server
+Album, Photo, and Trash cursors refer to retained ordered-ID collections in one server
 process. They expire on restart, after 15 minutes idle, or under bounded
 least-recently-used eviction. Their `expiresAt` is the current idle deadline;
 later activity may extend it, while eviction may invalidate the cursor earlier.
-If one valid Album or Photo query would exceed the 1,000,000 retained-ID maximum,
-the service returns `server_busy` with `effect: "none"`, the corresponding
-`albums-list` or `photos-list` operation, and `retryAfterSeconds: null`; it does
+If one valid Album, Photo, or Trash query exceeds the 1,000,000 retained-ID maximum,
+the service returns `server_busy`, `effect: "none"`, the `albums-list`, `photos-list`,
+or `trash-list` operation, and `retryAfterSeconds: null`; it does
 not publish a partial query or cursor. The caller must narrow the source or
 filters rather than assume that waiting or retrying will make the result fit.
 
@@ -308,12 +308,13 @@ that target; valid siblings may still be removed.
   have exactly `photoId` and `removedAtMs`, using the evidence observed in a
   removal result or Trash listing. The command restores exactly those markers
   and `OPERATION_ID` is the caller-generated identity of this Restore attempt.
-- With `--all`, the command restores every current Trash item except the
-  identities in `--exclude-input FILE`. The remaining identities are resolved
-  at admission under `OPERATION_ID`, and Trash items that arrive later never
-  join the captured set. `--exclude-input` requires `--all` and holds
-  `{"photoIds": [...]}` or a bare array of Photo IDs. `--all` and `--input` are
-  mutually exclusive.
+- With `--all`, capture current Trash identities and removal markers before
+  mutation, apply `--exclude-input FILE` to that capture, and bind the remaining
+  set to `OPERATION_ID`. Later arrivals and newer removal markers never join it;
+  a retry replays the original outcome rather than recapturing live Trash.
+  To Restore an earlier inspected selection, use `--input` with its markers.
+  `--exclude-input` requires `--all` and holds `{"photoIds": [...]}` or a bare
+  array of Photo IDs. `--all` and `--input` are mutually exclusive.
 - With neither flag, `OPERATION_ID` names the removal operation whose complete
   removed set is restored.
 
@@ -353,48 +354,94 @@ distinct IDs and nonnegative markers:
 Restore results use `restored`, `already-active`, `changed-elsewhere`, or
 `unavailable`. Counts contain `restored`, `alreadyActive`,
 `changedElsewhere`, and `missing`. A Restore clears only the matching
-removal marker. It does not authorize or perform permanent deletion.
+removal marker. It does not authorize Trash Record Cleanup or any file mutation.
 `photos restore-operation` is read-only and follows the same receipt replay and
-`outcome_unknown` rules. Permanent deletion remains a separate reviewed Trash
-operation.
+`outcome_unknown` rules. Cleaned-up identities are unavailable to Restore;
+historical operation results must not recreate their records.
 
 When at least one target changed and another target was conflicting or
 unavailable, the CLI returns `partial_result` with the complete result in
 `data`. An all-conflict result uses `conflict`; an all-unavailable result uses
 `not_found`. Inspect the original operation before retrying either command.
 
-## Trash and Permanent Deletion
+## Trash Inspection and Record Cleanup
 
-The Trash commands inspect the persistent Trash and perform the reviewed second
-deletion. Selection is shared with Restore: an explicit set names exact Photo
-IDs, and a select-all set is every current Trash item minus explicit
-exclusions. Permanent deletion is available only after a Trash review.
+The CLI queries and prints Trash Locations for user-operated external deletion.
+Original access remains read-only.
 
 ```text literal
 slipstream trash list [--start N] [--limit N]
-slipstream trash review OPERATION_ID (--input FILE | --all [--exclude-input FILE])
-slipstream trash delete OPERATION_ID
-slipstream trash operation OPERATION_ID
+slipstream trash list --cursor CURSOR
+slipstream --output text trash list [--start N] [--limit N]
+slipstream trash empty [--operation-id OPERATION_ID]
+slipstream --output text trash empty [--operation-id OPERATION_ID]
+slipstream trash cleanup OPERATION_ID --input FILE
+slipstream trash cleanup-operation OPERATION_ID
 ```
 
-`trash list` pages Trash items newest removal first. `--limit` accepts 1
-through 60 items and `--start` skips items.
+`trash list` captures ordered identities and observed removal and Original
+evidence. `--limit` accepts 1 through 60; `--start` chooses the first range.
+Use `nextCursor` to continue the same capture or receive explicit expiry, never
+another live offset page. New invocations capture independently. The response
+publishes `cleanupMaximum`, `restoreMaximum`, `libraryRoot`, and the service
+namespace.
 
-`trash review` captures one fixed reviewed set. `--input FILE` names the exact
-Photos to review and holds `{"photoIds": [...]}` or a bare array of Photo IDs.
-`--all` reviews every current Trash item except the identities in
-`--exclude-input FILE`; `--exclude-input` requires `--all` and uses the same
-file format. `--all` and `--input` are mutually exclusive. `OPERATION_ID` is a
-nonempty caller-generated identifier, and repeating it with the same intent
-reopens the original review instead of capturing a second set. A selection
-beyond the published review bound is refused, never truncated.
+The [Trash contract](../photo-library/trash/spec.md#querying-and-printing-locations)
+owns scope, totals, Locations, and namespace labeling. JSON preserves exact
+characters; text escapes control characters, not shell commands. Text output
+names the Library Folder and one item per line.
 
-`trash delete` permanently deletes the Original Files of exactly that reviewed
-operation and reports each reviewed Photo as `deleted`, `changed`, `missing`,
-`failed`, or `pendingVerification`. It never widens the reviewed set, never
-touches a Photo the review excluded, and never deletes a sibling, Sidecar,
-export, or directory. `trash operation` reopens the durable result without
-changing Library state. Permanent deletion has no Undo.
+`trash empty` is the primary human workflow: inspect and print Locations,
+delete the intended files outside Slipstream, then run one command. It captures
+every current Trash record through the cursor listing, generates one operation
+identity, and submits them as one cleanup. It needs no input file or
+`OPERATION_ID`. The identity is printed to stderr before submission; pass it
+with `--operation-id` to recover or replay that same attempt after a lost
+response. An empty Trash succeeds with `reviewed: 0` and no mutation. A capture
+larger than the advertised `cleanupMaximum`, or a serialized request larger
+than the service body bound, is refused without truncation. The same
+per-record outcomes and no-file-deletion rules apply; a present or
+uninspectable Location is refused and remains in Trash. On a lost response,
+inspect the attempt with `trash cleanup-operation OPERATION_ID`.
+
+`trash cleanup` is the explicit-set alternative for Agents or a reviewed subset.
+Its input has exactly one `items` array whose items have exactly `photoId`,
+`removedAtMs`, `originalId`, and `originalLocation`, copied from a Trash listing:
+
+```json
+{
+  "items": [
+    {
+      "photoId": "00000000-0000-4000-8000-000000000001",
+      "removedAtMs": 1735689600000,
+      "originalId": "00000000-0000-4000-8000-000000000002",
+      "originalLocation": "shoot/a.jpg"
+    }
+  ]
+}
+```
+
+The set must be nonempty, distinct, and no larger than the published
+`cleanupMaximum`; a cleanup input may fit 1 MiB. The CLI validates the complete
+document before network access. `OPERATION_ID` is retained by the caller before
+submission. Outcomes are `cleaned`, `changed`, `present`, `blocked`,
+`unavailable`, or `inspection-failed`; a `blocked` item names its blockers.
+Counts equal the result partition. A confirmed cleanup removes application
+records, decisions, and Album memberships; it never deletes, moves, renames, or
+rewrites a file and reports no reclaimed bytes.
+
+Cleanup revalidates the observed removal marker, Original identity, remembered
+Location, fresh absence, and retained dependencies. A present entry, changed
+record, unreadable storage, unsafe path, or retained workspace, Edit Recipe,
+Export, or Processing Artifact refuses that item. Repeating the same operation
+with identical intent returns its immutable result; different intent under that
+identity is `conflict`. A lost response is `outcome_unknown` until
+`trash cleanup-operation` inspects the same attempt. Cleanup has no Undo.
+
+Physical-deletion commands and aliases are outside this contract. Capability
+negotiation must distinguish this target from older services. CLI contract
+version 2 retires the physical-deletion commands; a version 1 client and a
+version 2 service reject each other as incompatible.
 
 ## Preview Download
 
@@ -951,7 +998,7 @@ or `null`. Arrays preserve the ordering stated below.
 - `fingerprints`: `null` or an object with count fields `enrolled` and `pending`.
 
 `status` data contains string fields `clientVersion` and `serverVersion`, integer
-`cliContractVersion` with value `1`, boolean `published`, nullable string
+`cliContractVersion` with value `2`, boolean `published`, nullable string
 `publication`, count `photoCount`, and `scan: ScanStatus`. `library check` data
 is an object containing only `scan: ScanStatus`. A failed check retains that
 same data shape with status `error` and `library_unavailable`.
@@ -1130,9 +1177,9 @@ The other codes have these required shapes:
   string `currentVersion`;
 - `name_conflict`: string `name` and string `albumId`;
 - `limit_exceeded`: string `limitName`, count `limit`, and count `actual`;
-- `cursor_expired`: `cursorKind` of `folder`, `album`, `photo`, `unavailable`,
+- `cursor_expired`: `cursorKind` of `folder`, `album`, `photo`, `trash`, `unavailable`,
   `mappings`, `workspace`, or `darktable`, and `reason` of `publication_replaced`,
-  `process_restarted`, or `idle_or_evicted`;
+  `process_restarted`, or `idle_or_evicted`; Trash uses the latter two reasons;
 - `incompatible_server`: integer `requestedContractVersion` and an integer array
   `supportedContractVersions`; capability-shape failures also include string
   `reason` and nullable string `field`;
@@ -1146,6 +1193,11 @@ The other codes have these required shapes:
 - `server_busy`: string `operation` and nullable count `retryAfterSeconds`;
 - `storage_failed`: string `operation`;
 - `partial_result`: `counts` with the four required Photo outcome counts;
+- `trash_cleanup_partial`: `counts` with `cleaned`, `changed`, `present`,
+  `blocked`, `unavailable`, and `inspectionFailed`, and `items` with the
+  complete per-item record result; a cleanup with no `cleaned` item and at
+  least one refusal is `conflict`, and one with every target `unavailable`
+  is `not_found`;
 - `transport_failed`: string `operation`;
 - `outcome_unknown`: string `operation`, string array `photoIds`, nullable string
   `albumId`, and nullable string `albumName`; and
@@ -1154,7 +1206,8 @@ The other codes have these required shapes:
 
 For `authentication_required`, `access_denied`, `server_busy`, `storage_failed`, `transport_failed`, and `outcome_unknown`,
 `operation` is one of `auth-login`, `auth-status`, `auth-use`, `auth-logout`,
-`status`, `library-check`, `folders-list`, `albums-list`,
+`status`, `library-check`, `folders-list`, `albums-list`, `trash-list`,
+`trash-empty`, `trash-cleanup`, `trash-cleanup-operation`,
 `albums-get`, `photos-list`, `photos-get`, `photos-resolve`, `photos-preview`, `photos-set`,
 `albums-create`, `albums-rename`, `albums-delete`, `albums-add`, `albums-remove`,
 `albums-reorder`, `processing-modules`, `processing-artifact`,

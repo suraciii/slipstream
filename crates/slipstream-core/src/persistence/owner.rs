@@ -7,20 +7,20 @@ use super::scan_recovery::ScanRecoveryPlan;
 use super::{
     DatabaseName, StateDirectory, StateError, StateFileIdentity, admission::StateDatabaseLock,
     album_queries, albums, decisions, development_proxy, edit_recipe, metadata, migrations,
-    mutation, owner_export, owner_recovery, queries, removal, scan, xmp,
+    mutation, owner_export, owner_recovery, queries, removal, scan, trash_cleanup, xmp,
 };
 use crate::{
     AlbumBrowseTarget, AlbumCreationResult, AlbumMembershipMutation, AlbumMembershipResult,
     AlbumMutation, AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary,
     CheckedAlbumMutation, CheckedAlbumMutationResult, CheckedPhotoDecisionMutation,
     CheckedPhotoDecisionResult, DiscoveredOriginal, EditRecipeRead, ExplicitPhotoRestoreResult,
-    MAXIMUM_PHOTO_RATING, OriginalScanError, PermanentDeletionItemState,
-    PermanentDeletionSelection, PermanentDeletionTarget, PhotoAlbumMembership,
+    LibraryRoot, MAXIMUM_PHOTO_RATING, OriginalScanError, PhotoAlbumMembership,
     PhotoOperationRemainder, PhotoQuery, PhotoQueryError, PhotoQueryProjection, PhotoRead,
     PhotoRemovalResult, PhotoRestoration, PhotoRestorationResult, PhotoStateBatchMutation,
     PhotoStateBatchResult, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult,
     PhotoStateValue, PreviewSeed, PreviewSeedResult, RecoveryRecord, RemovedPhotoRecord,
-    ScanSnapshot, SelectionState, WhiteBalanceIntent, XmpExportRecord,
+    ScanSnapshot, SelectionState, TrashAbsence, TrashCleanupPreview, TrashCleanupResult,
+    TrashCleanupTarget, TrashInspectionRecord, TrashSelection, WhiteBalanceIntent, XmpExportRecord,
 };
 
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, params};
@@ -455,37 +455,23 @@ pub(super) enum Command {
         limit: usize,
         reply: Reply<RemovedPhotoPage>,
     },
-    TrashCandidates {
-        selection: PermanentDeletionSelection,
-        reply: oneshot::Sender<removal::TrashCandidateResult>,
-    },
-    PreparePermanentDeletion {
+    TrashInspection(oneshot::Sender<Result<Vec<TrashInspectionRecord>, MutationError>>),
+    CleanupTrash {
+        root: LibraryRoot,
         operation_id: String,
-        targets: Vec<PermanentDeletionTarget>,
-        reply: oneshot::Sender<removal::PermanentDeletionReviewResult>,
+        targets: Vec<TrashCleanupTarget>,
+        reply: oneshot::Sender<Result<TrashCleanupResult, MutationError>>,
     },
-    PermanentDeletionWork {
-        operation_id: String,
-        retry_unresolved: bool,
-        reply: oneshot::Sender<removal::PermanentDeletionWorkResult>,
+    PreviewTrashCleanup {
+        root: LibraryRoot,
+        targets: Vec<TrashCleanupTarget>,
+        reply: oneshot::Sender<Result<TrashCleanupPreview, MutationError>>,
     },
-    MarkPermanentDeletionDeleting {
+    ReadTrashCleanup {
         operation_id: String,
-        photo_id: String,
-        reply: oneshot::Sender<Result<(), MutationError>>,
+        reply: oneshot::Sender<Result<TrashCleanupResult, MutationError>>,
     },
     PermanentlyDeletedOriginalIds(Reply<Vec<String>>),
-    SettlePermanentDeletion {
-        operation_id: String,
-        photo_id: String,
-        state: PermanentDeletionItemState,
-        message: Option<String>,
-        reply: oneshot::Sender<Result<(), MutationError>>,
-    },
-    ReadPermanentDeletion {
-        operation_id: String,
-        reply: oneshot::Sender<removal::PermanentDeletionResultReply>,
-    },
     WriteProbe(Reply<()>),
     Export(owner_export::ExportCommand),
     #[cfg(test)]
@@ -955,14 +941,30 @@ impl Persistence {
         Ok(receive)
     }
 
-    pub(crate) fn prepare_permanent_deletion_receiver(
+    pub(crate) fn trash_inspection_receiver(
         &self,
+    ) -> Result<oneshot::Receiver<Result<Vec<TrashInspectionRecord>, MutationError>>, MutationError>
+    {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::TrashInspection(send))
+            .map_err(mutation::mutation_error_from_persistence)?;
+        Ok(receive)
+    }
+
+    pub(crate) fn cleanup_trash_receiver(
+        &self,
+        root: LibraryRoot,
         operation_id: String,
-        targets: Vec<PermanentDeletionTarget>,
-    ) -> Result<oneshot::Receiver<removal::PermanentDeletionReviewResult>, MutationError> {
+        targets: Vec<TrashCleanupTarget>,
+    ) -> Result<oneshot::Receiver<Result<TrashCleanupResult, MutationError>>, MutationError> {
         if operation_id.is_empty()
-            || targets.len() > crate::PERMANENT_DELETION_MAX
-            || targets.iter().any(|target| target.photo_id.is_empty())
+            || targets.is_empty()
+            || targets.len() > crate::TRASH_CLEANUP_MAX
+            || targets.iter().any(|target| {
+                target.photo_id.is_empty()
+                    || target.original_id.is_empty()
+                    || target.removed_at_ms < 0
+            })
             || targets
                 .iter()
                 .map(|target| &target.photo_id)
@@ -973,7 +975,8 @@ impl Persistence {
             return Err(MutationError::Invalid);
         }
         let (send, receive) = oneshot::channel();
-        self.submit(Command::PreparePermanentDeletion {
+        self.submit(Command::CleanupTrash {
+            root,
             operation_id,
             targets,
             reply: send,
@@ -982,36 +985,47 @@ impl Persistence {
         Ok(receive)
     }
 
-    pub(crate) fn permanent_deletion_work_receiver(
+    pub(crate) fn preview_trash_cleanup_receiver(
         &self,
-        operation_id: String,
-        retry_unresolved: bool,
-    ) -> Result<oneshot::Receiver<removal::PermanentDeletionWorkResult>, MutationError> {
-        if operation_id.is_empty() {
+        root: LibraryRoot,
+        targets: Vec<TrashCleanupTarget>,
+    ) -> Result<oneshot::Receiver<Result<TrashCleanupPreview, MutationError>>, MutationError> {
+        if targets.is_empty()
+            || targets.len() > crate::TRASH_CLEANUP_MAX
+            || targets.iter().any(|target| {
+                target.photo_id.is_empty()
+                    || target.original_id.is_empty()
+                    || target.removed_at_ms < 0
+            })
+            || targets
+                .iter()
+                .map(|target| &target.photo_id)
+                .collect::<HashSet<_>>()
+                .len()
+                != targets.len()
+        {
             return Err(MutationError::Invalid);
         }
         let (send, receive) = oneshot::channel();
-        self.submit(Command::PermanentDeletionWork {
-            operation_id,
-            retry_unresolved,
+        self.submit(Command::PreviewTrashCleanup {
+            root,
+            targets,
             reply: send,
         })
         .map_err(mutation::mutation_error_from_persistence)?;
         Ok(receive)
     }
 
-    pub(crate) fn mark_permanent_deletion_deleting_receiver(
+    pub(crate) fn read_trash_cleanup_receiver(
         &self,
         operation_id: String,
-        photo_id: String,
-    ) -> Result<oneshot::Receiver<Result<(), MutationError>>, MutationError> {
-        if operation_id.is_empty() || photo_id.is_empty() {
+    ) -> Result<oneshot::Receiver<Result<TrashCleanupResult, MutationError>>, MutationError> {
+        if operation_id.is_empty() {
             return Err(MutationError::Invalid);
         }
         let (send, receive) = oneshot::channel();
-        self.submit(Command::MarkPermanentDeletionDeleting {
+        self.submit(Command::ReadTrashCleanup {
             operation_id,
-            photo_id,
             reply: send,
         })
         .map_err(mutation::mutation_error_from_persistence)?;
@@ -1026,44 +1040,6 @@ impl Persistence {
         self.submit_persistence_receiver(Command::PermanentlyDeletedOriginalIds)?
             .blocking_recv()
             .unwrap_or(Err(PersistenceError::OwnerStopped))
-    }
-
-    pub(crate) fn settle_permanent_deletion_receiver(
-        &self,
-        operation_id: String,
-        photo_id: String,
-        state: PermanentDeletionItemState,
-        message: Option<String>,
-    ) -> Result<oneshot::Receiver<Result<(), MutationError>>, MutationError> {
-        if operation_id.is_empty() || photo_id.is_empty() {
-            return Err(MutationError::Invalid);
-        }
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::SettlePermanentDeletion {
-            operation_id,
-            photo_id,
-            state,
-            message,
-            reply: send,
-        })
-        .map_err(mutation::mutation_error_from_persistence)?;
-        Ok(receive)
-    }
-
-    pub(crate) fn read_permanent_deletion_receiver(
-        &self,
-        operation_id: String,
-    ) -> Result<oneshot::Receiver<removal::PermanentDeletionResultReply>, MutationError> {
-        if operation_id.is_empty() {
-            return Err(MutationError::Invalid);
-        }
-        let (send, receive) = oneshot::channel();
-        self.submit(Command::ReadPermanentDeletion {
-            operation_id,
-            reply: send,
-        })
-        .map_err(mutation::mutation_error_from_persistence)?;
-        Ok(receive)
     }
 
     pub async fn write_probe(&self) -> Result<(), PersistenceError> {
@@ -1086,6 +1062,36 @@ impl Persistence {
 
     pub fn shutdown(&self) -> Result<(), PersistenceError> {
         self.inner.shutdown()
+    }
+}
+
+fn inspect_trash_targets(
+    root: &LibraryRoot,
+    connection: &Connection,
+    targets: &mut [TrashCleanupTarget],
+) {
+    for target in targets {
+        let binding_valid = LibraryRoot::open(root.canonical_path())
+            .and_then(|current| root.identifies_same_directory(&current))
+            .unwrap_or(false);
+        let synthetic_legacy = target
+            .relative_path
+            .as_str()
+            .starts_with(PERMANENT_DELETION_RETIRED_LOCATION_PREFIX)
+            && trash_cleanup::photo_is_permanently_deleted(connection, &target.photo_id)
+                .unwrap_or(true);
+        target.absence = if !binding_valid || synthetic_legacy {
+            TrashAbsence::Uninspectable
+        } else {
+            match root
+                .original(target.relative_path.clone())
+                .and_then(|original| original.facts_if_present())
+            {
+                Ok(None) => TrashAbsence::Absent,
+                Ok(Some(_)) => TrashAbsence::Present,
+                Err(_) => TrashAbsence::Uninspectable,
+            }
+        };
     }
 }
 
@@ -1453,74 +1459,56 @@ fn owner_main(
             } => {
                 let _ = reply.send(removal::removed_photos(&connection, start, limit));
             }
-            Command::TrashCandidates { selection, reply } => {
-                let _ = reply.send(removal::trash_candidates(&connection, selection));
+            Command::TrashInspection(reply) => {
+                let _ = reply.send(trash_cleanup::trash_inspection(&connection));
             }
-            Command::PreparePermanentDeletion {
+            Command::CleanupTrash {
+                root,
                 operation_id,
-                targets,
+                mut targets,
                 reply,
             } => {
-                let result = removal::prepare_permanent_deletion(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    operation_id,
-                    targets,
-                );
+                let result =
+                    match trash_cleanup::trash_cleanup_replay(&connection, &operation_id, &targets)
+                    {
+                        Ok(Some(result)) => Ok(result),
+                        Err(error) => Err(error),
+                        Ok(None) => {
+                            inspect_trash_targets(&root, &connection, &mut targets);
+                            trash_cleanup::cleanup_trash(
+                                &state,
+                                &database_name,
+                                &mut connection,
+                                operation_id,
+                                targets,
+                                &mut versions,
+                            )
+                        }
+                    };
                 let _ = reply.send(result);
             }
-            Command::PermanentDeletionWork {
-                operation_id,
-                retry_unresolved,
+            Command::PreviewTrashCleanup {
+                root,
+                mut targets,
                 reply,
             } => {
-                let _ = reply.send(removal::permanent_deletion_work(
-                    &connection,
-                    &operation_id,
-                    retry_unresolved,
+                inspect_trash_targets(&root, &connection, &mut targets);
+                let _ = reply.send(trash_cleanup::preview_trash_cleanup(
+                    &mut connection,
+                    &targets,
                 ));
             }
-            Command::MarkPermanentDeletionDeleting {
+            Command::ReadTrashCleanup {
                 operation_id,
-                photo_id,
                 reply,
             } => {
-                let result = removal::mark_permanent_deletion_deleting(
-                    &state,
-                    &database_name,
-                    &mut connection,
+                let _ = reply.send(trash_cleanup::read_trash_cleanup(
+                    &connection,
                     &operation_id,
-                    &photo_id,
-                );
-                let _ = reply.send(result);
+                ));
             }
             Command::PermanentlyDeletedOriginalIds(reply) => {
                 let _ = reply.send(permanently_deleted_original_ids(&connection));
-            }
-            Command::SettlePermanentDeletion {
-                operation_id,
-                photo_id,
-                state: item_state,
-                message,
-                reply,
-            } => {
-                let result = removal::settle_permanent_deletion(
-                    &state,
-                    &database_name,
-                    &mut connection,
-                    &operation_id,
-                    &photo_id,
-                    item_state,
-                    message,
-                );
-                let _ = reply.send(result);
-            }
-            Command::ReadPermanentDeletion {
-                operation_id,
-                reply,
-            } => {
-                let _ = reply.send(removal::read_permanent_deletion(&connection, &operation_id));
             }
             Command::WriteProbe(reply) => {
                 let result = write_transaction(&state, &database_name, &mut connection, |_| Ok(()));

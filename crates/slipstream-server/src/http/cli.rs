@@ -56,7 +56,13 @@ pub(super) type CliBoundaryResult<T> = Result<T, Box<Response<Body>>>;
 
 pub(crate) fn require_cli_contract(request: &Request<Body>) -> CliBoundaryResult<()> {
     let mut values = request.headers().get_all(CLI_CONTRACT_HEADER).iter();
-    if values.next().and_then(|value| value.to_str().ok()) == Some("1") && values.next().is_none() {
+    if values
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u16>().ok())
+        == Some(CLI_CONTRACT_VERSION)
+        && values.next().is_none()
+    {
         return Ok(());
     }
     Err(Box::new(cli_error(
@@ -88,6 +94,20 @@ pub(crate) fn cli_error(
                 "code": code,
                 "message": message.into(),
                 "effect": "none",
+                "details": details
+            }
+        }),
+    )
+}
+
+pub(crate) fn cli_outcome_unknown(message: impl Into<String>, details: Value) -> Response<Body> {
+    json_response(
+        StatusCode::CONFLICT,
+        &serde_json::json!({
+            "error": {
+                "code": "outcome_unknown",
+                "message": message.into(),
+                "effect": "unknown",
                 "details": details
             }
         }),
@@ -136,6 +156,7 @@ pub(crate) async fn capabilities(request: Request<Body>) -> Response<Body> {
                 list_page_maximum: MAXIMUM_LIST_PAGE,
                 mutation_photo_ids_maximum: slipstream_core::PHOTO_STATE_BATCH_MAX,
                 removal_photo_ids_maximum: slipstream_core::PHOTO_REMOVAL_MAX,
+                trash_cleanup_maximum: slipstream_core::TRASH_CLEANUP_MAX,
                 album_reorder_members_maximum: ALBUM_PHOTO_IDS_MAX,
                 retained_query_ids_maximum: MAXIMUM_RETAINED_IDS,
                 retained_query_idle_seconds: QUERY_IDLE.as_secs(),

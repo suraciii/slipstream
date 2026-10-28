@@ -79,7 +79,7 @@ The recovery review must not classify a matching fingerprint as an automatic rec
 
 ## Manual Recovery
 
-Every unavailable Original File belonging to an active Photo must remain listed with its remembered Location, filename, kind, Rating, Selection State, Album count, and whether a fingerprint exists. Here active means the Photo is not Removed and its Original is currently unavailable. Removed Photos remain in [Trash](trash/spec.md); Location Recovery must not restore them or reverse Permanent Deletion.
+Every unavailable Original File belonging to an active Photo must remain listed with its remembered Location, filename, kind, Rating, Selection State, Album count, and whether a fingerprint exists. Here active means the Photo is not Removed and its Original is currently unavailable. Removed Photos remain in [Trash](trash/spec.md); Location Recovery must not restore them or reverse Trash Record Cleanup. A file discovered after cleanup follows normal recovery for other retained identities first; only when none qualifies does discovery assign a new identity. Neither case recovers the cleaned-up identity or its discarded state.
 
 The Photographer must be able to review unavailable Originals and propose new Locations through one bounded `Review unavailable Originals` entry from the scan result or an affected Photo.
 

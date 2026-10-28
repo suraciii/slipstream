@@ -234,7 +234,7 @@ or changed dependency invalidates that confirmation. Active operations and
 references from outside the workspace must refuse deletion. Accepted deletion
 removes the workspace from use before reclaiming its files and reports any
 unfinished reclamation honestly. It must never delete the Library Original.
-Removing a Photo from the Library must not implicitly erase this work.
+Removing a Photo from the Library must not implicitly erase this work. [Trash Record Cleanup](../../photo-library/trash/spec.md) must refuse a Photo with retained workspace, edit, or artifact references or active or unresolved work; the separate explicit workspace removal flow above remains responsible for removing that work.
 
 Cancellation, a crashed tool, or disk exhaustion must preserve previous complete
 files and saved settings. Partial files must not appear ready or downloadable.

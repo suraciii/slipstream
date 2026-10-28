@@ -7,8 +7,8 @@ pub(crate) struct MutationIdentity {
     pub(crate) photo_ids: Vec<String>,
     pub(crate) album_id: Option<String>,
     pub(crate) album_name: Option<String>,
-    /// The submitted reviewed mapping identities of one recovery apply, in
-    /// request order; empty for every other mutation.
+    /// Reviewed recovery mappings, or the Trash cleanup attempt identity for
+    /// unknown-outcome reporting; empty for other mutations.
     pub(crate) mappings: Vec<Value>,
 }
 
@@ -32,17 +32,22 @@ impl MutationIdentity {
             "albumId": self.album_id,
             "albumName": self.album_name,
         });
-        if !self.mappings.is_empty() {
+        if matches!(
+            self.operation,
+            Operation::TrashCleanup | Operation::TrashEmpty
+        ) {
+            if let Some(operation_id) = self
+                .mappings
+                .first()
+                .and_then(|entry| entry.get("operationId"))
+            {
+                details["operationId"] = operation_id.clone();
+            }
+        } else if !self.mappings.is_empty() {
             details["mappings"] = json!(self.mappings);
         }
         details
     }
-}
-
-#[derive(Debug)]
-pub(crate) struct PendingTrashReview {
-    pub(crate) photo_ids: Vec<String>,
-    pub(crate) exclude_photo_ids: Vec<String>,
 }
 
 /// Records the point where a mutation request was handed to the transport.

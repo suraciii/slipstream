@@ -3,7 +3,10 @@
 Slipstream is a photo selection and organization workspace for a Photographer
 and the Photographer's own Agent. Its Web application supports direct visual
 review on a phone, tablet, or desktop. Its command-line client exposes the same
-photo-management capabilities for delegated use. Original Files remain unchanged except for explicit [Permanent Deletion from Trash](photo-library/trash/spec.md).
+photo-management capabilities for delegated use. Slipstream never changes or
+deletes Original Files. [Trash](photo-library/trash/spec.md) supports inspection
+of Original Locations and explicit cleanup of eligible application records
+after external file removal.
 
 ## Goal
 
@@ -87,7 +90,9 @@ Edit Preview and Export contracts are in [Photo Development](photo-development/s
 - **One set of facts**: Clients share domain rules and durable state.
 - **Camera-produced preview**: Preserve truthful source and detail information.
 - **RAW-first independence**: Each Original File has independent Photo state.
-- **Original ownership**: Original Files remain in place and unchanged except for separately confirmed [Permanent Deletion from Trash](photo-library/trash/spec.md).
+- **Original ownership**: Original Files remain read-only to Slipstream; the
+  Photographer controls any external file removal. Trash Record Cleanup removes
+  eligible application records, never Original Files.
 - **Touch-native browsing**: Gestures coexist with visible and keyboard controls.
 - **Bounded work**: Large Libraries do not require whole-Library transfer,
   client retention, or Preview generation before useful work.
@@ -111,8 +116,9 @@ It does not provide a built-in Agent, automatic aesthetic scoring, face
 recognition, a semantic index, or a workflow engine. External Agents may combine
 its capabilities without making those systems part of Slipstream.
 
-Original writes, public sharing, authentication, and XMP interoperability require
-their own contracts. Selection State must not be inferred from Rating or from a
+Original writes are outside Slipstream's boundary. Public sharing, authentication,
+and XMP interoperability require their own contracts. Selection State must not
+be inferred from Rating or from a
 task-specific Album. [The 0.1 support contract](deployment/support.md)
 remains the authority for that release; the target vision does not add CLI or
 editing claims to an already qualified release or imply publication.

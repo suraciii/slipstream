@@ -1,600 +1,368 @@
 import { describe, expect, test } from "bun:test";
 import {
-  deleteTrash,
-  fetchTrashOperation,
-  partitionTrashOperation,
-  planTrashReview,
-  reviewTrash,
-  trashAllSelection,
-  trashBoundNotice,
-  trashExclusionNotice,
-  type TrashOperation,
-  type TrashReview,
+  cleanupTarget,
+  cleanupTrash,
+  fetchTrashCleanupOperation,
+  fetchTrashPage,
 } from "./trash.js";
 
-const reviewResponse = (): unknown => ({
-  operationId: "operation-1",
-  items: [
-    {
-      photoId: "photo-1",
-      removedAtMs: 100,
-      originalId: "original-1",
-      originalLocation: "2024/photo-1.jpg",
-      originalKind: "jpeg",
-      size: 12,
-      albums: [
-        { id: "album-1", name: "Keepers" },
-        { id: "album-2", name: "Clients" },
-      ],
-    },
-    {
-      photoId: "photo-2",
-      removedAtMs: 90,
-      originalId: "original-2",
-      originalLocation: "2024/photo-2.cr2",
-      originalKind: "raw",
-      size: 2000,
-      albums: [{ id: "album-1", name: "Keepers" }],
-    },
-  ],
-  rejected: [
-    { photoId: "photo-3", reason: "missing" },
-    { photoId: "photo-4", reason: "changed-elsewhere" },
-  ],
+const photo = {
+  id: "photo-1",
+  available: false,
+  original: { kind: "jpeg", available: false },
+  originalFilename: "a.jpg",
+  selectionState: "rejected",
+  rating: 0,
+  hasSavedEdits: false,
+  preview: { state: "unavailable" },
+};
+const listingItem = (overrides: Record<string, unknown> = {}) => ({
+  photoId: "photo-1",
+  removedAtMs: 100,
+  originalId: "original-1",
+  originalLocation: 'folder/a "quoted"\n.jpg',
+  originalKind: "jpeg",
+  originalSize: null,
+  originalAvailable: false,
+  state: "captured",
+  photo,
+  ...overrides,
 });
+const page = (overrides: Record<string, unknown> = {}) => ({
+  start: 0,
+  limit: 1,
+  total: 1,
+  cleanupMaximum: 5000,
+  restoreMaximum: 100,
+  evaluatedAt: "2026-10-28T10:00:00Z",
+  expiresAt: null,
+  nextCursor: null,
+  libraryRoot: "/srv/photos",
+  namespace: "service",
+  operation: { operationId: "removal-1", removed: 1 },
+  photos: [listingItem()],
+  ...overrides,
+});
+const target = {
+  photoId: "photo-1",
+  removedAtMs: 100,
+  originalId: "original-1",
+  originalLocation: 'folder/a "quoted"\n.jpg',
+};
+const resultItem = (overrides: Record<string, unknown> = {}) => ({
+  photoId: "photo-1",
+  originalLocation: target.originalLocation,
+  originalKind: "jpeg" as const,
+  state: "cleaned" as const,
+  message: null,
+  blockers: [],
+  ...overrides,
+});
+const operation = (overrides: Record<string, unknown> = {}) => ({
+  operationId: "attempt/1",
+  reviewed: 1,
+  counts: {
+    cleaned: 1,
+    changed: 0,
+    present: 0,
+    blocked: 0,
+    unavailable: 0,
+    inspectionFailed: 0,
+  },
+  items: [resultItem()],
+  ...overrides,
+});
+const respond =
+  (body: unknown, status = 200) =>
+  () =>
+    Promise.resolve(Response.json(body, { status }));
 
-const operationResponse = (
-  items: unknown[] = [],
-  overrides: Record<string, unknown> = {},
-) =>
-  ({
-    operationId: "operation-2",
-    reviewed: 2,
-    logicalBytesDeleted: 1536,
-    items,
-    ...overrides,
-  }) as unknown;
-
-describe("Trash API", () => {
-  test("posts the fixed selection and accepts a review", async () => {
-    let request: { path: string; body: unknown } | undefined;
-    const operationId = "operation-1";
-    const result = await reviewTrash(
-      (path, init) => {
-        request = {
-          path,
-          body:
-            typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
-        };
-        return Promise.resolve(
-          new Response(JSON.stringify(reviewResponse()), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
+describe("Trash listing", () => {
+  test("requests a first capture and retains the exact Location and identity", async () => {
+    let path = "";
+    const signal = new AbortController().signal;
+    let init: RequestInit | undefined;
+    const result = await fetchTrashPage(
+      (url, request) => {
+        path = url;
+        init = request;
+        return Promise.resolve(Response.json(page()));
       },
-      operationId,
-      { all: false, photoIds: ["photo-1"], excludePhotoIds: [] },
+      { start: 0, limit: 1, signal },
     );
-
-    expect(request).toEqual({
-      path: "/api/trash/review",
-      body: {
-        operationId,
-        all: false,
-        photoIds: ["photo-1"],
-        excludePhotoIds: [],
-      },
-    });
-    expect(result.kind).toBe("ok");
-    if (result.kind === "ok") expect(result.value.items).toHaveLength(2);
-  });
-
-  test("round-trips a nonempty excludePhotoIds selection and excludes nothing by itself", async () => {
-    // No repository test exercised a nonempty exclusion list before: the
-    // exclusions travel in the request itself, so the server resolves the
-    // remaining current Trash items and an excluded Photo is never named as
-    // reviewed, counted, or deleted.
-    let request: { path: string; body: unknown } | undefined;
-    const operationId = "operation-1";
-    const result = await reviewTrash(
-      (path, init) => {
-        request = {
-          path,
-          body:
-            typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
-        };
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              operationId,
-              items: [
-                {
-                  photoId: "photo-1",
-                  removedAtMs: 100,
-                  originalId: "original-1",
-                  originalLocation: "2024/a.jpg",
-                  originalKind: "jpeg",
-                  size: 1024,
-                  albums: [],
-                },
-              ],
-              rejected: [{ photoId: "photo-2", reason: "missing" }],
-            }),
-            { status: 200, headers: { "Content-Type": "application/json" } },
-          ),
-        );
-      },
-      operationId,
-      trashAllSelection({
-        excludedPhotoIds: ["photo-2"],
-        reviewMaximum: 50,
-      }),
-    );
-
-    expect(request?.body).toEqual({
-      operationId,
-      all: true,
-      photoIds: [],
-      excludePhotoIds: ["photo-2"],
-    });
-    expect(result.kind).toBe("ok");
-    if (result.kind !== "ok") return;
-    // The excluded Photo is not one of the reviewed items.
-    expect(result.value.items.map((item) => item.photoId)).not.toContain(
-      "photo-2",
-    );
-  });
-
-  test("admits one operation id once: repeating it returns the captured review instead of widening the set", async () => {
-    // The captured review is keyed by operation id, so a second submission
-    // of the same id with the same intent is a no-op that never adds later
-    // Trash arrivals to the reviewed set.
-    const responses: string[] = [];
-    const respond = (path: string, init?: RequestInit) => {
-      responses.push(
-        `${path}:${typeof init?.body === "string" ? init.body : ""}`,
-      );
-      return Promise.resolve(
-        new Response(JSON.stringify(reviewResponse()), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-    };
-    const operationId = "operation-1";
-    const selection = trashAllSelection({
-      excludedPhotoIds: ["photo-2"],
-      reviewMaximum: 50,
-    });
-    const first = await reviewTrash(respond, operationId, selection);
-    const repeated = await reviewTrash(respond, operationId, selection);
-
-    expect(first.kind).toBe("ok");
-    expect(repeated.kind).toBe("ok");
-    // Both submissions carried the same captured request: the exclusions
-    // were part of it, not a filter applied after the fact.
-    expect(new Set(responses).size).toBe(1);
-    if (repeated.kind === "ok")
-      expect(repeated.value.operationId).toBe(operationId);
-  });
-
-  test("accepts a review that rejects an unsettled Photo as pending verification", async () => {
-    const result = await reviewTrash(
-      () =>
-        Promise.resolve(
-          new Response(
-            JSON.stringify({
-              operationId: "operation-1",
-              items: [],
-              rejected: [
-                { photoId: "photo-5", reason: "pending-verification" },
-              ],
-            }),
-            { status: 200, headers: { "Content-Type": "application/json" } },
-          ),
-        ),
-      "operation-1",
-      { all: false, photoIds: ["photo-5"], excludePhotoIds: [] },
-    );
-
-    expect(result.kind).toBe("ok");
-    if (result.kind === "ok")
-      expect(result.value.rejected[0]?.reason).toBe("pending-verification");
-  });
-
-  test("rejects a review whose operation id differs from the requested one", async () => {
-    const result = await reviewTrash(
-      () =>
-        Promise.resolve(
-          new Response(JSON.stringify(reviewResponse()), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        ),
-      "operation-9",
-      { all: false, photoIds: ["photo-1"], excludePhotoIds: [] },
-    );
-
-    expect(result.kind).toBe("malformed");
-  });
-
-  test("accepts nullable result details from a settled operation", async () => {
-    const result = await deleteTrash(
-      () =>
-        Promise.resolve(
-          new Response(
-            JSON.stringify({
-              operationId: "operation-2",
-              reviewed: 1,
-              logicalBytesDeleted: 0,
-              items: [
-                {
-                  photoId: "photo-2",
-                  state: "missing",
-                  originalLocation: "2024/photo-2.cr2",
-                  originalKind: "raw",
-                  size: null,
-                  message: null,
-                },
-              ],
-            }),
-            { status: 200, headers: { "Content-Type": "application/json" } },
-          ),
-        ),
-      "operation-2",
-    );
-
+    expect(path).toBe("/api/trash?start=0&limit=1");
+    expect(init?.signal).toBe(signal);
     expect(result.kind).toBe("ok");
     if (result.kind === "ok") {
-      expect(result.value.items[0]).toMatchObject({
-        photoId: "photo-2",
-        state: "missing",
-        originalLocation: "2024/photo-2.cr2",
-        originalKind: "raw",
-        size: null,
-        message: null,
-      });
+      expect(result.value.libraryRoot).toBe("/srv/photos");
+      expect(result.value.namespace).toBe("service");
+      expect(cleanupTarget(result.value.photos[0]!)).toEqual(target);
     }
   });
 
-  test("rejects an operation item that omits the reviewed Location", async () => {
-    const body = operationResponse([
-      {
-        photoId: "photo-2",
-        state: "missing",
-        originalKind: "raw",
-        size: null,
-        message: null,
-      },
-    ]);
-    const result = await deleteTrash(
-      () =>
-        Promise.resolve(
-          new Response(JSON.stringify(body), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        ),
-      "operation-2",
+  test("continues the retained capture with an encoded cursor", async () => {
+    const first = await fetchTrashPage(
+      respond(
+        page({
+          total: 2,
+          nextCursor: "next/+?",
+          expiresAt: "2026-10-28T10:30:00Z",
+        }),
+      ),
+      { start: 0, limit: 1 },
     );
-
-    expect(result.kind).toBe("malformed");
-  });
-
-  test("rejects an operation item with an unknown kind", async () => {
-    const body = operationResponse([
-      {
-        photoId: "photo-2",
-        state: "missing",
-        originalLocation: "2024/photo-2.cr2",
-        originalKind: "tiff",
-        size: null,
-        message: null,
-      },
-    ]);
-    const result = await deleteTrash(
-      () =>
-        Promise.resolve(
-          new Response(JSON.stringify(body), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        ),
-      "operation-2",
-    );
-
-    expect(result.kind).toBe("malformed");
-  });
-
-  test("fetches a retained operation result", async () => {
-    let path: string | undefined;
-    const result = await fetchTrashOperation((input) => {
-      path = input;
-      return Promise.resolve(
-        new Response(
-          JSON.stringify(
-            operationResponse(
-              [
-                {
-                  photoId: "photo-1",
-                  state: "deleting",
-                  originalLocation: "2024/photo-1.jpg",
-                  originalKind: "jpeg",
-                  size: null,
-                  message: null,
-                },
+    expect(first.kind).toBe("ok");
+    let path = "";
+    const second = await fetchTrashPage(
+      (url) => {
+        path = url;
+        return Promise.resolve(
+          Response.json(
+            page({
+              start: 1,
+              total: 2,
+              photos: [
+                listingItem({
+                  photoId: "photo-2",
+                  originalId: "original-2",
+                  state: "changed",
+                  photo: null,
+                }),
               ],
-              { operationId: "operation 7" },
-            ),
+            }),
           ),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
-      );
-    }, "operation 7");
-
-    expect(path).toBe("/api/trash/operations/operation%207");
-    expect(result.kind).toBe("ok");
-  });
-
-  test("reports a lost response as rejected, not as an outcome", async () => {
-    const result = await fetchTrashOperation(
-      () => Promise.reject(new Error("offline")),
-      "operation-2",
-    );
-
-    expect(result).toEqual({ kind: "rejected", status: 0 });
-  });
-});
-
-describe("partitionTrashOperation", () => {
-  test("partitions one settled mixed batch and reports bytes for deletions only", () => {
-    const operation = {
-      operationId: "operation-2",
-      reviewed: 5,
-      logicalBytesDeleted: 1536,
-      items: [
-        {
-          photoId: "photo-1",
-          state: "deleted",
-          originalLocation: "2024/photo-1.jpg",
-          originalKind: "jpeg",
-          size: 1536,
-        },
-        {
-          photoId: "photo-2",
-          state: "changed",
-          originalLocation: "2024/photo-2.cr2",
-          originalKind: "raw",
-          size: 2000,
-        },
-        {
-          photoId: "photo-3",
-          state: "missing",
-          originalLocation: "2024/photo-3.jpg",
-          originalKind: "jpeg",
-        },
-        {
-          photoId: "photo-4",
-          state: "failed",
-          originalLocation: "2024/photo-4.jpg",
-          originalKind: "jpeg",
-          message: "Permission denied",
-        },
-      ],
-    } as unknown as TrashOperation;
-
-    const partition = partitionTrashOperation(operation);
-
-    expect(partition).toEqual({
-      deleted: 1,
-      changed: 1,
-      missing: 1,
-      failed: 1,
-      pendingVerification: 0,
-      logicalBytesDeleted: 1536,
-      settled: true,
-      unresolved: [
-        {
-          photoId: "photo-2",
-          state: "changed",
-          originalLocation: "2024/photo-2.cr2",
-          originalKind: "raw",
-          size: 2000,
-        },
-        {
-          photoId: "photo-3",
-          state: "missing",
-          originalLocation: "2024/photo-3.jpg",
-          originalKind: "jpeg",
-          size: null,
-        },
-        {
-          photoId: "photo-4",
-          state: "failed",
-          originalLocation: "2024/photo-4.jpg",
-          originalKind: "jpeg",
-          size: null,
-          message: "Permission denied",
-        },
-      ],
-    });
-  });
-
-  test("groups pending, deleting, and uncertain states as pending verification", () => {
-    const operation = {
-      operationId: "operation-3",
-      reviewed: 3,
-      logicalBytesDeleted: 0,
-      items: [
-        {
-          photoId: "photo-1",
-          state: "pending",
-          originalLocation: "2024/photo-1.jpg",
-          originalKind: "jpeg",
-        },
-        {
-          photoId: "photo-2",
-          state: "deleting",
-          originalLocation: "2024/photo-2.jpg",
-          originalKind: "jpeg",
-        },
-        {
-          photoId: "photo-3",
-          state: "uncertain",
-          originalLocation: "2024/photo-3.jpg",
-          originalKind: "raw",
-        },
-      ],
-    } as unknown as TrashOperation;
-
-    const partition = partitionTrashOperation(operation);
-
-    expect(partition.pendingVerification).toBe(3);
-    expect(partition.deleted).toBe(0);
-    expect(partition.settled).toBe(false);
-    expect(partition.unresolved).toHaveLength(3);
-  });
-});
-
-describe("planTrashReview", () => {
-  test("summarizes the reviewed files, Albums, and rejections", () => {
-    const plan = planTrashReview(reviewResponse() as TrashReview);
-
-    expect(plan.itemCount).toBe(2);
-    expect(plan.totalBytes).toBe(2012);
-    expect(plan.albumCount).toBe(2);
-    expect(plan.albumNames).toEqual(["Keepers", "Clients"]);
-    expect(plan.canConfirm).toBe(true);
-    expect(plan.items).toEqual([
-      {
-        photoId: "photo-1",
-        originalLocation: "2024/photo-1.jpg",
-        originalKind: "jpeg",
-        size: 12,
-        albumNames: ["Keepers", "Clients"],
+        );
       },
-      {
-        photoId: "photo-2",
-        originalLocation: "2024/photo-2.cr2",
-        originalKind: "raw",
-        size: 2000,
-        albumNames: ["Keepers"],
-      },
-    ]);
-    expect(plan.rejected).toEqual([
-      { photoId: "photo-3", reasonLabel: "Original missing" },
-      {
-        photoId: "photo-4",
-        reasonLabel: "Original changed since it was removed",
-      },
-    ]);
-    expect(plan.rejectedCount).toBe(2);
-  });
-
-  test("offers no delete action when every selected item was rejected", () => {
-    const plan = planTrashReview({
-      operationId: "operation-1",
-      items: [],
-      rejected: [{ photoId: "photo-3", reason: "missing" }],
-    });
-
-    expect(plan.itemCount).toBe(0);
-    expect(plan.canConfirm).toBe(false);
-    expect(plan.rejectedCount).toBe(1);
-  });
-
-  test("labels a pending-verification rejection", () => {
-    const plan = planTrashReview({
-      operationId: "operation-1",
-      items: [],
-      rejected: [{ photoId: "photo-5", reason: "pending-verification" }],
-    });
-
-    expect(plan.rejected).toEqual([
-      { photoId: "photo-5", reasonLabel: "Deletion result pending" },
-    ]);
-  });
-});
-
-describe("trashAllSelection", () => {
-  test("submits all current Trash minus the named exclusions", () => {
-    // The exclusions are part of the captured request, not a client-side
-    // filter applied afterward, so the server resolves the remaining
-    // identities itself.
-    const selection = trashAllSelection({
-      excludedPhotoIds: ["photo-2"],
-      reviewMaximum: 50,
-    });
-
-    expect(selection).toEqual({
-      all: true,
-      photoIds: [],
-      excludePhotoIds: ["photo-2"],
-    });
-  });
-
-  test("copies the exclusion identities so a later change cannot widen the captured request", () => {
-    const excluded = ["photo-2"];
-    const selection = trashAllSelection({
-      excludedPhotoIds: excluded,
-      reviewMaximum: 50,
-    });
-    excluded.push("photo-3");
-
-    expect(selection.excludePhotoIds).toEqual(["photo-2"]);
-  });
-
-  test("submits no exclusions when nothing was excluded", () => {
-    const selection = trashAllSelection({
-      excludedPhotoIds: [],
-      reviewMaximum: 50,
-    });
-
-    expect(selection.excludePhotoIds).toEqual([]);
-    expect(selection.all).toBe(true);
-  });
-});
-
-describe("trashExclusionNotice", () => {
-  test("names the excluded count and that those items are never deleted", () => {
-    const notice = trashExclusionNotice({
-      excludedPhotoIds: ["photo-2", "photo-3"],
-      reviewMaximum: 50,
-    });
-
-    expect(notice).toBe(
-      "2 items excluded from the selection and never deleted.",
+      { cursor: "next/+?" },
     );
+    expect(path).toBe("/api/trash?cursor=next%2F%2B%3F");
+    expect(second.kind).toBe("ok");
   });
 
-  test("names one excluded item in the singular", () => {
-    const notice = trashExclusionNotice({
-      excludedPhotoIds: ["photo-2"],
-      reviewMaximum: 50,
+  test("accepts unavailable records and an empty page beyond the capture", async () => {
+    const unavailable = page({
+      photos: [listingItem({ state: "unavailable", photo: null })],
     });
-
-    expect(notice).toBe(
-      "1 item excluded from the selection and never deleted.",
-    );
-  });
-
-  test("stays silent when nothing was excluded", () => {
     expect(
-      trashExclusionNotice({ excludedPhotoIds: [], reviewMaximum: 50 }),
-    ).toBeUndefined();
+      (await fetchTrashPage(respond(unavailable), { start: 0, limit: 1 })).kind,
+    ).toBe("ok");
+    expect(
+      (
+        await fetchTrashPage(
+          respond(page({ start: 5, total: 0, photos: [] })),
+          { start: 5, limit: 1 },
+        )
+      ).kind,
+    ).toBe("ok");
+  });
+
+  test("rejects incomplete, inconsistent, or malformed capture pages", async () => {
+    const bad = [
+      page({ total: 2, nextCursor: null }),
+      page({ total: 2, nextCursor: "next", expiresAt: null }),
+      page({ total: 2, nextCursor: "next", expiresAt: "later", photos: [] }),
+      page({ namespace: "client" }),
+      page({ photos: [listingItem({ photoId: "other" })] }),
+      page({ photos: [listingItem({ removedAtMs: -1 })] }),
+      page({ photos: [listingItem({ state: "unknown" })] }),
+      page({ extra: true }),
+      page({ start: 1 }),
+    ];
+    for (const body of bad)
+      expect(
+        await fetchTrashPage(respond(body), { start: 0, limit: 1 }),
+      ).toEqual({ kind: "failed", malformed: true });
+    const duplicate = page({
+      limit: 2,
+      total: 2,
+      photos: [listingItem(), listingItem()],
+    });
+    expect(
+      await fetchTrashPage(respond(duplicate), { start: 0, limit: 2 }),
+    ).toEqual({ kind: "failed", malformed: true });
+  });
+
+  test("distinguishes expired cursor, transport error and malformed JSON", async () => {
+    expect(
+      await fetchTrashPage(respond({}, 410), { cursor: "expired" }),
+    ).toEqual({ kind: "failed", status: 410 });
+    expect(
+      await fetchTrashPage(() => Promise.reject(new Error("offline")), {
+        cursor: "next",
+      }),
+    ).toEqual({ kind: "failed" });
+    expect(
+      await fetchTrashPage(() => Promise.resolve(new Response("not-json")), {
+        cursor: "next",
+      }),
+    ).toEqual({ kind: "failed", malformed: true });
   });
 });
 
-describe("trashBoundNotice", () => {
-  test("names the review bound and the narrowing action instead of a truncated capture", () => {
-    const notice = trashBoundNotice({
-      excludedPhotoIds: [],
-      reviewMaximum: 5000,
-    });
-
-    expect(notice).toBe(
-      "Selecting all current Trash exceeds the 5,000-item review bound. Narrow the selection by excluding items, then review this batch.",
+describe("Trash cleanup", () => {
+  test("submits only explicit captured records to the cleanup route", async () => {
+    let path = "";
+    let request: RequestInit | undefined;
+    const result = await cleanupTrash(
+      (url, init) => {
+        path = url;
+        request = init;
+        return Promise.resolve(Response.json(operation()));
+      },
+      "attempt/1",
+      [target],
     );
+    expect(path).toBe("/api/trash/cleanup");
+    expect(request?.method).toBe("POST");
+    expect(typeof request?.body).toBe("string");
+    if (typeof request?.body !== "string")
+      throw new Error("cleanup request body is not JSON text");
+    expect(JSON.parse(request.body)).toEqual({
+      operationId: "attempt/1",
+      items: [target],
+    });
+    expect(result).toEqual({ kind: "ok", value: operation() });
+  });
+
+  test("accepts mixed record outcomes and named retained-work blockers", async () => {
+    const second = {
+      ...target,
+      photoId: "photo-2",
+      originalId: "original-2",
+      originalLocation: "b.raw",
+    };
+    const body = operation({
+      reviewed: 2,
+      counts: {
+        cleaned: 1,
+        changed: 0,
+        present: 0,
+        blocked: 1,
+        unavailable: 0,
+        inspectionFailed: 0,
+      },
+      items: [
+        resultItem(),
+        resultItem({
+          photoId: "photo-2",
+          originalLocation: "b.raw",
+          originalKind: "raw",
+          state: "blocked",
+          message: "Retained work",
+          blockers: [
+            {
+              kind: "workspace",
+              name: "work-1",
+              action: "Remove retained work",
+            },
+          ],
+        }),
+      ],
+    });
+    expect(
+      await cleanupTrash(respond(body), "attempt/1", [target, second]),
+    ).toEqual({ kind: "ok", value: body });
+  });
+
+  test("accepts each distinct refused state without treating it as cleanup", async () => {
+    for (const [state, field] of [
+      ["changed", "changed"],
+      ["present", "present"],
+      ["unavailable", "unavailable"],
+      ["inspection-failed", "inspectionFailed"],
+    ] as const) {
+      const body = operation({
+        counts: {
+          cleaned: 0,
+          changed: 0,
+          present: 0,
+          blocked: 0,
+          unavailable: 0,
+          inspectionFailed: 0,
+          [field]: 1,
+        },
+        items: [resultItem({ state, message: "Not cleaned" })],
+      });
+      expect(
+        await fetchTrashCleanupOperation(respond(body), "attempt/1"),
+      ).toEqual({ kind: "ok", value: body });
+    }
+  });
+
+  test("validates every result, exact counts, identity and Location", async () => {
+    const bad = [
+      operation({ operationId: "other" }),
+      operation({ reviewed: 2 }),
+      operation({
+        counts: {
+          cleaned: 0,
+          changed: 1,
+          present: 0,
+          blocked: 0,
+          unavailable: 0,
+          inspectionFailed: 0,
+        },
+      }),
+      operation({ items: [resultItem({ state: "deleted" })] }),
+      operation({ items: [resultItem({ originalLocation: "other.jpg" })] }),
+      operation({ items: [resultItem({ photoId: "other" })] }),
+      operation({
+        items: [
+          resultItem({
+            blockers: [{ kind: "workspace", name: "", action: "remove" }],
+          }),
+        ],
+      }),
+      operation({ extra: true }),
+    ];
+    for (const body of bad)
+      expect(await cleanupTrash(respond(body), "attempt/1", [target])).toEqual({
+        kind: "malformed",
+      });
+    const duplicate = operation({
+      reviewed: 2,
+      counts: {
+        cleaned: 2,
+        changed: 0,
+        present: 0,
+        blocked: 0,
+        unavailable: 0,
+        inspectionFailed: 0,
+      },
+      items: [resultItem(), resultItem()],
+    });
+    expect(
+      await fetchTrashCleanupOperation(respond(duplicate), "attempt/1"),
+    ).toEqual({ kind: "malformed" });
+  });
+
+  test("looks up the same attempt without sending another mutation", async () => {
+    let path = "";
+    let init: RequestInit | undefined;
+    const result = await fetchTrashCleanupOperation((url, request) => {
+      path = url;
+      init = request;
+      return Promise.resolve(Response.json(operation()));
+    }, "attempt/1");
+    expect(path).toBe("/api/trash/cleanup-operations/attempt%2F1");
+    expect(init).toBeUndefined();
+    expect(result).toEqual({ kind: "ok", value: operation() });
+  });
+
+  test("does not invent an outcome for a lost response or rejected lookup", async () => {
+    const offline = () => Promise.reject(new Error("offline"));
+    expect(await cleanupTrash(offline, "attempt/1", [target])).toMatchObject({
+      kind: "rejected",
+      status: 0,
+    });
+    expect(
+      await fetchTrashCleanupOperation(respond({}, 404), "attempt/1"),
+    ).toEqual({ kind: "rejected", status: 404 });
+    expect(
+      await fetchTrashCleanupOperation(
+        () => Promise.resolve(new Response("bad")),
+        "attempt/1",
+      ),
+    ).toEqual({ kind: "malformed" });
   });
 });

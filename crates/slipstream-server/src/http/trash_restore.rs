@@ -7,8 +7,8 @@ use axum::{
 use serde_json::Value;
 
 use super::{
-    ApiError, HttpState, cli_error, has_exact_keys, invalid_cli, json_response,
-    parse_permanent_deletion_ids, read_cli_json_body, valid_id,
+    ApiError, HttpState, cli_error, has_exact_keys, invalid_cli, json_response, parse_trash_ids,
+    read_cli_json_body, valid_id,
 };
 use crate::ServerError;
 
@@ -56,20 +56,20 @@ pub(crate) async fn restore_trash(
             serde_json::json!({"limitName":"removalPhotoIdsMaximum", "limit":slipstream_core::PHOTO_REMOVAL_MAX, "actual":items.len(), "operationId":operation_id}),
         );
     }
-    let Some(photo_ids) = parse_permanent_deletion_ids(body, "photoIds") else {
+    let Some(photo_ids) = parse_trash_ids(body, "photoIds") else {
         return invalid_cli("photoIds", "The Photo ID list is invalid.");
     };
-    let Some(exclude_photo_ids) = parse_permanent_deletion_ids(body, "excludePhotoIds") else {
+    let Some(exclude_photo_ids) = parse_trash_ids(body, "excludePhotoIds") else {
         return invalid_cli("excludePhotoIds", "The exclusion list is invalid.");
     };
     let selection = if all && photo_ids.is_empty() {
-        slipstream_core::PermanentDeletionSelection::All { exclude_photo_ids }
+        slipstream_core::TrashSelection::All { exclude_photo_ids }
     } else if !all
         && !photo_ids.is_empty()
         && exclude_photo_ids.is_empty()
         && photo_ids.len() <= slipstream_core::PHOTO_REMOVAL_MAX
     {
-        slipstream_core::PermanentDeletionSelection::Photos(photo_ids)
+        slipstream_core::TrashSelection::Photos(photo_ids)
     } else {
         return invalid_cli("input", "The Trash Restore selection is invalid.");
     };

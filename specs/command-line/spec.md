@@ -46,7 +46,7 @@ The CLI must let its caller:
 - [read and save standard metadata](../photo-library/metadata/spec.md) with explicit provenance and checked Sidecar changes;
 - create, rename, and delete Albums and add, remove, or order their members;
 - remove explicitly identified eligible Photos into Trash and Restore observed removals;
-- inspect Trash, review and separately confirm permanent deletion, and recover operation outcomes;
+- query and print Trash Original Locations for external user action, explicitly request Trash Record Cleanup, and recover its outcomes;
 - inspect unavailable Photos, review proposed Original Locations, and apply explicitly confirmed Location Recovery mappings;
 - request a Library check;
 - return a browser Destination for a Photo or Album;
@@ -55,12 +55,25 @@ The CLI must let its caller:
 
 [Composable Removal and Restore](../photo-library/removal/spec.md) defines
 explicit-set mutations and their effect recovery. [Trash](../photo-library/trash/spec.md)
-is the sole product authority for confirmed permanent Original deletion.
+owns Trash Record Cleanup and its record-only effects; Slipstream never deletes
+Original Files.
 [Manual Recovery](../photo-library/spec.md#manual-recovery) owns Location Recovery
 inspection, reviewed evidence, content confirmation, permitted retirement,
 atomic batch effects, and uncertainty. These operations restore associations;
 they do not restore Photos from Trash or write Original Files. Command help must
 make those differences explicit and advertise inspection and application limits.
+
+Trash inspection must expose the Photo identity, removal marker, remembered
+Original identity and Location needed to review a bounded selection. Help must
+describe selection and batch limits, fresh absence and identity checks,
+workspace or active-work blockers, per-item outcomes, and how to inspect or
+replay the same attempt. Cleanup requires an explicit request for the selected
+records; a query, external file deletion, removal, or Restore does not imply
+that request. It must refuse stale, present, replaced, inaccessible, or unsafe
+targets, and must not claim that absence at a Location proves deletion of all
+copies. Cleanup removes no Original, Sidecar, workspace, or export file, and
+cannot be undone. Exact command syntax belongs to the CLI Reference when
+specified.
 
 These capabilities do not include arbitrary Library Original download or mutation, XMP synchronization, or Library Expansion. Those operations retain their own product and operator boundaries. Workspace input/result downloads follow the explicit workspace contract and do not grant access to arbitrary Library paths. The CLI does not expose SQL or an arbitrary server-path/shell argument.
 

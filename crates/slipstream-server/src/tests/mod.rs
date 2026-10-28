@@ -224,7 +224,7 @@ async fn post_cli_json(router: &Router, uri: &str, body: serde_json::Value) -> R
         authenticated_request()
             .method("POST")
             .uri(format!("https://camera.local{uri}"))
-            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "2")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body.to_string()))
             .unwrap(),
@@ -237,7 +237,7 @@ async fn get_cli_json(router: &Router, uri: &str) -> Response<Body> {
         router,
         authenticated_request()
             .uri(format!("http://camera.local{uri}"))
-            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "2")
             .body(Body::empty())
             .unwrap(),
     )

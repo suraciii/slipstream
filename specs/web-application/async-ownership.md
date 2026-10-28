@@ -505,44 +505,39 @@ saved-position Recovery claim only while the same source generation, Photo
 generation, Album, and Photo remain current. A settlement from an older Photo
 is silent; saved-position writes never fallback to the Library summary.
 
-### Trash listing, review, and permanent deletion
+### Trash inspection, review, and record cleanup
 
 `GET /api/trash` is a presentation read owned by the Trash scope with key
-`(trashGeneration, start)`. It is keyed by Trash generation so a page read can
-never mix Photos from two different Trash states. Leaving Trash, reopening it,
-or a newer page request supersedes the older window; a superseded response may
-not render, clear a retry state, or change the selection. The listing also
-publishes the review bound one confirmation may capture and, per row, the
-retained operation still owing that Photo an outcome, so the surface never
-offers a selection the review would refuse.
+`(trashGeneration, inspectionScope, range)`. Leaving Trash, reopening it, or a
+newer request supersedes the older window. A superseded response may not render,
+clear a retry state, or change selection. Client generation fencing does not
+freeze server membership: complete captured inspection follows the separate
+[Trash scope contract](../photo-library/trash/spec.md#querying-and-printing-locations).
 
-`POST /api/trash/review` captures one fixed reviewed set under a caller-owned
-operation id. Admission is keyed by that operation id: repeating the same id
-while the request is in flight, or submitting the same id with the same intent
-again, is a no-op that returns the captured review rather than widening the set
-with later Trash arrivals. A different operation id is an independent review.
-Select-all is submitted as all-current-minus-exclusions, and the exclusions are
-part of the captured request rather than a client-side filter applied afterward.
+Review captures an explicit selected record set and the observed removal and
+Original evidence. Later Trash arrivals never join it. Explicit Cancel, Close,
+Escape, and scrim dismissal all clear the same unsubmitted review state; closing
+a dialog must not leave an invisible review blocking the next action.
 
-`POST /api/trash/delete` is an admitted server command and is never abortable.
-Once the confirmation is sent it always settles: the server may have unlinked an
-Original even when the Trash surface closes, the page reloads, or the transport
-is lost. Leaving Trash detaches the presentation continuation only. A lost or
-non-success response is an unknown outcome, not a cancellation and not a failure,
-and the surface must say so without claiming either effect.
+Record cleanup is an admitted server command, not a file-deletion command. The
+client retains its attempt identity before sending confirmation. Leaving Trash
+detaches presentation only; it does not cancel an accepted database effect.
+A lost or unusable response is an unknown outcome, not proof of rollback. A
+confirmed refusal before admission remains a no-effect refusal.
 
-An unknown outcome resolves through `GET /api/trash/operations/{operationId}`,
-which returns the durable result for that operation id. The browser reconciles
-that result before it submits another destructive confirmation for the same
-Photos, and it never resubmits the confirmation under a fresh operation id to
-discover what happened. Stale-response fencing applies to every Trash read: a
-response commits only while its captured Trash generation, operation id, and
-surface are still current, and a superseded result never rewrites a newer one.
+Read-only outcome inspection recovers the same attempt's durable record results.
+It must not retry filesystem work, widen the set, or submit a fresh confirmation
+to discover what happened. Reopening Trash preserves the pending outcome and its
+recovery actions across listing loads and failed outcome reads. Successful
+settlement or recovery refreshes affected counts, rows, and Undo before
+presenting converged state. A response renders only while its captured Trash
+generation, attempt identity, and surface remain current.
 
-No local write happens after the Trash surface is torn down. Leaving Trash,
-closing the page, or reloading clears its unsubmitted selection and its
-continuations; it does not record a local selection, a local outcome, or a local
-count that the durable operation has not confirmed.
+Leaving Trash clears unsubmitted selection and continuations. No stale
+continuation writes local selections, outcomes, or counts after teardown. The
+attempt identity stored before submission is recovery evidence, not a locally
+invented success. Physical deletion and its former request/retry lifecycle are
+not supported under the record-only Trash contract.
 
 ## Composite Workflows
 
@@ -812,18 +807,19 @@ Focused automated coverage must prove:
   Recovery behavior;
 - admission keys prevent duplicate same-key writes across re-renders without
   blocking independent keys;
-- Trash pages are keyed by Trash generation, so a superseded window can neither
-  render nor clear a retry state, and the review bound and per-row retained
-  operation reach the surface with the listing that needs them;
-- repeating a Trash review under the same operation id and intent returns the
-  captured set instead of admitting a second review or admitting later Trash
-  arrivals, while a different operation id is admitted independently;
-- an admitted Trash delete always settles, presents an unknown outcome when its
-  response is lost, resolves that outcome through the operation lookup, and
-  never resubmits the confirmation under a fresh identity;
-- leaving Trash clears its unsubmitted selection and its continuations, and no
-  local selection, outcome, or count is written after the Trash surface is torn
-  down;
+- Trash pages are scoped and generation-fenced, so a superseded window can
+  neither render nor clear retry state, and captured membership never admits
+  later arrivals or silently substitutes offset pages;
+- every review dismissal clears its owner state and permits a fresh review;
+- an admitted record cleanup settles after its surface closes, retains its
+  attempt identity before send, and recovers an unknown outcome through a
+  read-only lookup without reissuing confirmation under a new identity;
+- listing reload and failed outcome reads preserve pending recovery actions,
+  and recovered outcomes converge affected rows, counts, and Undo;
+- leaving Trash clears unsubmitted selection and continuations, and no local
+  selection, outcome, or count is written by a stale continuation after teardown;
+- no Trash read, confirmation, outcome recovery, or legacy retry deletes an
+  Original File;
 - session undo, redo, and reset each submit one guarded write with a new request
   identity through the per-edit queue and settle as their own operations, and a
   retained revision restore keeps its own identity and is never submitted as a

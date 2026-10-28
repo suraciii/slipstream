@@ -1,6 +1,4 @@
-import { validPhotoSummary } from "./source-grid.js";
 import { hasExactKeys, isRecord, validCount } from "./guards.js";
-import type { PhotoSummary } from "./contracts.js";
 import { fetchJson } from "./json-response.js";
 
 export type RemovalFetch = (
@@ -49,67 +47,12 @@ export type RestorationWriteResult =
   | Readonly<{ kind: "rejected"; status: number }>
   | Readonly<{ kind: "malformed" }>;
 
-export type TrashRestoreResult = Readonly<{
-  operationId: string;
-  counts: Readonly<{
-    restored: number;
-    alreadyActive: number;
-    changedElsewhere: number;
-    missing: number;
-  }>;
-  results: ReadonlyArray<
-    Readonly<{
-      photoId: string;
-      outcome:
-        | "restored"
-        | "already-active"
-        | "changed-elsewhere"
-        | "unavailable";
-    }>
-  >;
-}>;
-
-export type TrashRestoreWriteResult =
-  | Readonly<{ kind: "restored"; value: TrashRestoreResult }>
-  | Readonly<{ kind: "rejected"; status: number }>
-  | Readonly<{ kind: "malformed" }>;
-
-export type RemovedPhotoItem = Readonly<{
-  /// The removal marker the listing reported: the millisecond the removal was
-  /// confirmed. A restore names it so a listing read before a newer removal
-  /// cannot restore a Photo past the marker it was read under.
-  removedAtMs: number;
-  originalLocation: string;
-  originalKind: "raw" | "jpeg";
-  originalSize: number | null;
-  /// Non-null while the Photo's permanent-deletion outcome is not settled
-  /// yet; the value is the retained operation id a `Check result` fetch or a
-  /// `Resume` retry names. Restore and a new permanent deletion stay
-  /// unavailable for the item until an operation settles it.
-  pendingVerificationOperationId: string | null;
-  photo: PhotoSummary;
-}>;
-
 /// One removed Photo as a listing showed it. A restore names the identity and
 /// the marker that must still be in force.
 export type RemovalMarker = Readonly<{
   photoId: string;
   removedAtMs: number;
 }>;
-
-export type RemovedPhotosResult =
-  | Readonly<{
-      kind: "ok";
-      start: number;
-      limit: number;
-      total: number;
-      operation: Readonly<{ operationId: string; removed: number }> | undefined;
-      /// The largest number of Photos one permanent-deletion review may
-      /// capture. Select all stops at this bound.
-      reviewMaximum: number;
-      photos: ReadonlyArray<RemovedPhotoItem>;
-    }>
-  | Readonly<{ kind: "failed"; status?: number; malformed?: true }>;
 
 /// Identity lists a removal or restore reports beside its counts. They are
 /// disjoint, hold no duplicates, and every entry names one Photo.
@@ -250,82 +193,6 @@ export async function restoreRemovedPhotos(
   );
 }
 
-/// Restore all current Trash except the named exclusions under a durable
-/// operation identity. Repeating the same intent retrieves the same receipt.
-export async function restoreAllTrash(
-  fetcher: RemovalFetch,
-  operationId: string,
-  excludePhotoIds: ReadonlyArray<string>,
-): Promise<TrashRestoreWriteResult> {
-  const response = await fetchJson(() =>
-    fetcher("/api/trash/restore", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        operationId,
-        all: true,
-        photoIds: [],
-        excludePhotoIds,
-      }),
-    }),
-  );
-  if (response.kind !== "ok") return response;
-  const value = response.value;
-  if (
-    !isRecord(value) ||
-    !hasExactKeys(value, ["operationId", "counts", "results"]) ||
-    value.operationId !== operationId ||
-    !isRecord(value.counts) ||
-    !hasExactKeys(value.counts, [
-      "restored",
-      "alreadyActive",
-      "changedElsewhere",
-      "missing",
-    ]) ||
-    !validCount(value.counts.restored) ||
-    !validCount(value.counts.alreadyActive) ||
-    !validCount(value.counts.changedElsewhere) ||
-    !validCount(value.counts.missing) ||
-    !Array.isArray(value.results)
-  )
-    return { kind: "malformed" };
-  const counts = {
-    restored: 0,
-    alreadyActive: 0,
-    changedElsewhere: 0,
-    missing: 0,
-  };
-  const results: Array<TrashRestoreResult["results"][number]> = [];
-  const seen = new Set<string>();
-  const excluded = new Set(excludePhotoIds);
-  for (const item of value.results) {
-    if (
-      !isRecord(item) ||
-      !hasExactKeys(item, ["photoId", "outcome"]) ||
-      typeof item.photoId !== "string" ||
-      item.photoId.length === 0 ||
-      seen.has(item.photoId) ||
-      excluded.has(item.photoId)
-    )
-      return { kind: "malformed" };
-    if (item.outcome === "restored") counts.restored += 1;
-    else if (item.outcome === "already-active") counts.alreadyActive += 1;
-    else if (item.outcome === "changed-elsewhere") counts.changedElsewhere += 1;
-    else if (item.outcome === "unavailable") counts.missing += 1;
-    else return { kind: "malformed" };
-    seen.add(item.photoId);
-    results.push({ photoId: item.photoId, outcome: item.outcome });
-  }
-  if (
-    counts.restored !== value.counts.restored ||
-    counts.alreadyActive !== value.counts.alreadyActive ||
-    counts.changedElsewhere !== value.counts.changedElsewhere ||
-    counts.missing !== value.counts.missing
-  )
-    return { kind: "malformed" };
-  return { kind: "restored", value: { operationId, counts, results } };
-}
-
 async function restorationWrite(
   fetcher: RemovalFetch,
   body:
@@ -393,20 +260,6 @@ async function restorationWrite(
 /// The operation ids a restore touched, each naming how many Photos it still
 /// owns. Ids are distinct and non-empty and every count is a non-negative
 /// integer: zero says the operation owns nothing and may be withdrawn.
-/// The newest removal operation that still owns at least one removed Photo.
-const validRemovedOperation = (
-  value: unknown,
-): value is Readonly<{ operationId: string; removed: number }> | null =>
-  value === null ||
-  (isRecord(value) &&
-    hasExactKeys(value, ["operationId", "removed"]) &&
-    typeof value.operationId === "string" &&
-    value.operationId.length > 0 &&
-    validCount(value.removed));
-
-/// The operation ids a restore touched, each naming how many Photos it still
-/// owns. Ids are distinct and non-empty and every count is a non-negative
-/// integer: zero says the operation owns nothing and may be withdrawn.
 const validRestoredOperations = (
   value: unknown,
 ): value is ReadonlyArray<
@@ -430,108 +283,3 @@ const validRestoredOperations = (
   }
   return true;
 };
-
-/// One bounded page of removed Photos, newest removal first.
-export async function fetchRemovedPhotos(
-  fetcher: RemovalFetch,
-  input: Readonly<{
-    start: number;
-    limit: number;
-    signal: AbortSignal;
-  }>,
-): Promise<RemovedPhotosResult> {
-  let response: Response;
-  try {
-    response = await fetcher(
-      `/api/trash?start=${input.start}&limit=${input.limit}`,
-      { signal: input.signal, priority: "high" },
-    );
-  } catch {
-    return Object.freeze({ kind: "failed" });
-  }
-  if (!response.ok)
-    return Object.freeze({ kind: "failed", status: response.status });
-  try {
-    const value: unknown = await response.json();
-    if (
-      !isRecord(value) ||
-      !hasExactKeys(value, [
-        "start",
-        "limit",
-        "total",
-        "operation",
-        "photos",
-        "reviewMaximum",
-      ]) ||
-      value.start !== input.start ||
-      value.limit !== input.limit ||
-      !validCount(value.total) ||
-      !validCount(value.reviewMaximum) ||
-      !validRemovedOperation(value.operation) ||
-      !Array.isArray(value.photos) ||
-      // A page is complete for its position: a response that omits rows it
-      // claims to have cannot be presented as the whole page. A stale offset
-      // after a restore is a valid empty page, not a malformed response.
-      value.photos.length !==
-        Math.max(0, Math.min(input.limit, value.total - input.start)) ||
-      !value.photos.every(validRemovedPhotoItem)
-    )
-      return Object.freeze({ kind: "failed", malformed: true });
-    const photos = value.photos as ReadonlyArray<RemovedPhotoItem>;
-    if (new Set(photos.map((item) => item.photo.id)).size !== photos.length)
-      return Object.freeze({ kind: "failed", malformed: true });
-    return Object.freeze({
-      kind: "ok",
-      start: input.start,
-      limit: input.limit,
-      total: value.total,
-      reviewMaximum: value.reviewMaximum,
-      operation:
-        value.operation === null
-          ? undefined
-          : Object.freeze({
-              operationId: value.operation.operationId,
-              removed: value.operation.removed,
-            }),
-      photos: Object.freeze(
-        photos.map((item) =>
-          Object.freeze({
-            removedAtMs: item.removedAtMs,
-            originalLocation: item.originalLocation,
-            originalKind: item.originalKind,
-            originalSize: item.originalSize,
-            pendingVerificationOperationId: item.pendingVerificationOperationId,
-            photo: item.photo,
-          }),
-        ),
-      ),
-    });
-  } catch {
-    return Object.freeze({ kind: "failed", malformed: true });
-  }
-}
-
-const validRemovedPhotoItem = (value: unknown): value is RemovedPhotoItem =>
-  isRecord(value) &&
-  hasExactKeys(value, [
-    "removedAtMs",
-    "originalLocation",
-    "originalKind",
-    "originalSize",
-    "pendingVerificationOperationId",
-    "photo",
-  ]) &&
-  typeof value.removedAtMs === "number" &&
-  Number.isSafeInteger(value.removedAtMs) &&
-  value.removedAtMs >= 0 &&
-  typeof value.originalLocation === "string" &&
-  value.originalLocation.length > 0 &&
-  (value.originalKind === "raw" || value.originalKind === "jpeg") &&
-  (value.originalSize === null ||
-    (typeof value.originalSize === "number" &&
-      Number.isSafeInteger(value.originalSize) &&
-      value.originalSize >= 0)) &&
-  (value.pendingVerificationOperationId === null ||
-    (typeof value.pendingVerificationOperationId === "string" &&
-      value.pendingVerificationOperationId.length > 0)) &&
-  validPhotoSummary(value.photo);

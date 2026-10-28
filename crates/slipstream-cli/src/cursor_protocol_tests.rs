@@ -16,6 +16,7 @@ fn cursor_expiry_details_are_required_and_route_specific() {
         ("folder", "publication_replaced", Operation::FoldersList),
         ("album", "idle_or_evicted", Operation::AlbumsList),
         ("photo", "process_restarted", Operation::PhotosList),
+        ("trash", "idle_or_evicted", Operation::TrashList),
         (
             "darktable",
             "idle_or_evicted",
@@ -40,6 +41,7 @@ fn cursor_expiry_details_are_required_and_route_specific() {
         "folder",
         "album",
         "photo",
+        "trash",
         "unavailable",
         "mappings",
         "workspace",

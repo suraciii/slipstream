@@ -24,7 +24,7 @@ mod processing_artifact_download;
 mod processing_preview_download;
 mod workspace;
 
-const CLI_CONTRACT_VERSION: u16 = 1;
+const CLI_CONTRACT_VERSION: u16 = 2;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_LIST_PAGE: usize = 50;
 const MAXIMUM_LIST_PAGE: usize = 60;
@@ -45,6 +45,7 @@ mod protocol;
 mod state;
 #[cfg(test)]
 mod tests;
+mod trash;
 
 pub(crate) use client::*;
 pub(crate) use commands::*;
@@ -54,7 +55,7 @@ pub use commands::{
     OutputFormat, ParseErrorPreferences, PhotoCommand, PhotoDecisionArgs, PhotoListArgs,
     PhotoMetadataSaveArgs, PhotoRemovalArgs, PhotoRestoreArgs, PreviewSize, ProcessingCommand,
     RecoveryApplyArgs, RecoveryCommand, RecoveryProposeArgs, RecoveryUnavailableArgs, SelectionArg,
-    SetSelectionArg, TrashCommand, TrashListArgs, TrashReviewArgs, parse_error_preferences,
+    SetSelectionArg, TrashCleanupArgs, TrashCommand, TrashListArgs, parse_error_preferences,
 };
 pub use darktable::DarktableArgs;
 pub(crate) use execute::*;

@@ -14,6 +14,7 @@ pub struct CapabilityLimitsWire {
     pub list_page_maximum: usize,
     pub mutation_photo_ids_maximum: usize,
     pub removal_photo_ids_maximum: usize,
+    pub trash_cleanup_maximum: usize,
     pub album_reorder_members_maximum: usize,
     pub retained_query_ids_maximum: usize,
     pub retained_query_idle_seconds: u64,

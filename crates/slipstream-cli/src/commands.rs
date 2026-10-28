@@ -107,7 +107,7 @@ pub enum Command {
         #[command(subcommand)]
         command: PhotoCommand,
     },
-    /// Inspect and permanently delete files from the persistent Trash.
+    /// Inspect Trash and clean up records for absent Originals.
     Trash {
         #[command(subcommand)]
         command: TrashCommand,
@@ -171,15 +171,16 @@ pub enum ProcessingCommand {
 pub enum TrashCommand {
     /// List Trash items in removal order.
     List(TrashListArgs),
-    /// Capture a fixed Trash review before confirmation and deletion.
-    Review(TrashReviewArgs),
-    /// Permanently delete the reviewed operation and report every outcome.
-    Delete {
-        #[arg(value_parser = nonempty)]
-        operation_id: String,
+    /// Clean up every current Trash record whose Original is absent.
+    Empty {
+        /// Reuse one operation ID to recover an earlier unconfirmed attempt.
+        #[arg(long, value_name = "OPERATION_ID", value_parser = nonempty)]
+        operation_id: Option<String>,
     },
-    /// Reopen a durable Permanent Deletion result.
-    Operation {
+    /// Clean up explicitly reviewed Trash records; no files are deleted.
+    Cleanup(TrashCleanupArgs),
+    /// Read the durable result of a Trash record cleanup attempt.
+    CleanupOperation {
         #[arg(value_parser = nonempty)]
         operation_id: String,
     },
@@ -187,27 +188,24 @@ pub enum TrashCommand {
 
 #[derive(Debug, Args)]
 pub struct TrashListArgs {
-    /// Number of items to skip.
-    #[arg(long, default_value_t = 0)]
-    pub start: usize,
-    /// Maximum items in this page (1 through 60).
-    #[arg(long, value_name = "N", value_parser = page_limit, default_value_t = 60)]
-    pub limit: u8,
+    /// Number of items to skip on the first page.
+    #[arg(long, value_name = "N", conflicts_with = "cursor")]
+    pub start: Option<usize>,
+    /// Maximum items in the first page (1 through 60).
+    #[arg(long, value_name = "N", value_parser = page_limit, conflicts_with = "cursor")]
+    pub limit: Option<u8>,
+    /// Opaque continuation from a previous Trash page.
+    #[arg(long, value_name = "CURSOR", value_parser = nonempty, conflicts_with_all = ["start", "limit"])]
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Args)]
-pub struct TrashReviewArgs {
+pub struct TrashCleanupArgs {
     #[arg(value_name = "OPERATION_ID", value_parser = nonempty)]
     pub operation_id: String,
-    /// Review every current Trash item except IDs in --exclude-input.
-    #[arg(long, conflicts_with = "input")]
-    pub all: bool,
-    /// UTF-8 JSON file holding {"photoIds":[...]} or a bare ID array.
-    #[arg(long, value_name = "FILE", value_parser = nonempty, conflicts_with = "all")]
-    pub input: Option<String>,
-    /// UTF-8 JSON file holding {"photoIds":[...]} or a bare ID array to exclude.
-    #[arg(long, value_name = "FILE", value_parser = nonempty, requires = "all")]
-    pub exclude_input: Option<String>,
+    /// JSON document with reviewed items, at most 1 MiB; '-' reads stdin.
+    #[arg(long, value_name = "FILE", value_parser = nonempty)]
+    pub input: String,
 }
 
 #[derive(Debug, Subcommand)]

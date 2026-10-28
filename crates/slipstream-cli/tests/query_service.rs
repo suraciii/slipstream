@@ -43,7 +43,7 @@ fn fake_service_with_scan_delay(
             let body = if request_index == 0 {
                 serde_json::json!({
                     "serverVersion": "0.0.0",
-                    "supportedCliContractVersions": [1],
+                    "supportedCliContractVersions": [2],
                     "limits": {
                         "listPageMaximum": 60,
                         "mutationPhotoIdsMaximum": 100,
@@ -98,7 +98,7 @@ fn fake_preview_service(
                 let response = if step == 0 {
                     serde_json::json!({
                         "serverVersion": "0.0.0",
-                        "supportedCliContractVersions": [1],
+                        "supportedCliContractVersions": [2],
                         "limits": {
                             "listPageMaximum": 60,
                             "mutationPhotoIdsMaximum": 100,
@@ -401,7 +401,7 @@ fn executable_output_deadline_and_interrupt_do_not_wait_for_blocked_pipes() {
     let version = "v".repeat(256 * 1024);
     let status = serde_json::json!({
         "serverVersion": version,
-        "cliContractVersion": 1,
+        "cliContractVersion": 2,
         "published": true,
         "publication": "p1",
         "photoCount": 0,
@@ -456,7 +456,7 @@ fn executable_output_deadline_and_interrupt_do_not_wait_for_blocked_pipes() {
 fn status_payload_with_version(length: usize) -> Value {
     serde_json::json!({
         "serverVersion": "v".repeat(length),
-        "cliContractVersion": 1,
+        "cliContractVersion": 2,
         "published": true,
         "publication": "p1",
         "photoCount": 0,
@@ -768,7 +768,7 @@ async fn executable_queries_the_real_service_with_fixed_multi_page_membership() 
     let (exit, status) = command(&server.url, &["status"]).await;
     assert_eq!(exit, 0);
     assert_eq!(status["schemaVersion"], 1);
-    assert_eq!(status["data"]["cliContractVersion"], 1);
+    assert_eq!(status["data"]["cliContractVersion"], 2);
     assert_eq!(status["data"]["photoCount"], 5);
 
     let (exit, check) = command(&server.url, &["library", "check"]).await;

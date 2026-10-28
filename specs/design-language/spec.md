@@ -32,7 +32,7 @@ The Photographer and Agent use different surfaces, but they must share Photo ide
 The design language resolves these tensions without creating extra product concepts:
 
 - **Rich visual evidence vs. bounded work:** show useful Photos early; do not require a whole Library transfer or complete Preview generation.
-- **Direct decisions vs. Original safety:** keep review actions close to the Photo; make destructive filesystem effects separately reviewed and confirmed.
+- **Direct decisions vs. Original safety:** keep review actions close to the Photo; keep Originals read-only and separately review irreversible record cleanup.
 - **Large Library density vs. attention:** keep information compact and stable; reserve emphasis for the current Photo, current state, and next meaningful action.
 - **Gesture speed vs. discoverability:** gestures accelerate visible controls; they never replace visible, keyboard, and programmatic paths.
 - **Technical truth vs. calm presentation:** keep revision, transport, and implementation details available when useful, but do not make them the primary language of a Photographer's task.
@@ -74,7 +74,7 @@ Primary actions remain visible. Secondary actions may be grouped in a named supp
 
 ### Explicit effects
 
-An action must make its effect and scope clear before it is committed. Reversible decisions may be direct when their owner and outcome are visible. Grouped view changes may be staged and applied. Irreversible Original deletion must use review and separate confirmation. Unknown completion must remain unknown until reconciled.
+An action must make its effect and scope clear before it is committed. Reversible decisions may be direct when their owner and outcome are visible. Grouped view changes may be staged and applied. Trash Record Cleanup must clearly name the irreversible loss of selected application records and require review and separate confirmation; it never deletes files. Unknown completion must remain unknown until reconciled.
 
 ### One set of facts
 
@@ -223,7 +223,7 @@ The design language prescribes how these terms are presented. [`CONTEXT.md`](../
 
 ### Labels and messages
 
-- Action labels use verbs: Pick, Reject, Apply, Retry, Restore, Delete Original File.
+- Action labels use verbs: Pick, Reject, Apply, Retry, Restore, Clean up Trash records.
 - State labels use stable nouns or adjectives: Picked, Rejected, Unflagged, Pending, Failed, No Rating, and the specific unavailable fact, such as Original unavailable or Preview unavailable.
 - Messages combine condition, effect, and next action when a next action exists: "The Original is unavailable. Review unavailable Originals."
 - Do not use generic labels such as "Done" when the product can name the actual effect.
@@ -270,7 +270,7 @@ identify the exact object and scope
   → offer the valid recovery or inspection path
 ```
 
-The design language does not make permanent effects feel casual. It also does not make reversible review decisions feel dangerous by using the same visual treatment as permanent deletion.
+The design language does not make permanent effects feel casual. It also does not make reversible review decisions feel dangerous by using the same visual treatment as irreversible Trash Record Cleanup.
 
 ## Responsive Language
 

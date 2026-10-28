@@ -2135,8 +2135,11 @@ function mountPrivateLibraryBrowser(
       case "removed-toggle":
         removedListing.toggle(intent.photoId, intent.selected);
         return;
-      case "removed-delete":
-        void removedListing.deleteSelection();
+      case "removed-cleanup":
+        void removedListing.cleanupSelection();
+        return;
+      case "removed-copy-locations":
+        void removedListing.copyLocations();
         return;
       case "removed-restore-selected":
         void removedListing.restoreSelection();
@@ -2152,15 +2155,6 @@ function mountPrivateLibraryBrowser(
         return;
       case "trash-check-result":
         void removedListing.checkOutcome();
-        return;
-      case "trash-retry-delete":
-        void removedListing.retryDelete();
-        return;
-      case "trash-row-check":
-        void removedListing.checkRow(intent.photoId);
-        return;
-      case "trash-row-resume":
-        void removedListing.resumeRow(intent.photoId);
         return;
       case "show-grid":
         returnToSourceGrid();

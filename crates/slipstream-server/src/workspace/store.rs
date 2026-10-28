@@ -305,6 +305,13 @@ impl WorkspaceManager {
         self.retained_photo_references_inner(false)
     }
 
+    /// Identifies each workspace that retains each Photo while the root lease is held.
+    pub(crate) fn retained_workspace_photo_references_under_recovery_guard(
+        &self,
+    ) -> Result<Vec<(String, String)>> {
+        self.retained_workspace_photo_references_inner(false)
+    }
+
     pub(crate) fn workspace_ids(&self) -> Result<Vec<String>> {
         let registry = self.registry.lock();
         let mut statement =
@@ -453,10 +460,23 @@ impl WorkspaceManager {
     }
 
     fn retained_photo_references_inner(&self, include_root: bool) -> Result<Vec<String>> {
+        Ok(self
+            .retained_workspace_photo_references_inner(include_root)?
+            .into_iter()
+            .map(|(photo, _)| photo)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect())
+    }
+
+    fn retained_workspace_photo_references_inner(
+        &self,
+        include_root: bool,
+    ) -> Result<Vec<(String, String)>> {
         let mut referenced = std::collections::BTreeSet::new();
         for id in self.workspace_ids()? {
             let session = self.locked_inner(&id, LeaseMode::Shared, include_root, false)?;
-            referenced.insert(session.workspace.photo_id.clone());
+            referenced.insert((session.workspace.photo_id.clone(), id.clone()));
             let mut statement = session.db.prepare(
                 "SELECT provenance FROM files WHERE removed=0 AND provenance IS NOT NULL",
             )?;
@@ -472,7 +492,11 @@ impl WorkspaceManager {
                         "Retained workspace provenance could not be read.",
                     ));
                 };
-                referenced.extend(provenance_photo_ids(&provenance)?);
+                referenced.extend(
+                    provenance_photo_ids(&provenance)?
+                        .into_iter()
+                        .map(|photo| (photo, id.clone())),
+                );
             }
         }
         Ok(referenced.into_iter().collect())

@@ -9,6 +9,7 @@ mod removal;
 mod shared_library;
 mod shutdown;
 mod startup;
+pub(crate) mod trash;
 use preview::{ReviewWarmup, ReviewWarmupRequest, ReviewWarmupState};
 
 use crate::queries::{CursorSigner, RetainedKind, RetainedQueryStore};

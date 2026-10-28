@@ -52,8 +52,8 @@ Use this index to locate the affected Feature and its contracts. The Product Des
 
 ### Trash
 
-- [Trash and Permanent Deletion](photo-library/trash/spec.md): complete Trash browsing, Restore, explicit Original deletion, and truthful batch outcomes.
-- [Trash Design](photo-library/trash/design.md): reviewed deletion identity, durable receipts, confined filesystem effects, partial settlement, and crash reconciliation.
+- [Trash and Record Cleanup](photo-library/trash/spec.md): complete Trash browsing, Location output, Restore, external file deletion, and explicit missing-record cleanup.
+- [Trash Design](photo-library/trash/design.md): captured inspection scope, read-only absence checks, transactional record cleanup, and durable outcome recovery.
 
 ## Library Browser
 

@@ -3,8 +3,8 @@ use crate::persistence::Persistence;
 use crate::persistence::admission::StateDirectory;
 use crate::persistence::test_support::*;
 use crate::{
-    ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreMutation, PermanentDeletionSelection,
-    PhotoRemovalTarget, PhotoStateField, PhotoStateMutation, PhotoStateValue, SelectionState,
+    ExplicitPhotoRemovalMutation, ExplicitPhotoRestoreMutation, PhotoRemovalTarget,
+    PhotoStateField, PhotoStateMutation, PhotoStateValue, SelectionState, TrashSelection,
 };
 use rusqlite::Connection;
 
@@ -227,7 +227,7 @@ async fn trash_restore_all_refuses_capture_over_review_bound() {
         )
         .unwrap();
     connection.execute_batch("BEGIN").unwrap();
-    for index in 0..=crate::PERMANENT_DELETION_MAX {
+    for index in 0..=crate::TRASH_CLEANUP_MAX {
         add_recipe_test_photo(
             &connection,
             RecipeTestPhoto {
@@ -262,7 +262,7 @@ async fn trash_restore_all_refuses_capture_over_review_bound() {
     let refused = persistence
         .restore_trash_receiver(
             "too-many".to_owned(),
-            PermanentDeletionSelection::All {
+            TrashSelection::All {
                 exclude_photo_ids: Vec::new(),
             },
         )
@@ -276,6 +276,6 @@ async fn trash_restore_all_refuses_capture_over_review_bound() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(total, crate::PERMANENT_DELETION_MAX + 1);
+    assert_eq!(total, crate::TRASH_CLEANUP_MAX + 1);
     persistence.shutdown().unwrap();
 }

@@ -275,9 +275,17 @@ pub(crate) async fn response_bytes(
     mut response: reqwest::Response,
     operation: Operation,
 ) -> Result<Vec<u8>, CommandFailure> {
+    let maximum = if matches!(
+        operation,
+        Operation::TrashEmpty | Operation::TrashCleanup | Operation::TrashCleanupReceipt
+    ) {
+        8 * 1024 * 1024
+    } else {
+        MAXIMUM_JSON_RESPONSE_BYTES
+    };
     if response
         .content_length()
-        .is_some_and(|length| length > MAXIMUM_JSON_RESPONSE_BYTES as u64)
+        .is_some_and(|length| length > maximum as u64)
     {
         return Err(CommandFailure::transport(operation));
     }
@@ -287,7 +295,7 @@ pub(crate) async fn response_bytes(
         .await
         .map_err(|_| CommandFailure::transport(operation))?
     {
-        if bytes.len().saturating_add(chunk.len()) > MAXIMUM_JSON_RESPONSE_BYTES {
+        if bytes.len().saturating_add(chunk.len()) > maximum {
             return Err(CommandFailure::transport(operation));
         }
         bytes.extend_from_slice(&chunk);
@@ -302,6 +310,18 @@ pub(crate) fn validated_route_failure(
     operation: Operation,
     secret: &str,
 ) -> Option<CommandFailure> {
+    if operation == Operation::TrashCleanupReceipt
+        && error.code == "outcome_unknown"
+        && error.effect == "unknown"
+        && error
+            .details
+            .get("operationId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+    {
+        redact_error(&mut error, secret);
+        return Some(CommandFailure::from_payload(7, error));
+    }
     if error.effect != "none" || error.message.is_empty() {
         return None;
     }
@@ -411,6 +431,7 @@ pub(crate) fn validated_route_failure(
                             "folder"
                                 | "album"
                                 | "photo"
+                                | "trash"
                                 | "unavailable"
                                 | "mappings"
                                 | "workspace"
@@ -520,8 +541,10 @@ pub(crate) fn validated_route_failure(
                     && ["currentRecipeVersion", "currentSourceRevision"]
                         .iter()
                         .all(|key| details[*key].is_null() || details[*key].is_string()))
-                || (matches!(operation, Operation::PhotosRestore)
-                    && string("operationId").is_some())
+                || (matches!(
+                    operation,
+                    Operation::PhotosRestore | Operation::TrashCleanup | Operation::TrashEmpty
+                ) && string("operationId").is_some())
         }
         "name_conflict" => {
             required_keys(&["name", "albumId"])
@@ -542,6 +565,7 @@ pub(crate) fn validated_route_failure(
                         "folder"
                             | "album"
                             | "photo"
+                            | "trash"
                             | "unavailable"
                             | "mappings"
                             | "workspace"

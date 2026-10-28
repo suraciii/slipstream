@@ -1,38 +1,5 @@
 use super::*;
 
-fn permanent_deletion_state(state: slipstream_core::PermanentDeletionItemState) -> &'static str {
-    match state {
-        slipstream_core::PermanentDeletionItemState::Pending => "pending",
-        slipstream_core::PermanentDeletionItemState::Deleting => "deleting",
-        slipstream_core::PermanentDeletionItemState::Deleted => "deleted",
-        slipstream_core::PermanentDeletionItemState::Missing => "missing",
-        slipstream_core::PermanentDeletionItemState::Changed => "changed",
-        slipstream_core::PermanentDeletionItemState::Failed => "failed",
-        slipstream_core::PermanentDeletionItemState::Uncertain => "uncertain",
-    }
-}
-
-fn permanent_deletion_response(
-    result: slipstream_core::PermanentDeletionResult,
-) -> PermanentDeletionResponse {
-    PermanentDeletionResponse {
-        operation_id: result.operation_id,
-        reviewed: result.reviewed,
-        logical_bytes_deleted: result.logical_bytes_deleted,
-        items: result
-            .items
-            .into_iter()
-            .map(|item| PermanentDeletionItemWire {
-                photo_id: item.photo_id,
-                original_location: item.relative_path.to_string(),
-                original_kind: original_kind(&item.kind),
-                state: permanent_deletion_state(item.state),
-                size: item.size,
-                message: item.message,
-            })
-            .collect(),
-    }
-}
 fn explicit_photo_removal_response(
     result: slipstream_core::PhotoRemovalResult,
 ) -> ExplicitPhotoRemovalResponse {
@@ -252,7 +219,7 @@ impl Application {
     pub async fn restore_trash(
         &self,
         operation_id: String,
-        selection: slipstream_core::PermanentDeletionSelection,
+        selection: slipstream_core::TrashSelection,
     ) -> Result<ExplicitPhotoRestoreResponse, ServerError> {
         let _publication = self.shared.publication.lock().await;
         let replay = self
@@ -392,88 +359,12 @@ impl Application {
             start,
             limit,
             total,
-            review_maximum: slipstream_core::PERMANENT_DELETION_MAX,
+            review_maximum: slipstream_core::TRASH_CLEANUP_MAX,
             operation: operation.map(|operation| PhotoOperationRemainderWire {
                 operation_id: operation.operation_id,
                 removed: operation.removed,
             }),
             photos,
         })
-    }
-    pub async fn prepare_permanent_deletion(
-        &self,
-        operation_id: String,
-        selection: slipstream_core::PermanentDeletionSelection,
-    ) -> Result<PermanentDeletionReviewResponse, ServerError> {
-        let _publication = self.shared.publication.lock().await;
-        let review = self
-            .library
-            .prepare_permanent_deletion(operation_id, selection)
-            .await?;
-        Ok(PermanentDeletionReviewResponse {
-            operation_id: review.operation_id,
-            items: review
-                .items
-                .into_iter()
-                .map(|item| PermanentDeletionReviewItemWire {
-                    photo_id: item.photo_id,
-                    removed_at_ms: item.removed_at_ms,
-                    original_id: item.original_id,
-                    original_location: item.relative_path.to_string(),
-                    original_kind: original_kind(&item.kind).to_owned(),
-                    size: item.size,
-                    albums: item
-                        .albums
-                        .into_iter()
-                        .map(|album| PhotoAlbumMembershipWire {
-                            id: album.album_id,
-                            name: album.album_name,
-                        })
-                        .collect(),
-                })
-                .collect(),
-            rejected: review
-                .rejected
-                .into_iter()
-                .map(|(photo_id, reason)| PermanentDeletionRejectionWire {
-                    photo_id,
-                    reason: match reason {
-                        slipstream_core::PermanentDeletionRejection::Missing => "missing",
-                        slipstream_core::PermanentDeletionRejection::ChangedElsewhere => {
-                            "changed-elsewhere"
-                        }
-                        slipstream_core::PermanentDeletionRejection::PendingVerification => {
-                            "pending-verification"
-                        }
-                    },
-                })
-                .collect(),
-        })
-    }
-
-    pub async fn permanently_delete(
-        &self,
-        operation_id: String,
-    ) -> Result<PermanentDeletionResponse, ServerError> {
-        let _publication = self.shared.publication.lock().await;
-        let result = self.library.permanently_delete(operation_id).await?;
-        let deleted_photo_ids = result
-            .items
-            .iter()
-            .filter(|item| item.state == slipstream_core::PermanentDeletionItemState::Deleted)
-            .map(|item| item.photo_id.clone())
-            .collect::<Vec<_>>();
-        self.shared.patch_permanently_deleted(&deleted_photo_ids);
-        Ok(permanent_deletion_response(result))
-    }
-
-    pub async fn read_permanent_deletion(
-        &self,
-        operation_id: String,
-    ) -> Result<PermanentDeletionResponse, ServerError> {
-        let _publication = self.shared.publication.lock().await;
-        Ok(permanent_deletion_response(
-            self.library.read_permanent_deletion(operation_id).await?,
-        ))
     }
 }

@@ -56,7 +56,7 @@ async fn cli_preview_download_repeats_identity_and_refuses_stale_bytes() {
                 .uri(format!(
                     "https://camera.local/api/photos/{photo_id}/preview"
                 ))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -96,7 +96,7 @@ async fn cli_preview_download_repeats_identity_and_refuses_stale_bytes() {
             .uri(format!(
                 "https://camera.local/api/photos/{photo_id}/preview"
             ))
-            .header("Slipstream-CLI-Contract", "2")
+            .header("Slipstream-CLI-Contract", "1")
             .body(Body::empty())
             .unwrap(),
     )
@@ -113,7 +113,7 @@ async fn cli_preview_download_repeats_identity_and_refuses_stale_bytes() {
         &router,
         authenticated_request()
             .uri(format!("https://camera.local{url}"))
-            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "2")
             .body(Body::empty())
             .unwrap(),
     )
@@ -157,7 +157,7 @@ async fn cli_preview_download_repeats_identity_and_refuses_stale_bytes() {
                 .uri(format!(
                     "https://camera.local/api/photos/{photo_id}/thumbnail"
                 ))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -172,7 +172,7 @@ async fn cli_preview_download_repeats_identity_and_refuses_stale_bytes() {
         &router,
         authenticated_request()
             .uri(format!("https://camera.local{thumbnail_url}"))
-            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "2")
             .body(Body::empty())
             .unwrap(),
     )
@@ -221,7 +221,7 @@ async fn cli_preview_download_repeats_identity_and_refuses_stale_bytes() {
             .uri(format!(
                 "https://camera.local/api/photos/{photo_id}/preview"
             ))
-            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "2")
             .body(Body::empty())
             .unwrap(),
     )
@@ -243,7 +243,7 @@ async fn cli_preview_download_repeats_identity_and_refuses_stale_bytes() {
             &router,
             authenticated_request()
                 .uri(format!("https://camera.local{url}"))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -256,7 +256,7 @@ async fn cli_preview_download_repeats_identity_and_refuses_stale_bytes() {
             &router,
             authenticated_request()
                 .uri(format!("https://camera.local{thumbnail_url}"))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -336,7 +336,7 @@ async fn cli_preview_download_reports_unavailable_and_missing_truthfully() {
             .uri(format!(
                 "https://camera.local/api/photos/{photo_id}/preview"
             ))
-            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "2")
             .body(Body::empty())
             .unwrap(),
     )
@@ -360,7 +360,7 @@ async fn cli_preview_download_reports_unavailable_and_missing_truthfully() {
                 .uri(format!(
                     "https://camera.local/api/photos/{photo_id}/thumbnail"
                 ))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -379,7 +379,7 @@ async fn cli_preview_download_reports_unavailable_and_missing_truthfully() {
             .uri(format!(
                 "https://camera.local/api/photos/{missing_id}/preview"
             ))
-            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "2")
             .body(Body::empty())
             .unwrap(),
     )
@@ -426,7 +426,7 @@ async fn unpublished_cli_preview_reports_library_status_before_photo_lookup() {
             &router,
             authenticated_request()
                 .uri(format!("https://camera.local{path}"))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -444,7 +444,7 @@ async fn unpublished_cli_preview_reports_library_status_before_photo_lookup() {
             &router,
             authenticated_request()
                 .uri(format!("https://camera.local/api/photos/bad/{target}"))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -460,7 +460,7 @@ async fn unpublished_cli_preview_reports_library_status_before_photo_lookup() {
                 .uri(format!(
                     "https://camera.local/api/photos/{missing_id}/{target}"
                 ))
-                .header("Slipstream-CLI-Contract", "1")
+                .header("Slipstream-CLI-Contract", "2")
                 .body(Body::empty())
                 .unwrap(),
         )

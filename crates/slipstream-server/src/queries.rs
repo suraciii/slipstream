@@ -1,4 +1,5 @@
 use crate::wire::BrowseSelectionFilter;
+use slipstream_core::TrashInspectionRecord;
 use std::{
     collections::{HashMap, hash_map::RandomState},
     hash::{BuildHasher, Hasher},
@@ -10,7 +11,7 @@ use std::{
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-pub(crate) const CLI_CONTRACT_VERSION: u16 = 1;
+pub(crate) const CLI_CONTRACT_VERSION: u16 = 2;
 pub(crate) const MAXIMUM_LIST_PAGE: usize = 60;
 pub(crate) const MAXIMUM_RETAINED_IDS: usize = 1_000_000;
 pub(crate) const QUERY_IDLE: Duration = Duration::from_secs(15 * 60);
@@ -20,6 +21,7 @@ pub(crate) enum RetainedKind {
     Browse,
     Album,
     Photo,
+    Trash,
     WorkspaceFiles,
     /// One unavailable-Photo inspection review.
     RecoveryUnavailable,
@@ -33,6 +35,7 @@ impl RetainedKind {
             Self::Browse => 'b',
             Self::Album => 'a',
             Self::Photo => 'p',
+            Self::Trash => 't',
             Self::WorkspaceFiles => 'w',
             Self::RecoveryUnavailable => 'u',
             Self::RecoveryMappings => 'm',
@@ -48,6 +51,7 @@ impl RetainedKind {
             Self::Browse => crate::config::BROWSE_SNAPSHOT_IDLE,
             Self::Album
             | Self::Photo
+            | Self::Trash
             | Self::WorkspaceFiles
             | Self::RecoveryUnavailable
             | Self::RecoveryMappings => QUERY_IDLE,
@@ -58,6 +62,8 @@ impl RetainedKind {
 pub(crate) struct RetainedQuery {
     pub(crate) kind: RetainedKind,
     pub(crate) ids: Vec<String>,
+    pub(crate) trash: Option<Vec<TrashInspectionRecord>>,
+    pub(crate) trash_operation: Option<(String, usize)>,
     /// The Selection State filter one Browse Snapshot was created with.
     /// Removal admission reads it, so a reviewed result can only be removed
     /// from the view it was reviewed in.
@@ -94,12 +100,57 @@ impl QueryRegistry {
         now: Instant,
         evaluated_at: SystemTime,
     ) -> Result<(), ()> {
+        self.insert_query(
+            token,
+            RetainedQuery {
+                kind,
+                ids,
+                trash: None,
+                trash_operation: None,
+                filter,
+                last_used: now,
+                evaluated_at,
+            },
+            now,
+        )
+    }
+
+    pub(crate) fn insert_trash(
+        &mut self,
+        token: String,
+        items: Vec<TrashInspectionRecord>,
+        operation: Option<(String, usize)>,
+        now: Instant,
+        evaluated_at: SystemTime,
+    ) -> Result<(), ()> {
+        self.insert_query(
+            token,
+            RetainedQuery {
+                kind: RetainedKind::Trash,
+                ids: Vec::new(),
+                trash: Some(items),
+                trash_operation: operation,
+                filter: None,
+                last_used: now,
+                evaluated_at,
+            },
+            now,
+        )
+    }
+
+    fn insert_query(
+        &mut self,
+        token: String,
+        query: RetainedQuery,
+        now: Instant,
+    ) -> Result<(), ()> {
         self.prune(now);
-        if ids.len() > self.maximum_ids || self.maximum_collections == 0 {
+        let count = query.ids.len() + query.trash.as_ref().map_or(0, Vec::len);
+        if count > self.maximum_ids || self.maximum_collections == 0 {
             return Err(());
         }
         while self.entries.len() >= self.maximum_collections
-            || self.retained_ids().saturating_add(ids.len()) > self.maximum_ids
+            || self.retained_ids().saturating_add(count) > self.maximum_ids
         {
             let Some(oldest) = self
                 .entries
@@ -112,20 +163,11 @@ impl QueryRegistry {
             self.entries.remove(&oldest);
         }
         if self.entries.len() >= self.maximum_collections
-            || self.retained_ids().saturating_add(ids.len()) > self.maximum_ids
+            || self.retained_ids().saturating_add(count) > self.maximum_ids
         {
             return Err(());
         }
-        self.entries.insert(
-            token,
-            RetainedQuery {
-                kind,
-                ids,
-                filter,
-                last_used: now,
-                evaluated_at,
-            },
-        );
+        self.entries.insert(token, query);
         Ok(())
     }
 
@@ -140,7 +182,7 @@ impl QueryRegistry {
     ) -> Option<RetainedPage> {
         self.prune(now);
         let query = self.entries.get_mut(token)?;
-        if query.kind != kind || start > query.ids.len() {
+        if query.kind != kind || query.trash.is_some() || start > query.ids.len() {
             return None;
         }
         query.last_used = now;
@@ -149,6 +191,33 @@ impl QueryRegistry {
             total: query.ids.len(),
             evaluated_at: query.evaluated_at,
             expires_at: now_at + kind.idle(),
+        })
+    }
+
+    pub(crate) fn page_trash(
+        &mut self,
+        token: &str,
+        start: usize,
+        limit: usize,
+        now: Instant,
+        now_at: SystemTime,
+    ) -> Option<RetainedTrashPage> {
+        self.prune(now);
+        let query = self.entries.get_mut(token)?;
+        if query.kind != RetainedKind::Trash {
+            return None;
+        }
+        let items = query.trash.as_ref()?;
+        if start > items.len() {
+            return None;
+        }
+        query.last_used = now;
+        Some(RetainedTrashPage {
+            items: items.iter().skip(start).take(limit).cloned().collect(),
+            operation: query.trash_operation.clone(),
+            total: items.len(),
+            evaluated_at: query.evaluated_at,
+            expires_at: now_at + RetainedKind::Trash.idle(),
         })
     }
 
@@ -195,7 +264,10 @@ impl QueryRegistry {
     }
 
     fn retained_ids(&self) -> usize {
-        self.entries.values().map(|query| query.ids.len()).sum()
+        self.entries
+            .values()
+            .map(|query| query.ids.len() + query.trash.as_ref().map_or(0, Vec::len))
+            .sum()
     }
 }
 
@@ -236,6 +308,20 @@ impl RetainedQueryStore {
             .insert(token, kind, filter, ids, now, evaluated_at)
     }
 
+    pub(crate) fn insert_trash(
+        &self,
+        token: String,
+        items: Vec<TrashInspectionRecord>,
+        operation: Option<(String, usize)>,
+        now: Instant,
+        evaluated_at: SystemTime,
+    ) -> Result<(), ()> {
+        self.registry
+            .lock()
+            .expect("retained queries poisoned")
+            .insert_trash(token, items, operation, now, evaluated_at)
+    }
+
     pub(crate) fn page(
         &self,
         token: &str,
@@ -249,6 +335,20 @@ impl RetainedQueryStore {
             .lock()
             .expect("retained queries poisoned")
             .page(token, kind, start, limit, now, now_at)
+    }
+
+    pub(crate) fn page_trash(
+        &self,
+        token: &str,
+        start: usize,
+        limit: usize,
+        now: Instant,
+        now_at: SystemTime,
+    ) -> Option<RetainedTrashPage> {
+        self.registry
+            .lock()
+            .expect("retained queries poisoned")
+            .page_trash(token, start, limit, now, now_at)
     }
 
     pub(crate) fn position(&self, token: &str, id: &str, now: Instant) -> Option<Option<usize>> {
@@ -311,6 +411,14 @@ impl RetainedQueryStore {
 
 pub(crate) struct RetainedPage {
     pub(crate) ids: Vec<String>,
+    pub(crate) total: usize,
+    pub(crate) evaluated_at: SystemTime,
+    pub(crate) expires_at: SystemTime,
+}
+
+pub(crate) struct RetainedTrashPage {
+    pub(crate) items: Vec<TrashInspectionRecord>,
+    pub(crate) operation: Option<(String, usize)>,
     pub(crate) total: usize,
     pub(crate) evaluated_at: SystemTime,
     pub(crate) expires_at: SystemTime,
@@ -585,6 +693,94 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn trash_pages_preserve_evidence_and_expire_after_idle() {
+        let start = Instant::now();
+        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let item = |id: &str, marker: i64, path: &str| TrashInspectionRecord {
+            photo_id: id.to_owned(),
+            removed_at_ms: marker,
+            original_id: format!("original-{id}"),
+            relative_path: slipstream_core::RelativeOriginalPath::parse(path).unwrap(),
+            kind: slipstream_core::OriginalKind::Jpeg,
+            size: 42,
+            available: true,
+        };
+        let records = vec![item("1", 10, "one.jpg"), item("2", 20, "two.jpg")];
+        let mut registry = QueryRegistry::with_limits(2, 2);
+        registry
+            .insert_trash("trash".to_owned(), records.clone(), None, start, wall)
+            .unwrap();
+        let first = registry.page_trash("trash", 0, 1, start, wall).unwrap();
+        assert_eq!(first.items, records[..1]);
+        assert_eq!(first.total, 2);
+        assert_eq!(first.evaluated_at, wall);
+        assert_eq!(first.expires_at, wall + QUERY_IDLE);
+        let later = start + Duration::from_secs(60);
+        let second = registry.page_trash("trash", 1, 1, later, wall).unwrap();
+        assert_eq!(second.items, records[1..]);
+        assert!(registry.page_trash("trash", 3, 1, later, wall).is_none());
+        assert!(
+            registry
+                .page("trash", RetainedKind::Trash, 0, 1, later, wall)
+                .is_none()
+        );
+        assert!(
+            registry
+                .page_trash("trash", 0, 1, later + QUERY_IDLE, wall)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn trash_captures_share_the_registry_budget_and_cursor_kind() {
+        let start = Instant::now();
+        let wall = SystemTime::UNIX_EPOCH;
+        let item = TrashInspectionRecord {
+            photo_id: "photo".to_owned(),
+            removed_at_ms: 1,
+            original_id: "original".to_owned(),
+            relative_path: slipstream_core::RelativeOriginalPath::parse("one.jpg").unwrap(),
+            kind: slipstream_core::OriginalKind::Jpeg,
+            size: 1,
+            available: false,
+        };
+        let mut registry = QueryRegistry::with_limits(2, 2);
+        registry
+            .insert_trash("trash".to_owned(), vec![item.clone(); 2], None, start, wall)
+            .unwrap();
+        assert!(
+            registry
+                .insert_trash("oversized".to_owned(), vec![item; 3], None, start, wall)
+                .is_err()
+        );
+        registry
+            .insert(
+                "photo".to_owned(),
+                RetainedKind::Photo,
+                None,
+                vec!["1".to_owned()],
+                start + Duration::from_secs(1),
+                wall,
+            )
+            .unwrap();
+        assert!(!registry.entries.contains_key("trash"));
+        let signer = CursorSigner::new();
+        let cursor = signer.query_cursor(7, RetainedKind::Trash, "trash", 1, 1);
+        assert_eq!(
+            signer
+                .parse_query_cursor(&cursor, 7, RetainedKind::Trash)
+                .unwrap()
+                .token,
+            "trash"
+        );
+        assert_eq!(
+            signer.parse_query_cursor(&cursor, 7, RetainedKind::Photo),
+            Err(CursorError::Invalid)
+        );
+        assert!(RetainedKind::Trash.token(7, 1).starts_with('t'));
     }
 
     #[test]

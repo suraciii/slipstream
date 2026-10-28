@@ -18,7 +18,6 @@ mod mutation;
 mod owner;
 mod owner_export;
 mod owner_recovery;
-mod permanent_deletion;
 mod processing_export;
 mod queries;
 mod removal;
@@ -29,6 +28,7 @@ mod schema;
 #[cfg(test)]
 mod test_support;
 mod trash;
+mod trash_cleanup;
 mod xmp;
 
 pub use crate::domain::{

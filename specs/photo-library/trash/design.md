@@ -1,109 +1,118 @@
-# Library Management: Trash and Permanent Deletion
+# Trash Inspection and Record Cleanup Design
 
-The product contract is [Library Management: Trash and Permanent Deletion](spec.md). This design adds the irreversible filesystem boundary without weakening the existing read-only Original capability.
+[Trash and Record Cleanup](spec.md) owns observable behavior. [Photo Library Design](../design.md) owns Photo and Album state; [Composable Removal and Restore](../removal/design.md) owns reversible receipts; [Metadata Design](../metadata/design.md#sidecar-association-record) owns retained Sidecar associations.
 
-[Photo Library Design](../design.md) owns Photo and Album state; [Library Identity](../identity.md) owns identity across Location changes.
+## Design drivers
 
-## Design Drivers
+- The filesystem owner, not Slipstream, deletes Original Files. The existing read-only deployment must remain sufficient.
+- A missing Location is an observation, not proof of who deleted or moved a file. An unavailable flag must not authorize record loss.
+- Cleanup changes SQLite-owned records only. It needs no cross-filesystem deletion journal, unlink capability, privileged helper, or permission expansion.
+- Photo identity and a removal marker protect the selected records. A path is output for the Photographer, not a mutation identity.
+- Cleanup must preserve other Photos, Album order, retained development work, Sidecar ownership evidence, and historical operation outcomes.
 
-- Remove from Library already persists a reversible marker on the Photo row. Trash must include that state across restart without creating a second recovery record.
-- Permanent deletion has two different durability domains: SQLite records intent and outcome, while the Library Folder contains the Original File. A successful HTTP response cannot be the only evidence of either effect.
-- A reviewed Location is not an identity. The final deletion must re-open the confined Location and compare the reviewed file facts before unlinking it.
-- A batch may partially settle. One failed or uncertain item must not roll back a confirmed deletion or make a failed item disappear.
-- Existing Albums retain ordered membership until a deletion is confirmed. Confirmed deletion removes that membership and compacts the remaining positions through the existing Album invariant.
+## Model and ownership
 
-## Model
+### Trash inspection
 
-A **Permanent Deletion Operation** is a durable, browser- or CLI-supplied operation id and a fixed ordered set of reviewed Trash items. Each item stores:
+Trash remains the projection of current Removed Photo records. A listing item contains the current Photo and Original identities, removal marker, remembered Location, kind, file availability, and recognizable Photo facts. The response identifies its Library, scope, total, observation time, and finite traversal limits.
 
-- Photo identity and the removal marker reviewed;
-- Original identity, relative Location, kind, size, modification time, device, and inode observed for the review;
-- the item state: `pending`, `deleting`, `deleted`, `missing`, `changed`, `failed`, or `uncertain`;
-- the logical size credited only after confirmed deletion and an actionable failure message when applicable.
+A captured selection retains an ordered set of Photo identities, removal markers, Original identities, and remembered Locations, excluding deliberate exclusions before capture. Later arrivals and newer removal markers cannot enter that selection. Paged inspection retains this evidence or explicitly expires; current facts may mark a captured item changed or unavailable but cannot silently replace its evidence. The CLI uses the existing `--cursor` continuation convention for subsequent pages rather than evaluating another live offset. Existing [query continuation ownership](../../command-line/design.md) supplies bounded retention rather than a new durable export job.
 
-The operation record is persisted in the existing SQLite `library_metadata` owner boundary as one JSON receipt per operation. It is an application receipt, not a replacement Photo row. Permanent receipts are retained so reload and retry can reconcile the same operation; they also prevent Restore from clearing a permanently deleted item.
+Listing output is data. Structured output preserves exact Location characters; text output escapes control characters. The server identifies the configured Library Folder and its execution namespace so a client cannot mistake a server-relative Location for a client-local file. The CLI may print through its existing output modes. Neither interface constructs or executes deletion commands.
 
-The Photo row and Original row remain durable evidence after deletion. A confirmed item is no longer eligible for Trash or Restore, its Album memberships are removed, and its published Original is marked unavailable. The Original bytes are never rewritten.
+### Cleanup attempt
+
+One caller-owned attempt identity names one bounded, ordered, nonempty explicit set. Each target carries the reviewed Photo identity, removal marker, Original identity, and remembered Location. These facts come from public Trash inspection, not guessed filenames or private storage. The request's explicit confirmation authorizes loss of those application records only.
+
+The SQLite owner retains the immutable submitted intent and one outcome for every target in a durable receipt. The receipt is historical evidence, not a replacement Photo row or a recoverable file. Its identity fields must not require a live foreign key to a cleaned-up row. Existing removal and Restore receipts remain historical for the same reason.
+Before confirmation, the review reads current absence and retained-work evidence through a read-only preview. It performs the same revalidation as cleanup, writes no receipt, and never changes a record or file. The final application still revalidates every target because the preview is not authorization.
+
+There is no file-deletion progress state. A completed cleanup outcome is a database effect. Lost transport can leave the caller uncertain about that effect, but must not create an unresolved unlink or indefinitely block Restore.
 
 ## Semantics
 
-### Review
+### Inspection and external deletion
 
-The Library owner resolves either an explicit Photo-ID list or the complete current Trash set minus explicit exclusions. It snapshots the set before confirmation. The owner reads current confined file facts for every candidate, then accepts only a currently removed Photo whose Original is present and whose stored size and modification time still match. Stale, missing, or permanently deleted candidates are returned as explicit review rejections and are never included in the operation. A Photo whose own deletion has not settled is refused the same way, with its own reason, because its outcome must be known before another confirmation may capture it.
+Inspection and printing do not write Library state. Reading file presence uses descriptor-confined read-only access under the admitted Library Folder. A missing thumbnail, stale `available` fact, or inability to open a file is not a successful absence observation.
 
-The review response contains the fixed eligible set, each relative Location, kind, known logical size, and Album names. The operation id makes repeating review or confirmation idempotent; a repeat returns the original receipt rather than widening the set with later Trash arrivals.
+The Photographer separately maps the reported namespace to their filesystem tools, checks the current intended files, and deletes them outside Slipstream. This external action has no application receipt and is not inferred from a printed list. It does not authorize cleanup of new Trash arrivals or a replacement record at the same Location.
 
-### Confirmation and retry
+### Admission and revalidation
 
-Confirmation names only the reviewed operation id. For each unresolved item, the owner first durably changes `pending` or `failed` to `deleting`, then uses the confined deletion capability:
+Before admitting a new attempt, validate the complete input and advertised bound. Duplicate identities, malformed evidence, empty selection, unknown keys, and an oversized set are request-wide refusals with no effect. Never split, truncate, or reinterpret an omitted set as all Trash.
 
-1. open the reviewed Location beneath the Library Folder without following symlinks;
-2. require one regular file and compare device, inode, size, and modification time;
-3. unlink only that confined relative name;
-4. durably settle the item and, for `deleted`, remove its Album memberships and compact positions.
+Read a known attempt's receipt before resolving current candidates or inspecting files. Identical intent replays the original outcome even after cleanup; changed intent conflicts. A refusal or failure in a settled receipt is not silently retried with fresh filesystem facts under the old identity.
 
-A mismatch is `changed`; an absent file before a deletion attempt is `missing`; an access or filesystem refusal is `failed`. `deleting` survives a crash as pending verification. It is never presented as success or failure, and Restore and another destructive confirmation remain unavailable until a later reconciliation settles it. Reopening that operation reconciles it: the item is attempted again, and an absent Original it owned settles as `missing` instead of staying unresolved forever. A retry repeats only unresolved items and never changes the reviewed set.
+For a new attempt, the Library mutation and publication boundary serializes admission with Restore, removal, Library Check application, Location Recovery, metadata association changes, and development-reference admission. For each target:
 
-The operation result always partitions the fixed items into `deleted`, `changed`, `missing`, `failed`, and `pendingVerification`, and reports logical bytes for `deleted` only. A confirmed `deleted` item is idempotent on later retries and cannot become recoverable through a rescan or Restore.
+1. Revalidate the current Photo, exact removal marker, Original identity, and remembered Location. Active, re-removed, relocated, or otherwise changed records are refused.
+2. Inspect authoritative workspace, editing, processing, and active-use dependencies. Retained work or unresolved use refuses cleanup with named blockers under [Workspace Lifetime and Recovery](../../photo-development/workspace/spec.md#lifetime-and-recovery).
+3. Revalidate the admitted Library Folder and freshly observe the remembered Location without following symlinks. Only a definite absence permits cleanup. A present entry, including a replacement, refuses it. An unavailable root, changed binding, inaccessible component, unsafe traversal, or I/O error is an inspection failure, not absence.
+4. Immediately before applying the record changes, use that observation under the same Library mutation admission. Refused targets remain intact; otherwise remove only the reviewed records and retain the per-target outcome.
 
-### Interfaces
+Filesystem observation and SQLite commit cannot be atomic against arbitrary external writers. The contract records absence at the checked instant; it does not prove physical deletion or prevent a file appearing afterward. A later external arrival cannot be deleted by cleanup because cleanup has no filesystem mutation capability. A later Library Check applies normal Location Recovery and discovery, never recovery of the cleaned-up identity.
 
-The server exposes the same model to Web and CLI:
+### Record effects
 
-- `GET /api/trash` — bounded Trash page, newest removal first, publishing the review bound one confirmation may capture and, per row, the retained operation still owing that Photo an outcome;
-- `POST /api/trash/review` — explicit IDs or all-current-minus-exclusions, returning the fixed review and rejections;
-- `POST /api/trash/delete` — explicit confirmation of one operation id;
-- `GET /api/trash/operations/{operationId}` — durable result for reload and reconciliation;
-- the Restore request accepts the same four keys as the review request: `operationId`, `all`, `photoIds`, `excludePhotoIds`. `all: true` restores every current Trash item minus `excludePhotoIds`; `all: false` restores the named Photos. The same validation combinations apply, and the remaining identities are resolved at admission under that restore attempt's own operation identity.
-- Before admission, the selected count and checked rows reflect the selection observed when Select All was invoked, not later arrivals. The all-mode request still resolves current Trash minus exclusions at admission; its review or Restore result reports that resolved set. A refused Restore returns a structured CLI error with the operation identity when available, including a conflict if the current scope exceeds the review bound.
-- Restore is the only reversible action and must refuse permanently deleted items. Its compare-and-set removal-marker evidence is unchanged: a changed, already restored, pending-deletion, or re-removed item is refused rather than restored from stale evidence.
+Admitted effects and the immutable attempt receipt commit in one SQLite transaction. Mixed eligibility produces a complete per-target partition in that transaction; a storage failure rolls back all its record effects. A known attempt with identical intent never reapplies any effect.
 
-`POST /api/trash/review` accepts exactly four keys:
+For each admitted target, remove the Photo's decisions, Album memberships, and other Photo-owned Library projections. Remove its Original record and fingerprint when no retained Library state references that Original. Compact the remaining Album positions without changing relative order, advance the affected Album membership version, and make a saved position for the removed Photo unavailable.
 
-```text literal
-{
-  "operationId": "caller-owned-operation-identity",
-  "all": true,
-  "photoIds": [],
-  "excludePhotoIds": ["00000000-0000-4000-8000-000000000002"]
-}
-```
+Retain only the history and conflict evidence required by their owners:
+immutable operation outcomes and retained-orphan Sidecar association evidence.
+A Photo-owned historical XMP export snapshot is removed with that Photo; the
+snapshot is not retained workspace and must not block record cleanup forever. An orphan association retains its former owner as historical identity, not a live foreign-key dependency. It must continue to prevent an adjacent JPEG or later occupant from inheriting the Sidecar silently.
 
-- `operationId` names one review attempt. Repeating it with the same intent returns the original review instead of capturing a second set.
-- `all: true` selects every current Trash item minus `excludePhotoIds`, so `photoIds` must be empty and `excludePhotoIds` may be nonempty.
-- `all: false` names the exact Photos to review, so `photoIds` must be nonempty and `excludePhotoIds` must be empty.
-- Any other combination is refused before the Library owner reads any Trash state.
+Cleanup must not erase retained workspace or processing state to satisfy its own preconditions. That work must first be handled through its separately confirmed safe removal lifecycle. Cleanup performs no filesystem mutation, including deletion of workspace files or derivative cache bytes. Ordinary independent cache retention remains its own capability.
 
-The published review bound is the most Photos one review may capture. A select-all selection whose current Trash exceeds that bound is refused rather than silently truncated, and the surface reports the bound so the Photographer can narrow the selection.
+A cleaned-up identity no longer resolves as a current Photo, cannot be restored by an old marker, and cannot be recovered from a fingerprint or immutable attempt receipt. For a later supported file at the old Location, apply normal Location Recovery for other retained identities before allocating a new Photo and Original identity. Neither case recovers the discarded decisions or Album memberships of the cleaned-up Photo.
 
-The existing `/api/photos/removed` listing and `/api/photos/restore` behavior remain compatible aliases while the Web surface changes its product label to Trash.
+### Publication and outcome recovery
 
-### Publication
+Publish the committed removal of records and derived indexes before acknowledging success. Trash, Photo lookup, normal sources, Album counts, saved positions, query projections, and Undo eligibility must agree. An existing retained query keeps its evaluated membership and reports a cleaned-up identity as unavailable in its original position rather than substituting another Photo.
 
-Permanent deletion uses the same application publication lock as removal and Restore. The SQLite settlement commits before the published Photo and Original facts are patched. A reader therefore sees either the pre-deletion Trash item or the post-deletion unavailable evidence, never a confirmed result with a stale normal source.
+The caller stores the attempt identity before sending the confirmed request. A read-only outcome lookup returns the durable receipt without inspecting or deleting filesystem entries, changing Photo state, or retrying a refusal. A missing or uninspectable receipt is unknown outcome, not proof that no cleanup occurred. Successful outcome recovery also refreshes affected Web projections before presenting converged counts.
+
+If Restore commits first, cleanup refuses the stale target. If cleanup commits first, Restore reports that identity unavailable. A new removal after Restore always has a different marker and requires new cleanup evidence and consent.
+
+## Interface boundary and cutover
+
+The shared service exposes bounded Trash inspection, the existing compare-and-set Restore, explicit record-only cleanup, and read-only cleanup outcome inspection. Web and CLI use the same Library owner. The [CLI Reference](../../command-line/reference.md#trash-inspection-and-record-cleanup) owns the listing and cleanup command language.
+
+The physical-deletion review, confirmation, retry, and confined unlink capability are retired, not repurposed. Their HTTP mutation routes and CLI mutation commands must be removed together with their callers. There is no compatibility alias that can delete a file or reinterpret old deletion consent as record-cleanup consent. Contract negotiation and capability discovery must prevent clients from treating the retired commands as supported.
+
+Previously retained deletion receipts are history only. Startup, operation inspection, migration, and retry must never resume their filesystem effects. Previously confirmed deletions must not become recoverable Photos. Existing records with failed or unresolved old deletion attempts remain inspectable, with unknown historical file outcomes labeled honestly; fresh presence inspection and explicit Restore or cleanup follow the new record-only contract, without an everlasting old deletion lock. Migration must not silently clean up those records or invent proof that Slipstream deleted their files.
+
+Keep the Library bind read-only and expose no privileged delete helper. Before implementation cutover, the deployment host's operator tooling must verify the new listing, external fixture deletion, record cleanup, outcome recovery, and retired-route refusal end to end. No production Original is a qualification fixture.
 
 ## Options
 
-### Selected: durable per-operation receipt plus confined per-item settlement
+### Selected: external file deletion and explicit missing-record cleanup
 
-This keeps the existing Photo-row removal marker as the one recovery source, adds no second Photo model, and makes filesystem uncertainty explicit. It supports partial failure, restart, exact retry, and a review that cannot grow. The operation receipt is the smallest durable boundary already owned by the SQLite persistence thread.
+This keeps the filesystem owner in control, uses the existing read-only Original capability, and gives Slipstream one transactional effect domain. Explicit target evidence and a durable receipt protect application records without a second filesystem operation journal.
 
-### Rejected: delete every selected file first, then write one batch result
+### Rejected: make Originals writable or add an application deletion helper
 
-A process loss between unlink and the database commit would leave physical deletions with no durable evidence. Retry could report missing as if the user deleted the file elsewhere, and a partial failure could not distinguish confirmed deletion from unresolved work.
+Both preserve a destructive capability the product no longer needs. They require additional permission, replacement-race, partial-unlink, and crash-reconciliation boundaries. A missing-record cleanup does not justify any of them.
 
-### Rejected: move Originals into an operating-system Trash directory
+### Rejected: automatically purge unavailable Photos during Library Check
 
-Moving changes the Original Location, creates a second file-identity protocol, and can silently capture sibling or sidecar files. The product contract requires Originals to stay in place until the explicit second confirmation and limits the deletion scope to the selected Original itself.
+Unavailable can mean temporary storage failure, a moved Original, or incomplete inspection. Automatic purging discards recoverable decisions and Album membership without consent and expands a Trash action to active Photos.
+
+### Rejected: forget records while Originals are still present
+
+This makes a normal Library Check rediscover an orphaned file as a new Photo and erases decisions even though the external deletion step did not occur. Fresh absence is the conservative eligibility rule for this workflow.
 
 ## Verification
 
-Focused coverage must prove:
+Implementation must prove through disposable fixtures:
 
-- review is limited to current Trash, captures a fixed set, reports Location, kind, size, and Albums, and excludes later arrivals;
-- RAW and same-basename JPEG are independent and sidecars, exports, siblings, and directories remain unchanged;
-- restored, moved, replaced, missing, inaccessible, and changed items are not deleted by an old review;
-- mixed batches settle independently, report logical bytes only for confirmed deletions, and preserve recoverable state for failures;
-- retry and reload return the durable operation result without deleting a confirmed item twice;
-- confirmed deletion removes Album memberships, updates counts and publication, and never reappears in Trash after restart or rescan;
-- Web and CLI produce the same review, confirmation, and outcome partitions.
+- complete bounded listing and lossless printed Location data, including cross-page exclusions, later arrivals, unusual filenames, and the server/container namespace;
+- read-only Library mounts are sufficient for listing, Restore, and cleanup;
+- externally absent Originals permit cleanup, while present replacements, unreadable storage, invalid roots, unsafe entries, and retained work refuse it without file changes;
+- stale removal markers, changed identities or Locations, and competing Restore cannot clean up a different state;
+- one transaction commits admitted record effects and receipts, preserves Album order and orphan Sidecar protection, and publishes consistent counts and Undo;
+- same-attempt replay and lost-response recovery return historical outcomes without reapplying effects or retrying filesystem work;
+- a recreated file cannot recover the cleaned-up identity or its decisions, while a qualifying different retained identity still follows normal Location Recovery;
+- upgrade never executes an old unlink, automatically purges uncertain records, revives confirmed deletions, or turns old file-deletion consent into record-cleanup consent; and
+- Web, CLI, service routes, and operator tooling perform no Original deletion and agree on record-only outcomes.

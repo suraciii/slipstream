@@ -125,12 +125,14 @@ defined by Web Async Ownership:
   confirmed operation Undo can still restore, and the admission of every
   removal and restoration write. It never restores an operation or a Photo the
   Library no longer holds, and it holds no Photo facts of its own. The same owner
-  also owns the Trash listing, the reviewed permanent-deletion operation, and its
-  receipt recovery: it keys Trash reads by Trash generation, admits one review
-  per operation identity, keeps the admitted delete command settling to its
-  durable receipt, and reconciles a lost response through the operation lookup
-  instead of resubmitting. Trash is the irreversible boundary, so it stays one
-  owner rather than splitting into a second destructive-confirmation surface.
+  also owns Trash inspection, explicit record-cleanup review, and receipt
+  recovery. It fences reads by Trash generation and inspection scope, clears
+  unsubmitted review state on every dismissal, retains an attempt identity before
+  confirmation, and keeps admitted cleanup settling to its durable database
+  result. Outcome recovery preserves retry access and converges rows, counts,
+  and Undo without issuing another confirmation. Trash never deletes Original
+  Files; external deletion belongs to the Photographer under the
+  [Trash contract](../photo-library/trash/spec.md).
 - The **Editor rendition owner** owns independent current and baseline request
   admission, bounded polling, cancellation, retained images and object-URL
   lifetime. Both lanes use one transfer lifecycle and the existing rendition

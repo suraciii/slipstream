@@ -160,9 +160,8 @@ pub(super) fn scanner_main(
                         );
                         let mut evidence_ids =
                             crate::recovery::evidence_original_ids(&result.originals, &previous);
-                        // A permanently deleted Original keeps no relocation
-                        // or identity evidence: its bytes are gone, and a file
-                        // at its reviewed Location is a new Original.
+                        // Confirmed legacy deletions cannot be recovered or
+                        // assigned to a later file at their former Location.
                         let deleted_originals = persistence
                             .permanently_deleted_original_ids_blocking()
                             .map_err(LibraryError::from)?

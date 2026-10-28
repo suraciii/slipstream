@@ -960,8 +960,8 @@ async fn incompatible_service_is_rejected_before_album_create_is_sent() {
     for (status, capabilities, supported) in [
         (
             200,
-            json!({"serverVersion": "0.0.0", "supportedCliContractVersions": [2], "limits": capabilities_body()["limits"]}),
-            json!([2]),
+            json!({"serverVersion": "0.0.0", "supportedCliContractVersions": [1], "limits": capabilities_body()["limits"]}),
+            json!([1]),
         ),
         (404, json!({"error": "not found"}), json!([])),
     ] {
