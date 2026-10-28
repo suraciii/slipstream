@@ -98,7 +98,9 @@ export function mountAccessBoundary(
     privateHost.setAttribute("aria-hidden", "true");
     privateHost.style.visibility = "hidden";
     root.querySelector(".access-check-overlay")?.remove();
-    const checking = document.createElement("main");
+    // The Access screen renders inside the application's single main landmark,
+    // so it must not create a nested one.
+    const checking = document.createElement("div");
     checking.className = "access-screen access-check-overlay";
     checking.setAttribute("aria-busy", String(!checkAgain));
     checking.innerHTML = `<section class="access-panel" aria-labelledby="access-check-title"><h1 id="access-check-title">Slipstream</h1><p class="access-subtitle">Your photo library</p><p class="access-message" role="status" aria-live="polite"></p><button type="button" data-access-check hidden>Check access again</button></section>`;
@@ -135,7 +137,7 @@ export function mountAccessBoundary(
     if (!alive) return;
     currentEntry = options;
     root.innerHTML = `
-      <main class="access-screen">
+      <div class="access-screen">
         <section class="access-panel" aria-labelledby="access-title">
           <h1 id="access-title">Slipstream</h1>
           <p class="access-subtitle">Open your photo library</p>
@@ -159,7 +161,7 @@ export function mountAccessBoundary(
             <button type="button" data-access-logout-retry>Retry sign out</button>
           </div>
         </section>
-      </main>`;
+      </div>`;
 
     const form = root.querySelector<HTMLFormElement>("[data-access-form]");
     tokenInput =

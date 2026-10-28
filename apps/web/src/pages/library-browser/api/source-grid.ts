@@ -1,4 +1,5 @@
 import type {
+  BrowseFilterConditions,
   BrowseOpenResponse,
   BrowsePositionResponse,
   BrowseWindowResponse,
@@ -29,6 +30,7 @@ export type BrowseSourceRequest =
       resume?: boolean;
       order?: SourceViewOrder;
       selection?: SelectionFilter;
+      conditions?: BrowseFilterConditions;
     }>
   | Readonly<{
       kind: "album";
@@ -37,6 +39,7 @@ export type BrowseSourceRequest =
       resume?: boolean;
       order?: SourceViewOrder;
       selection?: SelectionFilter;
+      conditions?: BrowseFilterConditions;
     }>
   | Readonly<{
       kind: "folder";
@@ -46,7 +49,33 @@ export type BrowseSourceRequest =
       resume?: boolean;
       order?: SourceViewOrder;
       selection?: SelectionFilter;
+      conditions?: BrowseFilterConditions;
     }>;
+
+/// The wire fields one filter condition set contributes to a Browse open.
+/// A condition the Photographer did not set is omitted, so the server applies
+/// no restriction for it, and the server validates every supplied value
+/// against its own fact before it admits a Snapshot.
+const browseFilterFields = (
+  conditions: BrowseFilterConditions | undefined,
+): Readonly<Record<string, unknown>> => ({
+  ...(conditions?.ratingMinimum === undefined
+    ? {}
+    : { ratingMinimum: conditions.ratingMinimum }),
+  ...(conditions?.ratingMaximum === undefined
+    ? {}
+    : { ratingMaximum: conditions.ratingMaximum }),
+  ...(conditions?.kind === undefined ? {} : { kind: conditions.kind }),
+  ...(conditions?.available === undefined
+    ? {}
+    : { available: conditions.available }),
+  ...(conditions?.capturedFrom === undefined
+    ? {}
+    : { capturedFrom: conditions.capturedFrom }),
+  ...(conditions?.capturedBefore === undefined
+    ? {}
+    : { capturedBefore: conditions.capturedBefore }),
+});
 
 export type SourceGridApiResult<T> =
   | Readonly<{ kind: "ok"; value: T }>
@@ -142,6 +171,7 @@ export async function openBrowse(
           ...(source.selection && source.selection !== "all"
             ? { selection: source.selection }
             : {}),
+          ...browseFilterFields(source.conditions),
           ...(source.preferredPhotoId
             ? { photoId: source.preferredPhotoId }
             : {}),

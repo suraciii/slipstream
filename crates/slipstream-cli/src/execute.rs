@@ -65,6 +65,15 @@ pub(crate) async fn execute(
         },
         _ => None,
     };
+    let pending_restore_exclusions = match &cli.command {
+        Command::Photos {
+            command: PhotoCommand::Restore(args),
+        } if args.all => match &args.exclude_input {
+            Some(input) => read_trash_ids(input).await?,
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
     // The complete save document validates before any network access, so a
     // local input failure can never depend on service reachability.
     let pending_metadata_save = match &cli.command {
@@ -767,50 +776,14 @@ pub(crate) async fn execute(
             Command::Photos {
                 command: PhotoCommand::Restore(args),
             } => {
-                let photo_ids = pending_restore
-                    .as_ref()
-                    .map(|prepared| {
-                        prepared
-                            .markers
-                            .iter()
-                            .map(|marker| marker.photo_id.clone())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let identity = MutationIdentity {
-                    operation,
-                    photo_ids,
-                    album_id: None,
-                    album_name: None,
-                    mappings: Vec::new(),
-                };
-                match pending_restore.as_ref() {
-                    Some(prepared) => {
-                        let result: PhotoRestoreWire = client
-                            .mutation(
-                                &identity,
-                                admission,
-                                client.endpoint(&["api", "photos", "restore-explicit"]),
-                                prepared.body(&args.operation_id),
-                            )
-                            .await?;
-                        confirmed_restore_result(&identity, &args.operation_id, prepared, result)
-                    }
-                    None => {
-                        let data: Value = client
-                            .mutation(
-                                &identity,
-                                admission,
-                                client.endpoint(&["api", "photos", "restore"]),
-                                json!({ "operation": args.operation_id }),
-                            )
-                            .await?;
-                        if !data.is_object() {
-                            return Err(CommandFailure::unknown(&identity));
-                        }
-                        Ok(data)
-                    }
-                }
+                photo_restore::execute(
+                    &client,
+                    admission,
+                    args,
+                    pending_restore.as_ref(),
+                    &pending_restore_exclusions,
+                )
+                .await
             }
             Command::Trash {
                 command: TrashCommand::List(args),

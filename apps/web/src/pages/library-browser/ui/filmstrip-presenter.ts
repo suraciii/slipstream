@@ -1,4 +1,5 @@
 import "./thumbnail-placeholder.css";
+import { selectionLabel } from "./presentation-helpers.js";
 
 export type FilmstripPhotoViewModel = Readonly<{
   id: string;
@@ -381,12 +382,4 @@ export function createFilmstripPresenter(
       clear();
     },
   };
-}
-
-function selectionLabel(
-  state: FilmstripPhotoViewModel["selectionState"],
-): string {
-  if (state === "picked") return "Picked";
-  if (state === "rejected") return "Rejected";
-  return "Unflagged";
 }

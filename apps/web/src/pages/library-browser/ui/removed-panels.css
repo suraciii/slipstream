@@ -331,6 +331,19 @@
   color: var(--warning);
 }
 
+/* One item the Photographer excluded from a Select all selection. It is
+   never named as reviewed, counted, or deleted, so its row says so instead
+   of relying on the checkbox alone. */
+.removed-item[data-trash-excluded-item] {
+  opacity: 0.72;
+}
+
+.removed-excluded {
+  margin: 0.35rem 0 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
 .removed-pager {
   display: flex;
   flex-wrap: wrap;

@@ -113,9 +113,9 @@ test("narrow Grid discloses Sources as one named modal surface and restores focu
     );
   await expect(sources).toBeVisible();
   await expect(sources).toHaveAttribute("aria-expanded", "false");
-  // The disclosure's accessible name identifies both Sources and the current
-  // source, and a closed surface renders nothing.
-  await expect(sources).toHaveAccessibleName("Sources — All Photos");
+  // The disclosure names the current source and count together; the
+  // controlled Sources surface is closed until it is activated.
+  await expect(sources).toHaveAccessibleName("All Photos Ready · 1 Photo");
   await expect(panel).toBeHidden();
   await expect(dialog).toBeHidden();
   // The Grid keeps the height the app leaves below the view controls and

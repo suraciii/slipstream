@@ -1,4 +1,5 @@
 import "./thumbnail-placeholder.css";
+import { selectionLabel } from "./presentation-helpers.js";
 
 export type GridSelectionState = "unflagged" | "picked" | "rejected";
 
@@ -60,14 +61,6 @@ type GridCellPresenterOptions = Readonly<{
 
 const GRID_CELL_GAP_X = 10;
 const LOADING_CELL_SIGNATURE = "loading";
-
-function selectionLabel(value: GridSelectionState): string {
-  return value === "picked"
-    ? "Picked"
-    : value === "rejected"
-      ? "Rejected"
-      : "Unflagged";
-}
 
 function gridPhotoFacts(
   photo: GridPhotoViewModel,

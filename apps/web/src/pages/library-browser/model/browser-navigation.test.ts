@@ -9,6 +9,7 @@ import {
   NAVIGATION_STATE_NAMESPACE,
   NAVIGATION_STATE_VERSION,
   readEntryState,
+  sameConditions,
   sameSourceView,
   writeEntryState,
   type NavigationDestination,
@@ -20,18 +21,21 @@ const ALBUM = "00000000-0000-4000-8000-000000000001";
 const PHOTO_A = "00000000-0000-4000-8000-000000000004";
 const PHOTO_B = "00000000-0000-4000-8000-000000000009";
 
-const destination = (value: NavigationDestination): NavigationDestination =>
-  value;
+/// Every destination literal in these tests omits the fact conditions it does
+/// not exercise, so the address decoder's own default applies.
+const withoutConditions = (
+  value: Omit<NavigationDestination, "conditions">,
+): NavigationDestination => ({ ...value, conditions: {} });
 
 describe("browser address decoding", () => {
   test("the six documented examples decode to their destinations", () => {
     expect(decodeAddress("")).toEqual({
       kind: "destination",
-      destination: destination({ source: "library", selection: "all" }),
+      destination: withoutConditions({ source: "library", selection: "all" }),
     });
     expect(decodeAddress("?source=folder&folderPath=")).toEqual({
       kind: "destination",
-      destination: destination({
+      destination: withoutConditions({
         source: "folder",
         folderPath: "",
         selection: "all",
@@ -43,7 +47,7 @@ describe("browser address decoding", () => {
       ),
     ).toEqual({
       kind: "destination",
-      destination: destination({
+      destination: withoutConditions({
         source: "folder",
         folderPath: "RAW/26-spring",
         selection: "unflagged",
@@ -51,7 +55,7 @@ describe("browser address decoding", () => {
     });
     expect(decodeAddress(`?source=album&albumId=${ALBUM}`)).toEqual({
       kind: "destination",
-      destination: destination({
+      destination: withoutConditions({
         source: "album",
         albumId: ALBUM,
         selection: "all",
@@ -63,7 +67,7 @@ describe("browser address decoding", () => {
       ),
     ).toEqual({
       kind: "destination",
-      destination: destination({
+      destination: withoutConditions({
         source: "album",
         albumId: ALBUM,
         photoId: PHOTO_A,
@@ -73,7 +77,7 @@ describe("browser address decoding", () => {
     });
     expect(decodeAddress(`?photoId=${PHOTO_B}`)).toEqual({
       kind: "destination",
-      destination: destination({
+      destination: withoutConditions({
         source: "library",
         photoId: PHOTO_B,
         selection: "all",
@@ -97,7 +101,7 @@ describe("browser address decoding", () => {
       decodeAddress(`?source=album&albumId=${ALBUM}&order=album-order`),
     ).toEqual({
       kind: "destination",
-      destination: destination({
+      destination: withoutConditions({
         source: "album",
         albumId: ALBUM,
         order: "album-order",
@@ -135,6 +139,103 @@ describe("browser address decoding", () => {
     expect(decodeAddress(`?source=album&albumId=${ALBUM}&photoId=`)).toEqual({
       kind: "invalid",
     });
+  });
+
+  test("fact conditions decode with defaults omitted", () => {
+    expect(
+      decodeAddress(
+        "?rating-min=4&rating-max=5&kind=raw&available=false&captured-from=2026-01-02T09%3A00%3A00&captured-before=2026-01-04T09%3A00%3A00",
+      ),
+    ).toEqual({
+      kind: "destination",
+      destination: {
+        source: "library",
+        selection: "all",
+        conditions: {
+          ratingMinimum: 4,
+          ratingMaximum: 5,
+          kind: "raw",
+          available: false,
+          capturedFrom: "2026-01-02T09:00:00",
+          capturedBefore: "2026-01-04T09:00:00",
+        },
+      },
+    });
+    // Rating 0 means No Rating, so it is a real bound rather than a default.
+    expect(decodeAddress("?rating-min=0")).toEqual({
+      kind: "destination",
+      destination: {
+        source: "library",
+        selection: "all",
+        conditions: { ratingMinimum: 0 },
+      },
+    });
+    // An omitted parameter applies no condition for that fact.
+    expect(decodeAddress("?kind=jpeg")).toEqual({
+      kind: "destination",
+      destination: {
+        source: "library",
+        selection: "all",
+        conditions: { kind: "jpeg" },
+      },
+    });
+  });
+
+  test("fact condition values that fail their own fact are invalid", () => {
+    expect(decodeAddress("?rating-min=6")).toEqual({ kind: "invalid" });
+    expect(decodeAddress("?rating-max=6")).toEqual({ kind: "invalid" });
+    expect(decodeAddress("?rating-min=-1")).toEqual({ kind: "invalid" });
+    expect(decodeAddress("?rating-min=4.5")).toEqual({ kind: "invalid" });
+    // An inverted Rating range names an empty view and is invalid.
+    expect(decodeAddress("?rating-min=5&rating-max=2")).toEqual({
+      kind: "invalid",
+    });
+    expect(decodeAddress("?kind=heic")).toEqual({ kind: "invalid" });
+    expect(decodeAddress("?available=yes")).toEqual({ kind: "invalid" });
+    expect(decodeAddress("?captured-from=2026-01-02T09%3A00")).toEqual({
+      kind: "invalid",
+    });
+    expect(decodeAddress("?captured-from=2026-02-30T09%3A00%3A00")).toEqual({
+      kind: "invalid",
+    });
+    expect(decodeAddress("?captured-from=2026-01-02 09%3A00%3A00")).toEqual({
+      kind: "invalid",
+    });
+    // The lower bound is inclusive and the upper bound exclusive, so equal
+    // bounds name an empty range and are reversed.
+    expect(
+      decodeAddress(
+        "?captured-from=2026-01-02T09%3A00%3A00&captured-before=2026-01-02T09%3A00%3A00",
+      ),
+    ).toEqual({ kind: "invalid" });
+    expect(
+      decodeAddress(
+        "?captured-from=2026-01-04T09%3A00%3A00&captured-before=2026-01-02T09%3A00%3A00",
+      ),
+    ).toEqual({ kind: "invalid" });
+  });
+
+  test("a repeated fact condition parameter is invalid", () => {
+    expect(decodeAddress("?rating-min=4&rating-min=3")).toEqual({
+      kind: "invalid",
+    });
+    expect(decodeAddress("?kind=raw&kind=jpeg")).toEqual({
+      kind: "invalid",
+    });
+    expect(
+      decodeAddress(
+        "?captured-from=2026-01-02T09%3A00%3A00&captured-from=2026-01-03T09%3A00%3A00",
+      ),
+    ).toEqual({ kind: "invalid" });
+  });
+
+  test("an empty value for an optional filter parameter is invalid", () => {
+    expect(decodeAddress("?rating-min=")).toEqual({ kind: "invalid" });
+    expect(decodeAddress("?rating-max=")).toEqual({ kind: "invalid" });
+    expect(decodeAddress("?kind=")).toEqual({ kind: "invalid" });
+    expect(decodeAddress("?available=")).toEqual({ kind: "invalid" });
+    expect(decodeAddress("?captured-from=")).toEqual({ kind: "invalid" });
+    expect(decodeAddress("?captured-before=")).toEqual({ kind: "invalid" });
   });
 
   test("unknown values and source-incompatible options are invalid", () => {
@@ -190,7 +291,7 @@ describe("browser address decoding", () => {
       ),
     ).toEqual({
       kind: "destination",
-      destination: destination({
+      destination: withoutConditions({
         source: "folder",
         folderPath: "a".repeat(1024),
         selection: "all",
@@ -207,7 +308,7 @@ describe("browser address decoding", () => {
     const decoded = decodeAddress("?source=folder&folderPath=26-spring%3F");
     expect(decoded).toEqual({
       kind: "destination",
-      destination: destination({
+      destination: withoutConditions({
         source: "folder",
         folderPath: "26-spring?",
         selection: "all",
@@ -228,7 +329,7 @@ describe("browser address decoding", () => {
   test("unknown query keys are ignored and never make an address invalid", () => {
     expect(decodeAddress(`?photoId=${PHOTO_A}&panel=tools&zoom=200`)).toEqual({
       kind: "destination",
-      destination: destination({
+      destination: withoutConditions({
         source: "library",
         photoId: PHOTO_A,
         selection: "all",
@@ -256,7 +357,7 @@ describe("browser address encoding", () => {
     expect(encodeAddress(allPhotosDestination)).toBe("");
     expect(
       encodeAddress(
-        destination({
+        withoutConditions({
           source: "folder",
           folderPath: "",
           selection: "all",
@@ -265,7 +366,7 @@ describe("browser address encoding", () => {
     ).toBe("source=folder&folderPath=");
     expect(
       encodeAddress(
-        destination({
+        withoutConditions({
           source: "folder",
           folderPath: "RAW/26-spring",
           selection: "unflagged",
@@ -274,12 +375,16 @@ describe("browser address encoding", () => {
     ).toBe("source=folder&folderPath=RAW%2F26-spring&selection=unflagged");
     expect(
       encodeAddress(
-        destination({ source: "album", albumId: ALBUM, selection: "all" }),
+        withoutConditions({
+          source: "album",
+          albumId: ALBUM,
+          selection: "all",
+        }),
       ),
     ).toBe(`source=album&albumId=${ALBUM}`);
     expect(
       encodeAddress(
-        destination({
+        withoutConditions({
           source: "album",
           albumId: ALBUM,
           photoId: PHOTO_A,
@@ -292,13 +397,17 @@ describe("browser address encoding", () => {
     );
     expect(
       encodeAddress(
-        destination({ source: "library", photoId: PHOTO_B, selection: "all" }),
+        withoutConditions({
+          source: "library",
+          photoId: PHOTO_B,
+          selection: "all",
+        }),
       ),
     ).toBe(`photoId=${PHOTO_B}`);
     // album-order is the Album default, so it is omitted.
     expect(
       encodeAddress(
-        destination({
+        withoutConditions({
           source: "album",
           albumId: ALBUM,
           order: "album-order",
@@ -306,6 +415,72 @@ describe("browser address encoding", () => {
         }),
       ),
     ).toBe(`source=album&albumId=${ALBUM}`);
+  });
+
+  test("fact conditions follow selection in canonical order", () => {
+    expect(
+      encodeAddress({
+        source: "library",
+        selection: "unflagged",
+        conditions: {
+          ratingMinimum: 4,
+          ratingMaximum: 5,
+          kind: "raw",
+          available: true,
+          capturedFrom: "2026-01-02T09:00:00",
+          capturedBefore: "2026-01-04T09:00:00",
+        },
+      }),
+    ).toBe(
+      "selection=unflagged&rating-min=4&rating-max=5&kind=raw&available=true" +
+        "&captured-from=2026-01-02T09%3A00%3A00" +
+        "&captured-before=2026-01-04T09%3A00%3A00",
+    );
+    // A condition on its own is emitted after selection, and the other
+    // conditions are omitted rather than sent as empty values.
+    expect(
+      encodeAddress({
+        source: "library",
+        selection: "all",
+        conditions: { kind: "jpeg" },
+      }),
+    ).toBe("kind=jpeg");
+    // Rating 0 is a real bound, so it is emitted rather than omitted.
+    expect(
+      encodeAddress({
+        source: "library",
+        selection: "all",
+        conditions: { ratingMinimum: 0 },
+      }),
+    ).toBe("rating-min=0");
+    // available=false is a real condition, so it is emitted.
+    expect(
+      encodeAddress({
+        source: "library",
+        selection: "all",
+        conditions: { available: false },
+      }),
+    ).toBe("available=false");
+  });
+
+  test("a full condition set round-trips through encode and decode", () => {
+    const conditions = {
+      ratingMinimum: 4,
+      ratingMaximum: 5,
+      kind: "raw",
+      available: false,
+      capturedFrom: "2026-01-02T09:00:00",
+      capturedBefore: "2026-01-04T09:00:00",
+    } as const;
+    const search = encodeAddress({
+      source: "library",
+      selection: "all",
+      conditions,
+    });
+    expect(decodeAddress(search)).toEqual({
+      kind: "destination",
+      destination: { source: "library", selection: "all", conditions },
+    });
   });
 
   test("every documented example round-trips through encode and decode", () => {
@@ -337,7 +512,7 @@ describe("browser address encoding", () => {
   test("a Grid destination drops the Photo identity", () => {
     expect(
       gridDestination(
-        destination({
+        withoutConditions({
           source: "album",
           albumId: ALBUM,
           photoId: PHOTO_A,
@@ -345,12 +520,16 @@ describe("browser address encoding", () => {
         }),
       ),
     ).toEqual(
-      destination({ source: "album", albumId: ALBUM, selection: "unflagged" }),
+      withoutConditions({
+        source: "album",
+        albumId: ALBUM,
+        selection: "unflagged",
+      }),
     );
   });
 
   test("same source, order, and filter is what lets a traversal reuse a Snapshot", () => {
-    const left = destination({
+    const left = withoutConditions({
       source: "folder",
       folderPath: "shoot",
       selection: "unflagged",
@@ -364,10 +543,76 @@ describe("browser address encoding", () => {
       sameSourceView(left, {
         source: "folder",
         folderPath: "other",
+        conditions: {},
         selection: "unflagged",
       }),
     ).toBe(false);
     expect(sameSourceView(left, { ...left, photoId: PHOTO_A })).toBe(true);
+  });
+});
+
+describe("view identity", () => {
+  const library = (conditions: NavigationDestination["conditions"]) => ({
+    source: "library" as const,
+    selection: "all" as const,
+    conditions,
+  });
+
+  test("an omitted condition and an explicitly default one are the same view", () => {
+    // An explicitly default condition and an omitted one are the same view, so
+    // a traversal reuses the live Snapshot instead of reopening the source.
+    expect(sameConditions({}, { ratingMinimum: undefined as never })).toBe(
+      true,
+    );
+    expect(sameConditions({}, { kind: undefined as never })).toBe(true);
+  });
+
+  test("a changed condition is a different view", () => {
+    expect(sameSourceView(library({}), library({ ratingMinimum: 4 }))).toBe(
+      false,
+    );
+    expect(sameSourceView(library({}), library({ kind: "raw" }))).toBe(false);
+    expect(sameSourceView(library({}), library({ available: false }))).toBe(
+      false,
+    );
+    expect(
+      sameSourceView(
+        library({}),
+        library({ capturedFrom: "2026-01-02T09:00:00" }),
+      ),
+    ).toBe(false);
+    expect(
+      sameSourceView(
+        library({ ratingMinimum: 4 }),
+        library({ ratingMinimum: 4, ratingMaximum: 5 }),
+      ),
+    ).toBe(false);
+  });
+
+  test("source, order, and Selection State still decide reuse", () => {
+    expect(
+      sameSourceView(
+        { source: "library", selection: "all", conditions: {} },
+        { source: "library", selection: "all", conditions: {} },
+      ),
+    ).toBe(true);
+    expect(
+      sameSourceView(
+        { source: "library", selection: "all", conditions: {} },
+        { source: "library", selection: "rejected", conditions: {} },
+      ),
+    ).toBe(false);
+    expect(
+      sameSourceView(
+        { source: "library", selection: "all", conditions: {} },
+        {
+          source: "library",
+          selection: "all",
+          order: "capture-time-desc",
+          conditions: {},
+        },
+      ),
+    ).toBe(false);
   });
 });
 

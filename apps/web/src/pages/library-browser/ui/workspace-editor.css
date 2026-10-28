@@ -145,6 +145,33 @@
   border: 1px solid var(--danger, #b44);
   padding: 0.65rem;
 }
+.photo-editor-facts {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 0;
+}
+.photo-editor-facts p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.photo-editor-facts p::first-letter {
+  font-weight: 600;
+}
+.photo-editor-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(5.5rem, 1fr));
+  gap: 0.35rem;
+  min-width: 0;
+}
+.photo-editor-actions p {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-weight: 600;
+}
+.photo-editor-actions button {
+  margin: 0;
+  min-width: 0;
+}
 .workspace-editor .photo-editor-preview-image,
 .workspace-film img {
   max-width: 100%;

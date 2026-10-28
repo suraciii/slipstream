@@ -408,6 +408,27 @@ pub(super) fn filter_ids_by_selection(
         .collect()
 }
 
+pub(super) fn filter_ids_by_conditions(
+    published: &Published,
+    ids: Vec<String>,
+    conditions: &BrowseFilterConditions,
+) -> Vec<String> {
+    if conditions.is_default() {
+        return ids;
+    }
+    ids.into_iter()
+        .filter(|id| {
+            let Some(photo) = published_photo(published, id) else {
+                return false;
+            };
+            let Some(candidate) = published.photo_query_projection.get(id) else {
+                return false;
+            };
+            conditions.matches(candidate, photo.rating)
+        })
+        .collect()
+}
+
 /// Applies the requested view order to one complete source ID list.
 /// Ascending is the Published Library's natural deterministic order.
 /// Descending reverses only the Capture Time direction: missing-time Photos

@@ -2,7 +2,7 @@ import { PHOTO_TOOLS_TEMPLATE } from "./photo-tools-template.js";
 
 export const PHOTO_VIEW_TEMPLATE = `
 <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
-  <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div class="photo-identity"><h2 id="photo-title" data-photo-title>Photo</h2><p class="photo-filename" data-photo-filename>—</p></div><div class="photo-header-actions"><button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false" hidden>Sources</button><p class="photo-connection" data-photo-connection role="status" hidden></p><button type="button" class="quiet" data-retry-photo hidden>Retry</button></div></header>
+  <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div class="photo-identity"><h1 id="photo-title" data-photo-title>Photo</h1><p class="photo-filename" data-photo-filename>—</p><div class="photo-identity-facts" data-photo-identity-facts role="group" aria-label="Photo facts"><button type="button" class="selection-badge" data-selection aria-controls="photo-tools-panel" aria-expanded="false" aria-label="Selection State: Unflagged">Unflagged</button><span data-rating>No Rating</span></div></div><div class="photo-header-actions"><button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false" hidden>Sources</button><p class="photo-connection" data-photo-connection role="status" hidden></p><button type="button" class="quiet" data-retry-photo hidden>Retry</button></div></header>
   <section class="preview" data-preview aria-label="Photo Preview">
     <div class="swipe-feedback reject" data-reject-feedback role="status" aria-live="polite">Previous</div>
     <div class="image-stage" data-stage></div>
@@ -15,7 +15,7 @@ export const PHOTO_VIEW_TEMPLATE = `
   </section>
   <div class="filmstrip-host" data-filmstrip-host><div class="filmstrip" data-filmstrip role="group" aria-label="Nearby Photos" hidden></div></div>
   <footer class="photo-review-controls" aria-label="Photo review">
-    <div class="photo-navigation" data-photo-navigation role="group" aria-label="Photo navigation"><button type="button" class="quiet" data-dock-previous disabled>Previous</button><p class="photo-position" data-position>0 / 0</p><button type="button" class="quiet" data-dock-next disabled>Next</button><button type="button" class="selection-badge" data-selection aria-controls="photo-tools-panel" aria-expanded="false" aria-label="Selection State: Unflagged">Unflagged</button><span data-rating>No Rating</span></div>
+    <div class="photo-navigation" data-photo-navigation role="group" aria-label="Photo navigation"><button type="button" class="quiet" data-dock-previous disabled>Previous</button><p class="photo-position" data-position>0 / 0</p><button type="button" class="quiet" data-dock-next disabled>Next</button></div>
     <div class="quick-action-dock" data-quick-action-dock role="group" aria-label="Photo actions">
       <button type="button" class="pick-button" data-dock-pick>Pick</button>
       <button type="button" class="reject-button" data-dock-reject>Reject</button>

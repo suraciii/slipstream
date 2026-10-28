@@ -58,6 +58,7 @@ test("workspace preparation responses never take over another Photo", async () =
       isAlive: () => true,
       isCurrentPhoto: (id) => selected === id,
       currentPhoto: () => undefined,
+      libraryPhase: () => "idle",
     },
     surfaces,
   );

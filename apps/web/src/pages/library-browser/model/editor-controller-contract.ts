@@ -13,6 +13,9 @@ export type EditorViewPort = Readonly<{
   presentEditorPreview: (url: string) => void;
   clearEditorPreview: () => void;
 }>;
+export type EditorViewDependencies = Readonly<{
+  libraryPhase: () => string;
+}>;
 export type EditorFilmSurface = Readonly<{
   readonly element: HTMLElement;
   open(file: WorkspaceFilmFile): Promise<void>;
@@ -40,7 +43,8 @@ export type EditorControllerDependencies = Readonly<{
   isAlive: () => boolean;
   isCurrentPhoto: (photoId: string) => boolean;
   currentPhoto: () => PhotoSummary | undefined;
-  libraryPhase?: () => string;
+  /** The Library's own progress, an independent fact of this Photo. */
+  libraryPhase: () => string;
 }>;
 export type EditorController = Readonly<{
   open(photoId: string): void;

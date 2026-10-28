@@ -26,6 +26,7 @@ const destination = (
 ): NavigationDestination => ({
   source: "library",
   selection: "all",
+  conditions: {},
   ...values,
 });
 
@@ -46,6 +47,7 @@ const snapshot = (
       source: { kind: "library" },
       order: "source-default",
       selection: "all",
+      conditions: {},
       token: "token",
       authority: held,
       total: ids.length,
@@ -82,14 +84,16 @@ describe("live destination", () => {
         source: { kind: "library" },
         order: "source-default",
         selection: "all",
+        conditions: {},
       }),
-    ).toEqual({ source: "library", selection: "all" });
+    ).toEqual({ source: "library", selection: "all", conditions: {} });
     expect(
       liveDestination(
         {
           source: { kind: "album", album: { id: photoId("a"), name: "Picks" } },
           order: "capture-time-desc",
           selection: "rejected",
+          conditions: {},
         },
         photoId("p"),
       ),
@@ -98,6 +102,7 @@ describe("live destination", () => {
       albumId: photoId("a"),
       photoId: photoId("p"),
       order: "capture-time-desc",
+      conditions: {},
       selection: "rejected",
     });
     expect(
@@ -109,11 +114,13 @@ describe("live destination", () => {
         },
         order: "source-default",
         selection: "unflagged",
+        conditions: {},
       }),
     ).toEqual({
       source: "folder",
       folderPath: "shoot",
       selection: "unflagged",
+      conditions: {},
     });
   });
 
@@ -123,6 +130,7 @@ describe("live destination", () => {
         source: { kind: "library" },
         order: "capture-time-asc",
         selection: "all",
+        conditions: {},
       }).order,
     ).toBe("capture-time-asc");
   });

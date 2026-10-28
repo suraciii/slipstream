@@ -21,12 +21,20 @@
   --muted: #aeb4bd;
   --subtle: #9198a3;
   --focus: #78b7ff;
+  --focus-bg: #172331;
   --selected: #66d08a;
   --selected-bg: #173b27;
+  --picked: #dff8e6;
+  --picked-bg: #1f6c3b;
   --rejected: #ff9388;
   --rejected-bg: #46231f;
+  --rejected-strong: #ffe5e2;
+  --rejected-strong-bg: #84382f;
   --rating: #f0bd66;
   --warning: #f2c778;
+  --connected: #66d08a;
+  --sunken: #050607;
+  --scrim: rgb(255 255 255 / 18%);
 }
 
 * {

@@ -117,7 +117,7 @@ impl DerivativeTarget {
     pub const fn long_edge(self) -> u32 {
         match self {
             Self::Thumbnail512 => 512,
-            Self::Review2560 => 2560,
+            Self::Review2560 => crate::REVIEW_LONG_EDGE,
             Self::DevelopmentPreview1224 => DEVELOPMENT_PREVIEW_LONG_EDGE,
         }
     }

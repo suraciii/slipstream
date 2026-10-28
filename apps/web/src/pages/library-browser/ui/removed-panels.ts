@@ -387,6 +387,11 @@ export function createRemovedPanels({
       model.itemCount === 0
         ? "None of the selected Trash items can be deleted."
         : `${formatPhotoCount(model.itemCount)} selected for permanent deletion · ${model.totalBytes.toLocaleString()} logical bytes.`;
+    // The confirmation names exactly the captured set: every item the review
+    // admitted, and nothing else. An excluded item never appears here.
+    trashReviewConfirm.textContent = model.deleting
+      ? "Permanently deleting…"
+      : model.confirmLabel;
     trashReviewAlbums.textContent =
       model.albumCount === 0
         ? "No Album is affected."
@@ -469,13 +474,19 @@ export function createRemovedPanels({
       row.className = "removed-item";
       const pending = item.pendingVerificationOperationId !== null;
       if (pending) row.dataset.trashPendingItem = "true";
+      if (item.excluded) row.dataset.trashExcludedItem = "true";
       const retainedBusy =
         model.pending || model.deleting || model.outcomeBusy !== undefined;
       const select = document.createElement("input");
       select.type = "checkbox";
       select.checked = item.selected;
       select.ariaLabel = `Select ${item.filename}`;
-      select.disabled = model.pending || model.deleting || pending;
+      select.disabled =
+        model.pending ||
+        model.deleting ||
+        model.restoringSelection ||
+        Boolean(model.restoreUnconfirmed) ||
+        pending;
       select.addEventListener("change", () =>
         send({
           kind: "removed-toggle",
@@ -527,6 +538,7 @@ export function createRemovedPanels({
         model.pending ||
         model.deleting ||
         model.restoringSelection ||
+        model.restoreUnconfirmed ||
         restoring ||
         pending;
       restore.addEventListener("click", () =>
@@ -569,6 +581,16 @@ export function createRemovedPanels({
         note.append(marker, check, resume);
         row.append(note);
       }
+      if (item.excluded) {
+        // An excluded item was deliberately left out of the selection, so the
+        // row says so: it is never named as reviewed, counted, or deleted.
+        const excluded = document.createElement("p");
+        excluded.className = "removed-excluded";
+        excluded.dataset.trashExcluded = "";
+        excluded.textContent =
+          "Excluded — this item is not part of the selection and will not be deleted.";
+        row.append(excluded);
+      }
       const binding: GridThumbnailBinding = {
         photoId: item.photoId,
         preview: item.preview,
@@ -598,13 +620,25 @@ export function createRemovedPanels({
     removedList.replaceChildren(...rows.map((entry) => entry.row));
     removedSelectionCount.textContent = !ready
       ? ""
-      : model.selectionCount === 0
-        ? "Nothing selected."
-        : `${model.selectionCount.toLocaleString()} selected.`;
+      : model.allSelected
+        ? "All current Trash items, except exclusions."
+        : model.selectionCount === 0
+          ? "Nothing selected."
+          : `${model.selectionCount.toLocaleString()} selected.`;
     removedSelectAll.disabled =
-      !ready || model.pending || model.deleting || model.total === 0;
+      !ready ||
+      model.pending ||
+      model.deleting ||
+      model.restoringSelection ||
+      Boolean(model.restoreUnconfirmed) ||
+      model.total === 0;
     removedClearSelection.disabled =
-      !ready || model.pending || model.deleting || model.selectionCount === 0;
+      !ready ||
+      model.pending ||
+      model.deleting ||
+      model.restoringSelection ||
+      Boolean(model.restoreUnconfirmed) ||
+      model.selectionCount === 0;
     removedRestoreSelection.disabled =
       !ready ||
       model.pending ||
@@ -613,12 +647,15 @@ export function createRemovedPanels({
       !model.canRestore;
     removedRestoreSelection.textContent = model.restoringSelection
       ? "Restoring selected…"
-      : "Restore selected";
+      : model.restoreUnconfirmed
+        ? "Retry Restore result"
+        : "Restore selected";
     removedDelete.disabled =
       !ready ||
       model.pending ||
       model.deleting ||
       model.restoringSelection ||
+      model.restoreUnconfirmed ||
       !model.canDelete;
     removedDelete.textContent = "Review permanent deletion";
     const shownEnd = shown >= model.total;
@@ -630,7 +667,12 @@ export function createRemovedPanels({
     removedRetry.disabled = model.pending;
     removedUndo.hidden =
       !ready || model.undo === undefined || model.undo.removed === 0;
-    removedUndo.disabled = !ready || model.pending || model.deleting;
+    removedUndo.disabled =
+      !ready ||
+      model.pending ||
+      model.deleting ||
+      model.restoringSelection ||
+      Boolean(model.restoreUnconfirmed);
     removedUndo.textContent =
       model.undo === undefined
         ? "Undo the last removal"

@@ -602,16 +602,25 @@ pub(crate) fn confirmed_removal_result(
 pub(crate) fn confirmed_restore_result(
     identity: &MutationIdentity,
     operation_id: &str,
-    prepared: &PreparedRestore,
+    prepared: Option<&PreparedRestore>,
+    excluded: &[String],
     result: PhotoRestoreWire,
 ) -> Result<Value, CommandFailure> {
-    if result.operation_id != operation_id || result.results.len() != prepared.markers.len() {
+    if result.operation_id != operation_id
+        || prepared.is_some_and(|prepared| result.results.len() != prepared.markers.len())
+    {
         return Err(CommandFailure::unknown(identity));
     }
-    let submitted = prepared
-        .markers
+    let submitted = prepared.map(|prepared| {
+        prepared
+            .markers
+            .iter()
+            .map(|marker| marker.photo_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+    });
+    let excluded = excluded
         .iter()
-        .map(|marker| marker.photo_id.as_str())
+        .map(String::as_str)
         .collect::<std::collections::BTreeSet<_>>();
     let mut counts = PhotoRestoreCountsWire {
         restored: 0,
@@ -622,7 +631,13 @@ pub(crate) fn confirmed_restore_result(
     let mut seen = std::collections::BTreeSet::new();
     let mut items = Vec::with_capacity(result.results.len());
     for item in result.results {
-        if !submitted.contains(item.photo_id.as_str()) || !seen.insert(item.photo_id.clone()) {
+        if item.photo_id.is_empty()
+            || submitted
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(item.photo_id.as_str()))
+            || excluded.contains(item.photo_id.as_str())
+            || !seen.insert(item.photo_id.clone())
+        {
             return Err(CommandFailure::unknown(identity));
         }
         match item.outcome.as_str() {
@@ -637,7 +652,9 @@ pub(crate) fn confirmed_restore_result(
             "outcome": item.outcome,
         }));
     }
-    if seen.len() != submitted.len()
+    if submitted
+        .as_ref()
+        .is_some_and(|ids| seen.len() != ids.len())
         || counts.restored != result.counts.restored
         || counts.already_active != result.counts.already_active
         || counts.changed_elsewhere != result.counts.changed_elsewhere

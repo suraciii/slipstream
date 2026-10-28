@@ -1904,6 +1904,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "slipstream-preview-capability",
  "slipstream-server",
  "time",
  "tokio",
@@ -1946,8 +1947,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "slipstream-preview-capability",
  "tokio",
 ]
+
+[[package]]
+name = "slipstream-preview-capability"
+version = "0.0.0"
 
 [[package]]
 name = "slipstream-processing"

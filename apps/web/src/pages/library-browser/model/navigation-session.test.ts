@@ -9,11 +9,13 @@ const album: NavigationDestination = {
   source: "album",
   albumId: "00000000-0000-4000-8000-000000000001",
   selection: "rejected",
+  conditions: {},
 };
 const folder: NavigationDestination = {
   source: "folder",
   folderPath: "Trip",
   selection: "all",
+  conditions: {},
 };
 
 test("a newer complete destination invalidates older same-source establishment", () => {

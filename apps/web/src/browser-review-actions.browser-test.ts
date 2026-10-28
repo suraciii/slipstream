@@ -13,9 +13,128 @@ import {
   openPhotoToolsView,
   startReview,
   waitForLoadedReviewImage,
+  waitForGridFrame,
+  zoomLevel,
 } from "./browser-test-support/surfaces.js";
+import {
+  expectControlsAboveSafeViewport,
+  expectNoTextRangeCollision,
+} from "./browser-test-support/review-geometry.js";
 
 setupBrowserSmoke();
+
+test("Library status opens in Photo View without disturbing the review or Grid anchor", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 40);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 40 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const viewport = page.locator("[data-grid-viewport]");
+  await viewport.focus();
+  await page.keyboard.press("ArrowRight");
+  for (let step = 0; step < 4; step += 1)
+    await page.keyboard.press("ArrowDown");
+  const focusedIndex = await page
+    .locator('.photo-cell[tabindex="0"]')
+    .getAttribute("data-photo-index");
+  if (focusedIndex === null) throw new Error("Focused Photo has no index");
+  const focusedPhoto = page.locator(`[data-photo-index="${focusedIndex}"]`);
+  await expect(focusedPhoto).toBeFocused();
+  expect(
+    await viewport.evaluate((element) => element.scrollTop),
+  ).toBeGreaterThan(0);
+  const gridAnchor = await viewport.evaluate((element) => {
+    const top = element.getBoundingClientRect().top;
+    const cell = Array.from(
+      element.querySelectorAll<HTMLElement>(".photo-cell"),
+    ).find((candidate) => candidate.getBoundingClientRect().bottom > top);
+    if (!cell || !cell.dataset.photoIndex)
+      throw new Error("Visible Grid anchor is missing");
+    return {
+      index: cell.dataset.photoIndex,
+      offset: cell.getBoundingClientRect().top - top,
+    };
+  });
+  await page.keyboard.press("Enter");
+  await waitForLoadedReviewImage(page);
+
+  const image = page.locator("[data-stage] img");
+  const box = await image.boundingBox();
+  if (!box) throw new Error("Rendered image has no geometry");
+  const initialZoom = await zoomLevel(page);
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.wheel(0, -120);
+  await expect(page.locator("[data-preview]")).toHaveAttribute(
+    "data-zoom-state",
+    "manual",
+  );
+  const zoom = await zoomLevel(page);
+  expect(zoom).toBeGreaterThan(initialZoom);
+  const photo = await image.getAttribute("src");
+  const position = await page.locator("[data-position]").textContent();
+  const navigation = await page.evaluate(() => ({
+    url: location.href,
+    length: history.length,
+    state: history.state as unknown,
+  }));
+
+  // Keep the real Library and its publication, but make the monitor report a
+  // failed check so the shared notice is available while reviewing this Photo.
+  await page.route("**/api/status", async (route) => {
+    const response = await route.fetch();
+    const status = (await response.json()) as Record<string, unknown>;
+    await route.fulfill({ response, json: { ...status, state: "failed" } });
+  });
+  const entry = page.locator("[data-library-status-entry]");
+  const toggle = entry.locator("[data-library-status-toggle]");
+  const notice = entry.locator("[data-library-status-notice]");
+  await expect(entry).toBeVisible();
+  await expect(toggle).toHaveAccessibleName("Library status");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(notice).toBeHidden();
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(notice).toBeVisible();
+  await expect(notice).toContainText("Library check failed");
+  await expect(page.locator("[data-review]")).toBeVisible();
+  await expect(image).toHaveAttribute("src", photo!);
+  await expect(page.locator("[data-position]")).toHaveText(position!);
+  await expect(page.locator("[data-preview]")).toHaveAttribute(
+    "data-zoom-state",
+    "manual",
+  );
+  expect(await zoomLevel(page)).toBe(zoom);
+  expect(
+    await page.evaluate(() => ({
+      url: location.href,
+      length: history.length,
+      state: history.state as unknown,
+    })),
+  ).toEqual(navigation);
+
+  await page.getByRole("button", { name: "Back to Grid", exact: true }).click();
+  await expect(focusedPhoto).toBeFocused();
+  const anchorCell = page.locator(`[data-photo-index="${gridAnchor.index}"]`);
+  await expect(anchorCell).toBeVisible();
+  await expect
+    .poll(async () => {
+      const offset = await anchorCell.evaluate((cell) => {
+        const viewport = cell.closest<HTMLElement>("[data-grid-viewport]");
+        if (!viewport) throw new Error("Grid viewport is missing");
+        return (
+          cell.getBoundingClientRect().top -
+          viewport.getBoundingClientRect().top
+        );
+      });
+      return Math.abs(offset - gridAnchor.offset);
+    })
+    .toBeLessThan(3);
+});
 
 test("review strip and Photo tools share persisted decisions and Undo", async ({
   page,
@@ -59,8 +178,8 @@ test("Photo write failure stays visible in tools and after returning to review",
   const { base, root } = await fixture();
   await writePhotos(root, 1);
   const running = await server(base, root);
-  await page.setViewportSize({ width: 375, height: 667 });
   await startReview(page, running.url, "All Photos");
+  await page.setViewportSize({ width: 375, height: 667 });
   await waitForLoadedReviewImage(page);
   await page.route("**/api/photos/*/state", (route) =>
     route.fulfill({
@@ -208,4 +327,40 @@ test("review controls preserve Preview space and reachable targets across rotati
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
   ).toBe(true);
+});
+
+test("390 by 844 keeps every primary control above the safe viewport beside a 650px Preview", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
+  await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+
+  const preview = (await page.locator("[data-preview]").boundingBox())!;
+  expect(preview.height).toBeGreaterThanOrEqual(650);
+  await expectControlsAboveSafeViewport(page, 844);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+});
+
+test("844 by 390 leaves no text range collision in the review strip", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await page.setViewportSize({ width: 844, height: 390 });
+  await waitForLoadedReviewImage(page);
+  await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+  await expectNoTextRangeCollision(page);
+  await expectControlsAboveSafeViewport(page, 390);
 });

@@ -236,8 +236,34 @@ impl Application {
         mutation: slipstream_core::ExplicitPhotoRestoreMutation,
     ) -> Result<ExplicitPhotoRestoreResponse, ServerError> {
         let _publication = self.shared.publication.lock().await;
+        let replay = self
+            .library
+            .photo_restore_operation(mutation.operation_id.clone())
+            .await?
+            .is_some();
         let result = self.library.restore_photos_explicit(mutation).await?;
-        self.shared.patch_photo_removals(&result.restored, false);
+        if !replay {
+            self.shared.patch_photo_removals(&result.restored, false);
+        }
+        Ok(explicit_photo_restore_response(result))
+    }
+
+    /// Applies one fixed admission-time Trash selection.
+    pub async fn restore_trash(
+        &self,
+        operation_id: String,
+        selection: slipstream_core::PermanentDeletionSelection,
+    ) -> Result<ExplicitPhotoRestoreResponse, ServerError> {
+        let _publication = self.shared.publication.lock().await;
+        let replay = self
+            .library
+            .photo_restore_operation(operation_id.clone())
+            .await?
+            .is_some();
+        let result = self.library.restore_trash(operation_id, selection).await?;
+        if !replay {
+            self.shared.patch_photo_removals(&result.restored, false);
+        }
         Ok(explicit_photo_restore_response(result))
     }
 

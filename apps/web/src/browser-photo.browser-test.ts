@@ -29,6 +29,11 @@ import {
   filmstripIndices,
   waitForFilmstripImages,
 } from "./browser-test-support/surfaces.js";
+import {
+  expectControlsAboveSafeViewport,
+  expectDirectionLabelsMeetRestingContrast,
+  expectNoTextRangeCollision,
+} from "./browser-test-support/review-geometry.js";
 
 setupBrowserSmoke();
 
@@ -50,14 +55,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
     page.getByRole("button", { name: "More", exact: true }),
   ).toBeVisible();
   await openPhotoToolsView(page, "details");
-  await expect(
-    page.getByText("JPEG · limited detail", { exact: true }),
-  ).toBeVisible();
-  await expect(page.locator("[data-source]")).toHaveAttribute(
-    "title",
-    "Limited by camera Preview resolution",
-  );
-  await expect(page.locator("[data-detail-limit]")).toBeVisible();
+  await expect(page.locator("[data-source]")).toContainText("limited detail");
   await openPhotoToolsView(page, "zoom");
   for (const name of [
     "Fit Window",
@@ -830,4 +828,74 @@ test("Photo View shows a bounded filmstrip of neighbors and navigates through it
     "aria-current",
     "true",
   );
+});
+test("390 by 844 keeps every primary control above the safe viewport beside a 650px Preview", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
+  await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+
+  // The Preview region keeps its reserved 650px floor, which is the space the
+  // review controls must fit beside rather than push out of the viewport.
+  const preview = (await page.locator("[data-preview]").boundingBox())!;
+  expect(preview.height).toBeGreaterThanOrEqual(650);
+  await expectControlsAboveSafeViewport(page, 844);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+
+  // The Selection State badge is presented with the Photo identity, and its
+  // Photo tools invocation is still wired: activating it opens the sheet.
+  const identity = await page
+    .locator(".photo-identity")
+    .evaluate((node) =>
+      node.contains(document.querySelector("[data-selection]")),
+    );
+  expect(identity).toBe(true);
+  await page.locator("[data-selection]").click();
+  await expect(page.locator("[data-photo-tools]")).toBeVisible();
+  await closePhotoTools(page);
+});
+
+test("844 by 390 leaves no text range collision in the review strip", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await page.setViewportSize({ width: 844, height: 390 });
+  await waitForLoadedReviewImage(page);
+  await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+  await expectNoTextRangeCollision(page);
+
+  // Consolidation moves content, so the Previous label keeps its full text and
+  // its 44px target rather than being clipped to fit.
+  await expect(page.locator("[data-dock-previous]")).toHaveText("Previous");
+  await expect(page.locator("[data-dock-next]")).toHaveText("Next");
+  for (const selector of ["[data-dock-previous]", "[data-dock-next]"]) {
+    const box = (await page.locator(selector).boundingBox())!;
+    expect(box.width).toBeGreaterThanOrEqual(44);
+    expect(box.height).toBeGreaterThanOrEqual(44);
+  }
+  await expectControlsAboveSafeViewport(page, 390);
+});
+
+test("gesture direction labels meet resting text contrast at 4.5:1", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  await expectDirectionLabelsMeetRestingContrast(page);
 });

@@ -17,6 +17,7 @@ const deferred = <T>() => Promise.withResolvers<T>();
 const destination = (photoId: string): NavigationDestination => ({
   source: "library",
   selection: "all",
+  conditions: {},
   photoId,
 });
 
@@ -200,7 +201,9 @@ test.each(["failed", "missing", "superseded"] as const)(
       expect(await pending.result).toBe(kind === "missing");
       expect(f.opened).toEqual([]);
       expect(f.replacements).toEqual(
-        kind === "missing" ? [{ source: "library", selection: "all" }] : [],
+        kind === "missing"
+          ? [{ source: "library", selection: "all", conditions: {} }]
+          : [],
       );
       expect(f.session.takeRetry()).toEqual(
         kind === "failed" ? destination("photo-a") : undefined,

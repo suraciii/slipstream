@@ -25,9 +25,26 @@ export type NavigationSelectionFilter =
   | "picked"
   | "rejected";
 
+/// The Original File kind an address may request. A RAW Photo and a
+/// same-basename JPEG Photo stay independent Photos under any kind condition.
+export type NavigationOriginalKind = "raw" | "jpeg";
+
+/// The defined Photo fact conditions an address may request. Omission of one
+/// field applies no condition for that fact, and different facts combine with
+/// AND. The same facts carry the same meaning as the CLI query contract, so
+/// a Web link never names a condition the CLI cannot express.
+export type NavigationFilterConditions = Readonly<{
+  ratingMinimum?: number;
+  ratingMaximum?: number;
+  kind?: NavigationOriginalKind;
+  available?: boolean;
+  capturedFrom?: string;
+  capturedBefore?: string;
+}>;
+
 /// One validated destination: a source reference, view order, Selection State
-/// filter, and an optional stable Photo identity. Absence of `photoId` means
-/// Grid.
+/// filter, defined fact conditions, and an optional stable Photo identity.
+/// Absence of `photoId` means Grid.
 export type NavigationDestination = Readonly<{
   source: NavigationSourceKind;
   folderPath?: string;
@@ -35,6 +52,7 @@ export type NavigationDestination = Readonly<{
   photoId?: string;
   order?: NavigationViewOrder;
   selection: NavigationSelectionFilter;
+  conditions: NavigationFilterConditions;
 }>;
 
 /// The recognized parameters in their canonical address order.
@@ -45,6 +63,12 @@ const PARAMETER_ORDER = [
   "photoId",
   "order",
   "selection",
+  "rating-min",
+  "rating-max",
+  "kind",
+  "available",
+  "captured-from",
+  "captured-before",
 ] as const;
 
 const SELECTION_FILTERS: ReadonlyArray<NavigationSelectionFilter> = [
@@ -53,6 +77,8 @@ const SELECTION_FILTERS: ReadonlyArray<NavigationSelectionFilter> = [
   "picked",
   "rejected",
 ];
+
+const ORIGINAL_KINDS: ReadonlyArray<NavigationOriginalKind> = ["raw", "jpeg"];
 
 /// Mirrors the server's identifier validator: 36 to 64 bytes of lowercase
 /// hexadecimal or `-`.
@@ -91,6 +117,48 @@ const validOrder = (
   value === "capture-time-desc" ||
   (value === "album-order" && source === "album");
 
+/// Mirrors the server's Capture Time boundary validator: the exact
+/// camera-local `YYYY-MM-DDTHH:MM:SS` shape, with a real calendar date and a
+/// time of day. No timezone or offset is accepted.
+const CAPTURE_TIME_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/;
+const validCaptureTimeBound = (value: string): boolean => {
+  const parts = CAPTURE_TIME_PATTERN.exec(value);
+  if (!parts) return false;
+  const [, year, month, day, hour, minute, second] = parts;
+  const monthNumber = Number(month);
+  const dayNumber = Number(day);
+  const leap =
+    Number(year) % 4 === 0 &&
+    (Number(year) % 100 !== 0 || Number(year) % 400 === 0);
+  const days =
+    monthNumber === 2
+      ? leap
+        ? 29
+        : 28
+      : [4, 6, 9, 11].includes(monthNumber)
+        ? 30
+        : 31;
+  return (
+    Number(year) > 0 &&
+    monthNumber >= 1 &&
+    monthNumber <= 12 &&
+    dayNumber >= 1 &&
+    dayNumber <= days &&
+    Number(hour) <= 23 &&
+    Number(minute) <= 59 &&
+    Number(second) <= 59
+  );
+};
+
+/// One Rating bound: an integer from 0 through 5. Rating 0 means No Rating and
+/// is a real bound, so `0` is never treated as a missing value.
+const validRatingBound = (value: string): number | undefined => {
+  if (!/^\d+$/.test(value)) return undefined;
+  const rating = Number(value);
+  return rating <= 5 ? rating : undefined;
+};
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
@@ -100,6 +168,57 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 export type AddressDecoding =
   | Readonly<{ kind: "destination"; destination: NavigationDestination }>
   | Readonly<{ kind: "invalid" }>;
+
+/// Reads the optional fact conditions of one address. Every value is checked
+/// against its own fact: an out-of-range or inverted Rating range, an unknown
+/// `kind` or `available` value, and a malformed or reversed Capture Time bound
+/// make the whole address invalid. An omitted parameter applies no condition
+/// for that fact.
+const readFilterConditions = (
+  present: ReadonlyMap<string, string>,
+): NavigationFilterConditions | undefined => {
+  const ratingMinimum = present.get("rating-min");
+  const ratingMaximum = present.get("rating-max");
+  const minimum =
+    ratingMinimum === undefined ? undefined : validRatingBound(ratingMinimum);
+  const maximum =
+    ratingMaximum === undefined ? undefined : validRatingBound(ratingMaximum);
+  if (ratingMinimum !== undefined && minimum === undefined) return undefined;
+  if (ratingMaximum !== undefined && maximum === undefined) return undefined;
+  if (minimum !== undefined && maximum !== undefined && minimum > maximum)
+    return undefined;
+  const kind = present.get("kind");
+  if (
+    kind !== undefined &&
+    !ORIGINAL_KINDS.includes(kind as NavigationOriginalKind)
+  )
+    return undefined;
+  const available = present.get("available");
+  if (available !== undefined && available !== "true" && available !== "false")
+    return undefined;
+  const capturedFrom = present.get("captured-from");
+  if (capturedFrom !== undefined && !validCaptureTimeBound(capturedFrom))
+    return undefined;
+  const capturedBefore = present.get("captured-before");
+  if (capturedBefore !== undefined && !validCaptureTimeBound(capturedBefore))
+    return undefined;
+  // The lower bound is inclusive and the upper bound is exclusive, so equal
+  // bounds name an empty range and are reversed.
+  if (
+    capturedFrom !== undefined &&
+    capturedBefore !== undefined &&
+    capturedFrom >= capturedBefore
+  )
+    return undefined;
+  return {
+    ...(minimum === undefined ? {} : { ratingMinimum: minimum }),
+    ...(maximum === undefined ? {} : { ratingMaximum: maximum }),
+    ...(kind === undefined ? {} : { kind: kind as NavigationOriginalKind }),
+    ...(available === undefined ? {} : { available: available === "true" }),
+    ...(capturedFrom === undefined ? {} : { capturedFrom }),
+    ...(capturedBefore === undefined ? {} : { capturedBefore }),
+  };
+};
 
 /// Decodes one query string with URL and URLSearchParams, so every value is
 /// decoded exactly once. A duplicate recognized parameter, an empty value for
@@ -151,6 +270,11 @@ export function decodeAddress(search: string): AddressDecoding {
   )
     return { kind: "invalid" };
   const filter = (selection as NavigationSelectionFilter | undefined) ?? "all";
+  // Each optional filter parameter is additionally invalid when its value
+  // fails its own fact validation, and an inverted Rating range or a reversed
+  // Capture Time range is invalid as a pair.
+  const conditions = readFilterConditions(present);
+  if (!conditions) return { kind: "invalid" };
   const photo = photoId !== undefined ? { photoId } : {};
   const viewOrder = order !== undefined ? { order } : {};
   return {
@@ -163,6 +287,7 @@ export function decodeAddress(search: string): AddressDecoding {
             ...photo,
             ...viewOrder,
             selection: filter,
+            conditions,
           }
         : kind === "album"
           ? {
@@ -171,8 +296,15 @@ export function decodeAddress(search: string): AddressDecoding {
               ...photo,
               ...viewOrder,
               selection: filter,
+              conditions,
             }
-          : { source: "library", ...photo, ...viewOrder, selection: filter },
+          : {
+              source: "library",
+              ...photo,
+              ...viewOrder,
+              selection: filter,
+              conditions,
+            },
   };
 }
 
@@ -197,6 +329,21 @@ export function encodeAddress(destination: NavigationDestination): string {
   if (!omitsDefaultOrder(destination)) params.set("order", destination.order!);
   if (destination.selection !== "all")
     params.set("selection", destination.selection);
+  // The fact conditions follow `selection` in the canonical order. A condition
+  // the Photographer did not set is omitted, so an address never names a
+  // restriction the open view does not apply.
+  const conditions = destination.conditions;
+  if (conditions.ratingMinimum !== undefined)
+    params.set("rating-min", String(conditions.ratingMinimum));
+  if (conditions.ratingMaximum !== undefined)
+    params.set("rating-max", String(conditions.ratingMaximum));
+  if (conditions.kind !== undefined) params.set("kind", conditions.kind);
+  if (conditions.available !== undefined)
+    params.set("available", String(conditions.available));
+  if (conditions.capturedFrom !== undefined)
+    params.set("captured-from", conditions.capturedFrom);
+  if (conditions.capturedBefore !== undefined)
+    params.set("captured-before", conditions.capturedBefore);
   return params.toString();
 }
 
@@ -214,6 +361,7 @@ export function addressFor(
 export const allPhotosDestination: NavigationDestination = Object.freeze({
   source: "library",
   selection: "all",
+  conditions: {},
 });
 
 /// The Grid destination of one source: no Photo identity, so the address
@@ -229,9 +377,30 @@ export const gridDestination = (
     ...(destination.source === "album" ? { albumId: destination.albumId } : {}),
     ...(destination.order ? { order: destination.order } : {}),
     selection: destination.selection,
+    conditions: destination.conditions,
   };
   return grid;
 };
+
+/// True when two condition sets name the same restrictions. An omitted
+/// condition and an explicitly default one are the same view, so a traversal
+/// reuses the live Snapshot instead of reopening the source.
+export const sameConditions = (
+  left: NavigationFilterConditions,
+  right: NavigationFilterConditions,
+): boolean =>
+  sameBound(left.ratingMinimum, right.ratingMinimum) &&
+  sameBound(left.ratingMaximum, right.ratingMaximum) &&
+  sameBound(left.kind, right.kind) &&
+  sameBound(left.available, right.available) &&
+  sameBound(left.capturedFrom, right.capturedFrom) &&
+  sameBound(left.capturedBefore, right.capturedBefore);
+
+/// One optional condition value compared with an absent key and an explicit
+/// `undefined` treated alike, because an omitted condition and an explicitly
+/// default one are the same view.
+const sameBound = <T>(left: T | undefined, right: T | undefined): boolean =>
+  (left ?? undefined) === (right ?? undefined);
 
 /// True when two destinations name the same source, order, and filter, so a
 /// traversal can reuse the live Snapshot instead of reopening the source.
@@ -243,7 +412,8 @@ export const sameSourceView = (
   left.folderPath === right.folderPath &&
   left.albumId === right.albumId &&
   left.order === right.order &&
-  left.selection === right.selection;
+  left.selection === right.selection &&
+  sameConditions(left.conditions, right.conditions);
 
 /// The namespace that holds one entry's bounded restoration metadata.
 export const NAVIGATION_STATE_NAMESPACE = "slipstream";

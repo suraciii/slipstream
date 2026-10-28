@@ -17,7 +17,10 @@ import type {
   SourceGridSource,
   SourcePositionOutcome,
 } from "./source-grid-owner.js";
-import type { SelectionFilter } from "../api/contracts.js";
+import type {
+  BrowseFilterConditions,
+  SelectionFilter,
+} from "../api/contracts.js";
 import type { SourceViewOrder } from "../api/source-grid.js";
 
 /// The open source's identity as an address names it.
@@ -25,6 +28,7 @@ export interface LiveSourceView {
   readonly source: SourceGridSource;
   readonly order: SourceViewOrder;
   readonly selection: SelectionFilter;
+  readonly conditions: BrowseFilterConditions;
 }
 
 /// What the traversal reuse rule reads: the open source's identity plus the
@@ -63,6 +67,9 @@ export const liveDestination = (
     ...(photoId ? { photoId } : {}),
     ...(order ? { order } : {}),
     selection: live.selection,
+    // The live conditions are the ones the open Snapshot was created with, so
+    // an address never claims a condition the open view does not apply.
+    conditions: live.conditions,
   };
 };
 

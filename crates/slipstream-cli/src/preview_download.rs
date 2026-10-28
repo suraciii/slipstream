@@ -317,7 +317,12 @@ fn admitted_metadata(
         || metadata.source_revision.len() > crate::MAXIMUM_SOURCE_REVISION_BYTES
         || metadata.width == 0
         || metadata.height == 0
-        || metadata.detail_limited != (metadata.width.max(metadata.height) < 2560)
+        || metadata.detail_limited
+            != slipstream_preview_capability::PreviewCapability::from_dimensions(
+                metadata.width,
+                metadata.height,
+            )
+            .is_detail_limited()
     {
         return Err(CommandFailure::transport(OPERATION));
     }
@@ -567,6 +572,40 @@ pub(super) fn complete_png(bytes: &[u8], width: u32, height: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admitted_preview_requires_capability_matching_delivered_dimensions() {
+        let client = ServiceClient::new(
+            "https://example.test/".parse().unwrap(),
+            "token".into(),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        for (size, width, height, limited) in [
+            (PreviewSize::Review, 2559, 1700, true),
+            (PreviewSize::Review, 1700, 2560, false),
+            (PreviewSize::Thumbnail, 512, 341, true),
+        ] {
+            let mut metadata = PreviewMetadata {
+                photo_id: "photo".into(),
+                state: "ready".into(),
+                source: "jpeg-original".into(),
+                source_revision: "revision".into(),
+                width,
+                height,
+                detail_limited: limited,
+                url: format!(
+                    "/api/private/derivatives/photo/{}/{}.jpg",
+                    size.derivative(),
+                    "a".repeat(64)
+                ),
+                web_path: "/?photoId=photo".into(),
+            };
+            assert!(admitted_metadata(&metadata, "photo", size, &client).is_ok());
+            metadata.detail_limited = !limited;
+            assert!(admitted_metadata(&metadata, "photo", size, &client).is_err());
+        }
+    }
 
     #[test]
     fn commit_state_redacts_token_and_invalid_utf8_is_refused_before_io() {

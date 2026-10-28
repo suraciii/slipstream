@@ -7,56 +7,38 @@
 
 import {
   fetchRemovedPhotos,
-  type RemovedPhotoItem,
+  restoreAllTrash,
   type RemovalFetch,
   type RestorationResult,
 } from "../api/removal.js";
 import { randomUuid } from "./browser-crypto.js";
 import {
-  boundTrashSelection,
-  confirmTrashLabel,
+  readPendingTrashRestore,
+  storePendingTrashRestore,
+} from "./trash-restore-storage.js";
+import {
   deleteTrash,
   fetchTrashOperation,
   partitionTrashOperation,
   planTrashReview,
   reviewTrash,
-  trashSelectAllNotice,
-  type TrashListingSelectionItem,
-  type TrashOutcomePartition,
+  trashAllSelection,
+  trashExclusionNotice,
+  type TrashExclusionSelection,
   type TrashReview,
-  type TrashReviewPlan,
 } from "../api/trash.js";
 import type { RemovalOwner } from "./removal-owner.js";
 import type {
   RemovedPanelViewModel,
   TrashReviewViewModel,
 } from "./removed-listing-contract.js";
-
-/// One bounded page of removed Photos the listing presented.
-type RemovedPageState = Readonly<{
-  start: number;
-  total: number;
-  operation: Readonly<{ operationId: string; removed: number }> | undefined;
-  items: ReadonlyArray<RemovedPhotoItem>;
-}>;
-
-/// The permanent-deletion review currently presented. It names the one
-/// operation id the confirmation may use; Cancel discards it and deletes
-/// nothing.
-type TrashReviewState = Readonly<{
-  operationId: string;
-  plan: TrashReviewPlan;
-  deleting: boolean;
-}>;
-
-/// The Trash deletion operation this listing confirmed or is recovering: its
-/// partition once a validated response named it, only its id while the
-/// response is lost. A lost response is never presented as proof of
-/// failure or success.
-type TrashOperationState = Readonly<{
-  operationId: string;
-  partition?: TrashOutcomePartition;
-}>;
+import {
+  removedPanelModel,
+  trashReviewModel,
+  type RemovedPageState,
+  type TrashOperationState,
+  type TrashReviewState,
+} from "./removed-listing-view-model.js";
 
 /// The page's half of the listing: the surfaces that present the models the
 /// owner computes, and the control update every settled state reaches. The
@@ -112,7 +94,8 @@ export interface RemovedListingOwner {
   turnPage(direction: -1 | 1): void;
   /// Repeats the last failed read of the listing.
   retry(): void;
-  selectAll(): Promise<void>;
+  /// Selects current Trash minus exclusions, scanning pages for pending items.
+  selectAll(): void;
   clearSelection(): void;
   /// Toggles one listed Photo's membership in the selection.
   toggle(photoId: string, selected: boolean): void;
@@ -182,9 +165,17 @@ export function createRemovedListingOwner(
   let removedPending = false;
   let removedRestoringId: string | undefined;
   let removedRestoringSelection = false;
+  let pendingRestore = readPendingTrashRestore();
   let removedMessage: string | undefined;
   const removedSelectedIds = new Set<string>();
   const removedSelectedMarkers = new Map<string, number>();
+  /// All mode is resolved by the server at review admission. Pending rows and
+  /// manually unchecked rows are excluded before that capture.
+  let removedAllSelected = false;
+  let removedExcludedIds: ReadonlySet<string> = new Set<string>();
+  let removedPendingIds: ReadonlySet<string> = new Set<string>();
+  let removedAllCount = 0;
+  let selectionAbort: AbortController | undefined;
   let removedSelectionPending = false;
   let removedDeleting = false;
   let trashReview: TrashReviewState | undefined;
@@ -193,113 +184,150 @@ export function createRemovedListingOwner(
   /// re-entered while it settles.
   let trashOutcomeBusy: "check" | "resume" | undefined;
 
-  const selectAllRemoved = async (): Promise<void> => {
+  /// Scan all pages for pending-verification rows, which must not be sent to
+  /// review. Refuse inconsistent pages instead of silently omitting rows.
+  const selectAllRemoved = async (refresh = false): Promise<boolean> => {
     if (
       removedPending ||
       removedSelectionPending ||
       removedDeleting ||
-      removedRestoringSelection
+      pendingRestore !== undefined ||
+      removedRestoringSelection ||
+      removedPage === undefined
     )
-      return;
+      return false;
+
+    const controller = new AbortController();
+    selectionAbort = controller;
     removedSelectionPending = true;
     removedMessage = undefined;
-    const controller = new AbortController();
-    removedAbort?.abort();
-    removedAbort = controller;
     renderRemovedPanel();
     present.controlsChanged();
-    let start = 0;
-    const captured: TrashListingSelectionItem[] = [];
-    let total = 0;
-    let reviewMaximum = 0;
-    let captureFailed = false;
-    try {
-      while (true) {
-        const result = await fetchRemovedPhotos(fetcher, {
-          start,
-          limit: REMOVED_PAGE_LIMIT,
-          signal: controller.signal,
-        });
-        if (controller.signal.aborted || removedAbort !== controller) return;
-        if (result.kind !== "ok") {
-          captureFailed = true;
+
+    const pendingIds = new Set<string>();
+    const seen = new Set<string>();
+    let total: number | undefined;
+    let maximum: number | undefined;
+    let failed = false;
+    for (
+      let start = 0;
+      total === undefined || start < total;
+      start += REMOVED_PAGE_LIMIT
+    ) {
+      const page =
+        !refresh && start === removedPage.start
+          ? { kind: "ok" as const, ...removedPage, photos: removedPage.items }
+          : await fetchRemovedPhotos(fetcher, {
+              start,
+              limit: REMOVED_PAGE_LIMIT,
+              signal: controller.signal,
+            });
+      if (controller.signal.aborted || selectionAbort !== controller)
+        return false;
+      if (page.kind !== "ok") {
+        failed = true;
+        break;
+      }
+      if (total === undefined) {
+        total = page.total;
+        maximum = page.reviewMaximum;
+      } else if (page.total !== total || page.reviewMaximum !== maximum) {
+        failed = true;
+        break;
+      }
+      for (const item of page.photos) {
+        if (seen.has(item.photo.id)) {
+          failed = true;
           break;
         }
-        total = result.total;
-        reviewMaximum = result.reviewMaximum;
-        for (const item of result.photos)
-          captured.push({
-            photoId: item.photo.id,
-            removedAtMs: item.removedAtMs,
-            pendingVerificationOperationId: item.pendingVerificationOperationId,
-          });
-        // The capture stops at the review maximum: the listing is
-        // newest-removal-first, so the captured prefix is the deterministic
-        // subset a review may cover.
-        if (
-          captured.length >= Math.min(total, reviewMaximum) ||
-          result.photos.length === 0
-        )
-          break;
-        start += result.photos.length;
+        seen.add(item.photo.id);
+        if (item.pendingVerificationOperationId !== null)
+          pendingIds.add(item.photo.id);
       }
-      if (captureFailed) {
-        // A partial capture is never presented as the complete selection:
-        // the selection is left unchanged and the failure is named.
-        removedMessage =
-          "Trash could not be read while selecting. The selection was not changed. Retry to continue.";
-        return;
-      }
-      const selection = boundTrashSelection(captured, total, reviewMaximum);
-      removedSelectedIds.clear();
-      removedSelectedMarkers.clear();
-      for (const marker of selection.markers) {
-        removedSelectedIds.add(marker.photoId);
-        removedSelectedMarkers.set(marker.photoId, marker.removedAtMs);
-      }
-      removedMessage = trashSelectAllNotice(selection, total, reviewMaximum);
-    } finally {
-      if (removedAbort === controller) removedAbort = undefined;
-      removedSelectionPending = false;
-      renderRemovedPanel();
-      present.controlsChanged();
+      if (failed) break;
     }
+    selectionAbort = undefined;
+    removedSelectionPending = false;
+    if (failed) {
+      removedMessage =
+        "Trash changed or could not be read while selecting. Reload and try again.";
+    } else {
+      if (!refresh) {
+        removedSelectedIds.clear();
+        removedSelectedMarkers.clear();
+        removedExcludedIds = new Set<string>();
+      }
+      removedPendingIds = pendingIds;
+      removedAllCount =
+        (total ?? 0) -
+        pendingIds.size -
+        [...removedExcludedIds].filter(
+          (id) => seen.has(id) && !pendingIds.has(id),
+        ).length;
+      removedAllSelected = true;
+    }
+    renderRemovedPanel();
+    present.controlsChanged();
+    return !failed;
   };
+
+  const trashExclusionSelection = (): TrashExclusionSelection => ({
+    excludedPhotoIds: [...removedExcludedIds],
+    reviewMaximum: removedPage?.reviewMaximum ?? 0,
+  });
 
   const clearRemovedSelection = (): void => {
     if (
       removedPending ||
       removedSelectionPending ||
       removedDeleting ||
-      removedRestoringSelection
+      removedRestoringSelection ||
+      pendingRestore !== undefined
     )
       return;
     removedSelectedIds.clear();
     removedSelectedMarkers.clear();
+    removedAllSelected = false;
+    removedExcludedIds = new Set<string>();
     removedMessage = undefined;
     renderRemovedPanel();
     present.controlsChanged();
   };
 
-  /// Opens the permanent-deletion review for the current selection. The
-  /// review names the files, Locations, kinds, sizes, and affected Albums,
-  /// and offers the one confirmation; Cancel deletes nothing.
+  /// Opens a review for the current all-minus-exclusions or explicit selection.
   const deleteSelectedTrash = async (): Promise<void> => {
     if (
       removedPending ||
       removedSelectionPending ||
       removedDeleting ||
       removedRestoringSelection ||
-      removedSelectedIds.size === 0
+      pendingRestore !== undefined ||
+      (removedAllSelected
+        ? removedAllCount === 0
+        : removedSelectedIds.size === 0) ||
+      trashReview !== undefined
     )
       return;
+    if (removedAllSelected && !(await selectAllRemoved(true))) return;
+    if (removedAllSelected && removedAllCount === 0) return;
     const operationId = randomUuid();
-    const selection = [...removedSelectedIds];
-    const reviewResult = await reviewTrash(fetcher, operationId, {
-      all: false,
-      photoIds: selection,
-      excludePhotoIds: [],
-    });
+    const controller = new AbortController();
+    selectionAbort = controller;
+    removedSelectionPending = true;
+    renderRemovedPanel();
+    present.controlsChanged();
+    const selection = removedAllSelected
+      ? trashAllSelection({
+          excludedPhotoIds: [
+            ...new Set([...removedExcludedIds, ...removedPendingIds]),
+          ],
+          reviewMaximum: removedPage?.reviewMaximum ?? 0,
+        })
+      : { all: false, photoIds: [...removedSelectedIds], excludePhotoIds: [] };
+    const reviewResult = await reviewTrash(fetcher, operationId, selection);
+    if (controller.signal.aborted || selectionAbort !== controller) return;
+    selectionAbort = undefined;
+    removedSelectionPending = false;
     if (reviewResult.kind !== "ok") {
       removedMessage =
         reviewResult.kind === "rejected" && reviewResult.status === 409
@@ -310,6 +338,18 @@ export function createRemovedListingOwner(
       return;
     }
     const review: TrashReview = reviewResult.value;
+    if (
+      !removedAllSelected &&
+      review.items.some(
+        (item) => removedSelectedMarkers.get(item.photoId) !== item.removedAtMs,
+      )
+    ) {
+      removedMessage =
+        "Trash changed while it was being reviewed. Reload and select the files again.";
+      renderRemovedPanel();
+      present.controlsChanged();
+      return;
+    }
     trashReview = {
       operationId: review.operationId,
       plan: planTrashReview(review),
@@ -317,34 +357,7 @@ export function createRemovedListingOwner(
     };
     renderRemovedPanel();
     present.controlsChanged();
-    present.openReview(trashReviewModel());
-  };
-
-  const trashReviewModel = (): TrashReviewViewModel => {
-    const review = trashReview;
-    if (!review)
-      return {
-        itemCount: 0,
-        totalBytes: 0,
-        albumCount: 0,
-        albumNames: [],
-        items: [],
-        rejected: [],
-        canConfirm: false,
-        confirmLabel: confirmTrashLabel(0),
-        deleting: false,
-      };
-    return {
-      itemCount: review.plan.itemCount,
-      totalBytes: review.plan.totalBytes,
-      albumCount: review.plan.albumCount,
-      albumNames: [...review.plan.albumNames],
-      items: review.plan.items.map((item) => ({ ...item })),
-      rejected: review.plan.rejected.map((item) => ({ ...item })),
-      canConfirm: review.plan.canConfirm,
-      confirmLabel: confirmTrashLabel(review.plan.itemCount),
-      deleting: review.deleting,
-    };
+    present.openReview(trashReviewModel(trashReview));
   };
 
   const cancelTrashReview = (): void => {
@@ -363,7 +376,8 @@ export function createRemovedListingOwner(
   /// operation id, so the delete route can never widen the reviewed set.
   const confirmTrashReview = async (): Promise<void> => {
     const review = trashReview;
-    if (!review || review.deleting || !review.plan.canConfirm) return;
+    if (!review || review.deleting || !review.plan.canConfirm || pendingRestore)
+      return;
     trashReview = { ...review, deleting: true };
     renderTrashReview();
     await settleTrashDelete(review.operationId);
@@ -375,7 +389,7 @@ export function createRemovedListingOwner(
 
   const renderTrashReview = (): void => {
     if (!trashReview) return;
-    present.renderReview(trashReviewModel());
+    present.renderReview(trashReviewModel(trashReview));
   };
 
   /// Confirms one reviewed operation id, or retries it: the server repeats
@@ -383,6 +397,7 @@ export function createRemovedListingOwner(
   /// response keeps the operation id and offers recovery instead of claiming
   /// failure or success.
   const settleTrashDelete = async (operationId: string): Promise<void> => {
+    if (pendingRestore) return;
     removedDeleting = true;
     renderRemovedPanel();
     renderTrashReview();
@@ -392,6 +407,8 @@ export function createRemovedListingOwner(
     if (result.kind === "ok") {
       removedSelectedIds.clear();
       removedSelectedMarkers.clear();
+      removedAllSelected = false;
+      removedExcludedIds = new Set<string>();
       const partition = partitionTrashOperation(result.value);
       // The result is durable server-side: the retained id is only needed
       // while an item is still pending verification.
@@ -480,75 +497,28 @@ export function createRemovedListingOwner(
   };
 
   const renderRemovedPanel = (): void => {
-    present.renderPanel(removedPanelModel());
-  };
-
-  const removedPanelModel = (): RemovedPanelViewModel => {
-    const pending = removedPending || removedSelectionPending;
-    const status = removedPending
-      ? "loading"
-      : removedLoadFailed
-        ? "failed"
-        : removedPage
-          ? "ready"
-          : "loading";
-    return {
-      status,
-      start: removedPage?.start ?? 0,
-      total: removedPage?.total ?? 0,
-      limit: REMOVED_PAGE_LIMIT,
-      pending,
-      deleting: removedDeleting,
-      selectionCount: removedSelectedIds.size,
-      canDelete:
-        removedSelectedIds.size > 0 &&
-        !pending &&
-        !removedDeleting &&
-        !removedRestoringSelection,
-      canRestore:
-        removedSelectedIds.size > 0 &&
-        !pending &&
-        !removedDeleting &&
-        !removedRestoringSelection,
-      canRetry: removedLoadFailed,
-      restoringSelection: removedRestoringSelection,
-      ...(status === "ready" && removedPage?.operation
-        ? { undo: { removed: removedPage.operation.removed } }
-        : {}),
-      ...(removedRestoringId ? { restoringPhotoId: removedRestoringId } : {}),
-      ...(removedMessage ? { message: removedMessage } : {}),
-      ...(trashOutcomeBusy ? { outcomeBusy: trashOutcomeBusy } : {}),
-      ...(trashOperation
-        ? {
-            outcome: trashOperation.partition
-              ? {
-                  deleted: trashOperation.partition.deleted,
-                  changed: trashOperation.partition.changed,
-                  missing: trashOperation.partition.missing,
-                  failed: trashOperation.partition.failed,
-                  pendingVerification:
-                    trashOperation.partition.pendingVerification,
-                  logicalBytesDeleted:
-                    trashOperation.partition.logicalBytesDeleted,
-                  items: trashOperation.partition.unresolved.map((item) => ({
-                    ...item,
-                  })),
-                }
-              : { unconfirmed: true as const },
-          }
-        : {}),
-      items: (removedPage?.items ?? []).map((item) => ({
-        photoId: item.photo.id,
-        filename: item.photo.originalFilename ?? item.photo.id,
-        originalLocation: item.originalLocation,
-        originalKind: item.originalKind,
-        originalSize: item.originalSize,
-        removedAtMs: item.removedAtMs,
-        pendingVerificationOperationId: item.pendingVerificationOperationId,
-        selected: removedSelectedIds.has(item.photo.id),
-        preview: item.photo.preview,
-      })),
-    };
+    present.renderPanel(
+      removedPanelModel({
+        removedPage,
+        removedPending,
+        removedSelectionPending,
+        removedLoadFailed,
+        removedAllSelected,
+        removedExcludedIds,
+        removedPendingIds,
+        removedAllCount,
+        removedMessage,
+        pendingRestore,
+        removedDeleting,
+        removedSelectedIds,
+        removedSelectedMarkers,
+        removedRestoringSelection,
+        removedRestoringId,
+        trashOutcomeBusy,
+        trashOperation,
+        pageLimit: REMOVED_PAGE_LIMIT,
+      }),
+    );
   };
 
   const loadRemovedPage = async (
@@ -591,12 +561,19 @@ export function createRemovedListingOwner(
       removedPage = {
         start: result.start,
         total: result.total,
+        reviewMaximum: result.reviewMaximum,
         operation: result.operation,
         items: result.photos,
       };
       for (const item of result.photos) {
-        if (removedSelectedIds.has(item.photo.id))
-          removedSelectedMarkers.set(item.photo.id, item.removedAtMs);
+        if (
+          removedSelectedIds.has(item.photo.id) &&
+          (item.pendingVerificationOperationId !== null ||
+            removedSelectedMarkers.get(item.photo.id) !== item.removedAtMs)
+        ) {
+          removedSelectedIds.delete(item.photo.id);
+          removedSelectedMarkers.delete(item.photo.id);
+        }
       }
       removedMessage = successMessage;
     } else {
@@ -613,9 +590,12 @@ export function createRemovedListingOwner(
     removedLoadFailed = false;
     removedRestoringId = undefined;
     removedRestoringSelection = false;
+    pendingRestore ??= readPendingTrashRestore();
     removedMessage = undefined;
     removedSelectedIds.clear();
     removedSelectedMarkers.clear();
+    removedAllSelected = false;
+    removedExcludedIds = new Set<string>();
     removedSelectionPending = false;
     removedDeleting = false;
     trashReview = undefined;
@@ -629,6 +609,7 @@ export function createRemovedListingOwner(
       pending: true,
       deleting: false,
       selectionCount: 0,
+      allSelected: false,
       canDelete: false,
       canRestore: false,
       canRetry: false,
@@ -661,6 +642,8 @@ export function createRemovedListingOwner(
 
   const closeRemovedPanel = (): void => {
     removedPanelOpen = false;
+    selectionAbort?.abort();
+    selectionAbort = undefined;
     removedAbort?.abort();
     removedAbort = undefined;
     removedPending = false;
@@ -669,6 +652,8 @@ export function createRemovedListingOwner(
     removedRestoringSelection = false;
     removedSelectedIds.clear();
     removedSelectedMarkers.clear();
+    removedAllSelected = false;
+    removedExcludedIds = new Set<string>();
     removedRestoringId = undefined;
     if (trashReview) {
       trashReview = undefined;
@@ -714,15 +699,79 @@ export function createRemovedListingOwner(
     present.controlsChanged();
   };
 
+  /// Restores the selected Trash items. Restore is the reversible action, so
+  /// it stays available beside the listing's primary controls; permanent
+  /// deletion is a separately reviewed second action and never the default.
   const restoreSelectedTrash = async (): Promise<void> => {
     if (
       removedPending ||
       removedSelectionPending ||
       removedDeleting ||
       removedRestoringSelection ||
-      removedSelectedIds.size === 0
+      (!pendingRestore &&
+        (removedAllSelected
+          ? removedAllCount === 0
+          : removedSelectedIds.size === 0))
     )
       return;
+    if (removedAllSelected || pendingRestore) {
+      const retrying = pendingRestore !== undefined;
+      if (!pendingRestore) {
+        if (!(await selectAllRemoved(true)) || removedAllCount === 0) return;
+        pendingRestore = {
+          operationId: randomUuid(),
+          excludePhotoIds: [
+            ...new Set([...removedExcludedIds, ...removedPendingIds]),
+          ],
+        };
+        storePendingTrashRestore(pendingRestore);
+      }
+      const intent = pendingRestore;
+      removedRestoringSelection = true;
+      removedMessage = undefined;
+      renderRemovedPanel();
+      present.controlsChanged();
+      const outcome = await restoreAllTrash(
+        fetcher,
+        intent.operationId,
+        intent.excludePhotoIds,
+      );
+      removedRestoringSelection = false;
+      if (outcome.kind !== "restored") {
+        if (
+          !retrying &&
+          outcome.kind === "rejected" &&
+          (outcome.status === 400 || outcome.status === 409)
+        ) {
+          pendingRestore = undefined;
+          storePendingTrashRestore(undefined);
+          removedMessage =
+            "Restore was not admitted. Narrow the selection or reload Trash and try again.";
+          renderRemovedPanel();
+          present.controlsChanged();
+          return;
+        }
+        removedMessage =
+          "Restore was not confirmed; retry the retained operation to recover its result.";
+        renderRemovedPanel();
+        present.controlsChanged();
+        return;
+      }
+      pendingRestore = undefined;
+      storePendingTrashRestore(undefined);
+      removedSelectedIds.clear();
+      removedSelectedMarkers.clear();
+      removedAllSelected = false;
+      removedExcludedIds = new Set<string>();
+      const counts = outcome.value.counts;
+      const message = `${counts.restored.toLocaleString()} ${counts.restored === 1 ? "Photo" : "Photos"} restored. Restore resolved ${outcome.value.results.length.toLocaleString()} ${outcome.value.results.length === 1 ? "item" : "items"}: ${counts.alreadyActive.toLocaleString()} already active, ${counts.changedElsewhere.toLocaleString()} changed, ${counts.missing.toLocaleString()} unavailable.`;
+      await coordinate.refreshLibrary();
+      if (removedPanelOpen)
+        await loadRemovedPage(removedPage?.start ?? 0, message);
+      await coordinate.reopenSourceAfterRestore();
+      present.controlsChanged();
+      return;
+    }
     const markers = [...removedSelectedIds].flatMap((photoId) => {
       const removedAtMs = removedSelectedMarkers.get(photoId);
       return removedAtMs === undefined ? [] : [{ photoId, removedAtMs }];
@@ -754,6 +803,8 @@ export function createRemovedListingOwner(
     }
     removedSelectedIds.clear();
     removedSelectedMarkers.clear();
+    removedAllSelected = false;
+    removedExcludedIds = new Set<string>();
     await coordinate.refreshLibrary();
     await loadRemovedPage(
       removedPage?.start ?? 0,
@@ -783,10 +834,18 @@ export function createRemovedListingOwner(
       if (removedPending || removedSelectionPending || removedDeleting) return;
       void loadRemovedPage(removedPage?.start ?? 0);
     },
-    selectAll: selectAllRemoved,
+    selectAll: () => {
+      void selectAllRemoved();
+    },
     clearSelection: clearRemovedSelection,
     toggle: (photoId, selected) => {
-      if (removedPending || removedSelectionPending || removedDeleting) return;
+      if (
+        removedPending ||
+        removedSelectionPending ||
+        removedDeleting ||
+        pendingRestore
+      )
+        return;
       const item = removedPage?.items.find(
         (candidate) => candidate.photo.id === photoId,
       );
@@ -794,6 +853,18 @@ export function createRemovedListingOwner(
       // An item whose permanent-deletion outcome is not settled is never
       // selected: Restore and a new deletion stay unavailable for it.
       if (selected && item.pendingVerificationOperationId !== null) return;
+      if (removedAllSelected) {
+        const excluded = new Set(removedExcludedIds);
+        if (selected) excluded.delete(photoId);
+        else excluded.add(photoId);
+        if (selected && removedExcludedIds.has(photoId)) removedAllCount += 1;
+        if (!selected && !removedExcludedIds.has(photoId)) removedAllCount -= 1;
+        removedExcludedIds = excluded;
+        removedMessage = trashExclusionNotice(trashExclusionSelection());
+        renderRemovedPanel();
+        present.controlsChanged();
+        return;
+      }
       if (selected) {
         removedSelectedIds.add(photoId);
         removedSelectedMarkers.set(photoId, item.removedAtMs);
@@ -807,11 +878,17 @@ export function createRemovedListingOwner(
     deleteSelection: deleteSelectedTrash,
     restoreSelection: restoreSelectedTrash,
     restorePhoto: (photoId, removedAtMs) => {
+      if (pendingRestore) return;
       const item = removedPage?.items.find(
         (candidate) => candidate.photo.id === photoId,
       );
       // An unresolved deletion outcome is never answered with a restore.
-      if (item?.pendingVerificationOperationId != null) return;
+      if (
+        !item ||
+        item.removedAtMs !== removedAtMs ||
+        item.pendingVerificationOperationId !== null
+      )
+        return;
       void restoreRemovedPhoto(photoId, removedAtMs);
     },
     confirmReview: confirmTrashReview,
@@ -830,6 +907,7 @@ export function createRemovedListingOwner(
       await loadRemovedPage(removedPage?.start ?? 0, message);
     },
     dispose: () => {
+      selectionAbort?.abort();
       removedAbort?.abort();
     },
   };

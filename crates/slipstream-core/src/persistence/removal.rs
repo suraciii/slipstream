@@ -64,6 +64,22 @@ pub(super) struct PhotoRestoreReceipt {
     photo_ids: Vec<String>,
     removed_at_ms: Vec<i64>,
     outcomes: Vec<PhotoRestoreOutcome>,
+    #[serde(default)]
+    selection: Option<RestoreSelectionIntent>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+enum RestoreSelectionIntent {
+    Photos(Vec<String>),
+    All(Vec<String>),
+}
+
+pub(super) enum PhotoRestoreRequest {
+    Explicit(ExplicitPhotoRestoreMutation),
+    Trash {
+        operation_id: String,
+        selection: crate::PermanentDeletionSelection,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -540,26 +556,94 @@ pub(super) fn restore_photos_explicit(
     state: &StateDirectory,
     database_name: &DatabaseName,
     connection: &mut Connection,
-    mutation: ExplicitPhotoRestoreMutation,
+    request: PhotoRestoreRequest,
 ) -> Result<ExplicitPhotoRestoreResult, MutationError> {
-    let operation_id = mutation.operation_id.clone();
-    let photo_ids = mutation
-        .photos
-        .iter()
-        .map(|photo| photo.photo_id.clone())
-        .collect::<Vec<_>>();
-    let removed_at_ms = mutation
-        .photos
-        .iter()
-        .map(|photo| photo.removed_at_ms)
-        .collect::<Vec<_>>();
+    let (operation_id, selection, explicit) = match request {
+        PhotoRestoreRequest::Explicit(mutation) => {
+            (mutation.operation_id, None, Some(mutation.photos))
+        }
+        PhotoRestoreRequest::Trash {
+            operation_id,
+            selection,
+        } => {
+            let intent = match selection {
+                crate::PermanentDeletionSelection::Photos(ids) => {
+                    RestoreSelectionIntent::Photos(ids)
+                }
+                crate::PermanentDeletionSelection::All { exclude_photo_ids } => {
+                    RestoreSelectionIntent::All(exclude_photo_ids)
+                }
+            };
+            (operation_id, Some(intent), None)
+        }
+    };
     mutation_transaction(state, database_name, connection, |transaction| {
         if let Some(receipt) = read_photo_restore_operation(transaction, &operation_id)? {
-            if receipt.photo_ids != photo_ids || receipt.removed_at_ms != removed_at_ms {
+            let matches = match &explicit {
+                Some(photos) => {
+                    receipt.selection.is_none()
+                        && receipt.photo_ids
+                            == photos
+                                .iter()
+                                .map(|photo| photo.photo_id.clone())
+                                .collect::<Vec<_>>()
+                        && receipt.removed_at_ms
+                            == photos
+                                .iter()
+                                .map(|photo| photo.removed_at_ms)
+                                .collect::<Vec<_>>()
+                }
+                None => receipt.selection == selection,
+            };
+            if !matches {
                 return Err(MutationError::Conflict);
             }
             return photo_restore_result_from_receipt(&operation_id, receipt);
         }
+        let photos = match (explicit, &selection) {
+            (Some(photos), _) => photos,
+            (None, Some(RestoreSelectionIntent::Photos(ids))) => {
+                let mut photos = Vec::with_capacity(ids.len());
+                for photo_id in ids {
+                    let marker = transaction
+                        .query_row(
+                            "SELECT removed_at_ms FROM photos WHERE id=?",
+                            [photo_id],
+                            |row| row.get::<_, Option<i64>>(0),
+                        )
+                        .optional()
+                        .map_err(mutation_error_from_sqlite)?
+                        .flatten()
+                        .unwrap_or(-1);
+                    photos.push(PhotoRemovalMarker {
+                        photo_id: photo_id.clone(),
+                        removed_at_ms: marker,
+                    });
+                }
+                photos
+            }
+            (None, Some(RestoreSelectionIntent::All(exclusions))) => trash_candidates(
+                transaction,
+                crate::PermanentDeletionSelection::All {
+                    exclude_photo_ids: exclusions.clone(),
+                },
+            )?
+            .into_iter()
+            .map(|candidate| PhotoRemovalMarker {
+                photo_id: candidate.photo_id,
+                removed_at_ms: candidate.removed_at_ms,
+            })
+            .collect(),
+            (None, None) => unreachable!(),
+        };
+        let photo_ids = photos
+            .iter()
+            .map(|photo| photo.photo_id.clone())
+            .collect::<Vec<_>>();
+        let removed_at_ms = photos
+            .iter()
+            .map(|photo| photo.removed_at_ms)
+            .collect::<Vec<_>>();
 
         let mut outcomes = Vec::with_capacity(photo_ids.len());
         let mut result = ExplicitPhotoRestoreResult {
@@ -571,7 +655,7 @@ pub(super) fn restore_photos_explicit(
             changed_elsewhere: Vec::new(),
             missing: Vec::new(),
         };
-        for photo in mutation.photos {
+        for photo in photos {
             let current = transaction
                 .query_row(
                     "SELECT removed_at_ms FROM photos WHERE id=?",
@@ -630,6 +714,7 @@ pub(super) fn restore_photos_explicit(
                 photo_ids,
                 removed_at_ms,
                 outcomes,
+                selection,
             },
         )?;
         Ok(result)
@@ -812,5 +897,7 @@ fn operation_remainders(
     Ok(remainders)
 }
 
+#[cfg(test)]
+mod restore_tests;
 #[cfg(test)]
 mod tests;

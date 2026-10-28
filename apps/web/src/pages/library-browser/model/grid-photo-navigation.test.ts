@@ -159,6 +159,7 @@ function fixture(
       destinations.push(photoId);
       return {
         source: "library",
+        conditions: {},
         selection: "all",
         ...(photoId ? { photoId } : {}),
       };

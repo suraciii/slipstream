@@ -40,6 +40,7 @@ mod commands;
 mod execute;
 mod input;
 mod operations;
+mod photo_restore;
 mod protocol;
 mod state;
 #[cfg(test)]

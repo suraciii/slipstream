@@ -49,6 +49,31 @@ export type RestorationWriteResult =
   | Readonly<{ kind: "rejected"; status: number }>
   | Readonly<{ kind: "malformed" }>;
 
+export type TrashRestoreResult = Readonly<{
+  operationId: string;
+  counts: Readonly<{
+    restored: number;
+    alreadyActive: number;
+    changedElsewhere: number;
+    missing: number;
+  }>;
+  results: ReadonlyArray<
+    Readonly<{
+      photoId: string;
+      outcome:
+        | "restored"
+        | "already-active"
+        | "changed-elsewhere"
+        | "unavailable";
+    }>
+  >;
+}>;
+
+export type TrashRestoreWriteResult =
+  | Readonly<{ kind: "restored"; value: TrashRestoreResult }>
+  | Readonly<{ kind: "rejected"; status: number }>
+  | Readonly<{ kind: "malformed" }>;
+
 export type RemovedPhotoItem = Readonly<{
   /// The removal marker the listing reported: the millisecond the removal was
   /// confirmed. A restore names it so a listing read before a newer removal
@@ -223,6 +248,82 @@ export async function restoreRemovedPhotos(
     },
     markers.map((marker) => marker.photoId),
   );
+}
+
+/// Restore all current Trash except the named exclusions under a durable
+/// operation identity. Repeating the same intent retrieves the same receipt.
+export async function restoreAllTrash(
+  fetcher: RemovalFetch,
+  operationId: string,
+  excludePhotoIds: ReadonlyArray<string>,
+): Promise<TrashRestoreWriteResult> {
+  const response = await fetchJson(() =>
+    fetcher("/api/trash/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        operationId,
+        all: true,
+        photoIds: [],
+        excludePhotoIds,
+      }),
+    }),
+  );
+  if (response.kind !== "ok") return response;
+  const value = response.value;
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["operationId", "counts", "results"]) ||
+    value.operationId !== operationId ||
+    !isRecord(value.counts) ||
+    !hasExactKeys(value.counts, [
+      "restored",
+      "alreadyActive",
+      "changedElsewhere",
+      "missing",
+    ]) ||
+    !validCount(value.counts.restored) ||
+    !validCount(value.counts.alreadyActive) ||
+    !validCount(value.counts.changedElsewhere) ||
+    !validCount(value.counts.missing) ||
+    !Array.isArray(value.results)
+  )
+    return { kind: "malformed" };
+  const counts = {
+    restored: 0,
+    alreadyActive: 0,
+    changedElsewhere: 0,
+    missing: 0,
+  };
+  const results: Array<TrashRestoreResult["results"][number]> = [];
+  const seen = new Set<string>();
+  const excluded = new Set(excludePhotoIds);
+  for (const item of value.results) {
+    if (
+      !isRecord(item) ||
+      !hasExactKeys(item, ["photoId", "outcome"]) ||
+      typeof item.photoId !== "string" ||
+      item.photoId.length === 0 ||
+      seen.has(item.photoId) ||
+      excluded.has(item.photoId)
+    )
+      return { kind: "malformed" };
+    if (item.outcome === "restored") counts.restored += 1;
+    else if (item.outcome === "already-active") counts.alreadyActive += 1;
+    else if (item.outcome === "changed-elsewhere") counts.changedElsewhere += 1;
+    else if (item.outcome === "unavailable") counts.missing += 1;
+    else return { kind: "malformed" };
+    seen.add(item.photoId);
+    results.push({ photoId: item.photoId, outcome: item.outcome });
+  }
+  if (
+    counts.restored !== value.counts.restored ||
+    counts.alreadyActive !== value.counts.alreadyActive ||
+    counts.changedElsewhere !== value.counts.changedElsewhere ||
+    counts.missing !== value.counts.missing
+  )
+    return { kind: "malformed" };
+  return { kind: "restored", value: { operationId, counts, results } };
 }
 
 async function restorationWrite(

@@ -1,7 +1,7 @@
 use super::*;
 /// Commits one Selection State through the HTTP mutation route so a fixture
 /// holds real persisted decisions rather than fabricated facts.
-async fn decide_selection(router: &Router, photo_id: &str, value: &str) -> StatusCode {
+pub(super) async fn decide_selection(router: &Router, photo_id: &str, value: &str) -> StatusCode {
     post_json(
         router,
         &format!("https://camera.local/api/photos/{photo_id}/state"),

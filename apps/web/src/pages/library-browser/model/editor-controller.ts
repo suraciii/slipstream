@@ -57,6 +57,7 @@ export function createEditorController(
               model.resourceKinds,
             );
         }
+        model.libraryPhase = dependencies.libraryPhase();
         view.renderEditor(model);
         if (model.preview && !model.cameraReference)
           view.presentEditorPreview(

@@ -1,10 +1,8 @@
 import { formatCaptureTime } from "./capture-time.js";
 import type { ViewSelectionState } from "./library-browser-view.js";
+import { paragraph, required, selectionLabel } from "./presentation-helpers.js";
 
 export type ViewPreviewSource = "jpeg-original" | "raw-embedded-jpeg";
-
-/** Full wording behind the compact limited-detail marker in the Preview fact. */
-const LIMITED_PREVIEW_DETAIL = "Limited by camera Preview resolution";
 
 export type PhotoFactsViewModel = Readonly<{
   index: number;
@@ -79,6 +77,10 @@ export interface PhotoViewPresenter extends PhotoViewPresentation {
   readonly currentPhotoId: string | undefined;
   readonly currentSelection: ViewSelectionState;
   readonly photoSurface: object;
+  setPreviewDisplay(
+    dimensions: Readonly<{ width: number; height: number }> | undefined,
+    enlarged: boolean,
+  ): void;
   setSourceTitle(name: string): void;
   clearPreview(): void;
   resetSourceIdentity(): void;
@@ -103,7 +105,6 @@ export function createPhotoViewPresenter({
   const selection = required<HTMLElement>(root, "[data-selection]");
   const stage = required<HTMLElement>(root, "[data-stage]");
   const status = required<HTMLElement>(root, "[data-status]");
-  const detailLimit = required<HTMLElement>(root, "[data-detail-limit]");
   const previewSource = required<HTMLElement>(root, "[data-source]");
   const captureTime = required<HTMLElement>(
     root,
@@ -124,6 +125,10 @@ export function createPhotoViewPresenter({
   let currentSelection: ViewSelectionState = "unflagged";
   let photoSurface: object = {};
   let photoStatusSurface: object = {};
+  let source: ViewPreviewSource | undefined;
+  let limited = false;
+  let dimensions: Readonly<{ width: number; height: number }> | undefined;
+  let enlarged = false;
   let canReviewRecovery = false;
 
   const renderPhotoFacts = (model: PhotoFactsViewModel) => {
@@ -199,19 +204,30 @@ export function createPhotoViewPresenter({
       surface,
     };
   };
+  const renderPreviewEvidence = () => {
+    if (!alive) return;
+    if (!source) {
+      previewSource.textContent = sourceLabel(source);
+      return;
+    }
+    const parts = [sourceLabel(source)];
+    if (dimensions) parts.push(`${dimensions.width} × ${dimensions.height}`);
+    parts.push(limited ? "limited detail" : "normal review");
+    if (dimensions)
+      parts.push(
+        enlarged
+          ? "Enlarged Preview pixels cannot add source detail"
+          : "Preview pixels are not enlarged",
+      );
+    previewSource.textContent = parts.join(" · ");
+  };
   const setPreviewFacts = (
-    source: ViewPreviewSource | undefined,
+    nextSource: ViewPreviewSource | undefined,
     isLimited: boolean,
   ) => {
-    if (!alive) return;
-    previewSource.textContent = isLimited
-      ? `${sourceLabel(source)} · limited detail`
-      : sourceLabel(source);
-    // The Preview Source fact and the detail-limit explanation are one
-    // statement: a limited derivative names the resolution it came from.
-    detailLimit.hidden = !isLimited;
-    if (isLimited) previewSource.title = LIMITED_PREVIEW_DETAIL;
-    else previewSource.removeAttribute("title");
+    source = nextSource;
+    limited = isLimited;
+    renderPreviewEvidence();
   };
   const renderStatus = (text: string): void => {
     status.hidden = !text && !canReviewRecovery;
@@ -286,6 +302,11 @@ export function createPhotoViewPresenter({
     renderPhotoMetadata,
     renderPhotoShell,
     presentReviewImage,
+    setPreviewDisplay(nextDimensions, nextEnlarged) {
+      dimensions = nextDimensions;
+      enlarged = nextEnlarged;
+      renderPreviewEvidence();
+    },
     setPreviewFacts,
     setSourceTitle(name) {
       if (alive) title.textContent = name;
@@ -322,26 +343,6 @@ export function createPhotoViewPresenter({
       alive = false;
     },
   };
-}
-
-function required<T extends Element>(root: ParentNode, selector: string): T {
-  const value = root.querySelector<T>(selector);
-  if (!value) throw new Error(`Missing ${selector}`);
-  return value;
-}
-
-function paragraph(text: string): HTMLParagraphElement {
-  const value = document.createElement("p");
-  value.textContent = text;
-  return value;
-}
-
-function selectionLabel(value: ViewSelectionState): string {
-  return value === "picked"
-    ? "Picked"
-    : value === "rejected"
-      ? "Rejected"
-      : "Unflagged";
 }
 
 function sourceLabel(source?: ViewPreviewSource): string {

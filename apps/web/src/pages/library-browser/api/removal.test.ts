@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { fetchRemovedPhotos } from "./removal.js";
+import { fetchRemovedPhotos, restoreAllTrash } from "./removal.js";
 
 const photo = (overrides: Record<string, unknown> = {}) => ({
   removedAtMs: 100,
@@ -131,5 +131,65 @@ describe("removed Photos API", () => {
     );
 
     expect(result).toEqual({ kind: "failed", malformed: true });
+  });
+});
+
+describe("Trash Restore API", () => {
+  test("sends all-minus-exclusions and validates the resolved outcome", async () => {
+    let body: unknown;
+    const result = await restoreAllTrash(
+      (_path, init) => {
+        body = JSON.parse(
+          typeof init?.body === "string" ? init.body : "",
+        ) as unknown;
+        return Promise.resolve(
+          Response.json({
+            operationId: "restore-1",
+            counts: {
+              restored: 1,
+              alreadyActive: 0,
+              changedElsewhere: 1,
+              missing: 0,
+            },
+            results: [
+              { photoId: "photo-1", outcome: "restored" },
+              { photoId: "photo-2", outcome: "changed-elsewhere" },
+            ],
+          }),
+        );
+      },
+      "restore-1",
+      ["excluded"],
+    );
+    expect(body).toEqual({
+      operationId: "restore-1",
+      all: true,
+      photoIds: [],
+      excludePhotoIds: ["excluded"],
+    });
+    expect(result.kind).toBe("restored");
+    if (result.kind === "restored")
+      expect(result.value.results).toHaveLength(2);
+  });
+
+  test("refuses a receipt that includes an excluded item", async () => {
+    const result = await restoreAllTrash(
+      () =>
+        Promise.resolve(
+          Response.json({
+            operationId: "restore-1",
+            counts: {
+              restored: 1,
+              alreadyActive: 0,
+              changedElsewhere: 0,
+              missing: 0,
+            },
+            results: [{ photoId: "excluded", outcome: "restored" }],
+          }),
+        ),
+      "restore-1",
+      ["excluded"],
+    );
+    expect(result.kind).toBe("malformed");
   });
 });

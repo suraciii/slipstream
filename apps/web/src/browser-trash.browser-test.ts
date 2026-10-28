@@ -317,8 +317,16 @@ test("Trash permanent deletion reviews the files, reports outcomes, and blocks p
     if (pathname === "/api/trash/review") {
       const body = JSON.parse(request.postData() ?? "{}") as {
         operationId?: string;
+        all?: boolean;
         photoIds?: string[];
+        excludePhotoIds?: string[];
       };
+      const selected = body.all
+        ? trashRows.filter(
+            (photoId) => !body.excludePhotoIds?.includes(photoId),
+          )
+        : (body.photoIds ?? []);
+      expect(selected).toEqual([first, second]);
       reviewCalls += 1;
       await route.fulfill({
         status: 200,
@@ -335,7 +343,7 @@ test("Trash permanent deletion reviews the files, reports outcomes, and blocks p
               }
             : {
                 operationId: body.operationId,
-                items: (body.photoIds ?? []).map(reviewItem),
+                items: selected.map(reviewItem),
                 rejected: [],
               },
         ),
@@ -440,10 +448,10 @@ test("Trash permanent deletion reviews the files, reports outcomes, and blocks p
   // Select all skips the pending-verification item.
   await page.locator("[data-removed-select-all]").click();
   await expect(page.locator("[data-removed-selection-count]")).toHaveText(
-    "2 selected.",
+    "All current Trash items, except exclusions.",
   );
   await expect(page.locator("[data-removed-message]")).toHaveText(
-    "1 item pending verification was not selected.",
+    "Review scope: all current Trash items except 1 excluded. 1 item pending verification was not selected.",
   );
 
   // A review that rejected every selected item offers no delete action.
@@ -579,4 +587,131 @@ test("Trash permanent deletion reviews the files, reports outcomes, and blocks p
   ).toBeNull();
   await page.locator("[data-removed-close]").click();
   await expect(removed).toBeHidden();
+});
+
+test("excluding a Trash row before capture changes the submitted selection truthfully", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 3);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  expect(ids).toHaveLength(3);
+
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 3 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  // All three Photos are removed into Trash through the reviewed removal.
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  await page.locator("[data-grid-viewport]").focus();
+  for (const index of [0, 1, 2]) {
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("x");
+    await expect(cell(index).locator(".cell-state.rejected")).toHaveText("×");
+  }
+  await openViewOptions(page);
+  await page.locator("[data-filter-select]").selectOption("rejected");
+  await applyViewOptions(page);
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 3 Photos",
+  );
+  await openViewOptions(page);
+  await page.locator("[data-removal-open]").click();
+  const removal = page.locator("[data-removal-review]");
+  await expect(removal).toBeVisible();
+  await removal.locator("[data-removal-confirm]").click();
+  await expect(page.locator("[data-removal-message]")).toHaveText(
+    /^3 Photos removed from the Library\./,
+  );
+  await removal.locator("[data-removal-close]").click();
+  await expect(page.locator("[data-grid-status]")).toHaveText("0 Photos");
+
+  // Trash opens on the inventory of what was removed.
+  await openViewOptions(page);
+  await page.locator("[data-removed-open]").click();
+  const panel = page.locator("[data-removed-panel]");
+  await expect(panel).toBeVisible();
+  await expect(panel.locator("[data-removed-selection-count]")).toHaveText(
+    "Nothing selected.",
+  );
+
+  // Select all describes its current Trash scope across pages, rather than
+  // reporting an exact count before the server captures the review.
+  await panel.locator("[data-removed-select-all]").click();
+  await expect(panel.locator("[data-removed-selection-count]")).toHaveText(
+    "All current Trash items, except exclusions.",
+  );
+  await expect(panel.locator("[data-removed-message]")).toHaveText(
+    "Review scope: all current Trash items except 0 excluded.",
+  );
+
+  // Excluding one row before capture changes the review scope and marks the
+  // row excluded, so it is never counted as reviewed or deleted.
+  const rows = panel.locator("[data-removed-list] li");
+  await expect(rows).toHaveCount(3);
+  const secondRow = rows.nth(1);
+  const excludedLocation = await secondRow
+    .locator(".removed-location")
+    .textContent();
+  await secondRow.locator("input[type=checkbox]").uncheck();
+  await expect(panel.locator("[data-removed-selection-count]")).toHaveText(
+    "All current Trash items, except exclusions.",
+  );
+  await expect(panel.locator("[data-removed-message]")).toHaveText(
+    "Review scope: all current Trash items except 1 excluded. 1 item excluded from the selection and never deleted.",
+  );
+  await expect(secondRow).toHaveAttribute("data-trash-excluded-item", "true");
+  await expect(secondRow.locator("[data-trash-excluded]")).toHaveText(
+    "Excluded — this item is not part of the selection and will not be deleted.",
+  );
+
+  // Restore and deletion review accept the same all-minus-exclusions scope.
+  await expect(panel.locator("[data-removed-restore-selection]")).toBeEnabled();
+
+  // The review names the captured count and the captured set. The excluded
+  // Original is not among the reviewed files, and the confirmation names that
+  // same count.
+  await panel.locator("[data-removed-delete]").click();
+  const review = page.locator("[data-trash-review]");
+  await expect(review).toBeVisible();
+  await expect(review.locator("[data-trash-review-summary]")).toHaveText(
+    /^2 Photos selected for permanent deletion · /,
+  );
+  const reviewedNames = await review
+    .locator("[data-trash-review-items] .trash-review-location")
+    .allTextContents();
+  expect(reviewedNames.join(" ")).not.toContain(excludedLocation ?? "");
+  expect(reviewedNames).toHaveLength(2);
+  await expect(review.locator("[data-trash-confirm]")).toHaveText(
+    /^Permanently delete 2 /,
+  );
+  // Cancel deletes nothing, and the excluded item stays in Trash.
+  await review.locator("[data-trash-cancel]").click();
+  await expect(review).toBeHidden();
+  await expect(panel.locator("[data-removed-list] li")).toHaveCount(3);
+  await expect(secondRow).toHaveAttribute("data-trash-excluded-item", "true");
+
+  // The same excluded scope is valid for Restore, without reopening or
+  // reconstructing the selection. Only the two admitted Photos return.
+  const restoreRequest = page.waitForRequest(
+    (request) =>
+      new URL(request.url()).pathname === "/api/trash/restore" &&
+      request.method() === "POST",
+  );
+  await panel.locator("[data-removed-restore-selection]").click();
+  const requestBody = (await restoreRequest).postDataJSON() as {
+    all: boolean;
+    excludePhotoIds: string[];
+  };
+  expect(requestBody.all).toBe(true);
+  expect(requestBody.excludePhotoIds).toHaveLength(1);
+  await expect(panel.locator("[data-removed-message]")).toContainText(
+    "2 Photos restored",
+  );
+  await expect(panel.locator("[data-removed-list] li")).toHaveCount(1);
+  await expect(
+    panel.locator("[data-removed-list] .removed-location"),
+  ).toHaveText(excludedLocation ?? "");
 });

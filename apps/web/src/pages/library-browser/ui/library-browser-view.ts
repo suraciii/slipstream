@@ -2,8 +2,15 @@ import "./library-browser.css";
 import "./recovery-panel.css";
 import "./removed-panels.css";
 import "./external-metadata.css";
+import "./library-status.css";
 
 import { createModalSurfaces } from "./modal-surface.js";
+import { createSummaryPresenter } from "./library-status.js";
+import {
+  presentGridStatus,
+  required,
+  selectionLabel,
+} from "./presentation-helpers.js";
 import { gridThumbnailTarget } from "./grid-thumbnail-target.js";
 import {
   createRemovedPanels,
@@ -33,8 +40,8 @@ import {
 import {
   createViewOptions,
   type RandomPhotoViewModel,
-  type ViewOptionsElements,
 } from "./view-options.js";
+import { viewOptionsElements } from "./view-options-elements.js";
 import { createRatingControls } from "./rating-controls.js";
 import { createConnectionPresenter } from "./connection-presenter.js";
 import { createPhotoToolsController } from "./photo-tools.js";
@@ -98,7 +105,6 @@ import type {
   LibraryBrowserIntent,
   MembershipViewModel,
   SourceListViewModel,
-  ViewSelectionState,
 } from "./library-browser-view-contract.js";
 export type {
   AlbumFormReference,
@@ -316,6 +322,57 @@ export interface LibraryBrowserView extends RecoveryReviewView {
   dispose(): void;
 }
 
+export const APP_SHELL_TEMPLATE = `
+<div class="app-shell">
+  <header class="app-header"><p data-connection role="status">Connecting…</p></header>
+  <section class="browser" data-browser aria-labelledby="grid-title">
+    <div class="library-status-entry" data-library-status-entry hidden><button type="button" data-library-status-toggle aria-expanded="false" aria-controls="library-status-notice">Library status</button><div class="library-status-notice" id="library-status-notice" data-library-status-notice role="status" aria-live="polite" hidden></div></div>
+    <dialog class="source-dialog" data-source-dialog>
+      <nav class="source-panel" id="source-panel" data-library-screen aria-label="Library sources">
+        <header class="source-header"><h2 id="sources-title">Sources</h2><button type="button" class="quiet source-close" data-source-close>Close</button></header>
+        <p data-summary-status role="status">Loading Library…</p>
+        <p class="recovery-notice" data-recovery-notice hidden role="status"></p>
+        <div class="source-list" data-source-list></div>
+        <footer class="source-footer"><button type="button" data-retry hidden>Retry connection</button><button type="button" class="quiet" data-access-sign-out>Sign out</button></footer>
+        <p class="source-width-status" data-source-width-status role="status" aria-live="polite" hidden></p>
+      </nav>
+    </dialog>
+    <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" aria-valuemin="176" aria-valuemax="360" aria-valuenow="224" tabindex="0"></div>
+    <section class="grid-view" data-grid-view aria-labelledby="grid-title">
+      <header class="grid-header"><div class="grid-header-row"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false" aria-labelledby="grid-title grid-status"><span class="source-toggle-indicator" aria-hidden="true">▾</span><span class="source-toggle-name"><span class="grid-heading"><h1 id="grid-title" data-grid-title>All Photos</h1></span><span class="grid-status-slot"><p id="grid-status" data-grid-status role="status"></p></span></span></button><p class="grid-connection" data-grid-connection role="status" hidden></p><div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options aria-label="View options">View options</button><span class="options-flag" data-view-options-flag hidden></span><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button></div><div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
+      <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
+      <div class="grid-batch" data-grid-batch hidden><div class="grid-batch-result" data-grid-batch-result hidden><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-pick>Pick</button><button type="button" data-batch-reject>Reject</button><label for="batch-album-select">Add to</label><select id="batch-album-select" data-batch-album-select></select><button type="button" data-batch-album-add>Add to Album</button></div></div>
+    </section>
+${PHOTO_VIEW_TEMPLATE}
+    <dialog class="options-dialog" data-view-options aria-labelledby="view-options-title">
+      <div class="options-sheet">
+        <header class="options-header"><h2 id="view-options-title">View options</h2><button type="button" class="quiet" data-view-options-close>Close</button></header>
+        <div class="options-body">
+          <p class="options-progress" data-grid-source-progress role="status"></p>
+          <p class="options-progress" data-grid-visible-results role="status"></p>
+          <div class="options-field"><label for="view-filter-select">Selection State</label><select id="view-filter-select" data-filter-select></select></div>
+          <div class="options-field"><label for="view-rating-min-select">Rating minimum</label><select id="view-rating-min-select" data-rating-min-select></select></div>
+          <div class="options-field"><label for="view-rating-max-select">Rating maximum</label><select id="view-rating-max-select" data-rating-max-select></select></div>
+          <div class="options-field"><label for="view-kind-select">Original kind</label><select id="view-kind-select" data-kind-select></select></div>
+          <div class="options-field"><label for="view-available-select">Original availability</label><select id="view-available-select" data-available-select></select></div>
+          <div class="options-field"><label for="view-captured-from">Capture Time from</label><input id="view-captured-from" type="text" data-captured-from></div>
+          <div class="options-field"><label for="view-captured-before">Capture Time before</label><input id="view-captured-before" type="text" data-captured-before></div>
+          <div class="options-field"><label for="view-sort-select">Source order</label><select id="view-sort-select" data-sort-select></select></div>
+          <div class="options-field"><label for="view-size-select">Thumbnail size</label><select id="view-size-select" data-size-select></select></div>
+          <div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div>
+          <div class="options-browse-actions" data-browse-actions><h3>Browse actions</h3><button type="button" data-random-photo aria-label="Open a random Photo from the current source and filter">Open a random Photo</button></div><div class="options-source-actions" data-options-source-actions><button type="button" data-album-resume hidden>Resume</button><button type="button" data-refresh>Refresh Current Source</button><button type="button" class="quiet" data-removal-open hidden>Remove rejected Photos</button><button type="button" class="quiet" data-removed-open>Trash</button></div>
+        </div>
+        <footer class="options-footer"><button type="button" data-view-options-apply>Apply</button><button type="button" class="quiet" data-view-options-cancel>Cancel</button></footer>
+      </div>
+    </dialog>
+    <dialog class="album-dialog" data-album-form-dialog aria-labelledby="album-form-title">
+      <div class="album-dialog-sheet" data-album-form-body></div>
+    </dialog>
+${RECOVERY_PANEL_TEMPLATE}
+${REMOVED_PANELS_TEMPLATE}
+  </section>
+</div>`;
+
 export function createLibraryBrowserView(
   root: HTMLElement,
   emit: (intent: LibraryBrowserIntent) => void,
@@ -324,48 +381,7 @@ export function createLibraryBrowserView(
   openPhotoDetails: (photoId: string) => void,
 ): LibraryBrowserView {
   let alive = true;
-  root.innerHTML = `
-    <div class="app-shell">
-      <header class="app-header"><h1>Slipstream</h1><p data-connection role="status">Connecting…</p></header>
-      <section class="browser" data-browser aria-labelledby="browser-title">
-        <dialog class="source-dialog" data-source-dialog>
-          <nav class="source-panel" id="source-panel" data-library-screen aria-label="Library sources">
-            <header class="source-header"><h2 id="browser-title">Sources</h2><button type="button" class="quiet source-close" data-source-close>Close</button></header>
-            <p data-summary-status role="status">Loading Library…</p>
-            <p class="recovery-notice" data-recovery-notice hidden role="status"></p>
-            <div class="source-list" data-source-list></div>
-            <footer class="source-footer"><button type="button" data-retry hidden>Retry connection</button><button type="button" class="quiet" data-access-sign-out>Sign out</button></footer>
-          </nav>
-        </dialog>
-        <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" tabindex="0"></div>
-        <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-          <header class="grid-header"><div class="grid-header-row"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false"><span class="source-toggle-name" data-grid-compact-title>All Photos</span><span class="source-toggle-indicator" aria-hidden="true">▾</span></button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-connection" data-grid-connection role="status" hidden></p><div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options aria-label="View options">View options</button><span class="options-flag" data-view-options-flag hidden></span><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button></div><div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
-          <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
-          <div class="grid-batch" data-grid-batch hidden><div class="grid-batch-result" data-grid-batch-result hidden><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-pick>Pick</button><button type="button" data-batch-reject>Reject</button><label for="batch-album-select">Add to</label><select id="batch-album-select" data-batch-album-select></select><button type="button" data-batch-album-add>Add to Album</button></div></div>
-        </section>
-${PHOTO_VIEW_TEMPLATE}
-        <dialog class="options-dialog" data-view-options aria-labelledby="view-options-title">
-          <div class="options-sheet">
-            <header class="options-header"><h2 id="view-options-title">View options</h2><button type="button" class="quiet" data-view-options-close>Close</button></header>
-            <div class="options-body">
-              <p class="options-progress" data-grid-source-progress role="status"></p>
-              <p class="options-progress" data-grid-visible-results role="status"></p>
-              <div class="options-field"><label for="view-filter-select">Selection State</label><select id="view-filter-select" data-filter-select></select></div>
-              <div class="options-field"><label for="view-sort-select">Source order</label><select id="view-sort-select" data-sort-select></select></div>
-              <div class="options-field"><label for="view-size-select">Thumbnail size</label><select id="view-size-select" data-size-select></select></div>
-              <div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div>
-              <div class="options-browse-actions" data-browse-actions><h3>Browse actions</h3><button type="button" data-random-photo aria-label="Open a random Photo from the current source and filter">Open a random Photo</button></div><div class="options-source-actions" data-options-source-actions><button type="button" data-album-resume hidden>Resume</button><button type="button" data-refresh>Refresh Current Source</button><button type="button" class="quiet" data-removal-open hidden>Remove rejected Photos</button><button type="button" class="quiet" data-removed-open>Trash</button></div>
-            </div>
-            <footer class="options-footer"><button type="button" data-view-options-apply>Apply</button><button type="button" class="quiet" data-view-options-cancel>Cancel</button></footer>
-          </div>
-        </dialog>
-        <dialog class="album-dialog" data-album-form-dialog aria-labelledby="album-form-title">
-          <div class="album-dialog-sheet" data-album-form-body></div>
-        </dialog>
-${RECOVERY_PANEL_TEMPLATE}
-${REMOVED_PANELS_TEMPLATE}
-      </section>
-    </div>`;
+  root.innerHTML = APP_SHELL_TEMPLATE;
 
   const browser = required<HTMLElement>(root, "[data-browser]");
   const connection = required<HTMLElement>(root, "[data-connection]");
@@ -383,12 +399,15 @@ ${REMOVED_PANELS_TEMPLATE}
     "[data-photo-source-toggle]",
   );
   const sourceClose = required<HTMLButtonElement>(root, "[data-source-close]");
+  const sourceWidthStatus = required<HTMLElement>(
+    root,
+    "[data-source-width-status]",
+  );
   const gridConnection = required<HTMLElement>(root, "[data-grid-connection]");
   const photoConnection = required<HTMLElement>(
     root,
     "[data-photo-connection]",
   );
-  const compactTitle = required<HTMLElement>(root, "[data-grid-compact-title]");
   const albumFormDialog = required<HTMLDialogElement>(
     root,
     "[data-album-form-dialog]",
@@ -556,15 +575,13 @@ ${REMOVED_PANELS_TEMPLATE}
     "[data-grid-select-mode]",
   );
   const gridTools = required<HTMLElement>(root, "[data-grid-tools]");
-  /// Presents the current source in both views. The narrow disclosure's
-  /// accessible name identifies both Sources and the current source, so a
-  /// screen reader names the destination the control opens, while the visible
-  /// label stays the truncated source name.
+  /// Presents the current source in both views. The disclosure's accessible
+  /// name is built from the heading it contains plus the status slot beside
+  /// it, so a screen reader names both the source and the current result
+  /// count from one control while the visible label truncates.
   const presentSourceTitle = (name: string) => {
-    gridTitle.textContent = name;
+    gridTitle.title = gridTitle.textContent = name;
     photoPresenter.setSourceTitle(name);
-    compactTitle.textContent = name;
-    sourceToggle.setAttribute("aria-label", `Sources — ${name}`);
   };
   const gridSelection = required<HTMLElement>(root, "[data-grid-selection]");
   const multiDone = required<HTMLButtonElement>(root, "[data-grid-multi-done]");
@@ -696,6 +713,13 @@ ${REMOVED_PANELS_TEMPLATE}
   const send = (intent: LibraryBrowserIntent): void => {
     if (alive) emit(intent);
   };
+  const presentSummary = createSummaryPresenter(
+    root,
+    summaryStatus,
+    gridSummary,
+    gridEmptyAction,
+    send,
+  );
   const membershipPanelController = createMembershipPanel({
     elements: {
       membershipStatus: required<HTMLElement>(root, "[data-membership-status]"),
@@ -951,6 +975,7 @@ ${REMOVED_PANELS_TEMPLATE}
       sourceToggle,
       photoSourceToggle,
       sourceClose,
+      sourceWidthStatus,
     },
     surfaces,
     isModal: () => compactSources.matches || !photoView.hidden,
@@ -968,41 +993,7 @@ ${REMOVED_PANELS_TEMPLATE}
   };
   const viewOptionsController = createViewOptions({
     root,
-    elements: {
-      viewOptionsDialog: required<HTMLDialogElement>(
-        root,
-        "[data-view-options]",
-      ),
-      viewOptionsOpen: required<HTMLButtonElement>(
-        root,
-        "[data-grid-view-options]",
-      ),
-      viewOptionsFlag: required<HTMLElement>(root, "[data-view-options-flag]"),
-      viewOptionsClose: required<HTMLButtonElement>(
-        root,
-        "[data-view-options-close]",
-      ),
-      viewOptionsApply: required<HTMLButtonElement>(
-        root,
-        "[data-view-options-apply]",
-      ),
-      viewOptionsCancel: required<HTMLButtonElement>(
-        root,
-        "[data-view-options-cancel]",
-      ),
-      albumResume: required<HTMLButtonElement>(root, "[data-album-resume]"),
-      sortSelect: required<HTMLSelectElement>(root, "[data-sort-select]"),
-      optionsProgress: required<HTMLElement>(
-        root,
-        "[data-grid-source-progress]",
-      ),
-      optionsVisibleResults: required<HTMLElement>(
-        root,
-        "[data-grid-visible-results]",
-      ),
-      filterSelect: required<HTMLSelectElement>(root, "[data-filter-select]"),
-      sizeSelect,
-    } satisfies ViewOptionsElements,
+    elements: viewOptionsElements(root),
     surfaces,
     send,
     resetGestures,
@@ -1038,13 +1029,19 @@ ${REMOVED_PANELS_TEMPLATE}
     sourceAddress: (source) =>
       addressFor(
         source.kind === "library"
-          ? { source: "library", selection: "all" }
+          ? { source: "library", selection: "all", conditions: {} }
           : source.kind === "album"
-            ? { source: "album", albumId: source.id, selection: "all" }
+            ? {
+                source: "album",
+                albumId: source.id,
+                selection: "all",
+                conditions: {},
+              }
             : {
                 source: "folder",
                 folderPath: source.location,
                 selection: "all",
+                conditions: {},
               },
       ),
     openAlbumForm: (kind, albumId, name) =>
@@ -1067,6 +1064,8 @@ ${REMOVED_PANELS_TEMPLATE}
     slider: zoomSlider,
     level: zoomLevel,
     isAlive: () => alive,
+    onDisplayChange: (dimensions, enlarged) =>
+      photoPresenter.setPreviewDisplay(dimensions, enlarged),
   });
   const photoPresenter = createPhotoViewPresenter({
     root: photoView,
@@ -1273,29 +1272,7 @@ ${REMOVED_PANELS_TEMPLATE}
     setPhotoStatus: photoPresenter.setPhotoStatus,
     presentSummary(text, action, libraryCheckState) {
       if (!alive) return;
-      const render = (surface: HTMLElement) => {
-        surface.replaceChildren(document.createTextNode(text));
-        if (!action) return;
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "summary-action";
-        button.textContent =
-          action.kind === "retry-library-check"
-            ? "Retry Library Check"
-            : "Refresh Current Source";
-        button.addEventListener("click", () =>
-          send({
-            kind: "summary-action",
-            presentationId: action.presentationId,
-          }),
-        );
-        surface.append(" ", button);
-      };
-      render(summaryStatus);
-      gridSummary.replaceChildren();
-      if (libraryCheckState && libraryCheckState !== "idle")
-        render(gridSummary);
-      gridEmptyAction.disabled = libraryCheckState === "active";
+      presentSummary(text, action, libraryCheckState);
     },
     setConnection(isConnected, sourceRetryVisible, photoRetryVisible) {
       if (!alive) return;
@@ -1310,7 +1287,7 @@ ${REMOVED_PANELS_TEMPLATE}
     },
     setGridStatus(text) {
       if (!alive) return;
-      gridStatus.textContent = text;
+      presentGridStatus(gridStatus, text);
       gridEmpty.hidden = true;
       gridEmptyMessage.textContent = "";
       gridEmptyAction.hidden = true;
@@ -1617,18 +1594,4 @@ ${REMOVED_PANELS_TEMPLATE}
       surfaces.dispose();
     },
   };
-}
-
-function required<T extends Element>(root: ParentNode, selector: string): T {
-  const value = root.querySelector<T>(selector);
-  if (!value) throw new Error(`Missing ${selector}`);
-  return value;
-}
-
-function selectionLabel(value?: ViewSelectionState): string {
-  return value === "picked"
-    ? "Picked"
-    : value === "rejected"
-      ? "Rejected"
-      : "Unflagged";
 }
