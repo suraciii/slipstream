@@ -14,6 +14,7 @@ import {
 } from "./browser-test-support/fixtures.js";
 import {
   applyViewOptions,
+  openSources,
   openViewOptions,
   waitForGridFrame,
 } from "./browser-test-support/surfaces.js";
@@ -285,5 +286,157 @@ test("a Capture Time range is inclusive below and exclusive above", async ({
   }
   await expect(page.locator("[data-grid-source-progress]")).toHaveText(
     "Source progress: 0 picked · 0 rejected · 6 unflagged",
+  );
+});
+
+test("Refresh, Retry, and Snapshot expiry retain the committed filter", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const { base, root } = await fixture();
+  await seedFilterSource(page, root);
+  const running = await server(base, root);
+  await ratePhotos(running.url);
+  await page.setViewportSize({ width: 1400, height: 800 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
+  await openViewOptions(page);
+  await page.locator("[data-rating-min-select]").selectOption("4");
+  await page.locator("[data-kind-select]").selectOption("jpeg");
+  await page.locator("[data-available-select]").selectOption("true");
+  await page.locator("[data-captured-from]").fill(CAPTURE_TIMES.a);
+  await page.locator("[data-captured-before]").fill(CAPTURE_TIMES.d);
+  await applyViewOptions(page);
+  await expect(page.locator(".photo-cell")).toHaveCount(2);
+  const address = page.url();
+  const expected = {
+    ratingMinimum: 4,
+    kind: "jpeg",
+    available: true,
+    capturedFrom: CAPTURE_TIMES.a,
+    capturedBefore: CAPTURE_TIMES.d,
+  };
+  const opens: Record<string, unknown>[] = [];
+  let failOpen = false;
+  let expireWindow = false;
+  await page.route("**/api/browse", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    opens.push(route.request().postDataJSON() as Record<string, unknown>);
+    if (failOpen) {
+      failOpen = false;
+      return route.fulfill({ status: 503, json: { error: "unavailable" } });
+    }
+    return route.continue();
+  });
+  await page.route(/\/api\/browse\/[^/?]+\?/, async (route) => {
+    if (expireWindow) {
+      expireWindow = false;
+      return route.fulfill({ status: 404, json: { error: "expired" } });
+    }
+    return route.continue();
+  });
+  const refresh = async () => {
+    await openViewOptions(page);
+    await page.locator("[data-refresh]").click();
+  };
+  const assertFiltered = async () => {
+    await expect(page.locator(".photo-cell")).toHaveCount(2);
+    expect(page.url()).toBe(address);
+    expect(opens.at(-1)).toMatchObject(expected);
+  };
+  await refresh();
+  await expect.poll(() => opens.length).toBe(1);
+  await expect(page.locator("[data-filter-select]")).toBeEnabled();
+  await assertFiltered();
+  failOpen = true;
+  await refresh();
+  await expect(page.locator("[data-grid-status]")).toContainText("Retry");
+  await page.locator("[data-view-options-cancel]").click();
+  await openSources(page);
+  await page.locator("[data-retry]").click();
+  await expect.poll(() => opens.length).toBe(3);
+  await assertFiltered();
+  expireWindow = true;
+  await refresh();
+  await expect.poll(() => opens.length).toBe(5);
+  await expect(page.locator("[data-filter-select]")).toBeEnabled();
+  await assertFiltered();
+  expect(opens[3]).toMatchObject(expected);
+});
+
+test("background window settlement preserves View options draft until Apply or Cancel", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const { base, root } = await fixture();
+  await seedFilterSource(page, root);
+  const running = await server(base, root);
+  await ratePhotos(running.url);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
+  await openViewOptions(page);
+  await page.locator("[data-rating-min-select]").selectOption("4");
+  await applyViewOptions(page);
+  await expect(page.locator(".photo-cell")).toHaveCount(3);
+  const held = Promise.withResolvers<void>();
+  const requested = Promise.withResolvers<void>();
+  await page.route(/\/api\/browse\/[^/?]+\?/, async (route) => {
+    requested.resolve();
+    await held.promise;
+    await route.continue();
+  });
+  await openViewOptions(page);
+  await expect(page.locator("[data-rating-min-select]")).toHaveValue("4");
+  await page.locator("[data-filter-select]").selectOption("unflagged");
+  await page.locator("[data-sort-select]").selectOption("capture-time-desc");
+  await page.locator("[data-refresh]").click();
+  await requested.promise;
+  await page.locator("[data-rating-min-select]").selectOption("3");
+  await page.locator("[data-rating-max-select]").selectOption("5");
+  await page.locator("[data-kind-select]").selectOption("jpeg");
+  await page.locator("[data-available-select]").selectOption("true");
+  await page.locator("[data-captured-from]").fill(CAPTURE_TIMES.a);
+  await page.locator("[data-captured-before]").fill(CAPTURE_TIMES.d);
+  held.resolve();
+  await expect(page.locator("[data-filter-select]")).toBeEnabled();
+  await expect(page.locator("[data-filter-select]")).toHaveValue("unflagged");
+  await expect(page.locator("[data-sort-select]")).toHaveValue(
+    "capture-time-desc",
+  );
+  await expect(page.locator("[data-rating-min-select]")).toHaveValue("3");
+  await expect(page.locator("[data-rating-max-select]")).toHaveValue("5");
+  await expect(page.locator("[data-kind-select]")).toHaveValue("jpeg");
+  await expect(page.locator("[data-available-select]")).toHaveValue("true");
+  await expect(page.locator("[data-captured-from]")).toHaveValue(
+    CAPTURE_TIMES.a,
+  );
+  await expect(page.locator("[data-captured-before]")).toHaveValue(
+    CAPTURE_TIMES.d,
+  );
+  await applyViewOptions(page);
+  await expect(page.locator(".photo-cell")).toHaveCount(2);
+  await expect(page).toHaveURL(/rating-min=3/);
+  await expect(page).toHaveURL(/rating-max=5/);
+  await expect(page).toHaveURL(/kind=jpeg/);
+  await expect(page).toHaveURL(/available=true/);
+  await expect(page).toHaveURL(/captured-from=/);
+  await expect(page).toHaveURL(/captured-before=/);
+  await expect(page).toHaveURL(/selection=unflagged/);
+  await expect(page).toHaveURL(/order=capture-time-desc/);
+  await openViewOptions(page);
+  await expect(page.locator("[data-rating-min-select]")).toHaveValue("3");
+  await expect(page.locator("[data-kind-select]")).toHaveValue("jpeg");
+  await expect(page.locator("[data-captured-from]")).toHaveValue(
+    CAPTURE_TIMES.a,
+  );
+  await page.locator("[data-rating-min-select]").selectOption("4");
+  await page.locator("[data-kind-select]").selectOption("");
+  await page.locator("[data-captured-from]").fill("");
+  await page.locator("[data-view-options-cancel]").click();
+  await openViewOptions(page);
+  await expect(page.locator("[data-rating-min-select]")).toHaveValue("3");
+  await expect(page.locator("[data-kind-select]")).toHaveValue("jpeg");
+  await expect(page.locator("[data-captured-from]")).toHaveValue(
+    CAPTURE_TIMES.a,
   );
 });

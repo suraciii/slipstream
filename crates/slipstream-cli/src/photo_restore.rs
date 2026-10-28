@@ -36,7 +36,18 @@ pub(crate) async fn execute(
                     "excludePhotoIds": exclusions,
                 }),
             )
-            .await?;
+            .await
+            .map_err(|failure| {
+                if (failure.payload.code == "conflict"
+                    || failure.payload.details.get("operationId").is_some())
+                    && failure.payload.details["operationId"].as_str()
+                        != Some(args.operation_id.as_str())
+                {
+                    CommandFailure::unknown(&identity)
+                } else {
+                    failure
+                }
+            })?;
         confirmed_restore_result(&identity, &args.operation_id, None, exclusions, result)
     } else if let Some(prepared) = prepared {
         let result: PhotoRestoreWire = client

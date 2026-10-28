@@ -152,7 +152,7 @@ for (const viewport of [
       page.getByRole("navigation", { name: "Sources", includeHidden: true }),
     ).toBeAttached();
     if (viewport.width < 600)
-      await page.locator("[data-source-toggle]").click();
+      await page.getByRole("button", { name: /^Sources/ }).click();
     await page.getByRole("button", { name: "Sign out", exact: true }).click();
     await expect(
       page.getByLabel("Access Token", { exact: true }),

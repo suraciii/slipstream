@@ -42,6 +42,32 @@ async fn trash_restore_all_excludes_and_replays_fixed_selection() {
         serde_json::json!({"token":opened["token"],"operationId":"00000000-0000-4000-8000-000000000100"}),
         Some("https://camera.local")).await).await;
     assert_eq!(removed["counts"]["removed"], 3);
+    let too_many: Vec<String> = (0..=slipstream_core::PHOTO_REMOVAL_MAX)
+        .map(|index| format!("photo-{index}"))
+        .collect();
+    for (operation_id, photo_ids, expected_code) in [
+        ("invalid id", vec![ids[0].clone()], "invalid_input"),
+        (
+            "00000000-0000-4000-8000-000000000104",
+            too_many,
+            "limit_exceeded",
+        ),
+    ] {
+        let response = post_json(
+            &router,
+            "/api/trash/restore",
+            serde_json::json!({"operationId":operation_id,"all":false,
+                "photoIds":photo_ids,"excludePhotoIds":[]}),
+            Some("https://camera.local"),
+        )
+        .await;
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], expected_code);
+        assert_eq!(body["error"]["effect"], "none");
+        assert_eq!(body["error"]["details"]["operationId"], operation_id);
+        let (_, trash) = get_json(&router, "/api/trash?start=0&limit=60").await;
+        assert_eq!(trash["total"], 3);
+    }
     for (all, photo_ids, exclusions) in [
         (true, vec![ids[0].clone()], Vec::<String>::new()),
         (false, Vec::new(), Vec::new()),

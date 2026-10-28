@@ -67,23 +67,15 @@ const CAPTURE_TIME_PLACEHOLDER = "YYYY-MM-DDTHH:MM:SS";
 /// The staged fact conditions and the controls that hold them. One owner per
 /// draft: the dialog reads it on Apply and discards it on Cancel or close.
 export interface ViewOptionsFilters {
-  /// The staged conditions.
-  readonly draft: ViewFilterConditions;
   /// Replaces the draft with the committed conditions of the open source.
   reset(committed: ViewFilterConditions): void;
+  /// Updates committed conditions without replacing an open draft.
+  setCommitted(conditions: ViewFilterConditions): void;
   /// Applies the staged conditions as the committed ones.
   commit(): ViewFilterConditions;
-  /// True when the staged draft differs from the committed conditions.
-  changed(): boolean;
-  /// Every active non-default condition named in text, in the order View
-  /// options presents them. State and order are named by the dialog itself.
-  labels(): ReadonlyArray<string>;
   /// Every active condition of the committed source view, so Apply can tell a
   /// real change from a re-selection of the same conditions.
   committedLabels(): ReadonlyArray<string>;
-  /// The accessible name suffix that names the active conditions for the
-  /// View options entry and the random-Photo action.
-  describe(): string;
 }
 
 const fillSelect = (
@@ -204,8 +196,8 @@ export function createViewOptionsFilters(
   };
 
   return {
-    get draft() {
-      return draft;
+    setCommitted(next) {
+      committed = next;
     },
     reset(next) {
       committed = next;
@@ -216,18 +208,8 @@ export function createViewOptionsFilters(
       committed = draft;
       return committed;
     },
-    changed() {
-      return labels(draft).join(" · ") !== labels(committed).join(" · ");
-    },
     committedLabels() {
       return labels(committed);
-    },
-    labels() {
-      return labels(draft);
-    },
-    describe() {
-      const active = labels(draft);
-      return active.length === 0 ? "" : ` · ${active.join(" · ")}`;
     },
   };
 }

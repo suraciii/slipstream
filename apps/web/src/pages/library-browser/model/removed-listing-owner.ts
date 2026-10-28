@@ -169,6 +169,7 @@ export function createRemovedListingOwner(
   let removedMessage: string | undefined;
   const removedSelectedIds = new Set<string>();
   const removedSelectedMarkers = new Map<string, number>();
+  const removedAllMarkers = new Map<string, number>();
   /// All mode is resolved by the server at review admission. Pending rows and
   /// manually unchecked rows are excluded before that capture.
   let removedAllSelected = false;
@@ -206,6 +207,7 @@ export function createRemovedListingOwner(
 
     const pendingIds = new Set<string>();
     const seen = new Set<string>();
+    const markers = new Map<string, number>();
     let total: number | undefined;
     let maximum: number | undefined;
     let failed = false;
@@ -241,6 +243,7 @@ export function createRemovedListingOwner(
           break;
         }
         seen.add(item.photo.id);
+        markers.set(item.photo.id, item.removedAtMs);
         if (item.pendingVerificationOperationId !== null)
           pendingIds.add(item.photo.id);
       }
@@ -255,6 +258,8 @@ export function createRemovedListingOwner(
       if (!refresh) {
         removedSelectedIds.clear();
         removedSelectedMarkers.clear();
+        removedAllMarkers.clear();
+        for (const [id, marker] of markers) removedAllMarkers.set(id, marker);
         removedExcludedIds = new Set<string>();
       }
       removedPendingIds = pendingIds;
@@ -287,6 +292,7 @@ export function createRemovedListingOwner(
       return;
     removedSelectedIds.clear();
     removedSelectedMarkers.clear();
+    removedAllMarkers.clear();
     removedAllSelected = false;
     removedExcludedIds = new Set<string>();
     removedMessage = undefined;
@@ -407,6 +413,7 @@ export function createRemovedListingOwner(
     if (result.kind === "ok") {
       removedSelectedIds.clear();
       removedSelectedMarkers.clear();
+      removedAllMarkers.clear();
       removedAllSelected = false;
       removedExcludedIds = new Set<string>();
       const partition = partitionTrashOperation(result.value);
@@ -504,6 +511,7 @@ export function createRemovedListingOwner(
         removedSelectionPending,
         removedLoadFailed,
         removedAllSelected,
+        removedAllMarkers,
         removedExcludedIds,
         removedPendingIds,
         removedAllCount,
@@ -593,6 +601,7 @@ export function createRemovedListingOwner(
     pendingRestore ??= readPendingTrashRestore();
     removedMessage = undefined;
     removedSelectedIds.clear();
+    removedAllMarkers.clear();
     removedSelectedMarkers.clear();
     removedAllSelected = false;
     removedExcludedIds = new Set<string>();
@@ -652,6 +661,7 @@ export function createRemovedListingOwner(
     removedRestoringSelection = false;
     removedSelectedIds.clear();
     removedSelectedMarkers.clear();
+    removedAllMarkers.clear();
     removedAllSelected = false;
     removedExcludedIds = new Set<string>();
     removedRestoringId = undefined;
@@ -761,6 +771,7 @@ export function createRemovedListingOwner(
       storePendingTrashRestore(undefined);
       removedSelectedIds.clear();
       removedSelectedMarkers.clear();
+      removedAllMarkers.clear();
       removedAllSelected = false;
       removedExcludedIds = new Set<string>();
       const counts = outcome.value.counts;
@@ -854,11 +865,20 @@ export function createRemovedListingOwner(
       // selected: Restore and a new deletion stay unavailable for it.
       if (selected && item.pendingVerificationOperationId !== null) return;
       if (removedAllSelected) {
+        const wasSelected =
+          !removedExcludedIds.has(photoId) &&
+          !removedPendingIds.has(photoId) &&
+          removedAllMarkers.get(photoId) === item.removedAtMs;
         const excluded = new Set(removedExcludedIds);
-        if (selected) excluded.delete(photoId);
-        else excluded.add(photoId);
-        if (selected && removedExcludedIds.has(photoId)) removedAllCount += 1;
-        if (!selected && !removedExcludedIds.has(photoId)) removedAllCount -= 1;
+        if (selected) {
+          excluded.delete(photoId);
+          removedAllMarkers.set(photoId, item.removedAtMs);
+          removedPendingIds = new Set(
+            [...removedPendingIds].filter((id) => id !== photoId),
+          );
+        } else excluded.add(photoId);
+        if (selected && !wasSelected) removedAllCount += 1;
+        if (!selected && wasSelected) removedAllCount -= 1;
         removedExcludedIds = excluded;
         removedMessage = trashExclusionNotice(trashExclusionSelection());
         renderRemovedPanel();

@@ -12,6 +12,7 @@ function panelState(): Parameters<typeof removedPanelModel>[0] {
     removedSelectionPending: false,
     removedLoadFailed: false,
     removedAllSelected: false,
+    removedAllMarkers: new Map(),
     removedExcludedIds: new Set(),
     removedPendingIds: new Set(),
     removedAllCount: 0,

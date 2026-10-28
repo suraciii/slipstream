@@ -88,6 +88,82 @@ async fn cli_restore_all_rejects_invalid_exclusions_before_network() {
     }
     fs::remove_dir_all(base).unwrap();
 }
+#[tokio::test]
+async fn cli_restore_all_reports_refusal_with_operation_identity() {
+    let operation = "00000000-0000-4000-8000-000000000203";
+    for (status, error) in [
+        (
+            400,
+            json!({"code":"invalid_input","message":"Invalid operation ID", "effect":"none",
+            "details":{"argument":"operationId","reason":"Invalid operation ID","operationId":operation}}),
+        ),
+        (
+            409,
+            json!({"code":"conflict","message":"Selection exceeds review bound", "effect":"none",
+            "details":{"operationId":operation}}),
+        ),
+    ] {
+        let (server, handle, _) =
+            stub_service(MutationReply::Status(status, json!({"error":error})));
+        let (exit, envelope) = command(&server, &["photos", "restore", operation, "--all"]).await;
+        handle.join().unwrap();
+        assert_ne!(exit, 0, "{envelope}");
+        assert_eq!(envelope["error"]["code"], error["code"]);
+        assert_eq!(envelope["error"]["effect"], "none");
+        assert_eq!(envelope["error"]["details"]["operationId"], operation);
+    }
+}
+
+#[tokio::test]
+async fn cli_restore_all_real_server_refuses_invalid_id_and_overbound_without_mutation() {
+    let (base, config) = fixture_with(&[]);
+    let server = common::start_authenticated_server(config.clone()).await;
+    wait_until_idle(&server.url).await;
+    let db = rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+    db.execute_batch("BEGIN;
+        WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<5000)
+        INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available)
+        SELECT 'original-' || x, 'seed/' || x || '.jpg', 'jpeg', 1, 1, 1 FROM n;
+        WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<5000)
+        INSERT INTO photos(id,original_id,available,preview_state,sort_path,removed_at_ms,removed_operation)
+        SELECT 'photo-' || x, 'original-' || x, 1, 'unavailable', 'seed/' || x, 1, 'seed' FROM n;
+        COMMIT;").unwrap();
+    let operation = "00000000-0000-4000-8000-000000000207";
+    for (id, code) in [("invalid-id", "invalid_input"), (operation, "conflict")] {
+        let response = post_json(
+            &server.url,
+            "/api/trash/restore",
+            json!({
+                "operationId": id, "all": true, "photoIds": [], "excludePhotoIds": []
+            }),
+        )
+        .await;
+        assert_eq!(
+            response.status().as_u16(),
+            if code == "conflict" { 409 } else { 400 }
+        );
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["error"]["code"], code);
+        assert_eq!(body["error"]["effect"], "none");
+        assert_eq!(body["error"]["details"]["operationId"], id);
+        let (exit, envelope) = command(&server.url, &["photos", "restore", id, "--all"]).await;
+        assert_ne!(exit, 0, "{envelope}");
+        assert_eq!(envelope["error"]["code"], code, "{envelope}");
+        assert_eq!(envelope["error"]["effect"], "none");
+        assert_eq!(envelope["error"]["details"]["operationId"], id);
+        let count: i64 = db
+            .query_row(
+                "SELECT count(*) FROM photos WHERE removed_at_ms IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 5001);
+    }
+    drop(db);
+    server.close().await.unwrap();
+    fs::remove_dir_all(base).unwrap();
+}
 
 #[tokio::test]
 async fn cli_restore_all_excludes_ids_and_replays_the_captured_selection() {

@@ -55,6 +55,7 @@ The server exposes the same model to Web and CLI:
 - `POST /api/trash/delete` — explicit confirmation of one operation id;
 - `GET /api/trash/operations/{operationId}` — durable result for reload and reconciliation;
 - the Restore request accepts the same four keys as the review request: `operationId`, `all`, `photoIds`, `excludePhotoIds`. `all: true` restores every current Trash item minus `excludePhotoIds`; `all: false` restores the named Photos. The same validation combinations apply, and the remaining identities are resolved at admission under that restore attempt's own operation identity.
+- Before admission, the selected count and checked rows reflect the selection observed when Select All was invoked, not later arrivals. The all-mode request still resolves current Trash minus exclusions at admission; its review or Restore result reports that resolved set. A refused Restore returns a structured CLI error with the operation identity when available, including a conflict if the current scope exceeds the review bound.
 - Restore is the only reversible action and must refuse permanently deleted items. Its compare-and-set removal-marker evidence is unchanged: a changed, already restored, pending-deletion, or re-removed item is refused rather than restored from stale evidence.
 
 `POST /api/trash/review` accepts exactly four keys:

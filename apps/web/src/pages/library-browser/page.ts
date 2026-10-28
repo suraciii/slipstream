@@ -307,12 +307,7 @@ function mountPrivateLibraryBrowser(
       const bindable =
         remembered.kind !== "folder" || fileLocations.publication !== undefined;
       if (bindable) {
-        await openSourceDescriptor(
-          remembered,
-          undefined,
-          sourceGrid.order,
-          sourceGrid.selection,
-        );
+        await reopenSourceDescriptor(remembered);
       } else if (coordination.isCurrent()) {
         setGridStatusText("Could not load this source. Retry to continue.");
       }
@@ -1048,6 +1043,21 @@ function mountPrivateLibraryBrowser(
       }
     }
   }
+  function reopenSourceDescriptor(
+    requested: SourceGridSource,
+    preferredPhotoId?: string,
+    establishment: SourceEstablishmentOptions = {},
+  ): Promise<SourceEstablishment> {
+    return openSourceDescriptor(
+      requested,
+      preferredPhotoId,
+      sourceGrid.order,
+      sourceGrid.selection,
+      establishment,
+      false,
+      sourceGrid.conditions,
+    );
+  }
 
   /// Applies one View Options draft; size-only changes stay in the Grid.
   /// Order and filter commit together against one identity anchor.
@@ -1167,6 +1177,7 @@ function mountPrivateLibraryBrowser(
       mode: "reopen",
       order: sourceGrid.order,
       selection: sourceGrid.selection,
+      conditions: sourceGrid.conditions,
       ...(anchorId ? { preferredPhotoId: anchorId } : {}),
     });
     const authority = lifecycleOpen.authority;
@@ -1790,28 +1801,15 @@ function mountPrivateLibraryBrowser(
         setGridStatusText("Could not load this source. Retry to continue.");
       return;
     }
-    if (sourceGrid.kind === "album") {
-      const album = application.albums.find(
-        (candidate) => candidate.id === sourceGrid.albumId,
-      );
-      if (album)
-        await openSource({
-          kind: "album",
-          album,
-          preferredPhotoId: sourceAnchorPhotoId(),
-          order: sourceGrid.order,
-          selection: sourceGrid.selection,
-          establishment: { address: "replace", intent },
-        });
+    if (
+      sourceGrid.kind === "album" &&
+      !application.albums.some((album) => album.id === sourceGrid.albumId)
+    )
       return;
-    }
-    await openSourceDescriptor(
-      sourceGrid.source,
-      sourceAnchorPhotoId(),
-      sourceGrid.order,
-      sourceGrid.selection,
-      { address: "replace", intent },
-    );
+    await reopenSourceDescriptor(sourceGrid.source, sourceAnchorPhotoId(), {
+      address: "replace",
+      intent,
+    });
   };
   const currentSourceRangeRetries = (
     alignedStart?: number,
@@ -1859,13 +1857,9 @@ function mountPrivateLibraryBrowser(
           return;
         }
       }
-      await openSourceDescriptor(
-        remembered,
-        undefined,
-        sourceGrid.order,
-        sourceGrid.selection,
-        { address: "replace" },
-      );
+      await reopenSourceDescriptor(remembered, undefined, {
+        address: "replace",
+      });
     })();
   };
 

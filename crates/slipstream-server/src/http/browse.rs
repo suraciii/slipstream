@@ -506,57 +506,6 @@ pub(crate) async fn get_removed_photos(
         Err(error) => ApiError::from(error).into_response(),
     }
 }
-/// Restores a fixed admission-time Trash selection under a durable attempt ID.
-pub(crate) async fn restore_trash(
-    State(state): State<HttpState>,
-    request: Request<Body>,
-) -> Response<Body> {
-    let body = match read_json_body(request).await {
-        Ok(body) => body,
-        Err(response) => return response,
-    };
-    let Some(body) = body.as_object() else {
-        return api_error(StatusCode::BAD_REQUEST, "Invalid Trash Restore request");
-    };
-    if !has_exact_keys(body, &["operationId", "all", "photoIds", "excludePhotoIds"]) {
-        return api_error(StatusCode::BAD_REQUEST, "Invalid Trash Restore request");
-    }
-    let Some(operation_id) = body
-        .get("operationId")
-        .and_then(Value::as_str)
-        .filter(|id| valid_id(id))
-    else {
-        return api_error(StatusCode::BAD_REQUEST, "Invalid Trash Restore request");
-    };
-    let Some(all) = body.get("all").and_then(Value::as_bool) else {
-        return api_error(StatusCode::BAD_REQUEST, "Invalid Trash Restore request");
-    };
-    let Some(photo_ids) = parse_permanent_deletion_ids(body, "photoIds") else {
-        return api_error(StatusCode::BAD_REQUEST, "Invalid Trash Restore request");
-    };
-    let Some(exclude_photo_ids) = parse_permanent_deletion_ids(body, "excludePhotoIds") else {
-        return api_error(StatusCode::BAD_REQUEST, "Invalid Trash Restore request");
-    };
-    let selection = if all && photo_ids.is_empty() {
-        slipstream_core::PermanentDeletionSelection::All { exclude_photo_ids }
-    } else if !all
-        && !photo_ids.is_empty()
-        && exclude_photo_ids.is_empty()
-        && photo_ids.len() <= slipstream_core::PHOTO_REMOVAL_MAX
-    {
-        slipstream_core::PermanentDeletionSelection::Photos(photo_ids)
-    } else {
-        return api_error(StatusCode::BAD_REQUEST, "Invalid Trash Restore request");
-    };
-    match state
-        .application
-        .restore_trash(operation_id.to_owned(), selection)
-        .await
-    {
-        Ok(result) => json_response(StatusCode::OK, &result),
-        Err(error) => ApiError::from(error).into_response(),
-    }
-}
 
 /// Captures a fixed Trash selection and returns the exact files and affected
 /// Albums that require confirmation before deletion.

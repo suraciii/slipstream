@@ -187,7 +187,7 @@ export function createViewOptions({
         FILTER_OPTIONS.find((option) => option.value === committedFilter)
           ?.label ?? "",
       );
-    parts.push(...filters.labels());
+    parts.push(...filters.committedLabels());
     if (committedOrder !== "source-default")
       parts.push(
         SORT_OPTIONS[renderedSortKind ?? "library"].find(
@@ -325,7 +325,7 @@ export function createViewOptions({
       committedOrder = options.some((option) => option.value === model.value)
         ? model.value
         : options[0]!.value;
-      sortSelect.value = committedOrder;
+      if (!viewOptionsDialog.open) sortSelect.value = committedOrder;
       sortSelect.disabled = !model.enabled;
       presentViewOptionsFlag();
     },
@@ -344,9 +344,13 @@ export function createViewOptions({
       }
       committedFilter = model.value;
       committedConditions = model.conditions;
-      filterSelect.value = model.value;
+      if (viewOptionsDialog.open) {
+        filters.setCommitted(model.conditions);
+      } else {
+        filterSelect.value = model.value;
+        filters.reset(model.conditions);
+      }
       filterSelect.disabled = !model.enabled;
-      filters.reset(model.conditions);
       presentViewOptionsFlag();
     },
     renderProgress(model) {

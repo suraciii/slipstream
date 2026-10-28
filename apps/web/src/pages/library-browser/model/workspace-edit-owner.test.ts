@@ -533,6 +533,82 @@ test("session Undo and Redo each perform and persist their own guarded edit oper
   owner.dispose();
 });
 
+for (const scenario of [
+  {
+    type: "blend-set",
+    change: { type: "blend-set", instanceId: "i", value: { opacity: 0.8 } },
+    inverse: { type: "blend-set", instanceId: "i", value: { opacity: 0.2 } },
+  },
+  {
+    type: "mask-set",
+    change: { type: "mask-set", maskId: "m", value: { x: 2 } },
+    inverse: { type: "mask-set", maskId: "m", value: { x: 1 } },
+  },
+  {
+    type: "output-set",
+    change: { type: "output-set", fieldId: "format", value: "png" },
+    inverse: { type: "output-set", fieldId: "format", value: "jpeg" },
+  },
+]) {
+  test(`session Undo saves a complete ${scenario.type} inverse`, async () => {
+    let applied = 0;
+    const { owner, bodies, ready } = harness(
+      () => {
+        applied += 1;
+        return Promise.resolve(
+          Response.json({
+            revision: "r2",
+            stateToken: "token-r2",
+            current: { revision: "r2" },
+          }),
+        );
+      },
+      (body) => {
+        if (body.operation !== "edit show") return undefined;
+        const value = state(applied ? "r2" : "r1") as unknown as {
+          instances: { items: Record<string, unknown>[] };
+          masks: {
+            items: Record<string, unknown>[];
+            total: number;
+            nextCursor: null;
+          };
+          output: { settings: Record<string, unknown> };
+        };
+        value.instances.items[0]!.blend = {
+          opacity: applied === 1 ? 0.8 : 0.2,
+        };
+        value.instances.items[0]!.maskIds = [];
+        value.masks = {
+          items: [{ maskId: "m", value: { x: applied === 1 ? 2 : 1 } }],
+          total: 1,
+          nextCursor: null,
+        };
+        value.output.settings = { format: applied === 1 ? "png" : "jpeg" };
+        // Only the scenario's target differs in the confirmed action.
+        if (scenario.type !== "blend-set")
+          value.instances.items[0]!.blend = { opacity: 0.2 };
+        if (scenario.type !== "mask-set")
+          value.masks.items[0]!.value = { x: 1 };
+        if (scenario.type !== "output-set")
+          value.output.settings = { format: "jpeg" };
+        return Response.json(value);
+      },
+    );
+    await owner.refresh();
+    await ready.promise;
+    await owner.act("change", { change: scenario.change });
+    await owner.settle();
+    await owner.act("session-undo");
+    await owner.settle();
+    const requests = bodies.filter((body) => body.operation === "edit apply");
+    expect(requests).toHaveLength(2);
+    const args = requests[1]!.arguments as JsonObject;
+    expect((args.input as JsonObject).changes).toEqual([scenario.inverse]);
+    expect(args.ifState).toBe("token-r2");
+    owner.dispose();
+  });
+}
+
 test("a retained revision restore is its own guarded operation and is never Undo or Redo", async () => {
   const { owner, bodies, ready } = harness(undefined, (body) => {
     if (body.operation === "edit show") return Response.json(state("r2"));

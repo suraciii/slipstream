@@ -119,6 +119,101 @@ describe("session edit inverse", () => {
     expect(inverseChanges(before, after)).toEqual([set("i", "ev", 0)]);
   });
 
+  test("a blend change restores the complete previous blend", () => {
+    const before = editState([
+      { instanceId: "i", blend: { opacity: 0.2 }, maskIds: [] },
+    ]);
+    const after = editState([
+      { instanceId: "i", blend: { opacity: 0.8 }, maskIds: [] },
+    ]);
+    expect(inverseChanges(before, after)).toEqual([
+      { type: "blend-set", instanceId: "i", value: { opacity: 0.2 } },
+    ]);
+  });
+
+  test("a mask change restores the complete previous mask value", () => {
+    const before = {
+      ...editState([]),
+      masks: { items: [{ maskId: "m", value: { x: 1 } }] },
+    };
+    const after = {
+      ...editState([]),
+      masks: { items: [{ maskId: "m", value: { x: 2 } }] },
+    };
+    expect(inverseChanges(before, after)).toEqual([
+      { type: "mask-set", maskId: "m", value: { x: 1 } },
+    ]);
+  });
+
+  test("an output change restores the previous output field", () => {
+    const before = {
+      ...editState([]),
+      output: { settings: { format: "jpeg" } },
+    };
+    const after = { ...editState([]), output: { settings: { format: "png" } } };
+    expect(inverseChanges(before, after)).toEqual([
+      { type: "output-set", fieldId: "format", value: "jpeg" },
+    ]);
+  });
+
+  test("a mixed action restores every change, or has no inverse", () => {
+    const before = {
+      ...editState([
+        {
+          instanceId: "i",
+          parameters: { ev: 0 },
+          blend: { opacity: 0.2 },
+          maskIds: [],
+        },
+      ]),
+      output: { settings: { format: "jpeg" } },
+    };
+    const after = {
+      ...editState([
+        {
+          instanceId: "i",
+          parameters: { ev: 1 },
+          blend: { opacity: 0.8 },
+          maskIds: [],
+        },
+      ]),
+      output: { settings: { format: "png" } },
+    };
+    expect(inverseChanges(before, after)).toEqual([
+      set("i", "ev", 0),
+      { type: "blend-set", instanceId: "i", value: { opacity: 0.2 } },
+      { type: "output-set", fieldId: "format", value: "jpeg" },
+    ]);
+  });
+
+  test("an uninvertible change makes the entire mixed action unavailable", () => {
+    const before = {
+      ...editState([{ instanceId: "i", parameters: { ev: 0 } }]),
+      masks: { items: [] },
+    };
+    const after = {
+      ...editState([{ instanceId: "i", parameters: { ev: 1 } }]),
+      masks: { items: [{ maskId: "m", value: {} }] },
+    };
+    expect(inverseChanges(before, after)).toBeUndefined();
+  });
+
+  test("a partial state window cannot produce a truthful inverse", () => {
+    const before = {
+      instances: {
+        items: [{ instanceId: "i", parameters: { ev: 0 } }],
+        nextCursor: "more",
+      },
+    };
+    const after = {
+      instances: {
+        items: [{ instanceId: "i", parameters: { ev: 1 } }],
+        nextCursor: "more",
+      },
+    };
+    expect(inverseChanges(before, after)).toBeUndefined();
+  });
+
   test("a disabled operation inverts to its previous enablement", () => {
     const before = editState([
       { instanceId: "i", enabled: true, parameters: {} },

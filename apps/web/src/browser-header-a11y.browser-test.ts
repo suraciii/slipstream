@@ -155,7 +155,7 @@ test("only a long source name truncates and stays available to assistive technol
   // accessible name is built from the heading and the count it contains, so
   // the truncated paint never becomes the announced name.
   await expect(page.locator("[data-source-toggle]")).toHaveAccessibleName(
-    `${LONG_ALBUM_NAME} Ready · 2 Photos`,
+    `Sources — ${LONG_ALBUM_NAME} Ready · 2 Photos`,
   );
   await name.hover();
   await expect(name).toHaveAttribute("title", LONG_ALBUM_NAME);

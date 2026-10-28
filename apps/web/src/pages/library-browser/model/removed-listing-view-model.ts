@@ -45,6 +45,7 @@ type RemovedPanelState = Readonly<{
   removedSelectionPending: boolean;
   removedLoadFailed: boolean;
   removedAllSelected: boolean;
+  removedAllMarkers: ReadonlyMap<string, number>;
   removedExcludedIds: ReadonlySet<string>;
   removedPendingIds: ReadonlySet<string>;
   removedAllCount: number;
@@ -94,6 +95,7 @@ export function removedPanelModel({
   removedSelectionPending,
   removedLoadFailed,
   removedAllSelected,
+  removedAllMarkers,
   removedExcludedIds,
   removedPendingIds,
   removedAllCount,
@@ -208,6 +210,7 @@ export function removedPanelModel({
         pendingVerificationOperationId: item.pendingVerificationOperationId,
         selected: removedAllSelected
           ? !excluded &&
+            removedAllMarkers.get(item.photo.id) === item.removedAtMs &&
             item.pendingVerificationOperationId === null &&
             !removedPendingIds.has(item.photo.id)
           : removedSelectedIds.has(item.photo.id) &&

@@ -313,7 +313,7 @@ test("select all never selects an item whose deletion outcome is not settled", a
   f.owner.dispose();
 });
 
-test("all mode names its current scope before review captures it", async () => {
+test("later Trash arrivals stay unselected until all-mode capture", async () => {
   const f = fixture([
     exclusionListing(["photo-1", "photo-2"]),
     exclusionListing(["photo-1", "photo-2", "photo-3"]),
@@ -332,8 +332,83 @@ test("all mode names its current scope before review captures it", async () => {
   expect(f.model.selectionCount).toBe(2);
   expect(
     f.model.items.find((item) => item.photoId === "photo-3")?.selected,
+  ).toBe(false);
+  f.owner.toggle("photo-3", true);
+  expect(
+    f.model.items.find((item) => item.photoId === "photo-3")?.selected,
+  ).toBe(true);
+  expect(f.model.selectionCount).toBe(3);
+  f.owner.toggle("photo-3", false);
+  expect(f.model.selectionCount).toBe(2);
+  expect(
+    f.model.items.find((item) => item.photoId === "photo-3")?.excluded,
   ).toBe(true);
   f.owner.dispose();
+});
+
+test("all-mode review captures current Trash minus exclusions and reports the resolved count", async () => {
+  const items = ["photo-1", "photo-3"].map((photoId, index) => ({
+    photoId,
+    removedAtMs: 1000 - index * 2,
+    originalId: `original-${index}`,
+    originalLocation: `${photoId}.jpg`,
+    originalKind: "jpeg",
+    size: 100,
+    albums: [],
+  }));
+  const f = fixture([
+    exclusionListing(["photo-1", "photo-2"]),
+    exclusionListing(["photo-1", "photo-2", "photo-3"]),
+    exclusionListing(["photo-1", "photo-2", "photo-3"]),
+  ]);
+  let request: unknown;
+  let reviewed = 0;
+  const owner = createRemovedListingOwner(
+    async (path, init) => {
+      if (path === "/api/trash/review") {
+        const body: unknown = JSON.parse(
+          typeof init?.body === "string" ? init.body : "",
+        );
+        if (!body || typeof body !== "object" || !("operationId" in body))
+          throw new Error("Missing review operation identity");
+        request = body;
+        return Response.json({
+          operationId: body.operationId,
+          items,
+          rejected: [],
+        });
+      }
+      return f.fetcher(path, init);
+    },
+    {
+      removal: f.removal,
+      present: {
+        ...f.present,
+        openReview(model) {
+          reviewed = model.itemCount;
+        },
+      },
+      coordinate: f.coordinate,
+    },
+  );
+  owner.openPanel();
+  await f.settlement();
+  owner.selectAll();
+  await f.selectionSettlement();
+  owner.toggle("photo-2", false);
+  await owner.reloadAfterUndo("Restored.");
+  expect(f.model.selectionCount).toBe(1);
+  expect(
+    f.model.items.find((item) => item.photoId === "photo-3")?.selected,
+  ).toBe(false);
+  await owner.deleteSelection();
+  expect(request).toMatchObject({
+    all: true,
+    photoIds: [],
+    excludePhotoIds: ["photo-2"],
+  });
+  expect(reviewed).toBe(2);
+  owner.dispose();
 });
 
 test("clearing the selection drops the exclusions with it", async () => {

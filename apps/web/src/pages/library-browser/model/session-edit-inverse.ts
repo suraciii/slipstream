@@ -8,10 +8,9 @@
 //! produced, so the tool records the reversal exactly as it records a slider
 //! change.
 //!
-//! A change the tool's vocabulary cannot invert truthfully — a removed
-//! operation, a mask creation, an applied Style — yields no inverse, and the
-//! owner reports that Undo is unavailable rather than substituting an
-//! unrelated reset.
+//! A change the tool's vocabulary cannot invert truthfully yields no inverse,
+//! and the owner reports that Undo is unavailable rather than partially
+//! reversing the action or substituting an unrelated reset.
 //!
 //! See [Autosave and Reversible Editing](../../../../../../specs/photo-development/spec.md#autosave-and-reversible-editing).
 
@@ -19,28 +18,37 @@ import { isRecord } from "../api/guards.js";
 import type { EditChange } from "./workspace-edit-owner.js";
 
 type Change = EditChange;
-type Instance = Readonly<{
-  instanceId: string;
-  enabled?: unknown;
-  order?: unknown;
-  parameters?: unknown;
-}>;
+type Item = Record<string, unknown>;
 
-const instanceId = (value: unknown): string | undefined =>
-  typeof value === "string" && value ? value : undefined;
+const equal = (left: unknown, right: unknown): boolean =>
+  JSON.stringify(left) === JSON.stringify(right);
 
-const parameterValue = (instance: unknown, parameterId: string): unknown => {
-  if (!isRecord(instance)) return undefined;
-  const parameters = instance.parameters;
-  if (!isRecord(parameters) || !(parameterId in parameters)) return undefined;
-  return parameters[parameterId];
+const remaining = (item: Item, omitted: string[]): Item =>
+  Object.fromEntries(
+    Object.entries(item).filter(([key]) => !omitted.includes(key)),
+  );
+
+// A bounded edit-show window cannot establish what changed outside the page.
+const itemsOf = (edit: Item, key: string): Item[] | undefined => {
+  const window = edit[key];
+  if (window === undefined) return [];
+  if (!isRecord(window) || !Array.isArray(window.items)) return undefined;
+  if (
+    window.nextCursor != null ||
+    (typeof window.total === "number" && window.total !== window.items.length)
+  )
+    return undefined;
+  return window.items.every(isRecord) ? window.items : undefined;
 };
 
-const instancesOf = (edit: unknown): Instance[] => {
-  if (!isRecord(edit)) return [];
-  const instances = edit.instances;
-  if (!isRecord(instances) || !Array.isArray(instances.items)) return [];
-  return instances.items.filter(isRecord) as Instance[];
+const keyed = (items: Item[], key: string): Map<string, Item> | undefined => {
+  const result = new Map<string, Item>();
+  for (const item of items) {
+    const id = item[key];
+    if (typeof id !== "string" || !id || result.has(id)) return undefined;
+    result.set(id, item);
+  }
+  return result;
 };
 
 /**
@@ -51,55 +59,164 @@ export function inverseChanges(
   before: unknown,
   after: unknown,
 ): Change[] | undefined {
-  const beforeInstances = instancesOf(before);
-  const afterInstances = instancesOf(after);
   if (!isRecord(before) || !isRecord(after)) return undefined;
-  const ids = (instances: Instance[]) =>
-    new Set(
-      instances
-        .map((instance) => instanceId(instance.instanceId))
-        .filter((id): id is string => id !== undefined),
-    );
-  const beforeIds = ids(beforeInstances);
-  const afterIds = ids(afterInstances);
-  // A newly added operation cannot be removed truthfully: the tool generated
-  // its identity, and no change in the tool's vocabulary addresses it. An
-  // operation that disappeared cannot be recreated from the edit state alone.
-  if (beforeIds.size !== afterIds.size) return undefined;
-  for (const id of beforeIds) if (!afterIds.has(id)) return undefined;
+  if (
+    (before.instances === undefined) !== (after.instances === undefined) ||
+    (before.masks === undefined) !== (after.masks === undefined)
+  )
+    return undefined;
+  const beforeInstances = itemsOf(before, "instances");
+  const afterInstances = itemsOf(after, "instances");
+  const beforeMasks = itemsOf(before, "masks");
+  const afterMasks = itemsOf(after, "masks");
+  if (
+    !beforeInstances ||
+    !afterInstances ||
+    !beforeMasks ||
+    !afterMasks ||
+    !itemsOf(before, "actions") ||
+    !itemsOf(after, "actions")
+  )
+    return undefined;
+  const instances = keyed(afterInstances, "instanceId");
+  const masks = keyed(afterMasks, "maskId");
+  if (
+    !instances ||
+    !masks ||
+    !keyed(beforeInstances, "instanceId") ||
+    !keyed(beforeMasks, "maskId") ||
+    beforeInstances.length !== afterInstances.length ||
+    beforeMasks.length !== afterMasks.length
+  )
+    return undefined;
+  if (
+    !equal(
+      beforeInstances.map((item) => item.instanceId),
+      afterInstances.map((item) => item.instanceId),
+    ) ||
+    !equal(
+      beforeMasks.map((item) => item.maskId),
+      afterMasks.map((item) => item.maskId),
+    )
+  )
+    return undefined;
+  if (
+    !equal(before.frames, after.frames) ||
+    !equal(before.actions, after.actions) ||
+    !equal(before.bundleId, after.bundleId) ||
+    !equal(before.schemaVersion, after.schemaVersion)
+  )
+    return undefined;
+
   const inverses: Change[] = [];
-  for (const beforeInstance of beforeInstances) {
-    const id = instanceId(beforeInstance.instanceId);
-    if (!id) return undefined;
-    const afterInstance = afterInstances.find(
-      (candidate) => instanceId(candidate.instanceId) === id,
-    );
-    if (!afterInstance) return undefined;
-    if (beforeInstance.enabled !== afterInstance.enabled)
+  for (const previous of beforeInstances) {
+    const id = previous.instanceId as string;
+    const current = instances.get(id);
+    if (!current) return undefined;
+    const blendChanged = !equal(previous.blend, current.blend);
+    if (
+      !equal(
+        remaining(previous, [
+          "enabled",
+          "parameters",
+          "blend",
+          ...(blendChanged ? ["maskIds"] : []),
+        ]),
+        remaining(current, [
+          "enabled",
+          "parameters",
+          "blend",
+          ...(blendChanged ? ["maskIds"] : []),
+        ]),
+      )
+    )
+      return undefined;
+    if (previous.enabled !== current.enabled) {
+      if (typeof previous.enabled !== "boolean") return undefined;
       inverses.push({
         type: "instance-enable",
         instanceId: id,
-        enabled: Boolean(beforeInstance.enabled),
+        enabled: previous.enabled,
       });
-    const beforeParameters = isRecord(beforeInstance.parameters)
-      ? beforeInstance.parameters
+    }
+    if (
+      (!isRecord(previous.parameters) || !isRecord(current.parameters)) &&
+      !equal(previous.parameters, current.parameters)
+    )
+      return undefined;
+    const beforeParameters = isRecord(previous.parameters)
+      ? previous.parameters
       : {};
-    const afterParameters = isRecord(afterInstance.parameters)
-      ? afterInstance.parameters
+    const afterParameters = isRecord(current.parameters)
+      ? current.parameters
       : {};
     for (const key of new Set([
       ...Object.keys(beforeParameters),
       ...Object.keys(afterParameters),
     ])) {
-      const previous = parameterValue(beforeInstance, key);
-      const current = parameterValue(afterInstance, key);
-      if (JSON.stringify(previous) === JSON.stringify(current)) continue;
-      if (previous === undefined) return undefined;
+      if (equal(beforeParameters[key], afterParameters[key])) continue;
+      if (!(key in beforeParameters) || !(key in afterParameters))
+        return undefined;
       inverses.push({
         type: "set",
         instanceId: id,
         parameterId: key,
-        value: previous,
+        value: beforeParameters[key],
+      });
+    }
+    if (blendChanged) {
+      if (!isRecord(previous.blend) || !isRecord(current.blend))
+        return undefined;
+      // blend-set derives maskIds from the drawn root reference.
+      const previousIds =
+        typeof previous.blend.maskId === "string"
+          ? [previous.blend.maskId]
+          : [];
+      if (!equal(previous.maskIds, previousIds)) return undefined;
+      inverses.push({
+        type: "blend-set",
+        instanceId: id,
+        value: previous.blend,
+      });
+    }
+  }
+  for (const previous of beforeMasks) {
+    const id = previous.maskId as string;
+    const current = masks.get(id);
+    if (
+      !current ||
+      !equal(remaining(previous, ["value"]), remaining(current, ["value"]))
+    )
+      return undefined;
+    if (!equal(previous.value, current.value)) {
+      if (!isRecord(previous.value) || !isRecord(current.value))
+        return undefined;
+      inverses.push({ type: "mask-set", maskId: id, value: previous.value });
+    }
+  }
+  if (!equal(before.output, after.output)) {
+    if (
+      !isRecord(before.output) ||
+      !isRecord(after.output) ||
+      !isRecord(before.output.settings) ||
+      !isRecord(after.output.settings) ||
+      !equal(
+        remaining(before.output, ["settings"]),
+        remaining(after.output, ["settings"]),
+      )
+    )
+      return undefined;
+    for (const key of new Set([
+      ...Object.keys(before.output.settings),
+      ...Object.keys(after.output.settings),
+    ])) {
+      if (equal(before.output.settings[key], after.output.settings[key]))
+        continue;
+      if (!(key in before.output.settings)) return undefined;
+      inverses.push({
+        type: "output-set",
+        fieldId: key,
+        value: before.output.settings[key],
       });
     }
   }

@@ -163,14 +163,14 @@ const jobFact = (model: EditorViewModel): EditorFactRow => {
       value: "No processing job is running for this workspace.",
     };
   const active = jobs.filter(
-    (job) => job.state === "queued" || job.state === "running",
+    (job) => !["succeeded", "failed", "cancelled"].includes(job.status),
   );
   if (active.length)
     return {
       label: "Processing jobs",
       value: `${active.length} job${active.length === 1 ? "" : "s"} in progress. A finished file appears only after its job settles.`,
     };
-  const failed = jobs.filter((job) => job.state === "failed");
+  const failed = jobs.filter((job) => job.status === "failed");
   if (failed.length)
     return {
       label: "Processing jobs",
