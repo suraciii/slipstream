@@ -177,6 +177,13 @@ async fn cleanup_rechecks_absence_staleness_and_retained_work_and_replays() {
         .unwrap();
     assert_eq!(remaining_xmp, 0);
     drop(connection);
+    let retained_xmp = library
+        .xmp_export("xmp-history")
+        .await
+        .unwrap()
+        .expect("historical XMP provenance");
+    assert_eq!(retained_xmp.photo_id, record("absent.JPG").photo_id);
+    assert!(retained_xmp.document.is_empty());
     assert_eq!(
         library.trash_inspection().await.unwrap().len(),
         names.len() - 1
@@ -228,6 +235,7 @@ async fn cleanup_rechecks_absence_staleness_and_retained_work_and_replays() {
             .unwrap(),
         result
     );
+    assert!(library.xmp_export("xmp-history").await.unwrap().is_some());
     library.shutdown().unwrap();
 }
 
