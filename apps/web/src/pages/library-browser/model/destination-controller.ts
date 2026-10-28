@@ -1,4 +1,8 @@
-import type { AlbumSummary, SelectionFilter } from "../api/contracts.js";
+import type {
+  AlbumSummary,
+  BrowseFilterConditions,
+  SelectionFilter,
+} from "../api/contracts.js";
 import type { SourceViewOrder } from "../api/source-grid.js";
 import type { RecoveryGate } from "./async-ownership.js";
 import type { DestinationViewPort } from "./destination-view-port.js";
@@ -50,6 +54,7 @@ export type OpenSourceOptions = Readonly<{
   folder?: { location: string; name: string };
   order?: SourceViewOrder;
   selection?: SelectionFilter;
+  conditions?: BrowseFilterConditions;
   establishment?: SourceEstablishmentOptions;
 }>;
 
@@ -65,6 +70,7 @@ type Dependencies = Readonly<{
     | "source"
     | "order"
     | "selection"
+    | "conditions"
     | "authority"
     | "generation"
     | "token"
@@ -298,6 +304,7 @@ export function createDestinationController(deps: Dependencies) {
       ...(destination.photoId ? { preferredPhotoId: destination.photoId } : {}),
       order: destinationOrder(destination),
       selection: destination.selection,
+      conditions: destination.conditions,
       establishment: { ...options, intent },
     });
     if (!current(intent)) return false;
@@ -344,6 +351,7 @@ export function createDestinationController(deps: Dependencies) {
         source: "album",
         albumId,
         selection: "all",
+        conditions: {},
       });
       const alreadyCurrent =
         source.kind === "album" &&
@@ -371,6 +379,7 @@ export function createDestinationController(deps: Dependencies) {
         source: "folder",
         folderPath: session.takeCurrentFolder() ?? "",
         selection: "all",
+        conditions: {},
       };
       navigation.replaceGrid(destination, undefined, locations.publication);
       await establish(destination, { addressed: true, reopen: true });

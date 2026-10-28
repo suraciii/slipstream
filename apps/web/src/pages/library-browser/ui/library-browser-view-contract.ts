@@ -30,6 +30,22 @@ export type ViewSourceOrder =
 /// the source order.
 export type ViewSelectionFilter = "all" | ViewSelectionState;
 
+/// The Original File kind View options may request.
+export type ViewOriginalKind = "raw" | "jpeg";
+
+/// The defined Photo fact conditions View options stages until Apply. Every
+/// field is optional, an omitted field applies no condition, and different
+/// fields combine with AND. They carry the same meaning as the CLI query
+/// contract, so a Web link never names a condition the CLI cannot express.
+export type ViewFilterConditions = Readonly<{
+  ratingMinimum?: number;
+  ratingMaximum?: number;
+  kind?: ViewOriginalKind;
+  available?: boolean;
+  capturedFrom?: string;
+  capturedBefore?: string;
+}>;
+
 type ViewSourceKind = "library" | "album" | "folder";
 
 export type GridSortViewModel = Readonly<{
@@ -44,6 +60,8 @@ export type GridSortViewModel = Readonly<{
 export type GridFilterViewModel = Readonly<{
   value: ViewSelectionFilter;
   enabled: boolean;
+  /// The committed fact conditions of the open source.
+  conditions: ViewFilterConditions;
 }>;
 
 /// Decision progress for the open source: the per-state counts the server
@@ -69,6 +87,7 @@ export type LibraryBrowserIntent =
       kind: "view-options-apply";
       order: ViewSourceOrder;
       selection: ViewSelectionFilter;
+      conditions: ViewFilterConditions;
     }>
   | Readonly<{ kind: "source-open"; source: SourceReference }>
   /// Resolves an Album's saved position under the existing saved-position

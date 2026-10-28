@@ -11,6 +11,7 @@ use std::{
 };
 
 mod browse;
+mod browse_filters;
 mod browse_selection;
 mod cli;
 mod cli_preview;
@@ -28,6 +29,7 @@ mod recovery;
 mod removal;
 mod server;
 mod startup;
+mod trash;
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 

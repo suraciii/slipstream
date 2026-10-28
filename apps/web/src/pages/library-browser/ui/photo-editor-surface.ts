@@ -11,6 +11,7 @@ import type { EditorIntent } from "../model/editor-intent-contract.js";
 import "./workspace-editor.css";
 import { newSemanticValue } from "../model/semantic-schema.js";
 import { canContinueFilm } from "../model/workspace-film.js";
+import { editorFactRows, saveStateRow } from "./editor-facts.js";
 export interface PhotoEditorSurfaceController {
   open(photoId: string): void;
   visible(): boolean;
@@ -595,26 +596,32 @@ export function createPhotoEditorSurfaceController({
         ),
       );
     target.append(output);
-    const history = document.createElement("details");
-    history.append(
-      Object.assign(document.createElement("summary"), {
-        textContent: "Saved history / Undo",
-      }),
-    );
-    for (const entry of model.history)
-      history.append(
-        button(
-          `Restore ${displayScalar(entry.revision, "Unknown revision")} ${displayScalar(entry.createdAt)}`,
-          "command",
-          {
-            operation: "history restore",
-            arguments: { revision: entry.revision },
-            guarded: true,
-          },
-          blocked,
+  };
+  const renderRetainedRevisions = (model: EditorViewModel) => {
+    const target = element("[data-workspace-revision-list]");
+    target.replaceChildren();
+    if (!model.history.length) {
+      target.append(
+        paragraph(
+          "The editing tool has not retained any saved revision for this edit yet.",
         ),
       );
-    target.append(history);
+      return;
+    }
+    target.append(
+      paragraph(
+        "Retained revisions are the tool's own saved history. Restoring one is its own operation, not session Undo or Redo.",
+      ),
+    );
+    for (const entry of model.history)
+      target.append(
+        button(
+          `Restore retained revision ${displayScalar(entry.revision, "Unknown revision")} ${displayScalar(entry.createdAt)}`,
+          "revision-restore",
+          { revision: entry.revision },
+          model.blocked,
+        ),
+      );
   };
   return {
     open(id) {
@@ -660,19 +667,13 @@ export function createPhotoEditorSurfaceController({
       compareButton.setAttribute("aria-pressed", String(model.comparing));
       const actions = element("[data-workspace-editor-actions]");
       actions.replaceChildren(
-        button("Reload workspace", "refresh", {}, model.loading),
+        paragraph(saveStateRow(model).value),
+        button("Undo", "session-undo", {}, !model.sessionUndoCount),
+        button("Redo", "session-redo", {}, !model.sessionRedoCount),
         button(
           "Preview",
           "preview",
           {},
-          !model.edit?.availability.execute ||
-            model.blocked ||
-            model.previewPending,
-        ),
-        button(
-          "Render baseline comparison",
-          "preview",
-          { comparison: true },
           !model.edit?.availability.execute ||
             model.blocked ||
             model.previewPending,
@@ -683,7 +684,16 @@ export function createPhotoEditorSurfaceController({
           {},
           !model.edit?.availability.execute || model.blocked,
         ),
+        button("Reload workspace", "refresh", {}, model.loading),
       );
+      const facts = element("[data-workspace-facts]");
+      facts.replaceChildren();
+      for (const row of editorFactRows(model)) {
+        const fact = paragraph(`${row.label}: ${row.value}`);
+        fact.dataset.fact = row.label;
+        facts.append(fact);
+      }
+      renderRetainedRevisions(model);
       const errors = element("[data-workspace-error]");
       errors.replaceChildren();
       errors.hidden = !model.error && !model.blocked;

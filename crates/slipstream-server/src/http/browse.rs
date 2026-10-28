@@ -18,6 +18,7 @@ use crate::{
     Application, BrowseSelectionFilter, BrowseSourceRequest, BrowseViewOrder, ServerError,
     folders::valid_folder_location,
     queries::format_time,
+    valid_browse_filters,
     wire::{CliFolderListResponse, CliScanStatusWire},
 };
 use slipstream_core::SelectionState;
@@ -39,6 +40,18 @@ pub(crate) struct BrowseOpenBody {
     order: Option<String>,
     #[serde(default)]
     selection: Option<String>,
+    #[serde(default)]
+    rating_minimum: Option<u8>,
+    #[serde(default)]
+    rating_maximum: Option<u8>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    available: Option<bool>,
+    #[serde(default)]
+    captured_from: Option<String>,
+    #[serde(default)]
+    captured_before: Option<String>,
 }
 
 pub(crate) async fn open_browse(
@@ -99,12 +112,28 @@ pub(crate) async fn open_browse(
         Some("rejected") => BrowseSelectionFilter::Rejected,
         Some(_) => return api_error(StatusCode::BAD_REQUEST, "Invalid browse selection"),
     };
+    // Every defined fact is validated against its own fact before any
+    // Snapshot exists: an out-of-range Rating, an inverted Rating range, an
+    // unknown Original kind, and a malformed or reversed Capture Time range
+    // are refused here rather than admitted as a partial view.
+    let conditions = match valid_browse_filters(
+        body.rating_minimum,
+        body.rating_maximum,
+        body.kind.as_deref(),
+        body.available,
+        body.captured_from.as_deref(),
+        body.captured_before.as_deref(),
+    ) {
+        Ok(conditions) => conditions,
+        Err(()) => return api_error(StatusCode::BAD_REQUEST, "Invalid browse filter"),
+    };
     match state
         .application
-        .browse_open_with_mode(
+        .browse_open_with_conditions(
             source,
             order,
             selection,
+            conditions,
             preferred_photo_id.as_deref(),
             body.resume,
         )
@@ -477,6 +506,7 @@ pub(crate) async fn get_removed_photos(
         Err(error) => ApiError::from(error).into_response(),
     }
 }
+
 /// Captures a fixed Trash selection and returns the exact files and affected
 /// Albums that require confirmation before deletion.
 pub(crate) async fn review_permanent_deletion(

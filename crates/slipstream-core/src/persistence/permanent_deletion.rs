@@ -12,7 +12,7 @@ use crate::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub(super) type TrashCandidateResult = Result<Vec<TrashPhotoCandidate>, MutationError>;
 pub(super) type PermanentDeletionReviewResult = Result<PermanentDeletionReview, MutationError>;
@@ -472,11 +472,14 @@ pub(super) fn trash_candidates(
             .into_iter()
             .filter_map(|photo_id| by_id.remove(&photo_id))
             .collect(),
-        PermanentDeletionSelection::All { exclude_photo_ids } => ordered_ids
-            .into_iter()
-            .filter_map(|photo_id| by_id.remove(&photo_id))
-            .filter(|candidate| !exclude_photo_ids.contains(&candidate.photo_id))
-            .collect(),
+        PermanentDeletionSelection::All { exclude_photo_ids } => {
+            let exclusions: HashSet<_> = exclude_photo_ids.into_iter().collect();
+            ordered_ids
+                .into_iter()
+                .filter(|photo_id| !exclusions.contains(photo_id))
+                .filter_map(|photo_id| by_id.remove(&photo_id))
+                .collect()
+        }
     };
     // Every Trash row a review would consider counts against the bound one
     // review holds, so the retained review and its refusals stay bounded.

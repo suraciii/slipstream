@@ -511,7 +511,14 @@ export const RECOVERY_PANEL_TEMPLATE = `        <dialog class="recovery-dialog" 
             <header class="recovery-header"><h3 id="recovery-title">Review unavailable Originals</h3><button type="button" class="quiet" data-recovery-close>Close</button></header>
             <div class="recovery-body">
               <p class="recovery-explanation">Recovery changes which file a Photo points to. No file is moved, renamed, or copied, and nothing is overwritten.</p>
+              <section class="recovery-results" aria-label="Unavailable originals">
+                <h4 class="recovery-section-title">Unavailable originals</h4>
+                <p class="recovery-summary" data-recovery-summary role="status"></p>
+                <ul class="recovery-list" data-recovery-list tabindex="0" aria-label="Unavailable originals"></ul>
+                <div class="recovery-more"><button type="button" class="quiet" data-recovery-more hidden>Load more</button></div>
+              </section>
               <div class="recovery-forms">
+                <p class="recovery-forms-note">Choose a named Original above to map it, or use one of these mapping actions.</p>
                 <section class="recovery-batch" aria-labelledby="recovery-batch-title">
                   <h4 id="recovery-batch-title">Map a moved folder</h4>
                   <label>Old folder prefix<input data-recovery-old-prefix type="text" autocomplete="off" spellcheck="false" placeholder="2023/travel" /></label>
@@ -530,11 +537,6 @@ export const RECOVERY_PANEL_TEMPLATE = `        <dialog class="recovery-dialog" 
                 <p class="recovery-summary" data-recovery-proposal-summary role="status" hidden></p>
                 <ul class="recovery-proposals" data-recovery-proposals tabindex="0" aria-label="Proposed mappings" hidden></ul>
                 <div class="recovery-more"><button type="button" class="quiet" data-recovery-mappings-more hidden>Load more</button></div>
-              </section>
-              <section class="recovery-results" aria-label="Unavailable originals">
-                <p class="recovery-summary" data-recovery-summary role="status"></p>
-                <ul class="recovery-list" data-recovery-list tabindex="0" aria-label="Unavailable originals"></ul>
-                <div class="recovery-more"><button type="button" class="quiet" data-recovery-more hidden>Load more</button></div>
               </section>
             </div>
             <footer class="recovery-footer">

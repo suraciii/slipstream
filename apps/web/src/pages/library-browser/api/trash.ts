@@ -398,67 +398,62 @@ export const partitionTrashOperation = (
   });
 };
 
-/// One Trash listing item reduced to what a bounded selection captures.
+/// One Trash listing item reduced to what a selection decision needs: its
+/// identity, its removal marker, and whether a permanent-deletion outcome is
+/// still owing it.
 export type TrashListingSelectionItem = Readonly<{
   photoId: string;
   removedAtMs: number;
   pendingVerificationOperationId: string | null;
 }>;
 
-export type BoundedTrashSelection = Readonly<{
-  /// The captured selection in listing order, newest removal first: the
-  /// deterministic prefix a bound keeps.
-  markers: ReadonlyArray<Readonly<{ photoId: string; removedAtMs: number }>>;
-  selectedCount: number;
-  /// True when eligible Trash items exist beyond the captured prefix.
-  bounded: boolean;
-  skippedPending: number;
+/// The select-all-minus-exclusions selection: the exclusion identities the
+/// Photographer named on the listing, plus the published review bound the
+/// server applies to what it captures. The client never captures an
+/// identity list of its own: it submits the exclusions and the server
+/// resolves the remaining current Trash items itself.
+export type TrashExclusionSelection = Readonly<{
+  /// The Photo identities excluded from the selection, in listing order.
+  /// They are removed from the selection before it is captured, so they are
+  /// never named as reviewed, counted, or deleted.
+  excludedPhotoIds: ReadonlyArray<string>;
+  /// The largest number of Photos one review may capture, as the listing
+  /// publishes it. A selection whose current Trash exceeds it is refused by
+  /// the server rather than silently truncated.
+  reviewMaximum: number;
 }>;
 
-/// Select all keeps at most `reviewMaximum` items: the newest ones, in the
-/// listing's order. Items whose permanent-deletion outcome is not settled are
-/// never selected. `total` is the complete Trash size the capture ran
-/// against, which is larger than `items` when the capture stopped at the
-/// bound before reading the rest.
-export const boundTrashSelection = (
-  items: ReadonlyArray<TrashListingSelectionItem>,
-  total: number,
-  reviewMaximum: number,
-): BoundedTrashSelection => {
-  const eligible = items.filter(
-    (item) => item.pendingVerificationOperationId === null,
-  );
-  const markers = eligible
-    .slice(0, reviewMaximum)
-    .map((item) =>
-      Object.freeze({ photoId: item.photoId, removedAtMs: item.removedAtMs }),
-    );
-  return Object.freeze({
-    markers,
-    selectedCount: markers.length,
-    bounded: total > items.length || eligible.length > markers.length,
-    skippedPending: items.length - eligible.length,
+/// The request a select-all-minus-exclusions submission carries: the
+/// exclusions the Photographer named, and no identity list of the current
+/// Trash. `all: true` with a nonempty `excludePhotoIds` is the shape the
+/// review route accepts; `photoIds` stays empty so the server, not the
+/// client, resolves the remaining identities.
+export const trashAllSelection = (
+  selection: TrashExclusionSelection,
+): TrashSelection =>
+  Object.freeze({
+    all: true,
+    photoIds: [],
+    excludePhotoIds: [...selection.excludedPhotoIds],
   });
+
+/// The exclusion report a select-all that excluded something presents. An
+/// exclusion is an evidence-bearing decision the Photographer made, never a
+/// display filter, so the interface names it and stays silent when nothing
+/// was excluded.
+export const trashExclusionNotice = (
+  selection: TrashExclusionSelection,
+): string | undefined => {
+  const excluded = selection.excludedPhotoIds.length;
+  if (excluded === 0) return undefined;
+  return `${excluded.toLocaleString()} ${
+    excluded === 1 ? "item" : "items"
+  } excluded from the selection and never deleted.`;
 };
 
-/// The truthful select-all report: it names a bounded capture and the part
-/// of the selection that was skipped, and stays silent when the capture was
-/// complete and nothing was skipped.
-export const trashSelectAllNotice = (
-  selection: BoundedTrashSelection,
-  total: number,
-  reviewMaximum: number,
-): string | undefined => {
-  const parts: string[] = [];
-  if (selection.bounded)
-    parts.push(
-      `Selected the newest ${selection.selectedCount.toLocaleString()} of ${total.toLocaleString()} Trash items; a review captures at most ${reviewMaximum.toLocaleString()}. Review this batch, then select the rest.`,
-    );
-  if (selection.skippedPending > 0)
-    parts.push(
-      `${selection.skippedPending.toLocaleString()} ${
-        selection.skippedPending === 1 ? "item" : "items"
-      } pending verification ${selection.skippedPending === 1 ? "was" : "were"} not selected.`,
-    );
-  return parts.length === 0 ? undefined : parts.join(" ");
-};
+/// The report a refused select-all presents. The server refuses a selection
+/// whose current Trash exceeds the published bound instead of capturing a
+/// truncated set, so the interface names the bound and what remains to
+/// review rather than presenting the refusal as a complete selection.
+export const trashBoundNotice = (selection: TrashExclusionSelection): string =>
+  `Selecting all current Trash exceeds the ${selection.reviewMaximum.toLocaleString()}-item review bound. Narrow the selection by excluding items, then review this batch.`;

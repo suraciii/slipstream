@@ -10,6 +10,7 @@ mod recovery;
 #[path = "selection_tests.rs"]
 mod selection_tests;
 mod static_web;
+mod trash_restore;
 mod xmp;
 
 use crate::wire::valid_selection_state;
@@ -419,6 +420,7 @@ pub(crate) fn create_router_with_processing(
         )
         .route("/api/photos/removed", get(browse::get_removed_photos))
         .route("/api/trash", get(browse::get_removed_photos))
+        .route("/api/trash/restore", post(trash_restore::restore_trash))
         .route("/api/trash/review", post(browse::review_permanent_deletion))
         .route("/api/trash/delete", post(browse::permanently_delete))
         .route(

@@ -93,6 +93,7 @@ export type AlbumSummaryAuthority = Readonly<{
 
 export interface ApplicationOwner {
   readonly overview: LibraryOverviewResponse | undefined;
+  readonly scanState: string | undefined;
   readonly albums: ReadonlyArray<AlbumSummary>;
   loadOverview(): Promise<void>;
   refreshOverview(): Promise<boolean>;
@@ -680,6 +681,9 @@ export function createApplicationOwner(
   const owner: ApplicationOwner = {
     get overview() {
       return overview;
+    },
+    get scanState() {
+      return observedScanState ?? overview?.scan.state;
     },
     get albums() {
       return albums;

@@ -1,6 +1,8 @@
 use super::*;
+mod browse_filters;
 mod cli;
 
+pub use browse_filters::{BrowseFilterConditions, valid_browse_filters};
 pub(crate) use cli::*;
 
 #[derive(Clone, Debug, Serialize)]
@@ -559,7 +561,10 @@ pub(crate) fn photo_summary_indexed_with_url(
             limited_detail: photo
                 .preview_width
                 .zip(photo.preview_height)
-                .map(|(width, height)| width.max(height) < 2560),
+                .map(|(width, height)| {
+                    slipstream_core::PreviewCapability::from_dimensions(width, height)
+                        .is_detail_limited()
+                }),
             url: preview_url,
             thumbnail_url,
             message: (!photo.available).then_some("Original File is unavailable"),
@@ -651,6 +656,9 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod preview_tests;
+
 pub(crate) fn preview_state(state: PreviewState) -> &'static str {
     match state {
         PreviewState::InspectionPending => "inspection-pending",
@@ -710,7 +718,10 @@ impl PreviewResponse {
             stale: Some(stale),
             width: Some(ready.width),
             height: Some(ready.height),
-            limited_detail: Some(ready.width.max(ready.height) < 2560),
+            limited_detail: Some(
+                slipstream_core::PreviewCapability::from_dimensions(ready.width, ready.height)
+                    .is_detail_limited(),
+            ),
             url: Some(format!(
                 "/api/private/derivatives/{}/{}/{}.jpg",
                 photo_id,

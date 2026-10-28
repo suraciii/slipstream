@@ -26,6 +26,27 @@
   color: var(--muted, #9aa0aa);
 }
 
+/* The bounded unavailable inventory opens the review: it is the first
+   section, and every mapping action is entered from a named Original in it
+   or from one of the mapping actions below it. */
+.recovery-section-title {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.recovery-forms-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted, #9aa0aa);
+}
+
+.recovery-forms {
+  border-top: 1px solid var(--border, #2a2d33);
+  padding-top: 0.5rem;
+}
+
 .recovery-header {
   display: flex;
   align-items: center;

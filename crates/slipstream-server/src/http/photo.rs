@@ -208,7 +208,10 @@ pub(crate) async fn cli_preview_response(
                 source_revision: Some(ready.source_revision),
                 width: Some(ready.width),
                 height: Some(ready.height),
-                detail_limited: Some(ready.width.max(ready.height) < 2560),
+                detail_limited: Some(
+                    slipstream_core::PreviewCapability::from_dimensions(ready.width, ready.height)
+                        .is_detail_limited(),
+                ),
                 url: Some(format!(
                     "/api/private/derivatives/{}/{}/{}.jpg",
                     photo_id,

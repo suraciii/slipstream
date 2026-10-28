@@ -84,23 +84,23 @@ pub(crate) use http::{HttpState, healthz, open_web_root, static_web};
 pub use http::{RunningServer, create_router, expand_library, start_server};
 pub use wire::{
     AlbumMembershipAddResponse, AlbumMembershipRemoveResponse, AlbumSummaryListResponse,
-    AlbumSummaryWire, BrowseOpenResponse, BrowsePositionResponse, BrowseSelectionFilter,
-    BrowseSourceRequest, BrowseViewOrder, BrowseWindowResponse, DerivativeDelivery,
-    ExplicitPhotoRemovalResponse, ExplicitPhotoRestoreCountsWire, ExplicitPhotoRestoreResponse,
-    FileLocationsResponse, FolderAlbumMutationResponse, FolderChildWire, LibraryOverviewResponse,
-    OriginalWire, PermanentDeletionItemWire, PermanentDeletionRejectionWire,
-    PermanentDeletionResponse, PermanentDeletionReviewItemWire, PermanentDeletionReviewResponse,
-    PhotoAlbumMembershipWire, PhotoAlbumsResponse, PhotoMetadataWire, PhotoRemovalCountsWire,
-    PhotoRemovalItemWire, PhotoRemovalResponse, PhotoRestorationCountsWire,
-    PhotoRestorationResponse, PhotoRestoreItemWire, PhotoSummary, PreviewResponse,
-    RemovedPhotoWire, RemovedPhotosResponse, ScanStatusWire, SelectionCountsWire,
+    AlbumSummaryWire, BrowseFilterConditions, BrowseOpenResponse, BrowsePositionResponse,
+    BrowseSelectionFilter, BrowseSourceRequest, BrowseViewOrder, BrowseWindowResponse,
+    DerivativeDelivery, ExplicitPhotoRemovalResponse, ExplicitPhotoRestoreCountsWire,
+    ExplicitPhotoRestoreResponse, FileLocationsResponse, FolderAlbumMutationResponse,
+    FolderChildWire, LibraryOverviewResponse, OriginalWire, PermanentDeletionItemWire,
+    PermanentDeletionRejectionWire, PermanentDeletionResponse, PermanentDeletionReviewItemWire,
+    PermanentDeletionReviewResponse, PhotoAlbumMembershipWire, PhotoAlbumsResponse,
+    PhotoMetadataWire, PhotoRemovalCountsWire, PhotoRemovalItemWire, PhotoRemovalResponse,
+    PhotoRestorationCountsWire, PhotoRestorationResponse, PhotoRestoreItemWire, PhotoSummary,
+    PreviewResponse, RemovedPhotoWire, RemovedPhotosResponse, ScanStatusWire, SelectionCountsWire,
 };
 pub(crate) use wire::{
     FingerprintProgressWire, RecoveryAppliedWire, RecoveryApplyResponseWire, RecoveryItemWire,
     RecoveryListResponse, RecoveryMappingWire, RecoveryRejectionResponseWire,
     RecoveryRejectionWire, RecoverySubmittedMappingWire, RetireCandidateWire, ScanRecoveryWire,
     album_summary, photo_summary_indexed_with_url, photo_web_path, recovery_item_state,
-    selection_state,
+    selection_state, valid_browse_filters,
 };
 
 #[cfg(test)]

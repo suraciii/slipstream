@@ -43,7 +43,7 @@ It contains:
 
 - one opaque token;
 - source identity: `All Photos`, one Original Folder, or one Album;
-- the view order and Selection State filter it was created with;
+- the view order and filter conditions it was created with;
 - an immutable ordered array of Photo IDs;
 - total count;
 - the source's per-state Selection counts when it was created;
@@ -249,11 +249,23 @@ rejected before any Snapshot is created.
 
 It optionally accepts one Selection State filter. The values are `"all"`
 (the default when omitted), `"unflagged"`, `"picked"`, and `"rejected"`. An
-unknown value is rejected before any Snapshot is created. The filter is
-applied once, server-side, to the complete ordered source before the Snapshot
-is frozen, so a filtered Snapshot is one frozen bounded sequence with its own
-total and positions. The source's per-state Selection counts describe the
-unfiltered source order and are reported even for an unfiltered open.
+unknown value is rejected before any Snapshot is created.
+
+It optionally accepts the other defined filter facts: `ratingMinimum` and
+`ratingMaximum` as inclusive integers from 0 through 5, `kind` as `"raw"` or
+`"jpeg"`, `available` as `true` or `false`, and `capturedFrom` and
+`capturedBefore` as camera-local `YYYY-MM-DDTHH:MM:SS` bounds. Every value is
+validated against its own fact before any Snapshot exists: an unknown
+enumeration value, an out-of-range Rating, an inverted Rating range, a reversed
+Capture Time range, and a malformed timestamp are rejected there. The
+`capturedFrom` bound is inclusive and the `capturedBefore` bound is exclusive;
+a Photo without a Capture Time never matches a supplied bound.
+
+All supplied facts combine with AND and are applied once, server-side, to the
+complete ordered source before the Snapshot is frozen. A filtered Snapshot is
+therefore one frozen bounded sequence with its own total and positions, while
+its per-state Selection counts still describe the unfiltered source order and
+are reported even for an unfiltered open.
 
 It returns the opaque token, total count, initial position, per-state
 Selection counts, and optionally one bounded first window. The exact JSON
@@ -282,11 +294,24 @@ After creation, a Snapshot's ID order never changes. A rescan may change facts r
 
 ### Selection Filtering
 
-The Selection State filter is a view option of one open source. It is applied
-after the view order has been resolved to the complete source order and before
-the Snapshot is frozen, so it selects from that order and never rewrites it.
-Filtering writes no persisted state: Album membership, Album member position,
-Selection State, and Original Files are unaffected.
+Filtering is a view option of one open source. Its ordering rule is order,
+then filter, then freeze: the view order is resolved against the complete
+source order, the combined conditions are applied to that order, and the
+resulting sequence is frozen into the Snapshot. Filtering therefore selects
+from the order and never rewrites it. It writes no persisted state: Album
+membership, Album member position, Selection State, Rating, and Original Files
+are unaffected.
+
+The conditions are the defined facts of [Source-Scoped Library
+Filters](../filters/spec.md#defined-conditions). Different facts combine with
+AND; one fact may not be supplied twice in a way that contradicts itself.
+Rating `0` means No Rating and is a real bound, not a missing value. `raw` and
+`jpeg` describe the Original File's kind, and a RAW Photo and a same-baseline
+JPEG Photo remain independent Photos under any kind condition. `available`
+describes whether the remembered Original File is available, not whether its
+Preview is ready. Capture Time uses an inclusive lower bound and an exclusive
+upper bound in camera-local time; a Photo without a Capture Time never matches
+a supplied bound and remains eligible when no time bound is supplied.
 
 The Snapshot's per-state Selection counts are computed over the same complete
 ordered source before the filter is applied. A filtered Snapshot therefore
@@ -619,7 +644,7 @@ Sending only IDs is smaller than sending every fact, but it still makes startup 
 
 ### Selected: Freeze the Filter into the Browse Snapshot
 
-The Selection State filter is resolved with the view order against the same
+Every filter condition is resolved with the view order against the same
 complete source and stored in the Snapshot. Every position, window, and
 identity lookup keeps one meaning for the life of the open view, a filter
 change reuses the existing reopen and anchor paths, and the browser never
@@ -703,8 +728,9 @@ Verification must include a generated Library projection with at least 40,000 Ph
 - the first Grid becomes interactive without a complete Photo transfer;
 - every Browse Window respects the enforced maximum;
 - browser-retained Folder nodes, Photo facts, and rendered cells remain bounded while navigating and scrolling from the first to a late position;
+- the source separator exposes its current width and bounds from the one width owner, announces a keyboard resize, and stays hidden behind the Sources disclosure on a narrow viewport;
 - `All Photos` and Original Folder order match Capture Time rules, while Album order matches membership position;
-- a Selection State filter returns exactly the matching Photos of the source order, its total and positions describe the filtered sequence, its counts describe the unfiltered source, an unknown filter value is rejected before a Snapshot exists, and no filter value changes Album membership, member position, or Original Files;
+- a filter returns exactly the matching Photos of the source order, its total and positions describe the combined filtered sequence, its counts describe the unfiltered source, each invalid fact value is rejected before a Snapshot exists, and no filter value changes Album membership, member position, or Original Files;
 - each source's default order is used when no order is requested, `capture-time-desc` and Album time views order the complete source before pagination, missing-time Photos stay last in both directions, tie-breakers keep their direction, and persisted Album positions are unchanged;
 - the per-Photo Album membership query answers from membership tables without materializing member lists, and an unknown Photo is a distinct not-found failure;
 - a rescan refreshes facts and File Location navigation but cannot reorder or insert into an open Browse Snapshot;
@@ -712,8 +738,10 @@ Verification must include a generated Library projection with at least 40,000 Ph
 - Album saved-position and unavailable-member fallback work without complete membership transfer;
 - Selection State, Rating, undo, and saved Album position mutations refresh only affected facts and survive restart;
 - a batch Selection State write compares every existing requested Photo with its expected state in one transaction, reports exactly one non-overlapping `applied`, `changedElsewhere`, or `missing` outcome per request item, never overwrites a changed Photo, rejects an over-limit or malformed request before any write, moves the source's decision counts only for confirmed Photos, and undoes as one unit through per-Photo compare-and-set;
+- the combined Preview detail statement carries actual dimensions, the stable Preview Capability, and the local enlargement condition, is available in the accessibility tree without a tooltip or Help, and recomputes on every zoom, Fit, resize, and Preview load without changing any Photo fact, Selection State, Rating, Album membership, saved position, history, or Undo;
 - current Preview work outranks adjacent and Grid work under the shared capacity-two budget;
 - the manual recovery routes list remembered unavailable facts, return inspectable proposals without writing, commit one approved batch atomically, and refuse a stale or colliding batch without partial association;
+- the Web recovery review opens on the bounded unavailable inventory, reaches mapping configuration only from a named item or an explicit mapping action, and never shows an empty mapping form first;
 - a generated thumbnail and review Preview are reused from server cache after process restart and from browser HTTP cache when identity is unchanged;
 - a source revision change cannot reuse an old derivative as current;
 - cache removal rebuilds derivatives without changing SQLite user state or Original File hashes;

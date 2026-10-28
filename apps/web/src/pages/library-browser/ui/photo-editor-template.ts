@@ -12,13 +12,15 @@ export const PHOTO_EDITOR_TEMPLATE = `
       <div class="photo-editor-view-actions"><button type="button" class="quiet" data-photo-editor-current>Current edit</button><button type="button" class="quiet" data-photo-editor-camera-reference aria-pressed="false">Camera reference</button><button type="button" class="quiet" data-photo-editor-compare aria-pressed="false">Baseline comparison</button></div>
     </section>
     <div class="photo-editor-controls workspace-editor" aria-label="Photo edit controls" tabindex="0">
+      <div class="photo-editor-facts" data-workspace-facts aria-label="Edit facts"></div>
       <p data-photo-editor-status role="status" aria-live="polite">Preparing input</p>
       <p data-photo-editor-input></p>
-      <div data-workspace-editor-actions class="photo-editor-actions"></div>
+      <div data-workspace-editor-actions class="photo-editor-actions" role="group" aria-label="Primary actions"></div>
       <div data-workspace-error role="alert" hidden></div>
       <section data-workspace-selection aria-label="Editing input and saved edits"></section>
       <section data-workspace-controls aria-label="Tool settings"></section>
       <section data-workspace-jobs aria-label="Processing jobs"></section>
+      <details data-workspace-revisions><summary>Retained revisions</summary><div data-workspace-revision-list></div></details>
       <details data-workspace-files><summary>Files</summary><div data-workspace-file-groups></div><div data-workspace-file-inspection></div></details>
       <section data-workspace-film aria-label="Continue processing"></section>
       <section data-workspace-catalog aria-label="Resources, presets and styles"></section>

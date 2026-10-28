@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
-  boundTrashSelection,
   deleteTrash,
   fetchTrashOperation,
   partitionTrashOperation,
   planTrashReview,
   reviewTrash,
-  trashSelectAllNotice,
+  trashAllSelection,
+  trashBoundNotice,
+  trashExclusionNotice,
   type TrashOperation,
   type TrashReview,
 } from "./trash.js";
@@ -87,6 +88,95 @@ describe("Trash API", () => {
     });
     expect(result.kind).toBe("ok");
     if (result.kind === "ok") expect(result.value.items).toHaveLength(2);
+  });
+
+  test("round-trips a nonempty excludePhotoIds selection and excludes nothing by itself", async () => {
+    // No repository test exercised a nonempty exclusion list before: the
+    // exclusions travel in the request itself, so the server resolves the
+    // remaining current Trash items and an excluded Photo is never named as
+    // reviewed, counted, or deleted.
+    let request: { path: string; body: unknown } | undefined;
+    const operationId = "operation-1";
+    const result = await reviewTrash(
+      (path, init) => {
+        request = {
+          path,
+          body:
+            typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+        };
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              operationId,
+              items: [
+                {
+                  photoId: "photo-1",
+                  removedAtMs: 100,
+                  originalId: "original-1",
+                  originalLocation: "2024/a.jpg",
+                  originalKind: "jpeg",
+                  size: 1024,
+                  albums: [],
+                },
+              ],
+              rejected: [{ photoId: "photo-2", reason: "missing" }],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      },
+      operationId,
+      trashAllSelection({
+        excludedPhotoIds: ["photo-2"],
+        reviewMaximum: 50,
+      }),
+    );
+
+    expect(request?.body).toEqual({
+      operationId,
+      all: true,
+      photoIds: [],
+      excludePhotoIds: ["photo-2"],
+    });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    // The excluded Photo is not one of the reviewed items.
+    expect(result.value.items.map((item) => item.photoId)).not.toContain(
+      "photo-2",
+    );
+  });
+
+  test("admits one operation id once: repeating it returns the captured review instead of widening the set", async () => {
+    // The captured review is keyed by operation id, so a second submission
+    // of the same id with the same intent is a no-op that never adds later
+    // Trash arrivals to the reviewed set.
+    const responses: string[] = [];
+    const respond = (path: string, init?: RequestInit) => {
+      responses.push(
+        `${path}:${typeof init?.body === "string" ? init.body : ""}`,
+      );
+      return Promise.resolve(
+        new Response(JSON.stringify(reviewResponse()), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    };
+    const operationId = "operation-1";
+    const selection = trashAllSelection({
+      excludedPhotoIds: ["photo-2"],
+      reviewMaximum: 50,
+    });
+    const first = await reviewTrash(respond, operationId, selection);
+    const repeated = await reviewTrash(respond, operationId, selection);
+
+    expect(first.kind).toBe("ok");
+    expect(repeated.kind).toBe("ok");
+    // Both submissions carried the same captured request: the exclusions
+    // were part of it, not a filter applied after the fact.
+    expect(new Set(responses).size).toBe(1);
+    if (repeated.kind === "ok")
+      expect(repeated.value.operationId).toBe(operationId);
   });
 
   test("accepts a review that rejects an unsettled Photo as pending verification", async () => {
@@ -427,81 +517,84 @@ describe("planTrashReview", () => {
   });
 });
 
-const items = [
-  {
-    photoId: "photo-1",
-    removedAtMs: 300,
-    pendingVerificationOperationId: null,
-  },
-  {
-    photoId: "photo-2",
-    removedAtMs: 200,
-    pendingVerificationOperationId: "operation-9",
-  },
-  {
-    photoId: "photo-3",
-    removedAtMs: 100,
-    pendingVerificationOperationId: null,
-  },
-];
+describe("trashAllSelection", () => {
+  test("submits all current Trash minus the named exclusions", () => {
+    // The exclusions are part of the captured request, not a client-side
+    // filter applied afterward, so the server resolves the remaining
+    // identities itself.
+    const selection = trashAllSelection({
+      excludedPhotoIds: ["photo-2"],
+      reviewMaximum: 50,
+    });
 
-describe("boundTrashSelection", () => {
-  test("stops at the review maximum, keeping the newest eligible items", () => {
-    const selection = boundTrashSelection(items, 3, 1);
-
-    expect(selection.selectedCount).toBe(1);
-    expect(selection.markers).toEqual([
-      { photoId: "photo-1", removedAtMs: 300 },
-    ]);
-    expect(selection.bounded).toBe(true);
-    expect(selection.skippedPending).toBe(1);
+    expect(selection).toEqual({
+      all: true,
+      photoIds: [],
+      excludePhotoIds: ["photo-2"],
+    });
   });
 
-  test("selects everything when the Trash fits the review maximum", () => {
-    const selection = boundTrashSelection(items, 3, 50);
+  test("copies the exclusion identities so a later change cannot widen the captured request", () => {
+    const excluded = ["photo-2"];
+    const selection = trashAllSelection({
+      excludedPhotoIds: excluded,
+      reviewMaximum: 50,
+    });
+    excluded.push("photo-3");
 
-    expect(selection.selectedCount).toBe(2);
-    expect(selection.bounded).toBe(false);
-    expect(selection.skippedPending).toBe(1);
+    expect(selection.excludePhotoIds).toEqual(["photo-2"]);
   });
 
-  test("never selects an item whose deletion outcome is not settled", () => {
-    const selection = boundTrashSelection([items[1]!], 1, 50);
+  test("submits no exclusions when nothing was excluded", () => {
+    const selection = trashAllSelection({
+      excludedPhotoIds: [],
+      reviewMaximum: 50,
+    });
 
-    expect(selection.selectedCount).toBe(0);
-    expect(selection.bounded).toBe(false);
-    expect(selection.skippedPending).toBe(1);
+    expect(selection.excludePhotoIds).toEqual([]);
+    expect(selection.all).toBe(true);
   });
 });
 
-describe("trashSelectAllNotice", () => {
-  const bounded = boundTrashSelection(items, 120, 50);
-
-  test("names the total, the review maximum, and the remainder for a bounded capture", () => {
-    const notice = trashSelectAllNotice(bounded, 120, 50);
+describe("trashExclusionNotice", () => {
+  test("names the excluded count and that those items are never deleted", () => {
+    const notice = trashExclusionNotice({
+      excludedPhotoIds: ["photo-2", "photo-3"],
+      reviewMaximum: 50,
+    });
 
     expect(notice).toBe(
-      "Selected the newest 2 of 120 Trash items; a review captures at most 50. Review this batch, then select the rest. 1 item pending verification was not selected.",
+      "2 items excluded from the selection and never deleted.",
     );
   });
 
-  test("is silent about a complete capture that skipped nothing", () => {
-    const notice = trashSelectAllNotice(
-      boundTrashSelection(
-        [
-          {
-            photoId: "photo-1",
-            removedAtMs: 300,
-            pendingVerificationOperationId: null,
-          },
-        ],
-        1,
-        50,
-      ),
-      1,
-      50,
-    );
+  test("names one excluded item in the singular", () => {
+    const notice = trashExclusionNotice({
+      excludedPhotoIds: ["photo-2"],
+      reviewMaximum: 50,
+    });
 
-    expect(notice).toBeUndefined();
+    expect(notice).toBe(
+      "1 item excluded from the selection and never deleted.",
+    );
+  });
+
+  test("stays silent when nothing was excluded", () => {
+    expect(
+      trashExclusionNotice({ excludedPhotoIds: [], reviewMaximum: 50 }),
+    ).toBeUndefined();
+  });
+});
+
+describe("trashBoundNotice", () => {
+  test("names the review bound and the narrowing action instead of a truncated capture", () => {
+    const notice = trashBoundNotice({
+      excludedPhotoIds: [],
+      reviewMaximum: 5000,
+    });
+
+    expect(notice).toBe(
+      "Selecting all current Trash exceeds the 5,000-item review bound. Narrow the selection by excluding items, then review this batch.",
+    );
   });
 });

@@ -19,7 +19,7 @@ The active Grid status and every source card must use `1 Photo` for one and `N P
 
 Source layout, its narrow-screen disclosure, and focus restoration follow [Library Browser Experience](experience/spec.md#screen-structure). Both layouts must preserve the `Folders` and `Albums` distinction. A Folder and Album with the same name must remain distinguishable by section and source labeling. Changing source must not require entering a separate workflow.
 
-On a wide viewport, the Photographer must be able to resize the source navigation with its separator control by pointer drag or with the Left and Right Arrow keys while that control has focus, within a bounded width range. The separator must expose an accessible name. A narrow viewport must not offer the separator and must keep the source navigation behind the Sources disclosure.
+On a wide viewport, the Photographer must be able to resize the source navigation with its separator control by pointer drag or with the Left and Right Arrow keys while that control has focus, within a bounded width range. The separator must expose an accessible name, its current width, and its minimum and maximum bounds programmatically. The current width is read from the same width owner that controls the Sources width, so the separator and the source navigation never hold two different values. A keyboard resize must announce the resulting width. A narrow viewport must not offer the separator and must keep the source navigation behind the Sources disclosure.
 
 The current source must be visually and programmatically identifiable. Source state must not depend on color alone.
 
@@ -128,7 +128,7 @@ The action must sample from the complete ordered sequence of the current Browse 
 
 - its source is the current `All Photos`, Original Folder, or Album;
 - its order is the committed order of that open view; and
-- its Selection State filter is the committed filter of that open view.
+- its filter is the committed filter of that open view.
 
 Every position in that sequence must have the same chance of being chosen. The action must not sample only rendered cells, loaded windows, Photos with ready Previews, or available Originals. An unavailable Original or unavailable Preview remains eligible when its Photo is in the sequence. A result may be chosen again on a later activation; Slipstream must not maintain a hidden no-repeat list or a session random history.
 
@@ -136,7 +136,7 @@ When the sequence is empty, the action must not start. The interface must distin
 
 While a random Photo is being resolved, the current Grid remains visible, the action admits at most one pending attempt, and repeated activation is unavailable. Slipstream must not commit a Photo destination or claim that a Photo opened before the target's bounded Photo facts are ready. Once those facts are ready, it opens the target through the ordinary Photo View path; Preview bytes may load under the existing Photo View rules.
 
-The successful destination is an ordinary Photo destination containing the current source, order, Selection State filter, and target Photo identity. It must not contain a random flag or seed. Browser Back returns to the Grid context that started the action, with its existing source, order, filter, and Grid restoration rules. Reloading the committed address opens that Photo and must not perform a new random draw.
+The successful destination is an ordinary Photo destination containing the current source, order, committed filter, and target Photo identity. It must not contain a random flag or seed. Browser Back returns to the Grid context that started the action, with its existing source, order, filter, and Grid restoration rules. Reloading the committed address opens that Photo and must not perform a new random draw.
 
 An expired Snapshot, failed bounded read, or lost connection must leave the Grid context intact and expose the applicable Retry or Refresh Current Source path. Slipstream must not silently replace the Snapshot, choose from a different source, show a different Photo as success, or create a Photo history entry for an unresolved attempt.
 
@@ -277,9 +277,16 @@ precision and the timezone-free normalized form are transport detail and must
 not appear in the interface. Slipstream must not convert, re-interpret, or
 invent a timezone for this value.
 
-Limited Preview detail must be identified together with the Preview Source
-fact, and must not be presented as a separate fact row. The complete
-explanation of the limit must remain available to assistive technology.
+Photo View must present one combined Preview detail statement beside the
+Preview Source fact. It must report the Preview's actual dimensions, the
+Preview's stable source Preview Capability, and, when the effective displayed
+scale enlarges Preview pixels, that this enlargement cannot add source detail.
+The complete explanation must be available in the accessibility tree. It must
+not rely on a title tooltip, hover, color, or animation. The statement is
+recomputed on Preview load, Photo View resize, Fit recomputation, manual zoom,
+wheel zoom, pinch zoom, and return to Fit. Recomputing it must change no Photo
+fact, Selection State, Rating, Album membership, saved position, history, or
+Undo. Limited Preview detail must not be presented as a separate fact row.
 
 The next and previous Photos must remain reachable without recording a decision.
 
@@ -304,11 +311,17 @@ shortcut.
 
 Slipstream must prioritize the current Photo's Preview. After the current Preview is ready, it may prepare the immediately next and previous Previews in the background. This preparation must not change saved position or selection state.
 
-Photo View must keep the Preview inside the available viewport width. The
-Preview area may be shorter than the full Photo View when the remaining
-controls need more room, but it must remain large enough to inspect the image
-and must never create horizontal overflow. The Photo View may scroll
-vertically on a short viewport so every existing control remains reachable.
+Photo View must keep the Preview inside the available viewport width and must
+never create horizontal overflow.
+
+Photo View must keep the primary review controls reachable without scrolling
+away from the Preview at 375 by 667, 390 by 844, and the named short-landscape
+viewports. These primary review controls are the context row, one
+Previous/position/Next navigation group, and the review dock's Reject, Rating,
+Pick, Undo, and More actions. Vertical scrolling remains available only for
+supporting content or for enlarged text. The Preview region reserved at 390 by
+844 must stay at 650 pixels and must not push the primary review controls
+below the safe viewport.
 
 ## Loading Feedback
 
@@ -334,7 +347,7 @@ On a new state store with no published Library, the browser may show initializat
 
 A rescan that relocates or still misses Original Files must report committed recovery counts on the Library status, for example `Updated locations for 126 photos. 3 originals still unavailable.` The unavailable count means active unavailable Photos only: a Photo that is not Removed and whose Original is unavailable. A successful recovery must stay unobtrusive: it must not open a dialog or require a path entry. A candidate match, an occupied destination, or an unresolved proposal must not be counted as a committed recovery. The status must not imply that Original bytes were copied or restored.
 
-Slipstream must offer one bounded `Review unavailable Originals` entry from the scan result and from an affected Photo. The entry must list remembered Locations, filenames, kinds, Ratings, Selection States, Album counts, and whether each Original has a fingerprint. It must let the Photographer propose mappings, inspect every proposal, and confirm an explicit apply under the [Photo Library and Albums](../photo-library/spec.md) manual recovery rules.
+Slipstream must offer one bounded `Review unavailable Originals` entry from the scan result and from an affected Photo. The review opens on the bounded unavailable inventory. Mapping configuration is entered from a named inventory item or from an explicit mapping action; no empty mapping form precedes the inventory. The entry must list remembered Locations, filenames, kinds, Ratings, Selection States, Album counts, and whether each Original has a fingerprint. It must let the Photographer propose mappings, inspect every proposal, and confirm an explicit apply under the [Photo Library and Albums](../photo-library/spec.md) manual recovery rules.
 
 The Web review presents three simple outcomes: updated automatically, ready for confirmation, or still unavailable. A confirmation item shows the remembered and proposed Locations, file kind, and its evidence state. The Photographer may confirm one item or an explicitly selected bounded set; protocol identifiers and revision facts remain behind details rather than primary controls.
 
@@ -452,19 +465,27 @@ Photographer re-checks rejects, then finishes the unflagged Photos. Grid View
 must therefore offer an `All`, `Unflagged`, `Picked`, or `Rejected` view of
 the open source, and must show how much of that source is decided.
 
+Grid View may combine the Selection State choice with the other defined filter
+conditions: Rating bounds, Original kind, Original availability, and a Capture
+Time range. Their meaning and boundaries follow [Source-Scoped Library
+Filters](filters/spec.md#defined-conditions). Conditions of different facts
+combine with AND. The Photographer must be able to tell which non-default
+conditions are active.
+
 The filter is a view option of the open source. It must not create a source or
 an Album, and it must not change Album membership, Album member position, or
 Original Files. The filter and the view order are independent: changing one
 keeps the other. Committed filter values survive reload through the destination URL
 under [Browser History](experience/spec.md#destinations-and-browser-history).
 
-The server applies the filter to the open source's complete order before the
-view is frozen, so the reported Photo count is the filtered count and the
-browser must not decide membership from the loaded Grid windows. A filtered
-view pages and navigates like an unfiltered one: Previous and Next move
-through the filtered Photos only. A filtered view that matches no Photos must
-report that no Photos match the filter; it must not report an empty source,
-offer a Library check, or show the previous filter's Photos.
+The server applies the combined conditions to the open source's complete order
+before the view is frozen, so the reported Photo count is the filtered count
+and the browser must not decide membership from the loaded Grid windows. A
+filtered view pages and navigates like an unfiltered one: Previous and Next
+move through the filtered Photos only. A filtered view that matches no Photos
+must report that no Photos match the filter; it must not report an empty source,
+offer a Library check, or show the previous filter's Photos. A no-match result
+is not an empty Library.
 
 Changing the filter reopens the same source in the new view. When the current
 Photo matches the new filter, the reopened view keeps that Photo; otherwise it
@@ -706,7 +727,7 @@ The Photographer must be able to set Rating through visible controls. Keyboard s
 
 Exactly one visible Rating control from zero through five must communicate the current Rating visually and programmatically. The mobile Rating entry and the explicit Rating path opened from it count as the same Rating control for this rule; the touch-only Rating Wheel is an accelerator and does not replace them. Zero must remain an explicit current value when the Photo has no Rating.
 
-Photo View must present a Photo with no Rating as `No rating` in its Rating
+Photo View must present a Photo with no Rating as `No Rating` in its Rating
 fact. A rated Photo must present `<N> star` for one and `<N> stars`
 otherwise. This wording applies to the fact only; the Rating control keeps
 zero as an explicit value.

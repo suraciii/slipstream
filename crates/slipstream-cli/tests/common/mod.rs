@@ -320,9 +320,10 @@ fn proxy_one(stream: TcpStream, config: Arc<ServerConfig>, upstream: &str) {
     if service.write_all(&request).is_err() {
         return;
     }
-    let mut response = Vec::new();
-    if service.read_to_end(&mut response).is_ok() {
-        let _ = client.write_all(&response);
+    // Forward response bytes as they arrive. Waiting for the upstream socket
+    // to close withholds an already-complete HTTP response from the client.
+    if io::copy(&mut service, &mut client).is_ok() {
+        client.conn.send_close_notify();
         let _ = client.flush();
     }
 }

@@ -1,6 +1,6 @@
 use super::*;
 use clap::Parser;
-
+mod restore;
 #[test]
 fn metadata_read_retains_unavailable_evidence_and_reason() {
     let vectors: Value = serde_json::from_str(include_str!(

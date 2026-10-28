@@ -17,18 +17,12 @@
 .app-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 1rem;
   padding: env(safe-area-inset-top) max(0.9rem, env(safe-area-inset-right)) 0
     max(0.9rem, env(safe-area-inset-left));
   border-bottom: 1px solid var(--border);
-  background: #0e1013;
-}
-
-.app-header h1 {
-  font-size: 1rem;
-  font-weight: 700;
-  letter-spacing: 0.01em;
+  background: var(--canvas);
 }
 
 .app-header p {
@@ -39,16 +33,19 @@
   font-size: 0.75rem;
 }
 
+/* Connectivity is its own meaning, not a Selection State: the dot reports
+   whether the Browser can reach the Library, and the text beside it carries
+   the same fact in a non-color channel. */
 .app-header p::before {
   width: 0.45rem;
   height: 0.45rem;
   border-radius: 50%;
-  background: var(--selected);
+  background: var(--connected);
   content: "";
 }
 
 .app-header p.offline::before {
-  background: var(--rejected);
+  background: var(--warning);
 }
 
 .browser {
@@ -92,10 +89,14 @@
   background: var(--panel);
   touch-action: none;
 }
+/* Focus indication uses the focus token, not a Selection State token: a
+   focused separator is reachable, not selected. */
 .source-resizer:hover,
-.source-resizer.active,
+.source-resizer.active {
+  background: var(--raised-hover);
+}
 .source-resizer:focus-visible {
-  background: var(--selected);
+  background: var(--focus);
   outline: none;
 }
 
@@ -124,8 +125,8 @@
 }
 
 .source-header h2,
-.grid-header h2,
-.photo-header h2 {
+.grid-header h1,
+.photo-header h1 {
   font-size: 0.95rem;
   font-weight: 680;
 }
@@ -177,9 +178,15 @@
   background: var(--raised);
 }
 
+/* The active source card states its selection in more than color: the name
+   gains weight and the row keeps its border. */
 .source-card.active {
-  border-color: #365c84;
-  background: #172331;
+  border-color: var(--focus);
+  background: var(--focus-bg);
+}
+
+.source-card.active strong {
+  font-weight: 720;
 }
 
 .source-card strong {
@@ -329,20 +336,20 @@
 
 .album-form-message {
   flex-basis: 100%;
-  color: #f0a09a;
+  color: var(--rejected);
 }
 
 .album-confirm {
   flex-wrap: wrap;
   margin: 0.3rem 0;
   padding: 0.45rem;
-  border: 1px solid #6d3b37;
+  border: 1px solid var(--rejected-strong-bg);
   border-radius: 0.375rem;
 }
 
 .album-confirm p {
   flex-basis: 100%;
-  color: #f0aaa4;
+  color: var(--rejected);
 }
 
 .folder-more {
@@ -363,6 +370,14 @@
   gap: 0.4rem;
   padding-top: 0.6rem;
   border-top: 1px solid var(--border);
+}
+
+/* Resize feedback is a transient fact: it replaces the previous value rather
+   than appending to it, so it leaves no history of its own. */
+.source-width-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
 }
 
 .grid-view {
@@ -399,9 +414,12 @@
 }
 
 /* The narrow layout has no dedicated brand or connected-status row, so the
-   source disclosure carries the current source and the compact status slot
-   carries the count. A blocking connection failure is presented beside the
-   primary action of the open view. */
+   source disclosure carries the current source and the result count together.
+   A blocking connection failure is presented beside the primary action of the
+   open view. The disclosure is one control for both source and result count:
+   the source name is its heading, the count is the status beside it, and only
+   the name truncates. A long Album name gives up width instead of clipping the
+   View options or Select mode entries. */
 .source-toggle {
   flex: 1 1 auto;
   min-width: 0;
@@ -414,8 +432,36 @@
 
 .source-toggle-name {
   min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+}
+
+.grid-heading {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.grid-status-slot {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.grid-status-slot p {
+  margin: 0;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grid-status-ready {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
   white-space: nowrap;
 }
 
@@ -423,13 +469,6 @@
   flex: none;
   color: var(--muted);
   font-size: 0.7em;
-}
-
-/* The source disclosure and the compact count truncate rather than widen the
-   screen, so a long Album name or a long status never overflows the page. */
-.grid-heading {
-  flex: 0 1 auto;
-  min-width: 0;
 }
 
 .grid-connection,
@@ -490,15 +529,20 @@
   white-space: nowrap;
 }
 
-.grid-header h2,
-.photo-header h2 {
+/* Only the source name truncates: the result count beside it keeps the width
+   its text paints so a long Album name gives up width instead of clipping a
+   required header fact. */
+.grid-header h1,
+.photo-header h1 {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.grid-header p {
+.grid-connection,
+.grid-summary,
+.grid-header .grid-status-slot p {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -507,15 +551,13 @@
 /* Supporting surfaces share one native-modal presentation: a bottom sheet that
    scrolls internally on a narrow layout, and a centered dialog on a wide one.
    Sources uses the same surface whenever it is not the resizable sidebar.
-   Photo tools and Rating are the same kind of surface, so at most one of all
-   of them is ever active. */
+   Photo tools and the other supporting surfaces share the same presentation. */
 .options-dialog,
 .album-dialog,
 .recovery-dialog,
 .removal-dialog,
 .removed-dialog,
 .photo-tools-dialog,
-.rating-dialog,
 .browser.sources-drawer .source-dialog {
   position: fixed;
   z-index: 60;
@@ -540,7 +582,6 @@
 .removal-dialog::backdrop,
 .removed-dialog::backdrop,
 .photo-tools-dialog::backdrop,
-.rating-dialog::backdrop,
 .browser.sources-drawer .source-dialog::backdrop {
   background: rgb(0 0 0 / 58%);
 }
@@ -551,7 +592,6 @@
 .removal-sheet,
 .removed-sheet,
 .photo-tools-sheet,
-.rating-sheet,
 .browser.sources-drawer .source-panel {
   min-height: 0;
   max-height: 88dvh;
@@ -580,7 +620,6 @@
 .options-header,
 .album-dialog-header,
 .photo-tools-header,
-.rating-header,
 .photo-tools-view-header {
   display: flex;
   align-items: center;
@@ -590,8 +629,7 @@
 
 .options-header h2,
 .album-dialog-header h2,
-.photo-tools-header h2,
-.rating-header h2 {
+.photo-tools-header h2 {
   margin: 0;
   font-size: 0.95rem;
   font-weight: 680;
@@ -742,7 +780,6 @@
   .removal-dialog,
   .removed-dialog,
   .photo-tools-dialog,
-  .rating-dialog,
   .browser.sources-drawer .source-dialog {
     inset: 50% auto auto 50%;
     transform: translate(-50%, -50%);
@@ -758,7 +795,6 @@
   .removal-sheet,
   .removed-sheet,
   .photo-tools-sheet,
-  .rating-sheet,
   .browser.sources-drawer .source-panel {
     max-height: min(85dvh, 44rem);
     padding: 1rem 1.15rem;
@@ -924,13 +960,13 @@
   padding: 0.3rem;
   border-color: var(--border);
   border-radius: 0.25rem;
-  background: #15181d;
+  background: var(--raised);
   text-align: left;
 }
 
 .photo-cell:hover:not(:disabled) {
   border-color: var(--focus);
-  background: #191d23;
+  background: var(--raised-hover);
 }
 
 /* A multi-selected cell reads as marked without relying on color: the marker
@@ -948,7 +984,7 @@
   z-index: 1;
   padding: 0 0.2rem;
   border-radius: 0.2rem;
-  background: #20252c;
+  background: var(--raised-hover);
   color: var(--text);
   font-size: 0.7rem;
   line-height: 1.2;
@@ -965,7 +1001,7 @@
   min-height: 0;
   overflow: hidden;
   border-radius: 0.125rem;
-  background: #050607;
+  background: var(--sunken);
 }
 
 .thumbnail {
@@ -983,7 +1019,7 @@
   place-items: center;
   min-height: 0;
   border-radius: 0.125rem;
-  background: #0b0d10;
+  background: var(--sunken);
   color: var(--muted);
   font-size: 0.7rem;
 }
@@ -1001,27 +1037,35 @@
   place-items: center;
   min-width: 1.15rem;
   height: 1.15rem;
-  border: 1px solid rgb(255 255 255 / 18%);
+  border: 1px solid var(--scrim);
   border-radius: 50%;
-  background: #20252c;
+  background: var(--raised-hover);
   font-size: 0.7rem;
 }
 
+/* A Pick and a Reject are Selection States, not a destructive action. Each
+   carries its own label so the badge never depends on color alone. */
 .cell-state.picked {
-  color: #dff8e6;
-  background: #1f6c3b;
+  color: var(--picked);
+  background: var(--picked-bg);
 }
 
 .cell-state.rejected {
-  color: #ffe5e2;
-  background: #84382f;
+  color: var(--rejected-strong);
+  background: var(--rejected-strong-bg);
 }
 
+/* The footer reads as one small line pair: the filename identifies the Photo,
+   and the facts line below it states what a decision depends on. The caption
+   uses the secondary text token rather than a dimmed one so it stays legible
+   at thumbnail scale, and the facts line gains the weight it lost to its
+   smaller size. Neither line may wrap to a second line, so both truncate. */
 .cell-caption {
   grid-column: 2;
   overflow: hidden;
-  color: var(--muted);
+  color: var(--subtle);
   font-size: 0.75rem;
+  line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1035,9 +1079,9 @@
   grid-column: 1 / -1;
   min-width: 0;
   color: var(--warning);
-  font-size: 0.62rem;
+  font-size: 0.68rem;
   font-weight: 650;
-  line-height: 1.25;
+  line-height: 1.3;
   overflow-wrap: anywhere;
 }
 
@@ -1064,11 +1108,6 @@
   overflow-y: auto;
   background: var(--canvas);
 }
-@media (min-width: 761px) and (min-height: 481px) {
-  .photo-view {
-    grid-template-rows: auto minmax(30rem, 1fr) auto auto;
-  }
-}
 
 .photo-header {
   min-width: 0;
@@ -1085,12 +1124,39 @@
   justify-self: start;
 }
 
+/* The context row names the current source and Original File beside the two
+   facts a decision depends on: Selection State and Rating. The facts sit in a
+   second column spanning both identity lines, so neither one takes a row of
+   its own and the review strip below keeps Previous, position, and Next in one
+   line. */
 .photo-identity {
   min-width: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.2rem 0.5rem;
 }
 
-.photo-header h2 {
+/* The Photo identity facts share one column of the context row. They are
+   grouped, so neither one claims the row width and forces another. */
+.photo-identity-facts {
+  min-width: 0;
+  grid-column: 2;
+  grid-row: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.2rem 0.5rem;
+}
+
+.photo-identity-facts [data-rating] {
+  color: var(--rating);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.photo-header h1 {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1115,8 +1181,10 @@
   justify-self: end;
 }
 
-/* Position and Selection State share the review strip without overlaying the
-   Preview. The same strip is used on wide, narrow, and short viewports. */
+/* The review strip holds one navigation group and the review dock. Position
+   lives in the navigation group; Selection State and Rating live in the
+   context row above, so the strip never needs a row of its own. The same strip
+   is used on wide, narrow, and short viewports. */
 .photo-review-controls {
   display: flex;
   flex-wrap: wrap;
@@ -1130,6 +1198,10 @@
   background: var(--panel);
 }
 
+/* The navigation strip holds Previous, position, and Next in one row. The Photo
+   identity facts live in the context row above it, so no fact forces this
+   strip to a second line and pushes the primary review controls below the safe
+   viewport on a short screen. */
 .photo-navigation {
   min-width: 0;
   flex: 1 1 15rem;
@@ -1149,17 +1221,6 @@
   font-size: 0.78rem;
   font-variant-numeric: tabular-nums;
   text-align: center;
-}
-
-.photo-navigation .selection-badge,
-.photo-navigation [data-rating] {
-  grid-column: 1 / -1;
-  justify-self: center;
-}
-
-.photo-navigation [data-rating] {
-  color: var(--rating);
-  font-size: 0.72rem;
 }
 
 /* The wide layout shows the bounded neighbor strip beside the Preview. A
@@ -1413,14 +1474,16 @@
   font-size: 0.68rem;
   font-weight: 700;
   letter-spacing: 0.08em;
-  opacity: 0.42;
   text-transform: uppercase;
-  transition:
-    opacity 100ms,
-    background 100ms;
+  transition: background 100ms;
   writing-mode: vertical-rl;
 }
 
+/* A Pick and a Reject are decisions, and the resting label that names them is
+   ordinary text rather than a hint. The direction labels carry no opacity
+   composition: resting Pick and Reject keep their own colors, which already
+   clear the 4.5:1 resting text contrast once the dimming is gone. Pending
+   stays distinct through its existing background and text treatment. */
 .swipe-feedback.pick {
   color: var(--selected);
 }
@@ -1431,7 +1494,6 @@
 
 .swipe-feedback.pending {
   background: var(--selected-bg);
-  opacity: 1;
 }
 
 .swipe-feedback.reject.pending {
@@ -1511,39 +1573,6 @@
   margin: 0;
 }
 
-/* The decision facts keep one deterministic line height, so the Preview
-   region they sit beside never depends on host font metrics. */
-.facts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.2rem 0.85rem;
-  font-size: 0.74rem;
-  line-height: 1.3;
-}
-
-.facts div {
-  display: flex;
-  gap: 0.3rem;
-  min-width: 0;
-  max-width: 100%;
-}
-
-.facts dt {
-  color: var(--muted);
-}
-
-.facts dd {
-  color: var(--text);
-}
-
-/* A long Original filename truncates instead of widening the review bar. */
-.facts dd[data-photo-filename] {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 /* Capture Details, the Preview Source, and the combined detail-limit
    explanation are Photo tools content, so they scroll inside the surface
    instead of stacking under the Preview. */
@@ -1590,14 +1619,6 @@
 
 .photo-tools-preview-label {
   color: var(--muted);
-}
-
-.photo-tools-detail-limit {
-  color: var(--muted);
-}
-
-.photo-tools-detail-limit::before {
-  content: "· ";
 }
 
 /* Consequential Photo feedback remains beside the actions that caused it. */
@@ -1699,12 +1720,6 @@
 
 .photo-tools-entries button {
   min-height: 2.75rem;
-}
-
-.photo-tools-note {
-  margin: 0.5rem 0 0;
-  font-size: 0.85rem;
-  color: var(--text-muted);
 }
 
 .photo-tools-view-header {
@@ -1931,14 +1946,12 @@
   }
 
   .grid-header-row {
-    gap: 0.3rem;
+    gap: 0.2rem;
+    max-width: 100%;
   }
 
   .grid-header-row:has(.options-flag:not([hidden])) {
     flex-wrap: wrap;
-  }
-  .grid-header-row {
-    gap: 0.2rem;
   }
   .grid-heading,
   .grid-heading p,
@@ -1970,6 +1983,7 @@
   .grid-selection button {
     padding: 0.25rem 0.4rem;
     font-size: 0.68rem;
+    min-height: 2.75rem;
   }
 
   .grid-connection,
@@ -1977,21 +1991,28 @@
     font-size: 0.64rem;
   }
 
-  .grid-heading h2 {
-    display: none;
+  /* The compact header's disclosure carries the source name as its heading,
+     so the name truncates inside the disclosure instead of being dropped from
+     it. It stays in the accessibility tree rather than being removed from it,
+     so the narrow Grid still exposes exactly one h1: the current source. */
+  .grid-heading h1 {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* The compact status is a required header fact, so its slot keeps the width
-     its text paints and the source disclosure truncates instead. A blocking
-     notice is one short line ("Disconnected" paints 83px at this size) that
-     the shrinking disclosure absorbs, so every fact the row carries stays
-     visible without widening the screen. */
+     its text paints and the source name truncates instead. A blocking notice
+     is one short line ("Disconnected" paints 83px at this size) that the
+     shrinking source name absorbs, so every fact the row carries stays visible
+     without widening the screen. */
   .grid-heading {
     flex: 0 1 auto;
-    max-width: 5.5rem;
+    min-width: 0;
   }
 
-  .grid-heading p {
+  .grid-status-slot p {
     flex: none;
     max-width: 100%;
     font-size: 0.66rem;
@@ -2002,16 +2023,8 @@
      they leave. */
   .source-toggle {
     flex: 1 1 2rem;
-  }
-
-  .source-toggle {
     padding: 0.3rem 0.45rem;
     font-size: 0.85rem;
-  }
-
-  .grid-tools button,
-  .grid-selection button {
-    min-height: 2.75rem;
   }
 
   /* The View options entry keeps its two controls in the row, while the flag
@@ -2033,11 +2046,6 @@
     order: 1;
     flex: 0 0 100%;
     font-size: 0.68rem;
-  }
-  .options-flag {
-    max-width: 100%;
-  }
-  .grid-header-row {
     max-width: 100%;
   }
 
@@ -2066,7 +2074,7 @@
     min-height: 2.75rem;
   }
 
-  .grid-header h2 {
+  .grid-header h1 {
     font-size: 0.88rem;
   }
 
@@ -2081,8 +2089,6 @@
   .photo-header {
     gap: 0.35rem;
     padding: 0.25rem 0.5rem;
-  }
-  .photo-header {
     min-width: 0;
     grid-template-columns: minmax(2.75rem, auto) minmax(0, 1fr) minmax(0, auto);
   }
@@ -2097,6 +2103,40 @@
     white-space: nowrap;
   }
 
+  /* The context row keeps the identity facts beside the source name, and the
+     facts give up width before any of them can push the row into a second
+     line: the badge truncates its own label and the Rating value shortens,
+     while the source name and filename keep their own truncation. The facts
+     take a bounded share of the row, so the source name never collapses to
+     nothing beside them. */
+  .photo-identity-facts {
+    flex-wrap: nowrap;
+    gap: 0.2rem 0.35rem;
+  }
+
+  .photo-identity-facts .selection-badge {
+    min-width: 0;
+    max-width: 5rem;
+    overflow: hidden;
+    padding-inline: 0.35rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.68rem;
+  }
+
+  .photo-identity-facts [data-rating] {
+    font-size: 0.66rem;
+  }
+
+  /* The Rating value is a fact, not a control: it gives up its own text before
+     it can overflow the context row, and its accessible value stays in the
+     Rating entry rather than in this caption. */
+  .photo-identity-facts [data-rating] {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .preview {
     grid-template-columns: 2.4rem minmax(0, 1fr) 2.4rem;
   }
@@ -2108,11 +2148,6 @@
   .zoom-slider {
     width: 5.5rem;
     min-height: 2.75rem;
-  }
-
-  .facts {
-    gap: 0.2rem 0.65rem;
-    font-size: 0.7rem;
   }
 
   .status {
@@ -2185,18 +2220,27 @@
 
   .photo-navigation {
     display: grid;
-    grid-template-columns: 2.75rem minmax(2rem, 1fr) 2.75rem 2.75rem minmax(
-        5rem,
+    grid-template-columns: minmax(4.75rem, 1fr) minmax(2rem, auto) minmax(
+        4.75rem,
         1fr
       );
     align-items: center;
     gap: 0.2rem;
   }
 
-  .photo-navigation .selection-badge,
-  .photo-navigation [data-rating] {
-    grid-column: auto;
-    justify-self: stretch;
+  /* The context row is the review strip's neighbour on a short screen, so the
+     identity facts give up width before they can collide with it: the badge
+     truncates its own label while the source name and filename keep theirs. */
+  .photo-identity-facts {
+    flex-wrap: nowrap;
+  }
+
+  .photo-identity-facts .selection-badge {
+    min-width: 0;
+    overflow: hidden;
+    padding-inline: 0.4rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .quick-action-dock {
@@ -2214,10 +2258,6 @@
 }
 
 @media (max-width: 420px) {
-  .app-header h1 {
-    font-size: 0.92rem;
-  }
-
   .photo-header button {
     padding-inline: 0.45rem;
     font-size: 0.72rem;
@@ -2229,12 +2269,16 @@
 
   .photo-review-controls,
   .photo-navigation,
+  .photo-identity-facts,
   .quick-action-dock {
     min-width: 0;
   }
 
   .photo-navigation {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: minmax(2.75rem, 1fr) minmax(2rem, auto) minmax(
+        2.75rem,
+        1fr
+      );
   }
 
   .photo-navigation > *,
@@ -2255,16 +2299,13 @@
     overflow-y: auto;
   }
 
-  .photo-navigation {
-    grid-template-columns:
-      minmax(4.75rem, 1fr) auto minmax(4.75rem, 1fr) minmax(4.75rem, 1fr)
-      minmax(4.75rem, 1fr);
-  }
-
-  .photo-navigation .selection-badge,
-  .photo-navigation [data-rating] {
-    grid-column: auto;
-    min-width: 0;
+  /* A wide context row has room for the identity facts beside the source name,
+     so they keep their own text size instead of truncating. */
+  .photo-identity-facts .selection-badge {
+    max-width: none;
+    overflow: visible;
+    padding-inline: 0.7rem;
+    white-space: normal;
   }
 }
 

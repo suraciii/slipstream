@@ -1,0 +1,24 @@
+/* This transient entry overlays the Browser instead of changing either view's layout. */
+.library-status-entry {
+  position: absolute;
+  z-index: 5;
+  right: max(0.75rem, env(safe-area-inset-right));
+  bottom: max(0.75rem, env(safe-area-inset-bottom));
+  display: grid;
+  justify-items: end;
+  gap: 0.35rem;
+  max-width: min(22rem, calc(100% - 1.5rem));
+}
+
+.library-status-notice {
+  padding: 0.75rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.4rem;
+  background: var(--canvas);
+  box-shadow: 0 0.25rem 1rem rgb(0 0 0 / 25%);
+  overflow-wrap: anywhere;
+}
+
+.library-status-notice .summary-action {
+  margin-top: 0.5rem;
+}

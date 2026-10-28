@@ -1,4 +1,5 @@
 import type { ModalSurfaces } from "./modal-surface.js";
+import { paragraph } from "./presentation-helpers.js";
 import type {
   AlbumFormReference,
   LibraryBrowserIntent,
@@ -389,10 +390,4 @@ export function createAlbumForm({
       alive = false;
     },
   };
-}
-
-function paragraph(text: string): HTMLParagraphElement {
-  const value = document.createElement("p");
-  value.textContent = text;
-  return value;
 }

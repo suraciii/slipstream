@@ -27,7 +27,14 @@ Slipstream does not promise:
 - monitor calibration beyond the browser and operating system's normal color handling;
 - identical appearance across uncalibrated displays.
 
-Photo View must identify `JPEG` or `RAW embedded JPEG` as the Preview Source. The wire value is `jpeg-original` or `raw-embedded-jpeg`; the legacy names `matching-jpeg` and `embedded-raw-jpeg` existed only in schema version 5 and must not appear as current values. It must identify limited detail when the Preview is smaller than the display or requested zoom requires.
+Photo View must identify `JPEG` or `RAW embedded JPEG` as the Preview Source. The wire value is `jpeg-original` or `raw-embedded-jpeg`; the legacy names `matching-jpeg` and `embedded-raw-jpeg` existed only in schema version 5 and must not appear as current values.
+
+Limited detail has two separate facts, and the interface must not merge them:
+
+- **Preview Capability** is source evidence. It compares the delivered dimensions against the review target class — `normal-review` when the delivered Preview can reasonably fill Photo View, and `detail-limited` when magnification reaches source pixels before useful focus inspection. It is a fact about the Photo and its Preview, not about the browser. It must not claim anything about a client viewport, Preview area size, or the current zoom state.
+- **The Web display condition** is a separate presentation fact. It is true when the currently displayed Preview, at the current zoom in the current Preview area, would need to enlarge source pixels to fill what the Photographer is looking at. Only the Web owns it, and it is recomputed from what the browser actually measured.
+
+Photo View must identify limited detail using both facts: the capability states what the source supports, and the display condition states whether this display is currently asking for more than it has. Neither fact changes the Photo, the Preview, or the other fact.
 
 ## Preview Normalization
 

@@ -112,7 +112,7 @@ _Avoid_: sync error, overwrite conflict
 The primary interface for viewing Photos from `All Photos`, one Original Folder, or one Album. It provides a progressively loaded Grid View and a focused Photo View.
 
 **Destination**:
-One addressable Library Browser view: a source with its view order and Selection State filter, showing either its Grid or one Photo. A Destination resolves against current Library facts when opened; it is not an archival snapshot. It is unrelated to the destination Location used by Retire and Bind.
+One addressable Library Browser view: a source with its view order and its source-scoped filter, showing either its Grid or one Photo. The filter carries the committed conditions, such as Selection State, Rating bounds, Original kind, Original availability, and a Capture Time range. A Destination resolves against current Library facts when opened; it is not an archival snapshot. It is unrelated to the destination Location used by Retire and Bind.
 _Avoid_: page route, permalink
 
 **Resume**:

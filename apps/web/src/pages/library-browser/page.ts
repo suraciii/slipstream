@@ -8,7 +8,11 @@ import {
   type BrowseRangeRecoveryOwner,
   type GridRangeRetry,
 } from "./model/browse-range-recovery-owner.js";
-import type { SelectionFilter, SelectionState } from "./api/contracts.js";
+import type {
+  BrowseFilterConditions,
+  SelectionFilter,
+  SelectionState,
+} from "./api/contracts.js";
 import { routeEditorIntent } from "./model/editor-intent-router.js";
 import { createPhotoDetailsOwner } from "./model/photo-details-owner.js";
 import { createMetadataPanel } from "./ui/external-metadata-panel.js";
@@ -45,8 +49,16 @@ import { createPhotoOwner, type PhotoAuthority } from "./model/photo-owner.js";
 import { createSavedPositionOwner } from "./model/saved-position-owner.js";
 import {
   createNavigationOwner,
+  sameConditions,
   sameSourceView,
 } from "./model/browser-navigation.js";
+import { emptySourceMessage } from "./model/empty-source-message.js";
+import {
+  RESTORE_REOPEN,
+  reopenAfterLibraryChange,
+  type ReopenAfterChangeDeps,
+  type ReopenReason,
+} from "./model/reopen-after-change.js";
 import {
   createNavigationSession,
   type DestinationEstablishment,
@@ -127,7 +139,7 @@ function mountPrivateLibraryBrowser(
   );
   if (!metadataHost) throw new Error("External Metadata surface is missing.");
   const metadataPanel = createMetadataPanel(metadataHost, fetcher, (message) =>
-    view.presentSummary(message),
+    view.setPhotoStatus(message),
   );
   const photoOwner = createPhotoOwner(
     fetcher,
@@ -184,7 +196,7 @@ function mountPrivateLibraryBrowser(
     view,
     () => applicationAlive,
     photoOwner,
-    () => applicationPresentation.scanPhase,
+    () => application.scanState ?? "unknown",
   );
   const { refresh: refreshEditor, leave: leaveEditor } = editor;
   const savedPositions = createSavedPositionOwner(fetcher, {
@@ -295,12 +307,7 @@ function mountPrivateLibraryBrowser(
       const bindable =
         remembered.kind !== "folder" || fileLocations.publication !== undefined;
       if (bindable) {
-        await openSourceDescriptor(
-          remembered,
-          undefined,
-          sourceGrid.order,
-          sourceGrid.selection,
-        );
+        await reopenSourceDescriptor(remembered);
       } else if (coordination.isCurrent()) {
         setGridStatusText("Could not load this source. Retry to continue.");
       }
@@ -368,15 +375,7 @@ function mountPrivateLibraryBrowser(
           sourceGrid.token !== "" &&
           sourceGrid.isReady(sourceGrid.authority)
         ) {
-          const anchor =
-            sourceGrid.readGridPosition(sourceGrid.authority) ??
-            photoOwner.currentIndex;
-          await reopenExpired(
-            anchor,
-            sourceGrid.generation,
-            undefined,
-            RESTORE_REOPEN,
-          );
+          await reopenAfterLibraryChange(reopenDeps, RESTORE_REOPEN);
         }
       },
       restorationMessage: (counts) => restorationOutcomeMessage(counts),
@@ -583,6 +582,7 @@ function mountPrivateLibraryBrowser(
     view.renderFilter({
       value: sourceGrid.selection,
       enabled: !interactionBusy && !photoOwner.opening,
+      conditions: sourceGrid.conditions,
     });
   };
 
@@ -851,12 +851,12 @@ function mountPrivateLibraryBrowser(
   };
   const presentEmptySource = (): void => {
     setGridStatusText(formatPhotoCount(0));
-    view.setGridEmpty(
-      sourceGrid.selection === "all"
-        ? emptySourceStatus()
-        : "No Photos match this filter.",
-      sourceGrid.selection === "all" && sourceGrid.kind !== "album",
+    const empty = emptySourceMessage(
+      sourceGrid.kind,
+      sourceGrid.selection,
+      sourceGrid.conditions,
     );
+    view.setGridEmpty(empty.message, empty.offersLibraryCheck);
   };
   const sourceAnchorPhotoId = () =>
     (photoOwner.active ? currentPhoto()?.id : undefined) ??
@@ -870,6 +870,7 @@ function mountPrivateLibraryBrowser(
     folder,
     order,
     selection,
+    conditions,
     establishment,
   }: OpenSourceOptions) => {
     const descriptor: SourceGridSource =
@@ -889,6 +890,7 @@ function mountPrivateLibraryBrowser(
       selection,
       establishment,
       resume,
+      conditions,
     );
   };
 
@@ -899,6 +901,7 @@ function mountPrivateLibraryBrowser(
     selection: SelectionFilter = "all",
     establishment: SourceEstablishmentOptions = {},
     resume = false,
+    conditions: BrowseFilterConditions = {},
   ): Promise<SourceEstablishment> {
     const destinationEstablishment =
       establishment.intent ??
@@ -910,6 +913,7 @@ function mountPrivateLibraryBrowser(
         ...(requested.kind === "album" ? { albumId: requested.album.id } : {}),
         ...(order !== "source-default" ? { order } : {}),
         selection,
+        conditions,
       });
     const destinationCurrent = () =>
       applicationAlive && navigationSession.isCurrent(destinationEstablishment);
@@ -924,6 +928,7 @@ function mountPrivateLibraryBrowser(
       ...(resume ? { resume: true } : {}),
       order,
       selection,
+      conditions,
     });
     const authority = lifecycleOpen.authority;
     const generation = lifecycleOpen.generation;
@@ -1038,21 +1043,42 @@ function mountPrivateLibraryBrowser(
       }
     }
   }
+  function reopenSourceDescriptor(
+    requested: SourceGridSource,
+    preferredPhotoId?: string,
+    establishment: SourceEstablishmentOptions = {},
+  ): Promise<SourceEstablishment> {
+    return openSourceDescriptor(
+      requested,
+      preferredPhotoId,
+      sourceGrid.order,
+      sourceGrid.selection,
+      establishment,
+      false,
+      sourceGrid.conditions,
+    );
+  }
 
   /// Applies one View Options draft; size-only changes stay in the Grid.
   /// Order and filter commit together against one identity anchor.
   const applyViewOptions = async (
     order: SourceViewOrder,
     selection: SelectionFilter,
+    conditions: BrowseFilterConditions,
   ): Promise<void> => {
     if (!applicationAlive || pageBusy || photoOwner.busy) return;
     const orderChanged = order !== sourceGrid.order;
     const filterChanged = selection !== sourceGrid.selection;
-    if (!orderChanged && !filterChanged) return;
+    const conditionsChanged = !sameConditions(
+      conditions,
+      sourceGrid.conditions,
+    );
+    if (!orderChanged && !filterChanged && !conditionsChanged) return;
     const intent = navigationSession.begin({
       ...liveDestination(sourceGrid),
       ...(order !== "source-default" ? { order } : {}),
       selection,
+      conditions,
     });
     const current = () =>
       applicationAlive && navigationSession.isCurrent(intent);
@@ -1071,13 +1097,9 @@ function mountPrivateLibraryBrowser(
       order,
       selection,
       { address: "replace", intent },
+      false,
+      conditions,
     );
-  };
-
-  const emptySourceStatus = (): string => {
-    if (sourceGrid.kind === "album")
-      return "This Album contains no Photos. Add Photos from another source's Photo View.";
-    return "No supported Photos found. Check the Library Folder or add supported files, then run Check Library.";
   };
 
   /// Reopens the current source with a fresh Snapshot, retaining its anchor
@@ -1155,6 +1177,7 @@ function mountPrivateLibraryBrowser(
       mode: "reopen",
       order: sourceGrid.order,
       selection: sourceGrid.selection,
+      conditions: sourceGrid.conditions,
       ...(anchorId ? { preferredPhotoId: anchorId } : {}),
     });
     const authority = lifecycleOpen.authority;
@@ -1778,28 +1801,15 @@ function mountPrivateLibraryBrowser(
         setGridStatusText("Could not load this source. Retry to continue.");
       return;
     }
-    if (sourceGrid.kind === "album") {
-      const album = application.albums.find(
-        (candidate) => candidate.id === sourceGrid.albumId,
-      );
-      if (album)
-        await openSource({
-          kind: "album",
-          album,
-          preferredPhotoId: sourceAnchorPhotoId(),
-          order: sourceGrid.order,
-          selection: sourceGrid.selection,
-          establishment: { address: "replace", intent },
-        });
+    if (
+      sourceGrid.kind === "album" &&
+      !application.albums.some((album) => album.id === sourceGrid.albumId)
+    )
       return;
-    }
-    await openSourceDescriptor(
-      sourceGrid.source,
-      sourceAnchorPhotoId(),
-      sourceGrid.order,
-      sourceGrid.selection,
-      { address: "replace", intent },
-    );
+    await reopenSourceDescriptor(sourceGrid.source, sourceAnchorPhotoId(), {
+      address: "replace",
+      intent,
+    });
   };
   const currentSourceRangeRetries = (
     alignedStart?: number,
@@ -1847,13 +1857,9 @@ function mountPrivateLibraryBrowser(
           return;
         }
       }
-      await openSourceDescriptor(
-        remembered,
-        undefined,
-        sourceGrid.order,
-        sourceGrid.selection,
-        { address: "replace" },
-      );
+      await reopenSourceDescriptor(remembered, undefined, {
+        address: "replace",
+      });
     })();
   };
 
@@ -1957,7 +1963,11 @@ function mountPrivateLibraryBrowser(
         signOut();
         return;
       case "view-options-apply":
-        void applyViewOptions(intent.order, intent.selection);
+        void applyViewOptions(
+          intent.order,
+          intent.selection,
+          intent.conditions,
+        );
         return;
       case "random-photo":
         gridPhotoNavigation?.openRandomPhoto();
@@ -2222,24 +2232,17 @@ function mountPrivateLibraryBrowser(
     }
   }
 
-  const RESTORE_REOPEN = Object.freeze({
-    progress: "Reopening this source after the restore…",
-    settled: "Source reopened after the restore.",
-  });
-
   // Refresh shared facts; an explained destination without a Snapshot stays put.
-  const refreshAfterLibraryChange = async (
-    reason: Readonly<{ progress: string; settled: string }>,
-  ): Promise<void> => {
-    await application.refreshOverview().catch(() => {});
-    await folders.refreshCounts();
-    if (sourceGrid.token === "" || !sourceGrid.isReady(sourceGrid.authority))
-      return;
-    const anchor =
-      sourceGrid.readGridPosition(sourceGrid.authority) ??
-      photoOwner.currentIndex;
-    await reopenExpired(anchor, sourceGrid.generation, undefined, reason);
+  const reopenDeps: ReopenAfterChangeDeps = {
+    sourceGrid,
+    photoOwner,
+    refreshOverview: () => application.refreshOverview().catch(() => {}),
+    refreshFolderCounts: () => folders.refreshCounts(),
+    reopen: (anchor, generation, reason) =>
+      reopenExpired(anchor, generation, undefined, reason),
   };
+  const refreshAfterLibraryChange = (reason: ReopenReason): Promise<void> =>
+    reopenAfterLibraryChange(reopenDeps, reason);
 
   const removalReview = createRemovalReviewController({
     removal,
@@ -2265,19 +2268,8 @@ function mountPrivateLibraryBrowser(
       await application.refreshOverview();
     },
     refreshFolders: () => folders.refreshCounts(),
-    reopenAfterRestore: async () => {
-      if (sourceGrid.token !== "" && sourceGrid.isReady(sourceGrid.authority)) {
-        const anchor =
-          sourceGrid.readGridPosition(sourceGrid.authority) ??
-          photoOwner.currentIndex;
-        await reopenExpired(
-          anchor,
-          sourceGrid.generation,
-          undefined,
-          RESTORE_REOPEN,
-        );
-      }
-    },
+    reopenAfterRestore: () =>
+      reopenAfterLibraryChange(reopenDeps, RESTORE_REOPEN),
     updateControls,
   });
 

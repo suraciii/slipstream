@@ -1,4 +1,5 @@
 import type { ModalSurfaces } from "./modal-surface.js";
+import { required } from "./presentation-helpers.js";
 import type {
   GridFilterViewModel,
   GridProgressViewModel,
@@ -7,6 +8,11 @@ import type {
   ViewSelectionFilter,
   ViewSourceOrder,
 } from "./library-browser-view.js";
+import type { ViewFilterConditions } from "./library-browser-view-contract.js";
+import {
+  createViewOptionsFilters,
+  type ViewOptionsFilterElements,
+} from "./view-options-filters.js";
 
 type ViewOptionsIntentKind =
   | "album-resume"
@@ -61,6 +67,7 @@ export type ViewOptionsElements = Readonly<{
   optionsVisibleResults: HTMLElement;
   filterSelect: HTMLSelectElement;
   sizeSelect: HTMLSelectElement;
+  filters: ViewOptionsFilterElements;
 }>;
 
 /// The one Grid action View options presents: it samples the current Browse
@@ -121,7 +128,12 @@ export function createViewOptions({
     optionsVisibleResults,
     filterSelect,
     sizeSelect,
+    filters: filterControls,
   } = elements;
+  // One owner for the staged fact conditions: Rating bounds, Original kind,
+  // Original availability, and the Capture Time range. They commit together
+  // with order and Selection State on one Apply.
+  const filters = createViewOptionsFilters(filterControls);
   const randomPhoto = required<HTMLButtonElement>(root, "[data-random-photo]");
   const gridTools = required<HTMLElement>(root, "[data-grid-tools]");
   const browseActions = required<HTMLElement>(root, "[data-browse-actions]");
@@ -135,6 +147,7 @@ export function createViewOptions({
 
   let alive = true;
   let committedOrder: ViewSourceOrder = "source-default";
+  let committedConditions: ViewFilterConditions = {};
   let committedFilter: ViewSelectionFilter = "all";
   let draftOrder: ViewSourceOrder = "source-default";
   let draftFilter: ViewSelectionFilter = "all";
@@ -152,6 +165,7 @@ export function createViewOptions({
     sizeSelect.value = committedSize;
     sortSelect.value = committedOrder;
     filterSelect.value = committedFilter;
+    filters.reset(committedConditions);
   };
   viewOptionsDialog.addEventListener("close", () => {
     resetDraft();
@@ -173,6 +187,7 @@ export function createViewOptions({
         FILTER_OPTIONS.find((option) => option.value === committedFilter)
           ?.label ?? "",
       );
+    parts.push(...filters.committedLabels());
     if (committedOrder !== "source-default")
       parts.push(
         SORT_OPTIONS[renderedSortKind ?? "library"].find(
@@ -220,11 +235,19 @@ export function createViewOptions({
 
   const applyViewOptions = () => {
     if (!alive) return;
+    const previousLabels = filters.committedLabels().join(" · ");
     const order = draftOrder;
     const filter = draftFilter;
-    const viewChanged = order !== committedOrder || filter !== committedFilter;
+    const conditions = filters.commit();
+    const conditionsChanged =
+      filters.committedLabels().join(" · ") !== previousLabels;
+    const viewChanged =
+      order !== committedOrder ||
+      filter !== committedFilter ||
+      conditionsChanged;
     const sizeChanged = draftSize !== committedSize;
     committedSize = draftSize;
+    committedConditions = conditions;
     draftOrder = committedOrder = order;
     draftFilter = committedFilter = filter;
     surfaces.close("view-options", !viewChanged);
@@ -233,7 +256,12 @@ export function createViewOptions({
     if (sizeChanged) onSizeChange(committedSize);
     if (viewChanged) {
       presentViewOptionsFlag();
-      send({ kind: "view-options-apply", order, selection: filter });
+      send({
+        kind: "view-options-apply",
+        order,
+        selection: filter,
+        conditions,
+      });
     }
   };
 
@@ -297,7 +325,7 @@ export function createViewOptions({
       committedOrder = options.some((option) => option.value === model.value)
         ? model.value
         : options[0]!.value;
-      sortSelect.value = committedOrder;
+      if (!viewOptionsDialog.open) sortSelect.value = committedOrder;
       sortSelect.disabled = !model.enabled;
       presentViewOptionsFlag();
     },
@@ -315,7 +343,13 @@ export function createViewOptions({
         );
       }
       committedFilter = model.value;
-      filterSelect.value = model.value;
+      committedConditions = model.conditions;
+      if (viewOptionsDialog.open) {
+        filters.setCommitted(model.conditions);
+      } else {
+        filterSelect.value = model.value;
+        filters.reset(model.conditions);
+      }
       filterSelect.disabled = !model.enabled;
       presentViewOptionsFlag();
     },
@@ -368,10 +402,4 @@ export function createViewOptions({
       compact.removeEventListener("change", onCompactChange);
     },
   };
-}
-
-function required<T extends Element>(root: ParentNode, selector: string): T {
-  const value = root.querySelector<T>(selector);
-  if (!value) throw new Error(`Missing ${selector}`);
-  return value;
 }

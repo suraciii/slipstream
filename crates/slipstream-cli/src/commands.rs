@@ -384,7 +384,7 @@ pub enum PhotoCommand {
         #[arg(value_parser = nonempty)]
         operation_id: String,
     },
-    /// Restore one observed removal operation or explicit reviewed markers.
+    /// Restore a removal operation, reviewed markers, or current Trash.
     Restore(PhotoRestoreArgs),
     /// Read the durable result of one explicit Restore attempt.
     RestoreOperation {
@@ -546,10 +546,16 @@ pub struct PhotoRemovalArgs {
 pub struct PhotoRestoreArgs {
     #[arg(value_name = "OPERATION_ID", value_parser = nonempty)]
     pub operation_id: String,
+    /// Restore every current Trash item except IDs in --exclude-input.
+    #[arg(long, conflicts_with = "input")]
+    pub all: bool,
     /// UTF-8 JSON file holding {"photos":[{"photoId","removedAtMs"}]}.
-    /// Omit it to restore the complete named removal operation.
-    #[arg(long, value_name = "FILE", value_parser = nonempty)]
+    /// Omit it to restore the complete named removal operation, unless --all is set.
+    #[arg(long, value_name = "FILE", value_parser = nonempty, conflicts_with = "all")]
     pub input: Option<String>,
+    /// UTF-8 JSON file holding {"photoIds":[...]} or a bare ID array to exclude.
+    #[arg(long, value_name = "FILE", value_parser = nonempty, requires = "all")]
+    pub exclude_input: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

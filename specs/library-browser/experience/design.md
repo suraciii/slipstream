@@ -13,8 +13,8 @@ connects those contracts without changing the server's HTTP API.
 
 ## Model and Ownership
 
-A destination is a validated source reference, view order, Selection State
-filter, and optional stable Photo ID. Absence of a Photo ID means Grid. It is
+A destination is a validated source reference, view order, filter conditions,
+and optional stable Photo ID. Absence of a Photo ID means Grid. It is
 not a Browse token, Photo array, or saved mutation.
 
 A browser entry has an opaque page-generated identifier and bounded
@@ -51,16 +51,25 @@ The recognized parameters are:
 - `albumId`: required for `album` and forbidden for other sources;
 - `photoId`: optional stable Photo identity; omission means Grid;
 - `order`: `capture-time-asc` or `capture-time-desc`, with `album-order` also
-  allowed for Albums; omission uses that source's default; and
+  allowed for Albums; omission uses that source's default;
 - `selection`: `all`, `unflagged`, `picked`, or `rejected`; omission means
-  `all`.
+  `all`;
+- `rating-min` and `rating-max`: inclusive integers from 0 through 5; omission
+  applies no Rating bound;
+- `kind`: `raw` or `jpeg`; omission applies no Original kind condition;
+- `available`: `true` or `false`; omission applies no availability condition;
+- `captured-from` and `captured-before`: camera-local
+  `YYYY-MM-DDTHH:MM:SS`; omission applies no Capture Time bound.
 
 IDs and Folder Locations must satisfy the existing API validators. A Location
 must remain relative and component-valid; an encoded slash is a separator
 after the single decode, not an escape from containment. Absolute Locations,
 `.` or `..` components, duplicate recognized parameters, empty required IDs,
 an empty value for an optional parameter, and source-incompatible options
-are invalid. An encoded reserved character
+are invalid. An optional filter parameter is additionally invalid when its
+value fails its own fact validation: an out-of-range or inverted Rating range,
+an unknown `kind` or `available` value, or a malformed or reversed Capture
+Time bound. An encoded reserved character
 inside a valid Location must round-trip without double decoding.
 
 Unknown query keys are ignored and removed on canonicalization; startup
@@ -80,6 +89,8 @@ Examples use illustrative IDs that satisfy the identifier shape:
 /?source=album&albumId=00000000-0000-4000-8000-000000000001
 /?source=album&albumId=00000000-0000-4000-8000-000000000001&photoId=00000000-0000-4000-8000-000000000004&order=capture-time-desc
 /?photoId=00000000-0000-4000-8000-000000000009
+/?selection=rejected&rating-min=4&rating-max=5&kind=raw
+/?source=library&available=false&captured-from=2026-01-01T00%3A00%3A00&captured-before=2026-02-01T00%3A00%3A00
 ```
 
 These examples define browser addresses, not new HTTP endpoints. Wire values
@@ -297,14 +308,16 @@ regions and actual closed panels make the space contract testable.
 Focused automated coverage must derive from the product examples and prove:
 
 - codec round trips, invalid/duplicate values, encoded Locations, defaults,
-  canonicalization, and direct URL startup through the real server;
+  canonicalization, and direct URL startup through the real server, including
+  the Rating, kind, availability, and Capture Time parameters, their invalid
+  and empty values, and their canonical position after `selection`;
 - source/Grid/Photo push and replace behavior, Back, Forward, reload, direct
   entry, known-parent return, duplicate activation, and leaving the site;
 - one initial source bootstrap, delayed facts, rapid Back/Forward, stale
   success/failure, expired snapshots, removed targets, and Folder publication
   confirmation without an unbounded read;
-- **Open a random Photo** uses the current source, order, and Selection State
-  filter, can target an unloaded bounded window, commits one ordinary Photo
+- **Open a random Photo** uses the current source, order, and filter, can
+  target an unloaded bounded window, commits one ordinary Photo
   destination only after target facts are ready, allows repeated results, and
   leaves no history entry after an expired or failed attempt;
 - Grid anchor and focus restoration across resize and eviction in a generated
@@ -316,6 +329,12 @@ Focused automated coverage must derive from the product examples and prove:
   focus after re-render, and no primary shortcuts behind modal content;
 - region budgets, 44-pixel targets, safe areas, 200% text, reduced motion,
   rotation, desktop/touch input, all batch outcomes, and independent failures;
+- the primary review controls, one navigation group, and one review dock stay
+  inside the safe viewport at 375 by 667, 390 by 844, and the short-landscape
+  viewports while the Preview keeps its reserved region, with supporting
+  content yielding first and no 44-pixel target shrinking;
+- opening the compact status entry keeps the current Photo, its zoom state, and
+  the Grid anchor;
 - external page navigation and browser return do not break mount/disposal;
 - query deep links still pass the production host's existing health, static
   asset, and bounded browsing verification without a route migration; and

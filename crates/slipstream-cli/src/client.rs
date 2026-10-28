@@ -520,6 +520,8 @@ pub(crate) fn validated_route_failure(
                     && ["currentRecipeVersion", "currentSourceRevision"]
                         .iter()
                         .all(|key| details[*key].is_null() || details[*key].is_string()))
+                || (matches!(operation, Operation::PhotosRestore)
+                    && string("operationId").is_some())
         }
         "name_conflict" => {
             required_keys(&["name", "albumId"])

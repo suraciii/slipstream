@@ -467,3 +467,184 @@ test("completed export discovers its file after a temporary workspace lease", as
     owner.dispose();
   }
 });
+
+test("session Undo and Redo each perform and persist their own guarded edit operation", async () => {
+  const confirmed = (revision: string): JsonObject => {
+    const base = state(revision) as unknown as {
+      instances: { items: Record<string, unknown>[] };
+    };
+    base.instances.items[0]!.parameters = {
+      scalar: revision === "r2" ? 5 : 0,
+    };
+    return base as unknown as JsonObject;
+  };
+  const { owner, bodies, ready } = harness(undefined, (body) => {
+    if (body.operation === "edit show")
+      return Response.json(confirmed(owner.model.edit ? "r2" : "r1"));
+    return undefined;
+  });
+  await owner.refresh();
+  await ready.promise;
+  const applied = () =>
+    bodies.filter((body) => body.operation === "edit apply");
+  expect(applied()).toHaveLength(0);
+  await owner.act("change", {
+    change: { type: "set", instanceId: "i", parameterId: "scalar", value: 5 },
+  });
+  await owner.settle();
+  expect(applied()).toHaveLength(1);
+  await owner.act("session-undo");
+  await owner.settle();
+  const requests = applied();
+  expect(requests).toHaveLength(2);
+  const first = requests[0]!.arguments as JsonObject;
+  const undo = requests[1]!.arguments as JsonObject;
+  // One new guarded write, with its own request identity, over the observed
+  // state the first action produced.
+  expect(undo.requestId).not.toBe(first.requestId);
+  expect(undo.ifState).toBe("token-r2");
+  expect(first.ifState).toBe("token-r1");
+  expect((undo.input as JsonObject).changes).toEqual([
+    { type: "set", instanceId: "i", parameterId: "scalar", value: 0 },
+  ]);
+  // The reversal settled as an ordinary save: it is readable from the tool's
+  // confirmed state, not from a browser-local list.
+  expect(owner.model.edit?.revision).toBe("r2");
+  // The reversed action moved to Redo, so the session can reapply it.
+  expect(owner.model.sessionUndoCount).toBe(0);
+  expect(owner.model.sessionRedoCount).toBe(1);
+  await owner.act("session-redo");
+  await owner.settle();
+  const redone = applied();
+  expect(redone).toHaveLength(3);
+  const redo = redone[2]!.arguments as JsonObject;
+  expect(redo.requestId).not.toBe(undo.requestId);
+  expect(redo.ifState).toBe("token-r2");
+  expect((redo.input as JsonObject).changes).toEqual([
+    { type: "set", instanceId: "i", parameterId: "scalar", value: 5 },
+  ]);
+  // Redoing submitted the original action again as its own guarded write.
+  expect(owner.model.sessionUndoCount).toBe(1);
+  expect(owner.model.sessionRedoCount).toBe(0);
+  // Neither reversal touched the tool's retained history.
+  expect(
+    bodies.filter((body) => body.operation === "history restore"),
+  ).toHaveLength(0);
+  owner.dispose();
+});
+
+for (const scenario of [
+  {
+    type: "blend-set",
+    change: { type: "blend-set", instanceId: "i", value: { opacity: 0.8 } },
+    inverse: { type: "blend-set", instanceId: "i", value: { opacity: 0.2 } },
+  },
+  {
+    type: "mask-set",
+    change: { type: "mask-set", maskId: "m", value: { x: 2 } },
+    inverse: { type: "mask-set", maskId: "m", value: { x: 1 } },
+  },
+  {
+    type: "output-set",
+    change: { type: "output-set", fieldId: "format", value: "png" },
+    inverse: { type: "output-set", fieldId: "format", value: "jpeg" },
+  },
+]) {
+  test(`session Undo saves a complete ${scenario.type} inverse`, async () => {
+    let applied = 0;
+    const { owner, bodies, ready } = harness(
+      () => {
+        applied += 1;
+        return Promise.resolve(
+          Response.json({
+            revision: "r2",
+            stateToken: "token-r2",
+            current: { revision: "r2" },
+          }),
+        );
+      },
+      (body) => {
+        if (body.operation !== "edit show") return undefined;
+        const value = state(applied ? "r2" : "r1") as unknown as {
+          instances: { items: Record<string, unknown>[] };
+          masks: {
+            items: Record<string, unknown>[];
+            total: number;
+            nextCursor: null;
+          };
+          output: { settings: Record<string, unknown> };
+        };
+        value.instances.items[0]!.blend = {
+          opacity: applied === 1 ? 0.8 : 0.2,
+        };
+        value.instances.items[0]!.maskIds = [];
+        value.masks = {
+          items: [{ maskId: "m", value: { x: applied === 1 ? 2 : 1 } }],
+          total: 1,
+          nextCursor: null,
+        };
+        value.output.settings = { format: applied === 1 ? "png" : "jpeg" };
+        // Only the scenario's target differs in the confirmed action.
+        if (scenario.type !== "blend-set")
+          value.instances.items[0]!.blend = { opacity: 0.2 };
+        if (scenario.type !== "mask-set")
+          value.masks.items[0]!.value = { x: 1 };
+        if (scenario.type !== "output-set")
+          value.output.settings = { format: "jpeg" };
+        return Response.json(value);
+      },
+    );
+    await owner.refresh();
+    await ready.promise;
+    await owner.act("change", { change: scenario.change });
+    await owner.settle();
+    await owner.act("session-undo");
+    await owner.settle();
+    const requests = bodies.filter((body) => body.operation === "edit apply");
+    expect(requests).toHaveLength(2);
+    const args = requests[1]!.arguments as JsonObject;
+    expect((args.input as JsonObject).changes).toEqual([scenario.inverse]);
+    expect(args.ifState).toBe("token-r2");
+    owner.dispose();
+  });
+}
+
+test("a retained revision restore is its own guarded operation and is never Undo or Redo", async () => {
+  const { owner, bodies, ready } = harness(undefined, (body) => {
+    if (body.operation === "edit show") return Response.json(state("r2"));
+    if (body.operation === "history restore")
+      return Response.json({ revision: "r1", stateToken: "token-r1" });
+    return undefined;
+  });
+  await owner.refresh();
+  await ready.promise;
+  await owner.act("change", {
+    change: { type: "set", instanceId: "i", parameterId: "scalar", value: 5 },
+  });
+  await owner.settle();
+  await owner.act("revision-restore", { revision: "r1" });
+  await owner.settle();
+  const restore = bodies.find((body) => body.operation === "history restore");
+  expect(restore).toBeDefined();
+  const args = restore!.arguments as JsonObject;
+  // Its own label, its own guarded write and its own request identity.
+  expect(args.revision).toBe("r1");
+  expect(args.ifState).toBe("token-r2");
+  expect(args.requestId).toBeTruthy();
+  // The session's reversible actions are not a revision list relabel.
+  expect(owner.model.sessionUndoCount).toBe(0);
+  expect(owner.model.sessionRedoCount).toBe(0);
+  owner.dispose();
+});
+
+test("Library progress is projected as the Edit surface's own fact", async () => {
+  const { owner, ready } = harness();
+  await owner.refresh();
+  await ready.promise;
+  // The controller supplies the Library's declared phase; the owner never
+  // derives it from the Original's availability.
+  expect(owner.model.libraryPhase).toBe("");
+  owner.model.libraryPhase = "recovering";
+  expect(owner.model.libraryPhase).toBe("recovering");
+  owner.dispose();
+});

@@ -355,6 +355,9 @@ test("a file changed after inspection requires reviewing its new revision before
   await fileRow(page, file.artifactId)
     .getByRole("button", { name: "Inspect / Remove…", exact: true })
     .click();
+  await expect(page.locator("[data-workspace-file-inspection]")).toContainText(
+    "file-r1",
+  );
   // The inspected snapshot stays at r1 while an independent writer replaces the file.
   file.revision = "file-r2";
   state.bytes.set(

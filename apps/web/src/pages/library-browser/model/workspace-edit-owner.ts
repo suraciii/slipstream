@@ -22,6 +22,18 @@ import { coalesceChanges } from "./workspace-edit-draft.js";
 import { refreshWorkspaceFiles } from "./workspace-edit-files.js";
 import { isUnknownEffect, type UncertainRequest } from "./uncertain-request.js";
 import {
+  createSessionEditHistory,
+  recordSessionEdit,
+  redoableEntry,
+  retireForRedo,
+  retireForUndo,
+  undoableEntry,
+  type SessionEditEntry,
+  type SessionEditHistory,
+} from "./session-edit-history.js";
+import { inverseChanges } from "./session-edit-inverse.js";
+import { retainedExportJobs } from "./workspace-retained-jobs.js";
+import {
   createWorkspaceJobLane,
   type WorkspaceJobLane,
 } from "./workspace-job-lane.js";
@@ -58,6 +70,14 @@ export type WorkspaceEditModel = {
   cameraReference: boolean;
   jobs: ToolJob[];
   history: JsonObject[];
+  /** The tool's retained revisions, restored as their own operation. */
+  retainedRevisions: JsonObject[];
+  /** Completed session edit actions available to session Undo. */
+  sessionUndoCount: number;
+  /** Reversed session actions available to session Redo. */
+  sessionRedoCount: number;
+  /** The Library's own progress, disclosed separately from the Original. */
+  libraryPhase: string;
   fileCursor: string | null;
   uncertain?: UncertainRequest;
   filmElement?: HTMLElement;
@@ -66,6 +86,11 @@ export type WorkspaceEditModel = {
   filmModules?: readonly ProcessingModuleDescription[];
   conflictInspected?: boolean;
 };
+/** One axis of the Edit surface's independent facts. */
+export type EditorFact = Readonly<{
+  label: string;
+  value: string;
+}>;
 export type WorkspaceEditOwner = {
   model: WorkspaceEditModel;
   refresh(): Promise<void>;
@@ -102,12 +127,24 @@ export function createWorkspaceEditOwner(
     cameraReference: false,
     jobs: [],
     history: [],
+    retainedRevisions: [],
+    sessionUndoCount: 0,
+    sessionRedoCount: 0,
+    libraryPhase: "",
     fileCursor: null,
   };
   let alive = true;
   let editGeneration = 0;
   let savePromise: Promise<void> | undefined;
   let selectingEdit = false;
+  const session: SessionEditHistory = createSessionEditHistory();
+  let pendingReversal:
+    | Readonly<{ entry: SessionEditEntry; mode: "undo" | "redo" }>
+    | undefined;
+  const publishSession = () => {
+    model.sessionUndoCount = session.past.length;
+    model.sessionRedoCount = session.future.length;
+  };
   const publish = () => {
     if (alive) notify(model);
   };
@@ -196,36 +233,16 @@ export function createWorkspaceEditOwner(
       : Array.isArray(kinds.items)
         ? kinds.items.filter(isRecord)
         : [];
-    model.history = Array.isArray(history.items)
+    model.retainedRevisions = Array.isArray(history.items)
       ? history.items.filter(isRecord)
       : [];
+    model.history = model.retainedRevisions;
     const retainedJobs = Array.isArray(exports.jobs)
       ? exports.jobs
       : Array.isArray(exports.items)
         ? exports.items
         : [];
-    lane.retain(
-      retainedJobs.flatMap((job) => {
-        if (
-          !isRecord(job) ||
-          typeof job.requestId !== "string" ||
-          typeof job.status !== "string" ||
-          model.jobs.some((existing) => existing.requestId === job.requestId)
-        )
-          return [];
-        return [
-          {
-            requestId: job.requestId,
-            body: job,
-            operation: "export create",
-            editId,
-            revision: isRecord(job.capture)
-              ? job.capture.revision
-              : job.revision,
-          },
-        ];
-      }),
-    );
+    lane.retain(retainedExportJobs(retainedJobs, editId, model.jobs));
     if (isRecord(kinds.maskGraphSchema))
       model.maskGraphSchema = kinds.maskGraphSchema;
     const descriptors = await Promise.all(
@@ -435,6 +452,12 @@ export function createWorkspaceEditOwner(
       ) {
         const generation = editGeneration;
         const edit = model.edit;
+        // A session reversal carries the entry it reverses in this owner, not
+        // in the submitted payload: only the tool's own change vocabulary
+        // crosses the wire, and the Redo of that reversal re-submits the
+        // original action it recorded.
+        const settling = pendingReversal;
+        pendingReversal = undefined;
         const changes = model.draft;
         model.draft = [];
         const args = {
@@ -484,6 +507,22 @@ export function createWorkspaceEditOwner(
             );
           }
           await readEdit(edit.editId, generation);
+          if (generation !== editGeneration) continue;
+          if (settling) {
+            // The reversal settled as an ordinary save, so the entry moves
+            // between the two stacks now. An unsettled reversal keeps its
+            // entry where it was.
+            if (settling.mode === "undo") retireForUndo(session);
+            else retireForRedo(session);
+          } else {
+            recordSessionEdit(session, {
+              changes,
+              inverses: inverseChanges(edit, model.edit),
+              baseRevision: edit.revision,
+              revision: result.revision,
+            });
+          }
+          publishSession();
         } catch (error) {
           if (generation === editGeneration) {
             if (
@@ -628,9 +667,62 @@ export function createWorkspaceEditOwner(
             "Save or reconcile this draft before choosing another edit.",
           );
         editGeneration++;
+        session.past = [];
+        session.future = [];
+        publishSession();
         lane.supersedePreview();
         delete model.preview;
         await readEdit(String(args.editId));
+        return;
+      }
+      if (action === "session-undo" || action === "session-redo") {
+        // Each session reversal is its own ordinary edit action: it waits for
+        // the current queue, submits one guarded write with a new request
+        // identity, and settles as an ordinary save. It is not a revision
+        // restore, and it never relabels the tool's retained history.
+        if (!model.edit || model.blocked) return;
+        await drain();
+        if (model.blocked || model.draft.length || !model.edit) return;
+        const entry =
+          action === "session-undo"
+            ? undoableEntry(session)
+            : redoableEntry(session);
+        if (!entry?.inverses?.length) {
+          failure(
+            new Error(
+              action === "session-undo"
+                ? "This edit action cannot be reversed from its confirmed state."
+                : "This reversed edit action cannot be reapplied.",
+            ),
+            action,
+          );
+          return;
+        }
+        const mode = action === "session-undo" ? "undo" : "redo";
+        // A session Redo submits the recorded action's own changes again, so
+        // the tool sees the same edits it already confirmed once.
+        pendingReversal = { entry, mode };
+        model.draft = [
+          ...model.draft,
+          ...(action === "session-undo" ? entry.inverses : entry.changes),
+        ];
+        model.comparing = false;
+        model.status = "Saving settings";
+        publish();
+        await drain();
+        // The stacks move only once the reversal settled as an ordinary save;
+        // an unsettled reversal leaves the entry where it was.
+        if (pendingReversal?.mode === mode) pendingReversal = undefined;
+        return;
+      }
+      if (action === "revision-restore") {
+        // The tool's retained history is a separate operation with its own
+        // label and its own guarded request identity. It is never Undo/Redo.
+        await command("history restore", { revision: args.revision }, true);
+        session.past = [];
+        session.future = [];
+        publishSession();
+        publish();
         return;
       }
       if (action === "create") {

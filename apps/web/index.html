@@ -10,6 +10,9 @@
     <title>Slipstream</title>
   </head>
   <body>
+    <!-- The application's one main landmark. Every screen renders inside it,
+         including the Access entry screen, which must not create a nested one.
+         The Grid or Photo view inside supplies the single h1. -->
     <main id="app"></main>
     <script type="module" src="/src/app/index.ts"></script>
   </body>

@@ -171,6 +171,13 @@ retained revisions and restore. An uncertain mutation must be reconciled with
 its original request identity before dependent writes proceed; equality of
 current values is not proof that the request completed.
 
+Two reversible operations share the editing surface and must not be conflated:
+
+- **Session Undo and Redo** are browser-local over the drafted Edit State. Each one is an ordinary edit action: it is submitted as its own new guarded update through the same per-edit write queue, carries a new request identity, and appends to the same chronological edit history as a slider change or a reset. It is available without reopening the tool and does not reach outside the current browser session.
+- **Retained revision restore** selects an earlier confirmed revision from the tool's saved history. It is a separate tool-owned operation, not the inverse of a session edit, and it may select a revision the current draft never visited.
+
+Both stay beside the primary controls so the Photographer does not leave the image to reverse a change. A revision restore must never be labeled Undo or Redo, and session Undo and Redo must never be labeled as history restore, because the two operations have different owners, different scope, and different outcomes.
+
 ## Preview Behavior
 
 Controls must respond immediately; preview generation follows confirmed edits.

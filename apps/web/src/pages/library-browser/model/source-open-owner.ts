@@ -8,7 +8,10 @@ import type {
   FileLocationOwner,
 } from "./file-location-owner.js";
 import type { SourceViewOrder } from "../api/source-grid.js";
-import type { SelectionFilter } from "../api/contracts.js";
+import type {
+  BrowseFilterConditions,
+  SelectionFilter,
+} from "../api/contracts.js";
 
 type SourceLifecycleOutcome =
   | Readonly<{ kind: "opened"; position: number }>
@@ -22,6 +25,7 @@ type SourceOpenOptions = Readonly<{
   mode?: "replace" | "reopen";
   order?: SourceViewOrder;
   selection?: SelectionFilter;
+  conditions?: BrowseFilterConditions;
 }>;
 
 export interface SourceLifecycleOwner {

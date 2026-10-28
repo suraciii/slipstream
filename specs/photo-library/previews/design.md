@@ -74,7 +74,15 @@ Preview Capability describes what the selected source can support:
 - `detail-limited` when magnification reaches source pixels before useful focus inspection;
 - `unavailable` when no allowed source can be decoded.
 
-The first implementation may derive `detail-limited` from actual source and viewport dimensions. It must not invent a universal camera-independent quality score.
+Preview Capability is a source fact. It is derived only from the delivered derivative's own width and height against the review target class: `review-2560` normally means `normal-review`, and delivered dimensions below the target long edge mean `detail-limited`. No client viewport, Preview-area geometry, window size, device pixel ratio, or current zoom state participates in the derivation, so the same Photo reports the same capability to the browser, the CLI, and an Agent. It must not invent a universal camera-independent quality score.
+
+The review target class is the target the delivered derivative was produced for, not the zoom the Photographer chose. A Preview that fills a small Preview area at Fit is still `detail-limited` when its own pixels are below the review target; a large Preview is not `detail-limited` merely because the current window is small.
+
+### Web Display Condition
+
+The Web display condition is a presentation fact owned by the Preview and zoom presentation boundary. It is true when the currently rendered Preview cannot show what the current display asks for: the measured image pixels, the Preview-area geometry, and the existing zoom state together require enlarging source pixels to fill the area.
+
+The display condition is not Preview Capability. It is derived from browser-measured values, it may change while the Photographer resizes the window or zooms, and it says nothing about the Photo's own source. It is never persisted, never sent on the wire, and never changes a Photo fact or a Preview Capability. A surface that needs the capability asks the Preview response; a surface that needs the display condition measures its own rendering.
 
 ## Semantics
 
@@ -220,6 +228,8 @@ non-cacheable. Reconnect and reload may reuse browser-cached data when the
 identity remains current.
 The response also makes Preview Source, actual dimensions, and Preview Capability available to Photo View. These facts must not be inferred only from the derivative URL.
 
+The display condition is not delivered. A CLI consumer receives only the stable capability and the actual downloaded dimensions, and must not be told that a display needs more detail than the derivative holds, because the CLI has no viewport and no zoom state to measure. A browser consumer that also needs the display condition derives it locally from its own measured geometry.
+
 ## Failure Behavior
 
 A native extraction failure is bounded to the affected Photo and candidate. The worker releases native memory and records an actionable internal error without exposing absolute paths or native stack data to the browser.
@@ -296,5 +306,14 @@ Implementation tests must prove:
 - malformed inputs remain within resource limits;
 - failures stay isolated to one Photo;
 - actual camera samples provide sufficient normal-review and magnified-inspection dimensions.
+
+Capability and presentation evidence must also prove:
+
+- Preview Capability is independent of any client viewport: the same Photo with the same delivered dimensions reports the same capability under different window sizes, Preview-area sizes, device pixel ratios, and zoom states, and a CLI result and a browser result for that Photo agree;
+- `detail-limited` follows delivered dimensions against the review target class, so a small Preview area at Fit does not change it and a large Preview area does not clear it;
+- the Web display condition is recomputed on Preview load, on Preview-area resize, on Fit recomputation, on manual, wheel, and pinch zoom, and on return to Fit, and each recomputation uses the currently measured image pixels, Preview-area geometry, and zoom state;
+- the display condition is never persisted, never appears on the wire, and never changes a Photo fact or a Preview Capability;
+- CLI parity holds for the stable fact: a CLI Preview result carries the same capability meaning and the actual downloaded dimensions, and no CLI command accepts or reports a viewport or zoom parameter;
+- where limited detail is explained, the Web accessibility tree carries one combined explanation naming both the source capability and the current display condition, so assistive technology receives the same fact the Photographer reads.
 
 Tests should compare decoded output properties and representative pixels where stable. They must not use compressed JPEG byte equality as a visual correctness assertion.

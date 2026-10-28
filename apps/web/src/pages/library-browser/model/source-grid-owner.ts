@@ -1,16 +1,18 @@
 import type {
+  BrowseFilterConditions,
   PhotoSummary,
   SelectionCounts,
   SelectionFilter,
 } from "../api/contracts.js";
+import { freezeSource, sourceRequest } from "./source-request.js";
+import type { SourceGridSource, SourceViewOrder } from "./source-request.js";
+export type { SourceGridSource, SourceViewOrder };
 import {
   fetchBrowseWindow,
   fetchBrowsePosition,
   openBrowse,
   releaseBrowse,
-  type BrowseSourceRequest,
   type SourceGridFetch,
-  type SourceViewOrder,
 } from "../api/source-grid.js";
 import { TaskScope } from "./async-ownership.js";
 import {
@@ -36,17 +38,6 @@ declare const photoWindowAuthorityBrand: unique symbol;
 export type PhotoWindowAuthority = Readonly<{
   [photoWindowAuthorityBrand]: true;
 }>;
-export type SourceGridSource =
-  | Readonly<{ kind: "library" }>
-  | Readonly<{
-      kind: "album";
-      album: Readonly<{ id: string; name: string }>;
-    }>
-  | Readonly<{
-      kind: "folder";
-      folder: Readonly<{ location: string; name: string }>;
-      publication: string;
-    }>;
 
 export type SourceWindowOperation =
   | Readonly<{ kind: "source" | "grid"; authority: SourceAuthority }>
@@ -156,6 +147,7 @@ export interface SourceGridOwner {
   readonly source: SourceGridSource;
   readonly order: SourceViewOrder;
   readonly selection: SelectionFilter;
+  readonly conditions: BrowseFilterConditions;
   readonly selectionCounts: SelectionCounts;
   readonly lastSource: SourceGridSource | undefined;
   readonly kind: SourceGridSource["kind"];
@@ -180,6 +172,7 @@ export interface SourceGridOwner {
       mode?: "replace" | "reopen";
       order?: SourceViewOrder;
       selection?: SelectionFilter;
+      conditions?: BrowseFilterConditions;
     }>,
   ): Promise<SourceOpenOutcome>;
   establish(authority: SourceAuthority): boolean;
@@ -276,54 +269,6 @@ type PhotoWindowRecord = Readonly<{
   tasks: TaskScope;
 }>;
 
-const sourceRequest = (
-  source: SourceGridSource,
-  order: SourceViewOrder,
-  selection: SelectionFilter,
-  preferredPhotoId?: string,
-  resume = false,
-): BrowseSourceRequest =>
-  source.kind === "library"
-    ? {
-        kind: "library",
-        order,
-        selection,
-        ...(preferredPhotoId ? { preferredPhotoId } : {}),
-        ...(resume ? { resume: true } : {}),
-      }
-    : source.kind === "album"
-      ? {
-          kind: "album",
-          albumId: source.album.id,
-          order,
-          selection,
-          ...(preferredPhotoId ? { preferredPhotoId } : {}),
-          ...(resume ? { resume: true } : {}),
-        }
-      : {
-          kind: "folder",
-          folderPath: source.folder.location,
-          publication: source.publication,
-          order,
-          selection,
-          ...(preferredPhotoId ? { preferredPhotoId } : {}),
-          ...(resume ? { resume: true } : {}),
-        };
-
-const freezeSource = (source: SourceGridSource): SourceGridSource =>
-  source.kind === "library"
-    ? Object.freeze({ kind: "library" })
-    : source.kind === "album"
-      ? Object.freeze({
-          kind: "album",
-          album: Object.freeze({ ...source.album }),
-        })
-      : Object.freeze({
-          kind: "folder",
-          folder: Object.freeze({ ...source.folder }),
-          publication: source.publication,
-        });
-
 export function createSourceGridOwner(
   fetcher: SourceGridFetch,
   releaseLease: (token: string) => Promise<void> = (token) =>
@@ -341,6 +286,10 @@ export function createSourceGridOwner(
   let source: SourceGridSource = freezeSource({ kind: "library" });
   let viewOrder: SourceViewOrder = "source-default";
   let viewSelection: SelectionFilter = "all";
+  // The defined Photo fact conditions the open Snapshot was created with. They
+  // are frozen with its sequence, so a decision never moves a Photo in or out
+  // of the open view.
+  let viewConditions: BrowseFilterConditions = {};
   // The server's per-state counts for the open source. They describe the
   // source order, so a filtered view still reports source-wide progress.
   let selectionCounts: SelectionCounts = Object.freeze({
@@ -591,6 +540,7 @@ export function createSourceGridOwner(
       mode?: "replace" | "reopen";
       order?: SourceViewOrder;
       selection?: SelectionFilter;
+      conditions?: BrowseFilterConditions;
     }> = {},
   ): Promise<SourceOpenOutcome> {
     if (closed) return detachedOpen(authority, generation);
@@ -606,6 +556,7 @@ export function createSourceGridOwner(
     source = freezeSource(nextSource);
     viewOrder = options.order ?? "source-default";
     viewSelection = options.selection ?? "all";
+    viewConditions = options.conditions ?? {};
     lastSource = source;
     token = "";
     if (priorToken) releaseToken(priorToken);
@@ -634,6 +585,7 @@ export function createSourceGridOwner(
           source,
           viewOrder,
           viewSelection,
+          viewConditions,
           options.preferredPhotoId,
           options.resume,
         ),
@@ -1014,6 +966,9 @@ export function createSourceGridOwner(
     },
     get selection() {
       return viewSelection;
+    },
+    get conditions() {
+      return viewConditions;
     },
     get selectionCounts() {
       return selectionCounts;

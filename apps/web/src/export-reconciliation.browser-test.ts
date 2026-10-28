@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { setupBrowserSmoke } from "./browser-test-support/fixtures.js";
+import { openPhotoToolsView } from "./browser-test-support/surfaces.js";
 import {
   capturedJob,
   commandsFor,
@@ -12,6 +13,7 @@ import {
   retainFile,
   setExposure,
   setupWorkspace,
+  windowOf,
 } from "./browser-test-support/workspace-edit-fixtures.js";
 
 setupBrowserSmoke();
@@ -326,4 +328,176 @@ test("Camera reference remains selected when a current preview finishes later", 
     "src",
     original!,
   );
+});
+
+test("session Undo and Redo each perform and persist their own guarded edit operation", async ({
+  page,
+}) => {
+  const state = await setupWorkspace(page);
+  const first = state.photos[0]!;
+  await openWorkspace(page, state);
+  await setExposure(page, "1");
+  await expect.poll(() => state.edits.get(first)?.revision).toBe("r2");
+  const actions = page.getByRole("group", { name: "Primary actions" });
+  const undo = actions.getByRole("button", { name: "Undo", exact: true });
+  const redo = actions.getByRole("button", { name: "Redo", exact: true });
+  await expect(undo).toBeEnabled();
+  await setExposure(page, "-1");
+  await expect.poll(() => state.edits.get(first)?.revision).toBe("r3");
+  await expect(page.locator("[data-photo-editor-status]")).toHaveText("Ready");
+  await expect(undo).toBeEnabled();
+  await expect(redo).toBeDisabled();
+  const applied = commandsFor(state, first, "edit apply");
+  expect(applied).toHaveLength(2);
+  await undo.click();
+  await expect.poll(() => state.edits.get(first)?.revision).toBe("r4");
+  const reversed = commandsFor(state, first, "edit apply");
+  expect(reversed).toHaveLength(3);
+  const undoRequest = reversed[2]!.command.arguments;
+  expect(undoRequest.requestId).not.toBe(
+    applied[1]!.command.arguments.requestId,
+  );
+  expect(undoRequest.ifState).toBe("state-r3");
+  expect((undoRequest.input as { changes: unknown[] }).changes).toEqual([
+    {
+      type: "set",
+      instanceId: "exposure-1",
+      parameterId: "exposure",
+      value: 1,
+    },
+  ]);
+  await expect(redo).toBeEnabled();
+  const readsBeforeReopen = commandsFor(state, first, "edit show").length;
+  await page.locator("[data-photo-tools-close]").click();
+  await openPhotoToolsView(page, "edit");
+  await expect
+    .poll(() => commandsFor(state, first, "edit show").length)
+    .toBeGreaterThan(readsBeforeReopen);
+  await expect(page.getByLabel("Exposure (EV)", { exact: true })).toHaveValue(
+    "1",
+  );
+  await expect(redo).toBeEnabled();
+  await redo.click();
+  await expect.poll(() => state.edits.get(first)?.revision).toBe("r5");
+  const redone = commandsFor(state, first, "edit apply");
+  expect(redone).toHaveLength(4);
+  const redoRequest = redone[3]!.command.arguments;
+  expect(redoRequest.requestId).not.toBe(undoRequest.requestId);
+  expect(redoRequest.ifState).toBe("state-r4");
+  expect((redoRequest.input as { changes: unknown[] }).changes).toEqual([
+    {
+      type: "set",
+      instanceId: "exposure-1",
+      parameterId: "exposure",
+      value: -1,
+    },
+  ]);
+  // Both reversals settled as ordinary saves, and the tool's retained history
+  // was never relabelled as Undo or Redo.
+  expect(commandsFor(state, first, "history restore")).toHaveLength(0);
+  await expect(page.locator("[data-photo-editor-status]")).toHaveText("Ready");
+  await page.reload();
+  await openWorkspace(page, state);
+  await expect(page.getByLabel("Exposure (EV)", { exact: true })).toHaveValue(
+    "-1",
+  );
+});
+
+test("a retained revision restore is its own operation and is never Undo or Redo", async ({
+  page,
+}) => {
+  const state = await setupWorkspace(page);
+  const first = state.photos[0]!;
+  state.command = async (route, captured) => {
+    if (captured.command.operation === "history restore") {
+      expect(captured.command.arguments.ifState).toBe("state-r2");
+      expect(captured.command.arguments.revision).toBe("r1");
+      state.edits.set(first, editFixture(first, 0, "r3"));
+      return json(route, { revision: "r3", stateToken: "state-r3" });
+    }
+    if (captured.command.operation !== "history list") return false;
+    return json(route, {
+      ...windowOf([
+        {
+          revision: "r1",
+          createdAt: "2026-10-28T00:00:00Z",
+          summary: "confirmed before any change",
+        },
+      ]),
+    });
+  };
+  await openWorkspace(page, state);
+  await setExposure(page, "1");
+  await expect.poll(() => state.edits.get(first)?.revision).toBe("r2");
+  const actions = page.getByRole("group", { name: "Primary actions" });
+  await expect(
+    actions.getByRole("button", { name: "Undo", exact: true }),
+  ).toBeEnabled();
+  const revisions = page.locator("[data-workspace-revisions]");
+  await revisions.locator("summary").click();
+  const restore = revisions.getByRole("button", {
+    name: /Restore retained revision r1/,
+  });
+  await expect(restore).toBeVisible();
+  await restore.click();
+  await expect
+    .poll(() => commandsFor(state, first, "history restore").length)
+    .toBe(1);
+  const restoreRequest = commandsFor(state, first, "history restore")[0]!;
+  expect(restoreRequest.command.arguments.ifState).toBe("state-r2");
+  expect(restoreRequest.command.arguments.revision).toBe("r1");
+  expect(restoreRequest.command.arguments.requestId).toBeTruthy();
+  await expect.poll(() => state.edits.get(first)?.revision).toBe("r3");
+  await expect(page.getByLabel("Exposure (EV)", { exact: true })).toHaveValue(
+    "0",
+  );
+  // A retained revision restore clears the session's reversible actions: it is
+  // a separate history action, not a session reversal.
+  await expect(
+    actions.getByRole("button", { name: "Undo", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    actions.getByRole("button", { name: "Redo", exact: true }),
+  ).toBeDisabled();
+});
+
+test("Library progress, the Original and the editing tool are disclosed as independent facts", async ({
+  page,
+}) => {
+  const state = await setupWorkspace(page);
+  await openWorkspace(page, state);
+  const facts = page.locator("[data-workspace-facts]");
+  await expect(facts.locator('[data-fact="Library"]')).toContainText(
+    "The Library scan is not running.",
+  );
+  await expect(facts.locator('[data-fact="Original input"]')).toContainText(
+    "is the selected input for this edit",
+  );
+  await expect(facts.locator('[data-fact="Editing tool"]')).toContainText(
+    "ready at revision r1",
+  );
+  await expect(facts.locator('[data-fact="Saved state"]')).toContainText(
+    "confirmed at revision r1",
+  );
+  await expect(facts.locator('[data-fact="Preview"]')).toContainText(
+    "No Preview has been rendered",
+  );
+  await expect(facts.locator('[data-fact="Processing jobs"]')).toContainText(
+    "No processing job is running",
+  );
+  // The primary action strip holds save state, session Undo, session Redo,
+  // Preview and Export as peers; Files, jobs, catalogs, resources and raw
+  // technical details are named supporting disclosures instead.
+  const actions = page.locator("[data-workspace-editor-actions]");
+  for (const name of ["Undo", "Redo", "Preview", "Export"])
+    await expect(
+      actions.getByRole("button", { name, exact: true }),
+    ).toBeVisible();
+  await expect(actions).toContainText("All settings are saved at revision r1");
+  await expect(page.locator("[data-workspace-jobs]")).toBeAttached();
+  await expect(page.locator("[data-workspace-catalog]")).toBeAttached();
+  await expect(page.locator("[data-workspace-files]")).toBeAttached();
+  await expect(
+    page.locator("details", { has: page.locator("[data-workspace-details]") }),
+  ).toBeAttached();
 });

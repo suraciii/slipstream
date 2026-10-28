@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/slipstream-cli", "crates/slipstream-compat", "crates/slipstream-core", "crates/slipstream-server", "crates/slipstream-processing", "crates/photo-files", "crates/darktable-edit"]
+members = ["crates/slipstream-cli", "crates/slipstream-compat", "crates/slipstream-core", "crates/slipstream-server", "crates/slipstream-processing", "crates/slipstream-preview-capability", "crates/photo-files", "crates/darktable-edit"]
 resolver = "2"
 
 [workspace.package]

@@ -86,9 +86,12 @@ a recognized extension alone does not imply Preview support.
 [Photo Previews](../photo-library/previews/spec.md) defines Preview behavior. A JPEG Original's own
 content and a RAW Original's own embedded JPEG provide the Preview path. A RAW
 Photo never uses a same-basename JPEG as its Preview. Slipstream does not
-demosaic or develop RAW sensor data. Photo View identifies the source and identifies limited detail when the source
-cannot support meaningful magnification. A Preview failure does not alter an
-Original File or turn a Photo into a different Photo.
+demosaic or develop RAW sensor data. Photo View identifies the source and
+identifies limited detail from the source capability: the delivered Preview
+dimensions against the review target, which is a fact about the Photo rather
+than about the browser window or zoom. The Web may also report its own display
+condition for what the current Preview area shows. A Preview failure does not
+alter an Original File or turn a Photo into a different Photo.
 
 [Photo Library and Albums](../photo-library/spec.md) and
 [Capture-Time Library Ordering](../photo-library/ordering.md) define

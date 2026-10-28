@@ -19,6 +19,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+slipstream-preview-capability = { path = "../slipstream-preview-capability" }
 tokio = { workspace = true, features = ["time", "io-util"] }
 time.workspace = true
 url.workspace = true

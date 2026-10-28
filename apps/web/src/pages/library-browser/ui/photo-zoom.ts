@@ -27,6 +27,23 @@ const ZOOM_STEP = 1.25;
 const DETAIL_ZOOM_PERCENT = 200;
 const ZOOM_LEVEL_UNMEASURED = "—";
 
+/** The current display enlarges Preview pixels, independently of source capability. */
+export function previewPixelsEnlarged(
+  imageWidth: number,
+  imageHeight: number,
+  areaWidth: number,
+  areaHeight: number,
+  manualPercent?: number,
+): boolean {
+  if (imageWidth <= 0 || imageHeight <= 0 || areaWidth <= 0 || areaHeight <= 0)
+    return false;
+  const scale =
+    manualPercent === undefined
+      ? Math.min(areaWidth / imageWidth, areaHeight / imageHeight)
+      : manualPercent / 100;
+  return scale > 1;
+}
+
 export function createPhotoZoomController({
   preview,
   stage,
@@ -38,6 +55,7 @@ export function createPhotoZoomController({
   slider,
   level,
   isAlive,
+  onDisplayChange,
 }: Readonly<{
   preview: HTMLElement;
   stage: HTMLElement;
@@ -49,6 +67,10 @@ export function createPhotoZoomController({
   slider: HTMLInputElement;
   level: HTMLElement;
   isAlive: () => boolean;
+  onDisplayChange: (
+    dimensions: Readonly<{ width: number; height: number }> | undefined,
+    enlarged: boolean,
+  ) => void;
 }>): PhotoZoomController {
   let zoomManual = false;
   let zoomPercent = 100;
@@ -127,6 +149,7 @@ export function createPhotoZoomController({
       slider.value = String(MIN_ZOOM_PERCENT);
       slider.setAttribute("aria-valuetext", "Fit");
       syncZoomControls();
+      onDisplayChange(undefined, false);
       return;
     }
     image.style.width = `${imageNaturalWidth * scale}px`;
@@ -141,6 +164,16 @@ export function createPhotoZoomController({
     level.textContent = `${percent}%`;
     slider.value = String(sliderPercent);
     slider.setAttribute("aria-valuetext", `${sliderPercent}%`);
+    onDisplayChange(
+      { width: imageNaturalWidth, height: imageNaturalHeight },
+      previewPixelsEnlarged(
+        imageNaturalWidth,
+        imageNaturalHeight,
+        stage.clientWidth,
+        stage.clientHeight,
+        zoomManual ? zoomPercent : undefined,
+      ),
+    );
     syncZoomControls();
   };
   const applyFit = (): void => {

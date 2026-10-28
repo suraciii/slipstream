@@ -361,7 +361,10 @@ impl From<slipstream_core::PhotoRead> for CliPhotoItemWire {
         let detail_limited = value
             .preview_width
             .zip(value.preview_height)
-            .map(|(width, height)| width.max(height) < 2560)
+            .map(|(width, height)| {
+                slipstream_core::PreviewCapability::from_dimensions(width, height)
+                    .is_detail_limited()
+            })
             .filter(|_| ready);
         let capture_time = (value.capture.state == slipstream_core::CaptureMetadataState::Known)
             .then_some(value.capture.order_key)

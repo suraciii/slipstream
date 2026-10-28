@@ -21,7 +21,7 @@ ${PHOTO_EDITOR_TEMPLATE}
                 <div class="photo-tools-view" id="photo-tools-view-details" data-photo-tools-view="details" hidden>
                   <header class="photo-tools-view-header"><h3>Details</h3><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
                   <div class="photo-tools-facts" data-metadata aria-label="Capture details"><strong>Capture Details</strong><dl><div><dt>Capture Time</dt><dd data-metadata-capture-time>—</dd></div><div><dt>Aperture</dt><dd data-metadata-aperture>—</dd></div><div><dt>ISO</dt><dd data-metadata-iso>—</dd></div><div><dt>Shutter Speed</dt><dd data-metadata-shutter-speed>—</dd></div><div><dt>Focal Length</dt><dd data-metadata-focal-length>—</dd></div></dl></div>
-                  <p class="photo-tools-preview"><span class="photo-tools-preview-label">Preview Source</span><span data-source>—</span><span class="photo-tools-detail-limit" data-detail-limit hidden>Limited by camera Preview resolution</span></p>
+                  <p class="photo-tools-preview"><span class="photo-tools-preview-label">Preview Source</span><span data-source>—</span></p>
                   <div class="external-metadata" data-external-metadata aria-label="External Metadata"></div>
                 </div>
                 <div class="photo-tools-view" id="photo-tools-view-zoom" data-photo-tools-view="zoom" hidden>

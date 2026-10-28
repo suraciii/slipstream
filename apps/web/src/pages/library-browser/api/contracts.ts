@@ -1,8 +1,33 @@
 export type PreviewSource = "jpeg-original" | "raw-embedded-jpeg";
 export type SelectionState = "unflagged" | "picked" | "rejected";
-/// One Selection State filter for an open source. `all` keeps every Photo of
-/// the source order; every other value keeps only matching Photos.
+/** One Selection State filter for an open source. `all` keeps every Photo of
+ * the source order; every other value keeps only matching Photos. */
 export type SelectionFilter = "all" | SelectionState;
+/** The Original File kind one filter condition may name. A RAW Photo and a
+ * same-basename JPEG Photo are independent Photos, so a kind condition never
+ * merges them. */
+export type OriginalKindFilter = "raw" | "jpeg";
+/** One camera-local Capture Time bound, `YYYY-MM-DDTHH:MM:SS` with no offset.
+ * A lower bound is inclusive and an upper bound is exclusive, and a Photo
+ * without a Capture Time never matches a supplied bound. */
+export type CaptureTimeBound = string;
+/// The defined Photo fact conditions one open source may be filtered by,
+/// besides Selection State. Every field is optional, an omitted field applies
+/// no condition, and different fields combine with AND.
+export type BrowseFilterConditions = Readonly<{
+  /// Inclusive Rating lower bound, 0 through 5. Rating 0 means No Rating.
+  ratingMinimum?: number;
+  /// Inclusive Rating upper bound, 0 through 5.
+  ratingMaximum?: number;
+  kind?: OriginalKindFilter;
+  /// Whether the remembered Original File is available. It never describes
+  /// Preview readiness.
+  available?: boolean;
+  /// Inclusive camera-local Capture Time lower bound.
+  capturedFrom?: CaptureTimeBound;
+  /// Exclusive camera-local Capture Time upper bound.
+  capturedBefore?: CaptureTimeBound;
+}>;
 /// Bounded per-state Selection counts for one open source. They describe the
 /// source order, not a filtered view of it.
 export type SelectionCounts = Readonly<{

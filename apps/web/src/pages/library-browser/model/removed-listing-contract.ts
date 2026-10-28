@@ -93,6 +93,9 @@ export type RemovedPanelViewModel = Readonly<{
   pending: boolean;
   deleting: boolean;
   selectionCount: number;
+  /// True when review will resolve all current Trash minus exclusions at
+  /// admission; the count reflects the most recent complete scan.
+  allSelected: boolean;
   canDelete: boolean;
   canRestore: boolean;
   /// Whether the last read of the listing failed, so the surface offers the
@@ -100,6 +103,9 @@ export type RemovedPanelViewModel = Readonly<{
   canRetry: boolean;
   restoringPhotoId?: string;
   restoringSelection: boolean;
+  /// A prior all-mode Restore has no confirmed response and must be retried
+  /// under its retained operation identity before another selection or write.
+  restoreUnconfirmed?: boolean;
   message?: string;
   /// The last confirmed operation, while Undo can still restore it. The
   /// listing is the surface a Photographer returns to, so the operation-level
@@ -124,6 +130,9 @@ export type RemovedPanelViewModel = Readonly<{
       /// recovery that names the retained operation id.
       pendingVerificationOperationId: string | null;
       selected: boolean;
+      /// True when the Photographer excluded this item from a Select all
+      /// selection; excluded items are not submitted for review.
+      excluded: boolean;
       preview: Readonly<{
         state: "inspection-pending" | "ready" | "unavailable" | "failed";
         thumbnailUrl?: string;
