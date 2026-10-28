@@ -23,7 +23,7 @@ impl Library {
             .unwrap_or(Err(MutationError::Persistence))
             .map_err(Into::into)
     }
-    /// Removes an explicit, caller-reviewed Photo set with decision evidence.
+    /// Removes explicit, caller-reviewed Photos with decision evidence.
     pub async fn remove_photos_explicit(
         &self,
         mutation: ExplicitPhotoRemovalMutation,
@@ -55,7 +55,7 @@ impl Library {
             .unwrap_or(Err(MutationError::Persistence))
             .map_err(Into::into)
     }
-    /// Restores an explicit, caller-reviewed Photo set and retains its
+    /// Restores explicit, caller-reviewed Photos and retains the
     /// operation result for replay and read-only outcome inspection.
     pub async fn restore_photos_explicit(
         &self,
