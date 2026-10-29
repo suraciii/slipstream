@@ -101,13 +101,14 @@ metadata and appear valid. A valid empty Sidecar value must suppress fallback.
 Removing a Sidecar property must reveal the embedded fallback, if any. Read must
 make this distinction visible.
 
-[Sidecar Association](../../../CONTEXT.md#metadata) owns eligibility: one same-directory,
-same-basename XMP Sidecar belongs to the sole eligible RAW, or to the sole JPEG
-only when no RAW shares its basename. RAW and same-basename JPEG must remain
-independent. The JPEG must not read or overwrite the RAW's Sidecar. Multiple
-eligible Originals or candidate Sidecars must be reported as ambiguous; Save
-must refuse them. A Photo without an eligible association must remain readable
-from its Original and must report that Sidecar saving is unavailable.
+A Sidecar Association is eligible when one same-directory, same-basename XMP
+Sidecar belongs to the sole eligible RAW, or to the sole JPEG only when no RAW
+shares its basename. RAW and same-basename JPEG must remain independent. The
+JPEG must not read or overwrite the RAW's Sidecar. Multiple eligible Originals
+or candidate Sidecars must be reported as ambiguous; Save must refuse them. A
+Photo without an eligible association must remain readable from its Original
+and must report that Sidecar saving is unavailable. The association does not
+create a Photo or change Original identity.
 
 A new Sidecar must use the eligible Original's basename with `.xmp` in its own
 directory. Existing candidates must be inspected before creation; an existing

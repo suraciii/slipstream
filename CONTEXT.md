@@ -40,8 +40,8 @@ An Original File that cannot be read at its remembered Original Location. Its Ph
 _Avoid_: missing Photo, deleted Photo
 
 **Unavailable Photo**:
-A Photo whose Original File is unavailable. It keeps its identity, Original Location, Selection State, Rating, Album membership, and Grid position; it is not a Removed Photo. The user-facing cause is **Original unavailable**; reserve **Photo unavailable** for a Photo that is not present in the current view.
-_Avoid_: removed Photo, deleted Photo; Photo unavailable as the cause
+A Photo whose Original File is unavailable. It keeps its identity, Original Location, Selection State, Rating, Album membership, and Grid position; it is not a Removed Photo. [Library Browsing and Selection](specs/library-browser/spec.md#progressive-grid-loading) owns the user-facing `Original unavailable` presentation and reserves `Photo unavailable` for a Photo that is not present in the current view.
+_Avoid_: removed Photo, deleted Photo
 
 **Original Location**:
 The relative directory and filename used to find an Original File beneath the current Library Folder. A Location is not Original File identity.
@@ -90,7 +90,7 @@ A Photographer-owned external XMP file associated with a Photo and stored separa
 _Avoid_: sidecar when the kind is unclear, XMP Original, XMP Photo
 
 **Sidecar Association**:
-The rule that links one same-directory, same-basename XMP Sidecar to one Photo through its Original Location. A sole RAW Original owns the association; a sole JPEG Original owns it only when no RAW shares the basename. Multiple eligible owners remain ambiguous and have no writable association. A Location or ownership change invalidates prior metadata read evidence. The sidecar does not create a Photo or change its Original identity.
+The link between one Photo and one same-directory, same-basename XMP Sidecar, derived through the Photo's Original Location. [Read and Save Metadata](specs/photo-library/metadata/spec.md#sources-and-association) owns eligibility, ambiguity, invalidation, and the rule that the association does not create a Photo or change Original identity.
 _Avoid_: sidecar identity, filename identity
 
 **Sidecar Metadata**:
