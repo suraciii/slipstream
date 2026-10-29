@@ -50,11 +50,12 @@ continues after the captured requests settle.
 
 The controller owns each pending expansion and its loading presentation.
 Repeated expansion joins that operation; reset and teardown invalidate its
-presentation. A same-parent refresh or page request releases superseded
-expansion feedback; Retry replaces it with feedback for its own request. An
+presentation. A superseding refresh or page request releases pending expansion
+feedback; Retry replaces it with feedback for its own request. An
 obsolete, non-abortable transport cannot keep the disclosure busy or prevent
 collapse after its replacement settles. Refresh, paging, and retry still
-request authoritative windows.
+request authoritative windows. A load joining the initial root binding keeps
+the existing expansion feedback.
 This bounded reuse avoids a network round trip for every disclosure without
 retaining the complete tree or bypassing failure recovery.
 
