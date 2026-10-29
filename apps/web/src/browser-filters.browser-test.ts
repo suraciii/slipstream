@@ -363,6 +363,8 @@ test("Refresh, Retry, and Snapshot expiry retain the committed filter", async ({
   await page.locator("[data-captured-before]").fill(CAPTURE_TIMES.d);
   await applyViewOptions(page);
   await expect(page.locator(".photo-cell")).toHaveCount(2);
+  // The first Grid window can render before destination history commits.
+  await expect(page).toHaveURL(/rating-min=4/);
   const address = page.url();
   const expected = {
     ratingMinimum: 4,
