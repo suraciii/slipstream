@@ -2,16 +2,8 @@
 
 ## Language and Writing
 
-Write project documentation, Issue titles and bodies, pull request titles and
-descriptions, and commit messages in English. This rule applies to submissions
-made through the GitHub UI, CLI, API, or automation. Conversation with contributors
-may use their preferred language.
-
-Use short sentences, active voice, American spelling, and consistent terms.
-Prefer plain technical English inspired by ASD-STE100; formal compliance is not
-required. Use the domain terms in [`CONTEXT.md`](CONTEXT.md). Preserve exact
-identifiers, filenames, user-provided names, and quoted diagnostic output in their
-original language. Explain non-English evidence in English when needed.
+Follow [documentation language rules](eng/documentation-language.md) for project
+documentation, Issues, pull requests, and commits.
 
 ## Issues
 
