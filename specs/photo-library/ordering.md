@@ -2,27 +2,21 @@
 
 Slipstream needs camera capture ordering without discarding explicit Album sequence, inventing timezone facts, or letting a rescan reorder a source that the Photographer is already browsing.
 
-## Design Drivers
+Capture inspection MUST NOT unpack RAW sensor data or generate a Preview.
 
-- Legacy SQLite state persists explicit Album membership positions and saved Album positions under earlier Photo Set names.
-- Camera files often omit timezone and subsecond metadata.
-- One Original may contain missing or invalid capture metadata.
-- A relocated Original File resets its capture facts and re-derives them from its current bytes.
-- Every Original read remains descriptor-confined and read-only.
-- One malformed Original must not invalidate valid sibling Photos.
-- A completed Library snapshot must have one stable order. Metadata inspection must not reorder it progressively after publication.
-- Capture inspection must not unpack RAW sensor data or generate a Preview.
+A malformed Original MUST NOT invalidate valid sibling Photos.
 
 ## Order Ownership
 
-The `All Photos` Library source owns Capture Time order. An Original Folder source filters that order to one recursive subtree. An Album owns explicit membership order. Opening any source creates a hidden Browse Snapshot of its ordered Photo IDs within the Library Browser.
+`All Photos` owns Capture Time order.
 
-This keeps one owner for each order:
+An Original Folder filters that order by Folder ancestry.
 
-- a Library Browse Snapshot copies the current published Capture Time order;
-- an Original Folder Browse Snapshot filters that order by Folder ancestry;
-- an Album Browse Snapshot copies persisted membership position; and
-- a rescan may change a newly opened Library or Folder source but never an already open Snapshot or Album positions.
+An Album owns explicit membership order.
+
+Opening a source copies its ordered Photo IDs into a hidden Browse Snapshot.
+
+A rescan MAY change a newly opened Library or Folder source but MUST NOT reorder an open Snapshot or Album positions.
 
 ## Original Capture Fact
 
@@ -34,11 +28,23 @@ Each Original owns one derived capture fact:
 - optional timezone offset in minutes;
 - the source revision inspected.
 
-`pending` means the current Original revision has not been inspected. `known` has a valid ordering key. `missing` means no supported base field was present. `invalid` means supported base fields were present but malformed. `failed` means an admitted, confined read attempt could not produce a trustworthy result: confinement, I/O, parser, or revision enforcement failed. Native-work admission is not an inspection outcome — when the shared capacity cannot admit an attempt, the fact stays `pending` for that scan and remains retryable; capacity exhaustion must never be recorded as `failed`.
+| State     | Meaning                                                                                                                             |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `pending` | The current Original revision has not been inspected.                                                                               |
+| `known`   | The fact has a valid ordering key.                                                                                                  |
+| `missing` | No supported base field was present.                                                                                                |
+| `invalid` | Supported base fields were present but malformed.                                                                                   |
+| `failed`  | An admitted, confined read could not produce a trustworthy result because confinement, I/O, parser, or revision enforcement failed. |
 
-A failed fact remains eligible for retry. Missing and invalid facts are reused while their source revision remains unchanged.
+Native-work admission is not an inspection outcome. When shared capacity cannot admit an attempt, the fact remains retryable `pending` for that scan; capacity exhaustion MUST NOT be recorded as `failed`.
 
-A relocated Original File resets to `pending`. Its capture facts are re-derived from its current bytes at the new Location, so a value retained from the old Location never orders the Photo.
+A failed fact remains eligible for retry.
+
+Missing and invalid facts are reused while their source revision remains unchanged.
+
+A relocated Original File resets to `pending`.
+
+Its capture facts are re-derived from its current bytes at the new Location, so a value retained from the old Location never orders the Photo.
 
 ## Metadata Semantics
 
@@ -47,7 +53,9 @@ Inspect base fields in this order:
 1. EXIF `DateTimeOriginal`;
 2. EXIF `DateTimeDigitized`.
 
-A malformed higher-priority field does not block a valid lower-priority field. For the selected base field, use only its matching subsecond and offset companions:
+A malformed higher-priority field does not block a valid lower-priority field.
+
+For the selected base field, use only its matching subsecond and offset companions:
 
 - `SubSecTimeOriginal` and `OffsetTimeOriginal`; or
 - `SubSecTimeDigitized` and `OffsetTimeDigitized`.
@@ -58,17 +66,33 @@ Normalize a valid camera-local value to:
 YYYY-MM-DDTHH:MM:SS.fffffffff
 ```
 
-Missing or malformed subseconds contribute zero. Use at most the first nine decimal digits and right-pad shorter values with zero. Retain a valid offset as signed minutes, but do not apply it to the ordering key. A missing or malformed offset remains unknown and does not invalidate the base value.
+Missing or malformed subseconds contribute zero.
+
+Use at most the first nine decimal digits and right-pad shorter values with zero.
+
+Retain a valid offset as signed minutes, but do not apply it to the ordering key.
+
+A missing or malformed offset remains unknown and does not invalidate the base value.
 
 Do not use EXIF `DateTime`, GPS time, filesystem modification time, filenames, XMP, Preview metadata, or another Original as a guessed capture fact.
 
-For a supported RAW container without a TIFF header at byte zero, a narrow LibRaw metadata-only fallback may use `raw->other.timestamp`. It is converted with `localtime_r` in the inspecting process and normalized as a camera-local `DateTimeOriginal` value with zero subseconds and no offset. The fallback never runs for a TIFF container, including a TIFF container with missing fields, so direct EXIF remains exact. It calls only LibRaw open on a `/proc/self/fd` alias of the retained descriptor; it never unpacks, develops, or reads Preview pixels.
+For a supported RAW container without a TIFF header at byte zero, a narrow LibRaw metadata-only fallback MAY use `raw->other.timestamp`.
+
+It is converted with `localtime_r` in the inspecting process and normalized as a camera-local `DateTimeOriginal` value with zero subseconds and no offset.
+
+The fallback never runs for a TIFF container, including a TIFF container with missing fields, so direct EXIF remains exact.
+
+It calls only LibRaw open on a `/proc/self/fd` alias of the retained descriptor; it never unpacks, develops, or reads Preview pixels.
 
 ## Photo Capture Fact
 
-A Photo's authoritative ordering key comes from its own Original File's capture fact. A Photo has no fallback to another Original File.
+A Photo's authoritative ordering key comes from its own Original File's capture fact.
 
-A Photo whose own Original has no known key sorts in the missing-time partition until a current inspection produces one. A relocated Original returns to `pending`, so its Photo returns to the missing-time partition until its current bytes are inspected.
+A Photo has no fallback to another Original File.
+
+A Photo whose own Original has no known key sorts in the missing-time partition until a current inspection produces one.
+
+A relocated Original returns to `pending`, so its Photo returns to the missing-time partition until its current bytes are inspected.
 
 ## Deterministic Library Order
 
@@ -83,48 +107,118 @@ Photo ID by UTF-8 bytes
 
 The Photo ordering Location is the Photo's own Original Location.
 
-Album queries continue to order only by `album_members.position`. Original Folder sources preserve the relative order of the filtered `All Photos` sequence.
+Album queries continue to order only by `album_members.position`.
+
+Original Folder sources preserve the relative order of the filtered `All Photos` sequence.
 
 ## Confinement and Resource Bounds
 
-Metadata inspection begins from the Library-owned Original capability. It opens the Original read-only beneath the retained Library Folder descriptor and passes an already-open descriptor or borrowed read/seek adapter to the metadata parser.
+Metadata inspection begins from the Library-owned Original capability.
 
-The parser must not receive an Original filesystem path or reopen the Original by name. Direct parsing uses bounded reads from the retained descriptor. The LibRaw fallback receives only a `/proc/self/fd` alias of a duplicated retained descriptor. The first attempt compares the opened descriptor with the discovery device, inode, size, and modification time. Each attempt checks that its retained descriptor is unchanged after inspection. A discovery mismatch or a mid-read revision change discards that attempt's metadata; parser failure must not hide a revision change. Traversal and symlink escape remain forbidden.
+It opens the Original read-only beneath the retained Library Folder descriptor and passes an already-open descriptor or borrowed read/seek adapter to the metadata parser.
 
-After a changed-revision failure, Capture inspection makes one fresh observation at the same Location. It opens one new confined read-only descriptor and obtains the observation's source facts, source revision, and metadata through that descriptor. A completed `known`, `missing`, or `invalid` result replaces the scan's discovery facts and capture fact together, before recovery planning or persistence. It must not attach fresh metadata to stale discovery facts. A replacement already complete before this observation is the current file, just as in a later ordinary scan; the rejected attempt contributes no metadata. A change during the fresh descriptor's inspection still fails its revision check.
+The parser MUST NOT receive an Original filesystem path or reopen the Original by name.
 
-There are at most two attempts per Original per scan. The fresh attempt must not reuse a prior capture fact, change Location, infer identity or a Content Fingerprint, or start another scan. If it fails, the scan retains its discovery facts and records `failed` without a source revision or ordering key; a later scan may try again. Other first-attempt errors keep their existing failure behavior. Both attempts use the same Library native-work permit, and each keeps the existing parsing limits.
+Direct parsing uses bounded reads from the retained descriptor.
 
-When the shared budget cannot admit an inspection, that inspection is
-deferred rather than failed: the scan records a retryable wait state for the
-Original, the next admitted scan may retry it without a restart, and the
-Published Library keeps the prior published facts. A saturated queue must
-never publish null, stale, or `failed` facts over known published facts, and
-recovering one deferred Original must not require a full restart.
+The LibRaw fallback receives only a `/proc/self/fd` alias of a duplicated retained descriptor.
 
-Metadata input, parser allocation, blocking workers, and queued work are bounded. Each Library owns one capacity-two native-work budget shared by Capture inspection, Preview extraction, and derivative processing; standalone cache schedulers may own an independent budget. It must not unlock LibRaw sensor unpack, demosaic, or any RAW development path.
+The first attempt compares the opened descriptor with the discovery device, inode, size, and modification time.
+
+Each attempt checks that its retained descriptor is unchanged after inspection.
+
+A discovery mismatch or a mid-read revision change discards that attempt's metadata; parser failure MUST NOT hide a revision change.
+
+Traversal and symlink escape remain forbidden.
+
+After a changed-revision failure, Capture inspection makes one fresh observation at the same Location.
+
+It opens one new confined read-only descriptor and obtains the observation's source facts, source revision, and metadata through that descriptor.
+
+A completed `known`, `missing`, or `invalid` result replaces the scan's discovery facts and capture fact together, before recovery planning or persistence.
+
+It MUST NOT attach fresh metadata to stale discovery facts.
+
+A replacement already complete before this observation is the current file, just as in a later ordinary scan; the rejected attempt contributes no metadata.
+
+A change during the fresh descriptor's inspection still fails its revision check.
+
+There are at most two attempts per Original per scan.
+
+The fresh attempt MUST NOT reuse a prior capture fact, change Location, infer identity or a Content Fingerprint, or start another scan.
+
+If it fails, the scan retains its discovery facts and records `failed` without a source revision or ordering key; a later scan MAY try again.
+
+Other first-attempt errors keep their existing failure behavior.
+
+Both attempts use the same Library native-work permit, and each keeps the existing parsing limits.
+
+When the shared budget cannot admit an inspection, the scan records a retryable wait state instead of failure. The next admitted scan MAY retry it without a restart, and the Published Library keeps the prior published facts.
+
+A saturated queue MUST NOT publish null, stale, or `failed` facts over known published facts, and
+recovering one deferred Original MUST NOT require a full restart.
+
+Metadata input, parser allocation, blocking workers, and queued work are bounded.
+
+Each Library owns one capacity-two native-work budget shared by Capture inspection, Preview extraction, and derivative processing; standalone cache schedulers MAY own an independent budget.
+
+It MUST NOT unlock LibRaw sensor unpack, demosaic, or any RAW development path.
 
 ## Scan and Browse Lifecycle
 
 A completed scan is the only event that advances the Published Library, and
 its publication is atomic: discovery facts, source facts, source revision,
-capture fact, and derivative eligibility change together. A deferred, failed,
+capture fact, and derivative eligibility change together.
+
+A deferred, failed,
 or interrupted inspection or scan publishes nothing and leaves every prior
 published metadata fact, source revision, recipe binding, Preview fact, and
-processing eligibility intact. An empty or failed read must never overwrite a
+processing eligibility intact.
+
+An empty or failed read MUST NOT overwrite a
 known published fact.
 
-A completed scan atomically publishes one Library snapshot. An unchanged Original reuses its persisted fact when the inspected source revision matches. When compatible persisted state already contains a completed published snapshot, an ordinary startup may serve that snapshot while a background rescan builds its replacement. A new state store must finish its first scan before Browse Snapshots are available.
+A completed scan atomically publishes one Library snapshot.
 
-After a v2-to-v3 migration, available Originals begin as `pending` and are inspected before the first v3 ordered snapshot is published. This one-time backfill may lengthen the first upgraded initialization, but it prevents the server from publishing temporary path order that changes as metadata work completes. Preview generation remains demand-driven.
+An unchanged Original reuses its persisted fact when the inspected source revision matches.
 
-An unavailable Original retains its last completed capture fact. When it becomes readable with a changed revision, the result from the current bytes replaces the retained fact, including `missing`, `invalid`, or `failed`; an old key must not remain authoritative for changed bytes.
+After storage and state admission, an existing completed Published Library MAY remain browsable while an ordinary replacement scan runs in the background.
 
-A per-file capture failure does not abort valid sibling Photos. A root-level scan or persistence failure leaves the previously committed snapshot authoritative.
+An ordinary startup MAY serve a compatible persisted completed snapshot while a background rescan builds its replacement.
 
-An open Browse Snapshot keeps its ordered Photo-ID sequence. Availability, Selection State, Rating, and Preview facts may refresh, but a rescan does not insert, remove, or reorder that Snapshot. Reopening `All Photos` may observe the newly published order.
+A new state store MUST report initialization progress and finish its first scan before Browse Snapshots are available.
 
-When explicit Album Resume resolves an unavailable saved Photo, Slipstream searches later members and then wraps once for an available member. If every member is unavailable, it remains at the saved member. Browse creation without a saved position still resolves its initial position to the first available member or, if none are available, the first member. That value is advisory for Snapshot creation: it is not written as the Album's durable saved position, and Resume availability follows only the durable position. It does not force a Grid destination into Photo View. Grid entry and Resume presentation follow [Library Browser Experience](../library-browser/experience/spec.md#destinations-and-browser-history). A disconnected Album keeps mutation controls disabled until its required current facts and saved position are confirmed. `All Photos` and Original Folder sources have no durable position and reconnect through their current bounded windows.
+After a v2-to-v3 migration, available Originals begin as `pending` and are inspected before the first v3 ordered snapshot is published.
+
+This one-time backfill MAY lengthen the first upgraded initialization, but it prevents the server from publishing temporary path order that changes as metadata work completes.
+
+Preview generation remains demand-driven.
+
+An unavailable Original retains its last completed capture fact.
+
+When it becomes readable with a changed revision, the result from the current bytes replaces the retained fact, including `missing`, `invalid`, or `failed`; an old key MUST NOT remain authoritative for changed bytes.
+
+A per-file capture failure does not abort valid sibling Photos.
+
+A root-level scan or persistence failure leaves the previously committed snapshot authoritative.
+
+An open Browse Snapshot keeps its ordered Photo-ID sequence. Availability, Selection State, Rating, and Preview facts MAY refresh, but a rescan does not insert, remove, or reorder that Snapshot.
+
+Reopening `All Photos` MAY observe the newly published order.
+
+When explicit Album Resume resolves an unavailable saved Photo, Slipstream searches later members and then wraps once for an available member.
+
+If every member is unavailable, it remains at the saved member.
+
+Browse creation without a saved position still resolves its initial position to the first available member or, if none are available, the first member.
+
+That value is advisory for Snapshot creation: it is not written as the Album's durable saved position, and Resume availability follows only the durable position.
+
+It does not force a Grid destination into Photo View.
+
+Grid entry and Resume presentation follow [Library Browser Experience](../library-browser/experience/spec.md#destinations-and-browser-history).
+
+A disconnected Album keeps mutation controls disabled until its required current facts and saved position are confirmed. `All Photos` and Original Folder sources have no durable position and reconnect through their current bounded windows.
 
 ## Persistence
 
@@ -152,80 +246,43 @@ Application validation enforces:
 - `pending` has no derived fact;
 - `failed` has no authoritative key and remains retryable.
 
-Do not add a winning timestamp column to `photos`. Query and domain mapping derive the Photo's ordering key from its single Original File row.
+Do not add a winning timestamp column to `photos`.
 
-The v2-to-v3 migration adds only derived metadata columns and changes `PRAGMA user_version` to `3` in one admitted `BEGIN IMMEDIATE` transaction. It preserves every existing row, identity, membership position, Selection State, Rating, Preview fact, and saved virtual-group position. The later v4-to-v5 Album migration preserves those same values while adopting canonical Album names, and the v5-to-v6 independent-Photo migration preserves every Original File's capture facts, including paired inputs whose RAW and JPEG become independent Photos. Exact canonical-shape validation remains mandatory.
+Query and domain mapping derive the Photo's ordering key from its single Original File row.
+
+The v2-to-v3 migration adds only derived metadata columns and changes `PRAGMA user_version` to `3` in one admitted `BEGIN IMMEDIATE` transaction.
+
+It preserves every existing row, identity, membership position, Selection State, Rating, Preview fact, and saved virtual-group position.
+
+The later v4-to-v5 Album migration preserves those same values while adopting canonical Album names, and the v5-to-v6 independent-Photo migration preserves every Original File's capture facts, including paired inputs whose RAW and JPEG become independent Photos.
+
+Exact canonical-shape validation remains mandatory.
 
 ## Rollback
 
-Before the first v3 startup, the operator creates a consistent, sidecar-free v2 backup while the production service is stopped or through an equivalently proven snapshot. A v2 binary rejects v3 as a newer schema.
+Before the first v3 startup, the operator creates a consistent, sidecar-free v2 backup while the production service is stopped or through an equivalently proven snapshot.
 
-Rollback stops the v3 process and restores the pre-upgrade v2 backup. There is no in-place down migration. Original Files and rebuildable cache bytes require no conversion and remain untouched.
+A v2 binary rejects v3 as a newer schema.
+
+Rollback stops the v3 process and restores the pre-upgrade v2 backup.
+
+There is no in-place down migration.
+
+Original Files and rebuildable cache bytes require no conversion and remain untouched.
 
 ## Protocol
 
-The browser obtains deterministic order through the hidden bounded Browse Snapshot protocol in [Scalable Library Browsing](../library-browser/design.md). The protocol must not expose one unbounded complete-Library response. Library and Original Folder Snapshots use Capture Time order; an Album Snapshot uses explicit membership position.
+The browser obtains deterministic order through the hidden bounded Browse Snapshot protocol in [Scalable Library Browsing](../library-browser/design.md).
 
-Browse Windows do not expose Capture Time, offset, or inspection state in every Grid item. Photo View may request the bounded review
+The protocol MUST NOT expose one unbounded complete-Library response.
+
+Library and Original Folder Snapshots use Capture Time order; an Album Snapshot uses explicit membership position.
+
+Browse Windows do not expose Capture Time, offset, or inspection state in every Grid item.
+
+Photo View MAY request the bounded review
 metadata view defined by [Scalable Library Browsing](../library-browser/design.md),
-which exposes Capture Time for the current Photo when available. Capture
-failures must not disable selection, Rating, navigation, or Preview behavior.
+which exposes Capture Time for the current Photo when available.
 
-## Options
-
-### Selected: Separate Library, Folder, and Album Order Owners
-
-`All Photos` uses Capture Time order. An Original Folder filters that order. An Album uses membership position. This preserves explicit durable state and gives each source one order owner.
-
-### Rejected: Capture Order for Every Source
-
-This would make membership positions and explicit reorder ineffective while browsing an Album and unexpectedly change existing production sequences.
-
-### Selected: Per-Original Capture Authority
-
-Each Photo's ordering key comes from its own Original File. Independent RAW and JPEG Photos that share a base name keep their own capture facts and order separately, and Preview Source never influences chronology.
-
-### Rejected: Cross-Original Capture Authority
-
-Using another Original File's metadata would couple independent Photos and could let a regenerated sibling override a valid chronology.
-
-### Selected: Camera-Local Ordering
-
-The ordering key compares camera-local values and retains, but does not apply, optional offsets. This avoids inventing a timezone for files that omit one.
-
-### Rejected: Treat Missing Timezone as UTC
-
-This turns an unknown fact into an assumed instant and can move mixed camera files by hours.
-
-### Selected: Inspection Before Snapshot Publication
-
-Capture inspection is part of initial scan and rescan completion. This preserves one stable published order.
-
-### Rejected: Lazy Reordering Inside an Open Source
-
-A lazy backfill would expose temporary path order and move Grid cells or Photo navigation as background work completes.
-
-### Selected: One Fresh Observation After a Revision Change
-
-A scan may hold discovery facts long before it inspects one Original. Rejecting the stale attempt and observing the current file once avoids requiring another whole-Library scan for a transient change. Facts and metadata stay bound to one stable descriptor. This does not claim that bytes observed in separate attempts are identical.
-
-### Rejected: Wait for Another Scan After Every Revision Change
-
-This keeps the same safety boundary but unnecessarily leaves usable current metadata failed until another complete Library check. One bounded local retry limits both the delay and work for a repeatedly changing file.
-
-### Rejected: Ignore Inode Changes or Retain the Old Capture Time
-
-Size and modification time alone cannot detect a same-size, same-time replacement. Reusing an old key or ignoring the mismatch could publish metadata for bytes that were not inspected under the claimed revision.
-
-## Compatibility Fixtures
-
-- `compatibility/metadata/capture-time.json` owns field precedence, parsing, normalization, offset, and subsecond vectors; `compatibility/metadata/capture-order.json` owns per-Original capture authority, tie, missing-partition, and camera-local-offset ordering vectors.
-- `compatibility/sqlite/schema-v3.sql` and `schema-v3.json` own the Capture Time migration shape; `schema-v4.sql` and `schema-v4.json` own the identity-fence migration input; `schema-v5.sql` and `schema-v5.json` own the Album schema migration input; `schema-v6.sql` and `schema-v6.json` own the writable independent-Photo baseline, while schema versions 7 through 15 own later writable migrations and canonical v2 remains an earlier migration input.
-- Migration fixtures prove preservation of Photo identity, Albums, membership positions, Selection State, Rating, Preview facts, and saved Album positions, including the v4-to-v5 terminology migration and the v5-to-v6 independent-Photo migration.
-- `compatibility/protocol/capture-order-omission.json` owns ordered-response and capture-field-omission vectors.
-- Browser tests own the filename-versus-capture-order example, recursive Original Folder filtering, and the explicit Album order example.
-- Generated metadata fixtures are minimal and redistributable. Real camera Originals remain opt-in and retain their SHA.
-
-## Verification
-
-Verification covers every Product Spec example, descriptor-confined inspection, discovery-identity and mid-read revision changes, parser and resource failures, native-work saturation that defers an inspection without recording `failed` or erasing published facts, the next admitted scan retrying a deferred Original without a restart, exact v2-to-v3, v4-to-v5, and v5-to-v6 migrated state, stable open Browse Snapshot order, newly opened source order after rescan, unchanged Album positions, bounded protocol omission, and unchanged Original bytes and metadata. Generated JPEG and RAW fixtures must prove the two-attempt bound, successful fresh observation with matching published source facts, rejection of stale-discovery metadata for a same-size/same-time replacement, acceptance of a replacement completed before the fresh observation, and failure without old metadata reuse when the fresh attempt also changes. Persistence checks must pre
+Capture
+failures MUST NOT disable selection, Rating, navigation, or Preview behavior.

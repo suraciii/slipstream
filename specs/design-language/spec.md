@@ -1,329 +1,248 @@
 # Product Design Language
 
-Slipstream is a photo selection and organization workspace for a Photographer and the Photographer's own Agent. This document defines the product design language: how Slipstream should look, feel, speak, and behave as one product across human and programmatic use.
-
-[Product Vision](../spec.md) defines why Slipstream exists. [CONTEXT.md](../../CONTEXT.md) defines domain language. Feature specifications define exact behavior and outcomes. This document defines the shared design direction without replacing those contracts.
+This contract owns shared observable presentation, interaction, content, and accessibility behavior. Feature contracts own exact effects, scope, and recovery. [CONTEXT.md](../../CONTEXT.md) defines domain language; the [Design Language Contract](design.md) owns implementation boundaries and the [Visual System](visual-system.md) owns the Web reference scale.
 
 ## Product Reading
 
-### The product's job
+The interface MUST present the Photo as the subject and make evidence, decisions, consequences, and recovery understandable. It MUST support review without losing the Photographer's place.
 
-Slipstream helps a Photographer find, compare, organize, and decide what to keep in a large Photo Library while preserving trustworthy evidence and Original safety. Its central loop is:
-
-```text diagram
-See the Photo and its evidence
-  → make a deliberate decision
-  → continue without losing place
-  → inspect the result or recover uncertainty
-```
-
-The interface is a quiet instrument around the photograph. The Photo is the subject; the interface makes evidence, decisions, and consequences understandable.
-
-### The people and systems involved
-
-- The Photographer judges the image and sets the purpose.
-- Slipstream presents current facts, enforces preconditions, preserves identity, and reports effects.
-- The external Agent interprets a request, combines bounded capabilities, and reports its work.
-
-The Photographer and Agent use different surfaces, but they must share Photo identity, Album semantics, Selection State, Rating, Original safety, and truthful outcomes. The Web must not become a visual-only authority, and the CLI must not become a second product model.
-
-### Design tensions
-
-The design language resolves these tensions without creating extra product concepts:
-
-- **Rich visual evidence vs. bounded work:** show useful Photos early; do not require a whole Library transfer or complete Preview generation.
-- **Direct decisions vs. Original safety:** keep review actions close to the Photo; keep Originals read-only and separately review irreversible record cleanup.
-- **Large Library density vs. attention:** keep information compact and stable; reserve emphasis for the current Photo, current state, and next meaningful action.
-- **Gesture speed vs. discoverability:** gestures accelerate visible controls; they never replace visible, keyboard, and programmatic paths.
-- **Technical truth vs. calm presentation:** keep revision, transport, and implementation details available when useful, but do not make them the primary language of a Photographer's task.
+The Web, CLI, and Agent surfaces MUST share domain identity, facts, effects, scope, and outcomes, even when their affordances differ. They MUST preserve [Original safety](../spec.md#product-boundaries).
 
 ## Design Thesis
 
-**Calm, direct, inspectable review.**
-
-Slipstream must feel quiet enough for visual judgment, direct enough for repeated decisions, and explicit enough that a Photographer or Agent can tell what happened. Every visual emphasis, interaction, and message must support one of four purposes:
-
-1. show evidence;
-2. enable a decision;
-3. preserve continuity;
-4. explain an outcome or recovery path.
-
-Decoration, novelty, and hidden automation do not justify a new visual or interaction pattern.
+Visual emphasis, interaction, and messages MUST support evidence, a decision, continuity, or an outcome and recovery path. Decoration, novelty, and hidden automation MUST NOT justify a new visual or interaction pattern.
 
 ## Design Principles
 
 ### Photograph first
 
-The Preview and its surrounding facts must receive the strongest visual priority. Controls must frame the Photo rather than compete with it. A Photo must not be treated as a decorative tile behind unrelated controls.
+The Preview and its surrounding facts MUST receive the strongest visual priority. Controls MUST frame the Photo rather than compete with it.
 
 ### Truth before reassurance
 
-Slipstream must show what it knows, what it is doing, and what remains uncertain. It must not use a cheerful success treatment to hide a refused, partial, stale, failed, or unknown outcome. It must not invent counts, progress, Preview quality, or completion.
+The interface MUST distinguish known facts, work in progress, and uncertainty. It MUST NOT invent counts, progress, Preview quality, or completion, or present a refused, partial, stale, failed, or unknown outcome as success.
 
 ### Decisions stay close
 
-Pick, Reject, Rating, navigation, and Undo must be reachable from the current review context. A Photographer must not leave Photo View for ordinary review decisions. A supporting surface may contain secondary actions, but it must have a clear name, entry, and return path.
+Pick, Reject, Rating, navigation, and eligible Undo MUST be reachable in the current review context. Ordinary review decisions MUST NOT require leaving Photo View.
 
 ### Continuity is a feature
 
-Source, order, current Photo, position, Selection State, Rating, and saved Album position must remain understandable as the Photographer moves. Opening a supporting surface, changing layout, or recovering from a failure must not silently discard the current task or context.
+Source, order, current Photo, position, Selection State, Rating, and saved Album position MUST remain understandable during navigation. Supporting surfaces, layout changes, and failure recovery MUST NOT silently discard the task or its context.
 
 ### Progressive disclosure, not hidden capability
 
-Primary actions remain visible. Secondary actions may be grouped in a named supporting surface. Technical evidence may be disclosed when it helps inspection or recovery. A feature must not hide a necessary action behind an unexplained icon, gesture, hover state, or transient message.
+Primary actions MUST remain visible. Secondary actions MAY be grouped in a named supporting surface, and technical evidence MAY be disclosed for inspection or recovery.
+
+A necessary action MUST NOT be hidden behind an unexplained icon, gesture, hover state, or transient message.
 
 ### Explicit effects
 
-An action must make its effect and scope clear before it is committed. Reversible decisions may be direct when their owner and outcome are visible. Grouped view changes may be staged and applied. Trash Record Cleanup must clearly name the irreversible loss of selected application records and require review and separate confirmation; it never deletes files. Unknown completion must remain unknown until reconciled.
+An action MUST make its effect and scope clear before commitment. A reversible decision MAY be direct when its owner and outcome are visible; grouped view choices MAY be staged.
+
+Trash Record Cleanup MUST name the irreversible loss of selected application records and require review and separate confirmation. It MUST NOT delete files.
 
 ### One set of facts
 
-A visual state, accessible name, CLI result, and Agent-readable result must describe the same domain fact. Presentation may differ by surface; meaning, identity, and outcome must not.
+Visible state, accessible names, CLI results, and Agent-readable results MUST describe the same domain fact, identity, and outcome.
+
+An Agent MUST be able to observe and reproduce the same domain effect without depending on browser presentation state.
 
 ### Bounded attention
 
-A large Library must not make the Photographer wait for irrelevant work. Loading, retention, animation, and disclosure must stay bounded. The interface must keep the current range, current Photo, and current action understandable while background work continues.
+Loading, retention, animation, and disclosure MUST remain bounded. The current range, Photo, and action MUST remain understandable while background work continues.
 
 ### Quiet confidence
 
-Slipstream should use restraint instead of theatrical branding. Photographic character comes from the image, tonal hierarchy, and precise language—not from film decoration, dashboard ornament, or promotional cards.
+The interface SHOULD be restrained. Film decoration, dashboard ornament, and promotional cards MUST NOT compete with the review task.
 
 ## Visual Language
 
 ### Composition and hierarchy
 
-Every surface must establish this order unless a feature contract has a stronger reason:
+Unless a feature contract gives a stronger task-specific reason, surfaces MUST order emphasis as follows:
 
-```text literal
-Photo or current content
-  current facts and state
-    primary action
-      navigation and supporting actions
-        technical evidence and recovery detail
-```
+1. Photo or current content.
+2. Current facts and state.
+3. Primary action.
+4. Navigation and supporting actions.
+5. Technical evidence and recovery detail.
 
-Grid View is a field of Photos with stable cell geometry. Photo View is a focused inspection surface with the Preview, current facts, primary decisions, navigation, and supporting surfaces. Sources, options, Rating choices, Photo tools, and recovery review are supporting surfaces; they are not additional product pages by default.
+Grid View MUST use stable cell geometry. Photo View MUST present the Preview, current facts, primary decisions, navigation, and supporting surfaces as a focused inspection surface.
+
+Sources, options, Rating choices, Photo tools, and recovery review are supporting surfaces, not additional product pages by default.
 
 ### Tone and surfaces
 
-- The default visual tone is neutral, dark, and low-glare so the Preview remains the strongest visual object.
-- Surfaces must be separated primarily by tonal steps, spacing, and hierarchy; borders and shadows are supporting signals, not decoration.
-- An accent color may identify focus, current selection, or an available primary action. It must not carry several conflicting meanings at once.
-- Success, warning, failure, unavailable, Picked, Rejected, and Rating states must have distinct semantic roles. A destructive color belongs to destructive consequence, not to the ordinary Reject decision.
-- Gradients, ornamental texture, animated backgrounds, and persistent brand rows must not compete with the review task.
-- A Photo View may use a dimmed, blurred copy of the same Preview as a scrim inside the Preview well. The scrim must not add detail, imply a second Photo, appear in Grid, or remain when the Preview is unavailable. The sharp, complete Preview remains the content and the strongest visual object.
-- A state must never depend on color alone. Use text, iconography, geometry, position, or an accessible state description as a second channel.
+- The default tone MUST be neutral, dark, and low-glare.
+- Surfaces MUST be separated primarily by tonal steps, spacing, and hierarchy; borders and shadows are supporting signals.
+- An accent MAY identify focus, current selection, or an available primary action, but MUST NOT carry conflicting meanings at once.
+- Success, warning, failure, unavailable, Picked, Rejected, and Rating MUST have distinct semantic roles. Destructive color MUST NOT represent ordinary Reject.
+- Gradients, ornamental texture, animated backgrounds, and persistent brand rows MUST NOT compete with review.
+- Photo View MAY use the same Preview as a dimmed, blurred scrim inside its well. The sharp, complete Preview MUST remain the strongest visual object; the scrim MUST NOT add detail, imply another Photo, appear in Grid, or remain when the Preview is unavailable.
+- State MUST NOT depend on color alone; text, iconography, geometry, position, or an accessible state MUST provide a second channel.
 
 ### Typography and numbers
 
-- Use sentence case for labels, headings, buttons, and messages.
-- Use the product's exact domain names: **Pick**, **Reject**, **Picked**, **Rejected**, **Unflagged**, **Select**, **Selection State**, **Rating**, **No Rating**, **Library Check**, **Capture Time**, **Original File**, **Original Location**, and **Album**.
-- Use a stable, readable sans-serif voice for ordinary UI. Use a distinct numeric treatment for counts, positions, Capture Time, and other values that users compare.
-- A single display serif may distinguish the wordmark, source titles, and supporting-surface titles. The display serif must not carry a control, state label, action, or message. Mono may carry filenames, numeric values, and technical facts; ordinary state and field labels, actions, and messages use the UI sans. Incidental technical micro-labels may use tracking but remain sentence case. [Visual System](visual-system.md#type) owns the role-specific reference sizes.
-- Keep technical identifiers, revisions, and paths in a secondary or technical disclosure unless they are the object of the current task.
-- Do not use typography alone to imply that an action succeeded. Outcome text must name the outcome.
+- Labels, headings, buttons, and messages MUST use sentence case and the exact names in [CONTEXT.md](../../CONTEXT.md).
+- Ordinary UI MUST use a readable sans-serif voice. Counts, positions, Capture Time, and other compared values MUST use a distinct numeric treatment.
+- A single display serif MAY distinguish the wordmark, source titles, and supporting-surface titles; it MUST NOT carry a control, state label, action, or message.
+- Mono MAY carry filenames, numeric values, and technical facts. Ordinary state and field labels, actions, and messages MUST use UI sans.
+- Incidental technical micro-labels MAY use tracking but MUST remain sentence case. [Visual System](visual-system.md#type) owns role-specific reference sizes.
+- Technical identifiers, revisions, and paths MUST remain secondary or disclosed unless they are the current task's object.
+- Typography alone MUST NOT imply success; outcome text MUST name the outcome.
 
 ### Icons and imagery
 
-- Use familiar, simple icons that reinforce a visible label or state. An icon must not be the only explanation of a consequential action.
-- Keep one icon meaning stable across the product. Do not use the same symbol for Pick, Select, and a generic checkmark if their effects differ.
-- Preserve the complete composition, aspect ratio, and stated Preview Source. Grid composition must not crop or stretch a Photo. Display zoom may magnify the Preview only when it reports its actual zoom and does not imply additional source detail. See [Grid Composition and Orientation](../library-browser/spec.md#grid-composition-and-orientation) and [Preview Zoom and Fit](../library-browser/spec.md#preview-zoom-and-fit).
-- Never substitute a sibling JPEG for a RAW Photo's Preview. Preview derivatives must not upscale a smaller source for storage; [Preview Normalization](../photo-library/previews/spec.md#preview-normalization) owns derivative dimensions and magnification evidence.
-- Placeholder imagery must state the unavailable or failed fact without resembling a valid Photo.
+- Familiar, simple icons SHOULD reinforce a visible label or state. A consequential action MUST NOT rely on an icon as its only explanation.
+- Each icon meaning MUST remain stable; Pick, Select, and a generic checkmark MUST NOT share a symbol when their effects differ.
+- Photos MUST preserve complete composition, aspect ratio, and stated Preview Source. [Grid Composition](../library-browser/spec.md#grid-composition-and-orientation) and [Preview Zoom and Fit](../library-browser/spec.md#preview-zoom-and-fit) own composition and magnification behavior.
+- RAW Preview source and derivative dimensions follow [Preview Normalization](../photo-library/previews/spec.md#preview-normalization); a sibling JPEG MUST NOT substitute for a RAW Preview.
+- Placeholder imagery MUST name the unavailable or failed fact without resembling a valid Photo.
 
 ### Density, shape, and rhythm
 
-- Prefer a compact, stable rhythm that supports repeated review without visual fatigue.
-- Keep Grid cells uniform and stable under bounded loading. Loading must not cause placeholder churn, unpredictable jumps, or changing cell geometry.
-- Use a small family of surface shapes. A control, supporting surface, and destructive confirmation may be visually distinct, but the product must not accumulate one-off card treatments.
-- Use whitespace to group facts and actions, not to create decorative emptiness around every control.
-- Primary touch targets must remain comfortable and separated. A compact layout may reduce secondary controls before reducing the target or legibility of a primary action.
+- The layout SHOULD use a compact, stable rhythm without visual fatigue.
+- Grid loading MUST NOT cause placeholder churn, unpredictable jumps, or changes to cell geometry.
+- Surface shapes MUST remain a small family rather than accumulating one-off card treatments.
+- Whitespace MUST group facts and actions rather than create decorative emptiness.
+- Primary touch targets MUST remain comfortable and separated. Compact layouts MAY reduce secondary controls before reducing primary targets or legibility.
 
 ### State visibility
 
-Every interactive object must have a distinguishable presentation for the states that apply to it:
+Interactive objects MUST distinguish each applicable state:
 
-- resting;
-- hovered or pointed, when supported;
-- keyboard-focused;
-- pressed or committed;
-- current or selected;
-- disabled or unavailable;
-- pending;
-- stale or out of date;
-- failed or refused; and
-- unknown or awaiting reconciliation.
+- Resting.
+- Hover or pointing when supported.
+- Keyboard focus.
+- Pressed or committed.
+- Current or selected.
+- Disabled or unavailable.
+- Pending.
+- Stale.
+- Failed or refused.
+- Unknown or awaiting reconciliation.
 
-A pending state must not look like a committed state. A stale result must not look current. An unavailable Original must not look like a Removed Photo.
+Applied, partial, refused, failed, and unknown outcomes MUST remain distinguishable.
 
-A resting state is not a disabled or unavailable state. A control that is merely waiting for the Photographer must keep an ordinary enabled presentation, its ordinary label weight, and its accessible state; dimming, muting, or hiding it to suggest unavailability is a false statement about a control that is ready. A resting control must meet the same contrast requirement as ordinary text, so a quiet control never becomes an unreadable one.
+Pending MUST NOT look committed. Stale MUST NOT look current. An unavailable Original MUST NOT look like a Removed Photo.
+
+A resting enabled control MUST retain its ordinary label weight and accessible state. It MUST NOT be dimmed, muted, or hidden to imply unavailability, and MUST meet ordinary text contrast.
 
 ### Motion
 
-Motion must explain continuity, spatial relationship, or state transition. It must be short, interruptible, and unnecessary for understanding the outcome. Loading motion must not imply progress that the product cannot measure. Reduced-motion preferences must remove nonessential movement without removing state or feedback.
+Motion MUST explain continuity, spatial relationship, or state transition. It MUST be short, interruptible, and unnecessary for understanding the outcome.
+
+Loading motion MUST NOT imply unmeasurable progress. Reduced motion MUST remove nonessential movement without removing state or feedback.
 
 ## Interaction Language
 
 ### Core action classes
 
-Every interaction belongs to one of these classes:
+| Class | Contract |
+| --- | --- |
+| Read or navigate | Changes the view without silently changing Selection State, Rating, Album membership, or destructive state. A feature MAY define a continuity effect such as [saved position](../library-browser/spec.md#saved-position). |
+| Direct reversible decision | Records a bounded effect and reports pending and settled outcomes. |
+| Staged view choice | Applies filter, order, or presentation changes only on explicit Apply or equivalent commit; Cancel or Close discards the draft. |
+| Explicit recovery | Reviews uncertainty or unavailability; bounded reads and retries MAY repeat directly, while consequential recovery shows proposed effects and requires explicit Apply. |
+| Irreversible consequence | Identifies exact scope and consequence, requires separate confirmation, and reports the final effect. |
 
-- **Read or navigate:** normally changes what is viewed without changing Photo or Library facts. A feature contract may define a continuity effect, such as saved Album position; navigation must not silently change Selection State, Rating, Album membership, or destructive state. See [Saved Position](../library-browser/spec.md#saved-position).
-- **Direct reversible decision:** records a bounded Pick, Reject, Rating, or equivalent effect and reports truthful feedback while the effect is pending and after it settles.
-- **Staged view choice:** changes filters, order, or presentation after an explicit Apply or equivalent commit; Cancel or Close discards the draft.
-- **Explicit recovery:** reviews an uncertain or unavailable state. A bounded read or retry may repeat that operation directly; a consequential recovery shows proposed effects and requires explicit Apply.
-- **Irreversible consequence:** identifies the exact scope and consequence, requires separate confirmation, and reports the final effect.
-
-A feature must not silently change action class. Navigation must not silently record a decision; feature-defined continuity effects remain with their owning contract. A review shortcut must not become an irreversible operation.
+A feature MUST NOT silently change an action's class. A review shortcut MUST NOT become an irreversible operation.
 
 ### Visible controls and accelerators
 
-- A gesture or keyboard shortcut may accelerate a visible capability; it must not create a hidden Web capability. Visible controls or equivalent accessible paths remain available.
-- Agent and CLI capabilities may use different affordances or support capabilities without a Web counterpart. They must be discoverable through [machine-facing help and contracts](../command-line/spec.md#starting-and-discovering-capabilities) and preserve shared domain identity, effect, scope, and outcome.
-- For Library Browser, [touch gestures](../library-browser/spec.md#touch-gestures) and [visible controls](../library-browser/experience/spec.md#photo-view) remain equivalent paths for feature-defined decisions and navigation. Other surfaces may define different accelerators.
-- Undo must identify its operation scope and remain understandable as the inverse of an eligible operation. Library Browser one-level Undo follows [Library Browser Undo](../library-browser/spec.md#undo); Photo Development Undo/Redo follows [Photo Development history](../photo-development/spec.md#autosave-and-reversible-editing).
-- A control must communicate its current client-known state and availability before activation when that state affects the outcome. Authoritative admission may still refuse or conflict, and the surface must report that outcome.
+Gestures and keyboard shortcuts MAY accelerate visible Web capabilities but MUST NOT create hidden Web capabilities. Visible controls or equivalent accessible paths MUST remain available.
+
+CLI and Agent capabilities MAY differ from Web capabilities. They MUST be discoverable through [machine-facing help and contracts](../command-line/spec.md#starting-and-discovering-capabilities) and preserve shared meaning, scope, and outcome.
+
+Library Browser [touch gestures](../library-browser/spec.md#touch-gestures) and [visible controls](../library-browser/experience/spec.md#photo-view) MUST remain equivalent paths for feature-defined decisions and navigation.
+
+Undo MUST identify its operation scope and be understandable as an eligible operation's inverse. [Library Browser Undo](../library-browser/spec.md#undo) and [Photo Development history](../photo-development/spec.md#autosave-and-reversible-editing) own their distinct rules.
+
+Controls MUST communicate client-known state and availability before activation when these affect the outcome. The surface MUST report authoritative refusal or conflict.
 
 ### Supporting surfaces
 
-A supporting responsibility may be persistent alongside content or presented as a transient or modal surface. In either mode it must have a clear name and invoker, one coherent purpose, and preserve an already admitted operation's settlement rules.
+A supporting surface MUST have a clear name, invoker, and coherent purpose. Closing it MUST preserve an already admitted operation's settlement rules.
 
-When a supporting surface is modal, it must move focus into the surface, prevent background interaction while active, provide Close or Cancel as appropriate, and return focus to the invoker or nearest valid control. A persistent supporting region, such as wide-screen Sources, remains usable alongside content and follows [Library Browser screen structure](../library-browser/experience/spec.md#screen-structure) rather than modal focus trapping.
+A modal supporting surface MUST move focus inside, prevent background interaction, offer Close or Cancel as appropriate, and return focus to the invoker or nearest valid control. A persistent region follows its feature's navigation and focus contract without modal trapping.
 
-At most one modal supporting surface should be active. Moving between related details should replace the surface content rather than stack an unexplained modal tower. Exact modal behavior remains in [Supporting Surfaces](../library-browser/experience/spec.md#supporting-surfaces).
+At most one modal supporting surface SHOULD be active. Related details SHOULD replace its content rather than form an unexplained stack; [Supporting Surfaces](../library-browser/experience/spec.md#supporting-surfaces) owns Browser mechanics.
 
 ### Continuity and destinations
 
-A destination must be addressable when it represents a meaningful source, order, filter, or current Photo. Browser history must represent destinations, not every temporary panel. Temporary surfaces must not create history entries. Returning from Photo View must return to the meaningful source context. Exact URL and history behavior belongs to [Destinations and Browser History](../library-browser/experience/spec.md#destinations-and-browser-history).
+Meaningful source, order, filter, or current Photo destinations MUST be addressable. Browser history MUST represent destinations, not temporary panels; returning from Photo View MUST restore meaningful source context.
 
-Changing a source, order, or filter must state whether it preserves the current Photo, resets to a source default, or requires a new destination. The interface must not silently reinterpret a stale destination against new Library facts.
+Source, order, or filter changes MUST state whether they preserve the current Photo, reset to a source default, or require a new destination. A stale destination MUST NOT be silently reinterpreted against new Library facts. [Destinations and Browser History](../library-browser/experience/spec.md#destinations-and-browser-history) owns exact behavior.
 
 ## Content Language
 
 ### Voice
 
-- Write for a Photographer first and an implementer second.
-- Use short, active, concrete sentences.
-- Name the fact, effect, or next action before the implementation detail.
-- Explain what the Photographer can do next; do not only report that something failed.
-- Use the same domain terms and distinctions in visible labels, accessible names, CLI result descriptions, and specifications. Carrier-specific enum spellings remain in the CLI Reference.
+Copy MUST use short, active, concrete sentences and name the fact, effect, or next action before implementation detail. Failure messages MUST explain the next available action.
+
+Visible labels, accessible names, and CLI result descriptions MUST use the same domain distinctions. Carrier-specific enum spellings remain in the [CLI Reference](../command-line/reference.md).
 
 ### Stable vocabulary
 
-The following distinctions are part of the design language:
+Use the names and distinctions in [CONTEXT.md](../../CONTEXT.md), including Pick versus Select, No Rating, Original unavailable, Library Check, and Capture Time. The recovery entry MUST read **Review unavailable Originals** without implying the Photo was deleted.
 
-- **Pick** is the keep decision; **Picked** is its state.
-- **Reject** is the reject decision; **Rejected** is its state.
-- **Select** chooses Photos, sources, or a multi-selection; it is not the keep decision.
-- **No Rating** describes zero Rating in facts and accessible names; a compact control may show `0★`.
-- **Original unavailable** describes an unavailable Original File; **Photo unavailable** is not the cause of that state.
-- **Library Check** is the product operation; do not use scan or rescan in user-facing copy.
-- **Capture Time** is the camera-recorded ordering fact; do not call it file time or Copy Time.
-- **Review unavailable Originals** is the recovery entry; do not imply that the Photo was deleted.
-
-The design language prescribes how these terms are presented. [`CONTEXT.md`](../../CONTEXT.md) and the owning feature contracts remain authoritative for their definitions and behavior. This document must not add or redefine domain terms.
+User-facing copy MUST NOT call Library Check a scan or rescan, or Capture Time file time or Copy Time.
 
 ### Labels and messages
 
-- Action labels use verbs: Pick, Reject, Apply, Retry, Restore, Clean up Trash records.
-- State labels use stable nouns or adjectives: Picked, Rejected, Unflagged, Pending, Failed, No Rating, and the specific unavailable fact, such as Original unavailable or Preview unavailable.
-- Messages combine condition, effect, and next action when a next action exists: "The Original is unavailable. Review unavailable Originals."
-- Do not use generic labels such as "Done" when the product can name the actual effect.
-- Do not expose internal error names, request IDs, storage paths, or implementation labels in the primary message unless the user is inspecting technical details.
-- Counts must identify what they count and use the product's established pluralization. Progress must use a known total; otherwise name the phase without inventing a number.
+- Action labels MUST use verbs; state labels MUST use stable nouns or adjectives naming the specific state.
+- Messages MUST combine condition, effect, and next action when one exists.
+- Generic labels such as “Done” MUST NOT replace a nameable effect.
+- Internal errors, request IDs, storage paths, and implementation labels MUST NOT be primary messages unless the user is inspecting technical details.
+- Counts MUST identify what they count and use established pluralization. Progress MUST use a known total; otherwise it MUST name the phase without inventing a number.
 
 ## Feedback and Recovery
 
 ### Feedback is a fact
 
-Feedback must answer the smallest useful set of questions:
+Feedback MUST identify the operation or state, outcome, affected scope, and available next action. Routine success MAY use compact feedback; consequential, partial, uncertain, or recoverable outcomes MAY use persistent feedback.
 
-1. What operation or state is this?
-2. Is it pending, applied, refused, changed elsewhere, failed, unavailable, or unknown?
-3. What scope does it affect?
-4. What can the Photographer or Agent do next?
-
-The product may use compact feedback for routine success and persistent feedback for consequential, partial, uncertain, or recoverable outcomes. A toast alone must not be the only record of a consequential result.
+A transient notice MUST NOT be the only record of a consequential, partial, uncertain, or recoverable outcome.
 
 ### Preserve the last trustworthy state
 
-While a replacement Preview, source, or result is pending, keep the last trustworthy content visible when the feature contract permits it and identify it as stale or out of date. A failed refresh must not replace a valid previous state with an empty success-looking surface.
+When the feature contract permits, pending replacement content MUST retain the last trustworthy content and identify it as stale. A failed refresh MUST NOT replace valid prior state with an empty success-looking surface.
 
-A failure must stay local to the operation that failed. It must not erase unrelated Photo facts, decisions, Album membership, saved position, or retained workspace outputs. Retry must repeat only the failed or explicitly revalidated operation.
+Failure MUST remain local and MUST NOT erase unrelated Photo facts, decisions, Album membership, saved position, or retained workspace outputs. Retry MUST repeat only the failed or explicitly revalidated operation.
 
-Access is an explicit feature boundary: temporary unreachability may retain the current authorized view, while confirmed expiry, revocation, or rejection removes private views and offers Access entry. [Session Loss and Disconnection](../access/spec.md#session-loss-and-disconnection) owns that distinction; it is not a generic loading state.
+[Session Loss and Disconnection](../access/spec.md#session-loss-and-disconnection) distinguishes temporary unreachability from confirmed loss of access to private views.
 
 ### Reconcile uncertainty
 
-An uncertain result is not success and is not failure. The interface must say that the outcome needs inspection or reconciliation, preserve the request identity when available, and prevent a dependent action from assuming that the effect committed.
+An uncertain result MUST NOT be reported as success or failure. The interface MUST request inspection or reconciliation, preserve request identity when available, and prevent dependent actions from assuming commitment.
 
-Concurrent changes must be described as changed elsewhere or conflict, not as a generic failure. A stale draft may be reapplied explicitly; it must not silently overwrite newer state.
+Concurrent changes MUST be described as changed elsewhere or conflict. A stale draft MAY be reapplied explicitly but MUST NOT silently overwrite newer state.
 
 ### Destructive and recovery flow
 
-A destructive or identity-affecting flow must use this sequence:
+A destructive or identity-affecting flow MUST identify the exact object and scope, show consequences and retained facts, and require explicit confirmation. It MUST report the bounded operation's actual outcome and offer a valid recovery or inspection path.
 
-```text diagram
-identify the exact object and scope
-  → show the consequence and retained facts
-  → require explicit confirmation
-  → perform the bounded operation
-  → report applied, partial, refused, failed, or unknown outcome
-  → offer the valid recovery or inspection path
-```
-
-The design language does not make permanent effects feel casual. It also does not make reversible review decisions feel dangerous by using the same visual treatment as irreversible Trash Record Cleanup.
+Irreversible consequences MUST NOT use the same presentation as reversible review decisions.
 
 ## Responsive Language
 
-Responsive design changes composition, not product meaning.
-
-- Use available space and content constraints, not user-agent or device labels.
-- Wide layouts may place source navigation beside content and supporting surfaces beside or over the content.
-- Narrow layouts may collapse secondary controls into a named disclosure or supporting surface, but must keep the current source, current Photo, primary decisions, navigation, and status understandable.
-- A narrow screen must not become a miniature desktop toolbar. Remove or group secondary controls before shrinking the primary task.
-- Short viewports must preserve Preview inspection and primary actions; supporting content yields first.
-- Grid cells, filenames, facts, and action targets must not create horizontal overflow. Truncated text must remain available to assistive technology.
-- The same operation must have an equivalent pointer, touch, keyboard, and programmatic path where the surface supports that modality.
+- Composition MUST follow available space and content constraints, not device labels or user-agent detection.
+- Wide layouts MAY place source navigation beside content and supporting surfaces beside or over content.
+- Narrow layouts MAY group secondary controls in a named surface but MUST keep the current source, Photo, primary decisions, navigation, and status understandable.
+- Narrow layouts MUST group or remove secondary controls before shrinking the primary task. Short viewports MUST preserve Preview inspection and primary actions before supporting content.
+- Grid cells, filenames, facts, and action targets MUST NOT create horizontal overflow. Truncated text MUST remain available to assistive technology.
+- Operations MUST have equivalent pointer, touch, keyboard, and programmatic paths where the surface supports each modality.
 
 ## Accessibility Language
 
-Accessibility is part of the product's meaning, not a finishing layer.
-
-- Use semantic structure and one clear main landmark for each primary view.
-- Every action must have a stable accessible name and an exposed state when its state affects activation.
-- Visible focus must remain clear. Focus must enter a supporting surface and return after it closes.
-- Do not communicate state, error, selection, or progress through color alone.
-- Required text and controls must meet WCAG AA contrast. State colors must remain distinguishable in grayscale or with a non-color channel.
-- Keyboard access must cover navigation, decisions, dialogs, Apply, Cancel, Close, and recovery actions.
-- Touch targets must remain usable without relying on a precise gesture. Gestures must have visible alternatives.
-- Live regions may announce committed outcomes, errors, and consequential status transitions; they must not announce every background loading detail.
-- Reduced-motion preferences must remove nonessential animation and preserve the same state and feedback.
-- Truncated names, positions, ratings, unavailable facts, and result details must remain available to assistive technology.
-
-## Non-Goals
-
-This design language does not define:
-
-- a replacement for feature behavior or design contracts;
-- a component framework or a required CSS/TypeScript API;
-- a brand campaign, marketing site, or decorative film theme;
-- an automatic aesthetic score or Agent judgment model;
-- a second Photo, Album, metadata, or editing-state model; or
-- a requirement that every surface expose every capability at once.
-
-## Conformance
-
-A feature conforms to this design language when its review can answer yes to all applicable questions:
-
-1. Is the Photographer's current visual or organizational job obvious?
-2. Are the current Photo, facts, and primary action visually ordered?
-3. Do visible, accessible, keyboard, touch, and programmatic paths share one meaning?
-4. Are pending, applied, refused, stale, failed, unavailable, and unknown outcomes distinguishable?
-5. Does failure preserve trustworthy unrelated state and offer a local next step?
-6. Does the composition remain useful across available widths and short heights?
-7. Does the copy use the canonical product language?
-8. Are technical details disclosed without replacing the human task language?
-9. Can an Agent observe and reproduce the same domain effect without depending on presentation state?
-
-The owning feature specification remains the acceptance authority for exact behavior. This document is the design review authority for shared presentation and interaction language.
+- Each primary view MUST use semantic structure and one clear main landmark.
+- Every action MUST have a stable accessible name and expose state when it affects activation.
+- Focus MUST be visible. Modal focus behavior follows [Supporting surfaces](#supporting-surfaces).
+- Required text and controls MUST meet WCAG AA contrast. State, error, selection, and progress MUST NOT depend on color alone.
+- Keyboard access MUST cover navigation, decisions, dialogs, Apply, Cancel, Close, and recovery actions.
+- Touch targets MUST be usable without a precise gesture; gestures MUST have visible alternatives.
+- Live regions MAY announce committed outcomes, errors, and consequential status transitions, but MUST NOT announce every background loading detail.
+- Reduced motion MUST preserve state and feedback.
+- Truncated names, positions, ratings, unavailable facts, and result details MUST remain available to assistive technology.
+- Text and controls MUST remain readable under text enlargement and reflow. Equivalent supported input paths MUST NOT depend on timing, hover, precision, or a hidden shortcut.

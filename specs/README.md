@@ -10,12 +10,15 @@ Topic contracts own exact behavior within their scope. Web Frontend Architecture
 
 ## Product and System
 
-- [Product Vision](spec.md): audience, goals, principles, human and machine use, and product boundaries.
-- [Product Design Language](design-language/spec.md): product character, visual and interaction grammar, content, feedback and recovery, responsive composition, and accessibility.
-- [Design Language Contract](design-language/design.md): semantic layers, surface responsibilities, state ownership, carrier invariants, and design review evidence.
-- [Visual System](design-language/visual-system.md): Web reference token scale, type voices, surface presentation, Preview matte, and reference composition.
-- [Foundational Architecture](design.md): shared Web/CLI service boundary, file and state ownership, Photo identity, and vertical slices.
-- [Rust Server](server.md): production language, module ownership, dependency direction, compatibility, cutover, and rollback.
+- [Product Vision](spec.md): audience, shared human and machine use, Preview trust, and product boundaries.
+- [Foundational Architecture](design.md): shared service boundary, state ownership, module responsibilities, and client integration.
+- [Rust Server](server.md): runtime ownership, startup and shutdown, compatibility, and native boundaries.
+
+## Design Language
+
+- [Product Design Language](design-language/spec.md): product character, interaction grammar, feedback, responsive composition, and accessibility.
+- [Design Language Contract](design-language/design.md): semantic layers, surface responsibilities, state ownership, and carrier invariants.
+- [Visual System](design-language/visual-system.md): Web reference scale, type voices, surface presentation, Preview matte, and composition.
 
 ## Access
 
@@ -26,7 +29,17 @@ Topic contracts own exact behavior within their scope. Web Frontend Architecture
 
 - [Command-Line Use](command-line/spec.md): delegated workflows, shared state, Preview delivery, effects, and recovery.
 - [Command-Line Design](command-line/design.md): thin client, bounded queries, mutation guards, transport uncertainty, and Web handoff.
-- [CLI Reference](command-line/reference.md): authoritative syntax, inputs, structured results, errors, and composition examples.
+- [CLI Reference](command-line/reference.md): command semantics, input boundaries, results, errors, and composition.
+
+### Target Wire Schemas
+
+- [Query Results](../schemas/cli/results-query.schema.json): Library, Photo, Folder, and Album query shapes.
+- [Mutation Results](../schemas/cli/results-mutations.schema.json): checked decisions, Album mutations, recovery, removal, and Restore shapes.
+- [Processing Recipes](../schemas/cli/processing-recipe.schema.json): captured steps, bindings, and recipe mutation inputs.
+- [Processing Exports](../schemas/cli/processing-export.schema.json): immutable outputs, work records, and download exchanges.
+- [Processing Discovery](../schemas/cli/processing-discovery.schema.json): engine and image-contract discovery shapes.
+- [Workspace](../schemas/cli/workspace.schema.json): workspace file and mutation result shapes.
+- [Errors](../schemas/cli/errors.schema.json): structured failure shapes.
 
 ## Photo Library
 
@@ -50,10 +63,10 @@ Topic contracts own exact behavior within their scope. Web Frontend Architecture
 - [Removal and Restore](photo-library/removal/spec.md): explicitly identified Photos, reversible effects, stale-state protection, and recoverable outcomes.
 - [Removal and Restore Design](photo-library/removal/design.md): identity and evidence, durable attempt receipts, replay, ownership, and compare-and-set Restore.
 
-### Rejected Cleanup
+#### Rejected Cleanup
 
-- [Rejected Photo Cleanup](photo-library/rejected-cleanup/spec.md): marking, reversible Library removal, Restore, and Original File safety.
-- [Rejected Cleanup Design](photo-library/rejected-cleanup/design.md): Photo-row removal state, snapshot admission, confirmed-review operations, and recovery listing.
+- [Rejected Photo Cleanup](photo-library/removal/rejected-cleanup/spec.md): rejected-photo review, confirmation, and recovery through shared removal.
+- [Rejected Cleanup Design](photo-library/removal/rejected-cleanup/design.md): Snapshot admission and the browser review boundary.
 
 ### Trash
 
@@ -77,19 +90,18 @@ Topic contracts own exact behavior within their scope. Web Frontend Architecture
 ## Photo Development
 
 - [Photo Development](photo-development/spec.md): shared editing state, peer tools, previews, exports, and recovery.
-- [Photo Development Design](photo-development/design.md): independent tool integration, supervised execution, canonical file state, concurrency, and migration.
-- [Photo Editing Model](photo-development/model.md): tool-owned Edit State, directory ownership, and explicit file handoff.
+- [Photo Development Design](photo-development/design.md): tool-owned state, file handoff, supervised execution, and concurrency.
 
 ### Workspace
 
 - [Photo Workspace](photo-development/workspace/spec.md): real persistent directory, protected inputs, direct tool output, file discovery, downloads, continued processing, and safe removal.
-- [Directory Photo Workspace](photo-development/workspace/design.md): preparation, containment, indexing, tool-owned state, retention, consistent backup, and cutover.
+- [Directory Photo Workspace](photo-development/workspace/design.md): preparation, containment, indexing, tool-owned state, retention, and consistent backup.
 - [Photo Editor Workspace](photo-development/workspace/web.md): browser ownership, tool composition, freshness, conflict, and asynchronous lifecycle.
 
 ### darktable
 
 - [darktable Integration](photo-development/darktable/spec.md): engine relationship, capability coverage, saved intent, matching outputs, and upgrade failures.
-- [darktable Integration Design](photo-development/darktable/design.md): independent editor, private native MCP interaction, canonical persistence, initialization, and cutover.
+- [darktable Integration Design](photo-development/darktable/design.md): independent editor, native boundary, canonical persistence, and initialization.
 - [Headless darktable Editing](photo-development/darktable/editing.md): independent file/state editing, instances, masks, resources, Presets, Styles, history, and result delivery.
 - [darktable CLI Reference](photo-development/darktable/cli.md): standalone `darktable-edit` and optional `slipstream darktable` grammar, catalog scope, guards, structured results, and recovery.
 
@@ -102,7 +114,7 @@ Topic contracts own exact behavior within their scope. Web Frontend Architecture
 
 ## Web Application
 
-- [Web Frontend](web-application/design.md): Feature-Sliced Design layers, Library Browser ownership, dependency direction, and migration constraints.
+- [Web Frontend](web-application/design.md): Feature-Sliced Design layers, ownership, dependency direction, and public APIs.
 - [Web Async Ownership](web-application/async-ownership.md): read scopes, write settlement, and commit-ordered Web convergence.
 
 ### Installation
@@ -113,6 +125,6 @@ Topic contracts own exact behavior within their scope. Web Frontend Architecture
 ## Deployment
 
 - [Deployment](deployment/spec.md): image, host storage, and supported Compose operator contract.
-- [Support and Release](deployment/support.md): supported environment, files and cameras, recovery, limitations, rollback-artifact retention, and 0.1.0 release notes.
-- [Container Build Inputs](deployment/container-inputs.md): immutable base images, Ubuntu native packages, and release qualification.
+- [Support](deployment/support.md): supported environments, file boundaries, recovery, limitations, and qualified-release compatibility.
+- [Container Build Inputs](deployment/container-inputs.md): immutable base images and native dependency ownership.
 - [Storage Preflight](deployment/storage-preflight.md): host bind-source topology, operator entry-point ownership, and Original-safety failure boundary.

@@ -1,0 +1,534 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Slipstream CLI target retained processing adapter shapes — processing-recipe",
+  "description": "Target-only adapter carriers; operation semantics, UTF-8 byte limits, duplicate-key rejection, and cross-field comparisons remain in the CLI reference. No runtime conformance is implied.",
+  "$defs": {
+    "InputGeometry": {
+      "$ref": "#/$defs/ImageContract/properties/geometry",
+      "unevaluatedProperties": false
+    },
+    "InputImageContract": {
+      "$ref": "#/$defs/ImageContract",
+      "properties": {
+        "geometry": {
+          "$ref": "#/$defs/InputGeometry"
+        }
+      },
+      "unevaluatedProperties": false
+    },
+    "InputParameters": {
+      "$ref": "#/$defs/Parameters",
+      "unevaluatedProperties": false
+    },
+    "InputBinding": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Binding/oneOf/0",
+          "unevaluatedProperties": false
+        },
+        {
+          "$ref": "#/$defs/Binding/oneOf/1",
+          "properties": {
+            "contract": {
+              "$ref": "#/$defs/InputImageContract"
+            }
+          },
+          "unevaluatedProperties": false
+        },
+        {
+          "$ref": "#/$defs/Binding/oneOf/2",
+          "properties": {
+            "contract": {
+              "$ref": "#/$defs/InputImageContract"
+            }
+          },
+          "unevaluatedProperties": false
+        }
+      ]
+    },
+    "InputStep": {
+      "$ref": "#/$defs/Step",
+      "properties": {
+        "input": {
+          "$ref": "#/$defs/InputBinding"
+        },
+        "parameters": {
+          "$ref": "#/$defs/InputParameters"
+        }
+      },
+      "unevaluatedProperties": false
+    },
+    "ImageContract": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string",
+          "minLength": 1
+        },
+        "precision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "colorSpace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "transfer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "geometry": {
+          "type": "object",
+          "properties": {
+            "width": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536
+            }
+          },
+          "required": ["width", "height"]
+        },
+        "encoding": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "format",
+        "precision",
+        "colorSpace",
+        "transfer",
+        "geometry",
+        "encoding"
+      ]
+    },
+    "Parameters": {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "string"
+        },
+        "tree": {
+          "type": "object"
+        }
+      },
+      "required": ["schemaVersion", "tree"]
+    },
+    "Binding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "original"
+            },
+            "photoId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sourceRevision": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": ["kind", "photoId", "sourceRevision"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "artifact"
+            },
+            "artifactId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "contract": {
+              "$ref": "#/$defs/ImageContract"
+            }
+          },
+          "required": ["kind", "artifactId", "contract"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "workspace-artifact"
+            },
+            "workspaceId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "artifactId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "revision": {
+              "type": "string",
+              "minLength": 1
+            },
+            "contract": {
+              "$ref": "#/$defs/ImageContract"
+            }
+          },
+          "required": [
+            "kind",
+            "workspaceId",
+            "artifactId",
+            "revision",
+            "contract"
+          ]
+        }
+      ]
+    },
+    "Step": {
+      "type": "object",
+      "properties": {
+        "stepId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "module": {
+          "type": "string",
+          "minLength": 1
+        },
+        "input": {
+          "$ref": "#/$defs/Binding"
+        },
+        "parameters": {
+          "$ref": "#/$defs/Parameters"
+        }
+      },
+      "required": ["stepId", "module", "input", "parameters"]
+    },
+    "Recipe": {
+      "type": "object",
+      "properties": {
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceRevision": {
+          "type": "string"
+        },
+        "currentStepId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Step"
+          },
+          "maxItems": 64
+        },
+        "executionRefusals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "stepId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": ["stepId", "code", "message"]
+          }
+        }
+      },
+      "required": [
+        "photoId",
+        "revision",
+        "sourceRevision",
+        "currentStepId",
+        "steps"
+      ]
+    },
+    "RecipeGetData": {
+      "type": "object",
+      "properties": {
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceRevision": {
+          "type": "string"
+        },
+        "recipe": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Recipe"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "webUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        }
+      },
+      "required": ["photoId", "sourceRevision", "recipe", "webUrl"]
+    },
+    "RecipeSaveInput": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$",
+          "not": {
+            "pattern": "[^A-Za-z0-9._-]"
+          }
+        },
+        "expectedRecipeRevision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expectedSourceRevision": {
+          "type": "string"
+        },
+        "currentStepId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InputStep"
+          },
+          "maxItems": 64
+        }
+      },
+      "required": [
+        "requestId",
+        "expectedRecipeRevision",
+        "expectedSourceRevision",
+        "currentStepId",
+        "steps"
+      ],
+      "additionalProperties": false
+    },
+    "RecipeAutoInput": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$",
+          "not": {
+            "pattern": "[^A-Za-z0-9._-]"
+          }
+        },
+        "expectedRecipeRevision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expectedSourceRevision": {
+          "type": "string"
+        },
+        "currentStepId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InputStep"
+          },
+          "maxItems": 64
+        },
+        "automaticAdjustment": {
+          "type": "object",
+          "properties": {
+            "stepId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "operation": {
+              "type": "string"
+            },
+            "multiPriority": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 128
+            },
+            "instruction": {
+              "type": "object"
+            }
+          },
+          "required": ["stepId", "operation", "multiPriority", "instruction"],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "requestId",
+        "expectedRecipeRevision",
+        "expectedSourceRevision",
+        "currentStepId",
+        "steps",
+        "automaticAdjustment"
+      ],
+      "additionalProperties": false
+    },
+    "RecipeRebindInput": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$",
+          "not": {
+            "pattern": "[^A-Za-z0-9._-]"
+          }
+        },
+        "expectedRecipeRevision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "newSourceRevision": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": ["requestId", "expectedRecipeRevision", "newSourceRevision"],
+      "additionalProperties": false
+    },
+    "RecipeMutationData": {
+      "type": "object",
+      "properties": {
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$",
+          "not": {
+            "pattern": "[^A-Za-z0-9._-]"
+          }
+        },
+        "outcome": {
+          "enum": ["saved", "unchanged", "replayed"]
+        },
+        "recipe": {
+          "$ref": "#/$defs/Recipe"
+        },
+        "recipeVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceRevision": {
+          "type": "string"
+        },
+        "webUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        }
+      },
+      "required": [
+        "photoId",
+        "requestId",
+        "outcome",
+        "recipe",
+        "recipeVersion",
+        "sourceRevision",
+        "webUrl"
+      ]
+    },
+    "ExportInput": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$",
+          "not": {
+            "pattern": "[^A-Za-z0-9._-]"
+          }
+        },
+        "stepId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expectedRecipeRevision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expectedSourceRevision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "requestId",
+        "stepId",
+        "expectedRecipeRevision",
+        "expectedSourceRevision"
+      ],
+      "additionalProperties": false
+    },
+    "RetryInput": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$",
+          "not": {
+            "pattern": "[^A-Za-z0-9._-]"
+          }
+        }
+      },
+      "required": ["requestId"],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,241 +1,123 @@
 # Foundational Architecture
 
-Slipstream needs the smallest server-owned application boundary that lets one Photographer and their own external Agent review an existing Photo Library, group Photos, and retain selection decisions while Original Files remain unchanged.
+Slipstream uses one server-owned modular monolith for a Photographer and their external Agent. [Product Vision](spec.md) owns product scope; [Rust Server Architecture](server.md) owns the production runtime and lifecycle.
 
-## Design Drivers
+## Ownership
 
-- The Web supports visual use on a phone, tablet, or desktop; the CLI supports direct and delegated programmatic use through the same service.
-- Original Files may be large RAW files on local storage or a mounted network share.
-- Browsers cannot display most RAW formats directly.
-- Browsing uses camera-produced Previews; optional headless editing has the separate Photo Development boundary.
-- The product serves one Photographer and their Agent; public access uses instance credentials without accounts or collaboration roles.
-- Selection changes must persist with low latency and survive server restart.
-- File indexing and Preview work must not block gesture interaction.
-- Original Files are irreplaceable and remain read-only.
+| Owner                    | Canonical state                                                                                                 |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| Filesystem               | Photographer-owned Original Files.                                                                              |
+| SQLite                   | Photo identity, Library facts, Albums, decisions, saved Album positions, and derivative metadata.               |
+| Browser                  | Transient gestures, Grid and source position, zoom, pan, animations, and one-level Undo.                        |
+| Slipstream CLI           | Invocation-local input, output, and downloads.                                                                  |
+| Independent editing tool | Persistent Edit State and processing files within the [Photo Workspace](photo-development/workspace/design.md). |
 
-Three kinds of state have separate owners:
-
-1. The filesystem owns Original Files.
-2. SQLite owns Photo identity, Albums, Selection State, Rating, saved Album position, and derivative metadata.
-3. The browser owns transient gesture, zoom, navigation, and one-level undo state.
-
-Each kind of state has one canonical owner. The Slipstream CLI owns only invocation-local input, output, and downloads; independent editing tools own their persistent file state under the [Photo Workspace](photo-development/workspace/design.md) boundary. Neither client owns Library state, browsing positions, or an Agent runtime. [Command-Line Architecture](command-line/design.md) defines the machine-client boundary.
+Clients MUST NOT become additional owners of durable Library state or an Agent runtime. [Command-Line Architecture](command-line/design.md) owns the machine-client boundary.
 
 ## Application Model
 
-### Application Scope
+One server process owns application configuration and resource lifetime. [Rust Server Architecture](server.md#lifecycle) defines startup admission, bounded work queues, and shutdown ordering.
 
-One server process owns:
+Module imports MUST NOT perform:
 
-- configuration and application-data paths;
-- SQLite initialization and migration;
-- one configured Library Folder;
-- indexing and Preview work queues;
-- the HTTP server and browser event transport;
-- process shutdown.
+- file discovery;
+- storage creation;
+- listener binding.
 
-SQLite command admission and worker shutdown live in `persistence/owner/lifecycle.rs`;
-`persistence/owner.rs` retains the command protocol, database initialization,
-and command dispatch. The bounded queue drains accepted work before shutdown
-joins the worker.
-
-Importing a module must not scan files, create storage, or bind a port.
-
-The default listener remains loopback. [Instance Access Architecture](access/design.md) owns authentication at the HTTP boundary. [Deployment](deployment/spec.md) owns optional HTTP/HTTPS transport and network exposure. Authentication does not introduce user accounts or change Photo Library ownership.
+[Instance Access](access/design.md) owns authentication at the HTTP boundary. [Deployment](deployment/spec.md) owns transport and network exposure without introducing accounts or changing Library ownership.
 
 ### Photo Library Scope
 
-One Photo Library Scope owns:
+The [Photo Library](photo-library/design.md) owns discovery and organization beneath the admitted Library Folder. The Folder is a location boundary, not Library identity.
 
-- the configured Library Folder and its admitted storage binding;
-- read-only containment;
-- supported-file discovery;
-- stable Original File and Photo identities;
-- current Original Locations;
-- content fingerprints and exact-content Location Recovery;
-- Photo records and availability;
-- Album membership;
-- derived read-only Original Folder navigation;
-- Preview requests.
+[Library Identity](photo-library/identity.md) owns identity-preserving Location Recovery and ancestor expansion. Persisted Original File and Photo IDs MUST remain opaque after creation.
 
-Every Original File read must resolve beneath the current Library Folder. Slipstream must reject traversal and symbolic-link escape. The Original File interface exposes no write or delete operation, including for Trash Record Cleanup. Trash inspection exposes remembered Locations for external user action; cleanup changes only eligible application records under the [Trash contract](photo-library/trash/spec.md), never filesystem files.
-
-The Library Folder is a location and discovery boundary, not Photo Library identity. Persisted Original File and Photo IDs are opaque after creation. Ordinary rescan restores a moved Original only from exact content-fingerprint evidence. The explicit ancestor-expansion contract in [Photo Library Identity and Expansion](photo-library/identity.md) is the only first-product operation that may change remembered Original Locations while preserving identity.
+Every Original read MUST use the server's confinement boundary. Application record cleanup MUST NOT acquire filesystem write or delete authority.
 
 ### Library Browser Scope
 
-The Library Browser is the visual interface. It opens `All Photos`, one read-only Original Folder, or one Album in a progressively loaded Grid View and opens one current Photo in Photo View.
+[Library Browsing](library-browser/design.md) owns hidden Browse Snapshots and bounded windows of current Photo facts. [Capture-Time Ordering](photo-library/ordering.md) owns Library and Original Folder order; Albums retain explicit membership order.
 
-The implementation creates a hidden ephemeral Browse Snapshot when a source opens. Library and Original Folder Snapshots own Capture Time order, while Album Snapshots own explicit membership order. A Snapshot retains only ordered Photo IDs; bounded windows query current Photo facts. [`photo-organization.md`](photo-library/design.md) defines physical and virtual organization, [`capture-time-ordering.md`](photo-library/ordering.md) defines metadata authority, rescan behavior, and deterministic ties, and [`library-browsing.md`](library-browser/design.md) defines scalable loading and cache behavior.
+Only the last Photo shown in an Album's Photo View is a durable browsing position. Other navigation and interaction state remains browser-local.
 
-Durable saved position records only the last Photo shown in Photo View for an Album. Grid scroll position, current `All Photos` or Original Folder position, drag position, active animation, zoom, pan, and undo are browser-local.
-
-The server is authoritative for Selection State and Rating. The browser must reconcile failed mutations instead of assuming an animation committed them.
+Selection State and Rating are server-authoritative. [Library Browser](library-browser/spec.md) owns gesture outcomes, persistence feedback, and guarded Undo.
 
 ### Indexing
 
-Indexing discovers supported files and records lightweight facts needed for identity, Location Recovery, and invalidation. It does not decode every RAW or generate every Preview before the Photo Library becomes usable.
+Indexing MUST NOT decode every RAW or generate every Preview before the Library becomes usable. Indexing and Preview work MUST NOT block gesture interaction.
 
-After storage and state admission, an existing completed Library snapshot may remain browsable while an ordinary rescan builds its replacement in the background. A new state store exposes initialization progress until its first complete snapshot is published. A root binding, schema, sidecar, or confinement admission failure remains fail-closed.
-
-A scan proceeds incrementally:
-
-1. Walk paths below the configured Library Folder.
-2. Classify recognized RAW and JPEG files.
-3. Record Original Location, size, modification time, and availability.
-4. Restore a moved Original File when one exact unclaimed fingerprint candidate exists, before allocating new Photos.
-5. Queue thumbnail work only as needed for visible browsing.
-
-A failure for one file is recorded for that file and does not roll back successfully indexed files.
+[Photo Library](photo-library/spec.md) owns per-file discovery and recovery outcomes. [Scan and Browse Lifecycle](photo-library/ordering.md#scan-and-browse-lifecycle) owns complete-snapshot publication, replacement scans, and initialization visibility.
 
 ## Durable State
 
-SQLite uses explicit mutable state. A generic event log is not required.
+SQLite owns explicit mutable Library state. Original contents and extracted JPEG bytes MUST remain outside SQLite.
 
-At minimum, SQLite stores:
+| State group          | Durable facts                                                                                                                   |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Admission            | Schema version and admitted Library Folder binding.                                                                             |
+| Originals and Photos | Stable identities, the single-Original relationship, Location, kind, revision, availability, and Capture Time inspection facts. |
+| Previews             | Source, dimensions, cache revision, and failure state.                                                                          |
+| Albums               | Identity, name, explicit order, membership, and saved Photo position.                                                           |
+| Decisions            | Photo Selection State and Rating.                                                                                               |
 
-- schema version;
-- the admitted Library Folder binding;
-- stable Original File and Photo IDs;
-- Original Location, kind, size, modification time, availability, and derived Capture Time inspection facts;
-- Photo identity and its single Original File reference;
-- Preview source, dimensions, cache revision, and failure state;
-- Album identity, name, order, and membership;
-- Photo Selection State and Rating;
-- per-Album saved position.
+[Current Photo Facts](library-browser/design.md#current-photo-facts) owns mutation transactions and compare-and-set Undo. [Photo Organization](photo-library/design.md) owns Album deletion without loss of Photo state or Original content.
 
-Original bytes, JPEG Original bytes, and embedded RAW JPEG bytes do not belong in SQLite.
-
-Selection State and Rating update in one database transaction per Photo mutation. A mutation may update that Album's saved position in the same transaction. The browser holds one undo description containing the affected Photo, field, prior value, and expected current value; undo uses a compare-and-set transaction so it cannot overwrite a newer change. Album deletion removes membership and saved position, not Photo state or filesystem content.
-
-The first architecture does not write XMP sidecars. Export or synchronization requires a later design because it introduces a second writable source of metadata.
+[Metadata](photo-library/metadata/design.md) owns the explicit XMP write boundary. It does not make Original Files writable or turn sidecars into a second Library decision store.
 
 ## Client Boundary
 
-The browser and CLI are clients of the server. They receive displayable derivatives and never need the RAW Original to perform ordinary review. The CLI contract and the additive query and checked-write surfaces are defined in [Command-Line Architecture](command-line/design.md). Both interfaces use the same domain and persistence owners.
+The Web and CLI use the same service and persistence owners. Ordinary review receives displayable derivatives and MUST NOT require transfer of RAW Originals to a client.
 
-The browser-facing service exposes these surfaces:
+| Surface                                  | Contract owner                                       |
+| ---------------------------------------- | ---------------------------------------------------- |
+| Library Overview and scan state          | [Photo Library](photo-library/spec.md)               |
+| Direct-child Original Folder navigation  | [Photo Organization](photo-library/design.md)        |
+| Browse Snapshots and bounded windows     | [Library Browsing](library-browser/design.md)        |
+| Photo decisions and saved Album position | [Library Browser](library-browser/spec.md)           |
+| Album membership                         | [Photo Library](photo-library/spec.md)               |
+| Derivatives and Preview readiness        | [Preview Pipeline](photo-library/previews/design.md) |
+| Checked machine queries and writes       | [Command-Line Architecture](command-line/design.md)  |
 
-- a bounded Library Overview and scan status;
-- bounded direct-child File Location navigation;
-- creation and bounded traversal of hidden Browse Snapshots for `All Photos`, Original Folders, and Albums;
-- current Photo state and Preview metadata;
-- mutations for Album membership, Selection State, Rating, and saved Album position;
-- a rescan command;
-- derivative responses for thumbnails and review Previews; and
-- transient scan and Preview-ready notifications when useful.
+Protocol values MUST NOT expose:
 
-Protocol types must not expose database rows, native library objects, absolute Original File paths, or internal errors.
+- database rows;
+- native library objects;
+- absolute Original File paths;
+- internal errors.
 
-[Instance Access Architecture](access/design.md) owns admission before private routes. Request and forwarded headers alone never authenticate a caller. The protocol must not expose Original File paths as arbitrary download parameters.
+Request or forwarded headers alone MUST NOT authenticate a caller. Original File paths MUST NOT become arbitrary download parameters.
 
 ## Module Boundaries
 
-The initial codebase has these logical modules:
+| Logical module   | Responsibility                                                                      |
+| ---------------- | ----------------------------------------------------------------------------------- |
+| Application      | Compose startup, shutdown, storage, queues, and server resources.                   |
+| Library          | Own confinement, discovery, fingerprints, Location Recovery, and availability.      |
+| Preview          | Own source selection, extraction, normalization, cache invalidation, and delivery.  |
+| Browsing         | Own Library Overview, Browse Snapshots, bounded windows, and source navigation.     |
+| Selection        | Own Selection State, Rating, and saved Album position.                              |
+| Album            | Own virtual group identity, ordering, and membership.                               |
+| Original Folders | Derive read-only navigation from Published Library Locations.                       |
+| Protocol         | Own client-server schemas.                                                          |
+| Web              | Own presentation and transient interactions.                                        |
+| CLI              | Own command parsing, bounded service calls, structured results, and local delivery. |
 
-- **Application** composes startup, shutdown, storage, queues, and server resources.
-- **Library** owns root containment, discovery, content fingerprints, Location Recovery, and Photo availability.
-- **Preview** owns source selection, embedded JPEG extraction, normalization, cache invalidation, and delivery.
-- **Browsing** owns Library Overview, hidden Browse Snapshots, bounded windows, and source navigation.
-- **Selection** owns Selection State, Rating, and saved Album position.
-- **Album** owns virtual group identity, ordering, and membership.
-- **File Locations** derives read-only Original Folder navigation from Published Library Locations.
-- **Protocol** owns client-server schemas.
-- **Web** owns presentation, gestures, Preview zoom, and one-level undo.
-- **CLI** owns command parsing, bounded service calls, structured results, and local Preview delivery, with no domain-state ownership.
-
-These are ownership boundaries, not required packages or services. The first implementation uses a modular monolith and one process unless native-library isolation proves necessary for process safety.
+These are ownership boundaries, not required packages or separately deployed services. Native process isolation is justified only by process safety or demonstrated resource contention.
 
 ## Technology Direction
 
-The production server is a Rust modular monolith. Rust owns HTTP, application lifecycle, SQLite, Photo Library indexing and confinement, Preview extraction, derivative caching, and durable mutations. Bun and TypeScript own the Web application, browser tests, and repository tooling; they are not a production server runtime. [`rust-server.md`](server.md) defines the module and compatibility contracts.
+[Rust Server Architecture](server.md) owns the production Rust boundary. Bun and TypeScript serve the Web application, browser tests, and repository tooling, not a second production server.
 
-The browser uses ordinary Web platform image display and pointer/touch events, with a small established gesture library only if it reduces tested interaction complexity.
-LibRaw owns RAW container support and embedded JPEG extraction. The separate
-[Photo Development Architecture](photo-development/design.md) owns the bounded
-Processing Module adapters and their qualified image contracts; it does not
-change camera Preview source selection. [Processing Modules](photo-development/processing/design.md)
-defines caller-controlled single-module composition without making the launcher
-a workflow planner.
+The Web uses ordinary image display and pointer or touch events. An established gesture library MAY be used when it reduces interaction complexity.
 
-An established image library owns JPEG decode, orientation, resize, ICC
-preservation or conversion to sRGB, and derivative encoding. Slipstream must not
-build custom image codecs or color transforms.
+Native Preview extraction stays beside storage to avoid transferring large RAW files or duplicating per-device processing. Browsing uses camera-produced JPEG content; independent editing remains a separate capability.
 
-The selected server and Web technologies must support direct maintained library integration, bounded image-processing resources, and the supported deployment targets. This design does not require a specific application framework.
+Established libraries own image codecs and color transforms. Slipstream MUST NOT implement custom replacements for those libraries.
 
-## First Vertical Slice
-
-The first implementation proves this complete path:
-
-1. Start the server with one Photo Library directory.
-2. Open the Library Browser.
-3. Index a directory containing one RAW Original, one same-basename JPEG Original, and one RAW Original without a JPEG companion.
-4. Create one Album and add all three independent Photos.
-5. Display all three Photos in a progressively loaded Grid without a complete-Library response.
-6. Display the JPEG Original's own Preview in Photo View.
-7. Extract and display the largest usable embedded JPEG for each RAW Photo.
-8. In Fit Preview, swipe right on one Photo to set `picked`, swipe left on
-   another to set `rejected`, swipe up to open the next Photo, and swipe down
-   to open the previous Photo; navigation swipes must not change Photo facts.
-9. Set one Rating and undo one decision.
-10. Restart the server and restore cached Previews, the Album, decisions,
-    Rating, and saved position.
-11. Prove that Original File bytes and metadata are unchanged.
-
-Further increments reuse these ownership boundaries. [Command-Line Use](command-line/spec.md) adds the delegated-use path without replacing the visual slice.
-
-## Options
-
-### Selected: Server-Side Native Preview Extraction
-
-The server reads RAW files through a native open-source library and sends JPEG derivatives to the browser. This keeps large RAW processing near storage, avoids mobile-browser memory pressure, and provides one deterministic extraction path.
-
-### Rejected: Browser WebAssembly RAW Processing
-
-Browser-side RAW processing would transfer large files to each device, duplicate caches, consume mobile memory and battery, and complicate color and format support. It adds no value when the Photo Library already resides beside the server.
-
-### Selected: Embedded or Own JPEG Only
-
-Camera-produced JPEG content satisfies the current selection problem with less complexity and more predictable appearance than a generic RAW development pipeline.
-
-### Rejected: General RAW Development Pipeline
-
-Demosaicing, profiles, highlight recovery, lens correction, and tone processing expand the product into RAW editing. They are not required to judge most selection decisions and would create a large, ongoing camera-quality responsibility.
-
-### Selected: Scoped Modular Monolith
-
-One process keeps indexing, selection transactions, cache ownership, and lifecycle understandable. A separate Preview worker is justified only if native-library crashes or measured resource contention require isolation.
-
-### Rejected: Independent Web, API, and Worker Services
-
-Multiple deployable services add coordination, queues, health handling, and operational burden before one user and one Photo Library demonstrate a need.
-
-## Verification
-
-The first-slice gate must prove:
-
-- configured-root containment, including traversal and symbolic-link escape rejection;
-- indexing never writes, renames, moves, or deletes Original Files;
-- independent Photos with their own Preview Sources and no cross-file substitution;
-- a moved Original File is restored from one exact unambiguous candidate before new Photos are allocated;
-- correct own-file Preview Source selection;
-- embedded JPEG extraction for each supported sample camera;
-- visible orientation and dimensions match the camera Preview;
-- derivatives preserve a valid ICC profile or are correctly converted to sRGB;
-- selection and Rating transactions survive restart;
-- a low-resolution source is not upscaled or misrepresented;
-- Fit horizontal decision swipes and vertical navigation swipes have distinct
-  outcomes and do not fire while the Preview is manually zoomed;
-- Fit and continuous zoom keep the Preview contained by the Photo View
-  viewport, expose the current zoom state programmatically, and never record a
-  decision or navigation action while zoomed;
-- failed mutations do not silently advance;
-- cache invalidation follows current Original Location, source revision, and derivative version;
-- the complete path runs through the real browser-server protocol.
-
-A camera sample corpus must include the Photographer's actual RAW formats. Unsupported targets and unavailable devices must be reported rather than inferred.
+Selected technologies MUST support maintained library integration and bounded image-processing resources on supported deployment targets.
 
 ## Photo Development Extension
 
-[Directory Photo Workspace](photo-development/workspace/design.md) defines persistent Photo directories, protected input snapshots, tool-owned editing state, and a reconcilable file index. [Photo Development Architecture](photo-development/design.md) integrates independent editing tools and optional supervised execution into the Rust service. [Development Color Pipeline](photo-development/processing/color.md) owns scene-linear processing and display separation. [Headless darktable Editing](photo-development/darktable/editing.md) owns the general semantic editing target; the Library's camera-produced Preview rules remain independent.
+[Photo Workspace](photo-development/workspace/design.md) owns persistent directories and contained-file state. [Photo Development](photo-development/design.md) integrates independent tools and optional supervised execution into the service.
+
+[Processing Modules](photo-development/processing/design.md) owns caller-controlled invocation without a workflow planner. [Development Color](photo-development/processing/color.md) owns processing image contracts independently of camera Preview selection.

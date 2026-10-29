@@ -1,134 +1,103 @@
 # Instance Access
 
-A Photographer needs to use the Photo Library over a public connection without
-operating an account system. Slipstream must protect the entire instance with
-one Access Token while supporting both the browser and the Photographer's CLI.
+One Access Token grants instance-wide access to the Photographer and the Photographer's CLI. [Access Architecture](design.md) owns credential enforcement and the authentication protocol.
 
 ## Access Boundary
 
-An Access Token grants all existing Library capabilities. Slipstream must not
-maintain user accounts, email addresses, roles, or external identities for this
-capability. Giving someone the token grants the same access as the Photographer;
-it does not create a separately revocable person or a public Album share.
+An Access Token MUST grant all existing Library capabilities. Slipstream MUST NOT maintain user accounts, email addresses, roles, or external identities for this capability.
 
-All Library facts, Photos, Previews, Edit Previews, Exports, and read and write
-operations must require valid access. Identifiers and download links must not
-confer permission. Only the nonprivate application shell, access entry points,
-and minimal health information may be public. Original safety and operation
-preconditions continue to apply after access is granted.
+Giving someone the token grants the Photographer's access, not a separately revocable person or a public Album share.
+
+Valid access MUST be required for all Library facts and read and write operations. Identifiers and download links MUST NOT confer permission.
+
+An anonymous visitor MUST NOT read private facts or receive a state-changing response through a direct URL or either client. Private content includes:
+
+- Photos, counts, and filenames.
+- Previews and Edit Previews.
+- Processing results, Exports, and downloads.
+
+Only the nonprivate application shell, access entry points, and minimal health information MAY be public. Original safety and operation preconditions continue to apply after access is granted.
 
 ## Provisioning and Recovery
 
-The server operator must generate the token through local administration before
-opening the Library. Slipstream must generate an unpredictable token, disclose
-it once to that operator, and never choose a default token. The operator must
-be able to save it in a password manager. Anonymous visitors must not claim or
-configure an uninitialized instance.
+The server operator MUST generate an unpredictable token through local administration before opening the Library. Slipstream MUST disclose it once to the operator and MUST NOT choose a default token.
 
-Without a configured token, the browser must show that access is not configured
-and direct the Photographer to the operator. It must not show Library facts.
-Invalid authentication storage must fail closed.
+The operator MUST be able to save the token in a password manager. Anonymous visitors MUST NOT claim or configure an uninitialized instance.
 
-The token remains valid until the operator rotates or revokes it. Rotation must
-replace the token and invalidate all Browser Sessions. Revocation without a
-replacement must close Library access. A lost token must be replaced, not
-retrieved. None of these operations may change Photos, Albums, selection,
-Rating, saved position, editing intent, Exports, or Original Files.
+Without a configured token, the browser MUST show that access is not configured and direct the Photographer to the operator. It MUST NOT show Library facts.
+
+Invalid authentication storage MUST fail closed.
+
+The token remains valid until the operator rotates or revokes it. Rotation MUST replace the token and invalidate all Browser Sessions. Revocation without replacement MUST close Library access.
+
+Provisioning, rotation, and revocation MUST NOT change:
+
+- Photos or Original Files.
+- Albums.
+- Selection or Rating.
+- Saved position.
+- Editing intent.
+- Exports.
+
+A lost token MUST be replaced, not retrieved.
+
+Upgrade and restore MUST preserve Library data and require valid access before public exposure.
+
+Before a restored instance is exposed, local rotation MUST invalidate restored credentials and sessions. A rollback binary without access enforcement MUST remain isolated from public traffic.
 
 ## Browser Entry
 
-The entry screen must contain an Access token field, Show/Hide control, Open
-library button, and help directing the Photographer to the server operator.
-It must support paste, password-manager use, Enter submission, visible focus,
-announced errors, and a narrow viewport with its keyboard open. Private Photos
-must not decorate this screen.
+The entry screen MUST contain:
 
-Successful entry must establish a Browser Session and clear the token field.
-It must return to a valid requested Destination. Without a requested Destination,
-it must open All Photos. It must preserve the explicit Album Resume behavior.
-An external return address must never be followed.
+- An Access token field.
+- A Show/Hide control.
+- An Open library button.
+- Help directing the Photographer to the server operator.
 
-Incorrect tokens, temporary throttling, server unavailability, and expired
-sessions must have distinct messages. Throttling must show when another attempt
-is allowed. Submission must prevent duplicate requests while pending.
+It MUST support paste, password-manager use, and Enter submission.
 
-A Browser Session must expire seven days after creation without sliding renewal.
-This lifetime is a product choice. The token itself is longer lived, so a
-Photographer can establish another session. The entry screen must remind users
-to sign out on shared devices.
+The screen MUST support visible focus and announced errors. It MUST work in a narrow viewport with its keyboard open. Private Photos MUST NOT decorate it.
 
-Sources must include Sign out on wide and narrow layouts. Sign out must revoke
-only the current Browser Session and remove private content from that browser's
-application state. It must not claim successful server revocation if the server
-cannot confirm it. Other sessions remain valid until expiry or token rotation.
-Someone retaining a copy of the Access Token can establish another session.
+Successful entry MUST establish a Browser Session and clear the token field. It MUST return to a valid requested Destination or open All Photos if none was requested. It MUST preserve explicit Album Resume behavior and MUST NOT follow an external return address.
+
+Incorrect tokens, temporary throttling, server unavailability, and expired sessions MUST have distinct messages. Throttling MUST show when another attempt is allowed. Submission MUST prevent duplicate requests while pending.
+
+A Browser Session MUST expire seven days after creation without sliding renewal. The token remains valid independently, so the Photographer can establish another session.
+
+The entry screen MUST remind users to sign out on shared devices.
+
+Sources MUST include Sign out on wide and narrow layouts. Sign out MUST revoke only the current Browser Session and remove private content from that browser's application state.
+
+Sign out MUST NOT claim successful server revocation if the server cannot confirm it. Other sessions remain valid until expiry or token rotation. Someone retaining a copy of the Access Token can establish another session.
 
 ## Session Loss and Disconnection
 
-On detected expiry, revocation, or rejection, the browser must stop new writes,
-remove private views, and offer access entry at the current Destination. Other
-tabs must react to local sign-out. A locally known expiry must hide content even
-while disconnected.
+On detected expiry, revocation, or rejection, the browser MUST stop new writes, remove private views, and offer access entry at the current Destination. Other tabs MUST react to local sign-out. A locally known expiry MUST hide content even while disconnected.
 
-Returning to a tab with an already displayed, unexpired Browser Session must
-leave the current view in place. The browser checks access in the background;
-confirmed rejection removes the view and opens access entry. A temporarily
-unreachable server must not replace the current view with a checking screen or
-ask the Photographer to retry access. Private requests still require server
-authorization, and ordinary disconnection follows the browsing contract.
-Reloading a page or restoring history before a private view is available must
-validate access before displaying private content.
+Returning to a tab with an already displayed, unexpired Browser Session MUST leave the current view in place while the browser checks access in the background. Confirmed rejection MUST remove the view and open access entry.
 
-Requests admitted before revocation can finish. Reopening access must reconcile
-current server facts and must not automatically repeat uncertain mutations or
-claim they were saved.
+A temporarily unreachable server MUST NOT replace the current view with a checking screen or ask the Photographer to retry access. Private requests still require server authorization; ordinary disconnection follows the browsing contract.
+
+Concurrent writes MUST report truthful outcomes.
+
+Reloading a page or restoring history before a private view is available MUST validate access before displaying private content.
+
+Requests admitted before revocation MAY finish. Reopening access MUST reconcile current server facts and MUST NOT automatically repeat uncertain mutations or claim they were saved.
+
+Previously copied images cannot be remotely erased.
 
 ## CLI and Deployment
 
-The CLI must use the same Access Token for the same instance permissions. It
-must not require a browser session or interactive login. It must load the token
-from an operator-selected private file, never from a plaintext command argument,
-and must not expose it in output, links, or diagnostics. Credential-input syntax
-and error mapping belong in [CLI Reference](../command-line/reference.md).
+The CLI MUST use the same Access Token for the same instance permissions without requiring a browser session or interactive login. It MUST load the token from an operator-selected private file, never from a plaintext command argument.
 
-The deployment has a bounded set of controlled access origins. The internal
-server value is not user configuration: deployment tooling may provide a JSON
-array through `SLIPSTREAM_ACCESS_ORIGINS`, and each origin must be a canonical
-HTTP or HTTPS origin. The configured public origin is always included. Without
-that internal value, the server derives HTTP origins from its listener for
-loopback, a concrete IP, or reliably enumerated concrete interfaces when
-listening on a wildcard. No forwarded header creates an origin.
-The Photographer may use any allowed origin directly. Browser requests select
-the exact origin they present; requests without `Origin` use their Host
-authority (or absolute URI authority). A Host authority must match the selected
-origin, so one allowed address cannot be used to impersonate another. If HTTP
-and HTTPS share an authority, requests without Origin use HTTPS as the safe
-profile. The browser receives an HTTPS `__Host-slipstream` cookie with Secure
-or an HTTP `slipstream` cookie without Secure. CLI Bearer requests keep their
-existing no-cookie behavior.
+The CLI MUST NOT expose the token in output, links, or diagnostics. [CLI Reference](../command-line/reference.md) owns credential-input syntax and error mapping.
 
-HTTP must show an unencrypted connection warning before browser token entry,
-keep it visible during the session, and warn once per CLI invocation. It
-must preserve authentication, CSRF protection, and all ordinary browser Library
-operations, including editing, deletion, and verified downloads. It must not
-enable anonymous access, including on loopback. Clients must not change the
-configured scheme after a connection failure. PWA installation remains subject
-to [Installed Web App](../web-application/installation/spec.md).
-Session status and view revalidation must not extend the fixed session lifetime.
+The Photographer MAY use any allowed access origin directly. [Access Architecture](design.md#credential-and-session-state) owns origin selection and cookie profiles.
+
+HTTP MUST show an unencrypted connection warning before browser token entry and keep it visible during the session. It MUST warn once per CLI invocation.
+
+HTTP MUST preserve authentication, CSRF protection, and all ordinary browser Library operations, including editing, deletion, and verified downloads. It MUST NOT enable anonymous access, including on loopback.
+
+Clients MUST NOT change the configured scheme after a connection failure. PWA installation remains subject to [Installed Web App](../web-application/installation/spec.md).
 
 [Deployment](../deployment/spec.md) owns configuration and upgrade procedures.
-[Instance Access Architecture](design.md) owns credential storage,
-session enforcement, and caching.
-
-## Acceptance
-
-- An anonymous visitor cannot read a Photo, count, filename, processing result,
-  download, or state-changing response through a direct URL or either client.
-- A Photographer opens a deep link after entry, selects a Photo, and observes
-  the same decision through an authenticated CLI query.
-- Sign out, expiry, token rotation, and revoked access reject subsequent
-  requests with their specified scope, without losing confirmed Library state.
-- Wrong tokens, throttling, disconnection, restored history, and concurrent
-  writes give truthful results and never silently open access or repeat writes.
-- Upgrade and restore preserve Library data and require valid access before
-  public exposure. Previously copied images cannot be remotely erased.

@@ -1,74 +1,62 @@
-# Library Management: Explicit Removal and Restore
+# Removal and Restore Design
 
-## Problem and drivers
+[Removal and Restore](spec.md) owns observable behavior. [Photo Library Design](../design.md) owns Photo and Album state. [Rejected Cleanup](rejected-cleanup/design.md) owns the browser's reviewed Snapshot admission.
 
-The browser removal flow owns a Browse Snapshot, but an Agent can already identify an exact Photo set from a query or Photo read. The same Library must accept that set without treating a path, filename, Album, or live query as identity. A caller must also recover an accepted attempt after a lost response or service restart without repeating effects.
+## Model and ownership
 
-[Photo Library Design](../design.md) owns Photo and Album state; [Removal and Restore](spec.md) owns observable invocation behavior.
+The persistence owner MUST be the sole writer of Photo removal state, Restore, removal markers, and operation receipts. A Photo row stores `removed_at_ms` and `removed_operation`; both MUST be null together or set together. The retained row avoids a second recovery record that could drift from Photo facts.
 
-The design must preserve the existing browser route and its rejected-result review semantics while adding a machine-facing boundary that provides:
+Each removal marker MUST be strictly greater than every marker the Library assigned before it. Markers MUST NOT be reused, even for removal and Restore within one clock millisecond. Restore MUST compare the exact observed marker before clearing it.
 
-- explicit Photo IDs with the observed Selection State, decision version, and removal state;
-- bounded, all-or-nothing admission validation before any Photo changes;
-- durable attempt receipts and read-only outcome inspection;
-- compare-and-set Restore using the removal marker;
-- no authority or workflow coupling to Trash Record Cleanup.
-
-The existing process-local Photo decision version is the caller's evidence token. It changes on every successful decision, removal, and Restore mutation; a restarted owner starts a new version epoch, so pre-restart evidence is stale rather than silently reusable.
-
-## Domain model
-
-A removal attempt is identified by its caller-supplied operation ID and one ordered, distinct target set. Each target carries:
+An explicit removal attempt has a caller-supplied operation ID and an ordered, distinct target set. Each target carries:
 
 - Photo identity;
-- expected Selection State (`rejected` is the only eligible value);
-- expected decision version;
-- expected removal marker (`null` for a current Library Photo).
+- expected Selection State, with `rejected` the only eligible value;
+- expected decision version; and
+- expected removal marker, `null` for a current Library Photo.
 
-The owner checks the attempt receipt first. A known attempt replays its historical result only when the complete intent matches; reusing the ID with different targets or evidence is a conflict. A new attempt checks every target against current state in the owner transaction. A target that fails evidence or eligibility receives its own no-effect outcome; valid siblings may still commit.
+The process-local Photo decision version MUST change on every successful decision, removal, and Restore mutation. A restarted owner MUST start a new version epoch, making pre-restart evidence stale.
 
-Each newly removed target receives one monotonic removal marker. The persisted receipt stores the marker and outcome for every target, so an explicit response and later outcome read can name the exact removal that Restore must compare against.
+A Restore attempt has its own caller-supplied operation ID and ordered `{photoId, removedAtMs}` targets. A request MUST name either one operation or a bounded nonempty list of markers. A fresh select-all Restore captures Trash identities and markers, applies exclusions, and binds the result before mutation.
 
-A Restore attempt has its own caller-supplied operation ID and an ordered set of `{photoId, removedAtMs}` markers. Its receipt follows the same replay rule, even after the target record is cleaned up. Restore clears only a matching marker; an active, changed, missing, or cleaned-up target is reported without claiming a restore. The owner serializes Restore with Trash Record Cleanup, so both cannot claim success for one removal.
+## Admission and receipts
 
-Select-all Restore first captures Trash identities and their removal markers, then applies exclusions and binds the resulting set to the attempt identity before mutation. It never resolves that set again on retry or substitutes a newer removal marker. An earlier inspected selection is submitted through its explicit observed markers, not a new select-all invocation.
+Before admitting an explicit attempt, Slipstream MUST reject duplicate, empty, malformed, or over-limit input without changing any Photo. Input files MUST be locally validated for exact keys, evidence, distinct nonempty IDs, and the advertised maximum before network access.
 
-## Boundary and ownership
+The owner MUST inspect the receipt before checking current targets:
 
-The persistence owner remains the only writer of Photo removal, Restore, operation receipts, and removal markers. `Library` exposes explicit removal, explicit Restore, and read-only attempt lookup. The server maps browser calls to the existing `PhotoRemovalMutation` and `PhotoRestoration` owners, and maps CLI calls to explicit owner requests. The Web publication patch is held under the same publication lock as the owner call.
+| Receipt                               | Required outcome                                                                                                                          |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Known ID, identical intent            | Replay its historical outcome.                                                                                                            |
+| Known ID, changed targets or evidence | Report a conflict.                                                                                                                        |
+| New ID                                | Check each target's evidence and eligibility in the owner transaction. Valid siblings can commit alongside per-target no-effect outcomes. |
 
-The CLI boundary adds:
+Each newly removed target receives a monotonic marker. The durable receipt MUST retain the reviewed sequence and immutable per-target outcomes, including the marker for each newly removed Photo. It MUST survive Restore, cleanup, reload, and restart without requiring the Photo row to survive.
 
-- `photos remove OPERATION_ID --input FILE`;
-- `photos restore OPERATION_ID --input FILE`;
-- `photos removal-operation OPERATION_ID`;
-- `photos restore-operation OPERATION_ID`.
+A browser removal MUST commit its outcomes in one transaction. A persistence failure MUST leave the whole request unapplied and retryable. A failed or stale target MUST NOT change Photo facts.
 
-Input files contain complete explicit target documents and are validated locally for exact keys, nonempty distinct IDs, evidence fields, and the advertised maximum before network access. CLI reads carry the normal Access Token and CLI contract header. Missing attempt receipts are reported as `outcome_unknown`; they are never treated as proof that a replacement mutation is safe.
+## Undo and Restore
 
-## Options considered
+Operation Undo MUST restore in one transaction every Photo that the confirmed operation still owns and that remains eligible. A Photo already restored or cleaned up is not restored again. Restore and Trash Record Cleanup MUST serialize against the same removal.
 
-### Option A: Reuse the browser removal route with an overloaded body
+A named Restore MUST compare each supplied marker against the current removal. A mismatch MUST refuse that Photo without changing it, including a Photo removed again after the listing.
 
-The existing `POST /api/photos/remove` would accept either `{token, operationId}` or the explicit target document, and the existing Restore route would gain an optional attempt ID.
+The browser result MUST report `restored`, `changedElsewhere`, or `missing` for each named Photo.
 
-This minimizes route count but makes two authorization and validation protocols share one shape-dispatching handler. It also makes it easy for a browser body to accidentally reach the explicit path and makes outcome reads harder to distinguish from current Web reads.
+The [CLI Reference](../../command-line/reference.md#reversible-photo-removal-and-restore) owns explicit-set result vocabulary.
 
-### Option B: Add explicit CLI routes over shared owner operations — selected
+A Restore response MUST report the remaining count for each touched removal operation, including zero when emptied. Operations not touched MUST be absent. This lets the browser withdraw or retain Undo based on the operation's actual remaining ownership.
 
-Keep the existing browser routes byte-compatible and add CLI-contract-protected routes for explicit removal, explicit Restore, and attempt lookup. Both route families call the same persistence owner and publication patching code. Capability limits advertise the explicit removal bound.
+## Publication
 
-This adds three small routes but keeps authorization, request validation, browser compatibility, and historical-result reads distinct. The domain and persistence logic remains one owner implementation rather than a second mutation path.
+Confirmed removal and Restore MUST update the published Library and derived Original Folder index in the same publication critical section as the owning SQLite write. Readers serialized by that lock MUST see the whole state before or after the commit. Other readers MUST linearize at a whole published snapshot, replaced under its write lock.
 
-## Failure and concurrency rules
+The patch MUST complete before the response. A window from a pre-removal Browse Snapshot MUST expire instead of presenting the removed Photo or a page shorter than its named position. The browser MUST reopen the source against current state; rescans MUST carry persisted removal markers forward.
 
-- Duplicate, empty, malformed, or over-limit input is rejected before owner admission and before any Photo changes.
-- A known operation ID with changed intent is a conflict; a known operation ID with the same intent replays the stored result.
-- A response timeout, malformed result, missing result entry, or unknown receipt is uncertain. The caller must inspect the original operation before submitting replacement mutations.
-- Stale decision or removal evidence is a per-Photo no-effect outcome. It cannot be repaired by checking only the current Selection State.
-- [Trash Record Cleanup](../trash/spec.md) remains a separate reviewed capability. Restore observes its committed result through owner serialization; uncertainty about a lost response or historical deletion does not impose an indefinite lock.
-- Successful removal and Restore never modify Original Files, Album membership, rating, or decision values.
+Machine-client query projections MUST move with the same commit. A retained query MUST keep its ordered identities, report a subsequently removed Photo as `{"id":"…","state":"missing"}` in its original position, and re-admit it after Restore without a rescan. Refused or rolled-back requests MUST NOT change the projection.
 
-## Observable contract
+## Interface boundary
 
-Every accepted explicit attempt returns one result item per requested Photo, with a stable outcome and, for a removed item, its `removedAtMs`. Summary counts must equal the per-item partition. Outcome inspection returns the exact historical response and does not change state. Web Trash reads and browser views observe the same committed state after the CLI operation.
+Browser and CLI routes MUST share the same persistence owner and publication patching while retaining their separate admission contracts. Browser routes MUST remain byte-compatible. [CLI Reference](../../command-line/reference.md) owns CLI syntax; the CLI MUST use normal Access Token and contract-header admission.
+
+Outcome lookup MUST be read-only. A missing or uninspectable receipt is `outcome_unknown`, not proof that replacement mutation is safe. A lost response or historical deletion MUST NOT impose an indefinite Restore lock.

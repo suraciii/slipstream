@@ -1,0 +1,358 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Slipstream CLI target retained processing adapter shapes — processing-discovery",
+  "description": "Target-only adapter carriers; operation semantics, UTF-8 byte limits, duplicate-key rejection, and cross-field comparisons remain in the CLI reference. No runtime conformance is implied.",
+  "$defs": {
+    "PreviewHandle": {
+      "type": "object",
+      "properties": {
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stepId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "recipeRevision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "identity": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "not": {
+            "pattern": "[^0-9a-f]"
+          }
+        }
+      },
+      "required": ["photoId", "stepId", "recipeRevision", "identity"]
+    },
+    "PendingPreviewData": {
+      "type": "object",
+      "properties": {
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stepId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "enum": ["queued", "running"]
+        },
+        "webUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        },
+        "fileCommitted": {
+          "const": false
+        },
+        "handle": {
+          "$ref": "#/$defs/PreviewHandle"
+        }
+      },
+      "required": [
+        "photoId",
+        "stepId",
+        "state",
+        "webUrl",
+        "fileCommitted",
+        "handle"
+      ]
+    },
+    "PreviewProvenance": {
+      "type": "object",
+      "properties": {
+        "input": {
+          "$ref": "processing-recipe.schema.json#/$defs/Binding"
+        },
+        "module": {
+          "type": "string",
+          "minLength": 1
+        },
+        "adapterSchemaVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bundleId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parameterDigest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "not": {
+            "pattern": "[^0-9a-f]"
+          }
+        },
+        "identity": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "not": {
+            "pattern": "[^0-9a-f]"
+          }
+        },
+        "outputContract": {
+          "$ref": "processing-recipe.schema.json#/$defs/ImageContract"
+        },
+        "displayConversion": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "object",
+          "properties": {
+            "fullResolution": {
+              "type": "boolean"
+            },
+            "scale": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1
+            }
+          },
+          "required": ["fullResolution", "scale"]
+        }
+      },
+      "required": [
+        "input",
+        "module",
+        "adapterSchemaVersion",
+        "bundleId",
+        "parameterDigest",
+        "identity",
+        "outputContract",
+        "displayConversion",
+        "detail"
+      ]
+    },
+    "ReadyPreviewData": {
+      "type": "object",
+      "properties": {
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stepId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "const": "ready"
+        },
+        "sourceRevision": {
+          "type": "string"
+        },
+        "recipeRevision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "comparison": {
+          "const": "current"
+        },
+        "inputSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "not": {
+            "pattern": "[^0-9a-f]"
+          }
+        },
+        "inputByteLength": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "contentType": {
+          "const": "image/png"
+        },
+        "width": {
+          "type": "integer"
+        },
+        "height": {
+          "type": "integer"
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "not": {
+            "pattern": "[^0-9a-f]"
+          }
+        },
+        "path": {
+          "type": "string"
+        },
+        "webUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        },
+        "fileCommitted": {
+          "const": true
+        },
+        "provenance": {
+          "$ref": "#/$defs/PreviewProvenance"
+        }
+      },
+      "required": [
+        "photoId",
+        "stepId",
+        "state",
+        "sourceRevision",
+        "recipeRevision",
+        "comparison",
+        "inputSha256",
+        "inputByteLength",
+        "contentType",
+        "width",
+        "height",
+        "byteLength",
+        "sha256",
+        "path",
+        "webUrl",
+        "fileCommitted",
+        "provenance"
+      ]
+    },
+    "DiscoveryImageContract": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string"
+        },
+        "colorSpace": {
+          "type": "string"
+        },
+        "transferFunction": {
+          "type": "string"
+        },
+        "precisionBits": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "width": {
+          "type": "integer"
+        },
+        "height": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "format",
+        "colorSpace",
+        "transferFunction",
+        "precisionBits",
+        "width",
+        "height"
+      ]
+    },
+    "ModuleDescription": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "adapterVersion": {
+              "type": "string"
+            }
+          },
+          "required": ["name", "adapterVersion"]
+        },
+        "parameterVersions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "parameterSchema": {
+          "type": "object"
+        },
+        "admittedInputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DiscoveryImageContract"
+          }
+        },
+        "admittedOutputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DiscoveryImageContract"
+          }
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "maxInputBytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxParameterBytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxOutputPixels": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "deadlineMillis": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "maxInputBytes",
+            "maxParameterBytes",
+            "maxOutputPixels",
+            "deadlineMillis"
+          ]
+        },
+        "availability": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "enum": ["ready", "unavailable"]
+            },
+            "refusalReasons": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": ["state", "refusalReasons"]
+        }
+      },
+      "required": [
+        "id",
+        "parameterVersions",
+        "parameterSchema",
+        "admittedInputs",
+        "admittedOutputs",
+        "limits",
+        "availability"
+      ]
+    },
+    "ModulesData": {
+      "type": "object",
+      "properties": {
+        "contractVersion": {
+          "type": "string"
+        },
+        "modules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModuleDescription"
+          }
+        }
+      },
+      "required": ["contractVersion", "modules"]
+    }
+  }
+}

@@ -1,191 +1,59 @@
 # darktable Integration
 
-A Photographer needs saved corrections to produce the intended photograph in
-preview and output while keeping the files available for later use. darktable
-editing must work independently on files; Slipstream adds a convenient Photo
-Workspace and optional controls without creating another settings store.
-Engine upgrades must not silently reinterpret corrections or expose unsupported
-controls.
-
-[Photo Workspace](../workspace/spec.md) owns directory and file behavior.
-[Photo Development](../spec.md) owns shared editing and output behavior.
-[Headless darktable Editing](editing.md) owns the general semantic
-editing surface. This specification owns the engine relationship; published
-support remains subject to the [release boundary](../../deployment/support.md).
+[Photo Development](../spec.md) owns shared editing, composition, and Original safety. [Photo Workspace](../workspace/spec.md) owns file discovery and retention. [Headless darktable Editing](editing.md) owns editing behavior; [darktable CLI](cli.md) owns invocation and compatibility semantics.
 
 ## Relationship
 
-The proposed independent `darktable-edit` executable owns local image editing.
-It reads an input file, persists native JSON state in an explicit state directory,
-and writes preview and output files to accessible directories. Its dependencies
-are its own qualified darktable bundle, input files, and declared resources. It
-must not require a Slipstream installation, server, Library, Photo ID, database,
-HTTP token, or personal desktop catalog. This command is distinct from official
-`darktable-cli` and from darktable's GUI.
+`darktable-edit` MUST edit accessible files independently of Slipstream. It is distinct from official `darktable-cli` and the desktop GUI. It MUST NOT require a Slipstream server, Library, Photo ID, database, token, or personal desktop catalog.
 
-Slipstream owns Photos and their workspace association, file indexing, access,
-and optional supervised execution. Its `slipstream darktable` integration may
-resolve workspace input/state paths and invoke the independent tool. Web controls
-must invoke that same tool on the same on-disk state. Slipstream may index a state
-pointer and project settings for inspection, but must not mirror authoritative
-parameters in its database. [darktable CLI Reference](cli.md) owns the
-integration grammar and standalone invocation contract.
+The tool owns its saved state and qualified engine bundle. Optional `slipstream darktable` and Web controls MUST invoke the same tool against that state, without maintaining another authoritative parameter store.
 
-There is no download/edit/upload/submit cycle or state-copy commit between the
-tool and Slipstream. Completed ordinary files become visible through workspace
-reconciliation without a tool callback. Optional structured results can establish
-verified provenance but are not a requirement for file discovery. The native
-engine protocol remains an internal tool concern rather than a public engine
-catalog escape hatch.
-
-Existing compatible processing interfaces may remain projections over canonical
-file state. A cutover must preserve historical edits and files and disclose any
-explicit supported migration; it must not discard them or invent compatibility
-aliases. Library identity and decisions remain independent of editing.
+Existing compatible processing interfaces MAY project canonical file state. Historical edits and files MUST be preserved during an explicit supported migration; compatibility aliases MUST NOT be invented. [Photo Development Architecture](../design.md) owns service-state conversion.
 
 ## Local Availability
 
-Independent operation must not require a separately operated Slipstream service.
-A local user runs the executable against accessible paths. Slipstream may package
-or supervise it in the application's execution environment for Web use without
-requiring a personal darktable desktop catalog, processing control socket, or
-separate engine service in the normal local flow.
+Independent operation MUST work without a separately operated service. Slipstream MAY package or supervise the tool without requiring a personal desktop catalog, processing control socket, or separate engine service.
 
-Workspace opening must disclose the actual execution host and directory
-accessibility. A remote caller needs an authorized environment with access to
-those paths; the integration must not imply that server files exist on the
-caller's computer or introduce an arbitrary remote-shell endpoint. A final
-download does not become a mandatory synchronization step for later edits.
+The execution host and directory accessibility MUST be disclosed. A remote caller MUST use an authorized environment with access to the files; the integration MUST NOT expose an arbitrary remote shell.
 
-Missing or invalid engine assets leave the Library, files, and saved state usable
-and identify which editing operation is unavailable. CPU-only headless execution
-must be qualified; a GPU is not mandatory. Standalone SpektraFilm has separate
-availability and must not be inferred from darktable availability.
+Missing or invalid engine assets MUST leave Library facts, files, and saved intent usable and identify the unavailable operation. CPU-only headless execution MUST be qualified; a GPU MUST NOT be required. Standalone SpektraFilm availability is independent of darktable availability.
 
-Per-state write guards prevent concurrent corrupting edits. They must not lock
-the entire workspace during unrelated rendering or file completion. Supervised
-execution observes its configured processing capacity, separately from state
-locks. Cancellation must settle the affected process truthfully; standalone work
-must not be advertised as a surviving service-owned job after its process ends.
+State guards and execution capacity are separate. A state lock MUST NOT block unrelated workspace renders or file completions. Cancellation MUST report the affected process outcome truthfully; a terminated standalone process MUST NOT be advertised as a surviving service job.
 
 ## Available Controls
 
-[Discovering Editing Capabilities](editing.md#discovering-editing-capabilities)
-owns native control meanings, initialization, reset, instances, ordering,
-structured shapes, and capability status. The tool must support general editing
-rather than a permanent exposure/white-balance allowlist. Parameter schemas alone
-do not qualify camera mappings, GUI actions, masks, or output combinations.
+[Editing capability discovery](editing.md#discovering-editing-capabilities) owns control meanings and capability status. General editing MUST NOT become a permanent exposure and white-balance allowlist.
 
-The native engine describes operations and their schema/version identities.
-The editing tool validates and persists that meaning using the same declared
-contract used for execution. An adapter must not maintain a competing set of
-binary layouts or a bespoke command for each new control. Unsupported settings
-remain inspectable with specific limitations rather than being omitted or
-presented as executable.
+The native engine describes operations and schema identities. The tool MUST validate and persist their meaning under the same contract used for execution, without a competing binary-layout implementation or a bespoke command for every control.
 
-Native schema compatibility is part of saved state and discovery. An incompatible
-engine must refuse mutation or rendering while preserving readable intent.
-An upgrade must not reset or reinterpret settings silently. Supported migration
-is explicit, discloses changes, validates the new state, and retains the old one.
-Opening a basic Web control must preserve CLI-created instances, curves, masks,
-resource references, and output settings it cannot present.
+Unsupported settings MUST remain inspectable with specific limitations. An incompatible engine MUST refuse mutation and rendering without resetting or reinterpreting saved intent. [Migration](cli.md#saved-history-and-recovery) is explicit and retains the prior state.
+
+Web controls MUST preserve settings they cannot display, including CLI-created instances, curves, masks, resources, and output choices.
 
 ## Automatic Adjustments
 
-An admitted automatic adjustment is an explicit action on one captured state
-revision and input. The native engine evaluates its own algorithm and returns
-concrete values and dependencies sufficient to reproduce the accepted intent.
-The tool atomically saves them under its state guard. Slipstream must not
-implement a competing correction algorithm or independently save its own recipe.
+An automatic adjustment MUST be an explicit action on a captured input and state revision. The native engine MUST compute concrete values and dependencies; the tool MUST save them atomically under its state guard. Slipstream MUST NOT implement a competing adjustment or recipe.
 
-Automatic exposure and illuminant detection are examples rather than an
-allowlist. Other actions declare inputs, affected instances, region/source
-constraints, and results under the same headless contract. Preview and Export
-reuse saved concrete settings and do not independently recompute detection.
+Each action MUST declare its inputs, affected instances, source or region constraints, and results. Preview and Export MUST reuse accepted values rather than recompute detection.
 
-Failed detection, unavailable resources, changed input evidence, or a stale
-revision leaves saved state unchanged. Exact-request recovery must not repeat
-an uncertain action against newer state. Reusing a request identity for another
-intent must conflict rather than apply a second correction.
+Failure, unavailable resources, changed input evidence, or a stale revision MUST leave saved state unchanged. Exact-request recovery MUST NOT repeat an uncertain action against newer state; changed intent under the same identity MUST conflict.
 
 ## Editing and Outputs
 
-An Edit Preview and an Export from the same captured input and saved settings
-apply the same intended corrections against the same processing baseline.
-Resolution and display conversion can differ under qualified output contracts.
-Preview conversion must not become the final image's input. Neither opening an
-existing state nor requesting a render may reset or mutate settings.
+Preview and Export from the same captured input and settings MUST apply the same intended corrections and baseline. Qualified resolution and display conversion MAY differ; preview conversion MUST NOT become the final image input.
 
-Export requires no prior preview. Output format, precision, color, transfer,
-profile, and geometry are saved tool choices, not a fixed module pipeline.
-Scene-referred and display-encoded outputs must retain their distinct meanings.
-An incompatible output/settings combination fails explicitly rather than silently
-disabling artistic operations or declaring an image contract from extension.
+Opening state and rendering MUST NOT reset or mutate settings. Export MUST NOT require a Preview. The selected output contract MUST distinguish scene-referred from display-encoded output and refuse incompatible combinations without silently disabling effects.
 
-State saves are atomic and separate from rendering. Rendering captures immutable
-settings/input evidence so a later edit cannot retarget accepted work. A completed
-preview from an earlier revision stays marked stale and must not replace the
-current preview. An older output remains available without being called an
-output of the new state.
+Saving and rendering are separate outcomes. Rendering MUST capture immutable input and state evidence; later edits MUST NOT retarget accepted work. An older preview MUST remain identifiable as stale and MUST NOT replace the current preview; an older output MUST NOT be attributed to newer state.
 
-The tool writes files directly into the workspace's preview/output areas. Unique
-default names and no-overwrite completion preserve concurrent results. Private
-partial files become ready only through atomic completion. Slipstream discovers
-ordinary completed files independently of invocation callbacks and reconciles
-missed events after restart. It must not invent tool success or Processing
-Artifact provenance for a file whose producer is unknown.
-
-A standalone command owns synchronous execution. Optional Web supervision may
-retain bounded run status and cancellation; it must not alter the independent
-file/state contract. Outputs can be downloaded or explicitly selected as a
-compatible input to another tool. There is no automatic chaining, reprocessing,
-new Photo, or Album import.
+File completion, discovery, provenance, download, and explicit handoff follow [Photo Workspace](../workspace/spec.md) and [Photo Development](../spec.md#export). Standalone execution is synchronous; optional supervision MUST preserve the same file and state contract.
 
 ## Failure Behavior
 
-Invalid settings fail with the affected control and reason, without rounding an
-enum, truncating an integer, substituting zero, dropping unsupported objects, or
-ignoring the correction. A stale guarded write conflicts and preserves the
-newer state; a busy state reports bounded waiting or refusal. Exact-request replay
-reconciles the original mutation without duplicates and identifies a newer current
-revision separately.
+Invalid settings MUST identify the affected control and reason. The tool MUST NOT round enums, truncate integers, substitute zero, drop unsupported objects, or ignore corrections.
 
-An engine failure after confirmed save leaves the saved state intact and fails
-only the render. Cancellation, interruption, insufficient memory, and disk-full
-must preserve prior completed files and confirmed state. Partial outputs must not
-be offered for download or later processing. No camera Preview, uncorrected
-result, alternate engine version, reduced dimensions, or disabled effect may be
-substituted as a successful requested result.
+A stale guard MUST conflict without overwriting newer state. Exact-request replay MUST reconcile the original mutation without duplication and separately identify any newer current revision. [CLI mutation rules](cli.md#atomic-editing) own guard and receipt details.
 
-Original and external XMP safety follows [Photo Development](../spec.md).
-The input is the independent workspace snapshot, not a writable Library link.
-Its unchanged bytes remain editable when the live Original disappears or changes.
-Explicit source refresh adds another input version and does not retarget saved
-state. A missing or changed workspace input produces a dependency failure and
-must not silently reopen the live Original.
+An engine failure after a confirmed save MUST leave that state intact. Cancellation, interruption, memory exhaustion, and disk exhaustion MUST preserve prior completed files and confirmed state; partial outputs MUST NOT be offered as results.
 
-Workspace files and saved state are durable under
-[Photo Workspace](../workspace/spec.md); no fixed seven-day expiry applies to
-needed inputs, state, dependencies, or kept outputs. Cleanup and resource removal
-must respect retained references. Restart restores confirmed on-disk state and
-discovers completed outputs even when no callback was received. Interrupted work
-must be reported honestly, not automatically rerun as an uncertain correction.
-Normal browsing, Selection State, Rating, and Album membership remain available
-independently of engine availability.
-
-## Examples
-
-- An Agent runs `darktable-edit` on a local RAW with an explicit state directory
-  and writes a TIFF without a Slipstream server or a prior preview.
-- Slipstream opens a Photo Workspace; its CLI integration and optional Web
-  exposure control use that same state. A curve and mask created by the standalone
-  tool remain present after the Web change.
-- A native tool writes a complete uniquely named output without calling
-  Slipstream. Files discovers it; after restart it is still downloadable and can
-  be explicitly chosen as another tool's compatible input.
-- Two output runs finish concurrently. Neither overwrites the other's file or
-  gets attributed to the other's request.
-- A saved white-balance mode cannot execute after an engine upgrade. The values
-  stay readable with their native schema identity; no as-shot fallback is applied.
-- Disk fills during a later save or Export. Earlier state and completed outputs
-  remain available, and the incomplete file is not presented as a result.
+The tool MUST NOT substitute a camera Preview, uncorrected result, alternate engine, reduced dimensions, or disabled effect for a successful requested result. Input binding and recovery follow [Headless darktable Editing](editing.md#inspecting-and-starting-an-edit).

@@ -1,200 +1,91 @@
-# Slipstream 0.1 Support and Release Contract
+# Support and Release Boundary
 
-Slipstream 0.1 supports one Photographer who needs to browse and select from an
-existing Photo Library without changing its Original Files. This document defines the support
-boundary and the release notes for a separately approved `0.1.0` release. It
-does not announce, create, or imply a tag or published release.
-
-The product behavior remains authoritative in the linked Product and Design
-Specs. This document defines which parts of that behavior an operator may rely
-on in a 0.1 deployment.
+This contract distinguishes the supported `0.1` artifact from the broader target capabilities. It does not announce a release or imply publication.
 
 ## Supported Scope
 
-[Instance Access](../access/spec.md) defines the target authenticated public-access
-capability. It does not expand this 0.1 release boundary: enabling that capability
-requires a separately qualified release with the authentication, migration,
-and HTTPS acceptance evidence. The trusted-network restriction below applies
-to the 0.1 artifact without that capability.
+A `0.1` deployment supports one Photographer and one configured local or network-mounted Library Folder. The operator selects the Folder; the browser does not select arbitrary server paths.
 
-A 0.1 deployment supports one Photographer and one configured local or
-network-mounted Library Folder. The server operator configures that Folder;
-the browser cannot select arbitrary server paths. Original Files remain
-read-only. The complete Library, File Location, Album, browsing, and Original ownership
-rules are in [Photo Library and Albums](../photo-library/spec.md) and [Library
-Browsing and Selection](../library-browser/spec.md).
+The supported target is the repository-owned Docker image and Compose configuration on Linux amd64. Chromium is the supported browser; direct host deployments, other architectures, and other browser engines are not supported `0.1` targets.
 
-The supported deployment target is a Linux amd64 host running the
-repository-owned Docker image and Compose configuration. The container is the
-native dependency boundary: the Rust server uses LibRaw and libjpeg for RAW
-embedded-JPEG extraction, and libvips with LittleCMS for JPEG normalization.
-Bun builds the Web application and is not a production runtime dependency.
+The container is the native dependency boundary. LibRaw and libjpeg provide RAW embedded-JPEG extraction; libvips and LittleCMS normalize JPEGs. Bun is a Web build dependency, not a production runtime.
 
-Slipstream provides the binding capability; deployment topology is the
-operator's choice. The server binds `SLIPSTREAM_HOST` (default `127.0.0.1`),
-and Compose publishes `${SLIPSTREAM_BIND_ADDRESS:-127.0.0.1}:${SLIPSTREAM_PORT:-3000}`
-so an operator may bind loopback, a LAN interface, Tailscale, or any other
-address without product-imposed restrictions. Slipstream 0.1 has no accounts,
-authentication, authorization, or request-origin access control. `Host`,
-`Origin`, and forwarded headers do not establish trust. Every client that can
-reach a listener can use the Library, including state-changing routes. The
-default loopback listener is suitable for one host. A LAN or Tailscale listener
-is supported only as a trusted network; protecting any wider exposure remains
-the operator's responsibility.
+The `0.1` artifact without the separately qualified [Instance Access](../access/spec.md) capability has no accounts, authentication, authorization, or request-origin access control. Every client reaching its listener can use the Library, including state-changing routes; `Host`, `Origin`, and forwarded headers do not establish trust.
 
-Chromium is the supported browser target. Automated browser evidence runs
-against Chromium and covers visible controls, keyboard operation, and touch
-Pointer Events. That evidence does not establish support for Firefox, Safari,
-or other WebKit browsers, and it does not substitute for a Photographer's
-workflow acceptance on the intended device.
+The server's `SLIPSTREAM_HOST` defaults to `127.0.0.1`. Compose publishes `${SLIPSTREAM_BIND_ADDRESS:-127.0.0.1}:${SLIPSTREAM_PORT:-3000}`; an operator MAY bind another interface, but LAN or Tailscale use is supported only on a trusted network.
+
+Protecting wider exposure is the operator's responsibility. A separately qualified release is required before authentication, migration, and HTTPS expand this artifact's support boundary.
 
 ## File and Camera Boundary
 
-Slipstream recognizes these extensions case-insensitively for discovery:
+Discovery recognizes extensions case-insensitively:
 
-- RAW: `3fr`, `ari`, `arw`, `bay`, `bmq`, `cap`, `cine`, `cr2`, `cr3`, `cs1`,
-  `dc2`, `dcr`, `dng`, `drf`, `eip`, `erf`, `fff`, `gpr`, `iiq`, `k25`,
-  `kc2`, `kdc`, `mdc`, `mef`, `mos`, `mrw`, `nef`, `nrw`, `obm`, `orf`,
-  `pef`, `ptx`, `pxn`, `qtk`, `r3d`, `raf`, `raw`, `rdc`, `rw2`, `rwl`,
-  `rwz`, `sr2`, `srf`, `srw`, and `x3f`.
-- JPEG: `jpg` and `jpeg`.
+| Kind | Extensions |
+| --- | --- |
+| RAW | `3fr`, `ari`, `arw`, `bay`, `bmq`, `cap`, `cine`, `cr2`, `cr3`, `cs1`, `dc2`, `dcr`, `dng`, `drf`, `eip` |
+| RAW | `erf`, `fff`, `gpr`, `iiq`, `k25`, `kc2`, `kdc`, `mdc`, `mef`, `mos`, `mrw`, `nef`, `nrw`, `obm`, `orf` |
+| RAW | `pef`, `ptx`, `pxn`, `qtk`, `r3d`, `raf`, `raw`, `rdc`, `rw2`, `rwl`, `rwz`, `sr2`, `srf`, `srw`, `x3f` |
+| JPEG | `jpg`, `jpeg` |
 
-Recognition means only that Slipstream indexes the file as a candidate RAW or
-JPEG Original. It does not promise that every camera or every file with a
-recognized extension can yield metadata or an embedded JPEG. LibRaw is the
-container-support boundary for RAW files; unsupported, corrupt, or
-resource-limited files remain unavailable rather than receiving a generic RAW
-rendering.
+Recognition indexes a candidate; it does not guarantee metadata or an embedded JPEG for every file or camera. LibRaw defines RAW container support; unsupported, corrupt, or resource-limited files remain unavailable rather than receiving a generic RAW rendering.
 
-`.ARW` is a recognized RAW extension. An opt-in local Sony ARW integration
-sample proves embedded-JPEG selection, derivative dimensions, and unchanged
-Original bytes for that sample only. It does not establish support for every
-Sony body or every `.ARW` revision; a release qualification must use the
-Photographer's representative Originals without adding them to the repository.
+The qualified Linux image for Sony `ILCE-7CM2` ARW Originals MUST use hash-verified LibRaw `0.22.2`. The representative camera requirement does not imply support for other Sony bodies or ARW revisions.
 
-The qualified Linux image must use hash-verified LibRaw `0.22.2` for
-Sony `ILCE-7CM2` ARW Originals. A representative Original from this camera
-must yield its own `raw-embedded-jpeg` Preview through both the Grid thumbnail
-and the Photo View review Preview; the response dimensions and source must
-reflect the embedded JPEG, and the Original's SHA-256 must match before and
-after. This evidence does not establish support for every Sony model. Further
-camera qualifications must prove the same behavior with their own Originals;
-a recognized extension alone does not imply Preview support.
+For that camera, Grid thumbnails and Photo View review Previews MUST use the Original's own `raw-embedded-jpeg`. Their source and dimensions MUST reflect that embedded JPEG, and extraction MUST NOT change the Original.
 
-## Browsing and Selection Semantics
+Release qualification MUST use the Photographer's representative Originals without adding them to the repository. Each additional camera qualification MUST establish the same Preview behavior using that camera's own Originals.
 
-[Photo Previews](../photo-library/previews/spec.md) defines Preview behavior. A JPEG Original's own
-content and a RAW Original's own embedded JPEG provide the Preview path. A RAW
-Photo never uses a same-basename JPEG as its Preview. Slipstream does not
-demosaic or develop RAW sensor data. Photo View identifies the source and
-identifies limited detail from the source capability: the delivered Preview
-dimensions against the review target, which is a fact about the Photo rather
-than about the browser window or zoom. The Web may also report its own display
-condition for what the current Preview area shows. A Preview failure does not
-alter an Original File or turn a Photo into a different Photo.
-
-[Photo Library and Albums](../photo-library/spec.md) and
-[Capture-Time Library Ordering](../photo-library/ordering.md) define
-Capture Time. `All Photos` and Original Folder sources order by the authoritative,
-camera-local Capture Time from each Photo's own Original File. Timezone offsets remain metadata facts and are not
-converted to UTC for ordering. Missing or invalid Capture Time sorts in the
-deterministic missing-time partition. Album membership order is explicit and
-Capture Time never reorders it.
+[Photo Previews](../photo-library/previews/spec.md) owns Preview source, detail, and failure behavior. [Photo Library](../photo-library/spec.md) owns Original safety and Library behavior.
 
 ## State, Rescan, and Recovery
 
-SQLite owns Photo identity, Albums, Selection State, Rating, and saved Album position. File Location navigation is derived from Published Library Original Locations and is not a second writable hierarchy. The state directory and derivative cache directory must be separate from the configured Library Folder. The supported writable schema for 0.1 is SQLite schema version 15.
+[Photo Library Identity](../photo-library/identity.md) owns identity, Location Recovery, migration, and Library Folder binding. [Capture-Time Ordering](../photo-library/ordering.md) owns ordering and unavailable-Photo Capture Time.
 
-A rescan publishes one completed Library snapshot. It discovers new supported files, refreshes changed files, marks missing files unavailable, and preserves unaffected decisions and Album positions. Before it allocates new Photos, it restores a moved Original File that exact content evidence identifies as one globally unambiguous candidate. An unavailable Photo retains its state and its last successfully inspected Capture Time; an ambiguous or unprovable group stays unavailable, and Slipstream does not transfer state to a replacement file. Historical Originals without a fingerprint have an explicit batch recovery path under [Photo Library and Albums](../photo-library/spec.md); recovery revalidates every proposed mapping at commit and never deletes a filesystem file. A recovered association changes the remembered Original Location and Photo availability; it does not copy or restore file bytes. Content fingerprint enrollment runs in the background after migration and does not block initial browsing. The active unavailable count excludes Removed Photos in Trash. An open `All Photos`, Original Folder, or Album source retains its ordered Photo IDs while a rescan runs.
+The supported `0.1` writable state is SQLite schema version 15. State and derivative cache MUST be separate from the Library Folder; [Deployment](spec.md#storage-rules) owns storage admission.
 
-For a clean installation, use the repository-owned Docker procedure with a canonical absolute Library Folder, a persistent state directory, and a separate persistent cache directory. A new state store exposes initialization until its first scan publishes the Library. A compatible existing state store may serve its last complete Library while an ordinary background rescan checks for changes. The operator procedure, container hardening requirements, and health boundary are in the [deployment guide](spec.md).
+A v14-to-v15 upgrade requires a stopped service and a verified, sidecar-free, consistent pre-upgrade backup. It preserves Photo and Original identity, Rating, Album membership, saved positions, and Original Files while converting legacy Selection State to `unflagged`, `picked`, and `rejected`.
 
-For an upgrade from schema version 14, stop the service and create a verified, sidecar-free, consistent state backup before starting the schema-v15 image. The v14-to-v15 migration rebuilds legacy Selection State values into the canonical values `unflagged`, `picked`, and `rejected` without changing Photo identity, Original identity, Rating, Album membership, saved positions, or Original Files. The migration has no in-place down migration. To roll back, stop the schema-v15 service and restore the verified pre-upgrade v14 backup before starting the compatible v14 image. A v14 binary rejects schema-v15 state.
+There is no in-place down migration. Rollback MUST stop the v15 service and restore the verified v14 backup before starting a compatible v14 image; a v14 binary rejects v15 state.
 
-An upgrade from schema version 4 or earlier first completes the earlier migrations. An upgrade from schema version 5 through 13 then completes the later migrations. The v4-to-v5 migration replaces legacy v4 Photo Set storage names with Album names, and the v5-to-v6 migration establishes independent Photos; each preserves the state defined by its migration contract. Rollback across earlier migrations uses their verified backups and compatible images.
+Upgrades from v4 or earlier first complete earlier migrations; upgrades from v5 through v13 then complete later migrations. The v4-to-v5 Album migration and v5-to-v6 independent-Photo migration preserve the state defined by their respective contracts.
 
-A Library Expansion requires a verified current-schema backup after migration and before the offline expansion command. Rollback after expansion restores that pre-expansion backup and the prior Library Folder configuration.
+Rollback across earlier migrations MUST use their verified backups and compatible images. [Deployment](spec.md#backup) owns consistent recovery points and isolated restore admission.
 
-A backup is accepted only after an isolated restore starts with the same
-canonical read-only Library Folder and passes the state checks documented with
-the deployment. The
-cache contains rebuildable derivatives, not authoritative Selection State, Rating, Album membership, or saved position. An
-isolated restore or a cache rebuild may use an empty cache directory; the
-server regenerates derivatives on demand. Cache rebuild must preserve the
-state database and must not modify Original Files. The detailed backup,
-restore, and rollback procedure is operator material that lives with the
-deployment, not in this repository; on the supported host layout it is the host
-RUNBOOK at `/data/slipstream/RUNBOOK.md`. The [deployment guide](spec.md)
-defines the repository-owned parts: the backup precondition, the supported
-commands, and the post-cutover verification boundary.
+Library Expansion requires a verified current-schema backup after migration and before the offline expansion command. Rollback restores that backup and the prior Library Folder configuration.
+
+The derivative cache is rebuildable and does not own Selection State, Rating, Album membership, or saved position. An isolated restore or cache rebuild MAY use an empty cache; regeneration MUST preserve the state database and MUST NOT modify Original Files.
+
+The operator's detailed backup, restore, and rollback procedure lives with the deployment. On the supported host layout it is `/data/slipstream/RUNBOOK.md`.
 
 ## Rollback Artifact Retention
 
-A rollback artifact consists of the immediately preceding deployable image and
-its compatible, verified state backup. An operator-controlled sealed rollback
-archive, when retained outside the repository, is also a rollback artifact and
-must remain independently accessible.
+A rollback artifact consists of the immediately preceding deployable image and its compatible, verified state backup. An operator-controlled sealed rollback archive retained outside the repository is also a rollback artifact and MUST remain independently accessible.
 
-The minimum rollback window is 30 consecutive days after the replacement deployment passes production acceptance. A release approval may extend that window but must not shorten it.
+The minimum rollback window is 30 consecutive days after replacement deployment production acceptance. Release approval MAY extend, but MUST NOT shorten, that window.
 
-An operator may retire a rollback artifact only after all of these conditions hold:
+An operator MAY retire an artifact only when all conditions hold:
 
-- the replacement deployment has passed its release acceptance and an isolated
-  restore from its verified backup;
-- the minimum or explicitly extended rollback window has ended;
-- a tested rollback artifact exists for the then-current supported deployment;
-  and
-- no unresolved Original-safety, state-integrity, or service-recovery incident
-  requires the artifact.
+- The replacement passed release acceptance and an isolated restore from its verified backup.
+- The minimum or extended rollback window has ended.
+- A tested rollback artifact exists for the current supported deployment.
+- No unresolved Original-safety, state-integrity, or service-recovery incident requires the artifact.
 
-The release approval must identify the retained artifacts and the rollback
-window. Source changes, a successful build, or a release-gate decision alone
-do not retire an artifact.
+Release approval MUST identify retained artifacts and the rollback window. Source changes, a successful build, or a release-gate decision alone do not retire an artifact.
 
 ## Known Limitations and Non-Goals
 
-0.1 does not support multiple Photographers, accounts, authorization, public
-Internet access, cloud backup, XMP or Original-file writes, AI selection, RAW
-development, color-managed proofing, or parity with a desktop RAW editor. It
-does not support arbitrary server-directory selection, continuous filesystem
-watching, global disk search, fuzzy image matching, automatic merging of
-conflicting user state, full-resolution tiling, or an all-camera compatibility
-promise.
+The `0.1` artifact does not support:
 
-The 0.1 browser opens the Photo Library in a progressively loaded Grid and may browse `All Photos`, read-only Original Folders under File Locations, and Albums as distinct sources. The browser supports Album creation, rename, deletion, current-Photo membership addition, removal from the current Album, and adding an entire current recursive Folder to an Album. Explicit bulk reorder remains available through the local HTTP API; a visual bulk reorder surface is not part of 0.1. `All Photos` and Original Folders have no durable resume position; their addressed Photos and browser-local restoration follow [Library Browser Experience](../library-browser/experience/spec.md). Durable saved position belongs to an Album. Capture Time presentation follows [Photo View](../library-browser/spec.md#photo-view).
+- Multiple Photographers, accounts, or authorization.
+- Public Internet access or cloud backup.
+- XMP writes or Original-file writes.
+- AI selection, RAW development, color-managed proofing, or desktop RAW editor parity.
+- Arbitrary server-directory selection, continuous filesystem watching, or global disk search.
+- Fuzzy image matching or automatic merging of conflicting user state.
+- Full-resolution tiling.
 
-A 0.1 state store remains bound to its admitted Library Folder. Operators must not bypass the binding or change the Docker volume source beneath it. [Photo Library Identity and Expansion](../photo-library/identity.md) defines the supported offline ancestor-expansion operation and its backup and rollback requirements.
+The `0.1` artifact does not promise compatibility with every camera.
 
-Only the Linux amd64 Docker deployment and Chromium browser target are in the
-0.1 support boundary. Direct host deployment, other CPU architectures, and
-other browser engines may work but are not supported 0.1 release targets.
+The `0.1` browser has no visual bulk reorder surface; explicit bulk reorder is available through the local HTTP API. [Library Browser Experience](../library-browser/experience/spec.md) owns browser restoration and Album Resume.
 
-## 0.1.0 Release Notes
-
-These are the notes to publish only with a separately approved `0.1.0` tag and
-release action.
-
-- Slipstream provides one-Photographer browsing and selection of one existing
-  Photo Library through an operator-deployed browser service while keeping
-  Original Files read-only.
-- Each supported Original File is an independent Photo. A rescan restores a
-  moved Original File when exact content identifies one unambiguous candidate,
-  and historical Originals have a bounded explicit recovery path.
-- A JPEG Original's own content and a RAW Original's own embedded JPEG provide
-  the Preview path; Preview source and detail limits remain visible instead of
-  claiming a RAW development result.
-- `All Photos` uses deterministic camera-local Capture Time order, while Album
-  order remains Photographer-defined.
-- Durable Albums, selection decisions, Ratings, and saved Album positions
-  survive restart, rescan, moves proved by exact content, temporary file
-  unavailability, backup, and isolated restore according to the linked
-  specifications.
-- Operators use the Docker deployment procedure, preserve a verified backup
-  for schema upgrades, and may rebuild the derivative cache without losing
-  durable selection state.
-- The limitations and rollback-artifact retention conditions in this document
-  are part of the 0.1 support boundary.
-
-Creating the tag, publishing release artifacts, and recording release-specific
-image identity and acceptance evidence remain separate operator-approved
-actions.
+Operators MUST NOT bypass the state store's admitted Library Folder binding or change the Docker volume source beneath it. [Library Identity](../photo-library/identity.md) defines the supported offline ancestor expansion.

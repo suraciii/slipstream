@@ -1,6 +1,6 @@
 # Preview Pipeline
 
-Slipstream must turn large, mostly browser-incompatible Original Files into trustworthy JPEG Previews without owning a RAW development engine or changing the Photographer's files.
+Slipstream MUST turn large, mostly browser-incompatible Original Files into trustworthy JPEG Previews without owning a RAW development engine or changing the Photographer's files.
 
 [Photo Library Design](../design.md) owns Original and Photo ownership; [Photo Previews](spec.md) owns observable Preview behavior.
 
@@ -8,17 +8,17 @@ Slipstream must turn large, mostly browser-incompatible Original Files into trus
 
 - A JPEG Original's own content is the clearest available camera-produced representation.
 - Most RAW files contain one or more embedded JPEG images, but dimensions and metadata vary by camera.
-- Selection must begin before the whole Photo Library is processed.
-- Mobile browsers should not download RAW files or perform RAW decoding.
-- Magnified inspection must disclose the real resolution limit.
-- Cache generation may fail or be interrupted without damaging a valid prior derivative.
-- The implementation should integrate maintained open-source libraries, not shell out to user-facing CLI tools.
+- Selection MUST begin before the whole Photo Library is processed.
+- Mobile browsers SHOULD NOT download RAW files or perform RAW decoding.
+- Magnified inspection MUST disclose the real resolution limit.
+- Cache generation can fail or be interrupted without damaging a valid prior derivative.
+- The implementation SHOULD integrate maintained open-source libraries, not shell out to user-facing CLI tools.
 
 ## Model
 
 ### Source Candidate
 
-A Source Candidate is JPEG content that may represent a Photo:
+A Source Candidate is JPEG content that can represent a Photo:
 
 - the Photo's own JPEG Original content; or
 - one JPEG embedded in the Photo's own RAW Original.
@@ -27,16 +27,20 @@ A Photo's candidates never include another Original File's content. Candidates a
 
 ### Preview Source State
 
-Each Photo's allowed Preview Source follows from its own Original kind: a JPEG Original is its own source (`jpeg-original`), and a RAW Original is its own embedded-JPEG source (`raw-embedded-jpeg`). A Photo has exactly one allowed source, and a sibling file never provides a second candidate.
+Each Photo's allowed Preview Source follows from its own Original kind: a JPEG Original is its own source (`jpeg-original`), and a RAW Original is its own embedded-JPEG source (`raw-embedded-jpeg`).
+
+A Photo has exactly one allowed source. A sibling file never provides a second candidate.
 
 One persisted inspection state belongs to each Photo:
 
 - `inspection-pending` when no completed inspection exists for the current source revision;
 - `ready` when a usable source produced a current Derivative;
-- `failed` for a transient service or native failure that may be retried; and
+- `failed` for a transient service or native failure that MAY be retried; and
 - `unavailable` when no allowed source is usable for the current revision.
 
-A Preview fact is seeded only against the source revision it was produced from. A seed whose expected source revision no longer matches is ignored. A changed source revision returns the Photo to `inspection-pending`, and a relocation invalidates the location-derived derivative identity even when the bytes are equal.
+A Preview fact is seeded only against the source revision it was produced from. A seed whose expected source revision no longer matches is ignored.
+
+A changed source revision returns the Photo to `inspection-pending`. A relocation invalidates the location-derived derivative identity even when the bytes are equal.
 
 ### Source Inspection
 
@@ -49,13 +53,11 @@ Source Inspection determines:
 - byte size;
 - extraction or decode failure.
 
-A RAW Source Candidate also carries an optional container orientation from the
-same LibRaw inspection that produced its JPEG bytes. This is fallback metadata,
-not a second transform or another source. It remains paired with that retained
-Original descriptor and its post-operation revision check. It is not persisted
-as Photo identity or exposed as a new browser rotation control.
+A RAW Source Candidate also carries an optional container orientation from the same LibRaw inspection that produced its JPEG bytes. This is fallback metadata, not a second transform or another source.
 
-Inspection must not apply creative processing.
+It remains paired with that retained Original descriptor and its post-operation revision check. It is not persisted as Photo identity or exposed as a new browser rotation control.
+
+Inspection MUST NOT apply creative processing.
 
 ### Derivative
 
@@ -64,7 +66,9 @@ A Derivative is an immutable cached JPEG produced for a target class:
 - `thumbnail-512`;
 - `review-2560`.
 
-A Derivative records the selected source, actual dimensions, color handling, and cache revision. It does not become an Original File. Completed Derivatives persist in the configured cache directory across browser reload and server restart until an operator removes rebuildable cache data.
+A Derivative records the selected source, actual dimensions, color handling, and cache revision. It does not become an Original File.
+
+Completed Derivatives persist in the configured cache directory across browser reload and server restart until an operator removes rebuildable cache data.
 
 ### Preview Capability
 
@@ -74,33 +78,62 @@ Preview Capability describes what the selected source can support:
 - `detail-limited` when magnification reaches source pixels before useful focus inspection;
 - `unavailable` when no allowed source can be decoded.
 
-Preview Capability is a source fact. It is derived only from the delivered derivative's own width and height against the review target class: `review-2560` normally means `normal-review`, and delivered dimensions below the target long edge mean `detail-limited`. No client viewport, Preview-area geometry, window size, device pixel ratio, or current zoom state participates in the derivation, so the same Photo reports the same capability to the browser, the CLI, and an Agent. It must not invent a universal camera-independent quality score.
+Preview Capability is a source fact derived only from the delivered derivative's width and height against its review target class. `review-2560` normally means `normal-review`; dimensions below the target long edge mean `detail-limited`.
 
-The review target class is the target the delivered derivative was produced for, not the zoom the Photographer chose. A Preview that fills a small Preview area at Fit is still `detail-limited` when its own pixels are below the review target; a large Preview is not `detail-limited` merely because the current window is small.
+The review target class is the target the delivered derivative was produced for, not the Photographer's chosen zoom.
+
+Client viewport, Preview-area geometry, window size, device pixel ratio, and zoom state MUST NOT participate in the derivation. The same Photo reports the same capability to the browser, CLI, and Agent.
+
+The capability MUST NOT invent a universal camera-independent quality score.
+
+A Preview that fills a small Preview area at Fit remains `detail-limited` when its pixels are below the review target. A large Preview is not `detail-limited` merely because the current window is small.
 
 ### Web Display Condition
 
-The Web display condition is a presentation fact owned by the Preview and zoom presentation boundary. It is true when the currently rendered Preview cannot show what the current display asks for: the measured image pixels, the Preview-area geometry, and the existing zoom state together require enlarging source pixels to fill the area.
+The Web display condition is a presentation fact owned by the Preview and zoom presentation boundary. It is true when the measured image pixels, Preview-area geometry, and zoom state require enlarging source pixels to fill the area.
 
-The display condition is not Preview Capability. It is derived from browser-measured values, it may change while the Photographer resizes the window or zooms, and it says nothing about the Photo's own source. It is never persisted, never sent on the wire, and never changes a Photo fact or a Preview Capability. A surface that needs the capability asks the Preview response; a surface that needs the display condition measures its own rendering.
+The display condition is distinct from Preview Capability. It is derived from browser-measured values and can change when the Photographer resizes the window or zooms.
+
+The display condition says nothing about the Photo's own source. It MUST NOT be persisted, sent on the wire, or change a Photo fact or Preview Capability.
+
+A surface needing the capability obtains it from the Preview response. A surface needing the display condition measures its own rendering.
+
+The Web MUST recompute the display condition on Preview load, Preview-area resize, Fit recomputation, manual, wheel, and pinch zoom, and return to Fit.
+
+Where limited detail is explained, the Web accessibility tree MUST expose one combined explanation naming both the source capability and the current display condition.
 
 ## Semantics
 
 ### Source Selection
 
-For a JPEG Photo, the Preview module inspects the Photo's own JPEG content. If it is valid, it is selected.
+[Preview Source Order](spec.md#preview-source-order) owns source selection and fallback. Embedded candidates are ordered by actual pixel area, largest first.
 
-For a RAW Photo, the module asks LibRaw for embedded JPEG candidates and selects the largest valid candidate. If one embedded candidate fails to extract or decode, the module may try the next smaller candidate.
-
-A RAW Photo must not fall back to a same-basename JPEG, and a JPEG Photo must not fall back to another Original's content. No sensor-data unpacking, demosaicing, camera-profile rendering, or generic fallback is part of this pipeline.
+The native boundary MUST NOT unpack sensor data, demosaic, render camera profiles, or offer generic RAW development.
 
 ### Native Library Boundary
 
-LibRaw is the authoritative RAW container and embedded-preview extraction dependency. Slipstream uses a narrow owned C/C++ wrapper around LibRaw and libjpeg. The wrapper accepts a borrowed descriptor adapter, enumerates embedded JPEG candidates, validates complete JPEG bytes, returns bounded fixed-width results, and releases all native resources on success, failure, or cancellation. Rust retains descriptor ownership and performs the same-descriptor post-operation revision check. The wrapper must not expose LibRaw structs or native allocation ownership across the Preview module boundary.
+LibRaw is the authoritative RAW container and embedded-preview extraction dependency. A narrow owned C/C++ wrapper around LibRaw and libjpeg accepts a borrowed descriptor adapter and enumerates embedded JPEG candidates.
 
-A second narrow owned C wrapper around libvips owns JPEG inspection, orientation, bounded resize, ICC handling, and encoding. It receives bytes or a confined file handle, not an unconstrained browser path, and does not expose `VipsImage`, GLib references, or variadic option ownership to Rust. libvips is initialized once per process before Preview work and remains initialized until process exit; requests never initialize or shut down the library. The process-global lifecycle is not tied to an individual Library or PreviewService.
+The wrapper MUST fully validate JPEG bytes and return bounded fixed-width results with normalized outcomes. It MUST release all native resources on success, failure, or cancellation.
 
-Preview processing is bounded by 128 MiB input JPEG bytes, 100 million decoded pixels, 64 MiB output JPEG bytes, and 256 MiB LibRaw native memory. The Preview queue defaults to two concurrent jobs per cache directory; inspection and generation consume the same bounded budget.
+Rust MUST retain descriptor ownership and perform same-descriptor pre-operation and post-operation `fstat` revision checks. The wrapper MUST NOT expose LibRaw structs or native allocation ownership across the Preview module boundary.
+
+The wrapper MUST expose only embedded-JPEG extraction and complete JPEG validation. Whole-RAW buffering and Node-API are outside this boundary.
+
+A second narrow owned C wrapper around libvips owns JPEG inspection, orientation, bounded resize, ICC handling, and encoding. It receives bytes or a confined file handle, not an unconstrained browser path.
+
+The wrapper MUST NOT expose `VipsImage`, GLib references, or variadic option ownership to Rust.
+
+libvips is initialized once per process before Preview work and remains initialized until process exit. Requests never initialize or shut down the library; its process-global lifecycle is not tied to an individual Library or PreviewService.
+
+Preview processing is bounded by:
+
+- 128 MiB input JPEG bytes;
+- 100 million decoded pixels;
+- 64 MiB output JPEG bytes;
+- 256 MiB LibRaw native memory.
+
+The Preview queue defaults to two concurrent jobs per cache directory. Inspection and generation consume the same bounded budget.
 
 ### Orientation
 
@@ -123,11 +156,9 @@ bit-field values to standard EXIF orientation:
 - `6` becomes `6` (90-degree clockwise rotation);
 - `7` becomes `7` (transverse reflection).
 
-Any other LibRaw value supplies no fallback. LibRaw may default absent
-orientation to `0`, which leaves encoded pixel order unchanged. This mapping
-inverts LibRaw's [TIFF orientation conversion](https://github.com/LibRaw/LibRaw/blob/0.21.5/src/metadata/tiff.cpp).
-Its internal flip representation must not be passed directly as an EXIF value
-or reduced to a portrait/landscape flag.
+Any other LibRaw value supplies no fallback. LibRaw can default absent orientation to `0`, which leaves encoded pixel order unchanged.
+
+This mapping inverts LibRaw's [TIFF orientation conversion](https://github.com/LibRaw/LibRaw/blob/0.21.5/src/metadata/tiff.cpp). Its internal flip representation MUST NOT be passed directly as an EXIF value or reduced to a portrait/landscape flag.
 
 Candidate `thumbs_list.thumblist[index].tflip` does not participate in this
 fallback, whether zero, nonzero, or unknown. It is not a reliable indication
@@ -139,13 +170,11 @@ not a third candidate-flip precedence rule.
 Only JPEG EXIF orientation values 1 through 8 are valid; absent, malformed, or
 out-of-range JPEG values supply no orientation.
 
-The libvips wrapper reads the selected JPEG's orientation and applies the
-container fallback only when the JPEG has no valid value. This includes a JPEG
-with an EXIF block but without a valid Orientation field. It then normalizes
-pixels before sizing and encoding and removes orientation metadata from the
-output. Rust passes bounded metadata through the existing native boundary;
-there is no second RAW open or metadata-rewriting codec. The frontend uses the
-corrected derivative dimensions and performs no compensating rotation.
+The libvips wrapper reads the selected JPEG's orientation and applies the container fallback only when the JPEG has no valid value. This includes a JPEG with an EXIF block but without a valid Orientation field.
+
+The wrapper normalizes pixels before sizing and encoding and removes orientation metadata from the output. Rust passes bounded metadata through the existing native boundary; there is no second RAW open or metadata-rewriting codec.
+
+The frontend uses the corrected derivative dimensions and performs no compensating rotation.
 
 ### Color
 
@@ -153,7 +182,7 @@ When a valid source ICC profile exists, the pipeline preserves it if the output 
 
 When no source profile exists, the pipeline treats source RGB as sRGB. This is an interoperability default, not a claim about unknown source colorimetry.
 
-The pipeline must never copy an invalid or mismatched profile into the derivative.
+The pipeline MUST NOT copy an invalid or mismatched profile into the derivative.
 
 ### Resize
 
@@ -181,13 +210,23 @@ A Derivative cache identity includes:
 
 The first implementation does not hash whole RAW files. A changed size or modification time invalidates dependent derivatives.
 
+The Rust derivative uses cache algorithm version `rust-vips-v2`. Cache entries from earlier implementations are rebuildable stale entries and are not byte-compatible outputs.
+
+Version 2 uses the RAW-container orientation fallback while retaining JPEG orientation precedence under [Preview Normalization](spec.md#preview-normalization). New derivative records use `rust-vips-v2`.
+
+Historical identity vectors retain `sharp-v2`, `historicalCacheKey`, and `historicalManifestIdentity` as provenance for the earlier implementation. Those rebuildable cache and manifest identities are not migration authority.
+
+Only the vectors' Original File IDs, Photo IDs, and source revisions are deterministic migration authority.
+
 A change to orientation interpretation requires a new pipeline identity even
 when Original size and modification time are unchanged. An older algorithm's
-bytes or dimensions must not be reused as a current Derivative or hydrated
-current URL. Replacement remains demand-driven and must not require a Library
+bytes or dimensions MUST NOT be reused as a current Derivative or hydrated
+current URL. Replacement remains demand-driven and MUST NOT require a Library
 scan, Original edits, or deletion of unrelated cache data.
 
-Derivative creation writes to a temporary cache path and publishes the completed file atomically within the cache filesystem. A failed replacement leaves the previous valid Derivative available but stale; the protocol must identify whether a stale result is being shown.
+Derivative creation writes to a temporary cache path and publishes the completed file atomically within the cache filesystem.
+
+A failed replacement leaves the previous valid Derivative available but stale. The protocol MUST identify whether a stale result is being shown.
 
 ### Scheduling
 
@@ -203,117 +242,57 @@ Priority order is:
 4. bounded Grid look-ahead work explicitly justified by measured benefit;
 5. new or changed `review-2560` warmup.
 
-Warmup is best effort and rebuildable. It does not block Library publication or
-create a durable task table. A current manifest and complete file is a cache
-hit; an interrupted or failed item can be retried by the next scan or an
-ordinary foreground request. The first delivery does not backfill every
-existing Photo or warm `thumbnail-512`.
+Warmup is best effort and rebuildable. It does not block Library publication or create a durable task table.
+
+A current manifest and complete file is a cache hit. An interrupted or failed item can be retried by the next scan or an ordinary foreground request.
+
+The first delivery does not backfill every existing Photo or warm `thumbnail-512`.
 
 Duplicate requests for one cache identity share one in-flight job.
 Leaving a Photo does not require cancelling extraction if completion is near and
-the result remains reusable. The scheduler may cancel queued work that has no
+the result remains reusable. The scheduler MAY cancel queued work that has no
 remaining consumer.
 
 ### Delivery
 
 The browser requests a derivative by Photo identity and target class. It does not provide an Original File path.
 
-A current server-cache hit reads completed derivative bytes without reopening or reprocessing the Original File. Currentness is evaluated against the Published Library's selected source facts: candidate, Original Location, size, and modification time. Rescan is the invalidation boundary for those facts. Preview requests validate both the manifest and complete derivative bytes against that published bundle before returning a current result. Browse Window URL hydration may use only the bounded manifest, key, source-fact, and file-metadata checks; the subsequent Preview or derivative request remains the correctness-critical byte-validation boundary.
+A current server-cache hit reads completed derivative bytes without reopening or reprocessing the Original File.
 
-A derivative response uses ordinary HTTP cache validation tied to the cache
-identity, including an immutable identity-bearing URL and `ETag`. Successful
-private derivative responses use `Cache-Control: private, max-age=3600,
-must-revalidate` and `Vary: Cookie, Authorization`; errors remain
-non-cacheable. Reconnect and reload may reuse browser-cached data when the
-identity remains current.
-The response also makes Preview Source, actual dimensions, and Preview Capability available to Photo View. These facts must not be inferred only from the derivative URL.
+Currentness is evaluated against the Published Library's selected source facts: candidate, Original Location, size, and modification time. Rescan is the invalidation boundary for those facts.
 
-The display condition is not delivered. A CLI consumer receives only the stable capability and the actual downloaded dimensions, and must not be told that a display needs more detail than the derivative holds, because the CLI has no viewport and no zoom state to measure. A browser consumer that also needs the display condition derives it locally from its own measured geometry.
+Preview requests MUST validate both the manifest and complete derivative bytes against that published bundle before returning a current result.
+
+Browse Window URL hydration MAY use only bounded manifest, key, source-fact, and file-metadata checks. The subsequent Preview or derivative request remains the correctness-critical byte-validation boundary.
+
+A derivative response uses ordinary HTTP cache validation tied to the cache identity, including an immutable identity-bearing URL and `ETag`.
+
+Successful private derivative responses use `Cache-Control: private, max-age=3600, must-revalidate` and `Vary: Cookie, Authorization`; errors remain non-cacheable. Reconnect and reload MAY reuse browser-cached data when the identity remains current.
+
+The response also makes Preview Source, actual dimensions, and Preview Capability available to Photo View. These facts MUST NOT be inferred only from the derivative URL.
+
+The display condition is not delivered. A browser consumer that needs it derives it locally from measured geometry.
+
+A CLI consumer receives only the stable capability and the actual downloaded dimensions. It MUST NOT be told that a display needs more detail than the derivative holds, because it has no viewport or zoom state to measure.
 
 ## Failure Behavior
 
 A native extraction failure is bounded to the affected Photo and candidate. The worker releases native memory and records an actionable internal error without exposing absolute paths or native stack data to the browser.
 
-If all candidates fail, Preview state becomes `unavailable`. Only terminal no-usable-source outcomes (`Malformed`, `Unsupported`, and `NoUsablePreview`) seed this durable state. Hard native failures such as `ResourceLimit`, `Io`, and `Internal` remain transient service errors and must not seed durable `unavailable`, so later requests can retry them. The scheduler must not retry continuously. A source change, explicit rescan, or explicit retry may make it eligible again.
+Only terminal no-usable-source outcomes (`Malformed`, `Unsupported`, and `NoUsablePreview`) seed durable `unavailable` state.
 
-A RAW Photo's Preview failure must not substitute a same-basename JPEG, and a JPEG Photo's Preview failure must not substitute any other Original's content.
+Hard native failures such as `ResourceLimit`, `Io`, and `Internal` remain transient service errors and MUST NOT seed durable `unavailable`. Later requests can retry them.
 
-If the server stops during generation, a temporary file is not considered a valid Derivative. Startup or later cache maintenance may remove abandoned temporary files.
+The scheduler MUST NOT retry continuously. A source change, explicit rescan, or explicit retry can make the Photo eligible again.
 
-A malformed or adversarial file must not cause unbounded allocation based only on claimed dimensions. The implementation must enforce explicit input, pixel, output, memory, and concurrency limits.
+A RAW Photo's Preview failure MUST NOT substitute a same-basename JPEG, and a JPEG Photo's Preview failure MUST NOT substitute any other Original's content.
 
-## Options
+If the server stops during generation, a temporary file is not considered a valid Derivative. Startup or later cache maintenance MAY remove abandoned temporary files.
 
-### Selected: Owned LibRaw/libjpeg and libvips Wrappers
+A malformed or adversarial file MUST NOT cause unbounded allocation based only on claimed dimensions. The implementation MUST enforce explicit input, pixel, output, memory, and concurrency limits.
 
-This combination has a small responsibility split. The owned LibRaw/libjpeg wrapper knows RAW containers, embedded images, and complete JPEG validation. The owned libvips wrapper knows JPEG inspection, orientation, resize, profiles, and encoding. Slipstream owns source order, limits, process-global library lifecycle, caching, and product semantics.
+## Boundary rationale
 
-### Selected: Explicit Container Orientation Fallback
+LibRaw owns RAW container interpretation and complete JPEG validation. libvips owns JPEG normalization, so one bounded container-orientation value crosses their boundary without rewriting JPEG metadata.
 
-Pass one bounded orientation value beside extracted JPEG bytes and let the
-existing libvips normalizer resolve precedence and transform pixels. This
-handles absent and partial EXIF without constructing or rewriting JPEG metadata.
-It keeps RAW interpretation with LibRaw and pixel normalization with libvips.
-
-### Not selected: Synthesize EXIF Through LibRaw Thumbnail Output
-
-LibRaw's memory-thumbnail output can add an EXIF header when one is absent.
-That is insufficient when a JPEG already contains EXIF but has no valid
-Orientation. Extending it with another metadata-rewriting path adds a second
-metadata owner without removing the need to define precedence. An explicit
-fallback covers both cases through the same normalization path.
-
-### Rejected: LibRaw Basic RAW Conversion
-
-LibRaw's sensor-data conversion would create a new generic appearance that is less representative of the camera preview and introduces RAW-development policy. It is not a useful fallback for the first product.
-
-### Rejected: Exif-Only Thumbnail Extraction
-
-Metadata libraries can expose Preview offsets for many formats, but RAW container behavior and camera support vary. Using LibRaw as the extraction authority keeps this responsibility with the specialized library. A metadata library may still read ordinary EXIF later if product requirements justify it.
-
-### Rejected: Returning Embedded JPEG Bytes Without Normalization
-
-Direct return is attractive, but camera JPEG metadata, orientation, profiles, very large dimensions, and browser behavior vary. A small normalization step provides predictable delivery and bounded resource use. The original embedded bytes may later be an explicit magnified-inspection optimization after compatibility evidence.
-
-### Rejected: Precompute Every Derivative During Indexing
-
-Full precomputation delays first use and performs expensive I/O for Photos the Photographer may never review. Demand-driven generation serves current browsing and selection with less work.
-
-## Verification
-
-The checked-in minimal fixture contract must cover generated, redistributable JPEG inputs for orientation values 1 through 8, small and large dimensions, unprofiled RGB, valid RGB ICC, invalid ICC, CMYK conversion, corrupt and truncated input, and both derivative targets. The contract is executable by the compatibility tests and is the evidence gate for selecting a Rust pipeline algorithm version. It must not contain real photographs or generated binaries.
-
-Implementation tests must prove:
-
-- a JPEG Photo's own content is its only Preview Source and a RAW Photo uses only its own embedded candidates;
-- an unusable largest embedded candidate falls back to the next smaller embedded candidate;
-- embedded candidates are ordered by actual dimensions;
-- a RAW Photo never substitutes a same-basename JPEG, and a changed source revision returns the Photo to `inspection-pending`;
-- no code path unpacks RAW sensor pixels;
-- portrait and rotated samples display exactly once in the correct orientation;
-- generated RAW extraction-to-derivative cases cover container-only orientation,
-  JPEG precedence including normal orientation, partial EXIF, invalid or unknown
-  values, and all mirrored transforms for both targets;
-- old-algorithm derivatives and stored dimensions cannot pass current cache or
-  URL hydration checks after orientation semantics change;
-- output never exceeds source dimensions or target long edge;
-- valid profile preservation and sRGB conversion behave as specified;
-- source changes invalidate the cache;
-- concurrent duplicate requests perform one generation job;
-- completed thumbnail and review Derivatives survive process restart and reuse cache bytes without reopening the Original;
-- current work outranks adjacent and Grid work, while adjacent prefetch remains bounded;
-- interrupted generation does not publish a partial file;
-- malformed inputs remain within resource limits;
-- failures stay isolated to one Photo;
-- actual camera samples provide sufficient normal-review and magnified-inspection dimensions.
-
-Capability and presentation evidence must also prove:
-
-- Preview Capability is independent of any client viewport: the same Photo with the same delivered dimensions reports the same capability under different window sizes, Preview-area sizes, device pixel ratios, and zoom states, and a CLI result and a browser result for that Photo agree;
-- `detail-limited` follows delivered dimensions against the review target class, so a small Preview area at Fit does not change it and a large Preview area does not clear it;
-- the Web display condition is recomputed on Preview load, on Preview-area resize, on Fit recomputation, on manual, wheel, and pinch zoom, and on return to Fit, and each recomputation uses the currently measured image pixels, Preview-area geometry, and zoom state;
-- the display condition is never persisted, never appears on the wire, and never changes a Photo fact or a Preview Capability;
-- CLI parity holds for the stable fact: a CLI Preview result carries the same capability meaning and the actual downloaded dimensions, and no CLI command accepts or reports a viewport or zoom parameter;
-- where limited detail is explained, the Web accessibility tree carries one combined explanation naming both the source capability and the current display condition, so assistive technology receives the same fact the Photographer reads.
-
-Tests should compare decoded output properties and representative pixels where stable. They must not use compressed JPEG byte equality as a visual correctness assertion.
+Demand-driven generation avoids delaying first use or processing every Photo before it is needed.

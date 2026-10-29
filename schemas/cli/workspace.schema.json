@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Slipstream CLI target workspace carrier shapes",
+  "description": "Target-only known fields. Empty subschemas deliberately leave scalar types unspecified by the source contract. Other open/show/inspect fields remain governed by the CLI reference and workspace contract; runtime conformance is not implied.",
+  "$defs": {
+    "Execution": {
+      "type": "object",
+      "properties": {
+        "hostId": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": ["local", "shared-filesystem", "service-host"]
+        },
+        "accessibleToCaller": {
+          "type": "boolean"
+        },
+        "supervisedTools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["hostId", "mode", "accessibleToCaller", "supervisedTools"]
+    },
+    "OpenData": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "photoId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string"
+        },
+        "inputPath": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inputArtifactId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "webUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        },
+        "execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "previewDirectory": {
+          "type": "string"
+        },
+        "outputDirectory": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspaceId",
+        "photoId",
+        "path",
+        "inputPath",
+        "inputArtifactId",
+        "webUrl",
+        "execution",
+        "previewDirectory",
+        "outputDirectory"
+      ]
+    },
+    "RefreshInput": {
+      "type": "object",
+      "properties": {
+        "expectedSourceRevision": {
+          "type": "string"
+        }
+      },
+      "required": ["expectedSourceRevision"],
+      "additionalProperties": false
+    },
+    "RefreshData": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "outcome": {
+          "enum": ["created", "unchanged", "replayed"]
+        },
+        "inputArtifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inputPath": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workspaceStateToken": {
+          "type": "string",
+          "minLength": 1
+        },
+        "currentAvailability": {
+          "enum": ["ready", "missing", "changed", "removed"]
+        }
+      },
+      "required": [
+        "workspaceId",
+        "requestId",
+        "outcome",
+        "inputArtifactId",
+        "inputPath",
+        "revision",
+        "workspaceStateToken",
+        "currentAvailability"
+      ]
+    },
+    "WorkspaceFileItem": {
+      "type": "object",
+      "properties": {
+        "artifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "relativePath": {
+          "type": "string"
+        },
+        "kind": {},
+        "state": {},
+        "byteLength": {},
+        "sha256": {},
+        "imageContract": {},
+        "webUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        }
+      },
+      "required": [
+        "artifactId",
+        "revision",
+        "relativePath",
+        "kind",
+        "state",
+        "byteLength",
+        "sha256",
+        "imageContract",
+        "webUrl"
+      ]
+    },
+    "RemoveData": {
+      "type": "object",
+      "properties": {
+        "workspaceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "outcome": {
+          "enum": ["removed", "replayed"]
+        },
+        "inputArtifactId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inputPath": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workspaceStateToken": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "workspaceId",
+        "artifactId",
+        "revision",
+        "requestId",
+        "outcome",
+        "inputArtifactId",
+        "inputPath",
+        "workspaceStateToken"
+      ]
+    }
+  }
+}

@@ -62,16 +62,12 @@ const allowed = (path: string, line: number, text: string): boolean => {
   if (path === "specs/library-browser/design.md")
     return text.includes("Legacy Photo Set routes and source values");
   if (path === "specs/photo-library/design.md")
-    return (
-      text.includes("Legacy `Photo Set` names remain only") ||
-      text.startsWith("### Rejected: Retain Photo Set Internally") ||
-      text.startsWith("- absence of active `Photo Set` names")
-    );
+    return text.includes("Legacy `Photo Set` names remain only");
   if (path === "specs/photo-library/removal/design.md") return true;
   if (path === "specs/deployment/support.md")
     return text.includes("legacy v4 Photo Set storage names");
   if (path === "specs/photo-library/removal/spec.md") return true;
-  if (path === "specs/photo-library/rejected-cleanup/spec.md")
+  if (path === "specs/photo-library/removal/rejected-cleanup/spec.md")
     return text.includes("explicitly identified Photo sets");
   if (path === "crates/slipstream-core/src/library/mod.rs")
     return text.includes("explicit, caller-reviewed Photo set");
