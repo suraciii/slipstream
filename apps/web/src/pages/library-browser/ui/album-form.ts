@@ -690,6 +690,7 @@ export function createAlbumForm({
     setPending(formId, pending, name) {
       if (!alive || !albumForm || albumForm.formId !== formId) return;
       albumForm.pending = pending;
+      delete albumForm.unknown;
       if (name !== undefined) albumForm.name = name;
       delete albumForm.message;
       renderAlbumForm();

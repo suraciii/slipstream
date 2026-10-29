@@ -5,7 +5,7 @@ import {
   type JsonObject,
   type WorkspaceFile,
 } from "../api/workspace-edit.js";
-import type { EditChange } from "../model/workspace-edit-owner.js";
+import type { EditChange } from "../model/workspace-edit-model.js";
 import type { EditorViewModel } from "../model/editor-controller-contract.js";
 import type { EditorIntent } from "../model/editor-intent-contract.js";
 import "./workspace-editor.css";

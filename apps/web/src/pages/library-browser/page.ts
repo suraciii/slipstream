@@ -256,19 +256,19 @@ function mountPrivateLibraryBrowser(
       return;
     }
     if (coordination.kind === "reset-file-locations") {
-      resetFileLocations();
+      folders.reset();
       return;
     }
     if (coordination.kind === "load-file-location-root") {
-      await loadFolderWindow("", 0, false);
+      await folders.load("", 0, false);
       return;
     }
     if (!fileLocations.publication && coordination.overview.published) {
       if (sourceGrid.lastSource?.kind === "folder" && !sourceGrid.token) {
-        await awaitRootBinding();
+        await folders.awaitRootBinding();
         if (!coordination.isCurrent()) return;
       } else {
-        void loadFolderWindow("", 0, false);
+        void folders.load("", 0, false);
       }
     }
     if (!coordination.isCurrent()) return;
@@ -695,21 +695,12 @@ function mountPrivateLibraryBrowser(
     onReachable: () => setConnected(true),
   });
   const fileLocations = folders.owner;
-  const resetFileLocations = () => folders.reset();
-  const rebindFileLocations = () => folders.rebind();
-  const loadFolderWindow: typeof folders.load = (...args) =>
-    folders.load(...args);
-  const awaitRootBinding = () => folders.awaitRootBinding();
-  const releasePublicationLocationRecovery = () =>
-    folders.releasePublicationNotice();
-  const claimPublicationLocationNotice: typeof folders.claimPublicationNotice =
-    (...args) => folders.claimPublicationNotice(...args);
   const sourceLifecycle: SourceLifecycleOwner = createSourceOpenOwner({
     sourceGrid,
     fileLocations,
-    rebindFileLocations,
+    rebindFileLocations: () => folders.rebind(),
     onPublicationConflict: (publication) =>
-      claimPublicationLocationNotice(
+      folders.claimPublicationNotice(
         `publication:${publication}`,
         "Library changed. Reopen this folder.",
       ),
@@ -766,6 +757,7 @@ function mountPrivateLibraryBrowser(
     },
     photo: photoOwner,
     mutate: mutateAlbum,
+    refreshOverview: () => albumMutations.refreshOverview(),
     present: {
       setFormPending: (id, pending, name) =>
         view.setAlbumFormPending(id, pending, name),
@@ -803,7 +795,7 @@ function mountPrivateLibraryBrowser(
     current: () => boolean,
   ): Promise<boolean> => {
     if (kind === "folder" && !fileLocations.publication)
-      await awaitRootBinding();
+      await folders.awaitRootBinding();
     return (
       current() && (kind !== "folder" || Boolean(fileLocations.publication))
     );
@@ -829,7 +821,7 @@ function mountPrivateLibraryBrowser(
     authority: SourceAuthority,
     transition: RecoveryTransition,
   ): void => {
-    if (sourceGrid.kind === "folder") releasePublicationLocationRecovery();
+    if (sourceGrid.kind === "folder") folders.releasePublicationNotice();
     recoveryGate.succeedTransition(transition);
     sourceGrid.establish(authority);
     setConnected(true);
@@ -1853,8 +1845,8 @@ function mountPrivateLibraryBrowser(
     const remembered = sourceGrid.lastSource ?? ({ kind: "library" } as const);
     void (async () => {
       if (remembered.kind === "folder") {
-        resetFileLocations();
-        const bound = await awaitRootBinding();
+        folders.reset();
+        const bound = await folders.awaitRootBinding();
         if (!bound) {
           setGridStatusText("Could not load this source. Retry to continue.");
           return;
@@ -2033,7 +2025,7 @@ function mountPrivateLibraryBrowser(
         void albumManagement.submitForm(intent.formId, intent.name);
         return;
       case "album-overview-retry":
-        void albumMutations.refreshOverview();
+        void albumManagement.inspectAlbums();
         return;
       case "grid-render":
         renderGrid();
@@ -2316,7 +2308,7 @@ function mountPrivateLibraryBrowser(
       gridPhotoNavigation?.openPhoto(index, address, intent) ??
       Promise.resolve(false),
     leavePhoto: () => leavePhotoView(),
-    bindRoot: awaitRootBinding,
+    bindRoot: () => folders.awaitRootBinding(),
     loadWindow: (index, authority) =>
       loadWindow(index, { kind: "source", authority }, false, "high"),
     renderGrid,

@@ -103,6 +103,11 @@ for a newly selected input. Discovery failure retains a retryable unknown
 state; it is not proof that a tool is unsupported. Creation and execution
 still pass authoritative admission, with their separate refusal outcomes.
 No render on open does not remove Preview refresh after a confirmed edit.
+The supervised darktable choice uses the workspace tool's own read-only
+discovery, not the separately configured processing/export registry. Every
+file-list reconciliation rechecks the selected input identity, revision, and
+readiness; a changed or unavailable input invalidates the prior discovery.
+Discovery for a newly ready revision starts even when an older check is pending.
 
 ### Edit action
 

@@ -277,6 +277,7 @@ export type GridViewModel = Readonly<{
 type MembershipAlbumViewModel = Readonly<{ id: string; name: string }>;
 
 export type MembershipViewModel = Readonly<{
+  photoId?: string;
   photoPresent: boolean;
   loading: boolean;
   failed: boolean;

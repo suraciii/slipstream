@@ -418,6 +418,44 @@ test("gesture candidates name their effect only while active and tools retain lo
       await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
     }
   }
+  for (const trigger of ["keyboard", "wheel"]) {
+    await page.keyboard.press("f");
+    await page.locator("[data-stage] img").evaluate((image) => {
+      const rect = image.getBoundingClientRect();
+      const init = {
+        bubbles: true,
+        pointerId: 1,
+        pointerType: "mouse",
+        isPrimary: true,
+        clientX: rect.x + rect.width / 2,
+        clientY: rect.y + rect.height / 2,
+      };
+      image.dispatchEvent(new PointerEvent("pointerdown", init));
+      image.dispatchEvent(
+        new PointerEvent("pointermove", {
+          ...init,
+          clientX: init.clientX + 90,
+        }),
+      );
+    });
+    await expect(feedback).toHaveText("Pick");
+    if (trigger === "keyboard") await page.keyboard.press("d");
+    else
+      await page
+        .locator("[data-preview]")
+        .dispatchEvent("wheel", { deltaY: -100 });
+    await expect(page.locator("[data-preview]")).toHaveAttribute(
+      "data-zoom-state",
+      "manual",
+    );
+    await expect(feedback).toHaveCount(0);
+    await page
+      .locator("[data-preview]")
+      .dispatchEvent("pointerup", { pointerId: 1 });
+    await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+    await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
+  }
+  await page.keyboard.press("f");
   await expect(page.locator("[data-preview]")).toHaveAccessibleDescription(
     /Preview detail is limited/,
   );

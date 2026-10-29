@@ -5,7 +5,7 @@ import type {
   JsonObject,
 } from "../api/workspace-edit.js";
 import type { WorkspaceFilmFile } from "../api/workspace-film.js";
-import type { WorkspaceEditModel } from "./workspace-edit-owner.js";
+import type { WorkspaceEditModel } from "./workspace-edit-model.js";
 export type EditorViewModel = WorkspaceEditModel;
 export type EditorViewPort = Readonly<{
   editorVisible: () => boolean;

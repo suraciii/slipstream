@@ -674,8 +674,10 @@ export function createLibraryBrowserView(
     send,
     openNewAlbum: (invoker) =>
       albumFormController.openContextual(invoker, (album) => {
-        send({ kind: "membership-retry" });
-        if (album) membershipPanelController.focusAlbum(album.id);
+        if (album) {
+          membershipPanelController.focusAlbum(album);
+          send({ kind: "membership-retry" });
+        }
       }),
   });
 
@@ -995,8 +997,10 @@ export function createLibraryBrowserView(
     slider: zoomSlider,
     level: zoomLevel,
     isAlive: () => alive,
-    onDisplayChange: (dimensions, enlarged) =>
-      photoPresenter.setPreviewDisplay(dimensions, enlarged),
+    onDisplayChange: (dimensions, enlarged) => {
+      if (zoomController.isManual()) photoGestures.cancelFitGesture();
+      photoPresenter.setPreviewDisplay(dimensions, enlarged);
+    },
   });
   const photoPresenter = createPhotoViewPresenter({
     root: photoView,
@@ -1261,6 +1265,7 @@ export function createLibraryBrowserView(
       if (!alive) return;
       batchPresenter.renderAlbums(model);
       albumFormController.setAlbums(model);
+      membershipPanelController.setAlbums(model.albums);
     },
     renderSort(model) {
       if (!alive) return;

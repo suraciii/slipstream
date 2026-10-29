@@ -147,6 +147,12 @@ export function createGridPresenter(
   const probeState = probe.querySelector<HTMLElement>(".cell-state-group")!;
   const probeStars = probe.querySelector<HTMLElement>(".stars")!;
   const probeStateText = probe.querySelector<HTMLElement>(".state-text")!;
+  const probeMarker = probeState.firstElementChild as HTMLElement;
+  const stateSamples = [
+    ["Unflagged", "state-dot state-unflagged"],
+    ["Picked", "cell-state picked"],
+    ["Rejected", "cell-state rejected"],
+  ] as const;
 
   const layout = () => {
     const available = Math.max(0, viewport.clientWidth - insetX() * 2);
@@ -160,11 +166,19 @@ export function createGridPresenter(
     const width = Math.max(0, stride - gapX());
     probe.style.width = `${width}px`;
     probePosition.textContent = String(Math.max(1, total));
-    probeStateText.textContent = "Unflagged";
-    const unflaggedWidth = probeState.getBoundingClientRect().width;
-    probeStateText.textContent = "Rejected";
-    if (unflaggedWidth >= probeState.getBoundingClientRect().width)
-      probeStateText.textContent = "Unflagged";
+    let widestState: (typeof stateSamples)[number] = stateSamples[0];
+    let stateWidth = 0;
+    for (const sample of stateSamples) {
+      probeStateText.textContent = sample[0];
+      probeMarker.className = sample[1];
+      const measured = probeState.getBoundingClientRect().width;
+      if (measured > stateWidth) {
+        widestState = sample;
+        stateWidth = measured;
+      }
+    }
+    probeStateText.textContent = widestState[0];
+    probeMarker.className = widestState[1];
     probeStars.textContent = "☆☆☆☆☆";
     const emptyStarsWidth = probeStars.getBoundingClientRect().width;
     probeStars.textContent = "★★★★★";

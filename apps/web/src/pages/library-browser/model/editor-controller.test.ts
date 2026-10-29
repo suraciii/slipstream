@@ -4,7 +4,7 @@ import type {
   EditorViewPort,
   EditorSurfaceFactories,
 } from "./editor-controller-contract.js";
-import type { WorkspaceEditModel } from "./workspace-edit-owner.js";
+import type { WorkspaceEditModel } from "./workspace-edit-model.js";
 import type { PhotoSummary } from "../api/contracts.js";
 
 test("workspace preparation responses never take over another Photo", async () => {

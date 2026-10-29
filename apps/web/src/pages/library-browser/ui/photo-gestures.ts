@@ -45,6 +45,7 @@ export function isPaintedImagePointer(
 export interface PhotoGestures {
   reset(): void;
   cancelUnavailableDecision(): void;
+  cancelFitGesture(): void;
   dispose(): void;
 }
 type GestureAxis = "horizontal" | "vertical";
@@ -122,6 +123,9 @@ export function createPhotoGestures({
     rating.closeWheel();
     zoom.resetPointers();
     clearPointer();
+  };
+  const cancelFitGesture = () => {
+    if (pointer && !pointer.pan) reset();
   };
   const cancelUnavailableDecision = () => {
     if (
@@ -354,6 +358,7 @@ export function createPhotoGestures({
   return {
     reset,
     cancelUnavailableDecision,
+    cancelFitGesture,
     dispose() {
       if (!alive) return;
       alive = false;

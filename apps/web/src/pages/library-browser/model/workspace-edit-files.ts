@@ -1,5 +1,5 @@
 import type { BrowserFetch } from "../api/browser-fetch.js";
-import type { WorkspaceEditModel } from "./workspace-edit-owner.js";
+import type { WorkspaceEditModel } from "./workspace-edit-model.js";
 import {
   parseFile,
   parseWindow,

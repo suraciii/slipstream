@@ -12,7 +12,7 @@ import {
   type ToolJob,
   type WorkspaceFile,
 } from "../api/workspace-edit.js";
-import type { WorkspaceEditModel } from "./workspace-edit-owner.js";
+import type { WorkspaceEditModel } from "./workspace-edit-model.js";
 
 const TERMINAL_STATUSES = ["succeeded", "failed", "cancelled"];
 

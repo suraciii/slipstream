@@ -429,6 +429,66 @@ test("Grid size steps fill complete rows and keep incomplete rows uniform", asyn
   expect(await countAt(upper)).toBe(lowerCount + 1);
 });
 
+test("decision markers and Rating fit Grid captions across narrow text-size boundaries", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 6);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+  await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator('[data-photo-index="0"]')).toBeEnabled();
+  await page.keyboard.press("p");
+  await expect(page.locator('[data-photo-index="0"] .state-text')).toHaveText(
+    "Picked",
+  );
+  await expect(page.locator('[data-photo-index="0"]')).toBeEnabled();
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("x");
+  for (const selecting of [false, true]) {
+    if (selecting) await page.locator("[data-grid-select-mode]").click();
+    for (const fontSize of ["100%", "200%"]) {
+      await page.evaluate((value) => {
+        document.documentElement.style.fontSize = value;
+      }, fontSize);
+      for (const width of [320, 375, 390, 480, 760]) {
+        await page.setViewportSize({ width, height: 844 });
+        await waitForGridFrame(page);
+        const clipped = await page
+          .locator(".photo-cell[data-photo-index]")
+          .evaluateAll((cells) =>
+            cells.flatMap((cell) => {
+              const bounds = cell.getBoundingClientRect();
+              return Array.from(
+                cell.querySelectorAll(".cell-state-group, .stars"),
+              ).flatMap((fact) => {
+                const rect = fact.getBoundingClientRect();
+                return rect.left < bounds.left - 1 ||
+                  rect.right > bounds.right + 1 ||
+                  rect.bottom > bounds.bottom + 1
+                  ? [
+                      {
+                        index: (cell as HTMLElement).dataset.photoIndex,
+                        text: fact.textContent,
+                      },
+                    ]
+                  : [];
+              });
+            }),
+          );
+        expect(
+          clipped,
+          `${width}px / ${fontSize} / selecting=${selecting}`,
+        ).toEqual([]);
+      }
+    }
+  }
+});
+
 test("Grid reanchors on resize and text enlargement with required caption facts visible", async ({
   page,
 }) => {

@@ -46,6 +46,8 @@ const setup = (answer: Deferred<Response>) => {
   const pending: string[] = [];
   const messages: Array<{ formId: string; message: string }> = [];
   const pendingNames: Array<{ formId: string; name?: string }> = [];
+  let refresh = () => Promise.resolve(true);
+  let writes = 0;
   const settled = deferred<void>();
   const rendered: Array<
     Readonly<{ selectedAlbumId: string; pending: boolean; status?: string }>
@@ -67,6 +69,7 @@ const setup = (answer: Deferred<Response>) => {
       isCurrent: (value) => value === photo,
     },
     mutate: async (start, surface, _capturedPhoto, form) => {
+      writes += 1;
       const admission = start({
         sourceAuthority,
         surface: { kind: surface },
@@ -80,6 +83,10 @@ const setup = (answer: Deferred<Response>) => {
           ok: false,
           latest: false,
           failureMessage: outcome.failureMessage,
+          unknown:
+            admission.noticeKey === "create" &&
+            (outcome.settlement.kind === "malformed" ||
+              outcome.connectivity === "lost-if-latest"),
         };
       }
       settled.resolve();
@@ -90,6 +97,7 @@ const setup = (answer: Deferred<Response>) => {
         ...(outcome.folderAdd ? { folderAdd: outcome.folderAdd } : {}),
       };
     },
+    refreshOverview: () => refresh(),
     present: {
       setFormPending: (id, _pending, name) => {
         pending.push(id);
@@ -126,11 +134,46 @@ const setup = (answer: Deferred<Response>) => {
     pendingNames,
     rendered,
     settled,
+    setRefresh: (next: () => Promise<boolean>) => (refresh = next),
+    writes: () => writes,
     switchSource: () =>
       (sourceAuthority = Object.freeze({}) as SourceAuthority),
     switchPhoto: () => (photo = Object.freeze({}) as PhotoAuthority),
   };
 };
+
+test("unknown creation stays locked across close and failed or deferred inspection", async () => {
+  const answer = deferred<Response>();
+  const state = setup(answer);
+  state.controller.openForm({ formId: "first", kind: "create", name: "" });
+  const submission = state.controller.submitForm("first", "Uncertain");
+  state.controller.closeForm("first");
+  state.controller.openForm({ formId: "second", kind: "create", name: "" });
+  await state.controller.submitForm("second", "Another");
+  expect(state.writes()).toBe(1);
+  state.controller.closeForm("second");
+  state.switchSource();
+  answer.resolve(json({ albums: [] }));
+  await submission;
+  state.controller.openForm({ formId: "second", kind: "create", name: "" });
+  expect(state.messages.at(-1)?.message).toContain("Inspect the Album list");
+  state.controller.closeForm("second");
+  const waiting = deferred<boolean>();
+  state.setRefresh(() => waiting.promise);
+  const inspection = state.controller.inspectAlbums();
+  state.switchSource();
+  state.controller.openForm({ formId: "third", kind: "create", name: "" });
+  await state.controller.submitForm("third", "Another");
+  expect(state.writes()).toBe(1);
+  waiting.resolve(false);
+  await inspection;
+  await state.controller.submitForm("third", "Another");
+  expect(state.writes()).toBe(1);
+  state.setRefresh(() => Promise.resolve(true));
+  await state.controller.inspectAlbums();
+  await state.controller.submitForm("third", "Another");
+  expect(state.writes()).toBe(2);
+});
 
 describe("album management controller fences", () => {
   test("duplicate create and rename keep their current form recoverable", async () => {

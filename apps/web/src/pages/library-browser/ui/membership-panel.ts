@@ -3,7 +3,10 @@ import type {
   MembershipViewModel,
 } from "./library-browser-view.js";
 
-type MembershipPanelIntentKind = "membership-toggle" | "membership-retry";
+type MembershipPanelIntentKind =
+  | "membership-toggle"
+  | "membership-retry"
+  | "album-overview-retry";
 
 export type MembershipPanelIntent = Extract<
   LibraryBrowserIntent,
@@ -23,7 +26,8 @@ export type MembershipPanelElements = Readonly<{
 
 export interface MembershipPanel {
   render(model: MembershipViewModel): void;
-  focusAlbum(albumId: string): void;
+  focusAlbum(album: Readonly<{ id: string; name: string }>): void;
+  setAlbums(albums: ReadonlyArray<Readonly<{ id: string }>>): void;
   dispose(): void;
 }
 
@@ -50,9 +54,19 @@ export function createMembershipPanel({
   let membershipManageOpen = false;
   let membershipFocusAlbumId: string | undefined;
   let createdFocusAlbumId: string | undefined;
+  let createdAlbum:
+    | Readonly<{ id: string; name: string; photoId: string }>
+    | undefined;
+  let albums: ReadonlyArray<Readonly<{ id: string }>> = [];
 
   const render = (model: MembershipViewModel): void => {
     if (!alive) return;
+    if (createdAlbum && createdAlbum.photoId !== model.photoId) {
+      createdAlbum = undefined;
+      createdFocusAlbumId = undefined;
+    }
+    if (createdAlbum && albums.some((album) => album.id === createdAlbum?.id))
+      createdAlbum = undefined;
     const pending = new Set(model.pendingAlbumIds);
     const renderFacts = () => {
       membershipList.replaceChildren();
@@ -115,10 +129,11 @@ export function createMembershipPanel({
             ? "Loading Album membership…"
             : model.failed
               ? "Retry loading Album membership to manage Albums."
-              : "No Albums yet.";
+              : createdAlbum
+                ? "The new Album is not yet in the Album list."
+                : "No Albums yet.";
         empty.className = "membership-empty";
         membershipOptions.append(empty);
-        return;
       }
       for (const album of model.options) {
         const option = document.createElement("label");
@@ -144,6 +159,17 @@ export function createMembershipPanel({
         name.textContent = album.name;
         option.append(input, name);
         membershipOptions.append(option);
+      }
+      if (createdAlbum) {
+        const message = document.createElement("p");
+        message.textContent = `Album created: ${createdAlbum.name}. Refresh the Album list before adding Photos.`;
+        const refresh = document.createElement("button");
+        refresh.type = "button";
+        refresh.textContent = "Refresh Album list";
+        refresh.addEventListener("click", () =>
+          send({ kind: "album-overview-retry" }),
+        );
+        membershipOptions.append(message, refresh);
       }
       const targetId =
         createdFocusAlbumId ?? focusedAlbumId ?? membershipFocusAlbumId;
@@ -197,16 +223,22 @@ export function createMembershipPanel({
       currentModel = model;
       render(model);
     },
-    focusAlbum(albumId) {
-      if (!alive) return;
+    focusAlbum(album) {
+      if (!alive || !currentModel?.photoId) return;
       membershipManageOpen = true;
-      createdFocusAlbumId = albumId;
+      createdFocusAlbumId = album.id;
+      createdAlbum = { ...album, photoId: currentModel.photoId };
+      render(currentModel);
+    },
+    setAlbums(value) {
+      albums = value;
       if (currentModel) render(currentModel);
     },
     dispose() {
       alive = false;
       currentModel = undefined;
       membershipFocusAlbumId = undefined;
+      createdAlbum = undefined;
     },
   };
 }

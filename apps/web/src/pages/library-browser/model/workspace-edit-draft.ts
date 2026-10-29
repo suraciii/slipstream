@@ -1,4 +1,4 @@
-import type { EditChange } from "./workspace-edit-owner.js";
+import type { EditChange } from "./workspace-edit-model.js";
 
 export function coalesceChanges(
   changes: EditChange[],

@@ -50,7 +50,9 @@ test("Edit prepares a real input without initializing or rendering a tool", asyn
   await expect(page.locator("[data-workspace-file-groups]")).toContainText(
     "Inputs",
   );
-  expect(operations).toEqual([]);
+  expect(operations.every((operation) => operation === "modules list")).toBe(
+    true,
+  );
 });
 
 for (const viewport of [
@@ -64,20 +66,7 @@ for (const viewport of [
     const state = await setupWorkspace(page);
     for (const workspace of state.workspaces.values()) workspace.edits = [];
     await page.route("**/api/processing/modules", (route) =>
-      json(route, {
-        contractVersion: "test",
-        modules: [
-          {
-            id: { name: "darktable", adapterVersion: "test" },
-            parameterVersions: [],
-            parameterSchema: {},
-            admittedInputs: [],
-            admittedOutputs: [],
-            limits: {},
-            availability: { state: "ready", refusalReasons: [] },
-          },
-        ],
-      }),
+      json(route, { error: "processing registry unavailable" }, 503),
     );
     await startReview(page, state.url, "All Photos");
     const review = page.locator("[data-stage] img");
@@ -194,27 +183,32 @@ test("unknown tool discovery is retryable without blocking retained downloads", 
   for (const workspace of state.workspaces.values()) workspace.edits = [];
   retainFile(state, state.photos[0]!, "retained-output", Buffer.from("output"));
   let availability: "unknown" | "unavailable" | "ready" = "unknown";
-  await page.route("**/api/processing/modules", (route) =>
-    availability !== "unknown"
+  await page.route("**/api/darktable/commands", (route) =>
+    availability === "ready"
       ? json(route, {
-          contractVersion: "test",
-          modules: [
-            {
-              id: { name: "darktable", adapterVersion: "test" },
-              parameterVersions: [],
-              parameterSchema: {},
-              admittedInputs: [],
-              admittedOutputs: [],
-              limits: {},
-              availability: {
-                state: availability,
-                refusalReasons:
-                  availability === "unavailable" ? ["Engine missing"] : [],
-              },
-            },
-          ],
+          bundleId: "fixture-darktable",
+          schemaVersion: "v1",
+          items: [],
+          total: 0,
+          nextCursor: null,
         })
-      : json(route, { error: "unavailable" }, 503),
+      : json(
+          route,
+          {
+            error: {
+              code:
+                availability === "unavailable"
+                  ? "engine_unavailable"
+                  : "unknown_result",
+              message:
+                availability === "unavailable"
+                  ? "Engine missing"
+                  : "Check failed",
+              effect: "none",
+            },
+          },
+          503,
+        ),
   );
   await startReview(page, state.url, "All Photos");
   await openPhotoToolsView(page, "edit");

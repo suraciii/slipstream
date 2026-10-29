@@ -13,15 +13,18 @@ import {
   WorkspaceApiError,
   type EditView,
   type JsonObject,
-  type ToolJob,
   type Workspace,
   type WorkspaceFile,
 } from "../api/workspace-edit.js";
-import type { ProcessingModuleDescription } from "../api/processing-modules.js";
-import { fetchProcessingModules } from "../api/processing-modules.js";
 import { coalesceChanges } from "./workspace-edit-draft.js";
 import { refreshWorkspaceFiles } from "./workspace-edit-files.js";
-import { isUnknownEffect, type UncertainRequest } from "./uncertain-request.js";
+import { createWorkspaceToolDiscovery } from "./workspace-tool-discovery.js";
+import { isUnknownEffect } from "./uncertain-request.js";
+import {
+  createWorkspaceEditModel,
+  type EditChange,
+  type WorkspaceEditModel,
+} from "./workspace-edit-model.js";
 import {
   createSessionEditHistory,
   recordSessionEdit,
@@ -39,67 +42,6 @@ import {
   type WorkspaceJobLane,
 } from "./workspace-job-lane.js";
 
-export type EditChange = JsonObject & { type: string };
-export type WorkspaceEditModel = {
-  photoId: string;
-  workspace?: Workspace;
-  files: WorkspaceFile[];
-  edit?: EditView;
-  modules: JsonObject[];
-  descriptions: Record<string, JsonObject>;
-  instanceDetails: Record<string, JsonObject>;
-  maskDetails: Record<string, JsonObject>;
-  resourceKinds: JsonObject[];
-  catalogs: Record<string, JsonObject>;
-  selectedInput?: string;
-  inspectedFile?: WorkspaceFile;
-  draft: EditChange[];
-  saving: boolean;
-  loading: boolean;
-  status: string;
-  error?: WorkspaceApiError;
-  blocked: boolean;
-  preview?: {
-    url: string;
-    revision: string;
-    file: WorkspaceFile;
-    comparisonUrl?: string;
-    identity: string;
-  };
-  previewPending: boolean;
-  comparing: boolean;
-  cameraReference: boolean;
-  resultSelected?: boolean;
-  cameraReferenceUrl?: string;
-  toolDiscovery?: {
-    input: string;
-    revision: string;
-    state: "loading" | "unknown" | "ready" | "unavailable";
-    reasons: readonly string[];
-  };
-  jobs: ToolJob[];
-  history: JsonObject[];
-  /** The tool's retained revisions, restored as their own operation. */
-  retainedRevisions: JsonObject[];
-  /** Completed session edit actions available to session Undo. */
-  sessionUndoCount: number;
-  /** Reversed session actions available to session Redo. */
-  sessionRedoCount: number;
-  /** The Library's own progress, disclosed separately from the Original. */
-  libraryPhase: string;
-  fileCursor: string | null;
-  uncertain?: UncertainRequest;
-  filmElement?: HTMLElement;
-  catalogElement?: HTMLElement;
-  maskGraphSchema?: JsonObject;
-  filmModules?: readonly ProcessingModuleDescription[];
-  conflictInspected?: boolean;
-};
-/** One axis of the Edit surface's independent facts. */
-export type EditorFact = Readonly<{
-  label: string;
-  value: string;
-}>;
 export type WorkspaceEditOwner = {
   model: WorkspaceEditModel;
   refresh(): Promise<void>;
@@ -117,34 +59,9 @@ export function createWorkspaceEditOwner(
   photoId: string,
   notify: (model: WorkspaceEditModel) => void,
 ): WorkspaceEditOwner {
-  const model: WorkspaceEditModel = {
-    photoId,
-    files: [],
-    modules: [],
-    descriptions: {},
-    instanceDetails: {},
-    maskDetails: {},
-    resourceKinds: [],
-    catalogs: {},
-    draft: [],
-    saving: false,
-    loading: false,
-    status: "Preparing input",
-    blocked: false,
-    previewPending: false,
-    comparing: false,
-    cameraReference: false,
-    jobs: [],
-    history: [],
-    retainedRevisions: [],
-    sessionUndoCount: 0,
-    sessionRedoCount: 0,
-    libraryPhase: "",
-    fileCursor: null,
-  };
+  const model = createWorkspaceEditModel(photoId);
   let alive = true;
   let editGeneration = 0;
-  let discoveryGeneration = 0;
   let savePromise: Promise<void> | undefined;
   let selectingEdit = false;
   const session: SessionEditHistory = createSessionEditHistory();
@@ -158,54 +75,8 @@ export function createWorkspaceEditOwner(
   const publish = () => {
     if (alive) notify(model);
   };
-  const discoverTool = async (force = false) => {
-    const file = model.files.find(
-      (item) =>
-        item.artifactId === model.selectedInput && item.state === "ready",
-    );
-    if (!file || !file.revision) {
-      discoveryGeneration++;
-      delete model.toolDiscovery;
-      publish();
-      return;
-    }
-    if (
-      !force &&
-      model.toolDiscovery?.input === file.artifactId &&
-      model.toolDiscovery.revision === file.revision
-    )
-      return;
-    const generation = ++discoveryGeneration;
-    const input = file.artifactId;
-    const revision = file.revision;
-    model.toolDiscovery = { input, revision, state: "loading", reasons: [] };
-    publish();
-    const modules = await fetchProcessingModules(
-      fetcher,
-      new AbortController().signal,
-    );
-    if (
-      !alive ||
-      generation !== discoveryGeneration ||
-      model.selectedInput !== input ||
-      !model.files.some(
-        (item) =>
-          item.artifactId === input &&
-          item.revision === revision &&
-          item.state === "ready",
-      )
-    )
-      return;
-    const darktable = modules?.find((module) => module.id.name === "darktable");
-    model.toolDiscovery = {
-      input,
-      revision,
-      state: !darktable ? "unknown" : darktable.availability.state,
-      reasons: darktable?.availability.refusalReasons ?? [],
-    };
-    if (modules) model.filmModules = modules;
-    publish();
-  };
+  const discovery = createWorkspaceToolDiscovery(fetcher, model, publish);
+  const discoverTool = discovery.discover;
   const failure = (error: unknown, operation: string) => {
     model.error =
       error instanceof WorkspaceApiError
@@ -220,9 +91,7 @@ export function createWorkspaceEditOwner(
     model,
     publish,
     reportFailure: failure,
-    readFiles: async () => {
-      await readFiles();
-    },
+    readFiles: () => readFiles(),
     render: (operation, args, captured) => {
       void render(operation, args, captured);
     },
@@ -267,6 +136,7 @@ export function createWorkspaceEditOwner(
   });
   const readFiles = async (continuation = false) => {
     await refreshWorkspaceFiles(fetcher, model, continuation);
+    void discoverTool();
     publish();
   };
   const readEdit = async (editId: string, generation = editGeneration) => {
@@ -1071,6 +941,7 @@ export function createWorkspaceEditOwner(
     },
     dispose() {
       alive = false;
+      discovery.dispose();
       lane.dispose();
     },
   };

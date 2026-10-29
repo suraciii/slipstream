@@ -57,6 +57,7 @@ export interface AlbumManagementController {
   openForm(form: AlbumFormReference): void;
   closeForm(formId: string): boolean;
   submitForm(formId: string, draft?: string): Promise<void>;
+  inspectAlbums(): Promise<void>;
   addFolderToAlbum(albumId: string): Promise<void>;
   setAlbums(albums: ReadonlyArray<AlbumSummary>): void;
   dispose(): void;
@@ -80,6 +81,7 @@ export type AlbumManagementOptions = Readonly<{
     photoAuthority: PhotoAuthority,
     form?: AlbumFormAuthority,
   ) => Promise<AlbumMutationResult>;
+  refreshOverview: () => Promise<boolean>;
   present: Readonly<{
     setFormPending(formId: string, pending: boolean, name?: string): void;
     setFormMessage(formId: string, message: string, unknown?: boolean): void;
@@ -96,6 +98,8 @@ export type AlbumManagementOptions = Readonly<{
 }>;
 
 const ALBUM_NAME_MAXIMUM = 120;
+const INSPECT_CREATION =
+  "The Album may have been created. Inspect the Album list before creating it again.";
 
 const albumNameError = (name: string): string | undefined => {
   const trimmed = name.trim();
@@ -110,6 +114,9 @@ export function createAlbumManagementController(
 ): AlbumManagementController {
   let closed = false;
   let form: AlbumFormRecord | undefined;
+  let createPending = false;
+  let creationInspectionRequired = false;
+  let creationEpoch = 0;
   let albumList = [...options.albums()];
   let selectedAlbumId = "";
   let folderOperation:
@@ -158,6 +165,18 @@ export function createAlbumManagementController(
     options.present.dismissForm(record.formId, createdAlbum, suppressReturn);
     return true;
   };
+  const updateCreateForm = () => {
+    if (
+      !form ||
+      form.kind !== "create" ||
+      !options.actions.isFormCurrent(form.authority)
+    )
+      return;
+    if (createPending) options.present.setFormPending(form.formId, true);
+    else if (creationInspectionRequired)
+      options.present.setFormMessage(form.formId, INSPECT_CREATION, true);
+    else options.present.setFormPending(form.formId, false);
+  };
 
   return {
     openForm(reference) {
@@ -170,10 +189,29 @@ export function createAlbumManagementController(
         ...(reference.albumId ? { albumId: reference.albumId } : {}),
         initialName: reference.name,
       });
+      if (
+        reference.kind === "create" &&
+        (createPending || creationInspectionRequired)
+      )
+        updateCreateForm();
     },
     closeForm(formId) {
       if (closed || !form || form.formId !== formId) return false;
       return dismiss(form);
+    },
+    async inspectAlbums() {
+      const epoch = creationEpoch;
+      const committed = await options.refreshOverview();
+      if (
+        !closed &&
+        committed &&
+        !createPending &&
+        epoch === creationEpoch &&
+        creationInspectionRequired
+      ) {
+        creationInspectionRequired = false;
+        updateCreateForm();
+      }
     },
     async submitForm(formId, draft) {
       const record = form;
@@ -184,6 +222,13 @@ export function createAlbumManagementController(
         !options.actions.isFormCurrent(record.authority)
       )
         return;
+      if (
+        record.kind === "create" &&
+        (createPending || creationInspectionRequired)
+      ) {
+        updateCreateForm();
+        return;
+      }
       if (record.kind === "delete") {
         options.present.setFormPending(formId, true);
         const photoAuthority = options.photo.authority;
@@ -210,6 +255,10 @@ export function createAlbumManagementController(
         options.present.setFormMessage(formId, invalid);
         return;
       }
+      if (record.kind === "create") {
+        createPending = true;
+        creationEpoch += 1;
+      }
       options.present.setFormPending(formId, true, name);
       const sourceAuthority = options.source.authority;
       const photoAuthority = options.photo.authority;
@@ -223,6 +272,11 @@ export function createAlbumManagementController(
         record.authority,
       );
       if (closed) return;
+      if (record.kind === "create") {
+        createPending = false;
+        if (result.unknown) creationInspectionRequired = true;
+        if (form !== record) updateCreateForm();
+      }
       const current = options.actions.isFormCurrent(record.authority);
       const contextCurrent =
         options.source.isCurrent(sourceAuthority) &&
@@ -240,7 +294,7 @@ export function createAlbumManagementController(
             options.present.setFormMessage(
               formId,
               record.kind === "create" && result.unknown
-                ? "The Album may have been created. Inspect the Album list before creating it again."
+                ? INSPECT_CREATION
                 : (result.failureMessage ??
                     "The Album could not be saved. Try again."),
               record.kind === "create" && result.unknown,

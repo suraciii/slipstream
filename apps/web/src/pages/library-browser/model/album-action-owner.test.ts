@@ -5,6 +5,10 @@ import {
   type AlbumActionOwner,
 } from "./album-action-owner.js";
 import type { SourceAuthority } from "./source-grid-owner.js";
+import type { PhotoAuthority } from "./photo-owner.js";
+import { createAlbumMutationController } from "./album-mutation-controller.js";
+import { createApplicationOwner } from "./application-owner.js";
+import { RecoveryGate } from "./async-ownership.js";
 
 type Deferred<T> = Readonly<{
   promise: Promise<T>;
@@ -657,4 +661,134 @@ describe("AlbumActionOwner", () => {
     expect(owner.canPresent(outcome.surface)).toBe(false);
     owner.finish(outcome.mutation);
   });
+});
+
+test("a malformed successful create is an unknown outcome", async () => {
+  const actions = createAlbumActionOwner(() =>
+    Promise.resolve(jsonResponse({ albums: [] })),
+  );
+  const application = createApplicationOwner(
+    () => Promise.resolve(response()),
+    { emit: () => {} },
+  );
+  const photoAuthority = Object.freeze({}) as PhotoAuthority;
+  const controller = createAlbumMutationController({
+    actions,
+    application,
+    source: {
+      authority: defaultSourceAuthority,
+      generation: 1,
+      isCurrent: () => true,
+    },
+    gate: new RecoveryGate(),
+    photo: { authority: photoAuthority, active: false, isCurrent: () => true },
+    presentation: { surface: {}, isCurrent: () => true, status: () => {} },
+    connectionChanged: () => {},
+    reachable: () => {},
+  });
+  const result = await controller.mutate(
+    (actionContext) => actions.create("Created", actionContext),
+    "summary",
+    photoAuthority,
+  );
+  expect(result).toMatchObject({ admitted: true, ok: false, unknown: true });
+  controller.dispose();
+  actions.dispose();
+  application.dispose();
+});
+
+test("Album inspection clears older refresh failures but preserves a newer write failure", async () => {
+  for (const newerFailure of [false, true]) {
+    const held = deferred<Response>();
+    let overviewReads = 0;
+    let visibleSummary = "";
+    const created = {
+      id: "created",
+      name: "Created",
+      photoCount: 0,
+      hasSavedPosition: false,
+    };
+    const application = createApplicationOwner(
+      (path) => {
+        if (path === "/api/overview") {
+          overviewReads++;
+          return overviewReads === 1
+            ? Promise.reject(new Error("offline"))
+            : held.promise;
+        }
+        return Promise.resolve(
+          jsonResponse({ state: "idle", publication: "publication-1" }),
+        );
+      },
+      {
+        emit: (event) => {
+          if (event.kind === "summary") visibleSummary = event.summary.text;
+        },
+      },
+    );
+    const actions = createAlbumActionOwner((path) =>
+      Promise.resolve(
+        path === "/api/albums" ? albumResponse([created]) : response(409),
+      ),
+    );
+    const controller = createAlbumMutationController({
+      actions,
+      application,
+      source: {
+        authority: defaultSourceAuthority,
+        generation: 1,
+        isCurrent: () => true,
+      },
+      gate: new RecoveryGate(),
+      photo: {
+        authority: Object.freeze({}) as PhotoAuthority,
+        active: false,
+        isCurrent: () => true,
+      },
+      presentation: { surface: {}, isCurrent: () => true, status: () => {} },
+      connectionChanged: () => {},
+      reachable: () => {},
+    });
+    try {
+      expect(
+        (
+          await controller.mutate(
+            (context) => actions.create("Created", context),
+            "summary",
+          )
+        ).ok,
+      ).toBe(true);
+      const refreshFailure = visibleSummary;
+      const inspection = controller.refreshOverview();
+      if (newerFailure) {
+        expect(
+          (
+            await controller.mutate(
+              (context) => actions.rename("created", "Renamed", context),
+              "summary",
+            )
+          ).ok,
+        ).toBe(false);
+        expect(visibleSummary).not.toBe(refreshFailure);
+      }
+      const summaryBeforeCommit = visibleSummary;
+      held.resolve(
+        jsonResponse({
+          published: true,
+          publication: "publication-1",
+          photoCount: 1,
+          scan: { state: "idle", publication: "publication-1" },
+          albums: [created],
+        }),
+      );
+      expect(await inspection).toBe(true);
+      expect(application.albums).toEqual([created]);
+      if (newerFailure) expect(visibleSummary).toBe(summaryBeforeCommit);
+      else expect(visibleSummary).not.toBe(refreshFailure);
+    } finally {
+      controller.dispose();
+      actions.dispose();
+      application.dispose();
+    }
+  }
 });

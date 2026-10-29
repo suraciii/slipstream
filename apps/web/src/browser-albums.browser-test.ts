@@ -219,6 +219,63 @@ test("Photo membership creates an Album locally before explicit membership", asy
     .toBe(1);
 });
 
+test("Photo membership retains a created Album until its list refresh succeeds", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await openPhotoToolsView(page, "albums");
+  await openMembershipPanel(page);
+  const url = page.url();
+  await page.getByRole("button", { name: "New Album" }).click();
+  let failOverview = true;
+  await page.route("**/api/overview", async (route) => {
+    if (failOverview) {
+      failOverview = false;
+      await route.abort();
+    } else await route.continue();
+  });
+  await page.getByLabel("Album name").fill("Photo Needs Refresh");
+  const creation = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/albums" &&
+      response.ok(),
+  );
+  await page.getByRole("button", { name: "Create Album", exact: true }).click();
+  const body = (await (await creation).json()) as {
+    albums: Array<{ id: string; name: string }>;
+  };
+  const albumId = body.albums.find(
+    (album) => album.name === "Photo Needs Refresh",
+  )!.id;
+  await expect(
+    page.getByText(/Album created: Photo Needs Refresh/),
+  ).toBeVisible();
+  await expect(membershipCheckbox(page, "Photo Needs Refresh")).toHaveCount(0);
+  expect((await state(running.url, albumId)).members).toHaveLength(0);
+  const refreshFailure = page.getByText(
+    "The Album was saved but the Library summary could not be refreshed.",
+    { exact: true },
+  );
+  await expect(refreshFailure).toBeAttached();
+  await page.getByRole("button", { name: "Refresh Album list" }).click();
+  const checkbox = membershipCheckbox(page, "Photo Needs Refresh");
+  await expect(checkbox).toBeEnabled();
+  await expect(checkbox).not.toBeChecked();
+  await expect(refreshFailure).toHaveCount(0);
+  expect(page.url()).toBe(url);
+  await expect(page.locator("dialog[open]")).toHaveCount(1);
+  await checkbox.check();
+  await expect
+    .poll(async () => (await state(running.url, albumId)).members.length)
+    .toBe(1);
+});
+
 test("batch chooser requires a target and creates an Album without adding Photos", async ({
   page,
 }) => {
@@ -344,22 +401,68 @@ test("unknown contextual creation requires Album inspection before another attem
   await page.locator("[data-chooser-new-album]").click();
   let attempts = 0;
   await page.route("**/api/albums", async (route) => {
-    if (route.request().method() === "POST") {
-      attempts++;
-      await route.abort();
-    } else await route.continue();
+    if (route.request().method() !== "POST") return route.continue();
+    attempts++;
+    const response = await route.fetch();
+    await route.fulfill({ response, body: "{}" });
   });
   await page.getByLabel("Album name").fill("Uncertain Album");
   await page.getByRole("button", { name: "Create Album", exact: true }).click();
-  await expect(page.getByText(/may have been created/)).toBeVisible();
+  await expect(
+    page
+      .getByRole("form", { name: "Create Album" })
+      .getByText(/may have been created/),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page
+    .locator("[data-album-form-dialog]")
+    .getByRole("button", { name: "Close" })
+    .click();
+  await page.getByRole("button", { name: "Add to Album", exact: true }).click();
+  await page.locator("[data-chooser-new-album]").click();
+  await expect(
+    page.getByRole("button", { name: "Create Album", exact: true }),
+  ).toBeDisabled();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let refreshes = 0;
+  await page.route("**/api/overview", async (route) => {
+    refreshes++;
+    if (refreshes === 1) {
+      await held;
+      await route.abort();
+    } else await route.continue();
+  });
+  const refresh = page.waitForRequest(
+    (request) => new URL(request.url()).pathname === "/api/overview",
+  );
+  await page.getByRole("button", { name: "Inspect Albums" }).click();
+  await refresh;
+  await page.locator("[data-chooser-new-album]").click();
+  await expect(
+    page.getByRole("button", { name: "Create Album", exact: true }),
+  ).toBeDisabled();
+  const failed = page.waitForEvent(
+    "requestfailed",
+    (request) => new URL(request.url()).pathname === "/api/overview",
+  );
+  release();
+  await failed;
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.locator("[data-chooser-new-album]").click();
   await expect(
     page.getByRole("button", { name: "Create Album", exact: true }),
   ).toBeDisabled();
   await page.getByRole("button", { name: "Inspect Albums" }).click();
   await expect(
-    page.getByRole("heading", { name: "Add to Album" }),
-  ).toBeVisible();
-  await expect(page.locator("[data-chooser-new-album]")).toBeFocused();
+    page
+      .getByLabel("Choose an Album")
+      .locator("option", { hasText: "Uncertain Album" }),
+  ).toHaveCount(1);
+  await page.locator("[data-chooser-new-album]").click();
+  await expect(
+    page.getByRole("button", { name: "Create Album", exact: true }),
+  ).toBeEnabled();
   expect(attempts).toBe(1);
   await expect(page.locator("[data-batch-count]")).toContainText(
     "1 / 100 selected",

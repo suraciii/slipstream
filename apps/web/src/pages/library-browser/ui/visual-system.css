@@ -662,6 +662,7 @@
 .cell-state-group > .state-dot {
   flex: 0 0 auto;
   display: inline-block;
+  min-width: 0;
   width: 5px;
   height: 5px;
   border: 0;
