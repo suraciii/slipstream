@@ -207,6 +207,7 @@ export type FolderViewModel = Readonly<{
   photoCount: number;
   hasDescendantFolders: boolean;
   expanded: boolean;
+  loading: boolean;
   enabled: boolean;
   active: boolean;
   children: ReadonlyArray<FolderViewModel>;
@@ -224,6 +225,7 @@ export type SourceListViewModel = Readonly<{
   fileLocationsEnabled: boolean;
   fileLocationFailures: ReadonlyArray<Readonly<{ key: string; range: string }>>;
   rootExpanded: boolean;
+  rootLoading: boolean;
   rootActive: boolean;
   rootChildren: ReadonlyArray<FolderViewModel>;
   rootPager?: FolderViewModel["pager"];

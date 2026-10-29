@@ -140,6 +140,47 @@ describe("FileLocationOwner", () => {
     ).toHaveLength(32);
   });
 
+  test("bounds collapsed windows and reopens the retained page", async () => {
+    const owner = createFileLocationOwner((input) =>
+      Promise.resolve(windowResponse("published-1", parentFrom(input))),
+    );
+    await owner.loadWindow("", 0, false);
+    for (let index = 0; index < 40; index += 1) {
+      await owner.loadWindow(`folder-${index}`, 2);
+      owner.collapse(`folder-${index}`);
+    }
+    expect(owner.expandRetained("folder-0")).toBe(false);
+    expect(owner.expandRetained("folder-39")).toBe(true);
+    expect(owner.window("folder-39")?.page).toBe(2);
+    expect(owner.expandRetained("")).toBe(true);
+    expect(
+      Array.from({ length: 40 }, (_, index) =>
+        owner.window(`folder-${index}`),
+      ).filter(Boolean),
+    ).toHaveLength(31);
+    owner.reset();
+    expect(owner.expandRetained("folder-39")).toBe(false);
+  });
+
+  test("retained expansion cannot clear a failed refresh", async () => {
+    let fail = false;
+    const owner = createFileLocationOwner((input) =>
+      Promise.resolve(
+        fail
+          ? new Response(null, { status: 503 })
+          : windowResponse("p1", parentFrom(input)),
+      ),
+    );
+    await owner.loadWindow("", 0);
+    owner.collapse("");
+    fail = true;
+    const failed = await owner.loadWindow("", 0, false);
+    expect(failed.kind).toBe("failed");
+    expect(owner.expandRetained("")).toBe(false);
+    expect(owner.isExpanded("")).toBe(false);
+    expect(owner.failures()[0]?.parent).toBe("");
+  });
+
   test("same-parent supersession detaches a late response and keeps the newer page", async () => {
     const pending: Array<{
       url: string;

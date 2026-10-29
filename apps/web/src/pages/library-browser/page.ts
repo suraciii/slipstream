@@ -81,7 +81,6 @@ import {
   createLibraryBrowserView,
   type LibraryBrowserIntent,
   type LibraryBrowserView,
-  type SourceListViewModel,
 } from "./ui/library-browser-view.js";
 import { formatPhotoCount } from "./ui/photo-count.js";
 import { mountLibraryBrowserAccess } from "./ui/library-browser-access.js";
@@ -722,12 +721,13 @@ function mountPrivateLibraryBrowser(
         sourceGrid.kind === "folder" &&
         sourceGrid.folder?.location === location,
     );
-    const model: SourceListViewModel = {
+    view.renderSources({
       libraryCount: application.overview?.photoCount ?? 0,
       libraryActive: sourceGrid.kind === "library",
       fileLocationsEnabled: tree.enabled,
       fileLocationFailures: tree.failures,
       rootExpanded: tree.rootExpanded,
+      rootLoading: tree.rootLoading,
       rootActive:
         sourceGrid.kind === "folder" && sourceGrid.folder?.location === "",
       rootChildren: tree.rootChildren,
@@ -739,8 +739,7 @@ function mountPrivateLibraryBrowser(
         hasSavedPosition: album.hasSavedPosition,
         active: sourceGrid.kind === "album" && sourceGrid.albumId === album.id,
       })),
-    };
-    view.renderSources(model);
+    });
     albumManagement.setAlbums(application.albums);
     gridMulti.renderBatchAlbums();
   };

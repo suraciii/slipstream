@@ -6,7 +6,7 @@ import {
 import { TaskScope } from "./async-ownership.js";
 
 const FOLDER_PAGE_SIZE = 60;
-const MAXIMUM_EXPANDED_FOLDERS = 32;
+const MAXIMUM_RETAINED_FOLDERS = 32;
 
 declare const fileLocationAuthorityBrand: unique symbol;
 export type FileLocationAuthority = Readonly<{
@@ -75,6 +75,8 @@ export interface FileLocationOwner {
   isCurrent(authority: FileLocationAuthority): boolean;
   window(parent: string): FileLocationWindow | undefined;
   isExpanded(parent: string): boolean;
+  expandRetained(parent: string): boolean;
+  prepareCountRefresh(): ReadonlyMap<string, FileLocationWindow>;
   failures(): ReadonlyArray<FileLocationFailure>;
   awaitRootBinding(): Promise<FileLocationOutcome>;
   loadWindow(
@@ -122,9 +124,9 @@ export function createFileLocationOwner(
     page,
   });
 
-  const enforceExpandedCap = (newest: string) => {
-    while (expanded.size > MAXIMUM_EXPANDED_FOLDERS) {
-      const oldest = [...expanded].find(
+  const enforceWindowCap = (newest: string) => {
+    while (windows.size > MAXIMUM_RETAINED_FOLDERS) {
+      const oldest = [...windows.keys()].find(
         (location) => location !== newest && location !== "",
       );
       if (oldest === undefined) break;
@@ -177,10 +179,8 @@ export function createFileLocationOwner(
           total: result.window.total,
         }),
       );
-      if (expand) {
-        expanded.add(parent);
-        enforceExpandedCap(parent);
-      }
+      if (expand) expanded.add(parent);
+      enforceWindowCap(parent);
       const key = failureKey(ownerGeneration, parent, page);
       const recovered = failures.get(key);
       if (recovered) failures.delete(key);
@@ -260,7 +260,7 @@ export function createFileLocationOwner(
         expand
       ) {
         expanded.add("");
-        enforceExpandedCap("");
+        enforceWindowCap("");
       }
       return outcome;
     }
@@ -293,14 +293,44 @@ export function createFileLocationOwner(
     isCurrent: (candidate) => !closed && candidate === authority,
     window: (parent) => windows.get(parent),
     isExpanded: (parent) => expanded.has(parent),
+    expandRetained: (parent) => {
+      if (
+        closed ||
+        !publication ||
+        [...failures.values()].some((failure) => failure.parent === parent)
+      )
+        return false;
+      const retained = windows.get(parent);
+      if (!retained) return false;
+      windows.delete(parent);
+      windows.set(parent, retained);
+      expanded.add(parent);
+      return true;
+    },
     failures: () =>
       [...failures.values()].sort((left, right) => left.order - right.order),
     awaitRootBinding,
     loadWindow,
-    collapse: (parent) => {
-      if (!expanded.delete(parent)) return false;
-      if (parent) windows.delete(parent);
-      return true;
+    collapse: (parent) => expanded.delete(parent),
+    prepareCountRefresh: () => {
+      const visible = new Set<string>([""]);
+      const pending = [""];
+      for (let index = 0; index < pending.length; index += 1) {
+        const parent = pending[index]!;
+        if (!expanded.has(parent)) continue;
+        for (const child of windows.get(parent)?.children ?? []) {
+          if (!expanded.has(child.location) || visible.has(child.location))
+            continue;
+          visible.add(child.location);
+          pending.push(child.location);
+        }
+      }
+      for (const parent of windows.keys()) {
+        if (visible.has(parent)) continue;
+        windows.delete(parent);
+        expanded.delete(parent);
+      }
+      return new Map(windows);
     },
     retry,
     reset: () => {

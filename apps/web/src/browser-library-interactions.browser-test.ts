@@ -155,3 +155,70 @@ test("nested Folder expansion and paging keep focus on their controls", async ({
   await expect(expand).toHaveAttribute("aria-expanded", "false");
   await expect(expand).toBeFocused();
 });
+
+for (const width of [1200, 390]) {
+  test(`Folder disclosure shows pending work and reopens retained children offline at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 844 });
+    const { base, root } = await fixture();
+    const child = join(root, "Parent", "Child");
+    await mkdir(child, { recursive: true });
+    await writePhotos(child, 1);
+    const running = await server(base, root);
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    let requests = 0;
+    await page.route(/\/api\/file-locations\?/, async (route) => {
+      if (
+        new URL(route.request().url()).searchParams.get("parent") === "Parent"
+      ) {
+        requests += 1;
+        await held;
+      }
+      await route.continue();
+    });
+    await page.goto(running.url);
+    await expect(page.locator("[data-grid-status]")).toHaveText(
+      "Ready · 1 Photo",
+    );
+    await openSources(page);
+    await page
+      .getByRole("button", { name: "Toggle Library Folder subfolders" })
+      .click();
+    const expand = page.getByRole("button", {
+      name: "Toggle Parent subfolders",
+    });
+    await expand.click();
+    try {
+      await expect(
+        page
+          .getByRole("status")
+          .filter({ hasText: "Loading subfolders of Parent" }),
+      ).toBeVisible();
+      await expect(expand).toBeFocused();
+      await expect(expand).toHaveAttribute("aria-expanded", "false");
+      await expect(expand).toHaveAttribute("aria-disabled", "true");
+      await expand.press("Enter");
+      await expect.poll(() => requests).toBe(1);
+    } finally {
+      release();
+    }
+    const childLink = page.locator(
+      '[data-focus-key="source:folder:Parent/Child"]',
+    );
+    await expect(childLink).toBeVisible();
+    await expect(page.locator(".folder-loading")).toHaveCount(0);
+    await expect(expand).toHaveAttribute("aria-disabled", "false");
+    await expand.click();
+    await expect(childLink).toHaveCount(0);
+    await page.context().setOffline(true);
+    try {
+      await expand.click();
+      await expect(childLink).toBeVisible();
+      await expect(expand).toBeFocused();
+      expect(requests).toBe(1);
+    } finally {
+      await page.context().setOffline(false);
+    }
+  });
+}

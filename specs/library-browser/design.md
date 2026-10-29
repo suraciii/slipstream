@@ -35,6 +35,29 @@ The server derives Folder summaries from one Published Library according to [Phy
 
 A newer publication expires the old value. The browser restarts File Location navigation instead of combining windows from different publications. No route returns the complete Folder tree or complete recursive Folder membership. The Library Overview therefore remains small even when directory count grows with the Library.
 
+The File Location owner retains at most 32 parent windows, including the root,
+across expanded and collapsed Folders. Collapse changes disclosure without
+discarding a retained page. Reopening uses that page immediately unless the
+parent has an unresolved failure. Retention evicts an older non-root window;
+publication reset discards every window. Explicit count refresh first discards
+non-root windows outside the expanded, current-page tree, including descendants
+hidden by an ancestor or by paging. It then captures the remaining bounded set
+and admits those window requests together. Collapse cannot skip a captured
+target or reopen it when refresh settles; newer page requests still supersede
+older reads. Settlement uses the existing File Location authority, so an old
+refresh cannot modify a replacement generation. No traversal or cache cleanup
+continues after the captured requests settle.
+
+The controller owns each pending expansion and its loading presentation.
+Repeated expansion joins that operation; reset and teardown invalidate its
+presentation. A same-parent refresh or page request releases superseded
+expansion feedback; Retry replaces it with feedback for its own request. An
+obsolete, non-abortable transport cannot keep the disclosure busy or prevent
+collapse after its replacement settles. Refresh, paging, and retry still
+request authoritative windows.
+This bounded reuse avoids a network round trip for every disclosure without
+retaining the complete tree or bypassing failure recovery.
+
 ### Browse Snapshot
 
 A Browse Snapshot is an internal, ephemeral server object. It is not a product or domain concept exposed to the Photographer.
