@@ -146,8 +146,8 @@ does not replace commit ordering or the data floor.
 
 `GET /api/file-locations` belongs to an independent File Location scope with
 key `(fileLocationGeneration, parent)`. Source, Grid, and Photo changes neither
-abort nor detach it. Only same-parent supersession, File Location generation
-reset, or application teardown may detach it. Its transport may finish after
+abort nor detach it. Same-parent supersession, explicit count refresh, File
+Location generation reset, or application teardown MAY detach it. Its transport may finish after
 detachment, but its response cannot render, clear retry state, or replace the
 parent's current page.
 
@@ -170,6 +170,13 @@ other callers await its settlement instead of starting or cancelling a second
 bind. Resetting the File Location generation or tearing down the application
 releases those waiters with an unbound result. Root binding is not superseded
 by ordinary child-window work.
+
+Explicit count refresh MUST renew the File Location request scope while
+preserving publication authority and existing exact-range failure identities.
+It MUST reject already-produced outcomes from the previous request scope.
+It MUST release superseded waiters without awaiting their transports. The
+[File Location refresh plan](../library-browser/design.md#file-location-window)
+owns which current requests are re-admitted.
 
 ### Browse open and reopen
 

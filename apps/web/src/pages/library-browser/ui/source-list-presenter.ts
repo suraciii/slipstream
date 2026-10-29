@@ -139,6 +139,13 @@ export const createSourceListPresenter = (
     controls.append(prior, label, more);
     return controls;
   };
+  const appendLoading = (fragment: DocumentFragment, name: string) => {
+    const status = document.createElement("span");
+    status.className = "folder-loading folder-page-label";
+    status.setAttribute("role", "status");
+    status.textContent = `Loading subfolders of ${name}…`;
+    fragment.append(status);
+  };
   const appendFolder = (
     fragment: DocumentFragment,
     folder: FolderViewModel,
@@ -153,15 +160,20 @@ export const createSourceListPresenter = (
       expand.className = "folder-expand";
       expand.dataset.focusKey = `folder:expand:${folder.location}`;
       expand.setAttribute("aria-expanded", String(folder.expanded));
+      expand.setAttribute(
+        "aria-disabled",
+        String(folder.loading && !folder.expanded),
+      );
       expand.textContent = folder.expanded ? "▾" : "▸";
       expand.setAttribute("aria-label", `Toggle ${folder.name} subfolders`);
-      expand.addEventListener("click", () =>
+      expand.addEventListener("click", () => {
+        if (folder.loading && !folder.expanded) return;
         options.send({
           kind: "folder-toggle",
           location: folder.location,
           expanded: folder.expanded,
-        }),
-      );
+        });
+      });
       row.append(expand);
     }
     const source = {
@@ -182,6 +194,7 @@ export const createSourceListPresenter = (
     );
     row.append(button);
     fragment.append(row);
+    if (folder.loading) appendLoading(fragment, folder.name);
     if (!folder.expanded) return;
     for (const child of folder.children) appendFolder(fragment, child);
     if (folder.pager)
@@ -201,6 +214,8 @@ export const createSourceListPresenter = (
       focused instanceof HTMLElement
         ? focused.dataset.focusFallback
         : undefined;
+    const focusedRetryParent =
+      focused instanceof HTMLElement ? focused.dataset.retryParent : undefined;
     sourceList.replaceChildren();
     const library = createSourceButton(
       "All Photos",
@@ -221,11 +236,22 @@ export const createSourceListPresenter = (
       const retry = document.createElement("button");
       retry.type = "button";
       retry.className = "folder-more";
+      retry.dataset.focusKey = `folder:retry:${failure.key}`;
+      retry.dataset.retryParent = failure.parent;
+      retry.setAttribute("aria-disabled", String(failure.loading));
       retry.textContent = `Retry Folders (${failure.range})`;
-      retry.addEventListener("click", () =>
-        options.send({ kind: "file-location-retry", key: failure.key }),
-      );
+      retry.addEventListener("click", () => {
+        if (!failure.loading)
+          options.send({ kind: "file-location-retry", key: failure.key });
+      });
       sourceList.append(retry);
+      if (failure.loading) {
+        const status = document.createElement("span");
+        status.className = "folder-loading folder-page-label";
+        status.setAttribute("role", "status");
+        status.textContent = `Retrying Folders (${failure.range})…`;
+        sourceList.append(status);
+      }
     }
     const rootSource = {
       kind: "folder" as const,
@@ -250,18 +276,24 @@ export const createSourceListPresenter = (
     rootExpand.className = "folder-expand";
     rootExpand.dataset.focusKey = "folder:expand:";
     rootExpand.setAttribute("aria-expanded", String(next.rootExpanded));
+    rootExpand.setAttribute(
+      "aria-disabled",
+      String(next.rootLoading && !next.rootExpanded),
+    );
     rootExpand.textContent = next.rootExpanded ? "▾" : "▸";
     rootExpand.setAttribute("aria-label", "Toggle Library Folder subfolders");
-    rootExpand.addEventListener("click", () =>
+    rootExpand.addEventListener("click", () => {
+      if (next.rootLoading && !next.rootExpanded) return;
       options.send({
         kind: "folder-toggle",
         location: "",
         expanded: next.rootExpanded,
-      }),
-    );
+      });
+    });
     rootRow.append(rootExpand, rootCard);
     const folders = document.createDocumentFragment();
     folders.append(rootRow);
+    if (next.rootLoading) appendLoading(folders, "Library Folder");
     if (next.rootExpanded) {
       for (const folder of next.rootChildren) appendFolder(folders, folder);
       if (next.rootPager) folders.append(createFolderPager("", next.rootPager));
@@ -301,12 +333,21 @@ export const createSourceListPresenter = (
     }
     if (options.restoreSourceFocus(focusTarget)) return;
     const restored = focusedKey ? focusTarget(focusedKey) : undefined;
+    let retryFallback: HTMLElement | undefined;
+    if (!restored && focusedRetryParent !== undefined) {
+      let parent = focusedRetryParent;
+      while (true) {
+        retryFallback = focusTarget(`folder:expand:${parent}`);
+        if (retryFallback || !parent) break;
+        const slash = parent.lastIndexOf("/");
+        parent = slash < 0 ? "" : parent.slice(0, slash);
+      }
+    }
     const target =
       restored && !restored.matches(":disabled")
         ? restored
-        : focusedFallback
-          ? focusTarget(focusedFallback)
-          : undefined;
+        : (retryFallback ??
+          (focusedFallback ? focusTarget(focusedFallback) : undefined));
     if (target && !target.matches(":disabled"))
       target.focus({ preventScroll: true });
   };

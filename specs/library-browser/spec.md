@@ -27,6 +27,28 @@ A source name that is visually truncated must expose its complete name on hover.
 
 Opening Slipstream must not require the browser to download every Photo fact, every Album member, or the complete Original Folder tree. Album summaries may arrive with the bounded Library Overview. The `Folders` section must show a root labeled `Library Folder` without exposing its absolute server path, then load descendants as bounded direct-child Folder windows. A Folder window must report its real parent, range, direct-child count, and recursive Photo counts without returning complete recursive membership.
 
+Expanding a Folder must show a loading status immediately when its children
+are not retained. Repeated expansion while that request is pending must join
+the same work. A retained child window from the current File Location
+publication must reopen immediately, preserving its page without another
+request. Collapsed windows may remain in the bounded navigation cache;
+publication reset must discard them. Reopening retained content must not clear
+an unresolved Folder failure or replace an explicit refresh or retry.
+
+Explicit Folder count refresh MUST prevent older requests from restoring stale
+counts, including requests whose children have not appeared yet. It MUST
+preserve the latest requested page for visible Folders. A response that arrives
+after a Folder is collapsed MUST NOT reopen it.
+
+Folder Retry MUST retain keyboard focus while pending and expose progress even
+when its Folder is hidden. Successful Retry MUST move focus to an appropriate
+visible Folder control when the retry control disappears. Repeated activation
+of the same pending Retry MUST join that work.
+
+An expanded Folder MUST remain collapsible while its request is pending.
+Loading feedback MUST fit the Sources surface even for long unbroken Folder
+names, while retaining the complete accessible name.
+
 All Folder windows retained together must come from the same Published Library. Library summary counts and Albums must also be revalidated against that publication before they replace visible shared facts. If a rescan replaces the publication while an older summary or File Locations are loading, Slipstream must discard the older summary and refresh File Locations rather than append or present facts from different publications. Opening a Folder from an expired publication must refresh navigation and require the Photographer to open the current Folder projection; it must not silently reinterpret the stale Location against a different publication.
 
 The first product uses two views:

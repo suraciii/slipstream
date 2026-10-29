@@ -35,6 +35,44 @@ The server derives Folder summaries from one Published Library according to [Phy
 
 A newer publication expires the old value. The browser restarts File Location navigation instead of combining windows from different publications. No route returns the complete Folder tree or complete recursive Folder membership. The Library Overview therefore remains small even when directory count grows with the Library.
 
+The File Location owner retains at most 32 parent windows, including the root,
+across expanded and collapsed Folders. Collapse changes disclosure without
+discarding a retained page. Reopening uses that page immediately unless the
+parent has an unresolved failure. Retention evicts an older non-root window;
+publication reset discards every window.
+
+Explicit count refresh MUST replace the pending request scope without changing
+publication authority or exact-range failure identities. It MUST detach earlier
+Folder continuations without waiting for their non-abortable transports.
+
+The refresh plan MUST contain only visible retained windows and already
+requested visible windows. It MUST preserve the latest requested page and
+expansion intent. Hidden windows MUST be discarded, including descendants
+hidden by an ancestor or by paging.
+
+The captured requests MUST start together before another interaction can
+change the plan. A later collapse MUST prevent a pending response from reopening
+that Folder. Newer same-parent requests MUST supersede earlier requests.
+
+An obsolete response MUST NOT change counts or replace current retry state.
+Tree traversal and cache cleanup MUST NOT continue after the captured requests
+settle.
+
+Read-state changes and waiter resolution MUST occur in one synchronous
+settlement. Summary and Recovery claims MUST match the current exact-range
+failure identities, even when refresh supersedes a completed read's presentation.
+
+The controller owns each pending expansion and its loading presentation.
+Repeated expansion joins that operation; reset and teardown invalidate its
+presentation. A superseding refresh or page request releases pending expansion
+feedback; Retry replaces it with feedback for its own request. An
+obsolete, non-abortable transport cannot keep the disclosure busy or prevent
+collapse after its replacement settles. Refresh, paging, and retry still
+request authoritative windows. A load joining the initial root binding keeps
+the existing expansion feedback.
+This bounded reuse avoids a network round trip for every disclosure without
+retaining the complete tree or bypassing failure recovery.
+
 ### Browse Snapshot
 
 A Browse Snapshot is an internal, ephemeral server object. It is not a product or domain concept exposed to the Photographer.
