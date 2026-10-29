@@ -449,6 +449,13 @@ test("decision markers and Rating fit Grid captions across narrow text-size boun
   await expect(page.locator('[data-photo-index="0"]')).toBeEnabled();
   await page.keyboard.press("ArrowRight");
   await page.keyboard.press("x");
+  await expect(page.locator('[data-photo-index="1"] .state-text')).toHaveText(
+    "Rejected",
+  );
+  await expect(page.locator('[data-photo-index="2"] .state-text')).toHaveText(
+    "Unflagged",
+  );
+  await expect(page.locator('[data-photo-index="1"]')).toBeEnabled();
   for (const selecting of [false, true]) {
     if (selecting) await page.locator("[data-grid-select-mode]").click();
     for (const fontSize of ["100%", "200%"]) {
