@@ -3,7 +3,6 @@ import { createApplicationOwner } from "../model/application-owner.js";
 import { createApplicationPresentationController } from "../model/application-presentation-controller.js";
 import { RecoveryGate } from "../model/async-ownership.js";
 import type { LibraryBrowserIntent } from "./library-browser-view-contract.js";
-import { APP_SHELL_TEMPLATE } from "./library-browser-view.js";
 import { createSummaryPresenter } from "./library-status.js";
 
 // The unit runtime has no DOM. These elements implement the DOM operations
@@ -122,29 +121,6 @@ const fixture = () => {
 };
 
 describe("compact Library status", () => {
-  test("the shell starts with a hidden, accessible status disclosure", () => {
-    const entry =
-      APP_SHELL_TEMPLATE.match(
-        /<div\b[^>]*\bdata-library-status-entry\b[^>]*>/,
-      )?.[0] ?? "";
-    const toggle =
-      APP_SHELL_TEMPLATE.match(
-        /<button\b[^>]*\bdata-library-status-toggle\b[^>]*>[^<]*<\/button>/,
-      )?.[0] ?? "";
-    const notice =
-      APP_SHELL_TEMPLATE.match(
-        /<div\b[^>]*\bdata-library-status-notice\b[^>]*>/,
-      )?.[0] ?? "";
-    expect(entry).toMatch(/\shidden(?:\s|>)/);
-    expect(toggle).toContain('aria-expanded="false"');
-    expect(toggle).toContain('aria-controls="library-status-notice"');
-    expect(toggle).toContain(">Library status</button>");
-    expect(notice).toContain('id="library-status-notice"');
-    expect(notice).toContain('role="status"');
-    expect(notice).toContain('aria-live="polite"');
-    expect(notice).toMatch(/\shidden(?:\s|>)/);
-  });
-
   test("normal and background summaries keep the entry hidden", () => {
     const ui = fixture();
     try {

@@ -933,8 +933,11 @@
 .grid-empty {
   position: absolute;
   inset: 0;
-  display: grid;
-  place-items: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
   padding: 1.5rem;
   color: var(--muted);
   font-size: 0.9rem;
@@ -1467,52 +1470,6 @@
   white-space: nowrap;
 }
 
-.swipe-feedback {
-  display: grid;
-  place-items: center;
-  color: var(--muted);
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  transition: background 100ms;
-  writing-mode: vertical-rl;
-}
-
-/* A Pick and a Reject are decisions, and the resting label that names them is
-   ordinary text rather than a hint. The direction labels carry no opacity
-   composition: resting Pick and Reject keep their own colors, which already
-   clear the 4.5:1 resting text contrast once the dimming is gone. Pending
-   stays distinct through its existing background and text treatment. */
-.swipe-feedback.pick {
-  color: var(--selected);
-}
-
-.swipe-feedback.reject {
-  color: var(--rejected);
-}
-
-.swipe-feedback.pending {
-  background: var(--selected-bg);
-}
-
-.swipe-feedback.reject.pending {
-  background: var(--rejected-bg);
-}
-
-/* The direction labels are a touch affordance. On a device whose primary
-   pointer can hover, they stay out of sight until a drag shows the pending
-   direction. The reserved columns are kept so nothing shifts mid-drag. */
-@media (hover: hover) {
-  .swipe-feedback {
-    visibility: hidden;
-  }
-
-  .swipe-feedback.pending {
-    visibility: visible;
-  }
-}
-
 /* The bounded neighbor strip: a quiet navigation aid beside the Preview on a
    wide layout, and the disclosed Nearby Photos content of Photo tools on a
    compact one. It never widens Photo View. */
@@ -1699,12 +1656,13 @@
    it. Each subview carries its own local return to the list. */
 .photo-tools-actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.3rem;
 }
 
 .photo-tools-actions button {
   min-height: 2.75rem;
+  text-align: left;
 }
 
 /* Navigation remains in the Photo primary region; supporting tools contain no
@@ -1712,8 +1670,8 @@
 .photo-tools-entries {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 0.3rem;
-  margin-top: 0.5rem;
+  gap: 0.75rem;
+  margin-top: 0.25rem;
   justify-content: flex-start;
   text-align: left;
 }
@@ -1730,10 +1688,23 @@
   margin-bottom: 0.4rem;
 }
 
-.photo-tools-view-header h3 {
-  margin: 0;
-  font-size: 0.85rem;
-  font-weight: 680;
+.photo-tools-entries h3 {
+  margin: 0 0 0.25rem;
+  color: var(--muted);
+  font: 500 0.75rem var(--font-ui);
+}
+.photo-tools-help summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+.photo-tools-help p {
+  margin-top: 0.5rem;
+}
+.options-body > section {
+  display: grid;
+  gap: 0.5rem;
 }
 
 .rating-controls {
@@ -1741,14 +1712,6 @@
   margin: 0;
   padding: 0;
   border: 0;
-}
-
-.rating-controls legend,
-.membership-heading {
-  margin: 0 0 0.25rem;
-  color: var(--muted);
-  font-size: 0.68rem;
-  font-weight: 650;
 }
 
 .rating-controls div {
@@ -1968,14 +1931,6 @@
   }
   .grid-header-row > * {
     min-width: 0;
-  }
-  .grid-header-row .grid-tools button,
-  .grid-header-row .grid-selection button {
-    flex: 0 1 auto;
-    max-width: 5.5rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   /* Keep primary browsing controls compact with 44px touch targets. */

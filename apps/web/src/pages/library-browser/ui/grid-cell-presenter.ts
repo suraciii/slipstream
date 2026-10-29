@@ -44,7 +44,6 @@ export type GridCell = {
 };
 
 type GridCellPresenterOptions = Readonly<{
-  compact: () => boolean;
   gapX: () => number;
   insetX: () => number;
   insetY: () => number;
@@ -127,7 +126,6 @@ function gridCellSignature(
 
 export function createGridCellPresenter(options: GridCellPresenterOptions) {
   const {
-    compact,
     gapX,
     insetX,
     insetY,
@@ -149,7 +147,7 @@ export function createGridCellPresenter(options: GridCellPresenterOptions) {
   ): void => {
     cell.style.left = `${insetX() + (index % count) * stride}px`;
     cell.style.top = `${insetY() + Math.floor(index / count) * rowPitch()}px`;
-    cell.style.width = compact() ? `${stride - gapX()}px` : "";
+    cell.style.width = `${stride - gapX()}px`;
   };
 
   const applyMulti = (cell: HTMLButtonElement, index: number): void => {
@@ -268,7 +266,10 @@ export function createGridCellPresenter(options: GridCellPresenterOptions) {
     kind.textContent = `${photo.original.kind === "raw" ? "RAW" : "JPEG"}${
       photo.hasSavedEdits ? " · Edited" : ""
     }`;
-    meta.append(stateMark, stateText, stars, kind);
+    const stateGroup = document.createElement("span");
+    stateGroup.className = "cell-state-group";
+    stateGroup.append(stateMark, stateText);
+    meta.append(stateGroup, stars, kind);
     caption.append(line, meta);
     const rendered: GridCell = {
       cell,
@@ -288,9 +289,8 @@ export function createGridCellPresenter(options: GridCellPresenterOptions) {
         rendered.deliveryFailed,
         rendered.thumbnailState,
       );
-      // Exceptional facts replace the kind slot instead of adding a third
-      // caption line. The media placeholder names the same condition, so no
-      // text escapes the uniform cell.
+      // Exceptional facts use the optional kind slot; the placeholder and
+      // accessible name retain them when that slot cannot fit.
       kind.textContent =
         issues.length === 0
           ? `${photo.original.kind === "raw" ? "RAW" : "JPEG"}${

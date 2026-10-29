@@ -244,9 +244,12 @@ Use native dialog.showModal for modal surfaces. One page UI controller owns
 which surface is active, its invoker, its local subview, and draft values.
 It does not own a stack of routes or server state. A content transition within
 Photo tools replaces the modal content and restores a meaningful focus target.
-Native close/cancel events, explicit Close, and scrim dismissal converge on
-one cleanup path. Use explicit edge focus handling if needed to keep Tab in
-the surface. Destroy pending gesture candidates before opening it.
+The modal owner first classifies a close request under the experience contract:
+contextual Album form cancellation returns locally; whole-surface dismissal
+uses one cleanup and outer-focus restoration path. Handle native cancel before
+the dialog closes when that request means local return. History traversal
+always dismisses the whole surface. Use edge focus handling if needed to keep
+Tab contained, and destroy pending gesture candidates before opening.
 
 Browser history traversal closes the current modal before destination
 rendering. The UI must not add dummy history to emulate native close requests.
@@ -263,6 +266,35 @@ Loaded Preview inspection remains local during disconnection. Opening a panel
 must not change Photo readiness; readiness still derives from existing owners.
 Closed Nearby Photos releases strip thumbnails and admits no windows. Opening
 it uses the same bounded neighbor facts and five-entry limit as the wide strip.
+
+### Filter drafts and summaries
+
+View options owns one draft of the committed filter, order, and size. Reset
+filters changes only that draft's filter; direct zero-result Clear filters is
+an applied-view intent to the existing source/navigation owner. Counts and
+header summaries project committed choices, never unsent drafts. The compact
+summary counts condition groups from that same filter; it has no parallel
+query model. Immediate Browse or Source actions discard the draft and capture
+the committed scope before leaving options. No URL parameter or endpoint is added.
+
+### Contextual Album creation and choice
+
+The single modal owner retains a bounded local return context: its initiating
+surface and focus target, source/Photo generation, and, for a batch chooser,
+the existing at-most-100 selected stable IDs. It is not browser history or a
+new Album store. New Album replaces the chooser or membership content locally.
+Create uses the existing Album owner and form identity; successful creation
+returns only while that initiating context remains current. Membership is a
+later explicit action, never a continuation automatically sent after create.
+
+Closing or changing destination detaches the local return context, not the
+admitted write. Late creation can update shared Album facts through existing
+settlement but cannot reopen a surface or restore selection. At batch-add
+admission, the existing Album owner captures the chosen Album and eligible
+selected IDs; no selector or late response may change that captured target.
+Known missing Photos remain in the result/count under the batch contract but
+are excluded from a new request. Unknown creation is reconciled through Album
+inspection, not an automatic create retry or inferred membership.
 
 ## Options
 
@@ -303,6 +335,30 @@ Smaller controls violate touch targets. Wrapping every control can preserve
 reachability while removing the Photo's usable space. Contextual action
 regions and actual closed panels make the space contract testable.
 
+### Selected: Counted narrow summary, explicit full conditions
+
+A counted summary inside the existing View options entry keeps complete action
+labels, the 88px budget, and one keyboard disclosure path. Expanding the header
+for every condition defeats the space contract; an internally scrollable micro
+strip makes review depend on precision scrolling. Wide layouts retain explicit
+condition text. Full committed values remain programmatically described and
+visible when options opens, so compactness does not change filter meaning.
+
+### Selected: Separate creation and explicit membership
+
+Reusing one contextual form preserves Photo or batch context and the existing
+Album write boundary. A combined create-and-add action would need new atomicity,
+partial-success, and retry semantics. Sending the user to Sources avoids those
+semantics but loses the initiating task. Contextual create followed by an
+explicit membership choice needs neither a new transaction nor a collection mode.
+
+### Selected: On-demand batch target selection
+
+One Album chooser preserves the first-level action budget and makes the target
+explicit. A permanently embedded selector consumes narrow tray space even when
+the next action is Pick or Reject. Both can use existing membership writes;
+the chooser adds only bounded presentation state and no second operation owner.
+
 ## Verification
 
 Focused automated coverage must derive from the product examples and prove:
@@ -339,6 +395,26 @@ Focused automated coverage must derive from the product examples and prove:
 - query deep links still pass the production host's existing health, static
   asset, and bounded browsing verification without a route migration; and
 - the canonical repository gate passes after each implementation slice.
+
+Additional hierarchy evidence must cover:
+
+- all five filter groups, each range with one or both bounds, custom order,
+  default filters, narrow summaries, keyboard disclosure, draft reset/cancel,
+  immediate clear, and Source actions with unapplied drafts;
+- contextual Album creation from Photo membership and a batch chooser, an
+  empty Album list, cancelled and invalid names, unknown creation, failed
+  membership after successful creation, close or source change during writes,
+  and no implicit add, source transition, or second modal;
+- cancelled, committed, lost-capture, and superseded gestures on touch-only,
+  hover, and hybrid inputs, with no resting direction labels;
+- the title and return path of each Photo tools subview, including Help,
+  keyboard focus, and hidden controls;
+- all batch outcome classes with on-demand Album choice, all-already-member
+  results, scoped compensation expiry, one announcement, and visible final-row
+  captions; and
+- every thumbnail size, widths around column transitions, resized Sources,
+  selection gutters, long names, unloaded cells, and 200% text using consistent
+  geometry and identity-based restoration.
 
 Physical Android Chromium evidence must identify device, browser version,
 viewport, system Back versus toolbar traversal, keyboard/safe-area behavior,

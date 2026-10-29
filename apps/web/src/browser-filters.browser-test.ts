@@ -11,6 +11,8 @@ import {
   server,
   libraryPhoto,
   post,
+  browseIds,
+  createAlbum,
 } from "./browser-test-support/fixtures.js";
 import {
   applyViewOptions,
@@ -28,10 +30,10 @@ setupBrowserSmoke();
 
 const CAPTURE_TIMES = {
   a: "2026-01-02T09:00:00",
-  b: "2026-01-03T09:00:00",
+  b: "2026-01-03T09:00:45",
   c: "2026-01-04T09:00:00",
   d: "2026-01-05T09:00:00",
-  e: "2026-01-06T09:00:00",
+  e: "2026-01-06T09:00:59",
 } as const;
 
 const RATINGS = {
@@ -138,21 +140,16 @@ test("a selected high-rated view keeps its exact filtered count", async ({
     "Source progress: 3 picked · 0 rejected · 3 unflagged",
   );
 
-  // Every committed condition is named in the header, and the narrow header
-  // gives that text its own row instead of clipping it behind the tools.
+  // Narrow summaries count condition groups while the entry describes values.
   await page.setViewportSize({ width: 320, height: 844 });
   const flag = page.locator("[data-view-options-flag]");
   await expect(flag).toBeVisible();
-  await expect(flag).toContainText(/picked/i);
-  await expect(flag).toContainText(/4/);
-  expect(
-    await flag.evaluate(
-      (element) =>
-        element.scrollWidth <= element.clientWidth + 1 &&
-        element.scrollHeight <= element.clientHeight + 1,
-    ),
-  ).toBe(true);
-  await expect(flag).toHaveCSS("overflow-y", "auto");
+  await expect(flag.locator(".options-summary-compact")).toHaveText(
+    /Filters: 2/,
+  );
+  await expect(page.locator("[data-grid-view-options]")).toHaveAccessibleName(
+    /Picked.*Rating 4/,
+  );
   expect(
     await page
       .locator(".grid-header")
@@ -308,6 +305,10 @@ test("a Capture Time range is inclusive below and exclusive above", async ({
   const { base, root } = await fixture();
   await seedFilterSource(page, root);
   const running = await server(base, root);
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setTimezoneOverride", {
+    timezoneId: "Pacific/Honolulu",
+  });
 
   await page.goto(running.url);
   await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
@@ -320,8 +321,16 @@ test("a Capture Time range is inclusive below and exclusive above", async ({
   await page.locator("[data-captured-before]").fill(CAPTURE_TIMES.e);
   await applyViewOptions(page);
 
-  await expect(page).toHaveURL(/captured-from=2026-01-03T09%3A00%3A00/);
-  await expect(page).toHaveURL(/captured-before=2026-01-06T09%3A00%3A00/);
+  await expect(page).toHaveURL(/captured-from=2026-01-03T09%3A00%3A45/);
+  await expect(page).toHaveURL(/captured-before=2026-01-06T09%3A00%3A59/);
+  await openViewOptions(page);
+  await expect(page.locator("[data-captured-from]")).toHaveValue(
+    CAPTURE_TIMES.b,
+  );
+  await expect(page.locator("[data-captured-before]")).toHaveValue(
+    CAPTURE_TIMES.e,
+  );
+  await page.locator("[data-view-options-cancel]").click();
   // b, c, and d match: the lower bound includes b, the upper bound excludes e,
   // and f has no Capture Time.
   await expect(page.locator(".photo-cell")).toHaveCount(3);
@@ -397,7 +406,6 @@ test("Refresh, Retry, and Snapshot expiry retain the committed filter", async ({
   failOpen = true;
   await refresh();
   await expect(page.locator("[data-grid-status]")).toContainText("Retry");
-  await page.locator("[data-view-options-cancel]").click();
   await openSources(page);
   await page.locator("[data-retry]").click();
   await expect.poll(() => opens.length).toBe(3);
@@ -410,7 +418,55 @@ test("Refresh, Retry, and Snapshot expiry retain the committed filter", async ({
   expect(opens[3]).toMatchObject(expected);
 });
 
-test("background window settlement preserves View options draft until Apply or Cancel", async ({
+test("Reset is staged, Cancel discards it, and Apply preserves order and size", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const { base, root } = await fixture();
+  await seedFilterSource(page, root);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
+  await openViewOptions(page);
+  await page.locator("[data-filter-select]").selectOption("unflagged");
+  await page.locator("[data-kind-select]").selectOption("jpeg");
+  await applyViewOptions(page);
+  await expect(page).toHaveURL(/selection=unflagged&kind=jpeg/);
+  const original = page.url();
+  const opens: Record<string, unknown>[] = [];
+  await page.route("**/api/browse", async (route) => {
+    if (route.request().method() === "POST")
+      opens.push(route.request().postDataJSON() as Record<string, unknown>);
+    await route.continue();
+  });
+  await openViewOptions(page);
+  await page.locator("[data-sort-select]").selectOption("capture-time-desc");
+  await page.locator("[data-size-select]").selectOption("large");
+  await page.locator("[data-reset-filters]").click();
+  await expect(page.locator("[data-filter-select]")).toHaveValue("all");
+  await expect(page.locator("[data-kind-select]")).toHaveValue("");
+  expect(page.url()).toBe(original);
+  expect(opens).toHaveLength(0);
+  await page.locator("[data-view-options-cancel]").click();
+  await openViewOptions(page);
+  await expect(page.locator("[data-filter-select]")).toHaveValue("unflagged");
+  await expect(page.locator("[data-kind-select]")).toHaveValue("jpeg");
+  await page.locator("[data-sort-select]").selectOption("capture-time-desc");
+  await page.locator("[data-size-select]").selectOption("large");
+  await page.locator("[data-reset-filters]").click();
+  await applyViewOptions(page);
+  await expect(page).toHaveURL(/order=capture-time-desc/);
+  expect(page.url()).not.toContain("selection=");
+  expect(page.url()).not.toContain("kind=");
+  await expect.poll(() => opens.length).toBe(1);
+  await openViewOptions(page);
+  await expect(page.locator("[data-size-select]")).toHaveValue("large");
+  await expect(page.locator("[data-sort-select]")).toHaveValue(
+    "capture-time-desc",
+  );
+});
+
+test("immediate Refresh discards dirty choices and reopens the committed filter", async ({
   page,
 }) => {
   test.setTimeout(180_000);
@@ -424,65 +480,107 @@ test("background window settlement preserves View options draft until Apply or C
   await page.locator("[data-rating-min-select]").selectOption("4");
   await applyViewOptions(page);
   await expect(page.locator(".photo-cell")).toHaveCount(3);
-  const held = Promise.withResolvers<void>();
-  const requested = Promise.withResolvers<void>();
-  await page.route(/\/api\/browse\/[^/?]+\?/, async (route) => {
-    requested.resolve();
-    await held.promise;
+  const opens: Record<string, unknown>[] = [];
+  await page.route("**/api/browse", async (route) => {
+    if (route.request().method() === "POST")
+      opens.push(route.request().postDataJSON() as Record<string, unknown>);
     await route.continue();
   });
   await openViewOptions(page);
-  await expect(page.locator("[data-rating-min-select]")).toHaveValue("4");
   await page.locator("[data-filter-select]").selectOption("unflagged");
-  await page.locator("[data-sort-select]").selectOption("capture-time-desc");
-  await page.locator("[data-refresh]").click();
-  await requested.promise;
   await page.locator("[data-rating-min-select]").selectOption("3");
-  await page.locator("[data-rating-max-select]").selectOption("5");
-  await page.locator("[data-kind-select]").selectOption("jpeg");
-  await page.locator("[data-available-select]").selectOption("true");
-  await page.locator("[data-captured-from]").fill(CAPTURE_TIMES.a);
-  await page.locator("[data-captured-before]").fill(CAPTURE_TIMES.d);
-  held.resolve();
-  await expect(page.locator("[data-filter-select]")).toBeEnabled();
-  await expect(page.locator("[data-filter-select]")).toHaveValue("unflagged");
+  await page.locator("[data-sort-select]").selectOption("capture-time-desc");
+  await expect(page.locator("[data-draft-discard-notice]")).toBeVisible();
+  await page.locator("[data-refresh]").click();
+  await expect.poll(() => opens.length).toBe(1);
+  expect(opens[0]).toMatchObject({ ratingMinimum: 4 });
+  await expect(page.locator(".photo-cell")).toHaveCount(3);
+  await openViewOptions(page);
+  await expect(page.locator("[data-filter-select]")).toHaveValue("all");
+  await expect(page.locator("[data-rating-min-select]")).toHaveValue("4");
+  await expect(page.locator("[data-sort-select]")).toHaveValue(
+    "source-default",
+  );
+  await expect(page.locator("[data-draft-discard-notice]")).toBeHidden();
+});
+
+test("zero matches offer immediate Clear filters without changing order or size", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const { base, root } = await fixture();
+  await seedFilterSource(page, root);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  const { albumId } = await createAlbum(running.url, "Filter clearing", ids);
+  await page.goto(`${running.url}/?source=album&albumId=${albumId}`);
+  await expect(page.locator(".photo-cell")).toHaveCount(6);
+  await openViewOptions(page);
+  await page.locator("[data-kind-select]").selectOption("raw");
+  await page.locator("[data-sort-select]").selectOption("capture-time-desc");
+  await page.locator("[data-size-select]").selectOption("large");
+  await applyViewOptions(page);
+  await expect(page.locator("[data-grid-empty-action]")).toHaveText(
+    "Adjust filters",
+  );
+  await expect(page.locator("[data-grid-empty-clear-filters]")).toBeVisible();
+  await page.locator("[data-grid-empty-action]").click();
+  await expect(page.locator("[data-kind-select]")).toHaveValue("raw");
+  await page.locator("[data-view-options-cancel]").click();
+  const historyLength = await page.evaluate(() => history.length);
+  await page.locator("[data-grid-empty-clear-filters]").click();
+  await expect(page.locator(".photo-cell")).toHaveCount(6);
+  await expect(page).toHaveURL(/order=capture-time-desc/);
+  expect(new URL(page.url()).searchParams.get("albumId")).toBe(albumId);
+  expect(new URL(page.url()).searchParams.get("source")).toBe("album");
+  expect(page.url()).not.toContain("kind=");
+  expect(await page.evaluate(() => history.length)).toBe(historyLength);
+  await openViewOptions(page);
+  await expect(page.locator("[data-size-select]")).toHaveValue("large");
   await expect(page.locator("[data-sort-select]")).toHaveValue(
     "capture-time-desc",
   );
-  await expect(page.locator("[data-rating-min-select]")).toHaveValue("3");
-  await expect(page.locator("[data-rating-max-select]")).toHaveValue("5");
-  await expect(page.locator("[data-kind-select]")).toHaveValue("jpeg");
-  await expect(page.locator("[data-available-select]")).toHaveValue("true");
-  await expect(page.locator("[data-captured-from]")).toHaveValue(
-    CAPTURE_TIMES.a,
-  );
-  await expect(page.locator("[data-captured-before]")).toHaveValue(
-    CAPTURE_TIMES.d,
-  );
-  await applyViewOptions(page);
-  await expect(page.locator(".photo-cell")).toHaveCount(2);
-  await expect(page).toHaveURL(/rating-min=3/);
-  await expect(page).toHaveURL(/rating-max=5/);
-  await expect(page).toHaveURL(/kind=jpeg/);
-  await expect(page).toHaveURL(/available=true/);
-  await expect(page).toHaveURL(/captured-from=/);
-  await expect(page).toHaveURL(/captured-before=/);
-  await expect(page).toHaveURL(/selection=unflagged/);
-  await expect(page).toHaveURL(/order=capture-time-desc/);
+});
+
+test("invalid camera-local bounds never open a source", async ({ page }) => {
+  test.setTimeout(180_000);
+  const { base, root } = await fixture();
+  await seedFilterSource(page, root);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
+  const opens: string[] = [];
+  await page.route("**/api/browse", async (route) => {
+    if (route.request().method() === "POST") opens.push(route.request().url());
+    await route.continue();
+  });
+  const original = page.url();
   await openViewOptions(page);
-  await expect(page.locator("[data-rating-min-select]")).toHaveValue("3");
-  await expect(page.locator("[data-kind-select]")).toHaveValue("jpeg");
-  await expect(page.locator("[data-captured-from]")).toHaveValue(
-    CAPTURE_TIMES.a,
-  );
-  await page.locator("[data-rating-min-select]").selectOption("4");
-  await page.locator("[data-kind-select]").selectOption("");
-  await page.locator("[data-captured-from]").fill("");
-  await page.locator("[data-view-options-cancel]").click();
-  await openViewOptions(page);
-  await expect(page.locator("[data-rating-min-select]")).toHaveValue("3");
-  await expect(page.locator("[data-kind-select]")).toHaveValue("jpeg");
-  await expect(page.locator("[data-captured-from]")).toHaveValue(
-    CAPTURE_TIMES.a,
-  );
+  const from = page.locator("[data-captured-from]");
+  const before = page.locator("[data-captured-before]");
+  await from.fill("2026-10-29T12:30:45");
+  await before.fill("2026-10-29T12:30:45");
+  await page.locator("[data-view-options-apply]").click();
+  expect(
+    await before.evaluate(
+      (input) => (input as HTMLInputElement).validity.valid,
+    ),
+  ).toBe(false);
+  await before.fill("2026-10-29T12:30:44");
+  await page.locator("[data-view-options-apply]").click();
+  expect(
+    await before.evaluate(
+      (input) => (input as HTMLInputElement).validity.valid,
+    ),
+  ).toBe(false);
+  await before.fill("2026-10-29T12:30:46Z");
+  await page.locator("[data-view-options-apply]").click();
+  expect(
+    await before.evaluate(
+      (input) => (input as HTMLInputElement).validity.valid,
+    ),
+  ).toBe(false);
+  expect(opens).toHaveLength(0);
+  expect(page.url()).toBe(original);
+  await expect(page.locator("[data-view-options]")).toBeVisible();
 });

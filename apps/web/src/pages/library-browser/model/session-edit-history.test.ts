@@ -10,7 +10,7 @@ import {
   type SessionEditEntry,
 } from "./session-edit-history.js";
 import { inverseChanges } from "./session-edit-inverse.js";
-import type { EditChange } from "./workspace-edit-owner.js";
+import type { EditChange } from "./workspace-edit-model.js";
 
 const editState = (
   instances: ReadonlyArray<Readonly<Record<string, unknown>>>,

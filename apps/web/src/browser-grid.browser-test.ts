@@ -331,6 +331,250 @@ test("narrow Large cells keep their 3:2 media and complete caption in one row", 
   expect(nextTop).toBeGreaterThanOrEqual(geometry.cellBottom);
 });
 
+test("Grid size steps fill complete rows and keep incomplete rows uniform", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const { base, root } = await fixture();
+  await writePhotos(root, 41);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 41 Photos$/)).toBeVisible();
+  const viewport = page.locator("[data-grid-viewport]");
+  await waitForGridFrame(page);
+
+  for (const size of ["small", "medium", "large"]) {
+    await openViewOptions(page);
+    if (size === "small")
+      await expect(page.locator("[data-size-select]")).toHaveValue("medium");
+    await page.locator("[data-size-select]").selectOption(size);
+    await applyViewOptions(page);
+    for (const width of [1200, 761, 760, 390]) {
+      await page.setViewportSize({ width, height: 800 });
+      await waitForGridFrame(page);
+      await viewport.evaluate((element) => {
+        element.scrollTop = 0;
+      });
+      await expect(page.locator('[data-photo-index="0"]')).toBeVisible();
+      await expect
+        .poll(async () =>
+          viewport.evaluate((element) => {
+            const cells = Array.from(
+              element.querySelectorAll<HTMLElement>(
+                ".photo-cell[data-photo-index]",
+              ),
+            );
+            const count = Number(element.dataset.columns);
+            if (cells.length < count) return false;
+            const first = cells[0]!.getBoundingClientRect();
+            const last = cells[count - 1]!.getBoundingClientRect();
+            const view = element.getBoundingClientRect();
+            const left = first.left - view.left;
+            const right = view.left + element.clientWidth - last.right;
+            return (
+              Math.abs(left - right) < 2 &&
+              cells.slice(0, count).every((cell) => {
+                const box = cell.getBoundingClientRect();
+                const media = cell
+                  .querySelector<HTMLElement>(".cell-media")!
+                  .getBoundingClientRect();
+                const footer = cell
+                  .querySelector<HTMLElement>(".cell-footer")!
+                  .getBoundingClientRect();
+                return (
+                  Math.abs(box.width - first.width) < 1 &&
+                  Math.abs(box.height - first.height) < 1 &&
+                  Math.abs(media.width / media.height - 1.5) < 0.02 &&
+                  footer.bottom <= box.bottom + 1
+                );
+              })
+            );
+          }),
+        )
+        .toBe(true);
+      const firstWidth = (await page
+        .locator('[data-photo-index="0"]')
+        .boundingBox())!.width;
+      await viewport.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+      });
+      const last = page.locator('[data-photo-index="40"]');
+      await expect(last).toBeVisible();
+      expect(
+        Math.abs((await last.boundingBox())!.width - firstWidth),
+      ).toBeLessThan(1);
+    }
+  }
+  // Find a Large-step transition without assuming a particular sidebar width.
+  let lower = 800;
+  let upper = 1200;
+  const countAt = async (width: number) => {
+    await page.setViewportSize({ width, height: 800 });
+    await viewport.evaluate((element) => {
+      element.scrollTop = 0;
+    });
+    await waitForGridFrame(page);
+    await waitForGridFrame(page);
+    return Number(await viewport.getAttribute("data-columns"));
+  };
+  const lowerCount = await countAt(lower);
+  expect(await countAt(upper)).toBeGreaterThan(lowerCount);
+  while (upper - lower > 1) {
+    const middle = Math.floor((lower + upper) / 2);
+    if ((await countAt(middle)) === lowerCount) lower = middle;
+    else upper = middle;
+  }
+  expect(await countAt(lower)).toBe(lowerCount);
+  expect(await countAt(upper)).toBe(lowerCount + 1);
+});
+
+test("decision markers and Rating fit Grid captions across narrow text-size boundaries", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 6);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+  await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator('[data-photo-index="0"]')).toBeEnabled();
+  await page.keyboard.press("p");
+  await expect(page.locator('[data-photo-index="0"] .state-text')).toHaveText(
+    "Picked",
+  );
+  await expect(page.locator('[data-photo-index="0"]')).toBeEnabled();
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("x");
+  await expect(page.locator('[data-photo-index="1"] .state-text')).toHaveText(
+    "Rejected",
+  );
+  await expect(page.locator('[data-photo-index="2"] .state-text')).toHaveText(
+    "Unflagged",
+  );
+  await expect(page.locator('[data-photo-index="1"]')).toBeEnabled();
+  for (const selecting of [false, true]) {
+    if (selecting) await page.locator("[data-grid-select-mode]").click();
+    for (const fontSize of ["100%", "200%"]) {
+      await page.evaluate((value) => {
+        document.documentElement.style.fontSize = value;
+      }, fontSize);
+      for (const width of [320, 375, 390, 480, 760]) {
+        await page.setViewportSize({ width, height: 844 });
+        await waitForGridFrame(page);
+        const clipped = await page
+          .locator(".photo-cell[data-photo-index]")
+          .evaluateAll((cells) =>
+            cells.flatMap((cell) => {
+              const bounds = cell.getBoundingClientRect();
+              return Array.from(
+                cell.querySelectorAll(".cell-state-group, .stars"),
+              ).flatMap((fact) => {
+                const rect = fact.getBoundingClientRect();
+                return rect.left < bounds.left - 1 ||
+                  rect.right > bounds.right + 1 ||
+                  rect.bottom > bounds.bottom + 1
+                  ? [
+                      {
+                        index: (cell as HTMLElement).dataset.photoIndex,
+                        text: fact.textContent,
+                      },
+                    ]
+                  : [];
+              });
+            }),
+          );
+        expect(
+          clipped,
+          `${width}px / ${fontSize} / selecting=${selecting}`,
+        ).toEqual([]);
+      }
+    }
+  }
+});
+
+test("Grid reanchors on resize and text enlargement with required caption facts visible", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 150);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 150 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+  const viewport = page.locator("[data-grid-viewport]");
+  const count = Number(await viewport.getAttribute("data-columns"));
+  const index = count * 8;
+  await viewport.evaluate((element) => {
+    const first = element.querySelector<HTMLElement>('[data-photo-index="0"]')!;
+    const next = element.querySelector<HTMLElement>(
+      `[data-photo-index="${element.dataset.columns}"]`,
+    )!;
+    element.scrollTop = 8 * (next.offsetTop - first.offsetTop) + 5;
+  });
+  const anchor = page.locator(`[data-photo-index="${index}"]`);
+  await expect(anchor).toBeVisible();
+  await anchor.focus();
+  await page.keyboard.press("x");
+  await expect(anchor).toHaveAccessibleName(/Rejected/);
+  await page.keyboard.press("5");
+  await expect(anchor).toHaveAccessibleName(/5 stars/);
+  await page.setViewportSize({ width: 900, height: 800 });
+  await expect(anchor).toBeFocused();
+  await expect
+    .poll(() =>
+      anchor.evaluate((cell) => {
+        const view = cell.closest<HTMLElement>("[data-grid-viewport]")!;
+        const row = cell.getBoundingClientRect();
+        const viewportBox = view.getBoundingClientRect();
+        return row.bottom > viewportBox.top && row.top < viewportBox.bottom;
+      }),
+    )
+    .toBe(true);
+  await page.locator("[data-grid-select-mode]").click();
+  await anchor.focus();
+
+  await page.addStyleTag({ content: "html { font-size: 200% !important; }" });
+  await expect(anchor).toBeFocused();
+  await expect
+    .poll(() =>
+      anchor.evaluate((cell) => {
+        const box = cell.getBoundingClientRect();
+        const view = cell
+          .closest<HTMLElement>("[data-grid-viewport]")!
+          .getBoundingClientRect();
+        const required = [".cell-name", ".cell-pos", ".state-text", ".stars"];
+        return (
+          box.bottom > view.top &&
+          box.top < view.bottom &&
+          required.every((selector) => {
+            const fact = cell.querySelector<HTMLElement>(selector)!;
+            const rect = fact.getBoundingClientRect();
+            return (
+              rect.width > 0 &&
+              rect.height > 0 &&
+              rect.bottom <= box.bottom + 1 &&
+              rect.right <= box.right + 1
+            );
+          })
+        );
+      }),
+    )
+    .toBe(true);
+  await expect(anchor).toHaveAccessibleName(/Rejected.*5 stars/);
+  await page.locator("[data-grid-multi-done]").click();
+  await anchor.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("[data-review]")).toBeVisible();
+  await closePhotoTools(page);
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(anchor).toBeFocused();
+});
+
 test("the batch tray leaves the final Grid row scrollable above it", async ({
   page,
 }) => {

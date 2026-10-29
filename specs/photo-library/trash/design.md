@@ -104,6 +104,16 @@ Unavailable can mean temporary storage failure, a moved Original, or incomplete 
 
 This makes a normal Library Check rediscover an orphaned file as a new Photo and erases decisions even though the external deletion step did not occur. Fresh absence is the conservative eligibility rule for this workflow.
 
+### Selected: Layered evidence without a new data projection
+
+The Web list reuses the existing bounded Trash facts and available derivative
+URLs. Recognizable facts and Restore lead; technical identifiers and bytes use
+Details. Capture validity and consequential outcomes remain visible, and
+Location output retains its complete namespace and observation evidence.
+Always displaying every protocol field makes recovery harder to scan; removing
+those fields or their capture guards would weaken inspection. A new thumbnail
+pipeline or per-row full Photo read is unnecessary for this hierarchy.
+
 ## Verification
 
 Implementation must prove through disposable fixtures:

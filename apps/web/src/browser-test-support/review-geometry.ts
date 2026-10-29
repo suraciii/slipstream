@@ -1,5 +1,4 @@
 import { expect, type Page } from "@playwright/test";
-import { contrastRatio } from "./surfaces.js";
 
 /// The primary controls the continuous review surface must keep above the safe
 /// viewport: the context row, the one Previous/position/Next navigation group,
@@ -40,6 +39,12 @@ export async function expectControlsAboveSafeViewport(
       `${selector} ends below the safe viewport`,
     ).toBeLessThanOrEqual(viewportHeight);
   }
+  expect(
+    await page
+      .locator("[data-selection]")
+      .evaluate((element) => element.scrollWidth <= element.clientWidth + 1),
+    "Selection State remains fully readable",
+  ).toBe(true);
 }
 
 /// Asserts the review strip paints no overlapping text ranges. Element
@@ -75,38 +80,4 @@ export async function expectNoTextRangeCollision(page: Page) {
       return collisions;
     });
   expect(overlaps).toEqual([]);
-}
-
-/// Asserts the gesture direction labels carry no dimming composition, so their
-/// resting state is ordinary text that must meet the resting text contrast.
-export async function expectDirectionLabelsMeetRestingContrast(page: Page) {
-  const labels = await page.evaluate(() => {
-    const measure = (selector: string) => {
-      const node = document.querySelector(selector);
-      if (!node) throw new Error(`Missing ${selector}`);
-      const style = getComputedStyle(node);
-      // The Preview is the label's own backdrop, and it paints nothing behind
-      // the label except that background.
-      const backdrop = node.closest(".preview") ?? document.body;
-      return {
-        text: node.textContent ?? "",
-        foreground: style.color,
-        background: getComputedStyle(backdrop).backgroundColor,
-        opacity: style.opacity,
-        filter: style.filter,
-      };
-    };
-    return {
-      pick: measure("[data-pick-feedback]"),
-      reject: measure("[data-reject-feedback]"),
-    };
-  });
-  for (const label of [labels.pick, labels.reject]) {
-    expect(label.opacity).toBe("1");
-    expect(label.filter).toBe("none");
-    expect(
-      contrastRatio(label.foreground, label.background),
-      `${label.text} resting contrast`,
-    ).toBeGreaterThanOrEqual(4.5);
-  }
 }

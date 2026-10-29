@@ -31,7 +31,6 @@ import {
 } from "./browser-test-support/surfaces.js";
 import {
   expectControlsAboveSafeViewport,
-  expectDirectionLabelsMeetRestingContrast,
   expectNoTextRangeCollision,
 } from "./browser-test-support/review-geometry.js";
 
@@ -917,15 +916,4 @@ test("844 by 390 leaves no text range collision in the review strip", async ({
   await waitForLoadedReviewImage(page);
   await expectControlsAboveSafeViewport(page, 375);
   await expectNoTextRangeCollision(page);
-});
-
-test("gesture direction labels meet resting text contrast at 4.5:1", async ({
-  page,
-}) => {
-  const { base, root } = await fixture();
-  await writePhotos(root, 2);
-  const running = await server(base, root);
-  await startReview(page, running.url, "All Photos");
-  await waitForLoadedReviewImage(page);
-  await expectDirectionLabelsMeetRestingContrast(page);
 });

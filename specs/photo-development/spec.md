@@ -84,9 +84,11 @@ revision leaves the saved state unchanged.
 [Photo Workspace](workspace/spec.md) owns the exact entry flow, file presentation,
 input selection, tool launch, downloads, and Continue processing. Photo View's
 Edit action creates or reopens the Photo's persistent directory. Initially its
-only visible image is the input snapshot. The Photographer chooses an available
-tool, sees its latest relevant preview, and can inspect its saved outputs in
-Files. Technical paths and revision evidence belong in optional details.
+only workspace image file is the input snapshot; the Web's separate Camera
+reference follows [Web Interaction](workspace/spec.md#web-interaction).
+The Photographer chooses an available tool, sees its relevant Edit Preview,
+and can inspect saved outputs in Files. Technical paths and revision evidence
+belong in optional details, not in place of actionable status.
 
 A module choice must explain unavailable input support, engine dependencies, or
 execution capacity separately. Entering Edit must not reset saved state, require

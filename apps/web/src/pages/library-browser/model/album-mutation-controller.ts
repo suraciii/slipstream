@@ -15,6 +15,7 @@ export type AlbumMutationResult = Readonly<{
   ok: boolean;
   latest: boolean;
   failureMessage?: string;
+  unknown?: boolean;
   announce: (text: string) => void;
   removedFromCurrentAlbum?: Readonly<{
     albumId: string;
@@ -102,6 +103,26 @@ export function createAlbumMutationController(
   };
   return {
     clearInactive,
+    async refreshOverview(): Promise<boolean> {
+      if (closed) return false;
+      const authority = options.source.authority;
+      const summary = options.application.claimAlbumSummary("overview-retry");
+      try {
+        const committed = await options.application.refreshOverview();
+        if (!closed && committed)
+          options.application.resolveAlbumSummary(summary);
+        if (!closed && committed && options.source.isCurrent(authority)) {
+          recover(authority);
+          options.reachable();
+          options.connectionChanged();
+        }
+        return !closed && committed;
+      } catch {
+        return false;
+      } finally {
+        options.application.releaseAlbumSummary(summary);
+      }
+    },
     async mutate(
       start: (context: AlbumActionContext) => AlbumActionAdmission | undefined,
       surface: "photo" | "summary",
@@ -142,29 +163,36 @@ export function createAlbumMutationController(
             latest: options.actions.isLatest(outcome.mutation),
           };
         if (outcome.kind === "failed") {
+          const unknownCreate =
+            action.noticeKey === "create" &&
+            (outcome.settlement.kind === "malformed" ||
+              outcome.connectivity === "lost-if-latest");
+          if (unknownCreate) options.application.advanceAlbumMutationFloor();
+          const failureMessage = unknownCreate
+            ? "The Album may have been created. Inspect the Album list."
+            : outcome.failureMessage;
           const photo = options.actions.canPresent(outcome.surface);
           if (photo) {
-            options.presentation.status(outcome.failureMessage);
+            options.presentation.status(failureMessage);
             options.application.releaseAlbumSummary(summary);
           } else
-            options.application.presentAlbumSummary(
-              summary,
-              outcome.failureMessage,
-            );
+            options.application.presentAlbumSummary(summary, failureMessage);
           if (outcome.connectivity === "lost-if-latest") {
             if (action.invalidatesSavedPositionFor)
               options.application.invalidateSavedPositionAuthority(
                 action.invalidatesSavedPositionFor,
               );
             if (options.actions.isLatest(outcome.mutation)) {
-              options.application.advanceAlbumMutationFloor();
+              if (!unknownCreate)
+                options.application.advanceAlbumMutationFloor();
               disconnect(outcome.sourceAuthority, action.noticeKey);
             }
           }
           return {
             ...silent,
             admitted: true,
-            failureMessage: outcome.failureMessage,
+            failureMessage,
+            unknown: unknownCreate || outcome.connectivity === "lost-if-latest",
             latest: options.actions.isLatest(outcome.mutation),
           };
         }

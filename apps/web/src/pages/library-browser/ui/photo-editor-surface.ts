@@ -5,7 +5,7 @@ import {
   type JsonObject,
   type WorkspaceFile,
 } from "../api/workspace-edit.js";
-import type { EditChange } from "../model/workspace-edit-owner.js";
+import type { EditChange } from "../model/workspace-edit-model.js";
 import type { EditorViewModel } from "../model/editor-controller-contract.js";
 import type { EditorIntent } from "../model/editor-intent-contract.js";
 import "./workspace-editor.css";
@@ -55,6 +55,19 @@ export function createPhotoEditorSurfaceController({
     "[data-photo-editor-reference-image]",
   );
   const empty = element<HTMLElement>("[data-photo-editor-image-empty]");
+  let failedReferenceUrl: string | undefined;
+  referenceImage.addEventListener("error", () => {
+    if (
+      !current ||
+      referenceImage.hidden ||
+      !(current.cameraReference || (!current.edit && !current.resultSelected))
+    )
+      return;
+    failedReferenceUrl = referenceImage.getAttribute("src") ?? undefined;
+    referenceImage.hidden = true;
+    empty.textContent = "Camera reference unavailable";
+    empty.hidden = false;
+  });
   const act = (action: string, args: JsonObject = {}) => {
     if (alive && photoId)
       send({
@@ -626,6 +639,7 @@ export function createPhotoEditorSurfaceController({
   return {
     open(id) {
       if (!alive || !id || !isPhotoVisible()) return;
+      if (photoId !== id) failedReferenceUrl = undefined;
       photoId = id;
       current = undefined;
       controlsIdentity = "";
@@ -641,31 +655,35 @@ export function createPhotoEditorSurfaceController({
     render(model) {
       if (!alive || photoId !== model.photoId) return;
       current = model;
+      const showReference =
+        model.cameraReference || (!model.edit && !model.resultSelected);
       element("[data-photo-editor-status]").textContent = model.status;
       const input = model.files.find(
         (file) => file.artifactId === model.selectedInput,
       );
       element("[data-photo-editor-input]").textContent = input
-        ? `Input: ${input.relativePath}`
+        ? `Input: ${input.relativePath}${input.state === "ready" ? "" : ` · ${input.state}`}`
         : "No default input selected. Select an existing compatible file or prepare input again.";
       const stale = Boolean(
         model.preview &&
           (model.preview.revision !== model.edit?.revision ||
             model.draft.length),
       );
-      element("[data-photo-editor-render-status]").textContent =
-        model.cameraReference
-          ? "Camera Preview · Original reference"
-          : model.preview
-            ? `${model.comparing ? "Initialized baseline comparison" : "Edit preview"} · ${stale ? "Previous saved revision · out of date" : model.previewPending ? "Updating" : "Ready"}`
-            : model.edit
-              ? "Edit preview has not been rendered"
-              : "Start editing · no Edit State yet";
-      currentButton.disabled = !model.preview;
-      cameraButton.setAttribute("aria-pressed", String(model.cameraReference));
+      element("[data-photo-editor-render-status]").textContent = showReference
+        ? `Camera reference${model.preview && stale ? " · Edit Preview is out of date" : model.previewPending ? " · Edit Preview is updating" : ""}`
+        : model.preview
+          ? `${model.comparing ? "Initialized baseline comparison" : "Edit Preview"} · ${stale ? "Previous saved revision · out of date" : model.previewPending ? "Updating" : "Ready"}`
+          : model.previewPending
+            ? "Rendering Edit Preview"
+            : "Edit Preview has not been rendered";
+      currentButton.disabled = !model.edit && !model.resultSelected;
+      cameraButton.setAttribute("aria-pressed", String(showReference));
       compareButton.disabled = !model.preview?.comparisonUrl || stale;
       compareButton.setAttribute("aria-pressed", String(model.comparing));
+      element(".photo-editor-view-actions").hidden =
+        !model.edit && !model.resultSelected;
       const actions = element("[data-workspace-editor-actions]");
+      actions.hidden = !model.edit;
       actions.replaceChildren(
         paragraph(saveStateRow(model).value),
         button("Undo", "session-undo", {}, !model.sessionUndoCount),
@@ -698,9 +716,7 @@ export function createPhotoEditorSurfaceController({
       errors.replaceChildren();
       errors.hidden = !model.error && !model.blocked;
       if (model.error) {
-        errors.append(
-          paragraph(`${model.error.message} (${model.error.code})`),
-        );
+        errors.append(paragraph(model.error.message));
         const blockers = model.error.details.blockers;
         if (Array.isArray(blockers))
           for (const blocker of blockers)
@@ -725,19 +741,7 @@ export function createPhotoEditorSurfaceController({
       if (model.uncertain)
         errors.append(button("Replay exact request", "replay"));
       const selection = element("[data-workspace-selection]");
-      selection.replaceChildren(
-        select(
-          "Workspace input",
-          model.files
-            .filter((file) => file.state === "ready" && file.kind !== "preview")
-            .map((file) => ({
-              value: file.artifactId,
-              label: file.relativePath,
-            })),
-          model.selectedInput,
-          (artifactId) => act("input", { artifactId }),
-        ),
-      );
+      selection.replaceChildren();
       const edits =
         model.workspace?.edits.filter((edit) => edit.tool === "darktable") ??
         [];
@@ -750,12 +754,37 @@ export function createPhotoEditorSurfaceController({
             (editId) => act("edit-select", { editId }),
           ),
         );
+      const discovery = model.toolDiscovery;
+      const discoveryMatches =
+        input &&
+        discovery?.input === input.artifactId &&
+        discovery.revision === input.revision;
+      const toolState = discoveryMatches ? discovery?.state : undefined;
+      selection.append(
+        paragraph(
+          !input
+            ? "Select a ready editing input to check tools."
+            : input.state !== "ready" || !input.revision
+              ? "Editing input is not ready. Select another input or prepare it again."
+              : toolState === "ready"
+                ? "darktable engine available. Input compatibility and execution capacity are checked when requested."
+                : toolState === "unavailable"
+                  ? `darktable engine unavailable: ${discovery?.reasons.join("; ") || "No reason reported."}`
+                  : toolState === "unknown"
+                    ? "darktable availability could not be checked. Retry the check."
+                    : "Checking darktable availability…",
+        ),
+      );
+      if (toolState === "unknown" || toolState === "unavailable")
+        selection.append(button("Retry tool check", "retry-tool-discovery"));
       selection.append(
         button(
           model.edit ? "Start separate darktable edit" : "Edit with darktable",
           "create",
           {},
-          !model.selectedInput ||
+          !input ||
+            input.state !== "ready" ||
+            toolState !== "ready" ||
             model.loading ||
             model.saving ||
             model.draft.length > 0,
@@ -765,6 +794,19 @@ export function createPhotoEditorSurfaceController({
           "refresh-input",
           {},
           !model.workspace?.observedSourceRevision,
+        ),
+      );
+      selection.append(
+        select(
+          "Workspace input",
+          model.files
+            .filter((file) => file.state === "ready" && file.kind !== "preview")
+            .map((file) => ({
+              value: file.artifactId,
+              label: file.relativePath,
+            })),
+          model.selectedInput,
+          (artifactId) => act("input", { artifactId }),
         ),
       );
       const identity = JSON.stringify([
@@ -857,6 +899,11 @@ export function createPhotoEditorSurfaceController({
           revision: model.edit?.revision,
           bundleId: model.edit?.bundleId,
           schemaVersion: model.edit?.schemaVersion,
+          error: model.error && {
+            code: model.error.code,
+            effect: model.error.effect,
+            details: model.error.details,
+          },
         },
         null,
         2,
@@ -869,35 +916,35 @@ export function createPhotoEditorSurfaceController({
         );
       image.hidden = true;
       referenceImage.hidden = true;
-      empty.hidden = Boolean(model.preview || model.cameraReference);
-      if (model.preview) {
-        image.src = model.preview.url;
-        image.alt = model.comparing
-          ? "Initialized tool baseline comparison"
-          : "Selected workspace edit preview";
-        image.hidden = model.cameraReference;
-        empty.hidden = true;
-      } else image.removeAttribute("src");
-      if (model.cameraReference) {
-        const reference =
-          root.querySelector<HTMLImageElement>("[data-stage] img");
-        if (reference?.src) {
-          referenceImage.src = reference.src;
-          referenceImage.alt = "Camera Preview · Original reference";
+      empty.hidden = false;
+      if (showReference) {
+        if (
+          model.cameraReferenceUrl &&
+          model.cameraReferenceUrl !== failedReferenceUrl
+        ) {
+          if (referenceImage.getAttribute("src") !== model.cameraReferenceUrl)
+            referenceImage.src = model.cameraReferenceUrl;
           referenceImage.hidden = false;
           empty.hidden = true;
         } else {
           referenceImage.removeAttribute("src");
-          empty.textContent =
-            "The camera Preview for this Photo is unavailable. No image has been substituted.";
-          empty.hidden = false;
+          empty.textContent = "Camera reference unavailable";
         }
+      } else if (model.preview) {
+        image.src =
+          model.comparing && model.preview.comparisonUrl
+            ? model.preview.comparisonUrl
+            : model.preview.url;
+        image.alt = model.comparing
+          ? "Initialized tool baseline comparison"
+          : "Selected workspace edit preview";
+        image.hidden = false;
+        empty.hidden = true;
       } else {
-        empty.textContent = model.preview
-          ? ""
-          : model.edit
-            ? "No Edit Preview is available yet. Refresh the preview when processing is ready."
-            : "No Edit State yet. Choose an available Processing Engine to start, or inspect the Original reference.";
+        image.removeAttribute("src");
+        empty.textContent = model.previewPending
+          ? "Rendering Edit Preview"
+          : "No Edit Preview is available. Use Preview when processing is ready.";
       }
     },
     presentPreview(url) {

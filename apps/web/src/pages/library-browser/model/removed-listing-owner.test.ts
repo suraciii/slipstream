@@ -428,3 +428,37 @@ test("a failed continuation does not claim a complete selection", async () => {
   expect(f.model.allSelected).toBe(false);
   f.owner.dispose();
 });
+
+test("copying all locations refuses an expired continuation without changing selection", async () => {
+  const f = fixture((path) =>
+    Promise.resolve(
+      path.includes("cursor=")
+        ? new Response(null, { status: 410 })
+        : Response.json(page(0, 51)),
+    ),
+  );
+  f.owner.openPanel();
+  await f.until((model) => model.status === "ready");
+  expect(f.model.canCopy).toBe(true);
+  await f.owner.copyLocations();
+  expect(f.model.message).toContain("continuation expired");
+  expect(f.model.selectionCount).toBe(0);
+  expect(f.model.allSelected).toBe(false);
+  f.owner.dispose();
+});
+
+test("excluding every captured item does not turn location output into all Trash", async () => {
+  const f = fixture(() => Promise.resolve(Response.json(page())));
+  f.owner.openPanel();
+  await f.until((model) => model.status === "ready");
+  f.owner.selectAll();
+  await f.until((model) => model.allSelected && !model.pending);
+  f.owner.toggle("photo-0", false);
+  expect(f.model.selectionCount).toBe(0);
+  expect(f.model.canCopy).toBe(false);
+  await f.owner.copyLocations();
+  expect(f.model.allSelected).toBe(true);
+  f.owner.clearSelection();
+  expect(f.model.canCopy).toBe(true);
+  f.owner.dispose();
+});

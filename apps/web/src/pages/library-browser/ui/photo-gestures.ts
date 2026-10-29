@@ -45,6 +45,7 @@ export function isPaintedImagePointer(
 export interface PhotoGestures {
   reset(): void;
   cancelUnavailableDecision(): void;
+  cancelFitGesture(): void;
   dispose(): void;
 }
 type GestureAxis = "horizontal" | "vertical";
@@ -98,6 +99,15 @@ export function createPhotoGestures({
     if (holdTimer !== undefined) window.clearTimeout(holdTimer);
     holdTimer = undefined;
   };
+  const feedback = (element: HTMLElement, label = "") => {
+    element.hidden = !label;
+    element.textContent = label;
+    element.classList.toggle("pending", !!label);
+    element.classList.toggle(
+      "navigation",
+      label === "Next" || label === "Previous",
+    );
+  };
   const clearPointer = (releaseCapture = true) => {
     cancelHold();
     const id = pointer?.id;
@@ -105,10 +115,8 @@ export function createPhotoGestures({
     if (releaseCapture && id !== undefined && preview.hasPointerCapture(id))
       preview.releasePointerCapture(id);
     stage.style.transform = "";
-    pickFeedback.classList.remove("pending");
-    rejectFeedback.classList.remove("pending");
-    pickFeedback.textContent = "Next";
-    rejectFeedback.textContent = "Previous";
+    feedback(pickFeedback);
+    feedback(rejectFeedback);
   };
   const reset = () => {
     cancelHold();
@@ -116,8 +124,16 @@ export function createPhotoGestures({
     zoom.resetPointers();
     clearPointer();
   };
+  const cancelFitGesture = () => {
+    if (pointer && !pointer.pan) reset();
+  };
   const cancelUnavailableDecision = () => {
-    if (pointer?.ratingPending || pointer?.ratingWheel || rating.isWheelOpen())
+    if (
+      pointer?.axis === "horizontal" ||
+      pointer?.ratingPending ||
+      pointer?.ratingWheel ||
+      rating.isWheelOpen()
+    )
       reset();
   };
   const pointerDown = (event: PointerEvent) => {
@@ -196,8 +212,8 @@ export function createPhotoGestures({
       active.ratingPending = false;
       active.ratingWheel = true;
       stage.style.transform = "";
-      pickFeedback.classList.remove("pending");
-      rejectFeedback.classList.remove("pending");
+      feedback(pickFeedback);
+      feedback(rejectFeedback);
       rating.openWheel(active.lastX, active.lastY);
       rating.updateWheel(active.lastX, active.lastY);
     }, RATING_WHEEL_HOLD_MS);
@@ -221,6 +237,8 @@ export function createPhotoGestures({
       return;
     }
     if (pointer.pan || zoom.isManual()) {
+      feedback(pickFeedback);
+      feedback(rejectFeedback);
       zoom.panBy(stepX, stepY);
       return;
     }
@@ -234,18 +252,20 @@ export function createPhotoGestures({
     }
     if (pointer.axis === "vertical") {
       stage.style.transform = `translateY(${Math.max(-140, Math.min(140, dy))}px)`;
-      pickFeedback.textContent = dy < 0 ? "Next" : "";
-      rejectFeedback.textContent = dy > 0 ? "Previous" : "";
-      pickFeedback.classList.toggle("pending", dy < -SWIPE_PENDING_PIXELS);
-      rejectFeedback.classList.toggle("pending", dy > SWIPE_PENDING_PIXELS);
+      feedback(pickFeedback, dy < -SWIPE_PENDING_PIXELS ? "Next" : "");
+      feedback(rejectFeedback, dy > SWIPE_PENDING_PIXELS ? "Previous" : "");
       return;
     }
     if (pointer.axis === "horizontal") {
       stage.style.transform = `translateX(${Math.max(-140, Math.min(140, dx))}px)`;
-      pickFeedback.textContent = dx > 0 ? "Pick" : "";
-      rejectFeedback.textContent = dx < 0 ? "Reject" : "";
-      pickFeedback.classList.toggle("pending", dx > SWIPE_PENDING_PIXELS);
-      rejectFeedback.classList.toggle("pending", dx < -SWIPE_PENDING_PIXELS);
+      feedback(
+        pickFeedback,
+        decisionEnabled() && dx > SWIPE_PENDING_PIXELS ? "Pick" : "",
+      );
+      feedback(
+        rejectFeedback,
+        decisionEnabled() && dx < -SWIPE_PENDING_PIXELS ? "Reject" : "",
+      );
     }
   };
   const finishPointer = (event: PointerEvent, cancelled = false) => {
@@ -338,6 +358,7 @@ export function createPhotoGestures({
   return {
     reset,
     cancelUnavailableDecision,
+    cancelFitGesture,
     dispose() {
       if (!alive) return;
       alive = false;

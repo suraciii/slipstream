@@ -65,9 +65,10 @@ new work runs. The camera-produced Preview remains an explicit Original referenc
 never a hidden fallback or comparison operand.
 
 The Files drawer groups input, previews and outputs, with generic files/resources
-available through inspection. The initial workspace has one visible image:
-`input/<original filename>`. Private edit directories and temporary partials do
-not clutter result cards. Selecting a file does not mutate saved settings.
+available through inspection. The initial workspace has one visible image file:
+`input/<original filename>`. The Library's Camera reference is separate display
+evidence, not a new workspace file. Private edit directories and temporary partials
+do not clutter result cards. Selecting a file does not mutate saved settings.
 Outputs offer Download and Continue Processing when actual input compatibility
 is verified. Previews are viewable/downloadable renditions; they are not assumed
 full-resolution scene-linear sources. Unknown types remain generic files.
@@ -87,6 +88,26 @@ Reopen reads actual file/state facts and reconciles missed events. Missing live
 Original, unavailable tool or resource preserves already staged input, saved
 state and completed downloads. It disables only the affected action with a reason.
 The UI must not automatically run all saved edits just to populate the page.
+
+The [initial-view contract](spec.md#web-interaction) uses the existing Photo's
+camera Preview as a labeled reference when no edit is selected. The browser
+must not write it into the workspace or infer input readiness from its pixels.
+An unavailable reference leaves input and tool inspection usable. Once an
+applicable Edit Preview is selected, its pending/stale/failure lifecycle owns
+the canvas; camera reference requires an explicit reference selection and must
+not replace that result automatically or enter comparison.
+
+Tool choice consumes read-only discovery for the captured input and current
+Photo/workspace generation. A late discovery response cannot enable creation
+for a newly selected input. Discovery failure retains a retryable unknown
+state; it is not proof that a tool is unsupported. Creation and execution
+still pass authoritative admission, with their separate refusal outcomes.
+No render on open does not remove Preview refresh after a confirmed edit.
+The supervised darktable choice uses the workspace tool's own read-only
+discovery, not the separately configured processing/export registry. Every
+file-list reconciliation rechecks the selected input identity, revision, and
+readiness; a changed or unavailable input invalidates the prior discovery.
+Discovery for a newly ready revision starts even when an older check is pending.
 
 ### Edit action
 
@@ -164,6 +185,12 @@ shown as a completed Export with fabricated provenance. An external in-place
 rewrite invalidates old revision/download evidence and shows checking/changed;
 old metadata cannot continue describing the new bytes.
 
+The visible projection emphasizes the axes that affect the next action, not
+one permanent paragraph for every independent axis. Required saving, conflict,
+unknown, stale, and refusal facts remain outside technical Details under
+[Web Interaction](spec.md#web-interaction). Collapsing presentation never merges
+those owners or makes a ready file depend on a successful Preview or tool.
+
 ## Ownership and ordering rules
 
 Visible continuations carry Photo/workspace/edit generations and full result
@@ -236,6 +263,16 @@ A browser cache cannot preserve external edits, authoritative revision guards,
 resource meaning or uncertain operation outcomes. It can show drafts and cached
 images only with disclosed identity/staleness.
 
+### Selected: Explicit initial reference and capability-led tool choice
+
+A labeled Camera reference makes the no-edit state useful without executing a
+tool. Hiding it behind Details leaves a blank entry despite available evidence;
+using it as a fallback falsely associates camera rendering with tool settings.
+Read-only discovery supports truthful choices but never replaces admission.
+Creating an edit merely to probe a missing engine was rejected because it
+conflates capability inspection with an admitted mutation and reports failure
+too late for known unavailable dependencies.
+
 ## Verification
 
 Future browser evidence must show initial input -> tool selection -> saved edits
@@ -258,3 +295,16 @@ after reopening the workspace from the tool's confirmed state rather than from a
 browser-local list. The evidence must also show that a revision restore from the
 tool's retained history is presented and executed as its own operation with its
 own label, never as Undo or Redo.
+
+Entry and status evidence must additionally cover:
+
+- no edit with an available or unavailable reference, and no render on open;
+- a missing live Original with intact workspace input and retained downloads;
+- discovery pending, failed, unavailable, and ready followed by input or
+  capacity refusal, including input changes before discovery settles;
+- a confirmed save followed by a failed Preview, preserving saved state and
+  the correctly identified stale result without camera substitution;
+- a newer save during rendering, with the normal newest-confirmed Preview
+  request after settlement rather than a new manual-only rendering policy; and
+- first-view input/tool visibility, short-height layouts, keyboard focus,
+  200% text, and actionable failures outside closed technical disclosures.

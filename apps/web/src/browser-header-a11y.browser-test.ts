@@ -135,6 +135,60 @@ test("no Grid header control is clipped at 320, 360, 390, 420, or 760", async ({
   }
 });
 
+test("enlarged filter summaries and header actions reflow without clipped targets", async ({
+  page,
+}) => {
+  const { running } = await gridFixture(LONG_ALBUM_NAME);
+  await page.goto(
+    `${running.url}/?selection=picked&rating-min=4&kind=raw&available=false&captured-from=2026-10-01T12%3A34%3A56&order=capture-time-desc`,
+  );
+  await expect(page.locator("[data-grid-empty-clear-filters]")).toBeVisible();
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "200%";
+  });
+  for (const width of [320, 390, 760]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const header = document
+            .querySelector(".grid-header")!
+            .getBoundingClientRect();
+          const controls = Array.from(
+            document.querySelectorAll<HTMLElement>("[data-grid-tools] button"),
+          );
+          return (
+            document.documentElement.scrollWidth <= innerWidth &&
+            controls.every((control) => {
+              const box = control.getBoundingClientRect();
+              const range = document.createRange();
+              range.selectNodeContents(control);
+              return (
+                box.width >= 44 &&
+                box.height >= 44 &&
+                box.bottom <= header.bottom + 1 &&
+                Array.from(range.getClientRects()).every(
+                  (rect) =>
+                    rect.left >= box.left - 1 &&
+                    rect.right <= box.right + 1 &&
+                    rect.top >= box.top - 1 &&
+                    rect.bottom <= box.bottom + 1,
+                )
+              );
+            })
+          );
+        }),
+      )
+      .toBe(true);
+    await page.locator("[data-grid-view-options]").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("[data-filter-select]")).toHaveValue("picked");
+    await expect(page.locator("[data-rating-min-select]")).toHaveValue("4");
+    await page.keyboard.press("Escape");
+    await expect(page.locator("[data-grid-view-options]")).toBeFocused();
+  }
+});
+
 test("only a long source name truncates and stays available to assistive technology", async ({
   page,
 }) => {
@@ -312,4 +366,49 @@ test("the Photo View exposes exactly one h1", async ({ page }) => {
   // The Photo heading retains the name of its current source.
   await expect(page.locator("[data-photo-title]")).toHaveText(LONG_ALBUM_NAME);
   await expect(page.locator(".photo-filename")).not.toBeEmpty();
+});
+
+test("narrow summary counts groups and exposes every committed value through View options", async ({
+  page,
+}) => {
+  const { running } = await gridFixture(LONG_ALBUM_NAME);
+  await page.setViewportSize({ width: 320, height: 844 });
+  const params = new URLSearchParams({
+    selection: "picked",
+    "rating-min": "2",
+    "rating-max": "4",
+    kind: "jpeg",
+    available: "true",
+    "captured-from": "2026-01-02T12:30:45",
+    "captured-before": "2026-01-04T12:30:59",
+    order: "capture-time-desc",
+  });
+  await page.goto(`${running.url}/?${params}`);
+  const entry = page.locator("[data-grid-view-options]");
+  await expect(entry).toBeVisible();
+  await expect(entry.locator(".options-summary-compact")).toHaveText(
+    /Filters: 5.*Custom order/,
+  );
+  await expect(entry).toHaveAccessibleName(
+    /Picked.*Rating 2–4.*JPEG.*Available Originals.*2026-01-02T12:30:45.*2026-01-04T12:30:59.*latest first/,
+  );
+  await entry.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("[data-filter-select]")).toHaveValue("picked");
+  await expect(page.locator("[data-rating-min-select]")).toHaveValue("2");
+  await expect(page.locator("[data-rating-max-select]")).toHaveValue("4");
+  await expect(page.locator("[data-kind-select]")).toHaveValue("jpeg");
+  await expect(page.locator("[data-available-select]")).toHaveValue("true");
+  await expect(page.locator("[data-captured-from]")).toHaveValue(
+    "2026-01-02T12:30:45",
+  );
+  await expect(page.locator("[data-captured-before]")).toHaveValue(
+    "2026-01-04T12:30:59",
+  );
+  await page.locator("[data-view-options-cancel]").click();
+  await page.setViewportSize({ width: 1400, height: 844 });
+  await expect(entry.locator(".options-summary-wide")).toContainText(
+    "Rating 2–4",
+  );
+  await expect(entry.locator(".options-summary-wide")).toContainText("JPEG");
 });

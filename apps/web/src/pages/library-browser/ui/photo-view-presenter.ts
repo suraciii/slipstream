@@ -117,6 +117,11 @@ export function createPhotoViewPresenter({
   );
   const status = required<HTMLElement>(root, "[data-status]");
   const previewSource = required<HTMLElement>(root, "[data-source]");
+  const previewDescription = required<HTMLElement>(
+    root,
+    "[data-preview-description]",
+  );
+  const previewHelp = required<HTMLElement>(root, "[data-preview-help]");
   const captureTime = required<HTMLElement>(
     root,
     "[data-metadata-capture-time]",
@@ -226,6 +231,8 @@ export function createPhotoViewPresenter({
     if (!alive) return;
     if (!source) {
       previewSource.textContent = sourceLabel(source);
+      previewDescription.textContent = previewSource.textContent;
+      previewHelp.textContent = previewSource.textContent;
       return;
     }
     const parts = [sourceLabel(source)];
@@ -238,6 +245,9 @@ export function createPhotoViewPresenter({
           : "Preview pixels are not enlarged",
       );
     previewSource.textContent = parts.join(" · ");
+    const explanation = `${parts.join(" · ")}. Preview detail is limited by its source pixels, not the Original's full resolution.`;
+    previewDescription.textContent = explanation;
+    previewHelp.textContent = explanation;
   };
   const setPreviewFacts = (
     nextSource: ViewPreviewSource | undefined,

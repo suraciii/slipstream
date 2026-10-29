@@ -366,3 +366,125 @@ test("844 by 390 leaves no text range collision in the review strip", async ({
   await expectNoTextRangeCollision(page);
   await expectControlsAboveSafeViewport(page, 390);
 });
+
+test("gesture candidates name their effect only while active and tools retain local focus", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  const feedback = page.locator(".swipe-feedback:visible");
+  await expect(feedback).toHaveCount(0);
+  for (const pointerType of ["touch", "mouse", "pen"]) {
+    for (const [dx, dy, label] of [
+      [90, 0, "Pick"],
+      [-90, 0, "Reject"],
+      [0, -90, "Next"],
+      [0, 90, "Previous"],
+    ] as const) {
+      await page.locator("[data-stage] img").evaluate(
+        (image, args) => {
+          const box = image.getBoundingClientRect();
+          const init = {
+            bubbles: true,
+            pointerId: 1,
+            pointerType: args.pointerType,
+            isPrimary: true,
+            clientX: box.x + box.width / 2,
+            clientY: box.y + box.height / 2,
+          };
+          image.dispatchEvent(new PointerEvent("pointerdown", init));
+          image.dispatchEvent(
+            new PointerEvent("pointermove", {
+              ...init,
+              clientX: init.clientX + args.dx,
+              clientY: init.clientY + args.dy,
+            }),
+          );
+        },
+        { dx, dy, pointerType },
+      );
+      await expect(feedback).toHaveText(label);
+      await page.locator("[data-preview]").dispatchEvent("pointercancel", {
+        pointerId: 1,
+        pointerType,
+        isPrimary: true,
+      });
+      await expect(feedback).toHaveCount(0);
+      await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+      await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
+    }
+  }
+  for (const trigger of ["keyboard", "wheel"]) {
+    await page.keyboard.press("f");
+    await page.locator("[data-stage] img").evaluate((image) => {
+      const rect = image.getBoundingClientRect();
+      const init = {
+        bubbles: true,
+        pointerId: 1,
+        pointerType: "mouse",
+        isPrimary: true,
+        clientX: rect.x + rect.width / 2,
+        clientY: rect.y + rect.height / 2,
+      };
+      image.dispatchEvent(new PointerEvent("pointerdown", init));
+      image.dispatchEvent(
+        new PointerEvent("pointermove", {
+          ...init,
+          clientX: init.clientX + 90,
+        }),
+      );
+    });
+    await expect(feedback).toHaveText("Pick");
+    if (trigger === "keyboard") await page.keyboard.press("d");
+    else
+      await page
+        .locator("[data-preview]")
+        .dispatchEvent("wheel", { deltaY: -100 });
+    await expect(page.locator("[data-preview]")).toHaveAttribute(
+      "data-zoom-state",
+      "manual",
+    );
+    await expect(feedback).toHaveCount(0);
+    await page
+      .locator("[data-preview]")
+      .dispatchEvent("pointerup", { pointerId: 1 });
+    await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+    await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
+  }
+  await page.keyboard.press("f");
+  await expect(page.locator("[data-preview]")).toHaveAccessibleDescription(
+    /Preview detail is limited/,
+  );
+  const url = page.url();
+  await page.locator("[data-dock-more]").click();
+  const tools = page.locator("[data-photo-tools-view=tools]");
+  await expect(
+    tools.getByRole("region", { name: "Review", exact: true }),
+  ).toBeVisible();
+  await expect(
+    tools.getByRole("region", { name: "Photo", exact: true }),
+  ).toBeVisible();
+  await expect(
+    tools.getByRole("region", { name: "Library", exact: true }),
+  ).toBeVisible();
+  await tools.locator("summary").click();
+  await expect(page.locator("[data-preview-help]")).toBeVisible();
+  await tools.locator("[data-photo-tools-entry=details]").click();
+  await expect(page.locator("[data-photo-tools] h2:visible")).toHaveText(
+    "Details",
+  );
+  await expect(
+    page.locator("[data-photo-tools-view=details] h3:visible"),
+  ).toHaveCount(0);
+  await page
+    .locator("[data-photo-tools-view=details] [data-photo-tools-return]")
+    .click();
+  await expect(tools).toBeVisible();
+  expect(page.url()).toBe(url);
+  await page.keyboard.press("Escape");
+  await expect(page.locator("[data-dock-more]")).toBeFocused();
+});
