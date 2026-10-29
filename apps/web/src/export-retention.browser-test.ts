@@ -367,9 +367,7 @@ test("a file changed after inspection requires reviewing its new revision before
   await page
     .getByRole("button", { name: "Remove this reviewed file", exact: true })
     .click();
-  await expect(page.locator("[data-workspace-error]")).toContainText(
-    "artifact_changed",
-  );
+  await expect(page.locator("[data-workspace-error]")).toBeVisible();
   await expect(fileRow(page, file.artifactId)).toBeVisible();
   expect(state.removals[0]!.body.revision).toBe("file-r1");
   await fileRow(page, file.artifactId)

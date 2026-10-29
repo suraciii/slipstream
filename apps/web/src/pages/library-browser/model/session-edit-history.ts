@@ -12,7 +12,7 @@
 //!
 //! See [Autosave and Reversible Editing](../../../../../../specs/photo-development/spec.md#autosave-and-reversible-editing).
 
-import type { EditChange } from "./workspace-edit-owner.js";
+import type { EditChange } from "./workspace-edit-model.js";
 
 /** The bounded number of completed edit actions this session remembers. */
 export const MAXIMUM_SESSION_HISTORY = 64;

@@ -19,6 +19,7 @@ export type AlbumFormReference = Readonly<{
   kind: "create" | "rename" | "delete";
   albumId?: string;
   name: string;
+  contextual?: boolean;
 }>;
 
 export type ViewSourceOrder =
@@ -101,6 +102,7 @@ export type LibraryBrowserIntent =
   | Readonly<{ kind: "folder-toggle"; location: string; expanded: boolean }>
   | Readonly<{ kind: "folder-page"; location: string; direction: -1 | 1 }>
   | Readonly<{ kind: "folder-album-add"; albumId: string }>
+  | Readonly<{ kind: "album-overview-retry" }>
   | Readonly<{ kind: "album-form-open"; form: AlbumFormReference }>
   | Readonly<{ kind: "album-form-close"; formId: string }>
   | Readonly<{
@@ -279,6 +281,7 @@ export type GridViewModel = Readonly<{
 type MembershipAlbumViewModel = Readonly<{ id: string; name: string }>;
 
 export type MembershipViewModel = Readonly<{
+  photoId?: string;
   photoPresent: boolean;
   loading: boolean;
   failed: boolean;

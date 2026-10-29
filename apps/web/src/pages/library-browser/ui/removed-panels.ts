@@ -478,13 +478,20 @@ export function createRemovedPanels({
       const location = document.createElement("p");
       location.className = "removed-location";
       location.textContent = item.originalLocation;
-      const details = document.createElement("p");
-      details.className = "removed-when";
-      details.textContent = `${item.originalKind.toUpperCase()} · ${item.photoId} · ${item.originalSize === null ? "Size unavailable" : `${item.originalSize.toLocaleString()} bytes`} · Last known Original: ${item.originalAvailable ? "available" : "unavailable"} · ${item.state}`;
       const when = document.createElement("p");
       when.className = "removed-when";
       when.textContent = `Removed ${removalTimestamp(item.removedAtMs)}`;
-      facts.append(name, location, details, when);
+      const availability = document.createElement("p");
+      availability.className = "removed-when";
+      availability.textContent = `${item.originalKind.toUpperCase()} · Last known Original: ${item.originalAvailable ? "available" : "unavailable"}${item.state === "changed" ? " · Changed since capture; inspect again before Restore or cleanup." : item.state === "unavailable" ? " · Photo record unavailable since capture." : ""}`;
+      const details = document.createElement("details");
+      details.className = "removed-details";
+      const detailsLabel = document.createElement("summary");
+      detailsLabel.textContent = "Details";
+      const technicalFacts = document.createElement("p");
+      technicalFacts.textContent = `Photo ID: ${item.photoId} · Original ID: ${item.originalId} · ${item.originalSize === null ? "Size unavailable" : `${item.originalSize.toLocaleString()} bytes`} · Removal marker: ${item.removedAtMs}`;
+      details.append(detailsLabel, technicalFacts);
+      facts.append(name, when, location, availability, details);
       const restore = document.createElement("button");
       restore.type = "button";
       restore.className = "removed-restore";
@@ -548,6 +555,14 @@ export function createRemovedPanels({
         : model.selectionCount === 0
           ? "Nothing selected."
           : `${model.selectionCount.toLocaleString()} selected.`;
+    const hasRows = ready && model.total > 0;
+    removedSelectAll.hidden = !hasRows;
+    removedClearSelection.hidden =
+      model.selectionCount === 0 && !model.allSelected;
+    removedRestoreSelection.hidden = model.selectionCount === 0;
+    removedDelete.hidden = model.selectionCount === 0;
+    trashCopyLocations.hidden = !hasRows;
+    removedSelectionCount.hidden = !hasRows && model.selectionCount === 0;
     removedSelectAll.disabled =
       !ready ||
       model.pending ||
@@ -561,7 +576,7 @@ export function createRemovedPanels({
       model.cleaning ||
       model.restoringSelection ||
       singleRestore ||
-      model.selectionCount === 0;
+      (model.selectionCount === 0 && !model.allSelected);
     removedRestoreSelection.disabled =
       !ready ||
       model.pending ||
@@ -581,8 +596,8 @@ export function createRemovedPanels({
       !model.canCleanup;
     removedDelete.textContent = "Clean up records";
     trashCopyLocations.disabled = !ready || !model.canCopy;
-    trashLibraryFolder.textContent = ready
-      ? `Library Folder: ${model.libraryRoot} (service filesystem namespace) · Captured ${model.evaluatedAt}${model.expiresAt ? ` · Expires ${model.expiresAt}` : ""}`
+    trashLibraryFolder.textContent = hasRows
+      ? `Library Folder: ${model.libraryRoot} · Server/container filesystem namespace, not this device. Map this location before using filesystem tools. Captured ${model.evaluatedAt}${model.expiresAt ? ` · Capture continuation expires ${model.expiresAt}` : ""}`
       : "";
     removedPrevious.hidden = !ready || model.total === 0;
     removedNext.hidden = !ready || model.total === 0;

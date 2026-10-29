@@ -15,7 +15,7 @@
 //! See [Autosave and Reversible Editing](../../../../../../specs/photo-development/spec.md#autosave-and-reversible-editing).
 
 import { isRecord } from "../api/guards.js";
-import type { EditChange } from "./workspace-edit-owner.js";
+import type { EditChange } from "./workspace-edit-model.js";
 
 type Change = EditChange;
 type Item = Record<string, unknown>;

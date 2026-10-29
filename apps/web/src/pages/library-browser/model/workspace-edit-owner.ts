@@ -13,14 +13,18 @@ import {
   WorkspaceApiError,
   type EditView,
   type JsonObject,
-  type ToolJob,
   type Workspace,
   type WorkspaceFile,
 } from "../api/workspace-edit.js";
-import type { ProcessingModuleDescription } from "../api/processing-modules.js";
 import { coalesceChanges } from "./workspace-edit-draft.js";
 import { refreshWorkspaceFiles } from "./workspace-edit-files.js";
-import { isUnknownEffect, type UncertainRequest } from "./uncertain-request.js";
+import { createWorkspaceToolDiscovery } from "./workspace-tool-discovery.js";
+import { isUnknownEffect } from "./uncertain-request.js";
+import {
+  createWorkspaceEditModel,
+  type EditChange,
+  type WorkspaceEditModel,
+} from "./workspace-edit-model.js";
 import {
   createSessionEditHistory,
   recordSessionEdit,
@@ -38,59 +42,6 @@ import {
   type WorkspaceJobLane,
 } from "./workspace-job-lane.js";
 
-export type EditChange = JsonObject & { type: string };
-export type WorkspaceEditModel = {
-  photoId: string;
-  workspace?: Workspace;
-  files: WorkspaceFile[];
-  edit?: EditView;
-  modules: JsonObject[];
-  descriptions: Record<string, JsonObject>;
-  instanceDetails: Record<string, JsonObject>;
-  maskDetails: Record<string, JsonObject>;
-  resourceKinds: JsonObject[];
-  catalogs: Record<string, JsonObject>;
-  selectedInput?: string;
-  inspectedFile?: WorkspaceFile;
-  draft: EditChange[];
-  saving: boolean;
-  loading: boolean;
-  status: string;
-  error?: WorkspaceApiError;
-  blocked: boolean;
-  preview?: {
-    url: string;
-    revision: string;
-    file: WorkspaceFile;
-    comparisonUrl?: string;
-    identity: string;
-  };
-  previewPending: boolean;
-  comparing: boolean;
-  cameraReference: boolean;
-  jobs: ToolJob[];
-  history: JsonObject[];
-  /** The tool's retained revisions, restored as their own operation. */
-  retainedRevisions: JsonObject[];
-  /** Completed session edit actions available to session Undo. */
-  sessionUndoCount: number;
-  /** Reversed session actions available to session Redo. */
-  sessionRedoCount: number;
-  /** The Library's own progress, disclosed separately from the Original. */
-  libraryPhase: string;
-  fileCursor: string | null;
-  uncertain?: UncertainRequest;
-  filmElement?: HTMLElement;
-  catalogElement?: HTMLElement;
-  maskGraphSchema?: JsonObject;
-  filmModules?: readonly ProcessingModuleDescription[];
-  conflictInspected?: boolean;
-};
-/** One axis of the Edit surface's independent facts. */
-export type EditorFact = Readonly<{
-  label: string;
-  value: string;
-}>;
 export type WorkspaceEditOwner = {
   model: WorkspaceEditModel;
   refresh(): Promise<void>;
@@ -108,31 +59,7 @@ export function createWorkspaceEditOwner(
   photoId: string,
   notify: (model: WorkspaceEditModel) => void,
 ): WorkspaceEditOwner {
-  const model: WorkspaceEditModel = {
-    photoId,
-    files: [],
-    modules: [],
-    descriptions: {},
-    instanceDetails: {},
-    maskDetails: {},
-    resourceKinds: [],
-    catalogs: {},
-    draft: [],
-    saving: false,
-    loading: false,
-    status: "Preparing input",
-    blocked: false,
-    previewPending: false,
-    comparing: false,
-    cameraReference: false,
-    jobs: [],
-    history: [],
-    retainedRevisions: [],
-    sessionUndoCount: 0,
-    sessionRedoCount: 0,
-    libraryPhase: "",
-    fileCursor: null,
-  };
+  const model = createWorkspaceEditModel(photoId);
   let alive = true;
   let editGeneration = 0;
   let savePromise: Promise<void> | undefined;
@@ -148,6 +75,8 @@ export function createWorkspaceEditOwner(
   const publish = () => {
     if (alive) notify(model);
   };
+  const discovery = createWorkspaceToolDiscovery(fetcher, model, publish);
+  const discoverTool = discovery.discover;
   const failure = (error: unknown, operation: string) => {
     model.error =
       error instanceof WorkspaceApiError
@@ -162,9 +91,7 @@ export function createWorkspaceEditOwner(
     model,
     publish,
     reportFailure: failure,
-    readFiles: async () => {
-      await readFiles();
-    },
+    readFiles: () => readFiles(),
     render: (operation, args, captured) => {
       void render(operation, args, captured);
     },
@@ -209,6 +136,7 @@ export function createWorkspaceEditOwner(
   });
   const readFiles = async (continuation = false) => {
     await refreshWorkspaceFiles(fetcher, model, continuation);
+    void discoverTool();
     publish();
   };
   const readEdit = async (editId: string, generation = editGeneration) => {
@@ -295,7 +223,7 @@ export function createWorkspaceEditOwner(
   };
   const refresh = async () => {
     model.loading = true;
-    delete model.error;
+    if (!model.blocked) delete model.error;
     publish();
     try {
       if (!model.workspace) {
@@ -320,6 +248,7 @@ export function createWorkspaceEditOwner(
       await readFiles();
       if (!model.selectedInput && model.workspace.inputArtifactId)
         model.selectedInput = model.workspace.inputArtifactId;
+      void discoverTool();
       const edits = model.workspace.edits.filter(
         (edit) => edit.tool === "darktable",
       );
@@ -331,8 +260,11 @@ export function createWorkspaceEditOwner(
         !model.saving
       )
         await readEdit(model.edit.editId);
-      else if (!selectingEdit && !model.edit && edits.length === 1)
+      else if (!selectingEdit && !model.edit && edits.length === 1) {
+        model.resultSelected = true;
+        publish();
         await readEdit(edits[0]!.editId);
+      }
       if (
         model.edit &&
         !model.preview &&
@@ -603,7 +535,18 @@ export function createWorkspaceEditOwner(
     }
   };
   const act = async (action: string, args: JsonObject = {}) => {
-    delete model.error;
+    if (
+      [
+        "change",
+        "preview",
+        "export",
+        "create",
+        "replay",
+        "reapply",
+        "discard",
+      ].includes(action)
+    )
+      delete model.error;
     try {
       if (action === "change") {
         if (isRecord(args.change) && typeof args.change.type === "string")
@@ -658,7 +601,12 @@ export function createWorkspaceEditOwner(
       }
       if (action === "input") {
         model.selectedInput = String(args.artifactId);
+        void discoverTool();
         publish();
+        return;
+      }
+      if (action === "retry-tool-discovery") {
+        void discoverTool(true);
         return;
       }
       if (action === "edit-select") {
@@ -666,12 +614,15 @@ export function createWorkspaceEditOwner(
           throw new Error(
             "Save or reconcile this draft before choosing another edit.",
           );
+        model.cameraReference = false;
+        model.resultSelected = true;
         editGeneration++;
         session.past = [];
         session.future = [];
         publishSession();
         lane.supersedePreview();
         delete model.preview;
+        publish();
         await readEdit(String(args.editId));
         return;
       }
@@ -729,7 +680,15 @@ export function createWorkspaceEditOwner(
         const file = model.files.find(
           (item) => item.artifactId === model.selectedInput,
         );
-        if (!file) throw new Error("Select a ready input file first.");
+        if (
+          !file ||
+          file.state !== "ready" ||
+          model.toolDiscovery?.state !== "ready" ||
+          model.toolDiscovery.input !== file.artifactId ||
+          model.toolDiscovery.revision !== file.revision
+        )
+          return;
+        model.cameraReference = false;
         if (selectingEdit) return;
         const generation = ++editGeneration;
         selectingEdit = true;
@@ -755,6 +714,8 @@ export function createWorkspaceEditOwner(
           if (typeof result.editId !== "string")
             throw new Error("The tool did not return a saved edit identity.");
           if (generation !== editGeneration) return;
+          model.resultSelected = true;
+          publish();
           await readEdit(result.editId, generation);
         } finally {
           selectingEdit = false;
@@ -841,7 +802,8 @@ export function createWorkspaceEditOwner(
         return;
       }
       if (action === "camera") {
-        model.cameraReference = !model.cameraReference;
+        model.cameraReference = true;
+        model.comparing = false;
         publish();
         return;
       }
@@ -979,6 +941,7 @@ export function createWorkspaceEditOwner(
     },
     dispose() {
       alive = false;
+      discovery.dispose();
       lane.dispose();
     },
   };

@@ -130,11 +130,12 @@ const stateFact = (model: EditorViewModel): EditorFactRow => {
 };
 
 const previewFact = (model: EditorViewModel): EditorFactRow => {
-  if (model.cameraReference)
+  if (model.cameraReference || (!model.edit && !model.resultSelected))
     return {
       label: "Preview",
-      value:
-        "The camera Preview is the Original reference. It is not a workspace result and it does not show your saved settings.",
+      value: model.cameraReferenceUrl
+        ? "The camera reference is not a workspace result and does not show saved settings."
+        : "Camera reference unavailable. Workspace input readiness is independent.",
     };
   if (!model.preview)
     return {
@@ -200,13 +201,23 @@ export function editorFactRows(model: EditorViewModel): EditorFactRow[] {
 
 /** The save state of the primary action strip, as its own fact. */
 export function saveStateRow(model: EditorViewModel): EditorFactRow {
-  if (model.uncertain)
+  if (model.uncertain?.operation === "edit apply")
     return {
       label: "Save state",
       value:
         "The last save did not answer. It may have been written. Replay the exact request before applying another change.",
     };
-  if (model.blocked)
+  if (
+    model.blocked &&
+    !model.uncertain &&
+    model.error?.code !== "state_conflict"
+  )
+    return {
+      label: "Save state",
+      value:
+        "Saving or checking settings failed. Your draft is retained; inspect the current settings before reapplying or discarding it.",
+    };
+  if (model.blocked && !model.uncertain)
     return {
       label: "Save state",
       value:
@@ -220,7 +231,7 @@ export function saveStateRow(model: EditorViewModel): EditorFactRow {
   if (model.edit)
     return {
       label: "Save state",
-      value: `All settings are saved at revision ${String(model.edit.revision)}.`,
+      value: "All settings are saved.",
     };
   return {
     label: "Save state",

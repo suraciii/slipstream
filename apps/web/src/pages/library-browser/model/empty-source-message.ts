@@ -10,6 +10,10 @@ import type { SelectionFilter } from "../api/contracts.js";
 
 /// The kind of source the open view names.
 export type EmptySourceKind = "library" | "album" | "folder";
+export type EmptySourcePresentation = Readonly<{
+  message: string;
+  action: "check-library" | "adjust-filters" | "browse-library";
+}>;
 
 /// True when the open view applies any restriction at all, so an empty result
 /// is a no-match state rather than an empty source.
@@ -29,23 +33,23 @@ export const emptySourceMessage = (
   kind: EmptySourceKind,
   selection: SelectionFilter,
   conditions: BrowseFilterConditions,
-): Readonly<{ message: string; offersLibraryCheck: boolean }> => {
+): EmptySourcePresentation => {
   // A filter that matched nothing never offers a Library check: the Library is
   // available, the view is empty.
   if (restricts(selection, conditions))
     return {
       message: "No Photos match this filter.",
-      offersLibraryCheck: false,
+      action: "adjust-filters",
     };
   if (kind === "album")
     return {
       message:
-        "This Album contains no Photos. Add Photos from another source's Photo View.",
-      offersLibraryCheck: false,
+        "This Album contains no Photos. Add Photos from Photo View's Albums or select Photos in another source's Grid and choose Add to Album.",
+      action: "browse-library",
     };
   return {
     message:
       "No supported Photos found. Check the Library Folder or add supported files, then run Check Library.",
-    offersLibraryCheck: true,
+    action: "check-library",
   };
 };

@@ -46,8 +46,8 @@ must not change the semantic roles or the presentation invariants below.
 - **Three type voices versus one sans voice.** One sans voice makes source
   titles, filenames, counts, and controls compete at similar weight. The
   selected voice uses a display serif for the wordmark and surface titles, a
-  sans for ordinary UI, and a mono for filenames, counts, positions, and
-  facts. The serif never carries a control or message.
+  sans for ordinary UI and state labels, and a mono for filenames, numeric
+  values, and technical facts. The serif never carries a control or message.
 - **An ambient Preview matte versus a black letterbox or a crop.** Cropping
   violates complete composition. A black letterbox satisfies the 650px
   region but reads as empty chrome. The selected matte is a dimmed, blurred
@@ -70,6 +70,15 @@ must not change the semantic roles or the presentation invariants below.
 - **A left rule for the active source versus a filled row.** A filled row
   competes with the Grid's selected and current indicators. The selected
   active source uses a 2px attention rule, the source name, and the count.
+- **Role-specific legibility versus global enlargement.** Routine states and
+  labels use readable sans text; numeric and technical values retain their
+  distinct compact voice. A global multiplier changes unrelated text and
+  consumes region budgets without deciding which facts matter. Uniform
+  captions may gain a line rather than hide state or shrink required text.
+- **Even row fill versus fixed-width cells with a trailing void.** The chosen
+  thumbnail step still controls density. Distributing remaining width across
+  its columns fills the available row without switching steps or cropping.
+  Incomplete rows keep that geometry rather than stretching their few cells.
 
 ## Reference Scale
 
@@ -122,8 +131,8 @@ uses the Rejected role.
   Use it for ordinary controls, body, state text, messages, and notes.
 - Mono:
   `ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace`.
-  Use it for filenames, positions, counts, Capture Time, technical facts, and
-  compact state or field labels.
+  Use it for filenames, positions, counts, Capture Time, numeric values, and
+  technical facts. Ordinary state and field labels use UI sans.
 
 The reference sizes are:
 
@@ -133,10 +142,12 @@ The reference sizes are:
 - dialog title 20px;
 - photo filename 15.5px on desktop and 12.5px on narrow layouts;
 - grid filename 13px with a 12.5px narrow equivalent;
-- grid state text 10.5px;
-- ordinary body and control text 12–13px; narrow navigation may use 11.5px;
-- positions, counts, and facts 10.5–11px; and
-- mono micro-labels 10px.
+- routine Grid state and availability text, form labels, and outcome text 12px
+  in UI sans;
+- ordinary body and control text 12–13px, including narrow navigation;
+- positions, counts, and numeric facts 11px with tabular numerals; and
+- incidental technical micro-labels 10px, never required action, state, or
+  outcome text.
 
 No product text may be smaller than 10px. Counts and positions use tabular
 numbers. Product labels, headings, buttons, and messages use sentence case;
@@ -162,11 +173,12 @@ The reference composition uses:
 - a 60px Photo View header, a 32px fact line, an 82px filmstrip, and a 64px
   review dock;
 - an 88px narrow Grid header with two 44px rows and no separate brand row;
-- a 50px narrow Photo View header, a 650px Preview region, a 26px fact line,
-  a 44px navigation row, a 58px review dock, and a 14px safe-area allowance;
-- a 4-column desktop Grid at the reference Large step and a 2-column narrow
-  Grid at the reference step. Column count remains owned by Grid Thumbnail
-  Size.
+- narrow Photo View context, navigation, and review regions within the
+  [owning viewport budgets](../library-browser/experience/spec.md#accessibility-and-space-acceptance),
+  rather than summing independent fixed header, fact-line, and dock heights;
+- the reference Large step with width-derived columns. Its illustrated column
+  count is not a fixed desktop or narrow layout requirement; Grid Thumbnail
+  Size retains the chosen step and default.
 
 Every interactive target on a narrow or short layout is at least 44 by 44
 CSS pixels. A visible capsule may be smaller when its hit area is at least
@@ -200,11 +212,11 @@ dot and `Ready`, and the account. It does not repeat the Library or source
 count.
 
 The narrow Grid has no separate brand row. Its 88px header contains two 44px
-rows. Active conditions may continue in an internally scrollable line inside
-the second row when they exceed that row; the 88px budget stays fixed:
-
-- the source title, its count, and the compact status; and
-- the complete `View options` and `Select mode` labels.
+rows: source title/count/status, then View options and Select mode. The compact
+filter-group count and non-default-order indication belong to the View options
+entry under [Grid View](../library-browser/experience/spec.md#grid-view).
+An internally scrolling condition strip is not part of the reference. Full
+conditions stay readable in the opened surface and its accessible description.
 
 The complete labels must remain visible at every supported width. They may
 not be shortened, relabeled, or clipped; the 88px budget is a region budget,
@@ -225,14 +237,18 @@ does not use a filled rounded row.
 
 A cell is media, then a caption. The media keeps a stable 3:2 reference box
 with the inset bed, a 6px radius, and the complete, unstretched image. The
-caption has two lines:
+caption starts with the mono filename and position, followed by sans Selection
+State and Rating. Unflagged remains a text fact without a decision badge;
+zero Rating retains No Rating in its accessible meaning.
 
-- the mono filename and the mono position at the right; and
-- a state dot, the sentence-case state text, the Rating stars, and the
-  kind or availability fact. Unavailability replaces the kind slot; it does
-  not add a third line. At the Small step and in the narrow Grid, the kind
-  yields before Selection State or Rating; the media placeholder and the
-  accessible label retain the unavailable fact.
+The caption uses at least two lines and gains another line when required for
+readable state and Rating. Kind yields before those facts at a constrained
+width. Availability remains in the required placeholder and accessible fact;
+it must not be lost when the kind slot yields. A different Photo's text or
+loading state must not alter row height. All cells and placeholders share
+one caption height for the current width, step, text scale, and selection
+gutter under [Grid presentation state](../web-application/design.md#grid-presentation-state).
+At 200% text, further uniform vertical growth is allowed instead of clipping.
 
 Selection State, Rating, kind, availability, and the multi-selection check
 must not overlay the image. The current Photo uses a 2px attention outline
@@ -244,9 +260,10 @@ cell shows the attention check in that gutter; unselected cells keep the
 empty gutter so the filenames stay aligned. The image is unchanged. The
 check is not a button.
 
-When the Original or its Preview is unavailable, the kind slot names the
-unavailable fact in text and the media region uses the text placeholder from
-the [Grid composition contract](../library-browser/spec.md#grid-composition-and-orientation).
+When the Original or its Preview is unavailable, the kind slot, when present,
+must name that unavailable fact instead of the kind. At every width, the
+required media placeholder and accessible fact retain the unavailable meaning
+under the [Grid composition contract](../library-browser/spec.md#grid-composition-and-orientation).
 A failed image must not leave a broken-image icon. The unavailable state must
 not rely on color or on a dimmed image.
 
@@ -271,9 +288,9 @@ radial `rgba(10,9,8,0)` to `rgba(10,9,8,0.46)` scrim on desktop. On a narrow
 surface use `blur(100px) brightness(0.55) saturate(1.2)` and a 0.5 scrim so
 the letterbox reads as a dim matte, not a light fog.
 
-The fact line uses the mono voice. Which facts are primary and which are
-disclosed remains owned by the [Photo View contract](../library-browser/experience/spec.md#photo-view);
-this reference only fixes their type and rhythm.
+The fact line uses UI sans for state labels and mono for numeric or technical
+values. Which facts are primary or disclosed remains owned by the
+[Photo View contract](../library-browser/experience/spec.md#photo-view).
 
 The filmstrip uses 72 by 48 thumbnails at 65% opacity, a 1px boundary, and the
 current thumbnail at full opacity with a 2px attention outline. It is
@@ -282,11 +299,11 @@ viewport.
 
 The review dock has three zones: previous/position/next; Reject, Rating, and
 Pick; and Undo and More. Pick is the only filled control and uses a pill with
-a sage soft fill. Rating keeps a visible label: inline `Rating` and gold
-stars on desktop, stacked stars over a 10px `Rating` label on narrow
-surfaces. Undo is disabled with the muted color and never hidden. The dock
-must not remove an action the [Photo View contract](../library-browser/experience/spec.md#photo-view)
-requires; secondary review actions may use the contract's defined disclosure.
+a sage soft fill. Rating keeps a visible label with the routine text scale,
+inline with stars on desktop or stacked on narrow surfaces. Undo is disabled
+only when unavailable and is never hidden. The dock must not remove an action
+the [Photo View contract](../library-browser/experience/spec.md#photo-view)
+requires; secondary review actions use its defined disclosure.
 
 ### Selection Mode
 
@@ -296,13 +313,13 @@ View options and Select mode controls are not visible while selecting. The
 selection behavior follows the
 [Library Browser Experience](../library-browser/experience/spec.md#multi-selection).
 
-The selection tray appears only while the multi-selection is nonempty and
-carries Pick, Reject, and Add to Album. It does not add a Clear action; Done
-is the visible exit. The tray is a raised floating surface with the floating
-shadow. While it floats over the Grid, the Grid reserves its measured height
-as scrollable clearance so no final-row caption is trapped under it. The
-caption check and the header count are the selection carriers; the image
-remains unchanged.
+The selection tray appears only while the multi-selection is nonempty, with
+Pick, Reject, and the on-demand Add to Album entry. Actions, persistent outcome,
+and scoped compensation have distinct groups under the experience contract.
+Done remains the visible exit. The tray is a raised floating surface; the Grid
+reserves its measured height as scrollable clearance so no final-row caption
+is trapped under it. The caption check and header count carry selection; the
+image stays unchanged.
 
 ### Supporting Surfaces
 
@@ -310,6 +327,11 @@ Dialogs and the select tray use the raised tone, a 16px radius, a hairline,
 and the floating shadow. A dialog title uses the display serif; the body uses
 the sans voice. Inputs use the inset tone and the strong boundary; focus uses
 the 2px attention ring at a 2px offset.
+The shell supplies one current-task title; repeated body titles must not
+consume another heading row. Navigation entries align to a common leading
+edge and group by task, rather than appearing as a flat set of centered
+buttons. This treatment must preserve the named groups and local return paths
+in [Supporting Surfaces](../library-browser/experience/spec.md#supporting-surfaces).
 
 The segmented control uses an inset capsule track, 3px padding, and a raised
 active segment. The active segment does not use the attention fill.
@@ -326,11 +348,12 @@ A Web presentation conforms when all of these hold:
 - No state, selection, Rating, error, or progress meaning depends on color
   alone.
 - Product labels use sentence case and the exact domain names; no product
-  text is smaller than 10px.
+  text is smaller than 10px; routine state, form, action, and outcome labels
+  use their 12px-or-larger role, not the technical micro-label role.
 - The display serif is limited to the wordmark, source titles, and
-  supporting-surface or dialog titles; mono is limited to filenames, counts,
-  positions, facts, and compact state or field labels; actions and messages
-  remain in the UI sans.
+  supporting-surface or dialog titles; mono is limited to filenames, numeric
+  values, and technical facts. State labels, ordinary field labels, actions,
+  and messages use UI sans.
 - The narrow Grid header fits 88px with complete labels, two 44px rows, and
   no separate brand row; no control is clipped or relabeled at 320, 360, 390,
   420, or 760px.
@@ -347,6 +370,9 @@ A Web presentation conforms when all of these hold:
   the filled Pick is the only filled decision control.
 - Focus is visible; reduced motion preserves the end state; the dock, tray,
   and dialogs remain keyboard-operable.
+- Required caption state and Rating survive every size step, selection gutter,
+  narrow width, and text enlargement without per-Photo row heights; full rows
+  divide available width and incomplete rows keep the same cell geometry.
 
 The design-language review questions in the
 [Design Language Contract](design.md#design-review-evidence) still apply. This

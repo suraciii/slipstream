@@ -350,14 +350,29 @@ test("Trash cleanup reviews records and recovers a lost mixed outcome", async ({
       ?.state,
   ).toBe("present");
 
+  // Refresh the listing without resolving the cleanup, then restore the last
+  // remaining record. The unknown outcome must survive the empty list.
+  await panel.locator("[data-removed-close]").click();
+  await openViewOptions(page);
+  await page.locator("[data-removed-open]").click();
+  await expect(panel.locator(".removed-location")).toHaveText("001.jpg");
+  await panel.getByRole("button", { name: "Restore", exact: true }).click();
+  await expect(panel.locator("[data-removed-status]")).toHaveText(
+    "Trash is empty.",
+  );
+  await expect(panel.locator("[data-trash-check-result]")).toBeVisible();
+  await expect(panel.locator("[data-removed-close]")).toBeVisible();
+  await expect(panel.locator("[data-removed-select-all]")).toBeHidden();
+  await expect(panel.locator("[data-trash-copy-locations]")).toBeHidden();
+  await expect(panel.locator("[data-removed-delete]")).toBeHidden();
+
   // Recovery reads the original operation and converges without another cleanup.
   await page.reload();
   await openViewOptions(page);
   await page.locator("[data-removed-open]").click();
-  await expect(panel.locator("[data-removed-list] .removed-item")).toHaveCount(
-    1,
+  await expect(panel.locator("[data-removed-status]")).toHaveText(
+    "Trash is empty.",
   );
-  await expect(panel.locator(".removed-location")).toHaveText("001.jpg");
   await expect(page.locator("[data-trash-outcome]")).toContainText(/present/i);
   await expect(page.locator("[data-trash-outcome]")).toBeInViewport();
   expect(cleanupCalls).toBe(1);
@@ -461,6 +476,17 @@ test("captured Trash selection follows a retained cursor and excludes a row", as
   const running = await server(base, root);
   const ids = await browseIds(running.url);
   expect(ids).toHaveLength(3);
+
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: {
+        writeText: (text: string) => {
+          sessionStorage.setItem("test-copied-trash", text);
+          return Promise.resolve();
+        },
+      },
+    });
+  });
 
   await page.setViewportSize({ width: 1000, height: 700 });
   await page.goto(running.url);
@@ -576,10 +602,40 @@ test("captured Trash selection follows a retained cursor and excludes a row", as
   await expect(panel.locator("[data-removed-list] .removed-item")).toHaveCount(
     50,
   );
+  await expect(panel.locator("[data-trash-copy-locations]")).toBeEnabled();
+  await panel.locator("[data-trash-copy-locations]").click();
+  await expect(panel.locator("[data-removed-message]")).toContainText(
+    "file locations copied",
+  );
+  const allLocations = await page.evaluate(() =>
+    sessionStorage.getItem("test-copied-trash"),
+  );
+  expect(allLocations).toContain(`Library Folder: ${JSON.stringify(root)}`);
+  expect(allLocations).toContain(
+    "server/container filesystem, not client-local",
+  );
+  expect(allLocations).toContain("2026-01-01T00:00:00Z");
+  expect(allLocations).toContain("2099-01-01T00:00:00Z");
+  expect(allLocations).toContain('"originalId":"original-50"');
+  expect(allLocations).toContain('"originalLocation":"fixture/50.jpg"');
+  await expect(panel.locator("[data-removed-selection-count]")).toHaveText(
+    "Nothing selected.",
+  );
+  await expect(panel.locator("[data-removed-delete]")).toBeHidden();
   await panel.locator("[data-removed-select-all]").click();
   await expect.poll(() => cursors).toContain("retained-page-2");
   const excluded = panel.locator("[data-removed-list] .removed-item").first();
   await excluded.locator("input[type=checkbox]").uncheck();
+  await panel.locator("[data-trash-copy-locations]").click();
+  await expect(panel.locator("[data-removed-message]")).toContainText(
+    "Selected file locations copied",
+  );
+  const selectedLocations = await page.evaluate(() =>
+    sessionStorage.getItem("test-copied-trash"),
+  );
+  expect(selectedLocations).not.toContain('"originalLocation":"fixture/0.jpg"');
+  expect(selectedLocations).toContain('"originalLocation":"fixture/50.jpg"');
+  await expect(excluded.locator("[data-trash-excluded]")).toBeVisible();
 
   await page.route("**/api/trash/cleanup-preview", async (route) => {
     const body = route.request().postDataJSON() as {

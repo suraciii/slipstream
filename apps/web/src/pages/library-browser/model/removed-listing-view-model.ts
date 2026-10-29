@@ -25,6 +25,7 @@ export type TrashOperationState = Readonly<{
 type RemovedPanelState = Readonly<{
   page: RemovedPageState | undefined;
   pageIndex: number;
+  captureExpiresAt?: string | null;
   pending: boolean;
   failed: boolean;
   cleaning: boolean;
@@ -89,6 +90,7 @@ export function removedPanelModel(
 ): RemovedPanelViewModel {
   const {
     page,
+    captureExpiresAt,
     pending,
     failed,
     cleaning,
@@ -135,7 +137,7 @@ export function removedPanelModel(
           libraryRoot: page.libraryRoot,
           namespace: page.namespace,
           evaluatedAt: page.evaluatedAt,
-          expiresAt: page.expiresAt,
+          expiresAt: captureExpiresAt ?? page.expiresAt,
         }
       : {}),
     hasPrevious: pageIndex > 0,
@@ -149,7 +151,10 @@ export function removedPanelModel(
       cleanupBounded &&
       !busy &&
       (!operation || operation.result !== undefined),
-    canCopy: selected.size > 0 && !pending,
+    canCopy:
+      page !== undefined &&
+      (selected.size > 0 || (!allSelected && page.total > 0)) &&
+      !busy,
     canRestore: selected.size > 0 && restoreBounded && !busy,
     canRetry: failed,
     restoringSelection,
@@ -170,6 +175,7 @@ export function removedPanelModel(
       : {}),
     items: (page?.photos ?? []).map((item) => ({
       photoId: item.photoId,
+      originalId: item.originalId,
       filename:
         item.photo?.originalFilename ??
         item.originalLocation.split("/").at(-1) ??

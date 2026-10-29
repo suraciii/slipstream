@@ -26,11 +26,13 @@ failure if the Original is unavailable, changed during copying, or cannot fit.
 No incomplete input may appear ready. Preparation must not run darktable or
 change the Original, its XMP Sidecar, or Library decisions.
 
-Initially, the only visible image must be that input. Directories for previews,
-outputs, and tool state must appear only when needed. The input's original
-filename must remain recognizable. A subsequent open must reuse existing files
-and tool state, without recopying the Original or resetting edits. After explicit
-removal of the default input, open must disclose that no default is selected.
+Initially, the only workspace image file must be the protected input. The
+separate camera reference in the Web is not another workspace file or a render
+of that RAW snapshot. Directories for previews, outputs, and tool state must
+appear only when needed. The input's Original filename must remain recognizable.
+A subsequent open must reuse existing files and tool state, without recopying
+the Original or resetting edits. After explicit removal of the default input,
+open must disclose that no default is selected.
 It must keep remaining files and resumable edits available for explicit selection
 without reading the Original, recreating removed files, or retargeting an edit.
 Prepare input again explicitly refreshes from an available verified Original;
@@ -149,10 +151,28 @@ after its actual contract passes the selected tool's checks.
 ## Web Interaction
 
 The main Edit view must show the selected image, relevant tool controls, the
-input name, and concise save and processing status. A Files disclosure must group
-input files, previews, and outputs without requiring a separate workflow screen.
-The initial view must not be a general file manager or a blank stage editor.
-The user must see a prepared RAW and the available editing action immediately.
+input name, and concise save and processing status. Files groups inputs,
+previews, and outputs without a separate workflow screen. With no saved edit,
+the prepared input and tool choice must be visible together with an explicitly
+labeled **Camera reference** when that Photo's Preview is available. It is the
+Library reference, not an Edit Preview or proof of workspace input readiness.
+Show **Camera reference unavailable** when necessary, without substituting a
+sibling image or disabling an otherwise intact input. No edit is a normal start
+state, not a Preview failure. Opening or reopening must not start rendering.
+
+Tool choices must show known availability and refusal reasons beside the
+input before creation is offered. Unanswered discovery stays loading or
+retryable, not supported or unsupported by assumption. Engine availability,
+selected-input compatibility, and execution capacity remain independent; an
+available engine may still refuse authoritative admission. A missing tool
+must not disable other tools, Files, or existing downloads.
+
+At default text size, the initial image/reference and next available editing
+action or actionable blocker must share the first view at 375 by 667 and
+390 by 844. Routine technical status must not displace them. Short layouts
+retain an image/reference region and primary actions while controls scroll
+independently, yielding supporting details before clipping controls. Text
+enlargement may require vertical reflow, never horizontal page overflow.
 
 ### Primary action strip
 
@@ -209,6 +229,15 @@ Rendering preview, Exporting, Checking file, and Ready. Failures must name the
 failed operation and a concrete recovery action. A successful settings save must
 remain saved if the following render fails. Files must remain visible while an
 unrelated operation is pending or fails.
+
+Routine diagnostics, revision identifiers, and execution paths may move into
+Details. Saving, conflict, failed or unknown writes, Preview staleness, and
+actionable refusal must remain visible beside the affected primary action.
+Primary messages must name the condition, its effect, and a valid next action
+when known; raw error codes and operating-system messages are diagnostic
+detail. The interface must not invent a retry or configuration fix for an
+unclassified failure. A reference must never silently replace a failed or
+stale Edit Preview; comparison and result identity retain their owning rules.
 
 ## Lifetime and Recovery
 

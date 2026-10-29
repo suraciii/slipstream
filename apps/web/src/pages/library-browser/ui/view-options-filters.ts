@@ -9,6 +9,10 @@
 /// and the fact conditions together. Clearing returns to the source's default
 /// filter without changing the source.
 import type { ViewFilterConditions } from "./library-browser-view-contract.js";
+import {
+  sameConditions,
+  validCaptureTimeBound,
+} from "../model/browser-navigation.js";
 
 export type ViewOptionsFilterElements = Readonly<{
   ratingMinimum: HTMLSelectElement;
@@ -71,10 +75,11 @@ export interface ViewOptionsFilters {
   reset(committed: ViewFilterConditions): void;
   /// Updates committed conditions without replacing an open draft.
   setCommitted(conditions: ViewFilterConditions): void;
-  /// Applies the staged conditions as the committed ones.
-  commit(): ViewFilterConditions;
-  /// Every active condition of the committed source view, so Apply can tell a
-  /// real change from a re-selection of the same conditions.
+  /// Replaces the draft only, retaining committed conditions.
+  resetDraft(): void;
+  /// Reads the current controls, or reports invalid bounds without committing.
+  read(): ViewFilterConditions | undefined;
+  draftChanged(): boolean;
   committedLabels(): ReadonlyArray<string>;
 }
 
@@ -106,15 +111,23 @@ export function createViewOptionsFilters(
   capturedBefore.placeholder = CAPTURE_TIME_PLACEHOLDER;
 
   let committed: ViewFilterConditions = {};
-  let draft: ViewFilterConditions = {};
+  const clearValidity = () => {
+    for (const control of [
+      ratingMinimum,
+      ratingMaximum,
+      capturedFrom,
+      capturedBefore,
+    ])
+      control.setCustomValidity("");
+  };
 
   const readControls = (): ViewFilterConditions => {
     const minimum = ratingMinimum.value;
     const maximum = ratingMaximum.value;
     const kind = kindSelect.value;
     const available = availableSelect.value;
-    const from = capturedFrom.value.trim();
-    const before = capturedBefore.value.trim();
+    const from = capturedFrom.value;
+    const before = capturedBefore.value;
     return {
       ...(minimum === "" ? {} : { ratingMinimum: Number(minimum) }),
       ...(maximum === "" ? {} : { ratingMaximum: Number(maximum) }),
@@ -140,25 +153,6 @@ export function createViewOptionsFilters(
     capturedFrom.value = conditions.capturedFrom ?? "";
     capturedBefore.value = conditions.capturedBefore ?? "";
   };
-
-  ratingMinimum.addEventListener("change", () => {
-    draft = readControls();
-  });
-  ratingMaximum.addEventListener("change", () => {
-    draft = readControls();
-  });
-  kindSelect.addEventListener("change", () => {
-    draft = readControls();
-  });
-  availableSelect.addEventListener("change", () => {
-    draft = readControls();
-  });
-  capturedFrom.addEventListener("change", () => {
-    draft = readControls();
-  });
-  capturedBefore.addEventListener("change", () => {
-    draft = readControls();
-  });
 
   writeControls(committed);
 
@@ -188,9 +182,15 @@ export function createViewOptionsFilters(
       conditions.capturedFrom !== undefined ||
       conditions.capturedBefore !== undefined
     ) {
-      const from = conditions.capturedFrom ?? "any time";
-      const before = conditions.capturedBefore ?? "any time";
-      parts.push(`Capture Time ${from} to ${before}`);
+      const bounds = [
+        conditions.capturedFrom === undefined
+          ? ""
+          : `From ${conditions.capturedFrom} inclusive`,
+        conditions.capturedBefore === undefined
+          ? ""
+          : `Before ${conditions.capturedBefore} exclusive`,
+      ].filter(Boolean);
+      parts.push(`Capture Time ${bounds.join(", ")}`);
     }
     return parts;
   };
@@ -201,12 +201,52 @@ export function createViewOptionsFilters(
     },
     reset(next) {
       committed = next;
-      draft = next;
+      clearValidity();
       writeControls(next);
     },
-    commit() {
-      committed = draft;
-      return committed;
+    resetDraft() {
+      clearValidity();
+      writeControls({});
+    },
+    read() {
+      clearValidity();
+      const conditions = readControls();
+      if (
+        conditions.ratingMinimum !== undefined &&
+        conditions.ratingMaximum !== undefined &&
+        conditions.ratingMinimum > conditions.ratingMaximum
+      ) {
+        ratingMaximum.setCustomValidity(
+          "Rating maximum must not be less than the minimum.",
+        );
+        ratingMaximum.reportValidity();
+        return undefined;
+      }
+      for (const [control, value] of [
+        [capturedFrom, conditions.capturedFrom],
+        [capturedBefore, conditions.capturedBefore],
+      ] as const) {
+        if (value !== undefined && !validCaptureTimeBound(value)) {
+          control.setCustomValidity(
+            "Enter a camera-local time as YYYY-MM-DDTHH:MM:SS, without a time zone.",
+          );
+          control.reportValidity();
+          return undefined;
+        }
+      }
+      if (
+        conditions.capturedFrom !== undefined &&
+        conditions.capturedBefore !== undefined &&
+        conditions.capturedFrom >= conditions.capturedBefore
+      ) {
+        capturedBefore.setCustomValidity("Before must be later than From.");
+        capturedBefore.reportValidity();
+        return undefined;
+      }
+      return conditions;
+    },
+    draftChanged() {
+      return !sameConditions(readControls(), committed);
     },
     committedLabels() {
       return labels(committed);

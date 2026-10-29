@@ -1,8 +1,6 @@
 import { expect, test } from "bun:test";
-import {
-  createWorkspaceEditOwner,
-  type WorkspaceEditModel,
-} from "./workspace-edit-owner.js";
+import { createWorkspaceEditOwner } from "./workspace-edit-owner.js";
+import type { WorkspaceEditModel } from "./workspace-edit-model.js";
 import { coalesceChanges } from "./workspace-edit-draft.js";
 import { WorkspaceApiError, type JsonObject } from "../api/workspace-edit.js";
 const capability = {
@@ -12,6 +10,25 @@ const capability = {
   reason: null,
   recovery: null,
 };
+const toolResponse = (state: "ready" | "unavailable" = "ready") =>
+  state === "ready"
+    ? Response.json({
+        bundleId: "tool-bundle",
+        schemaVersion: "tool-schema",
+        items: [],
+        total: 0,
+        nextCursor: null,
+      })
+    : Response.json(
+        {
+          error: {
+            code: "engine_unavailable",
+            message: "Engine missing",
+            effect: "none",
+          },
+        },
+        { status: 503 },
+      );
 function state(revision = "r1"): JsonObject {
   return {
     revision,
@@ -74,6 +91,7 @@ function harness(
             : input.url;
       const response = await onRequest?.(path);
       if (response) return response;
+      if (path === "/api/darktable/commands") return toolResponse();
       if (path.endsWith("/commands")) {
         if (typeof options?.body !== "string")
           throw new Error("Expected string request body");
@@ -646,5 +664,202 @@ test("Library progress is projected as the Edit surface's own fact", async () =>
   expect(owner.model.libraryPhase).toBe("");
   owner.model.libraryPhase = "recovering";
   expect(owner.model.libraryPhase).toBe("recovering");
+  owner.dispose();
+});
+
+test("late discovery cannot enable creation for a different selected input", async () => {
+  const first = Promise.withResolvers<Response>();
+  const secondSettled = Promise.withResolvers<void>();
+  let requests = 0;
+  const { owner, bodies } = harness(
+    undefined,
+    undefined,
+    (path) => {
+      if (path === "/api/darktable/commands") {
+        requests++;
+        return requests === 1 ? first.promise : toolResponse("unavailable");
+      }
+      if (path.endsWith("/files?limit=60"))
+        return Response.json({
+          items: ["raw", "other"].map((artifactId) => ({
+            artifactId,
+            revision: `${artifactId}-bytes`,
+            relativePath: `input/${artifactId}`,
+            kind: "input",
+            state: "ready",
+            byteLength: 12,
+            imageContract: null,
+          })),
+          total: 2,
+          nextCursor: null,
+        });
+      return undefined;
+    },
+    (model) => {
+      if (
+        model.toolDiscovery?.input === "other" &&
+        model.toolDiscovery.state === "unavailable"
+      )
+        secondSettled.resolve();
+    },
+  );
+  await owner.refresh();
+  expect(owner.model.toolDiscovery?.state).toBe("loading");
+  await owner.act("input", { artifactId: "other" });
+  await secondSettled.promise;
+  first.resolve(toolResponse());
+  await first.promise;
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(owner.model.toolDiscovery).toMatchObject({
+    input: "other",
+    state: "unavailable",
+    reasons: ["Engine missing"],
+  });
+  await owner.act("create");
+  expect(bodies.some((body) => body.operation === "edit create")).toBe(false);
+  owner.dispose();
+});
+
+test("settled job file refresh rediscovers changed input and retry remains scoped to its revision", async () => {
+  const first = Promise.withResolvers<Response>();
+  const job = Promise.withResolvers<Response>();
+  const polling = Promise.withResolvers<void>();
+  const unknown = Promise.withResolvers<void>();
+  const ready = Promise.withResolvers<void>();
+  let discoveryReads = 0;
+  let fileReads = 0;
+  let requestId = "";
+  const { owner } = harness(
+    undefined,
+    (body) => {
+      if (body.operation !== "export create") return undefined;
+      requestId = String((body.arguments as JsonObject).requestId);
+      return Response.json({ requestId, status: "running" });
+    },
+    (path) => {
+      if (path === "/api/darktable/commands") {
+        discoveryReads++;
+        if (discoveryReads === 1) return first.promise;
+        if (discoveryReads === 2) return Response.json({ bad: true });
+        return toolResponse();
+      }
+      if (path.includes("/jobs/")) {
+        polling.resolve();
+        return job.promise;
+      }
+      if (path.endsWith("/files?limit=60")) {
+        fileReads++;
+        return Response.json({
+          items: [
+            {
+              artifactId: "raw",
+              revision: fileReads === 1 ? "old" : "new",
+              relativePath: "input/RAW.nef",
+              kind: "input",
+              state: "ready",
+              byteLength: 12,
+              imageContract: null,
+            },
+          ],
+          total: 1,
+          nextCursor: null,
+        });
+      }
+      return undefined;
+    },
+    (model) => {
+      if (
+        model.toolDiscovery?.revision === "new" &&
+        model.toolDiscovery.state === "unknown"
+      )
+        unknown.resolve();
+      if (
+        model.toolDiscovery?.revision === "new" &&
+        model.toolDiscovery.state === "ready"
+      )
+        ready.resolve();
+    },
+  );
+  await owner.refresh();
+  expect(owner.model.toolDiscovery).toMatchObject({
+    revision: "old",
+    state: "loading",
+  });
+  await owner.act("export");
+  await polling.promise;
+  job.resolve(Response.json({ requestId, status: "succeeded" }));
+  await unknown.promise;
+  first.resolve(toolResponse());
+  await first.promise;
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(owner.model.toolDiscovery).toMatchObject({
+    revision: "new",
+    state: "unknown",
+  });
+  await owner.act("retry-tool-discovery");
+  await ready.promise;
+  expect(owner.model.toolDiscovery).toMatchObject({
+    revision: "new",
+    state: "ready",
+  });
+  expect(discoveryReads).toBe(3);
+  owner.dispose();
+});
+
+test("file readiness changes invalidate pending discovery and restart it when ready", async () => {
+  const first = Promise.withResolvers<Response>();
+  const ready = Promise.withResolvers<void>();
+  let discoveryReads = 0;
+  let fileState = "ready";
+  const { owner, bodies } = harness(
+    undefined,
+    undefined,
+    (path) => {
+      if (path === "/api/darktable/commands") {
+        discoveryReads++;
+        return discoveryReads === 1 ? first.promise : toolResponse();
+      }
+      if (path.endsWith("/files?limit=60"))
+        return Response.json({
+          items: [
+            {
+              artifactId: "raw",
+              revision: "bytes",
+              relativePath: "input/RAW.nef",
+              kind: "input",
+              state: fileState,
+              byteLength: 12,
+              imageContract: null,
+            },
+          ],
+          total: 1,
+          nextCursor: null,
+        });
+      return undefined;
+    },
+    (model) => {
+      if (model.toolDiscovery?.state === "ready") ready.resolve();
+    },
+  );
+  await owner.refresh();
+  fileState = "checking";
+  await owner.act("refresh");
+  expect(owner.model.toolDiscovery).toBeUndefined();
+  first.resolve(toolResponse());
+  await first.promise;
+  await Promise.resolve();
+  await Promise.resolve();
+  await owner.act("create");
+  expect(bodies.some((body) => body.operation === "edit create")).toBe(false);
+  fileState = "ready";
+  await owner.act("refresh");
+  await ready.promise;
+  expect(discoveryReads).toBe(2);
+  expect(owner.model.toolDiscovery).toMatchObject({
+    revision: "bytes",
+    state: "ready",
+  });
   owner.dispose();
 });

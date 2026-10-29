@@ -5,7 +5,7 @@ import type {
   JsonObject,
 } from "../api/workspace-edit.js";
 import type { WorkspaceFilmFile } from "../api/workspace-film.js";
-import type { WorkspaceEditModel } from "./workspace-edit-owner.js";
+import type { WorkspaceEditModel } from "./workspace-edit-model.js";
 export type EditorViewModel = WorkspaceEditModel;
 export type EditorViewPort = Readonly<{
   editorVisible: () => boolean;
@@ -49,6 +49,7 @@ export type EditorControllerDependencies = Readonly<{
 export type EditorController = Readonly<{
   open(photoId: string): void;
   refresh(photoId: string): void;
+  referenceChanged(photoId: string): void;
   act(photoId: string, action: string, args: JsonObject): void;
   leave(): void;
 }>;

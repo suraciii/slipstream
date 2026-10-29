@@ -386,7 +386,11 @@ An empty source must identify what is empty and must not imply that Photos or Or
 
 When the Photo Library contains no Photos, the `All Photos` source and Library Folder source must say that no supported Photos were found. They must direct the operator to check the configured Library Folder or add supported files, then offer **Check Library** through the existing rescan workflow. A completed check follows the normal **Refresh Current Source** contract above.
 
-An empty Album must remain openable and manageable. Its Grid must say that the Album contains no Photos and that the Photographer can add Photos from another source's Photo View. Rename and delete remain available through source navigation.
+An empty Album must remain openable and manageable. Its Grid must identify the
+empty Album and offer **Browse All Photos**, an ordinary navigation to that
+source's default Grid. It must explain how to add Photos through Photo View
+membership or Grid multi-selection. This action neither enrolls Photos nor
+creates an implicit collection mode. Rename and delete remain available.
 
 ## Saved Position
 
@@ -409,9 +413,36 @@ follow [Returning to a Grid](experience/spec.md#returning-to-a-grid).
 
 ## Album Management
 
-The Photographer must be able to create an Album from source navigation. Album names must be nonempty, at most 120 characters, and unique within the flat Album list under ASCII letter-case folding, exactly as SQLite's NOCASE collation performs it; scripts without letter case, such as Chinese, are unaffected. [Physical File Locations and Virtual Albums](../photo-library/design.md) owns that naming boundary. A newly created empty Album must open to a usable empty Grid with controls to rename or delete it.
+The Photographer must be able to create an Album from source navigation.
+Album names must be nonempty, at most 120 characters, and unique within the
+flat list under SQLite NOCASE's ASCII case folding; scripts without letter
+case are unaffected. [Photo Library Design](../photo-library/design.md) owns
+that naming boundary. Creation from Sources opens the new empty Album's
+usable Grid with rename and delete controls. Contextual creation follows the
+return behavior below instead of navigating to that Grid.
 
 Opening Album creation or rename must focus the Album name input and select its current value. Closing an Album form after cancellation or a completed action must return focus to the control that opened it when that control remains available, or to the nearest stable Album action. A validation or persistence failure must keep the form and its input recoverable; closing that form follows the same focus rule.
+
+Photo membership management and the Grid Add to Album chooser must also offer
+**New Album**, including when no Albums exist. They reuse the same creation
+form and name validation. Opening it replaces the current supporting content,
+not the underlying source or Photo, and never stacks a second modal.
+
+Contextual creation creates only the Album. On confirmed success, return to
+the initiating membership panel or batch chooser with the new Album available
+and identified, retaining the Photo or selected IDs. It must not implicitly add
+members or switch to the new Album. The Photographer then checks membership
+for the current Photo or explicitly confirms the batch addition. These are
+separate persisted actions; a failed membership addition leaves the created
+Album available and reports that addition's failure, not a failed creation.
+
+Cancelling the creation form returns to its parent without changing membership
+or clearing the existing selection. Validation or known creation failure keeps
+the name recoverable. An unknown creation outcome requires inspection of the
+Album list before another create; a matching name alone is not proof of which
+attempt created it. Dismissing the workflow or changing source/Photo detaches
+its return behavior: an admitted create still settles, but its completion must
+not reopen the panel, restore an obsolete selection, or start membership work.
 
 The Photographer must be able to rename an Album and delete an Album after a confirmation that Photos and Original Files remain unchanged. Deleting the open Album must return to `All Photos` or another valid source without leaving an unusable current source.
 
@@ -455,9 +486,9 @@ a checkbox reflecting the Photo's true membership. Checking an Album adds
 the Photo through the same persistence rules as any membership addition,
 and unchecking removes it through the same rules as membership removal,
 including the browsing-position contract when removing from the open Album.
-Creating a new Album reuses the existing Album creation entry. An Album list
-too large for one view must load on demand rather than transferring every
-member of every Album.
+Creating a new Album follows [contextual Album creation](#album-management),
+without implicitly checking membership. An Album list too large for one view
+must load on demand rather than transferring every member of every Album.
 
 A successful add or remove must update the membership list and the Album
 counts. A failed toggle must keep the prior true state, identify the failed
@@ -541,9 +572,9 @@ While the Preview zoom state is Fit:
   accepted;
 - a drag below the commit threshold returns the Photo to its starting position
   without changing any Photo fact; and
-- the surface shows the pending direction before release. A device whose
-  primary pointer can hover must not show those direction labels outside an
-  in-progress decision drag.
+- the surface shows the candidate action before release only during an active
+  directional gesture. On every pointer capability, including touch-only and
+  hybrid devices, no direction labels remain at rest.
 
 While the Preview zoom state is Fit, a committed upward swipe opens the next
 Photo and a committed downward swipe opens the previous Photo. These are
@@ -559,6 +590,13 @@ changes. `Up` means next and `Down` means previous because the gesture follows
 the mobile-feed convention of continuing to the next item; the source's
 ordering semantics remain represented by the visible position and
 Previous/Next labels.
+
+Direction feedback must identify Reject, Pick, Next, or Previous according to
+that mapping, not assign decision colors to navigation labels. It clears on
+release, below-threshold cancellation, pointer cancellation or lost capture,
+Photo/source change, leaving Fit, and supporting-surface entry. An admitted
+write or navigation then uses its ordinary pending and outcome presentation;
+gesture feedback must not imply that the operation has already succeeded.
 
 A horizontal or vertical gesture must not be interpreted as both a decision and
 navigation action. The gesture owner is selected before commit from the
@@ -812,8 +850,9 @@ Grid View supports multi-selection in addition to the single open target:
   Photo's multi-selection instead of opening Photo View, so a touch device can
   multi-select without a modifier key.
 
-One batch addresses at most 100 Photos. When **Select** mode is active, the
-Grid must show a selection tray even when it is empty, with `0 / 100 selected`.
+One batch addresses at most 100 Photos. While Select mode is active, its
+header must show the count, including `0 / 100 selected`, and Done; the action
+tray appears only for a nonempty selection under the experience contract.
 The Grid refuses to grow the multi-selection past that bound, names the bound
 when it does, and keeps the selection it already holds, so a batch the server
 would refuse can never be built. A refused toggle or range is one operation:
@@ -824,10 +863,12 @@ The selection tray must state `Selection remains active` after a batch
 operation. It must show the active source and must distinguish the visible
 filtered result count from the Selection State counts for the complete source.
 
-The **Select** mode must be enterable and leavable from a keyboard. The clear exit labeled Done and `Escape` empty the multi-selection and leave **Select** mode, including
-when the tray currently shows `0 / 100 selected`. Opening or reopening a source
-also leaves Select mode. The Grid decision and Rating keys keep
-their existing meaning for the focused Photo.
+Select mode must be enterable and leavable from a keyboard. Done and Escape
+from the Grid empty the multi-selection and leave Select mode, including at
+zero selected. While a supporting surface owns focus, Escape follows that
+surface's close or local form-return behavior instead. Opening or reopening a
+source leaves Select mode. Grid decision and Rating keys retain their meaning
+for the focused Photo.
 
 A range extends over the Photos the Grid has loaded. A position the Grid has
 not loaded cannot join the multi-selection, and the count reports the Photos

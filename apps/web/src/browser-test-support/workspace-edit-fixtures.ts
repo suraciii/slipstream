@@ -281,6 +281,15 @@ export async function setupWorkspace(page: Page): Promise<WorkspaceFixture> {
     }
     return json(route, file);
   });
+  await page.route("**/api/darktable/commands", (route) => {
+    const command = route.request().postDataJSON() as Command;
+    if (command.operation !== "modules list") return route.fallback();
+    return json(route, {
+      bundleId: "fixture-darktable",
+      schemaVersion: "v1",
+      ...windowOf([]),
+    });
+  });
   await page.route("**/api/photos/*/darktable/jobs/**", (route) => {
     const parts = new URL(route.request().url()).pathname.split("/");
     const photoId = parts[3]!;

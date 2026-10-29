@@ -7,6 +7,7 @@ import type {
   AlbumActionAdmission,
 } from "./album-action-owner.js";
 type MembershipViewModel = Readonly<{
+  photoId?: string;
   photoPresent: boolean;
   loading: boolean;
   failed: boolean;
@@ -91,6 +92,7 @@ export function createPhotoDetailsOwner(
           .map((album) => album.id)
       : [];
     deps.renderMembership({
+      ...(photoId ? { photoId } : {}),
       photoPresent: Boolean(photo),
       loading: Boolean(photo) && facts.kind === "loading",
       failed: Boolean(photo) && facts.kind === "failed",

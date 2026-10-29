@@ -9,6 +9,7 @@ import type {
   ViewSourceOrder,
 } from "./library-browser-view.js";
 import type { ViewFilterConditions } from "./library-browser-view-contract.js";
+import { sameConditions } from "../model/browser-navigation.js";
 import {
   createViewOptionsFilters,
   type ViewOptionsFilterElements,
@@ -61,6 +62,9 @@ export type ViewOptionsElements = Readonly<{
   viewOptionsClose: HTMLButtonElement;
   viewOptionsApply: HTMLButtonElement;
   viewOptionsCancel: HTMLButtonElement;
+  resetFilters: HTMLButtonElement;
+  draftDiscardNotice: HTMLElement;
+  advancedFilters: HTMLDetailsElement | null;
   albumResume: HTMLButtonElement;
   sortSelect: HTMLSelectElement;
   optionsProgress: HTMLElement;
@@ -83,6 +87,8 @@ export type RandomPhotoViewModel = Readonly<{
 
 export interface ViewOptions {
   open(): void;
+  discardDraftForImmediateAction(): void;
+  clearFilters(): void;
   renderSort(model: GridSortViewModel): void;
   renderFilter(model: GridFilterViewModel): void;
   renderProgress(model: GridProgressViewModel): void;
@@ -122,6 +128,9 @@ export function createViewOptions({
     viewOptionsClose,
     viewOptionsApply,
     viewOptionsCancel,
+    resetFilters,
+    draftDiscardNotice,
+    advancedFilters,
     albumResume,
     sortSelect,
     optionsProgress,
@@ -157,6 +166,24 @@ export function createViewOptions({
   let filterRendered = false;
   let renderedProgressText = "";
   let renderedSourceProgressText = "";
+  const wideSummary = document.createElement("span");
+  wideSummary.className = "options-summary-wide";
+  const compactSummary = document.createElement("span");
+  compactSummary.className = "options-summary-compact";
+  viewOptionsFlag.setAttribute("aria-hidden", "true");
+  viewOptionsFlag.replaceChildren(wideSummary, compactSummary);
+
+  const syncDraftNotice = () => {
+    const dirty =
+      draftOrder !== committedOrder ||
+      draftFilter !== committedFilter ||
+      draftSize !== committedSize ||
+      filters.draftChanged();
+    draftDiscardNotice.hidden = !dirty;
+    draftDiscardNotice.textContent = dirty
+      ? "Browse and Source actions use committed choices and discard unapplied changes."
+      : "";
+  };
 
   const resetDraft = () => {
     draftOrder = committedOrder;
@@ -166,6 +193,9 @@ export function createViewOptions({
     sortSelect.value = committedOrder;
     filterSelect.value = committedFilter;
     filters.reset(committedConditions);
+    if (advancedFilters)
+      advancedFilters.open = filters.committedLabels().length > 0;
+    syncDraftNotice();
   };
   viewOptionsDialog.addEventListener("close", () => {
     resetDraft();
@@ -195,10 +225,17 @@ export function createViewOptions({
         )?.label ?? "",
       );
     const text = parts.filter(Boolean).join(" · ");
-    viewOptionsFlag.textContent = text ? ` · ${text}` : "";
+    const count =
+      (committedFilter === "all" ? 0 : 1) + filters.committedLabels().length;
+    const compactParts = [
+      count ? `Filters: ${count}` : "",
+      committedOrder !== "source-default" ? "Custom order" : "",
+    ].filter(Boolean);
+    wideSummary.textContent = text ? ` · ${text}` : "";
+    compactSummary.textContent = compactParts.length
+      ? ` · ${compactParts.join(" · ")}`
+      : "";
     viewOptionsFlag.hidden = text === "";
-    // The visible label is "Options" on a narrow row, so the accessible name
-    // spells out the entry and the committed choices it will show.
     viewOptionsOpen.setAttribute(
       "aria-label",
       text === "" ? "View options" : `View options, ${text}`,
@@ -235,19 +272,18 @@ export function createViewOptions({
 
   const applyViewOptions = () => {
     if (!alive) return;
-    const previousLabels = filters.committedLabels().join(" · ");
     const order = draftOrder;
     const filter = draftFilter;
-    const conditions = filters.commit();
-    const conditionsChanged =
-      filters.committedLabels().join(" · ") !== previousLabels;
+    const conditions = filters.read();
+    if (!conditions) return;
     const viewChanged =
       order !== committedOrder ||
       filter !== committedFilter ||
-      conditionsChanged;
+      !sameConditions(conditions, committedConditions);
     const sizeChanged = draftSize !== committedSize;
     committedSize = draftSize;
     committedConditions = conditions;
+    filters.setCommitted(conditions);
     draftOrder = committedOrder = order;
     draftFilter = committedFilter = filter;
     surfaces.close("view-options", !viewChanged);
@@ -269,22 +305,21 @@ export function createViewOptions({
     if (!alive || viewOptionsOpen.hidden) return;
     openViewOptions();
   });
-  // A narrow header cannot fit the active-choice flag inside the View options
-  // entry, so the flag names the choices beside it and carries the entry's
-  // activation: the entry stays the keyboard and assistive-technology path
-  // with its full accessible name, and closing the surface returns focus to it
-  // because it is the invoker recorded here.
-  viewOptionsFlag.addEventListener("click", () => {
-    if (!alive || viewOptionsFlag.hidden) return;
-    viewOptionsOpen.focus();
-    openViewOptions();
-  });
   viewOptionsClose.addEventListener("click", () => closeViewOptions());
   viewOptionsCancel.addEventListener("click", () => closeViewOptions());
   viewOptionsApply.addEventListener("click", () => applyViewOptions());
+  resetFilters.addEventListener("click", () => {
+    draftFilter = "all";
+    filterSelect.value = "all";
+    filters.resetDraft();
+    syncDraftNotice();
+  });
+  viewOptionsDialog.addEventListener("input", syncDraftNotice);
+  viewOptionsDialog.addEventListener("change", syncDraftNotice);
   albumResume.addEventListener("click", () => {
     if (!alive || albumResume.hidden) return;
     const albumId = activeAlbumId();
+    if (viewOptionsDialog.open) closeViewOptions(false);
     if (albumId) send({ kind: "album-resume", albumId });
   });
   randomPhoto.addEventListener("click", () => {
@@ -296,18 +331,33 @@ export function createViewOptions({
     if (!alive) return;
     // View options holds a draft until Apply commits it.
     draftOrder = sortSelect.value as ViewSourceOrder;
+    syncDraftNotice();
   });
   filterSelect.addEventListener("change", () => {
     if (!alive) return;
     draftFilter = filterSelect.value as ViewSelectionFilter;
+    syncDraftNotice();
   });
   sizeSelect.addEventListener("change", () => {
     if (!alive) return;
     draftSize = sizeSelect.value as ViewOptionsThumbnailSize;
+    syncDraftNotice();
   });
 
   return {
     open: openViewOptions,
+    discardDraftForImmediateAction() {
+      if (viewOptionsDialog.open) closeViewOptions(false);
+    },
+    clearFilters() {
+      if (!alive) return;
+      send({
+        kind: "view-options-apply",
+        order: committedOrder,
+        selection: "all",
+        conditions: {},
+      });
+    },
     renderSort(model) {
       if (!alive) return;
       if (renderedSortKind !== model.kind) {
@@ -327,6 +377,7 @@ export function createViewOptions({
         : options[0]!.value;
       if (!viewOptionsDialog.open) sortSelect.value = committedOrder;
       sortSelect.disabled = !model.enabled;
+      if (viewOptionsDialog.open) syncDraftNotice();
       presentViewOptionsFlag();
     },
     renderFilter(model) {
@@ -351,6 +402,7 @@ export function createViewOptions({
         filters.reset(model.conditions);
       }
       filterSelect.disabled = !model.enabled;
+      if (viewOptionsDialog.open) syncDraftNotice();
       presentViewOptionsFlag();
     },
     renderProgress(model) {

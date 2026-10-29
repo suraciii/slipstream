@@ -6,6 +6,8 @@ import type { LibraryBrowserIntent } from "./library-browser-view.js";
 
 class Surface extends EventTarget {
   style = { transform: "" };
+  hidden = true;
+  textContent = "";
   parent: Surface | undefined;
   captured = new Set<number>();
   classes = new Set<string>();
@@ -125,6 +127,8 @@ function fixture() {
     writes,
     preview,
     stage,
+    pick,
+    reject,
     get wheel() {
       return wheel;
     },
@@ -182,6 +186,35 @@ function fixture() {
     },
   };
 }
+
+test("direction feedback exists only for the active candidate and clears without a write", () => {
+  const f = fixture();
+  try {
+    expect(f.pick.hidden).toBe(true);
+    expect(f.reject.hidden).toBe(true);
+    f.pointer("pointerdown", 100, 100);
+    f.pointer("pointermove", 130, 100);
+    expect(f.pick.hidden).toBe(false);
+    expect(f.pick.textContent).toBe("Pick");
+    expect(f.reject.hidden).toBe(true);
+    f.pointer("pointermove", 105, 100);
+    expect(f.pick.hidden).toBe(true);
+    f.pointer("pointermove", 60, 100);
+    expect(f.reject.textContent).toBe("Reject");
+    expect(f.reject.hidden).toBe(false);
+    f.pointer("pointercancel", 60, 100);
+    expect(f.reject.hidden).toBe(true);
+    f.pointer("pointerdown", 100, 100);
+    f.pointer("pointermove", 100, 60);
+    expect(f.pick.textContent).toBe("Next");
+    expect(f.pick.classes.has("navigation")).toBe(true);
+    f.changePhoto();
+    expect(f.pick.hidden).toBe(true);
+    expect(f.writes).toEqual([]);
+  } finally {
+    f.dispose();
+  }
+});
 test("Rating hold boundary and release submit exactly once", () => {
   const f = fixture();
   try {

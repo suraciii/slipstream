@@ -111,7 +111,41 @@ for (const viewport of [
     await expect(first.locator(".removed-name")).toHaveText(
       "photograph-with-a-long-filename.jpg",
     );
+    await expect(first.locator(".removed-when").first()).toContainText(
+      "Removed",
+    );
+    await expect(first.locator(".removed-when").last()).toContainText(
+      "Original: available",
+    );
+    await expect(first.getByText("Photo ID:", { exact: false })).toBeHidden();
+    await first.getByText("Details", { exact: true }).click();
+    await expect(first.getByText("Photo ID:", { exact: false })).toContainText(
+      "removed-0",
+    );
+    await expect(first.getByText("Photo ID:", { exact: false })).toContainText(
+      "original-0",
+    );
+    await first.getByText("Details", { exact: true }).click();
+    await expect(
+      panel.locator("[data-removed-restore-selection]"),
+    ).toBeHidden();
+    await expect(panel.locator("[data-removed-delete]")).toBeHidden();
+    await expect(panel.locator("[data-trash-copy-locations]")).toBeEnabled();
+    await expect(panel.locator("[data-removed-select-all]")).toBeVisible();
+    await expect(panel.locator("[data-removed-undo]")).toBeVisible();
+    await expect(panel.locator("[data-trash-library-folder]")).toContainText(
+      root,
+    );
+    await expect(panel.locator("[data-trash-library-folder]")).toContainText(
+      "Server/container filesystem namespace, not this device",
+    );
     await first.getByRole("checkbox").check();
+    await expect(
+      panel.locator("[data-removed-restore-selection]"),
+    ).toBeVisible();
+    await expect(panel.locator("[data-removed-selection-count]")).toContainText(
+      "1 selected",
+    );
     const reviewEntry = panel.locator("[data-removed-delete]");
     if (height <= 480) {
       const restoreLast = panel

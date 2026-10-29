@@ -198,6 +198,22 @@
   overflow-wrap: anywhere;
 }
 
+.removed-details {
+  color: var(--muted);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.removed-details summary {
+  cursor: pointer;
+  min-height: 2rem;
+  padding-block: 0.35rem;
+}
+
+.removed-details p {
+  margin: 0 0 0.2rem;
+}
+
 .removed-message {
   margin: 0;
   font-size: 0.85rem;
@@ -313,7 +329,7 @@
 
 .removed-excluded {
   margin: 0.35rem 0 0;
-  font-size: 0.72rem;
+  font-size: 0.75rem;
   color: var(--muted);
 }
 
