@@ -45,6 +45,9 @@ export type GridCell = {
 
 type GridCellPresenterOptions = Readonly<{
   compact: () => boolean;
+  gapX: () => number;
+  insetX: () => number;
+  insetY: () => number;
   rowPitch: () => number;
   interactionEnabled: () => boolean;
   multiSelected: (index: number) => boolean;
@@ -59,7 +62,6 @@ type GridCellPresenterOptions = Readonly<{
   ) => GridThumbnailTarget;
 }>;
 
-const GRID_CELL_GAP_X = 10;
 const LOADING_CELL_SIGNATURE = "loading";
 
 function gridPhotoFacts(
@@ -81,6 +83,25 @@ function gridPhotoFacts(
   if (thumbnailState === "failed") facts.push("Thumbnail failed");
   if (deliveryFailed) facts.push("Thumbnail delivery failed");
   return facts;
+}
+
+function gridPhotoIssues(
+  photo: GridPhotoViewModel,
+  deliveryFailed: boolean,
+  thumbnailState?: "unavailable" | "failed",
+): string[] {
+  const issues: string[] = [];
+  const originalUnavailable = !photo.original.available;
+  if (originalUnavailable) issues.push("Original unavailable");
+  else if (!photo.available) issues.push("Photo unavailable");
+  if (photo.preview.state === "unavailable" && !originalUnavailable)
+    issues.push("Preview unavailable");
+  if (photo.preview.state === "failed") issues.push("Preview failed");
+  if (thumbnailState === "unavailable" && photo.preview.state !== "unavailable")
+    issues.push("Thumbnail unavailable");
+  if (thumbnailState === "failed") issues.push("Thumbnail failed");
+  if (deliveryFailed) issues.push("Thumbnail delivery failed");
+  return issues;
 }
 
 function gridCellSignature(
@@ -107,6 +128,9 @@ function gridCellSignature(
 export function createGridCellPresenter(options: GridCellPresenterOptions) {
   const {
     compact,
+    gapX,
+    insetX,
+    insetY,
     rowPitch,
     interactionEnabled,
     multiSelected,
@@ -123,9 +147,9 @@ export function createGridCellPresenter(options: GridCellPresenterOptions) {
     count: number,
     stride: number,
   ): void => {
-    cell.style.left = `${(index % count) * stride}px`;
-    cell.style.top = `${Math.floor(index / count) * rowPitch()}px`;
-    cell.style.width = compact() ? `${stride - GRID_CELL_GAP_X}px` : "";
+    cell.style.left = `${insetX() + (index % count) * stride}px`;
+    cell.style.top = `${insetY() + Math.floor(index / count) * rowPitch()}px`;
+    cell.style.width = compact() ? `${stride - gapX()}px` : "";
   };
 
   const applyMulti = (cell: HTMLButtonElement, index: number): void => {
@@ -201,16 +225,51 @@ export function createGridCellPresenter(options: GridCellPresenterOptions) {
     footer.className = "cell-footer";
     const caption = document.createElement("span");
     caption.className = "cell-caption";
-    const identity = photo.originalFilename
-      ? `${index + 1} · ${photo.originalFilename}`
-      : String(index + 1);
-    caption.textContent = photo.rating
-      ? `${identity} · ${photo.rating}★`
-      : identity;
-    if (photo.originalFilename) caption.title = photo.originalFilename;
+    const line = document.createElement("span");
+    line.className = "cell-line";
+    const check = document.createElement("span");
+    check.className = "cell-check";
+    check.setAttribute("aria-hidden", "true");
+    check.textContent = "✓";
+    const name = document.createElement("span");
+    name.className = "cell-name";
+    name.textContent = photo.originalFilename ?? "Photo";
+    name.title = photo.originalFilename ?? "";
+    const captionPosition = document.createElement("span");
+    captionPosition.className = "cell-pos";
+    captionPosition.textContent = String(index + 1);
+    line.append(check, name, captionPosition);
 
-    const facts = document.createElement("span");
-    facts.className = "cell-facts";
+    const meta = document.createElement("span");
+    meta.className = `cell-meta state-${photo.selectionState}`;
+    const stateMark = document.createElement("span");
+    stateMark.className =
+      photo.selectionState === "unflagged"
+        ? "state-dot state-unflagged"
+        : `cell-state ${photo.selectionState}`;
+    if (photo.selectionState === "picked") stateMark.textContent = "✓";
+    else if (photo.selectionState === "rejected") stateMark.textContent = "×";
+    stateMark.setAttribute("aria-hidden", "true");
+    const stateText = document.createElement("span");
+    stateText.className = "state-text";
+    stateText.textContent = selectionLabel(photo.selectionState);
+    const stars = document.createElement("span");
+    stars.className = "stars";
+    stars.setAttribute("aria-hidden", "true");
+    for (let star = 1; star <= 5; star += 1) {
+      const glyph = document.createElement("span");
+      // Shape carries the rated/unrated split; color only reinforces it.
+      glyph.textContent = star > photo.rating ? "☆" : "★";
+      if (star > photo.rating) glyph.className = "star-empty";
+      stars.append(glyph);
+    }
+    const kind = document.createElement("span");
+    kind.className = "cell-kind";
+    kind.textContent = `${photo.original.kind === "raw" ? "RAW" : "JPEG"}${
+      photo.hasSavedEdits ? " · Edited" : ""
+    }`;
+    meta.append(stateMark, stateText, stars, kind);
+    caption.append(line, meta);
     const rendered: GridCell = {
       cell,
       signature: "",
@@ -224,8 +283,21 @@ export function createGridCellPresenter(options: GridCellPresenterOptions) {
         rendered.deliveryFailed,
         rendered.thumbnailState,
       );
-      facts.textContent = values.join(" · ");
-      facts.hidden = values.length === 0;
+      const issues = gridPhotoIssues(
+        photo,
+        rendered.deliveryFailed,
+        rendered.thumbnailState,
+      );
+      // Exceptional facts replace the kind slot instead of adding a third
+      // caption line. The media placeholder names the same condition, so no
+      // text escapes the uniform cell.
+      kind.textContent =
+        issues.length === 0
+          ? `${photo.original.kind === "raw" ? "RAW" : "JPEG"}${
+              photo.hasSavedEdits ? " · Edited" : ""
+            }`
+          : issues.join(" · ");
+      kind.classList.toggle("cell-issue", issues.length > 0);
       cell.setAttribute(
         "aria-label",
         [
@@ -239,33 +311,27 @@ export function createGridCellPresenter(options: GridCellPresenterOptions) {
     };
     const presentThumbnail = (): void => {
       placeholder.hidden = !image.hidden;
-      placeholder.textContent = rendered.deliveryFailed
-        ? "Thumbnail delivery failed"
-        : rendered.thumbnailState === "failed"
-          ? "Thumbnail failed"
-          : rendered.thumbnailState === "unavailable"
-            ? "Thumbnail unavailable"
-            : photo.preview.state === "failed"
-              ? "Preview failed"
-              : photo.preview.state === "unavailable"
-                ? "Preview unavailable"
-                : photo.preview.state === "inspection-pending"
-                  ? "Preparing Preview…"
-                  : "Loading thumbnail…";
+      placeholder.textContent = !photo.original.available
+        ? "Original unavailable"
+        : rendered.deliveryFailed
+          ? "Thumbnail delivery failed"
+          : rendered.thumbnailState === "failed"
+            ? "Thumbnail failed"
+            : rendered.thumbnailState === "unavailable"
+              ? "Thumbnail unavailable"
+              : photo.preview.state === "failed"
+                ? "Preview failed"
+                : photo.preview.state === "unavailable"
+                  ? "Preview unavailable"
+                  : photo.preview.state === "inspection-pending"
+                    ? "Preparing Preview…"
+                    : "Loading thumbnail…";
     };
     presentThumbnail();
     presentFacts();
     rendered.signature = gridCellSignature(index, photo, false);
 
-    if (photo.selectionState === "unflagged") {
-      caption.classList.add("cell-caption-wide");
-      footer.append(caption, facts);
-    } else {
-      const badge = document.createElement("span");
-      badge.className = `cell-state ${photo.selectionState}`;
-      badge.textContent = photo.selectionState === "picked" ? "✓" : "×";
-      footer.append(badge, caption, facts);
-    }
+    footer.append(caption);
     cell.append(media, footer);
     cell.addEventListener("click", (event) => send(index, event));
     applyMulti(cell, index);

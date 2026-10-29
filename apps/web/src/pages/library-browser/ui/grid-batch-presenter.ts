@@ -58,6 +58,23 @@ export const createGridBatchPresenter = (
     signature = "";
   let held: HTMLButtonElement | HTMLSelectElement | null = null;
   let disposed = false;
+  const gridView = e.gridBatch.closest<HTMLElement>(".grid-view");
+  const gridCanvas = gridView?.querySelector<HTMLElement>(".grid-canvas");
+  const batchClearance = document.createElement("div");
+  batchClearance.className = "grid-batch-clearance";
+  batchClearance.setAttribute("aria-hidden", "true");
+  gridCanvas?.after(batchClearance);
+  const syncBatchHeight = () => {
+    gridView?.style.setProperty(
+      "--grid-batch-height",
+      `${e.gridBatch.hidden ? 0 : Math.ceil(e.gridBatch.getBoundingClientRect().height)}px`,
+    );
+  };
+  const batchResize =
+    typeof ResizeObserver === "undefined"
+      ? undefined
+      : new ResizeObserver(syncBatchHeight);
+  batchResize?.observe(e.gridBatch);
   const render = (multi: GridViewModel["multi"]) => {
     if (disposed || !options.alive()) return;
     mode = multi.mode;
@@ -86,6 +103,7 @@ export const createGridBatchPresenter = (
   };
   const renderTray = () => {
     const visible = mode || count > 0;
+    gridView?.classList.toggle("multi-mode", visible);
     e.gridBatch.hidden = count === 0;
     e.gridSelectMode.setAttribute("aria-pressed", String(mode));
     const toolsFocus = e.gridTools.contains(document.activeElement),
@@ -105,6 +123,7 @@ export const createGridBatchPresenter = (
       signature = "";
       albumSelection = "";
       options.applyMultiSelection();
+      syncBatchHeight();
       return;
     }
     const resultAction = result?.compensation ?? result?.review;
@@ -173,6 +192,7 @@ export const createGridBatchPresenter = (
       )
         control.focus();
     }
+    syncBatchHeight();
   };
   const onSelectChange = () => {
     if (!options.alive()) return;
@@ -214,6 +234,8 @@ export const createGridBatchPresenter = (
     applyMulti: options.applyMultiSelection,
     dispose: () => {
       disposed = true;
+      batchResize?.disconnect();
+      batchClearance.remove();
       e.batchAlbumSelect.removeEventListener("change", onSelectChange);
       e.batchPick.removeEventListener("click", onPick);
       e.batchReject.removeEventListener("click", onReject);

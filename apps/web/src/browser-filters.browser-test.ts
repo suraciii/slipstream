@@ -138,6 +138,28 @@ test("a selected high-rated view keeps its exact filtered count", async ({
     "Source progress: 3 picked · 0 rejected · 3 unflagged",
   );
 
+  // Every committed condition is named in the header, and the narrow header
+  // gives that text its own row instead of clipping it behind the tools.
+  await page.setViewportSize({ width: 320, height: 844 });
+  const flag = page.locator("[data-view-options-flag]");
+  await expect(flag).toBeVisible();
+  await expect(flag).toContainText(/picked/i);
+  await expect(flag).toContainText(/4/);
+  expect(
+    await flag.evaluate(
+      (element) =>
+        element.scrollWidth <= element.clientWidth + 1 &&
+        element.scrollHeight <= element.clientHeight + 1,
+    ),
+  ).toBe(true);
+  await expect(flag).toHaveCSS("overflow-y", "auto");
+  expect(
+    await page
+      .locator(".grid-header")
+      .evaluate((element) => element.getBoundingClientRect().height),
+  ).toBeLessThanOrEqual(88);
+  await page.setViewportSize({ width: 1000, height: 700 });
+
   // Rating 0 means No Rating, so a maximum of 0 matches only the unrated Photo.
   await openViewOptions(page);
   await page.locator("[data-rating-min-select]").selectOption("");
@@ -245,6 +267,30 @@ test("an unavailable Original describes the Original File, not Preview readiness
   );
   await expect(page.locator("[data-grid-source-progress]")).toHaveText(
     "Source progress: 0 picked · 0 rejected · 6 unflagged",
+  );
+
+  // A compact cell keeps the exceptional fact in its media placeholder and
+  // its caption inside the uniform cell.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await waitForGridFrame(page);
+  const unavailable = page.locator(".photo-cell").first();
+  await expect(unavailable.locator(".thumbnail-placeholder")).toBeVisible();
+  await expect(unavailable.locator(".thumbnail-placeholder")).toContainText(
+    "Original unavailable",
+  );
+  const unavailableGeometry = await unavailable.evaluate((cell) => {
+    const footer = cell.querySelector<HTMLElement>(".cell-footer");
+    if (!footer) throw new Error("Cell footer is missing");
+    return {
+      cellBottom: cell.getBoundingClientRect().bottom,
+      footerBottom: footer.getBoundingClientRect().bottom,
+    };
+  });
+  expect(unavailableGeometry.footerBottom).toBeLessThanOrEqual(
+    unavailableGeometry.cellBottom + 1,
+  );
+  await expect(page.locator("[data-view-options-flag]")).toContainText(
+    "Unavailable",
   );
 
   // The complementary condition keeps the other five.

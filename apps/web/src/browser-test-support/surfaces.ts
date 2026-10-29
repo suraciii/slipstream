@@ -237,7 +237,7 @@ export const connectionIndicator = (
     .locator(
       "[data-connection], [data-grid-connection], [data-photo-connection]",
     )
-    .filter({ hasText: state });
+    .filter({ hasText: state === "Connected" ? "Ready" : "Disconnected" });
 
 /// Reads the connection state the open layout presents. A narrow layout has no
 /// dedicated brand or connected-status row, so a normal state presents no

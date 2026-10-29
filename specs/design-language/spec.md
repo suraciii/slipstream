@@ -111,6 +111,7 @@ Grid View is a field of Photos with stable cell geometry. Photo View is a focuse
 - An accent color may identify focus, current selection, or an available primary action. It must not carry several conflicting meanings at once.
 - Success, warning, failure, unavailable, Picked, Rejected, and Rating states must have distinct semantic roles. A destructive color belongs to destructive consequence, not to the ordinary Reject decision.
 - Gradients, ornamental texture, animated backgrounds, and persistent brand rows must not compete with the review task.
+- A Photo View may use a dimmed, blurred copy of the same Preview as a scrim inside the Preview well. The scrim must not add detail, imply a second Photo, appear in Grid, or remain when the Preview is unavailable. The sharp, complete Preview remains the content and the strongest visual object.
 - A state must never depend on color alone. Use text, iconography, geometry, position, or an accessible state description as a second channel.
 
 ### Typography and numbers
@@ -118,6 +119,7 @@ Grid View is a field of Photos with stable cell geometry. Photo View is a focuse
 - Use sentence case for labels, headings, buttons, and messages.
 - Use the product's exact domain names: **Pick**, **Reject**, **Picked**, **Rejected**, **Unflagged**, **Select**, **Selection State**, **Rating**, **No Rating**, **Library Check**, **Capture Time**, **Original File**, **Original Location**, and **Album**.
 - Use a stable, readable sans-serif voice for ordinary UI. Use a distinct numeric treatment for counts, positions, Capture Time, and other values that users compare.
+- A single display serif may distinguish the wordmark, source titles, and supporting-surface titles. The display serif must not carry a control, state label, action, or message. Mono may carry filenames, counts, positions, and technical facts; it must not carry an action. Mono micro-labels may use tracking but remain sentence case.
 - Keep technical identifiers, revisions, and paths in a secondary or technical disclosure unless they are the object of the current task.
 - Do not use typography alone to imply that an action succeeded. Outcome text must name the outcome.
 

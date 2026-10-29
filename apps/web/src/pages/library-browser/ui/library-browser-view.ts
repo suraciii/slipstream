@@ -1,4 +1,5 @@
 import "./library-browser.css";
+import "./visual-system.css";
 import "./recovery-panel.css";
 import "./removed-panels.css";
 import "./external-metadata.css";
@@ -323,7 +324,7 @@ export interface LibraryBrowserView extends RecoveryReviewView {
 
 export const APP_SHELL_TEMPLATE = `
 <div class="app-shell">
-  <header class="app-header"><p data-connection role="status">Connecting…</p></header>
+  <header class="app-header"><div class="app-wordmark">Slipstream</div><p data-connection role="status">Connecting…</p></header>
   <section class="browser" data-browser aria-labelledby="grid-title">
     <div class="library-status-entry" data-library-status-entry hidden><button type="button" data-library-status-toggle aria-expanded="false" aria-controls="library-status-notice">Library status</button><div class="library-status-notice" id="library-status-notice" data-library-status-notice role="status" aria-live="polite" hidden></div></div>
     <dialog class="source-dialog" data-source-dialog>
@@ -336,9 +337,9 @@ export const APP_SHELL_TEMPLATE = `
         <p class="source-width-status" data-source-width-status role="status" aria-live="polite" hidden></p>
       </nav>
     </dialog>
-    <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" aria-valuemin="176" aria-valuemax="360" aria-valuenow="224" tabindex="0"></div>
+    <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" aria-valuemin="176" aria-valuemax="360" aria-valuenow="240" tabindex="0"></div>
     <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-      <header class="grid-header"><div class="grid-header-row"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false" aria-labelledby="source-toggle-label grid-title grid-status"><span id="source-toggle-label" hidden>Sources —</span><span class="source-toggle-indicator" aria-hidden="true">▾</span><span class="source-toggle-name"><span class="grid-heading"><h1 id="grid-title" data-grid-title>All Photos</h1></span><span class="grid-status-slot"><p id="grid-status" data-grid-status role="status"></p></span></span></button><p class="grid-connection" data-grid-connection role="status" hidden></p><div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options aria-label="View options">View options</button><span class="options-flag" data-view-options-flag hidden></span><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button></div><div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
+      <header class="grid-header"><div class="grid-header-row"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false" aria-labelledby="source-toggle-label grid-title grid-status"><span id="source-toggle-label" hidden>Sources —</span><span class="source-toggle-name"><span class="grid-heading"><h1 id="grid-title" data-grid-title>All Photos</h1></span><span class="grid-status-slot"><p id="grid-status" data-grid-status role="status"></p></span><span class="source-toggle-indicator" aria-hidden="true">▾</span></span></button><p class="grid-connection" data-grid-connection role="status" hidden></p><div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options aria-label="View options">View options</button><span class="options-flag" data-view-options-flag hidden></span><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button></div><div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
       <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
       <div class="grid-batch" data-grid-batch hidden><div class="grid-batch-result" data-grid-batch-result hidden><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-pick>Pick</button><button type="button" data-batch-reject>Reject</button><label for="batch-album-select">Add to</label><select id="batch-album-select" data-batch-album-select></select><button type="button" data-batch-album-add>Add to Album</button></div></div>
     </section>
@@ -810,7 +811,6 @@ export function createLibraryBrowserView(
     gridConnection,
     photoConnection,
     compact: compactSources,
-    shortViewport,
     photoVisible: () => !photoView.hidden,
   });
   const presentConnection = () => connectionPresenter.present();

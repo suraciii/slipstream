@@ -43,6 +43,8 @@ export function createRatingControls({
     rating,
     dockRating,
   } = elements;
+  const dockStars = dockRating.querySelector<HTMLElement>(".rating-dock-stars");
+  if (!dockStars) throw new Error("Rating dock stars are missing.");
   let alive = true;
   let currentRating = 0;
   let ratingWheelOpen = false;
@@ -210,7 +212,8 @@ export function createRatingControls({
         value === 0
           ? "No Rating"
           : `Rating: ${value} ${value === 1 ? "star" : "stars"}`;
-      dockRating.textContent = value === 0 ? "Rating 0★" : `Rating ${value}★`;
+      dockStars.textContent =
+        value === 0 ? "☆☆☆☆☆" : `${"★".repeat(value)}${"☆".repeat(5 - value)}`;
       dockRating.setAttribute(
         "aria-label",
         value === 0

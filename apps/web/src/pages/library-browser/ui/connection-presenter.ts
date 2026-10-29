@@ -1,8 +1,8 @@
 /// Presents the connection state. A wide layout keeps it in the application
-/// header. A narrow layout has no dedicated brand or connected-status row, so
-/// the normal state shows no permanent connection text at all and the open
-/// view's own header carries the state beside its primary actions only while
-/// it is a failure. Exactly one indicator holds the text at a time.
+/// header. A narrow Grid carries a compact readiness status in its source
+/// row; a narrow Photo View gives that row to the filename and state, so only
+/// a failure appears there beside the affected actions. Exactly one indicator
+/// holds the text at a time.
 export type ConnectionPresenter = Readonly<{
   setConnected(connected: boolean): void;
   present(): void;
@@ -13,28 +13,27 @@ export function createConnectionPresenter({
   gridConnection,
   photoConnection,
   compact,
-  shortViewport,
   photoVisible,
 }: Readonly<{
   connection: HTMLElement;
   gridConnection: HTMLElement;
   photoConnection: HTMLElement;
   compact: MediaQueryList;
-  shortViewport: MediaQueryList;
   photoVisible: () => boolean;
 }>): ConnectionPresenter {
   let connected = true;
 
   const present = (): void => {
     const failed = !connected;
-    const state = failed ? "Disconnected" : "Connected";
+    // One compact word carries the reachable state on every layout; a lost
+    // connection names the failure explicitly.
+    const state = failed ? "Disconnected" : "Ready";
     gridConnection.classList.toggle("offline", failed);
     photoConnection.classList.toggle("offline", failed);
-    // A compact layout has no dedicated brand or connected-status row. A short
-    // viewport gives its whole height to the open Photo View, so the Photo
-    // header carries the state there exactly as a narrow layout does.
-    const compactChrome =
-      compact.matches || (photoVisible() && shortViewport.matches);
+    // The application bar is not part of Photo View at any width, so the
+    // Photo header carries a failure there. A compact Grid carries readiness
+    // in its source row; a failure is the only text for an open Photo.
+    const compactChrome = compact.matches || photoVisible();
     if (!compactChrome) {
       connection.textContent = state;
       connection.classList.toggle("offline", failed);
@@ -45,11 +44,13 @@ export function createConnectionPresenter({
       return;
     }
     connection.textContent = "";
-    // A narrow normal state presents no connection text: the compact header
-    // keeps its row for the source, the count, and the two tool entries.
+    // The compact Grid keeps the source, count, and compact readiness status
+    // in its first row. A compact Photo View gives that row to the filename
+    // and state, so only a failure is presented beside its actions.
     const inPhoto = photoVisible();
-    gridConnection.textContent = inPhoto || !failed ? "" : state;
-    gridConnection.hidden = inPhoto || !failed;
+    gridConnection.textContent = inPhoto ? "" : state;
+    gridConnection.hidden = inPhoto;
+    gridConnection.classList.toggle("offline", failed);
     photoConnection.textContent = !inPhoto || !failed ? "" : state;
     photoConnection.hidden = !inPhoto || !failed;
   };

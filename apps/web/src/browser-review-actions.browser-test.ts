@@ -39,12 +39,13 @@ test("Library status opens in Photo View without disturbing the review or Grid a
   await page.keyboard.press("ArrowRight");
   for (let step = 0; step < 4; step += 1)
     await page.keyboard.press("ArrowDown");
-  const focusedIndex = await page
-    .locator('.photo-cell[tabindex="0"]')
-    .getAttribute("data-photo-index");
-  if (focusedIndex === null) throw new Error("Focused Photo has no index");
+  const columns = Number(await viewport.getAttribute("data-columns"));
+  const expectedFocusedIndex = 4 * columns;
+  await expect(
+    page.locator(`[data-photo-index="${expectedFocusedIndex}"]`),
+  ).toBeFocused();
+  const focusedIndex = String(expectedFocusedIndex);
   const focusedPhoto = page.locator(`[data-photo-index="${focusedIndex}"]`);
-  await expect(focusedPhoto).toBeFocused();
   expect(
     await viewport.evaluate((element) => element.scrollTop),
   ).toBeGreaterThan(0);
@@ -224,6 +225,7 @@ test("unavailable Original keeps its Photo review and visible recovery action", 
   );
   await expect(status).toContainText("Original File is unavailable");
   await expect(status).toBeVisible();
+  await expect(page.locator("[data-preview-ambient]")).toBeHidden();
   await page.locator("[data-dock-more]").click();
   const recoveryEntry = page
     .locator("[data-photo-tools-entries]")

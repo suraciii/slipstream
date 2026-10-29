@@ -12,7 +12,7 @@ export interface SourceSurfaceController {
 /// and keeps Sources behind its disclosure.
 export const SOURCE_WIDTH_MINIMUM = 176;
 export const SOURCE_WIDTH_MAXIMUM = 360;
-export const SOURCE_WIDTH_DEFAULT = 224;
+export const SOURCE_WIDTH_DEFAULT = 240;
 /// One pointer or keyboard step of the resize, in CSS pixels.
 export const SOURCE_WIDTH_STEP = 16;
 
@@ -60,7 +60,7 @@ export function createSourceSurfaceController({
     sourceWidthStatus,
   } = elements;
   let alive = true;
-  let sourceWidth = SOURCE_WIDTH_MINIMUM;
+  let sourceWidth = SOURCE_WIDTH_DEFAULT;
   let resizing = false;
   const listeners = new AbortController();
 

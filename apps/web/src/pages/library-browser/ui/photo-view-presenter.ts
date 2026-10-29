@@ -103,7 +103,18 @@ export function createPhotoViewPresenter({
   const position = required<HTMLElement>(root, "[data-position]");
   const filename = required<HTMLElement>(root, "[data-photo-filename]");
   const selection = required<HTMLElement>(root, "[data-selection]");
+  const selectionChip = required<HTMLElement>(root, "[data-selection-chip]");
   const stage = required<HTMLElement>(root, "[data-stage]");
+  const ambient = required<HTMLElement>(root, "[data-preview-ambient]");
+  const factsKind = required<HTMLElement>(root, "[data-photo-facts-kind]");
+  const factsCapture = required<HTMLElement>(
+    root,
+    "[data-photo-facts-capture]",
+  );
+  const factsAvailability = required<HTMLElement>(
+    root,
+    "[data-photo-facts-availability]",
+  );
   const status = required<HTMLElement>(root, "[data-status]");
   const previewSource = required<HTMLElement>(root, "[data-source]");
   const captureTime = required<HTMLElement>(
@@ -137,7 +148,7 @@ export function createPhotoViewPresenter({
     filename.textContent = model.originalFilename ?? "—";
     filename.title = model.originalFilename ?? "";
     currentSelection = model.selectionState ?? "unflagged";
-    selection.textContent = selectionLabel(currentSelection);
+    selectionChip.textContent = selectionLabel(currentSelection);
     selection.setAttribute(
       "aria-label",
       `Selection State: ${selectionLabel(currentSelection)}`,
@@ -149,6 +160,7 @@ export function createPhotoViewPresenter({
       model.captureTime === undefined
         ? "—"
         : formatCaptureTime(model.captureTime);
+    factsCapture.textContent = captureTime.textContent;
     aperture.textContent = model.aperture ?? "—";
     iso.textContent = model.iso === undefined ? "—" : String(model.iso);
     shutterSpeed.textContent = model.shutterSpeed ?? "—";
@@ -161,6 +173,11 @@ export function createPhotoViewPresenter({
   ): ReviewImagePresentation | undefined => {
     if (!alive) return undefined;
     const surface = photoStatusSurface;
+    const resolvedUrl = new URL(url, window.location.href).href;
+    // The matte copies a Preview that actually exists. Show it with the sharp
+    // image, so a failed request never leaves an ambient image behind.
+    ambient.hidden = true;
+    ambient.style.backgroundImage = `url("${resolvedUrl.replaceAll('"', "%22")}")`;
     const image = document.createElement("img");
     image.alt = `Photo ${index + 1} of ${total}`;
     image.draggable = false;
@@ -173,6 +190,7 @@ export function createPhotoViewPresenter({
     image.dataset.measured = "false";
     image.addEventListener("load", () => {
       if (!alive || !image.isConnected) return;
+      ambient.hidden = false;
       zoom.applyZoom();
       image.dataset.measured = "true";
     });
@@ -200,7 +218,7 @@ export function createPhotoViewPresenter({
     };
     return {
       target,
-      resolvedUrl: new URL(url, window.location.href).href,
+      resolvedUrl,
       surface,
     };
   };
@@ -227,6 +245,9 @@ export function createPhotoViewPresenter({
   ) => {
     source = nextSource;
     limited = isLimited;
+    if (nextSource)
+      factsKind.textContent =
+        nextSource === "raw-embedded-jpeg" ? "RAW" : "JPEG";
     renderPreviewEvidence();
   };
   const renderStatus = (text: string): void => {
@@ -246,6 +267,17 @@ export function createPhotoViewPresenter({
     photoStatusSurface = {};
     renderStatus(text);
   };
+  const clearAmbient = () => {
+    ambient.hidden = true;
+    ambient.style.removeProperty("background-image");
+  };
+  const kindLabel = (model: PhotoShellViewModel): string => {
+    if (model.previewSource === "raw-embedded-jpeg") return "RAW";
+    if (model.previewSource === "jpeg-original") return "JPEG";
+    const extension = model.originalFilename?.split(".").at(-1)?.toLowerCase();
+    if (!extension) return "—";
+    return extension === "jpg" || extension === "jpeg" ? "JPEG" : "RAW";
+  };
   const renderPhotoShell = (model: PhotoShellViewModel) => {
     if (!alive) return undefined;
     resetGestures();
@@ -256,10 +288,19 @@ export function createPhotoViewPresenter({
     renderPhotoFacts(model);
     renderPhotoMetadata();
     setPreviewFacts(model.previewSource, Boolean(model.limitedDetail));
+    factsKind.textContent = kindLabel(model);
+    factsAvailability.textContent =
+      model.photoId === undefined
+        ? "—"
+        : model.available === false
+          ? "Unavailable"
+          : "Available";
+    factsAvailability.dataset.available = String(model.available !== false);
     let image: ReviewImagePresentation | undefined;
     if (model.previewUrl)
       image = presentReviewImage(model.previewUrl, model.index, model.total);
     else {
+      clearAmbient();
       stage.replaceChildren(
         paragraph(
           !model.photoId
@@ -313,6 +354,7 @@ export function createPhotoViewPresenter({
     },
     clearPreview() {
       if (!alive) return;
+      clearAmbient();
       stage.replaceChildren();
       zoom.resetForImage();
     },
@@ -334,10 +376,11 @@ export function createPhotoViewPresenter({
       );
     },
     showPreviewUnavailable(text) {
-      if (alive && !stage.querySelector("img")) {
-        stage.replaceChildren(paragraph(text));
-        zoom.resetForImage();
-      }
+      if (!alive) return;
+      clearAmbient();
+      if (stage.querySelector("img")) return;
+      stage.replaceChildren(paragraph(text));
+      zoom.resetForImage();
     },
     dispose() {
       alive = false;

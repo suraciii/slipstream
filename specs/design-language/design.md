@@ -20,10 +20,11 @@ The design language is not a collection of visual preferences. It is a constrain
 
 ## Authority and Context
 
-The two design-language documents have separate responsibilities:
+The design-language documents have separate responsibilities:
 
 - [Product Design Language](spec.md) owns product character, hierarchy, interaction grammar, content language, feedback and recovery language, responsive principles, accessibility language, and shared review questions.
 - This document owns the semantic-layer model, surface responsibility boundaries, state invariants, and implementation-independent conformance method.
+- [Visual System](visual-system.md) owns the Web reference token scale and the presentation of shared surfaces. It does not add semantic meanings or feature behavior; it realizes the roles in this contract.
 - A Feature behavior contract owns exact user-visible behavior, bounds, ordering, persistence, failure, recovery, and feature-specific exceptions. It must link to the shared design language rather than restate it.
 - A Feature design contract owns technical boundaries, lifecycle, identity, and ownership for that Feature. It must not redefine the product's domain vocabulary.
 - [`CONTEXT.md`](../../CONTEXT.md) defines terms. It must not become a second source for behavior or visual rules.
@@ -78,6 +79,8 @@ Tokens are names for presentation meaning, not a second domain model. The exact 
 Reference tokens are implementation primitives: palette values, type sizes, spacing steps, radii, borders, elevation, and motion durations. They are useful for a rendering system but have no product meaning by themselves.
 
 Reference tokens must be owned by the rendering boundary. Feature code and feature specifications must not select a raw color, arbitrary spacing value, or animation duration when a semantic role exists. A reference scale may change to satisfy contrast, density, or platform constraints without changing product meaning.
+
+The selected Web reference scale is fixed in [Visual System](visual-system.md). It supplies the values for these roles; feature code still selects semantic roles and must not select a raw value when a role exists.
 
 ### Semantic tokens
 
@@ -243,6 +246,8 @@ Responsive composition is a carrier decision over the same semantic model:
 
 Exact viewport thresholds, cell geometry, target sizes, and feature-specific layouts remain in the owning behavior or experience contract.
 
+The [Visual System](visual-system.md) reference composes within those owned budgets; it does not create new viewport thresholds, target limits, or cell-count defaults.
+
 ## Accessibility and Carrier Invariants
 
 A carrier conforms when all applicable statements are true:
@@ -272,6 +277,8 @@ A feature review must record enough evidence to answer these questions:
 9. Which exact feature contract accepts the behavior, and are any rules duplicated instead of linked?
 
 A screenshot or passing test alone is not conformance evidence. Evidence must show the semantic mapping and the outcome boundary. A browser check is useful for Web composition; it cannot prove Native Processing, iOS/Safari, physical safe-area behavior, or a CLI result unless those surfaces were exercised.
+
+The [Visual System](visual-system.md) reference adds reference-scale and presentation checks. A review still records the semantic mapping and outcome evidence above.
 
 ## Non-Goals
 
