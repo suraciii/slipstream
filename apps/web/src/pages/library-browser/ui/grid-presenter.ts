@@ -8,17 +8,26 @@ import { gridThumbnailTarget } from "./grid-thumbnail-target.js";
 import type { NavigationGridRestoration } from "../model/browser-navigation.js";
 
 type GridThumbnailSize = "small" | "medium" | "large";
-const GRID_CELL_GAP_X = 10;
-const GRID_CELL_GAP_Y = 12;
+const DESKTOP_GAP = 22;
+const COMPACT_GAP = 12;
+const DESKTOP_INSET_X = 28;
+const DESKTOP_INSET_Y = 24;
+const COMPACT_INSET = 16;
+const COMPACT_CAPTION_HEIGHT = 45;
 const GRID_THUMBNAIL_SIZE_STEPS: Readonly<
   Record<
     GridThumbnailSize,
-    Readonly<{ width: number; height: number; label: string }>
+    Readonly<{
+      width: number;
+      height: number;
+      compactWidth: number;
+      label: string;
+    }>
   >
 > = {
-  small: { width: 108, height: 130, label: "Small" },
-  medium: { width: 140, height: 166, label: "Medium" },
-  large: { width: 216, height: 256, label: "Large" },
+  small: { width: 120, height: 124, compactWidth: 96, label: "Small" },
+  medium: { width: 180, height: 168, compactWidth: 132, label: "Medium" },
+  large: { width: 260, height: 223, compactWidth: 220, label: "Large" },
 };
 
 type GridPresentation = Readonly<{
@@ -96,15 +105,29 @@ export function createGridPresenter(
   let photoAt: GridPresentation["photoAt"] = () => undefined;
 
   const cellBox = () => GRID_THUMBNAIL_SIZE_STEPS[thumbnailSize];
-  const columnPitch = () => cellBox().width + GRID_CELL_GAP_X;
-  const rowPitch = () => cellBox().height + GRID_CELL_GAP_Y;
+  const gapX = () => (compact.matches ? COMPACT_GAP : DESKTOP_GAP);
+  const gapY = () => (compact.matches ? COMPACT_GAP : DESKTOP_GAP);
+  const insetX = () => (compact.matches ? COMPACT_INSET : DESKTOP_INSET_X);
+  const insetY = () => (compact.matches ? COMPACT_INSET : DESKTOP_INSET_Y);
+  const availableWidth = () => Math.max(0, viewport.clientWidth - insetX() * 2);
+  const columnPitch = () =>
+    (compact.matches ? cellBox().compactWidth : cellBox().width) + gapX();
   const columns = () =>
-    Math.max(
-      1,
-      Math.floor(Math.max(320, viewport.clientWidth) / columnPitch()),
-    );
+    Math.max(1, Math.floor(Math.max(320, availableWidth()) / columnPitch()));
   const columnStride = (count = columns()) =>
-    compact.matches ? viewport.clientWidth / count : columnPitch();
+    compact.matches
+      ? (availableWidth() + gapX()) / count
+      : cellBox().width + gapX();
+  const compactCellWidth = (count = columns()) =>
+    Math.max(0, columnStride(count) - gapX());
+  // A compact cell stretches to its column, so its 3:2 media and complete
+  // caption decide the row height. Fixed step heights only fit the desktop
+  // step width; a one-column Large cell would otherwise overflow its row.
+  const cellHeight = (count = columns()) =>
+    compact.matches
+      ? Math.ceil(compactCellWidth(count) * (2 / 3)) + COMPACT_CAPTION_HEIGHT
+      : cellBox().height;
+  const rowPitch = () => cellHeight() + gapY();
   const viewportHeight = () =>
     Math.max(360, Math.min(viewport.clientHeight, window.innerHeight));
   const firstVisibleIndex = (count: number): number =>
@@ -114,13 +137,19 @@ export function createGridPresenter(
           0,
           Math.min(
             total - 1,
-            Math.floor(viewport.scrollTop / rowPitch()) * count,
+            Math.floor(
+              Math.max(0, viewport.scrollTop - insetY()) / rowPitch(),
+            ) * count,
           ),
         );
   const applySize = () => {
     const box = cellBox();
-    browser.style.setProperty("--grid-cell-width", `${box.width}px`);
-    browser.style.setProperty("--grid-cell-height", `${box.height}px`);
+    browser.dataset.gridSize = thumbnailSize;
+    browser.style.setProperty(
+      "--grid-cell-width",
+      `${compact.matches ? compactCellWidth() : box.width}px`,
+    );
+    browser.style.setProperty("--grid-cell-height", `${cellHeight()}px`);
   };
   for (const [size, step] of Object.entries(GRID_THUMBNAIL_SIZE_STEPS)) {
     const option = document.createElement("option");
@@ -145,6 +174,9 @@ export function createGridPresenter(
   };
   const cellPresenter = createGridCellPresenter({
     compact: () => compact.matches,
+    gapX,
+    insetX,
+    insetY,
     rowPitch,
     interactionEnabled: () => interactive,
     multiSelected,
@@ -161,6 +193,7 @@ export function createGridPresenter(
     target: gridThumbnailTarget,
   });
   let interactive = false;
+  let currentIndex: number | undefined;
 
   const clear = () => {
     for (const rendered of renderedCells.values())
@@ -172,6 +205,10 @@ export function createGridPresenter(
   const applyMulti = () => {
     for (const [index, rendered] of renderedCells)
       cellPresenter.applyMulti(rendered.cell, index);
+  };
+  const applyCurrent = () => {
+    for (const [index, rendered] of renderedCells)
+      rendered.cell.classList.toggle("is-current", index === currentIndex);
   };
   // Rebind only images detached by a source boundary; retained cells otherwise
   // keep their in-flight thumbnails across merged renders.
@@ -249,10 +286,15 @@ export function createGridPresenter(
     const stride = columnStride(count);
     const pitch = rowPitch();
     const height = viewportHeight();
+    // A compact width change changes the derived cell and row height too.
+    browser.style.setProperty("--grid-cell-height", `${cellHeight(count)}px`);
     renderedColumns = count;
     renderedStride = stride;
     renderedHeight = height;
-    const canvasHeight = `${Math.ceil(model.total / count) * pitch}px`;
+    viewport.dataset.columns = String(count);
+    const canvasHeight = `${
+      Math.ceil(model.total / count) * pitch - gapY() + insetY() * 2
+    }px`;
     canvas.style.height = canvasHeight;
     layer.style.height = canvasHeight;
     if (pendingAnchor !== undefined) {
@@ -261,7 +303,10 @@ export function createGridPresenter(
     }
     if (position !== undefined)
       viewport.scrollTop = Math.floor(position / count) * pitch;
-    const firstRow = Math.max(0, Math.floor(viewport.scrollTop / pitch) - 2);
+    const firstRow = Math.max(
+      0,
+      Math.floor(Math.max(0, viewport.scrollTop - insetY()) / pitch) - 2,
+    );
     const start = firstRow * count;
     const end = Math.min(
       model.total,
@@ -312,6 +357,7 @@ export function createGridPresenter(
     }
     restoreKeyboardFocus();
     applyMulti();
+    applyCurrent();
     // An incomplete range is reported again so the owner can join or retry it.
     if (
       end > start &&
@@ -430,13 +476,21 @@ export function createGridPresenter(
     },
     resetKeyboard() {
       keyboardIndex = undefined;
+      currentIndex = undefined;
+      applyCurrent();
     },
     scrollTo(index: number) {
       viewport.scrollTop = Math.floor(index / columns()) * rowPitch();
     },
     captureRestoration(): NavigationGridRestoration | undefined {
       if (!isAlive() || gridView.hidden || total === 0) return undefined;
-      const index = firstVisibleIndex(columns());
+      // Capture the row at the scroll boundary and the pixel offset into it.
+      // The presentation inset is not scroll distance: subtracting it here
+      // would name the previous, offscreen row and restore one row too high.
+      const index = Math.min(
+        total - 1,
+        Math.floor(viewport.scrollTop / rowPitch()) * columns(),
+      );
       const photo = photoAt(index);
       if (!photo) return undefined;
       const offset = viewport.scrollTop % rowPitch();
@@ -492,8 +546,11 @@ export function createGridPresenter(
     },
     returnFromPhoto(index: number | undefined) {
       keyboardIndex = index;
-      if (index !== undefined)
+      if (index !== undefined) {
+        currentIndex = index;
         viewport.scrollTop = Math.floor(index / columns()) * rowPitch();
+      }
+      applyCurrent();
       schedule();
     },
     dispose() {

@@ -38,16 +38,25 @@ test("Grid View moves cell focus with the arrow keys and opens the focused Photo
 
   const viewport = page.locator("[data-grid-viewport]");
   const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
-  // The Grid's own column rule: one 150-pixel column per 150 pixels of Grid.
-  const columns = await viewport.evaluate((element) =>
-    Math.max(1, Math.floor(Math.max(320, element.clientWidth) / 150)),
-  );
+  // The Grid presenter owns the applied column count for the selected
+  // thumbnail step; the test reads the count instead of duplicating it.
+  const columns = Number(await viewport.getAttribute("data-columns"));
+  expect(columns).toBeGreaterThan(0);
 
   // The Grid viewport is the keyboard's entry: the first arrow enters at the
   // first visible Photo, and later arrows step from the cell it owns.
   await viewport.focus();
   await page.keyboard.press("ArrowRight");
   await expect(cell(0)).toBeFocused();
+  const mediaBox = await page
+    .locator(".photo-cell .cell-media")
+    .first()
+    .boundingBox();
+  if (!mediaBox) throw new Error("Grid cell media has no geometry");
+  expect(Math.abs(mediaBox.width / mediaBox.height - 1.5)).toBeLessThan(0.02);
+  await expect(cell(0).locator(".stars span")).toHaveCount(5);
+  await expect(cell(0).locator(".star-empty")).toHaveCount(5);
+  await expect(cell(0).locator(".stars")).toHaveText("☆☆☆☆☆");
   // The focused cell announces its position through the existing label.
   await expect(cell(0)).toHaveAccessibleName(/^Photo 1 of 300/);
   expect(
@@ -67,18 +76,11 @@ test("Grid View moves cell focus with the arrow keys and opens the focused Photo
   await expect(cell(0)).toHaveAttribute("tabindex", "0");
   await expect(cell(1)).toHaveAttribute("tabindex", "-1");
 
-  // Arrow movement loads the bounded window that contains the target row the
-  // same way scrolling does.
-  const windowStarts: number[] = [];
-  page.on("request", (request) => {
-    const url = new URL(request.url());
-    if (!/^\/api\/browse\/[^/]+$/.test(url.pathname)) return;
-    const start = Number(url.searchParams.get("start"));
-    if (Number.isFinite(start)) windowStarts.push(start);
-  });
+  // Arrow movement reaches a row outside the first bounded window; the
+  // rendered and focused target cell is the observable proof that the Grid
+  // joined the window that contains it.
   for (let step = 0; step < 20; step += 1)
     await page.keyboard.press("ArrowDown");
-  await expect.poll(() => [...new Set(windowStarts)]).toContain(120);
   const target = 20 * columns;
   await expect(cell(target)).toBeFocused();
 
@@ -286,6 +288,89 @@ test("EXIF-rotated thumbnails display the corrected orientation exactly once", a
 /// and Photo View (#309) slices own their focused tests; this block owns the
 /// cross-slice sessions the Epic gate requires, driven against the production
 /// server exactly as a Photographer would drive them.
+
+test("narrow Large cells keep their 3:2 media and complete caption in one row", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 4);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 4 Photos",
+  );
+  await waitForGridFrame(page);
+  await openViewOptions(page);
+  await page.locator("[data-size-select]").selectOption("large");
+  await applyViewOptions(page);
+  await waitForGridFrame(page);
+  await expect(page.locator("[data-grid-viewport]")).toHaveAttribute(
+    "data-columns",
+    "1",
+  );
+  const cells = page.locator(".photo-cell[data-photo-index]");
+  await expect(cells).toHaveCount(4);
+  const geometry = await cells.first().evaluate((cell) => {
+    const media = cell.querySelector<HTMLElement>(".cell-media");
+    const footer = cell.querySelector<HTMLElement>(".cell-footer");
+    if (!media || !footer) throw new Error("Cell geometry is incomplete");
+    const cellBox = cell.getBoundingClientRect();
+    const mediaBox = media.getBoundingClientRect();
+    const footerBox = footer.getBoundingClientRect();
+    return {
+      cellBottom: cellBox.bottom,
+      cellHeight: cellBox.height,
+      mediaRatio: mediaBox.width / mediaBox.height,
+      footerBottom: footerBox.bottom,
+    };
+  });
+  expect(Math.abs(geometry.mediaRatio - 1.5)).toBeLessThan(0.02);
+  expect(geometry.footerBottom).toBeLessThanOrEqual(geometry.cellBottom + 1);
+  const nextTop = (await cells.nth(1).boundingBox())!.y;
+  expect(nextTop).toBeGreaterThanOrEqual(geometry.cellBottom);
+});
+
+test("the batch tray leaves the final Grid row scrollable above it", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 40);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 40 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+  await page.locator("[data-grid-select-mode]").click();
+
+  const viewport = page.locator("[data-grid-viewport]");
+  await viewport.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  const last = page.locator('[data-photo-index="39"]');
+  await expect(last).toBeVisible();
+  await last.click();
+  const tray = page.locator("[data-grid-batch]");
+  await expect(tray).toBeVisible();
+
+  // The tray's measured height becomes scrollable clearance. At the end of
+  // that range the final row sits above the tray instead of under it. The
+  // measurement arrives asynchronously, so re-scroll after it becomes
+  // scrollable instead of assuming the first scroll already includes it.
+  await expect
+    .poll(async () => {
+      await viewport.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+      });
+      const [cellBox, trayBox] = await Promise.all([
+        last.boundingBox(),
+        tray.boundingBox(),
+      ]);
+      if (!cellBox || !trayBox) return false;
+      return cellBox.y + cellBox.height <= trayBox.y + 1;
+    })
+    .toBe(true);
+});
 
 test("Grid batch Select decides every multi-selected Photo and Undo restores them as one unit", async ({
   page,

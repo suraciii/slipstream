@@ -1,0 +1,1962 @@
+/*
+ * Slipstream Web reference presentation.
+ *
+ * Values and invariants: specs/design-language/visual-system.md.
+ * Behaviour, layout budgets, and selection semantics stay with the owning
+ * Feature contracts; this layer only realizes their shared surfaces.
+ */
+
+/* ------------------------------------------------------------------------- */
+/* Shell and Sources                                                          */
+/* ------------------------------------------------------------------------- */
+
+.private-library:has(> .app-shell) {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.private-library:has(> .private-transport.access-transport-warning) {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+/* The platform already exposes HTTPS; the private surface spends its top
+   rows on the review, not on repeating the secure transport. An unencrypted
+   transport warning remains a full line. */
+.private-transport.access-transport-secure {
+  display: none;
+}
+
+.private-library .app-shell {
+  grid-template-rows: 46px minmax(0, 1fr);
+}
+
+/* Photo View is a full-window focus surface in the reference composition. */
+.app-shell:has(.photo-view:not([hidden])) {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.app-shell:has(.photo-view:not([hidden])) .app-header {
+  display: none;
+}
+
+.app-header {
+  justify-content: space-between;
+  gap: 24px;
+  padding: 0 28px;
+  border-bottom: 1px solid var(--border);
+  background: var(--canvas);
+}
+
+.app-wordmark {
+  font: 500 17px/1 var(--font-display);
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.app-header p {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-3);
+  font: 10px/1.3 var(--font-mono);
+  letter-spacing: 0.04em;
+}
+
+.app-header p::before {
+  width: 5px;
+  height: 5px;
+  background: var(--connected);
+  box-shadow: none;
+}
+
+.app-header p.offline::before {
+  background: var(--warning);
+}
+
+.private-transport {
+  padding: 3px 28px;
+  border-bottom: 1px solid var(--border);
+  background: var(--canvas);
+  color: var(--fg-3);
+  font: 10px/1.4 var(--font-mono);
+}
+
+.private-transport p {
+  margin-top: 4px;
+  color: var(--fg-2);
+  font: 11px/1.5 var(--font-ui);
+}
+
+.browser {
+  --source-width: 15rem;
+  grid-template-columns: var(--source-width) 4px minmax(0, 1fr);
+}
+
+.source-resizer {
+  border-right: 1px solid var(--border);
+  background: transparent;
+}
+
+.source-resizer:hover,
+.source-resizer.active {
+  background: var(--accent-soft);
+}
+
+.source-resizer:focus-visible {
+  background: var(--accent);
+  outline: none;
+}
+
+.source-panel {
+  gap: 0;
+  padding: 24px 12px 14px;
+  border-right: 1px solid var(--border);
+  background: var(--canvas);
+}
+
+.source-header {
+  padding: 0 8px 14px;
+}
+
+.source-header h2 {
+  font: 500 20px/1.15 var(--font-display);
+  letter-spacing: -0.01em;
+}
+
+.source-close {
+  min-height: 32px;
+  padding: 0 8px;
+  color: var(--fg-3);
+  font: 10px var(--font-mono);
+}
+
+.source-panel > p {
+  min-height: 0;
+  padding: 0 8px 14px;
+  color: var(--fg-3);
+  font: 10px/1.5 var(--font-mono);
+}
+
+.recovery-notice {
+  padding: 0 8px 10px;
+  color: var(--warning);
+  font: 10.5px/1.5 var(--font-ui);
+}
+
+.source-list {
+  gap: 1px;
+  padding: 0;
+}
+
+.source-list h3 {
+  margin: 20px 8px 6px;
+  color: var(--fg-3);
+  font: 10px var(--font-mono);
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: none;
+}
+
+.source-card {
+  min-height: 34px;
+  padding: 0 8px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--fg-2);
+}
+
+.source-card:hover:not(:disabled) {
+  border-color: transparent;
+  background: rgb(244 236 224 / 4%);
+}
+
+.source-card.active {
+  border-color: transparent;
+  border-left-color: var(--accent);
+  background: transparent;
+  color: var(--text);
+}
+
+.source-card.active strong {
+  font-weight: 600;
+}
+
+.source-card strong {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.source-card span {
+  color: var(--fg-3);
+  font: 10.5px var(--font-mono);
+}
+
+.source-card.active span {
+  color: var(--accent);
+}
+
+.folder-page-button,
+.folder-more,
+.album-new,
+.album-tool {
+  min-height: 30px;
+  padding: 0 8px;
+  border: 0;
+  color: var(--fg-3);
+  font: 10px var(--font-mono);
+}
+
+.album-new {
+  color: var(--accent);
+}
+
+.album-heading {
+  margin-top: 16px;
+  padding: 0 8px;
+}
+
+.album-heading h3 {
+  margin: 0;
+}
+
+.folder-pager {
+  padding: 2px 8px;
+}
+
+.folder-page-label {
+  font: 10px var(--font-mono);
+  color: var(--fg-3);
+}
+
+.album-row {
+  gap: 2px;
+}
+
+.album-tools {
+  gap: 0;
+}
+
+.source-footer {
+  gap: 4px;
+  padding: 12px 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.source-footer button {
+  min-height: 34px;
+  padding: 0;
+  border: 0;
+  color: var(--fg-3);
+  font: 10.5px var(--font-mono);
+}
+
+.source-width-status {
+  color: var(--fg-3);
+  font: 10px var(--font-mono);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Grid shell and header                                                      */
+/* ------------------------------------------------------------------------- */
+
+.grid-view {
+  position: relative;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: var(--canvas);
+}
+
+.grid-header {
+  height: auto;
+  min-height: 88px;
+  padding: 0 28px;
+  /* The hairline must not make the 88px reference header 89px. */
+  border-bottom: 0;
+  box-shadow: inset 0 -1px 0 var(--border);
+  background: var(--canvas);
+}
+
+.grid-header-row {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  width: 100%;
+  min-height: 88px;
+}
+
+/* A wide header may give active conditions their own line. The narrow
+   header keeps its two-row budget and shares the second row instead. */
+@media (min-width: 761px) {
+  .grid-header:has(.options-flag:not([hidden])) {
+    height: auto;
+  }
+
+  .grid-header-row:has(.options-flag:not([hidden])) {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 88px;
+  }
+
+  .grid-header-row:has(.options-flag:not([hidden])) .grid-tools {
+    flex: 1 0 100%;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    width: 100%;
+  }
+
+  .grid-header-row:has(.options-flag:not([hidden])) .options-flag {
+    flex: 0 0 100%;
+    max-width: none;
+    overflow: visible;
+    text-align: right;
+    text-overflow: clip;
+    white-space: normal;
+  }
+}
+
+.source-toggle {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+}
+
+.source-toggle:hover:not(:disabled) {
+  background: transparent;
+}
+
+.source-toggle-indicator {
+  display: none;
+}
+
+.source-toggle-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+
+.grid-heading {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.grid-heading h1 {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font: 500 30px/1.15 var(--font-display);
+  letter-spacing: -0.015em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grid-status-slot {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.grid-status-slot p {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-3);
+  font: 11px/1.4 var(--font-mono);
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.grid-view.multi-mode .grid-status-slot {
+  display: none;
+}
+
+.grid-connection {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 20px;
+  color: var(--fg-3);
+  font: 10px/1.3 var(--font-mono);
+}
+
+.grid-connection::before {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--connected);
+  content: "";
+}
+
+.grid-connection.offline {
+  color: var(--warning);
+  font-weight: 500;
+}
+
+.grid-connection.offline::before {
+  background: var(--warning);
+}
+
+.grid-tools {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 22px;
+}
+
+.grid-tools button {
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  color: var(--fg-2);
+  font: 12.5px var(--font-ui);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.grid-tools button:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text);
+}
+
+.options-flag {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 12rem;
+  overflow: hidden;
+  color: var(--accent);
+  font: 10px var(--font-mono);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grid-selection {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.grid-selection-count {
+  color: var(--fg-2);
+  font: 11px var(--font-mono);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.grid-selection button {
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  color: var(--fg-2);
+  font: 12.5px var(--font-ui);
+  font-weight: 500;
+}
+
+.grid-selection button:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text);
+}
+
+.grid-summary {
+  display: none;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Grid field and cells                                                       */
+/* ------------------------------------------------------------------------- */
+
+.grid-viewport {
+  background: var(--canvas);
+}
+
+.grid-empty {
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.photo-cell {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto;
+  align-content: start;
+  gap: 0;
+  overflow: visible;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.photo-cell:hover:not(:disabled) {
+  border: 0;
+  background: transparent;
+}
+
+.photo-cell:focus-visible {
+  outline: none;
+}
+
+.photo-cell:focus-visible .cell-media {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.photo-cell.is-current .cell-media {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.photo-cell.multi-selected {
+  border: 0;
+  box-shadow: none;
+}
+
+.photo-cell.multi-selected .cell-media::before {
+  content: none;
+}
+
+.cell-media {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--inset);
+}
+
+.thumbnail {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 3px;
+  transition: opacity 160ms ease-out;
+}
+
+.cell-media:hover .thumbnail {
+  opacity: 1;
+}
+
+.photo-cell:hover:not(:disabled) .cell-media {
+  box-shadow: 0 18px 40px rgb(0 0 0 / 38%);
+}
+
+.cell-placeholder {
+  grid-row: 1 / -1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--inset);
+  color: var(--fg-3);
+  font: 10px var(--font-mono);
+}
+
+.cell-footer {
+  display: block;
+  min-width: 0;
+  padding-top: 10px;
+}
+
+.cell-caption {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  overflow: visible;
+  color: var(--fg-2);
+  font-size: inherit;
+  line-height: inherit;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.cell-line {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.cell-check {
+  display: none;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  place-items: center;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #1a1713;
+  font: 700 10px var(--font-ui);
+}
+
+.grid-view.multi-mode .cell-check {
+  display: grid;
+  visibility: hidden;
+}
+
+.photo-cell.multi-selected .cell-check {
+  visibility: visible;
+}
+
+.cell-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font: 500 13px/1.4 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cell-pos {
+  flex: none;
+  margin-left: auto;
+  color: var(--fg-3);
+  font: 11px var(--font-mono);
+}
+
+.cell-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: var(--fg-3);
+  font: 10.5px/1.4 var(--font-mono);
+  white-space: nowrap;
+}
+
+/* Only the Grid caption turns the state into a dot. Filmstrip badges keep
+   the base circular badge and its ✓/× glyph. */
+.cell-meta > .cell-state,
+.cell-meta > .state-dot {
+  flex: 0 0 auto;
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--fg-3);
+  color: transparent;
+  font-size: 0;
+}
+
+.cell-meta > .cell-state.picked {
+  background: var(--picked);
+  color: transparent;
+}
+
+.cell-meta > .cell-state.rejected {
+  background: var(--rejected);
+  color: transparent;
+}
+
+.cell-meta > .state-dot.state-unflagged {
+  background: var(--fg-3);
+}
+
+.state-text {
+  flex: none;
+  color: var(--fg-3);
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  letter-spacing: 0.01em;
+}
+
+.cell-meta.state-picked .state-text {
+  color: var(--picked);
+}
+
+.cell-meta.state-rejected .state-text {
+  color: var(--rejected);
+}
+
+.stars {
+  flex: none;
+  color: var(--rating);
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+}
+
+.stars .star-empty {
+  color: var(--fg-3);
+}
+
+.browser[data-grid-size="small"] .cell-kind {
+  display: none;
+}
+
+.browser[data-grid-size="small"] .cell-meta {
+  gap: 4px;
+}
+
+.browser[data-grid-size="small"] .stars {
+  font-size: 10.5px;
+}
+
+.cell-kind {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--fg-3);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+}
+
+.cell-kind.cell-issue {
+  flex: 1 1 auto;
+  margin-left: 0;
+  color: var(--warning);
+  text-align: right;
+}
+
+.thumbnail-placeholder {
+  background: var(--inset);
+  color: var(--fg-3);
+  font: 10px/1.35 var(--font-mono);
+}
+
+/* The batch tray floats over the field; this spacer keeps the final row
+   scrollable above the tray at its actual, possibly wrapped height. */
+.grid-batch-clearance {
+  height: 0;
+  pointer-events: none;
+}
+
+.grid-view.multi-mode .grid-batch-clearance {
+  height: calc(var(--grid-batch-height, 56px) + 24px);
+}
+
+.grid-batch {
+  position: absolute;
+  z-index: 10;
+  right: 16px;
+  bottom: 16px;
+  left: 16px;
+  min-height: 56px;
+  height: auto;
+  max-height: calc(100% - 112px);
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 8px 12px;
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  background: var(--raised);
+  box-shadow: var(--shadow-float);
+}
+
+.grid-batch-result {
+  flex: 1 1 16rem;
+  color: var(--fg-2);
+  font-size: 11px;
+}
+
+.grid-batch-result[data-tone="success"] {
+  color: var(--text);
+}
+
+.grid-batch-result[data-tone="warning"],
+.grid-batch-result[data-tone="failure"] {
+  color: var(--warning);
+}
+
+.grid-batch-retained {
+  color: var(--fg-3);
+  font: 10px var(--font-mono);
+}
+
+.grid-batch-actions {
+  flex: 1 1 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.grid-batch-actions label {
+  color: var(--fg-3);
+  font: 10px var(--font-mono);
+}
+
+.grid-batch-actions select {
+  min-height: 36px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--inset);
+  color: var(--text);
+  font: 11px var(--font-ui);
+}
+
+.grid-batch-actions button {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0;
+  color: var(--fg-2);
+  font-size: 11.5px;
+}
+
+.grid-batch-actions [data-batch-pick] {
+  border-radius: 999px;
+  background: var(--picked-soft);
+  color: var(--picked);
+}
+
+.grid-batch-actions [data-batch-pick]:hover:not(:disabled) {
+  background: rgb(163 195 171 / 22%);
+}
+
+.grid-batch-actions [data-batch-reject]:hover:not(:disabled) {
+  background: var(--rejected-soft);
+  color: var(--rejected);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Photo View                                                                 */
+/* ------------------------------------------------------------------------- */
+
+.photo-view {
+  grid-template-rows: auto minmax(480px, 1fr) auto auto auto;
+  background: var(--canvas);
+}
+
+.photo-header {
+  height: 60px;
+  min-height: 60px;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--canvas);
+}
+
+.photo-back {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  color: var(--fg-2);
+  font: 18px/1 var(--font-ui);
+}
+
+.photo-back:hover:not(:disabled) {
+  background: rgb(244 236 224 / 6%);
+}
+
+.photo-identity {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  align-items: center;
+  column-gap: 12px;
+}
+
+.photo-header h1 {
+  grid-column: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-3);
+  font: 10px/1.35 var(--font-mono);
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-filename {
+  grid-column: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font: 15.5px/1.25 var(--font-mono);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-identity-facts {
+  grid-column: 2;
+  grid-row: 1 / -1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.photo-identity-facts [data-rating] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.selection-badge {
+  width: auto;
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.selection-badge:hover:not(:disabled) {
+  background: transparent;
+}
+
+.selection-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  height: 24px;
+  padding: 0 10px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--fg-2);
+  font: 10px/1 var(--font-mono);
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selection-badge:hover:not(:disabled) .selection-chip {
+  background: rgb(244 236 224 / 6%);
+}
+
+.photo-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.photo-header-actions button {
+  min-height: 44px;
+  padding: 0 10px;
+  border: 0;
+  color: var(--fg-2);
+  font-size: 11.5px;
+}
+
+.photo-connection {
+  color: var(--warning);
+  font: 10px var(--font-mono);
+  white-space: nowrap;
+}
+
+/* Facts line. Primary/disclosed facts are still selected by Photo View. */
+.photo-facts-line {
+  height: 32px;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0 20px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border);
+  background: var(--canvas);
+  color: var(--muted);
+  font: 10.5px/1 var(--font-mono);
+  white-space: nowrap;
+}
+
+.photo-facts-line span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.photo-facts-line span + span {
+  margin-left: 10px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+
+.photo-facts-line [data-photo-facts-availability] {
+  margin-left: auto;
+  color: var(--picked);
+}
+
+.photo-facts-line [data-photo-facts-availability="false"] {
+  color: var(--warning);
+}
+
+/* Preview well: ambient same-Preview matte, radial scrim, sharp print. */
+.preview {
+  display: block;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--inset);
+}
+
+.preview-ambient {
+  position: absolute;
+  inset: -24px;
+  background-position: center;
+  background-size: cover;
+  filter: blur(90px) brightness(0.7) saturate(1.18);
+  opacity: 0.9;
+  pointer-events: none;
+}
+
+.preview::after {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  background: radial-gradient(
+    ellipse at center,
+    rgb(10 9 8 / 0%) 0%,
+    rgb(10 9 8 / 46%) 100%
+  );
+  content: "";
+  pointer-events: none;
+}
+
+.image-stage {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  place-content: center;
+  overflow: hidden;
+}
+
+.image-stage img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  object-fit: contain;
+  box-shadow: var(--shadow-print);
+  transform-origin: center;
+}
+
+.image-stage > p {
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.swipe-feedback {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3rem;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  color: var(--fg-2);
+  font: 10px var(--font-mono);
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: none;
+  pointer-events: none;
+  writing-mode: vertical-rl;
+}
+
+.swipe-feedback.pick {
+  right: 0;
+  left: auto;
+  color: var(--picked);
+}
+
+.swipe-feedback.reject {
+  color: var(--rejected);
+}
+
+.swipe-feedback.pending {
+  background: var(--picked-soft);
+}
+
+.swipe-feedback.reject.pending {
+  background: var(--rejected-soft);
+}
+
+@media (hover: hover) {
+  .swipe-feedback {
+    visibility: hidden;
+  }
+
+  .swipe-feedback.pending {
+    visibility: visible;
+  }
+}
+
+.filmstrip-host {
+  min-height: 0;
+  display: flex;
+  justify-content: center;
+}
+
+.filmstrip {
+  min-height: 82px;
+  height: 82px;
+  gap: 6px;
+  padding: 8px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.filmstrip-cell {
+  width: 72px;
+  height: 48px;
+  min-height: 48px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: var(--inset);
+  opacity: 0.65;
+}
+
+.filmstrip-cell:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  opacity: 0.85;
+}
+
+.filmstrip-cell[aria-current="true"] {
+  border-color: transparent;
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+  opacity: 1;
+}
+
+.filmstrip-cell img {
+  border-radius: 3px;
+}
+
+.filmstrip-cell .cell-state {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+}
+
+/* Navigation and review dock. */
+.photo-review-controls {
+  min-height: 64px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 3px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.photo-navigation {
+  width: min(380px, 42vw);
+  height: 44px;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 4px;
+}
+
+.photo-navigation button {
+  min-width: 0;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  color: var(--fg-2);
+  font: 11.5px var(--font-ui);
+}
+
+.photo-position {
+  color: var(--fg-3);
+  font: 10px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.quick-action-dock {
+  height: 58px;
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(64px, 1fr));
+  gap: 2px;
+  padding: 7px 0;
+  background: transparent;
+}
+
+.quick-action-dock button {
+  min-width: 0;
+  min-height: 44px;
+  height: 44px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0 4px;
+  overflow: hidden;
+  border: 0;
+  color: var(--fg-2);
+  font: 12px var(--font-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-action-dock .rating-dock-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pick-button {
+  position: relative;
+  isolation: isolate;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--picked);
+}
+
+/* The visible capsule is 38px inside the 44px action target, so the touch
+   target keeps its floor without making Pick a full-height block. */
+.pick-button::before {
+  position: absolute;
+  z-index: -1;
+  inset: 3px 0;
+  border-radius: inherit;
+  background: var(--picked-bg);
+  content: "";
+}
+
+.pick-button:hover:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+}
+
+.pick-button:hover:not(:disabled)::before {
+  background: rgb(163 195 171 / 24%);
+}
+
+.reject-button {
+  border-color: transparent;
+  background: transparent;
+  color: var(--fg-2);
+}
+
+.reject-button:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--rejected-soft);
+  color: var(--rejected);
+}
+
+.rating-dock-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--rating);
+}
+
+.rating-dock-button:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--rating-soft);
+}
+
+.rating-dock-stars {
+  font-size: 11.5px;
+  line-height: 1;
+  letter-spacing: 0.02em;
+}
+
+.rating-dock-label {
+  color: var(--rating);
+  font: 10px/1 var(--font-mono);
+}
+
+.photo-review-controls .status {
+  grid-column: 1 / -1;
+  margin: 0 0 6px;
+  padding: 0;
+  color: var(--warning);
+  font-size: 11px;
+}
+
+/* Supporting surfaces share the same raised material. */
+.options-dialog,
+.album-dialog,
+.recovery-dialog,
+.removal-dialog,
+.removed-dialog,
+.photo-tools-dialog,
+.browser.sources-drawer .source-dialog {
+  border-color: var(--border-strong);
+  border-radius: 16px 16px 0 0;
+  background: var(--raised);
+  box-shadow: var(--shadow-float);
+}
+
+@media (min-width: 761px) {
+  .options-dialog,
+  .album-dialog,
+  .recovery-dialog,
+  .removal-dialog,
+  .removed-dialog,
+  .photo-tools-dialog,
+  .browser.sources-drawer .source-dialog {
+    border-radius: 16px;
+  }
+}
+
+.options-header h2,
+.album-dialog-header h2,
+.photo-tools-header h2 {
+  font: 500 20px/1.2 var(--font-display);
+  letter-spacing: -0.01em;
+}
+
+.options-progress,
+.options-field label,
+.folder-album-controls label,
+.grid-batch-actions label {
+  color: var(--fg-3);
+  font: 10px/1.4 var(--font-mono);
+}
+
+.options-field select,
+.folder-album-controls select,
+.options-field input,
+.album-dialog-sheet .album-form input {
+  min-height: 40px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--inset);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.options-footer [data-view-options-apply] {
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #1a1713;
+  font-weight: 600;
+}
+
+.options-footer [data-view-options-apply]:hover:not(:disabled) {
+  background: #efd2a5;
+}
+
+.album-dialog-sheet .album-form button[type="submit"],
+.removal-actions [data-removal-confirm],
+.recovery-actions [data-recovery-apply] {
+  border-radius: 6px;
+  background: var(--accent);
+  color: #17130f;
+  font-weight: 600;
+}
+
+.album-dialog-sheet .album-form button[type="submit"]:hover:not(:disabled),
+.removal-actions [data-removal-confirm]:hover:not(:disabled),
+.recovery-actions [data-recovery-apply]:hover:not(:disabled) {
+  background: #efd2a5;
+}
+
+.album-dialog-sheet .album-confirm button[data-focus-key$=":confirm"],
+.trash-review-dialog .trash-confirm-danger {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #17130f;
+  font-weight: 600;
+}
+
+.album-dialog-sheet
+  .album-confirm
+  button[data-focus-key$=":confirm"]:hover:not(:disabled),
+.trash-review-dialog .trash-confirm-danger:not(:disabled):hover {
+  border-color: #c9564a;
+  background: #c9564a;
+}
+
+.options-browse-actions h3 {
+  color: var(--fg-3);
+  font: 10px var(--font-mono);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+
+.rating-wheel::before {
+  border-color: var(--border-strong);
+  background: rgb(24 22 20 / 94%);
+}
+
+.rating-wheel-option {
+  border-color: var(--border-strong);
+  background: var(--raised);
+  color: var(--fg-2);
+}
+
+.rating-wheel-option[data-current="true"] {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.rating-wheel-option[aria-pressed="true"] {
+  border-color: var(--picked);
+  background: var(--picked-soft);
+  color: var(--text);
+  box-shadow: none;
+}
+
+.rating-wheel-status {
+  background: rgb(24 22 20 / 94%);
+  color: var(--text);
+}
+
+.rating-controls legend,
+.membership-heading {
+  color: var(--fg-3);
+  font: 10px var(--font-mono);
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+
+.rating-controls button {
+  color: var(--rating);
+}
+
+.rating-controls button[aria-pressed="true"] {
+  border-color: var(--rating);
+  background: var(--rating-soft);
+  box-shadow: none;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Narrow composition                                                         */
+/* ------------------------------------------------------------------------- */
+
+@media (max-width: 760px) {
+  .private-library .app-shell {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .private-transport {
+    padding: 3px 16px;
+  }
+
+  .private-transport summary {
+    font-size: 10px;
+  }
+
+  .source-panel button,
+  .source-panel select,
+  .source-panel input,
+  .source-card,
+  .options-dialog button,
+  .options-dialog select,
+  .options-dialog input,
+  .album-dialog button,
+  .album-dialog input,
+  .recovery-dialog button,
+  .recovery-dialog select,
+  .recovery-dialog input,
+  .removal-dialog button,
+  .removed-dialog button,
+  .photo-tools-dialog button {
+    min-height: 44px;
+  }
+
+  .browser {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .grid-view,
+  .photo-view {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .grid-header {
+    height: auto;
+    min-height: 88px;
+    max-width: 100%;
+    overflow: visible;
+    padding: 0 16px;
+  }
+
+  .grid-header-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: 44px 44px;
+    align-items: center;
+    gap: 0;
+    width: 100%;
+    min-height: 88px;
+  }
+
+  .grid-header .source-toggle {
+    grid-column: 1;
+    grid-row: 1;
+    min-width: 0;
+    min-height: 44px;
+    align-self: center;
+    gap: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+
+  .source-toggle-name {
+    min-width: 0;
+    gap: 8px;
+    overflow: hidden;
+  }
+
+  .source-toggle-indicator {
+    flex: none;
+    display: inline-block;
+    order: 2;
+    margin-left: 4px;
+    color: var(--fg-3);
+    font-size: 10px;
+  }
+
+  .grid-heading {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  .grid-heading h1 {
+    font-size: 22px;
+    line-height: 1.1;
+    text-overflow: ellipsis;
+  }
+
+  .grid-status-slot {
+    flex: 0 0 auto;
+    overflow: hidden;
+  }
+
+  .grid-status-slot p {
+    font-size: 11px;
+    text-overflow: clip;
+  }
+
+  .grid-connection {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+    align-self: center;
+    min-height: 20px;
+    font-size: 10px;
+  }
+
+  .grid-tools {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    align-content: center;
+    gap: 22px;
+    width: 100%;
+    min-width: 0;
+    overflow: visible;
+  }
+
+  .grid-tools button {
+    flex: 0 0 auto;
+    max-width: none;
+    min-height: 44px;
+    height: 44px;
+    padding: 0;
+    overflow: visible;
+    font-size: 12px;
+    text-overflow: clip;
+    white-space: nowrap;
+  }
+
+  .options-flag {
+    flex: 1 1 0;
+    max-width: none;
+    min-width: 0;
+    max-height: 44px;
+    order: 2;
+    padding: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    overflow-wrap: anywhere;
+    font-size: 10px;
+    line-height: 1.2;
+    text-align: left;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
+  .grid-selection {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .grid-selection-count {
+    min-width: 0;
+    overflow: hidden;
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .grid-selection button {
+    flex: none;
+    min-height: 44px;
+    height: 44px;
+    padding: 0;
+    font-size: 12px;
+  }
+
+  .grid-batch {
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+    min-height: 56px;
+    max-height: calc(100% - 100px);
+    flex-direction: row;
+    align-items: center;
+    gap: 6px 10px;
+    padding: 6px 10px max(6px, env(safe-area-inset-bottom));
+    border-radius: 16px;
+  }
+
+  .grid-batch-result {
+    flex: 1 1 100%;
+    font-size: 11px;
+  }
+
+  .grid-batch-actions {
+    flex: 1 1 100%;
+    justify-content: flex-end;
+    gap: 4px;
+  }
+
+  .grid-batch-actions button,
+  .grid-batch-actions select {
+    min-height: 44px;
+    font-size: 11px;
+  }
+
+  .grid-batch-actions label {
+    font-size: 10px;
+  }
+
+  .photo-header {
+    height: 50px;
+    min-height: 50px;
+    grid-template-columns: 44px minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 0 12px;
+  }
+
+  .photo-back {
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .photo-identity {
+    grid-template-rows: auto;
+  }
+
+  /* The narrow header carries the filename and state on one line. The source
+     title remains the single Photo View h1 for assistive technology. */
+  .photo-header h1 {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .photo-filename {
+    grid-row: 1;
+    font-size: 12.5px;
+    line-height: 1.2;
+  }
+
+  .photo-identity-facts {
+    grid-row: 1;
+  }
+
+  .rating-dock-button {
+    display: grid;
+    grid-template-rows: 14px 10px;
+    gap: 0;
+  }
+
+  .photo-identity-facts {
+    gap: 4px;
+    flex-wrap: nowrap;
+  }
+
+  .photo-identity-facts .selection-badge {
+    min-width: 0;
+    max-width: 5rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .selection-chip {
+    height: 24px;
+    padding: 0 8px;
+    font-size: 10px;
+  }
+
+  .photo-header-actions button {
+    min-height: 44px;
+    padding: 0 6px;
+    font-size: 11px;
+  }
+
+  .photo-facts-line {
+    height: 26px;
+    min-height: 26px;
+    padding: 0 16px;
+    font-size: 10.5px;
+  }
+
+  .cell-footer {
+    padding-top: 8px;
+  }
+
+  .cell-kind {
+    display: none;
+  }
+
+  .preview-ambient {
+    filter: blur(100px) brightness(0.55) saturate(1.2);
+  }
+
+  .preview::after {
+    background: radial-gradient(
+      ellipse at center,
+      rgb(10 9 8 / 0%) 0%,
+      rgb(10 9 8 / 50%) 100%
+    );
+  }
+
+  .photo-review-controls {
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0;
+    padding: 0;
+    background: var(--panel);
+  }
+
+  .photo-navigation {
+    width: 100%;
+    height: 44px;
+    padding: 0 12px;
+    border-top: 1px solid var(--border);
+  }
+
+  .photo-navigation button {
+    min-height: 44px;
+  }
+
+  .quick-action-dock {
+    width: 100%;
+    height: 58px;
+    min-height: 58px;
+    padding: 7px 12px max(7px, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .quick-action-dock button {
+    min-height: 44px;
+    height: 44px;
+    font-size: 12px;
+  }
+
+  .photo-review-controls .status {
+    grid-row: 1;
+    margin: 0;
+    padding: 6px 12px 0;
+    font-size: 11px;
+  }
+
+  .photo-review-controls .status button {
+    min-height: 44px;
+  }
+
+  .photo-navigation {
+    grid-row: 2;
+  }
+
+  .quick-action-dock {
+    grid-row: 3;
+  }
+
+  .quick-action-dock .rating-dock-button {
+    display: grid;
+    grid-template-rows: 14px 10px;
+    gap: 0;
+  }
+
+  .options-dialog,
+  .album-dialog,
+  .recovery-dialog,
+  .removal-dialog,
+  .removed-dialog,
+  .photo-tools-dialog,
+  .browser.sources-drawer .source-dialog {
+    border-radius: 16px 16px 0 0;
+  }
+}
+
+@media (min-width: 390px) and (max-width: 760px) and (min-height: 481px) {
+  .photo-view {
+    grid-template-rows: auto minmax(650px, 1fr) auto auto auto;
+  }
+
+  /* Keep the view natively scrollable below the dock. A touch that starts
+     in the Preview letterbox must scroll rather than decide, even when the
+     primary controls already fit above the safe viewport. */
+  .photo-view::after {
+    grid-column: 1 / -1;
+    display: block;
+    height: 32px;
+    content: "";
+  }
+
+  .photo-review-controls {
+    min-height: 102px;
+  }
+}
+
+@media (min-width: 761px) and (min-height: 481px) {
+  .photo-view {
+    grid-template-rows: auto minmax(480px, 1fr) auto auto auto;
+  }
+}
+
+@media (max-height: 480px) {
+  .photo-view {
+    grid-template-rows: auto minmax(15rem, 1fr) auto;
+  }
+
+  .photo-facts-line {
+    display: none;
+  }
+
+  .photo-header {
+    height: 50px;
+    min-height: 50px;
+  }
+
+  .photo-review-controls {
+    min-height: 58px;
+    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.4fr);
+    gap: 6px;
+    padding: 0 10px;
+    border-top: 1px solid var(--border);
+  }
+
+  .photo-navigation {
+    grid-column: 1;
+    grid-row: 1;
+    width: 100%;
+    height: 44px;
+    padding: 0;
+    border-top: 0;
+  }
+
+  .quick-action-dock {
+    grid-column: 2;
+    grid-row: 1;
+    width: 100%;
+    height: 44px;
+    min-height: 44px;
+    padding: 0;
+    border-top: 0;
+    background: transparent;
+  }
+
+  .quick-action-dock button {
+    height: 44px;
+    min-height: 44px;
+  }
+
+  .photo-review-controls .status {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    padding: 0;
+  }
+}
+
+@media (max-width: 420px) {
+  .photo-header {
+    gap: 4px;
+    padding: 0 8px;
+  }
+
+  .photo-header-actions button {
+    padding: 0 4px;
+  }
+
+  .photo-navigation {
+    padding: 0 8px;
+  }
+
+  .quick-action-dock {
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+}

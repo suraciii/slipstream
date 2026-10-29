@@ -47,6 +47,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   const { albumId } = await createAlbum(running.url, "Picks");
   await startReview(page, running.url, "Picks", albumId);
   await expect(page.getByText("1 / 2")).toBeVisible();
+  await expect(page.locator(".app-header")).toBeHidden();
   await expect(page.locator("[data-selection]")).toHaveText("Unflagged");
   await expect(
     page.getByRole("button", { name: "Back to Grid", exact: true }),
@@ -118,6 +119,17 @@ test("Photo View gestures navigate and decide while More owns one review sheet",
   const running = await server(base, root);
   await startReview(page, running.url, "All Photos");
   await waitForLoadedReviewImage(page);
+  const ambient = page.locator("[data-preview-ambient]");
+  await expect(ambient).toBeVisible();
+  const reviewImageSource = await page
+    .locator("[data-stage] img")
+    .getAttribute("src");
+  expect(reviewImageSource).not.toBeNull();
+  expect(
+    await ambient.evaluate(
+      (element) => getComputedStyle(element).backgroundImage,
+    ),
+  ).toContain(reviewImageSource!);
   for (const selector of ["[data-dock-previous]", "[data-dock-next]"])
     await expect(page.locator(selector)).toBeVisible();
   await expect(page.locator("[data-dock-previous]")).toBeDisabled();
@@ -782,6 +794,8 @@ test("Photo View shows a bounded filmstrip of neighbors and navigates through it
 
   await page.locator('[data-photo-index="2"]').click();
   await waitForLoadedReviewImage(page);
+  await page.locator("[data-dock-pick]").click();
+  await expect(page.locator("[data-selection]")).toHaveText("Picked");
   await openPhotoToolsView(page, "nearby");
   const strip = page.locator("[data-filmstrip]");
   await expect(strip).toBeVisible();
@@ -795,6 +809,15 @@ test("Photo View shows a bounded filmstrip of neighbors and navigates through it
   await expect(
     strip.locator('.filmstrip-cell[aria-current="true"]'),
   ).toHaveCount(1);
+  const filmstripBadge = strip.locator(
+    '[data-filmstrip-index="2"] .cell-state.picked',
+  );
+  await expect(filmstripBadge).toHaveText("✓");
+  expect(
+    await filmstripBadge.evaluate((element) =>
+      Number.parseFloat(getComputedStyle(element).fontSize),
+    ),
+  ).toBeGreaterThan(0);
   await waitForFilmstripImages(page);
 
   // Activating a neighbor navigates there without recording a decision, and
@@ -887,6 +910,13 @@ test("844 by 390 leaves no text range collision in the review strip", async ({
     expect(box.height).toBeGreaterThanOrEqual(44);
   }
   await expectControlsAboveSafeViewport(page, 390);
+
+  // The same short layout must also hold when the viewport is narrower than
+  // the stacked two-row fallback; navigation and the dock stay one row.
+  await page.setViewportSize({ width: 667, height: 375 });
+  await waitForLoadedReviewImage(page);
+  await expectControlsAboveSafeViewport(page, 375);
+  await expectNoTextRangeCollision(page);
 });
 
 test("gesture direction labels meet resting text contrast at 4.5:1", async ({
