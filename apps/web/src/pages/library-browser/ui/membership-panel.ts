@@ -18,19 +18,23 @@ export type MembershipPanelElements = Readonly<{
   membershipRetry: HTMLButtonElement;
   membershipPanel: HTMLElement;
   membershipOptions: HTMLElement;
+  membershipNewAlbum: HTMLButtonElement;
 }>;
 
 export interface MembershipPanel {
   render(model: MembershipViewModel): void;
+  focusAlbum(albumId: string): void;
   dispose(): void;
 }
 
 export function createMembershipPanel({
   elements,
   send,
+  openNewAlbum,
 }: Readonly<{
   elements: MembershipPanelElements;
   send: (intent: MembershipPanelIntent) => void;
+  openNewAlbum: (invoker: HTMLElement) => void;
 }>): MembershipPanel {
   const {
     membershipStatus,
@@ -40,10 +44,12 @@ export function createMembershipPanel({
     membershipRetry,
     membershipPanel,
     membershipOptions,
+    membershipNewAlbum,
   } = elements;
   let alive = true;
   let membershipManageOpen = false;
   let membershipFocusAlbumId: string | undefined;
+  let createdFocusAlbumId: string | undefined;
 
   const render = (model: MembershipViewModel): void => {
     if (!alive) return;
@@ -139,14 +145,18 @@ export function createMembershipPanel({
         option.append(input, name);
         membershipOptions.append(option);
       }
-      const targetId = focusedAlbumId ?? membershipFocusAlbumId;
+      const targetId =
+        createdFocusAlbumId ?? focusedAlbumId ?? membershipFocusAlbumId;
       if (targetId !== undefined) {
         const restored = Array.from(
           membershipOptions.querySelectorAll("input"),
         ).find((input) => input.dataset.membershipAlbumId === targetId);
-        if (!restored) membershipFocusAlbumId = undefined;
-        else if (!restored.disabled) {
-          if (document.activeElement === document.body) restored.focus();
+        if (!restored && !createdFocusAlbumId)
+          membershipFocusAlbumId = undefined;
+        else if (restored && !restored.disabled) {
+          if (createdFocusAlbumId || document.activeElement === document.body)
+            restored.focus();
+          createdFocusAlbumId = undefined;
           membershipFocusAlbumId = undefined;
         }
       }
@@ -176,6 +186,9 @@ export function createMembershipPanel({
     if (!alive) return;
     send({ kind: "membership-retry" });
   });
+  membershipNewAlbum.addEventListener("click", () => {
+    if (alive) openNewAlbum(membershipNewAlbum);
+  });
 
   let currentModel: MembershipViewModel | undefined;
   return {
@@ -183,6 +196,12 @@ export function createMembershipPanel({
       if (!alive) return;
       currentModel = model;
       render(model);
+    },
+    focusAlbum(albumId) {
+      if (!alive) return;
+      membershipManageOpen = true;
+      createdFocusAlbumId = albumId;
+      if (currentModel) render(currentModel);
     },
     dispose() {
       alive = false;

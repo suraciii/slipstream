@@ -314,6 +314,13 @@ a different verb or Album is independently admitted. Form continuation
 ownership is keyed by stable form ID, so an older settlement never clears a
 newer form or draft.
 
+Contextual creation and batch Album choice retain only the bounded return and
+target context defined by [Responsive Surfaces](../library-browser/experience/design.md#contextual-album-creation-and-choice).
+Replacing a chooser with the creation form does not change source ownership.
+Creation never schedules membership automatically. Closing or superseding the
+context suppresses its return continuation without aborting creation; a later
+explicit membership submit captures its own IDs and existing settlement handle.
+
 Answered `404`, `409`, and other `4xx` failures do not change connectivity.
 Transport failures and service failures (`5xx`) change connectivity only while
 the operation still owns the global Album settlement family.

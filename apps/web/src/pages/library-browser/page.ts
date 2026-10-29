@@ -769,8 +769,10 @@ function mountPrivateLibraryBrowser(
     present: {
       setFormPending: (id, pending, name) =>
         view.setAlbumFormPending(id, pending, name),
-      setFormMessage: (id, message) => view.setAlbumFormMessage(id, message),
-      dismissForm: (id) => view.dismissAlbumForm(id),
+      setFormMessage: (id, message, unknown) =>
+        view.setAlbumFormMessage(id, message, unknown),
+      dismissForm: (id, album, suppressReturn) =>
+        view.dismissAlbumForm(id, album, suppressReturn),
       renderFolder: (model) => view.renderFolderAlbum(model),
     },
     onCreatedAlbum: async (album) => {
@@ -856,7 +858,7 @@ function mountPrivateLibraryBrowser(
       sourceGrid.selection,
       sourceGrid.conditions,
     );
-    view.setGridEmpty(empty.message, empty.offersLibraryCheck);
+    view.setGridEmpty(empty);
   };
   const sourceAnchorPhotoId = () =>
     (photoOwner.active ? currentPhoto()?.id : undefined) ??
@@ -1423,6 +1425,7 @@ function mountPrivateLibraryBrowser(
       return false;
     }
     if (!photoOwner.isCurrent(authority)) return false;
+    if (currentPhoto()) editor.referenceChanged(currentPhoto()!.id);
     if (outcome.kind === "not-ready") {
       if (view.isPhotoStatusSurfaceCurrent(capturedStatus))
         view.setPhotoStatus(outcome.preview.message ?? "Preview unavailable");
@@ -2028,6 +2031,9 @@ function mountPrivateLibraryBrowser(
         return;
       case "album-form-submit":
         void albumManagement.submitForm(intent.formId, intent.name);
+        return;
+      case "album-overview-retry":
+        void albumMutations.refreshOverview();
         return;
       case "grid-render":
         renderGrid();

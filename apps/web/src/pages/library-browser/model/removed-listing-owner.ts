@@ -96,6 +96,7 @@ export function createRemovedListingOwner(
   const model = () =>
     removedPanelModel({
       page: pages[pageIndex],
+      captureExpiresAt: pages[0]?.expiresAt ?? null,
       pageIndex,
       pending,
       failed,
@@ -187,7 +188,40 @@ export function createRemovedListingOwner(
     render();
   };
 
-  const selectAll = async () => {
+  const copyCapturedLocations = async (
+    page: TrashListingPage,
+    items: ReadonlyArray<TrashListingItem>,
+    scope: "selected" | "all",
+    expiresAt: string | null,
+  ) => {
+    const lines = [
+      `Library Folder: ${JSON.stringify(page.libraryRoot)}`,
+      `Namespace: ${page.namespace} (server/container filesystem, not client-local)`,
+      `Captured: ${page.evaluatedAt}`,
+      `Scope: ${scope === "all" ? "all" : "selected"} · ${items.length} of ${page.total} captured Trash records`,
+      `Cleanup bound: ${page.cleanupMaximum} records per attempt`,
+      `Restore bound: ${page.restoreMaximum} Photos per attempt`,
+      `Capture continuation expires: ${expiresAt ?? "none"}`,
+      ...items.map((item) =>
+        JSON.stringify({
+          photoId: item.photoId,
+          removedAtMs: item.removedAtMs,
+          originalId: item.originalId,
+          originalLocation: item.originalLocation,
+          originalKind: item.originalKind,
+        }),
+      ),
+    ];
+    try {
+      await navigator.clipboard.writeText(lines.join("\n"));
+      message = `${scope === "all" ? "All captured" : "Selected"} file locations copied.`;
+    } catch {
+      message = "File locations could not be copied.";
+    }
+    render();
+  };
+
+  const selectAll = async (copyOnly = false) => {
     if (busy() || !pages.length) return;
     selectionAbort?.abort();
     const controller = new AbortController();
@@ -231,11 +265,17 @@ export function createRemovedListingOwner(
     pending = false;
     if (ok && ids.size === captured[0]!.total) {
       pages = captured;
-      selected = new Map(
-        captured.flatMap((page) =>
-          page.photos.map((item) => [item.photoId, item] as const),
-        ),
-      );
+      const items = captured.flatMap((page) => page.photos);
+      if (copyOnly) {
+        await copyCapturedLocations(
+          captured[0]!,
+          items,
+          "all",
+          captured[0]!.expiresAt,
+        );
+        return;
+      }
+      selected = new Map(items.map((item) => [item.photoId, item] as const));
       allSelected = true;
       excluded = new Set();
     } else
@@ -593,32 +633,23 @@ export function createRemovedListingOwner(
     cleanupSelection: openReview,
     copyLocations: async () => {
       const page = pages[pageIndex];
-      if (!page || selected.size === 0) return;
-      const lines = [
-        `Library Folder: ${JSON.stringify(page.libraryRoot)}`,
-        `Namespace: ${page.namespace}`,
-        `Captured: ${page.evaluatedAt}`,
-        `Selected: ${selected.size} of ${page.total} captured Trash records`,
-        `Cleanup bound: ${page.cleanupMaximum} records per attempt`,
-        `Restore bound: ${page.restoreMaximum} Photos per attempt`,
-        `Capture continuation expires: ${pages[0]?.expiresAt ?? "none"}`,
-        ...[...selected.values()].map((item) =>
-          JSON.stringify({
-            photoId: item.photoId,
-            removedAtMs: item.removedAtMs,
-            originalId: item.originalId,
-            originalLocation: item.originalLocation,
-            originalKind: item.originalKind,
-          }),
-        ),
-      ];
-      try {
-        await navigator.clipboard.writeText(lines.join("\n"));
-        message = "Selected file locations copied.";
-      } catch {
-        message = "File locations could not be copied.";
+      if (
+        busy() ||
+        !page ||
+        page.total === 0 ||
+        (allSelected && selected.size === 0)
+      )
+        return;
+      if (selected.size === 0) {
+        await selectAll(true);
+        return;
       }
-      render();
+      await copyCapturedLocations(
+        page,
+        [...selected.values()],
+        "selected",
+        pages[0]?.expiresAt ?? null,
+      );
     },
     restoreSelection: () => restore([...selected.values()], false),
     restorePhoto: (photoId, marker) => {

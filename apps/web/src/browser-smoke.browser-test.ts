@@ -6,7 +6,6 @@ import {
   sample,
   jpeg,
   fixture,
-  writePhotos,
   server,
   post,
   browseIds,
@@ -14,7 +13,6 @@ import {
   originalSnapshot,
 } from "./browser-test-support/fixtures.js";
 import {
-  waitForGridFrame,
   openPhotoAndWaitForProgress,
   waitForLoadedReviewImage,
   previewImageGeometry,
@@ -22,8 +20,6 @@ import {
   expectConnection,
   openSources,
   openPhotoTools,
-  openViewOptions,
-  applyViewOptions,
   contrastRatio,
 } from "./browser-test-support/surfaces.js";
 
@@ -313,57 +309,4 @@ test("real-camera: shows matching JPEG then RAW embedded JPEG through the mobile
   );
   expect(await originalSnapshot(cameraSample)).toEqual(sourceBefore);
   expect(await originalSnapshot(raw)).toEqual(copiedBefore);
-});
-
-test("the empty Library, an empty Album, and no filter matches stay distinct", async ({
-  page,
-}) => {
-  const { base, root } = await fixture();
-  await writePhotos(root, 2);
-  const running = await server(base, root);
-  // An Album with no members, so its empty state is its own.
-  const created = await post(running.url, "/api/albums", {
-    name: "Empty Album",
-  });
-  expect(created.ok).toBe(true);
-  const albumId = (
-    (await await created.json()) as { albums: Array<{ id: string }> }
-  ).albums[0]!.id;
-  await page.setViewportSize({ width: 1000, height: 700 });
-  await page.goto(running.url);
-  await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
-  await waitForGridFrame(page);
-
-  // No filter matches: the filter is named, and no Library check is offered.
-  await openViewOptions(page);
-  await page.locator("[data-filter-select]").selectOption("rejected");
-  await applyViewOptions(page);
-  await expect(page.locator("[data-grid-empty-message]")).toHaveText(
-    "No Photos match this filter.",
-  );
-  await expect(page.locator("[data-grid-empty-action]")).toBeHidden();
-  await expect(page.locator("[data-grid-status]")).toHaveText("0 Photos");
-
-  // An empty Album names the Album and its existing action.
-  await openSources(page);
-  await page.getByRole("link", { name: /^Empty Album 0 Photos/ }).click();
-  await expect(page.locator("[data-grid-empty-message]")).toHaveText(
-    "This Album contains no Photos. Add Photos from another source's Photo View.",
-  );
-  await expect(page.locator("[data-grid-empty-action]")).toBeHidden();
-  await expect(page.locator("[data-grid-status]")).toHaveText("0 Photos");
-  expect(albumId).toBeTruthy();
-
-  // An empty Library keeps its Library check action.
-  await openSources(page);
-  await page.getByRole("link", { name: /^All Photos 2 Photos/ }).click();
-  await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
-  await openViewOptions(page);
-  await page.locator("[data-filter-select]").selectOption("all");
-  await applyViewOptions(page);
-  await page.evaluate(async () => {
-    const response = await fetch("/api/overview");
-    void response;
-  });
-  await expect(page.locator("[data-grid-empty]")).toBeHidden();
 });

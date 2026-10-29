@@ -28,6 +28,26 @@ Trash persists across reload and restart. It has no automatic expiration, physic
 
 On narrow screens, filenames, Locations, facts, and Restore remain readable without horizontal scrolling. Long Locations may wrap. Counts, selection actions, listing output, and available Undo remain reachable without scrolling through the entire list.
 
+The ordinary list must lead with recognizable filename, removal time, and
+Restore, retaining the relative Original Location and availability. Existing
+thumbnails may support recognition; unavailable or failed delivery uses a
+truthful placeholder and must not hide the row or imply Original absence.
+Opaque identities, byte counts, and exact capture timestamps may use named
+Details. Changed or expired capture, exclusions, uncertainty, and actionable
+failure must stay visible at the affected selection or operation.
+
+An empty successful Trash shows its empty state and a close/return path rather
+than a bank of targetless disabled actions. With rows but no selection, batch
+actions may stay hidden until selection; individual Restore, selection, complete
+count, Location output, and available removal Undo remain reachable. No empty
+state may hide pending work or an unresolved prior outcome.
+
+Location inspection, copying, printing, or saving must expose the Library Folder,
+capture qualification, and server/container namespace at the point of use under
+the listing contract below. Disclosure changes presentation only: exported
+evidence remains complete. The cleanup review must never hide its scope,
+absence evidence, refusal reasons, or irreversible record-loss consequence.
+
 ## Querying and printing Locations
 
 Web and CLI must let the caller inspect the complete Trash and obtain the Locations of an explicitly selected set or all captured Trash results. The caller must be able to print or save that listing without changing Library state. A first page or bounded subset must not be presented as the complete result.
@@ -92,3 +112,10 @@ Web and CLI must expose the same inspection, selection, absence checks, explicit
 - A missing Original has retained editing work. Cleanup names the blocker and leaves both the Photo record and work intact until the separate explicit workspace action permits cleanup.
 - Lose the cleanup response and restart. Inspecting the original attempt recovers its committed record outcomes without a second effect.
 - A cleaned-up Location later contains a supported file with no qualifying retained recovery candidate. A Library Check discovers a new Photo with default decisions and no old Album membership. If the file instead uniquely matches another retained unavailable Original, normal Location Recovery preserves that other identity, never the cleaned-up one.
+- A thumbnail is unavailable or fails to transfer. Its Trash record remains
+  recognizable and restorable; cleanup still requires fresh absence evidence.
+- The last visible row is restored while an earlier outcome remains unknown.
+  The resulting empty list must retain that unknown outcome's inspection path.
+- A remote Photographer opens File locations from a compact row. The output
+  identifies the Library Folder, capture, and execution namespace before it can
+  be mistaken for a client-local path; closing details changes no selection.

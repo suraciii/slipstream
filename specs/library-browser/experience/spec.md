@@ -69,30 +69,41 @@ remaining area. Routine progress must not create another toolbar row. The
 Library refresh action is a recovery action and must not occupy a
 permanently prominent primary slot.
 
-View options must group these controls:
+View options must separate staged choices from immediate actions:
 
-- Selection State filter;
-- Rating minimum and maximum;
-- Original kind;
-- Original availability;
-- Capture Time range;
-- source order;
-- Small, Medium, and Large thumbnail size;
-- complete source decision counts, distinct from the filtered result count;
-- Browse actions, including **Open a random Photo**;
-- source-specific actions, including Add Folder for an Original Folder and
-  Resume for an Album with a saved position; and
-- Refresh Current Source when it is available.
+- **Filter:** Selection State first, then Rating, Original kind, Original
+  availability, and Capture Time, with Reset filters. Advanced conditions may
+  use a named disclosure; active advanced conditions must be exposed on open.
+- **Order and display:** source order and Small, Medium, or Large thumbnail size.
+- **Browse actions:** Open a random Photo and Album Resume when available.
+- **Source actions:** Add Folder for an Original Folder, Refresh Current Source,
+  the current Rejected result's removal review, and the Library-wide Trash entry.
 
-The additional conditions share the meanings of [Source-Scoped Library
-Filters](../filters/spec.md#defined-conditions). View options and Select mode
-must keep their complete labels at every supported width. The header must name
-each active non-default condition in text, not by color alone. The source name
-and the result count share one disclosure: only a long source name may be
-visually truncated, and the complete name must then remain available to
-assistive technology and on pointer hover. No Grid control may be clipped at
-320, 360, 390, 420, or 760 CSS pixels wide, and no supported width may accept a
-clipped or relabeled control as the correct presentation.
+Committed matching count and complete-source decision counts must stay distinct
+from each other and from draft choices. Conditions, exact Capture Time input,
+Reset filters, and zero-result recovery follow [Source-Scoped Library
+Filters](../filters/spec.md#applying-and-reading-a-filter).
+
+The header must show the result count and identify an active filter and
+non-default order. Wide layouts must name each active condition in text. Narrow
+layouts must use a compact **Filters: N** summary rather than a scrollable
+condition strip. Count the five condition groups: Selection State, Rating,
+kind, availability, and Capture Time. Either or both bounds of one range count
+as one group; defaults count as zero. Order and thumbnail size are not filters.
+Non-default order must have a separate text indication, **Custom order**.
+
+The summary belongs to the View options entry, not a second filter button or
+header row. Its accessible description must name every committed condition
+with its values and the actual non-default order. Opening View options exposes
+those values as readable, keyboard-operable controls; no hover or tiny nested
+scroll area may be the only complete-condition path. With no active filter,
+the count summary may be omitted.
+
+View options and Select mode must retain their complete visible labels. The
+source name and result count share one Sources disclosure: only a long source
+name may truncate, with its full name available to assistive technology and
+on pointer hover. No Grid control may be clipped or relabeled at 320, 360,
+390, 420, or 760 CSS pixels wide. The normal header retains its space budget.
 
 On a wide Grid, **Open a random Photo** must appear in the normal header's
 secondary action group without creating another toolbar row. On a narrow Grid,
@@ -110,13 +121,10 @@ unresolved Photo automatically. The action's placement and pending presentation
 follow [Random Photo](../spec.md#random-photo); it must not change the current
 Grid into a different source or filter.
 
-The header must indicate an active nondefault filter or order and the visible
-result count. Every active non-default condition, including Rating bounds,
-Original kind, Original availability, and a Capture Time range, must be named
-in text and must not be communicated by color alone. Complete progress remains
-available in View options with the existing server-authoritative count rules.
-A consequential Library check completion or failure must remain discoverable
-under Status and Recovery, even while the options surface is closed.
+Complete progress remains available in View options with the existing
+server-authoritative count rules. A consequential Library check completion or
+failure must remain discoverable under Status and Recovery while options are
+closed.
 
 Trash and the current Rejected result's removal review belong in View options, beside source management actions. They must not add a permanent row to the narrow Grid header. Trash remains reachable regardless of the active source or filter. Removal review must retain its current-source and reviewed-result scope.
 
@@ -125,26 +133,51 @@ must discard uncommitted changes. Applying only a thumbnail-size change must
 not reopen the source. Applying filter and order together must open one view
 with both choices and the existing identity-anchor rules.
 
+Browse and Source actions must use the committed source, filter, and order,
+never unsubmitted choices. Their activation discards the options draft before
+opening the next surface or admitting the action; it must not implicitly Apply.
+When a draft differs, the action group must say that it uses the current view
+and discards unapplied choices. Returning to options starts from committed
+values. Removal confirmation remains separate and retains its reviewed scope.
+
 Grid cells must retain complete, unstretched composition, a position number,
 filename, Selection State, Rating, and independent availability facts. The
 uniform cell geometry, placeholders, keyboard behavior, and bounded loading
 contract remain in [Grid Composition and Orientation](../spec.md#grid-composition-and-orientation).
 An unavailable or failed Thumbnail must use an explicit text placeholder in the image region, retaining the Photo's facts and interaction. A failed image delivery must not leave a browser broken-image icon visible.
-At narrow widths, complete rows must divide the available Grid width evenly,
-leaving no more than the ordinary inter-cell gap at the trailing edge.
+At every width, complete rows must divide the available Grid width evenly,
+leaving no more than the ordinary inter-cell gap at the trailing edge. An
+incomplete last row keeps the complete-row cell width and leading alignment;
+it must not stretch its few Photos. The selected size step and Medium default
+remain unchanged; filling a row never crops or stretches its images.
 
 ## Multi-Selection
 
 Select mode must replace the normal header controls with the source name,
 `N / 100 selected`, and Done. Done is the visible clear exit: it empties the
 multi-selection and leaves Select mode without changing a Photo decision.
-Escape has the same effect. Source changes and source reopening retain their
-existing clear behavior.
+Escape has the same effect only while the Grid owns it. A supporting surface
+handles its own Escape first. Source changes and reopening retain their clear
+behavior.
 
 The selection tray occupies a bottom action region with Pick, Reject, and Add
 to Album. It appears only while the Grid multi-selection is nonempty. Desktop
 modifier selection must show this same selection surface whenever the
 multi-selection is nonempty.
+
+Add to Album must open one named chooser instead of an always-visible Album
+selector. Opening or cancelling it writes nothing. The chooser identifies the
+selected count and source, requires an explicit target Album choice, and names
+that Album before **Add to Album** confirms membership. It must not silently
+submit a default Album. The existing New Album form is available even when no
+Albums exist; creation returns to the chooser without adding Photos.
+
+The chooser and creation form share the one supporting surface and preserve
+the captured selection through local transitions. Cancelling the form returns
+to the chooser; closing the chooser returns focus to Add to Album without
+clearing selection. A source change invalidates an unsubmitted chooser. At
+submission, capture the eligible stable Photo IDs and target Album ID once;
+later UI changes must not retarget an admitted write.
 
 A completed batch must retain the selection and the visible indication
 Selection remains active. Partial, uncertain, changed-elsewhere, and missing
@@ -154,6 +187,13 @@ actions. Detailed results may use a bounded disclosure, but must not be
 replaced by an expiring toast or an unexplained success icon. Review N closes
 that disclosure and focuses the affected Grid cells; it does not open another
 modal. The existing single live-region announcement rule remains in force.
+
+The next action, the persistent result, and compensation must be visually
+distinct. Normal compact outcomes and first-level actions must fit the
+Select-mode region budget; detailed outcomes may expand explicitly. Closing a
+chooser or result disclosure must not cancel admitted work, erase uncertainty,
+or claim success. Compensation expires only under its existing owning rules;
+a persistent outcome does not promise indefinite compensation availability.
 
 ## Photo View
 
@@ -199,16 +239,19 @@ Next, Pick, and Reject controls remain the equivalent non-gesture paths.
 Manual Zoom gives one-finger panning priority over all four swipe actions.
 Vertical movement that does not commit navigation must retain the natural
 Photo View scroll path, including scrolling from Preview letterbox regions.
-The Preview must show transient direction feedback during an in-progress swipe;
-feedback must not rely on color, haptics, or animation alone.
+The Preview's direction feedback follows the [gesture lifecycle](../spec.md#touch-gestures).
+It must name the candidate action and must not rely on color, haptics, or
+animation alone. Static gesture instructions belong in Help, not on the image.
 
 More opens the supporting action groups:
 
-- **Review:** Clear flag, with its existing availability rule;
-- **Photo:** Album membership, Capture Details, Preview Source, Preview Zoom,
-  and Nearby Photos;
+- **Review:** Clear flag with its existing availability rule, and Rating using
+  the same choice surface as the primary Rating entry;
+- **Photo:** Edit, Album membership, Capture Details, Preview Source, Preview
+  Zoom, and Nearby Photos;
 - **Library:** Sources, View options, and Review unavailable Originals; and
-- **Help:** the combined Preview detail-limit explanation and gesture guidance.
+- **Help:** a named disclosure for the combined Preview detail-limit explanation
+  and gesture guidance.
 
 The combined Preview detail evidence must be programmatically available beside
 the Preview without opening the Help disclosure. Opening Help may repeat the
@@ -248,18 +291,27 @@ surface may be a centered dialog or an appropriate source drawer.
 At most one modal surface may be active. Moving from Photo tools to Details,
 Albums, Zoom, or Nearby Photos replaces its content and provides a local
 return to Photo tools. That local return is not a browser history entry.
+Each active subview must have one visible primary title naming the current
+task and one clear local return action. Shell and body must not repeat that
+title as adjacent headings. Distinct subsection headings and programmatic
+group names remain available; reducing repetition must not remove labels.
 Leaving an Album form with an unsubmitted draft discards it after an explicit
 cancel or close. Metadata drafts follow the [metadata editing contract](../../photo-library/metadata/spec.md#human-and-agent-access).
 An admitted operation still follows its settlement rules.
 
 Opening a modal must cancel a pending Rating Wheel and move focus into the
 surface. Background content must not receive pointer input, keyboard focus,
-or Photo shortcuts. Tab and Shift+Tab remain within the modal. Close, Escape,
-a scrim activation, or a supported platform close request dismisses it and
-returns focus to its invoker, or the nearest valid control when that invoker is
-gone or cannot take focus. An already admitted operation must not be cancelled
-by closing its form. A consequential failure must remain recoverable after
-closing.
+or Photo shortcuts. Tab and Shift+Tab remain within the modal. At its root,
+Close, Escape, scrim activation, and a supported platform close request dismiss
+the surface and return focus to its invoker or nearest valid control.
+
+In contextual New Album, Cancel, Escape, and a supported platform close request
+discard the unsubmitted name and return locally to the initiating membership
+panel or batch chooser, focusing New Album. They must not clear Grid selection.
+The shell's Close and scrim activation dismiss the entire supporting workflow
+and restore its outer invoker. A standalone Album form has no local parent;
+all close paths dismiss it. These transitions never cancel an admitted write,
+claim success, or hide a consequential failure's recovery path.
 
 Temporary panels must not add browser history entries. Android system Back
 may issue a platform close request; browser toolbar Back and browser history
@@ -267,12 +319,13 @@ swipes navigate through history. A history traversal must close temporary
 surfaces and render its destination. Forward must not reopen an old tools
 panel. These mechanisms must not be described as universally equivalent.
 
-Album creation remains available in Sources. Each Album must have a visible,
-keyboard-accessible action entry for rename and delete on touch screens;
-actions must not depend on hover. Photo membership management retains its
-true per-Album checkboxes, including removal. Original Folder Add Folder
-remains an explicit confirmable action distinct from Add to Album for selected
-Photos. Recovery review retains its proposal and explicit apply workflow.
+Album creation remains available in Sources and in the contextual membership
+or batch chooser under [Album Management](../spec.md#album-management).
+Each Album must have a visible, keyboard-accessible action entry for rename
+and delete on touch screens; actions must not depend on hover. Photo membership
+management retains true per-Album checkboxes, including removal. Original
+Folder Add Folder remains an explicit confirmable action distinct from Add to
+Album for selected Photos. Recovery retains its proposal and explicit apply.
 
 Album creation and rename failures must appear inside the active form with
 the submitted name retained. Delete Album confirmation must name the Album
@@ -432,3 +485,17 @@ request instead closes only the tools.
 The Photographer opens the Album `26春节`, which has a saved position. Its
 Grid opens with Resume available. Resume opens the saved Photo, and Back
 returns to the Album Grid.
+
+On a narrow Grid, a Picked filter with both Rating bounds, RAW kind, unavailable
+Originals, and both Capture Time bounds shows Filters: 5. A custom order is
+identified separately. Keyboard activation of View options exposes every
+value without enlarging the closed header or adding a second filter surface.
+
+The Photographer changes a draft filter and opens Trash from Source actions.
+The draft is discarded, the committed source remains unchanged, and Trash
+still covers the entire Library. Returning to options does not revive the draft.
+
+The Photographer opens Add to Album for selected Photos, creates an Album,
+and returns to the chooser. Nothing joins the Album until explicit addition.
+Closing after addition was sent leaves that write settling for its captured
+IDs and Album; switching source cannot transfer its result to a new selection.

@@ -322,12 +322,21 @@ to run through the Album action owner's admitted-write contract.
 
 ### Grid presentation state
 
-The page UI owns the Grid's thumbnail size as presentation state of the open
-Grid. One step set in the page UI is the single source for both the CSS cell
-box and the virtualized layout: column count, row and column pitch, cell
-positions, scroll anchors, canvas height, and keyboard row movement all
-derive from the chosen step, so a size change cannot leave the layout and its
-cells disagreeing about geometry.
+The page UI owns the chosen Grid thumbnail step. One layout calculation uses
+the available Grid width, step target width, gap, current font metrics/text
+scale, and selection gutter to supply both CSS and virtualization geometry.
+Choose the column count from the selected step, then distribute the remaining
+row width evenly across those columns; resizing must not change the chosen
+step. An incomplete row uses the same widths. Column count, actual cell width,
+caption height, row/column pitch, positions, canvas height, visible ranges,
+keyboard movement, and restoration must all use that calculation.
+
+Caption height must fit the required state and Rating presentations at those
+layout inputs and apply uniformly to every cell and placeholder. It must not
+depend on each Photo's text, orientation, availability, or image completion.
+Width, text scale, font metric, or selection-gutter changes recompute geometry
+and preserve the top Photo anchor and applicable focus. Content updates must
+not create variable-height rows or make a loaded image shift the Grid.
 
 A size change re-anchors the Grid on the topmost visible row, re-renders
 through the same merged render as scrolling, and reports the new range
@@ -336,12 +345,12 @@ wire contract, keeps the current Browse Snapshot, and leaves Selection State,
 Rating, and Album state untouched.
 
 Thumbnail requests keep the single `thumbnail-512` derivative at every step.
-The largest step still displays within that derivative at 1× and 2× device
-pixel ratios; above 2× the Grid scales the derivative up inside the cell
-instead of requesting another rendition: per-step renditions would fragment
-the rebuildable cache and add derivative work for no visible gain. The Preview
-scheduling priority
-in [Scalable Library Browsing](../library-browser/design.md) is unchanged.
+Actual cell width and device pixel ratio may require display upscaling; that
+does not establish extra source detail. The Grid must not request per-step
+renditions or upscale stored derivatives to fill a row. Such renditions would
+fragment the rebuildable cache without changing the composition contract.
+Preview scheduling priority in [Scalable Library Browsing](../library-browser/design.md)
+is unchanged.
 
 ### Destination and restoration policy
 

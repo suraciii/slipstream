@@ -12,6 +12,24 @@ const capability = {
   reason: null,
   recovery: null,
 };
+const moduleResponse = (state: "ready" | "unavailable" = "ready") =>
+  Response.json({
+    contractVersion: "test",
+    modules: [
+      {
+        id: { name: "darktable", adapterVersion: "test" },
+        parameterVersions: [],
+        parameterSchema: {},
+        admittedInputs: [],
+        admittedOutputs: [],
+        limits: {},
+        availability: {
+          state,
+          refusalReasons: state === "unavailable" ? ["Engine missing"] : [],
+        },
+      },
+    ],
+  });
 function state(revision = "r1"): JsonObject {
   return {
     revision,
@@ -74,6 +92,7 @@ function harness(
             : input.url;
       const response = await onRequest?.(path);
       if (response) return response;
+      if (path === "/api/processing/modules") return moduleResponse();
       if (path.endsWith("/commands")) {
         if (typeof options?.body !== "string")
           throw new Error("Expected string request body");
@@ -646,5 +665,59 @@ test("Library progress is projected as the Edit surface's own fact", async () =>
   expect(owner.model.libraryPhase).toBe("");
   owner.model.libraryPhase = "recovering";
   expect(owner.model.libraryPhase).toBe("recovering");
+  owner.dispose();
+});
+
+test("late discovery cannot enable creation for a different selected input", async () => {
+  const first = Promise.withResolvers<Response>();
+  const secondSettled = Promise.withResolvers<void>();
+  let requests = 0;
+  const { owner, bodies } = harness(
+    undefined,
+    undefined,
+    (path) => {
+      if (path === "/api/processing/modules") {
+        requests++;
+        return requests === 1 ? first.promise : moduleResponse("unavailable");
+      }
+      if (path.endsWith("/files?limit=60"))
+        return Response.json({
+          items: ["raw", "other"].map((artifactId) => ({
+            artifactId,
+            revision: `${artifactId}-bytes`,
+            relativePath: `input/${artifactId}`,
+            kind: "input",
+            state: "ready",
+            byteLength: 12,
+            imageContract: null,
+          })),
+          total: 2,
+          nextCursor: null,
+        });
+      return undefined;
+    },
+    (model) => {
+      if (
+        model.toolDiscovery?.input === "other" &&
+        model.toolDiscovery.state === "unavailable"
+      )
+        secondSettled.resolve();
+    },
+  );
+  await owner.refresh();
+  expect(owner.model.toolDiscovery?.state).toBe("loading");
+  await owner.act("input", { artifactId: "other" });
+  await secondSettled.promise;
+  first.resolve(moduleResponse());
+  await first.promise;
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(owner.model.toolDiscovery).toMatchObject({
+    input: "other",
+    state: "unavailable",
+    reasons: ["Engine missing"],
+  });
+  await owner.act("create");
+  expect(bodies.some((body) => body.operation === "edit create")).toBe(false);
   owner.dispose();
 });

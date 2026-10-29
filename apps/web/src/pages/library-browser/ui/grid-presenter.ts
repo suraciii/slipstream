@@ -13,21 +13,19 @@ const COMPACT_GAP = 12;
 const DESKTOP_INSET_X = 28;
 const DESKTOP_INSET_Y = 24;
 const COMPACT_INSET = 16;
-const COMPACT_CAPTION_HEIGHT = 45;
 const GRID_THUMBNAIL_SIZE_STEPS: Readonly<
   Record<
     GridThumbnailSize,
     Readonly<{
       width: number;
-      height: number;
       compactWidth: number;
       label: string;
     }>
   >
 > = {
-  small: { width: 120, height: 124, compactWidth: 96, label: "Small" },
-  medium: { width: 180, height: 168, compactWidth: 132, label: "Medium" },
-  large: { width: 260, height: 223, compactWidth: 220, label: "Large" },
+  small: { width: 120, compactWidth: 96, label: "Small" },
+  medium: { width: 180, compactWidth: 132, label: "Medium" },
+  large: { width: 260, compactWidth: 220, label: "Large" },
 };
 
 type GridPresentation = Readonly<{
@@ -36,7 +34,7 @@ type GridPresentation = Readonly<{
 }>;
 
 type GridIntent =
-  | Readonly<{ kind: "grid-render" | "grid-resize" | "grid-multi-clear" }>
+  | Readonly<{ kind: "grid-render" | "grid-multi-clear" }>
   | Readonly<{ kind: "grid-range"; start: number; end: number }>
   | Readonly<{
       kind: "open-photo";
@@ -96,60 +94,117 @@ export function createGridPresenter(
   let pendingCellFocus: number | undefined;
   let thumbnailSize: GridThumbnailSize = "medium";
   let pendingAnchor: number | undefined;
-  let renderedColumns = 0;
-  let renderedStride = 0;
-  let renderedHeight = 0;
+  let renderedGeometry:
+    | Readonly<{
+        count: number;
+        stride: number;
+        pitch: number;
+        inset: number;
+        gap: number;
+      }>
+    | undefined;
   let renderFrame: number | undefined;
   const renderedCells = new Map<number, GridCell>();
   let reportedRange: Readonly<{ start: number; end: number }> | undefined;
   let photoAt: GridPresentation["photoAt"] = () => undefined;
 
-  const cellBox = () => GRID_THUMBNAIL_SIZE_STEPS[thumbnailSize];
   const gapX = () => (compact.matches ? COMPACT_GAP : DESKTOP_GAP);
   const gapY = () => (compact.matches ? COMPACT_GAP : DESKTOP_GAP);
   const insetX = () => (compact.matches ? COMPACT_INSET : DESKTOP_INSET_X);
   const insetY = () => (compact.matches ? COMPACT_INSET : DESKTOP_INSET_Y);
-  const availableWidth = () => Math.max(0, viewport.clientWidth - insetX() * 2);
-  const columnPitch = () =>
-    (compact.matches ? cellBox().compactWidth : cellBox().width) + gapX();
-  const columns = () =>
-    Math.max(1, Math.floor(Math.max(320, availableWidth()) / columnPitch()));
-  const columnStride = (count = columns()) =>
-    compact.matches
-      ? (availableWidth() + gapX()) / count
-      : cellBox().width + gapX();
-  const compactCellWidth = (count = columns()) =>
-    Math.max(0, columnStride(count) - gapX());
-  // A compact cell stretches to its column, so its 3:2 media and complete
-  // caption decide the row height. Fixed step heights only fit the desktop
-  // step width; a one-column Large cell would otherwise overflow its row.
-  const cellHeight = (count = columns()) =>
-    compact.matches
-      ? Math.ceil(compactCellWidth(count) * (2 / 3)) + COMPACT_CAPTION_HEIGHT
-      : cellBox().height;
-  const rowPitch = () => cellHeight() + gapY();
   const viewportHeight = () =>
     Math.max(360, Math.min(viewport.clientHeight, window.innerHeight));
-  const firstVisibleIndex = (count: number): number =>
-    total === 0
-      ? 0
-      : Math.max(
-          0,
-          Math.min(
-            total - 1,
-            Math.floor(
-              Math.max(0, viewport.scrollTop - insetY()) / rowPitch(),
-            ) * count,
-          ),
-        );
-  const applySize = () => {
-    const box = cellBox();
-    browser.dataset.gridSize = thumbnailSize;
-    browser.style.setProperty(
-      "--grid-cell-width",
-      `${compact.matches ? compactCellWidth() : box.width}px`,
+
+  // Measure the longest required state and a full Rating using the same CSS
+  // as a real caption. This is independent of the Photos currently loaded.
+  const probe = document.createElement("button");
+  probe.type = "button";
+  probe.className = "grid-caption-probe";
+  probe.tabIndex = -1;
+  probe.setAttribute("aria-hidden", "true");
+  Object.assign(probe.style, {
+    visibility: "hidden",
+    pointerEvents: "none",
+    height: "auto",
+    display: "block",
+    position: "absolute",
+    left: "0",
+    top: "0",
+    padding: "0",
+    border: "0",
+    textAlign: "left",
+    containerType: "inline-size",
+  });
+  probe.innerHTML = `
+    <span class="cell-footer"><span class="cell-caption">
+      <span class="cell-line"><span class="cell-check">✓</span><span class="cell-name">Photo</span><span class="cell-pos"></span></span>
+      <span class="cell-meta"><span class="cell-state-group"><span class="state-dot state-unflagged"></span><span class="state-text">Unflagged</span></span><span class="stars">☆☆☆☆☆</span><span class="cell-kind"></span></span>
+    </span></span>`;
+  gridView.append(probe);
+  const probeFooter = probe.querySelector<HTMLElement>(".cell-footer")!;
+  const probePosition = probe.querySelector<HTMLElement>(".cell-pos")!;
+  const probeMeta = probe.querySelector<HTMLElement>(".cell-meta")!;
+  const probeState = probe.querySelector<HTMLElement>(".cell-state-group")!;
+  const probeStars = probe.querySelector<HTMLElement>(".stars")!;
+  const probeStateText = probe.querySelector<HTMLElement>(".state-text")!;
+
+  const layout = () => {
+    const available = Math.max(0, viewport.clientWidth - insetX() * 2);
+    const step = GRID_THUMBNAIL_SIZE_STEPS[thumbnailSize];
+    const target = compact.matches ? step.compactWidth : step.width;
+    const count = Math.max(
+      1,
+      Math.floor((available + gapX()) / (target + gapX())),
     );
-    browser.style.setProperty("--grid-cell-height", `${cellHeight()}px`);
+    const stride = (available + gapX()) / count;
+    const width = Math.max(0, stride - gapX());
+    probe.style.width = `${width}px`;
+    probePosition.textContent = String(Math.max(1, total));
+    probeStateText.textContent = "Unflagged";
+    const unflaggedWidth = probeState.getBoundingClientRect().width;
+    probeStateText.textContent = "Rejected";
+    if (unflaggedWidth >= probeState.getBoundingClientRect().width)
+      probeStateText.textContent = "Unflagged";
+    probeStars.textContent = "☆☆☆☆☆";
+    const emptyStarsWidth = probeStars.getBoundingClientRect().width;
+    probeStars.textContent = "★★★★★";
+    if (emptyStarsWidth >= probeStars.getBoundingClientRect().width)
+      probeStars.textContent = "☆☆☆☆☆";
+    const metaGap =
+      Number.parseFloat(getComputedStyle(probeMeta).columnGap) || 0;
+    browser.dataset.gridKind =
+      probeState.getBoundingClientRect().width +
+        probeStars.getBoundingClientRect().width +
+        2 * metaGap +
+        36 <=
+      width
+        ? "visible"
+        : "hidden";
+    const caption = Math.ceil(probeFooter.getBoundingClientRect().height);
+    const cellHeight = Math.ceil(width * (2 / 3)) + caption;
+    return {
+      count,
+      stride,
+      width,
+      caption,
+      cellHeight,
+      pitch: cellHeight + gapY(),
+    };
+  };
+  const columns = () => renderedGeometry?.count ?? layout().count;
+  const columnStride = () => renderedGeometry?.stride ?? layout().stride;
+  const rowPitch = () => renderedGeometry?.pitch ?? layout().pitch;
+  const firstVisibleIndex = (count: number): number => {
+    if (total === 0) return 0;
+    const inset = renderedGeometry?.inset ?? insetY();
+    const gap = renderedGeometry?.gap ?? gapY();
+    const row = Math.floor(
+      Math.max(0, viewport.scrollTop - inset + gap) / rowPitch(),
+    );
+    return Math.min(total - 1, row * count);
+  };
+  const applySize = () => {
+    browser.dataset.gridSize = thumbnailSize;
   };
   for (const [size, step] of Object.entries(GRID_THUMBNAIL_SIZE_STEPS)) {
     const option = document.createElement("option");
@@ -173,7 +228,6 @@ export function createGridPresenter(
     renderFrame = undefined;
   };
   const cellPresenter = createGridCellPresenter({
-    compact: () => compact.matches,
     gapX,
     insetX,
     insetY,
@@ -215,7 +269,7 @@ export function createGridPresenter(
   const rebindDetached = (model: GridPresentation) => {
     if (!isAlive() || gridView.hidden) return;
     const count = columns();
-    const stride = columnStride(count);
+    const stride = columnStride();
     for (const [index, rendered] of [...renderedCells]) {
       const image = rendered.cell.querySelector<HTMLImageElement>("img");
       if (!rendered.thumbnail || !image || image.getAttribute("src")) continue;
@@ -282,21 +336,37 @@ export function createGridPresenter(
     photoAt = model.photoAt;
     if (!isAlive() || gridView.hidden) return;
     renderBatch();
-    const count = columns();
-    const stride = columnStride(count);
-    const pitch = rowPitch();
+    const previous = renderedGeometry;
+    const geometry = layout();
+    const { count, stride, pitch } = geometry;
     const height = viewportHeight();
-    // A compact width change changes the derived cell and row height too.
-    browser.style.setProperty("--grid-cell-height", `${cellHeight(count)}px`);
-    renderedColumns = count;
-    renderedStride = stride;
-    renderedHeight = height;
+    let resizeAnchor: Readonly<{ index: number; offset: number }> | undefined;
+    if (
+      previous &&
+      pendingAnchor === undefined &&
+      position === undefined &&
+      (previous.count !== count ||
+        previous.stride !== stride ||
+        previous.pitch !== pitch)
+    ) {
+      resizeAnchor = {
+        index: firstVisibleIndex(previous.count),
+        offset: Math.min(viewport.scrollTop % previous.pitch, pitch - 1),
+      };
+    }
+    renderedGeometry = { count, stride, pitch, inset: insetY(), gap: gapY() };
+    browser.style.setProperty("--grid-cell-width", `${geometry.width}px`);
+    browser.style.setProperty("--grid-cell-height", `${geometry.cellHeight}px`);
+    browser.style.setProperty("--grid-caption-height", `${geometry.caption}px`);
     viewport.dataset.columns = String(count);
     const canvasHeight = `${
       Math.ceil(model.total / count) * pitch - gapY() + insetY() * 2
     }px`;
     canvas.style.height = canvasHeight;
     layer.style.height = canvasHeight;
+    if (resizeAnchor)
+      viewport.scrollTop =
+        Math.floor(resizeAnchor.index / count) * pitch + resizeAnchor.offset;
     if (pendingAnchor !== undefined) {
       viewport.scrollTop = Math.floor(pendingAnchor / count) * pitch;
       pendingAnchor = undefined;
@@ -439,17 +509,12 @@ export function createGridPresenter(
     });
   };
   const onResize = () => {
-    requestAnimationFrame(() => {
-      if (!isAlive() || gridView.hidden) return;
-      if (
-        columns() === renderedColumns &&
-        columnStride() === renderedStride &&
-        viewportHeight() === renderedHeight
-      )
-        return;
-      send({ kind: "grid-resize" });
-    });
+    if (isAlive() && !gridView.hidden) schedule();
   };
+  const resizeObserver = new ResizeObserver(onResize);
+  resizeObserver.observe(viewport);
+  resizeObserver.observe(probeFooter);
+  document.fonts.addEventListener("loadingdone", onResize);
   const onScroll = () => {
     if (isAlive() && !gridView.hidden) schedule();
   };
@@ -557,6 +622,9 @@ export function createGridPresenter(
       cancel();
       viewport.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onResize);
+      resizeObserver.disconnect();
+      document.fonts.removeEventListener("loadingdone", onResize);
+      probe.remove();
       clear();
     },
   };

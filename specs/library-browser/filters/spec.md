@@ -97,17 +97,42 @@ inclusive lower bound and exclusive upper bound. Filesystem modification time
 must not substitute for Capture Time. Photos without Capture Time remain
 eligible when no time bound is supplied and do not match a supplied bound.
 
+Web input must preserve camera-local seconds without converting through the
+browser's time zone. Date and time controls may use localized presentation,
+but must retain an exact seconds field and an exact-value text alternative
+when the browser cannot provide it. Labels must distinguish **From
+(inclusive)** and **Before (exclusive)**. Omitted bounds remain unbounded;
+the UI must not silently supply an end-of-day bound or change an existing
+second value. Equal or reversed bounds and time-zone-bearing values are
+invalid under the [CLI time contract](../../command-line/reference.md#photo-queries).
+
 ## Applying and Reading a Filter
 
-View Options must stage changes until the Photographer chooses Apply. Closing
-or Cancel discards staged values. Apply creates one destination with the
-chosen source, order, and filter. Clear returns to the source's default
-filter without changing the source.
+View options must stage filter, order, and thumbnail-size changes until the
+Photographer chooses Apply. Closing or Cancel discards staged values. Apply
+creates one destination with the chosen source, order, and filter when those
+choices change; a size-only change follows the existing presentation rules.
 
-The header must show the active non-default filter and the number of matching
-Photos. View Options must keep that filtered result count separate from the
-source progress counts for the complete source. A valid result of zero is a
-no-match state, not an empty Library.
+**Reset filters** inside View options changes only the draft filter to the
+source's default: All Selection States and no Rating, kind, availability, or
+Capture Time restriction. It must preserve draft order and thumbnail size,
+make no request, and leave the current result and address unchanged until
+Apply. Cancel after Reset filters must retain the original committed filter.
+
+A successfully resolved zero-match view with an active filter must offer
+**Adjust filters** and **Clear filters**. Adjust filters opens View options
+with the committed choices. Clear filters immediately opens the same source
+with its default filter, preserving committed order and thumbnail size. It
+uses the existing applied-view history replacement and source-reopen rules;
+it must not push another history entry, switch source, or change Photo facts.
+Pending, failed, and expired reads must not be presented as zero matches.
+
+The header must identify the active filter and matching Photo count through
+the [responsive summary](../experience/spec.md#grid-view). View options must
+keep that committed result count separate from complete-source progress and
+unapplied draft choices. Editing a draft must not relabel the committed count
+as a preview of the draft's results. A valid zero-match result is not an empty
+Library; an unfiltered empty source uses its own recovery actions.
 
 The service resolves the complete ordered source, applies the defined facts,
 and freezes the resulting Photo ID sequence before pagination. Grid windows,
@@ -232,6 +257,21 @@ RAW Photo.
 The Photographer queries a local Capture Time range and receives no matches.
 The Library remains available, and clearing the range returns to the same
 source's normal view.
+
+The Photographer resets filters in View options, changes order, and cancels.
+The current filter, order, size, and address remain unchanged. Applying instead
+opens one default-filter view in the chosen order, not successive views for
+each changed field.
+
+A zero-match Album view has a custom order. Clear filters retains that Album,
+order, and thumbnail size and replaces the current destination. If opening
+fails, that requested default-filter view remains retryable; the old result
+must not appear as its successful content.
+
+A Capture Time of `2026-10-29T12:30:45` remains exactly that camera-local value
+after opening and applying View options in a browser with a different time
+zone. A Photo at the inclusive From bound matches; one exactly at the Before
+bound does not. A From value equal to Before is rejected without a source open.
 
 ## Product Boundaries
 

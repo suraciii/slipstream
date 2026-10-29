@@ -122,7 +122,7 @@ const validOrder = (
 /// time of day. No timezone or offset is accepted.
 const CAPTURE_TIME_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/;
-const validCaptureTimeBound = (value: string): boolean => {
+export const validCaptureTimeBound = (value: string): boolean => {
   const parts = CAPTURE_TIME_PATTERN.exec(value);
   if (!parts) return false;
   const [, year, month, day, hour, minute, second] = parts;

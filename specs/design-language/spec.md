@@ -119,7 +119,7 @@ Grid View is a field of Photos with stable cell geometry. Photo View is a focuse
 - Use sentence case for labels, headings, buttons, and messages.
 - Use the product's exact domain names: **Pick**, **Reject**, **Picked**, **Rejected**, **Unflagged**, **Select**, **Selection State**, **Rating**, **No Rating**, **Library Check**, **Capture Time**, **Original File**, **Original Location**, and **Album**.
 - Use a stable, readable sans-serif voice for ordinary UI. Use a distinct numeric treatment for counts, positions, Capture Time, and other values that users compare.
-- A single display serif may distinguish the wordmark, source titles, and supporting-surface titles. The display serif must not carry a control, state label, action, or message. Mono may carry filenames, counts, positions, and technical facts; it must not carry an action. Mono micro-labels may use tracking but remain sentence case.
+- A single display serif may distinguish the wordmark, source titles, and supporting-surface titles. The display serif must not carry a control, state label, action, or message. Mono may carry filenames, numeric values, and technical facts; ordinary state and field labels, actions, and messages use the UI sans. Incidental technical micro-labels may use tracking but remain sentence case. [Visual System](visual-system.md#type) owns the role-specific reference sizes.
 - Keep technical identifiers, revisions, and paths in a secondary or technical disclosure unless they are the object of the current task.
 - Do not use typography alone to imply that an action succeeded. Outcome text must name the outcome.
 

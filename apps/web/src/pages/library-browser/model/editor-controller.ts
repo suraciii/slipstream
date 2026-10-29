@@ -30,6 +30,16 @@ export function createEditorController(
     dependencies.isAlive() &&
     dependencies.isCurrentPhoto(photoId) &&
     view.editorVisible();
+  const bindReference = (model: WorkspaceEditOwner["model"]) => {
+    const photo = dependencies.currentPhoto();
+    if (
+      photo?.id === model.photoId &&
+      photo.preview.state === "ready" &&
+      photo.preview.url
+    )
+      model.cameraReferenceUrl = photo.preview.url;
+    else delete model.cameraReferenceUrl;
+  };
   const open = (photoId: string) => {
     if (!dependencies.isAlive() || !dependencies.isCurrentPhoto(photoId))
       return;
@@ -57,6 +67,7 @@ export function createEditorController(
               model.resourceKinds,
             );
         }
+        bindReference(model);
         model.libraryPhase = dependencies.libraryPhase();
         view.renderEditor(model);
         if (model.preview && !model.cameraReference)
@@ -93,6 +104,7 @@ export function createEditorController(
         });
       }
     }
+    bindReference(owner.model);
     view.renderEditor(owner.model);
     void owner.refresh().then(async () => {
       if (typeof window === "undefined" || !owns(photoId)) return;
@@ -111,6 +123,12 @@ export function createEditorController(
     open,
     refresh(photoId) {
       if (owns(photoId)) void owners.get(photoId)?.refresh();
+    },
+    referenceChanged(photoId) {
+      const owner = owners.get(photoId);
+      if (!owner || !owns(photoId)) return;
+      bindReference(owner.model);
+      view.renderEditor(owner.model);
     },
     act(photoId, action, args) {
       if (!owns(photoId)) return;

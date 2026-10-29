@@ -38,6 +38,11 @@ const setup = (answer: Deferred<Response>) => {
   const actions = createAlbumActionOwner(fetcher);
   const navigated: string[] = [];
   const dismissed: string[] = [];
+  const continuations: Array<{
+    id: string;
+    albumId?: string;
+    suppressed?: boolean;
+  }> = [];
   const pending: string[] = [];
   const messages: Array<{ formId: string; message: string }> = [];
   const pendingNames: Array<{ formId: string; name?: string }> = [];
@@ -91,7 +96,14 @@ const setup = (answer: Deferred<Response>) => {
         pendingNames.push({ formId: id, ...(name ? { name } : {}) });
       },
       setFormMessage: (formId, message) => messages.push({ formId, message }),
-      dismissForm: (id) => dismissed.push(id),
+      dismissForm: (id, created, suppressed) => {
+        dismissed.push(id);
+        continuations.push({
+          id,
+          ...(created ? { albumId: created.id } : {}),
+          ...(suppressed ? { suppressed } : {}),
+        });
+      },
       renderFolder: (model) => rendered.push(model),
     },
     onCreatedAlbum: (value) => {
@@ -108,6 +120,7 @@ const setup = (answer: Deferred<Response>) => {
     actions,
     dismissed,
     navigated,
+    continuations,
     pending,
     messages,
     pendingNames,
@@ -205,6 +218,43 @@ describe("album management controller fences", () => {
     await submission;
     expect(state.navigated).toEqual(["created"]);
     expect(state.dismissed).toEqual(["create"]);
+  });
+
+  test("contextual creation returns the new Album without navigation", async () => {
+    const answer = deferred<Response>();
+    const state = setup(answer);
+    state.controller.openForm({
+      formId: "context",
+      kind: "create",
+      name: "",
+      contextual: true,
+    });
+    const submission = state.controller.submitForm("context", "Created");
+    answer.resolve(json(createBody("Created")));
+    await submission;
+    expect(state.continuations).toEqual([
+      { id: "context", albumId: "created" },
+    ]);
+    expect(state.navigated).toEqual([]);
+  });
+
+  test("a superseded contextual creation cannot return to its parent", async () => {
+    const answer = deferred<Response>();
+    const state = setup(answer);
+    state.controller.openForm({
+      formId: "context",
+      kind: "create",
+      name: "",
+      contextual: true,
+    });
+    const submission = state.controller.submitForm("context", "Created");
+    state.switchSource();
+    answer.resolve(json(createBody("Created")));
+    await submission;
+    expect(state.continuations).toEqual([
+      { id: "context", albumId: "created", suppressed: true },
+    ]);
+    expect(state.navigated).toEqual([]);
   });
 
   test("folder success is not presented after the source is superseded", async () => {

@@ -32,6 +32,14 @@ export function viewOptionsElements(root: ParentNode): ViewOptionsElements {
       root,
       "[data-view-options-cancel]",
     ),
+    resetFilters: required<HTMLButtonElement>(root, "[data-reset-filters]"),
+    draftDiscardNotice: required<HTMLElement>(
+      root,
+      "[data-draft-discard-notice]",
+    ),
+    advancedFilters: root.querySelector<HTMLDetailsElement>(
+      "[data-advanced-filters]",
+    ),
     albumResume: required<HTMLButtonElement>(root, "[data-album-resume]"),
     sortSelect: required<HTMLSelectElement>(root, "[data-sort-select]"),
     optionsProgress: required<HTMLElement>(root, "[data-grid-source-progress]"),

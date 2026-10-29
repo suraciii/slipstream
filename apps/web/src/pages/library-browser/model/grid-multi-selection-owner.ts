@@ -494,6 +494,7 @@ export function createGridMultiSelectionOwner(
     const remaining = [...multiChangedIds].filter(
       (photoId) => multiSelection.has(photoId) && !multiMissingIds.has(photoId),
     );
+    const compensation = gridBatchResult?.compensation;
     if (failed) {
       const missingMessage =
         becameMissing.size > 0
@@ -506,6 +507,7 @@ export function createGridMultiSelectionOwner(
         ...(remaining.length > 0
           ? { review: { label: `Review ${photoCountText(remaining.length)}` } }
           : {}),
+        ...(compensation ? { compensation } : {}),
       };
       present.setDecisionStatus(message);
     } else {
@@ -518,6 +520,7 @@ export function createGridMultiSelectionOwner(
       gridBatchResult = {
         tone: becameMissing.size > 0 ? "warning" : "success",
         message,
+        ...(compensation ? { compensation } : {}),
       };
       present.setDecisionStatus(message);
     }
@@ -535,12 +538,16 @@ export function createGridMultiSelectionOwner(
       .albums()
       .find((album) => album.id === albumId);
     if (!albumBefore) return;
-    const photoIds = [...multiSelection].filter(
+    const selectedIds = [...multiSelection];
+    const photoIds = selectedIds.filter(
       (photoId) => !multiMissingIds.has(photoId),
     );
+    const missingCount = selectedIds.length - photoIds.length;
+    const changedIds = photoIds.filter((photoId) =>
+      multiChangedIds.has(photoId),
+    );
     if (photoIds.length === 0) {
-      const message =
-        "No selected Photos remain in this Library. Clear the selection to continue.";
+      const message = `${photoCountText(missingCount)} no longer in this Library. Clear the selection to continue.`;
       gridBatchResult = { tone: "warning", message };
       present.setDecisionStatus(message);
       render();
@@ -599,9 +606,26 @@ export function createGridMultiSelectionOwner(
           }`
         : `Could not add the selected Photos to “${name}”.`;
     }
+    if (missingCount > 0)
+      message += ` ${photoCountText(missingCount)} no longer in this Library.`;
+    if (changedIds.length > 0)
+      message += ` ${photoCountText(changedIds.length)} changed elsewhere. Review their Selection State before retrying a decision.`;
+    const reviewCount = changedIds.filter(
+      (photoId) =>
+        multiSelection.has(photoId) &&
+        multiChangedIds.has(photoId) &&
+        !multiMissingIds.has(photoId),
+    ).length;
     gridBatchResult = {
-      tone: result.ok ? "success" : "failure",
+      tone: result.ok
+        ? missingCount > 0 || changedIds.length > 0
+          ? "warning"
+          : "success"
+        : "failure",
       message,
+      ...(reviewCount > 0
+        ? { review: { label: `Review ${photoCountText(reviewCount)}` } }
+        : {}),
       ...(compensation ? { compensation } : {}),
     };
     present.setDecisionStatus(message);
@@ -646,11 +670,13 @@ export function createGridMultiSelectionOwner(
       render();
       return;
     }
+    const review = gridBatchResult?.review;
     if (!result.ok || !result.membershipRemove) {
       const message = `Could not remove the added Photos from “${compensation.albumName}”. Retry to continue.`;
       gridBatchResult = {
         tone: "failure",
         message,
+        ...(review ? { review } : {}),
         compensation: { label: "Remove added Photos" },
       };
       present.setDecisionStatus(message);
@@ -681,8 +707,9 @@ export function createGridMultiSelectionOwner(
       .join(" ");
     batchAlbumCompensation = undefined;
     gridBatchResult = {
-      tone: absent > 0 ? "warning" : "success",
+      tone: absent > 0 || review ? "warning" : "success",
       message,
+      ...(review ? { review } : {}),
     };
     present.setDecisionStatus(message);
     render();

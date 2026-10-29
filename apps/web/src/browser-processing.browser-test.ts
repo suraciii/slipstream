@@ -18,6 +18,11 @@ import {
   startReview,
   openPhotoToolsView,
 } from "./browser-test-support/surfaces.js";
+import {
+  setupWorkspace,
+  json,
+  retainFile,
+} from "./browser-test-support/workspace-edit-fixtures.js";
 setupBrowserSmoke();
 
 test("Edit prepares a real input without initializing or rendering a tool", async ({
@@ -46,6 +51,199 @@ test("Edit prepares a real input without initializing or rendering a tool", asyn
     "Inputs",
   );
   expect(operations).toEqual([]);
+});
+
+for (const viewport of [
+  { width: 375, height: 667 },
+  { width: 390, height: 844 },
+]) {
+  test(`no-edit reference and available tool share the first view at ${viewport.width}×${viewport.height}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(viewport);
+    const state = await setupWorkspace(page);
+    for (const workspace of state.workspaces.values()) workspace.edits = [];
+    await page.route("**/api/processing/modules", (route) =>
+      json(route, {
+        contractVersion: "test",
+        modules: [
+          {
+            id: { name: "darktable", adapterVersion: "test" },
+            parameterVersions: [],
+            parameterSchema: {},
+            admittedInputs: [],
+            admittedOutputs: [],
+            limits: {},
+            availability: { state: "ready", refusalReasons: [] },
+          },
+        ],
+      }),
+    );
+    await startReview(page, state.url, "All Photos");
+    const review = page.locator("[data-stage] img");
+    await expect(review).toBeVisible();
+    const reviewSource = await review.getAttribute("src");
+    await openPhotoToolsView(page, "edit");
+    const reference = page.locator("[data-photo-editor-reference-image]");
+    const create = page.getByRole("button", {
+      name: "Edit with darktable",
+      exact: true,
+    });
+    await expect(reference).toBeVisible();
+    await expect(reference).toHaveJSProperty("src", reviewSource!);
+    await expect(create).toBeEnabled();
+    await expect(
+      page.locator("[data-photo-editor-render-status]"),
+    ).toContainText("Camera reference");
+    await expect(page.locator("[data-photo-editor-input]")).toContainText(
+      "input",
+    );
+    const boxes = await Promise.all([
+      reference.boundingBox(),
+      create.boundingBox(),
+    ]);
+    expect(
+      boxes.every(
+        (box) => box && box.y >= 0 && box.y + box.height <= viewport.height,
+      ),
+    ).toBe(true);
+    const controls = await page.locator(".photo-editor-controls").boundingBox();
+    expect(
+      controls &&
+        boxes[1] &&
+        boxes[1].y + boxes[1].height <= controls.y + controls.height,
+    ).toBeTruthy();
+    expect(
+      state.commands.some(
+        (entry) =>
+          entry.command.operation === "preview render" ||
+          entry.command.operation === "edit create",
+      ),
+    ).toBe(false);
+    await page.evaluate(() => {
+      document.documentElement.style.fontSize = "200%";
+    });
+    expect(
+      await page.evaluate(
+        () =>
+          document.documentElement.scrollWidth <=
+          document.documentElement.clientWidth,
+      ),
+    ).toBe(true);
+  });
+}
+
+test("saved edit never silently substitutes camera reference for its missing result", async ({
+  page,
+}) => {
+  const state = await setupWorkspace(page);
+  state.command = async (route, captured) => {
+    if (captured.command.operation !== "preview render") return false;
+    await json(
+      route,
+      {
+        error: {
+          code: "capacity_unavailable",
+          effect: "none",
+          message:
+            "Preview capacity unavailable. Try again when capacity is available.",
+        },
+      },
+      503,
+    );
+    return true;
+  };
+  await startReview(page, state.url, "All Photos");
+  await openPhotoToolsView(page, "edit");
+  await expect(page.getByLabel("Exposure (EV)", { exact: true })).toBeVisible();
+  const reference = page.locator("[data-photo-editor-reference-image]");
+  await expect(reference).toBeHidden();
+  await expect(page.locator("[data-photo-editor-image-empty]")).toContainText(
+    "No Edit Preview",
+  );
+  expect(
+    state.commands.some(
+      (entry) => entry.command.operation === "preview render",
+    ),
+  ).toBe(false);
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
+  await expect(page.locator("[data-workspace-error]")).toContainText(
+    "Preview capacity unavailable",
+  );
+  await expect(reference).toBeHidden();
+  await page
+    .getByRole("button", { name: "Camera reference", exact: true })
+    .click();
+  await expect(reference).toBeVisible();
+  await page.getByRole("button", { name: "Current edit", exact: true }).click();
+  await expect(reference).toBeHidden();
+  await expect(page.locator("[data-photo-editor-image-empty]")).toContainText(
+    "No Edit Preview",
+  );
+  expect(
+    state.commands.filter(
+      (entry) => entry.command.operation === "preview render",
+    ),
+  ).toHaveLength(1);
+});
+
+test("unknown tool discovery is retryable without blocking retained downloads", async ({
+  page,
+}) => {
+  const state = await setupWorkspace(page);
+  for (const workspace of state.workspaces.values()) workspace.edits = [];
+  retainFile(state, state.photos[0]!, "retained-output", Buffer.from("output"));
+  let availability: "unknown" | "unavailable" | "ready" = "unknown";
+  await page.route("**/api/processing/modules", (route) =>
+    availability !== "unknown"
+      ? json(route, {
+          contractVersion: "test",
+          modules: [
+            {
+              id: { name: "darktable", adapterVersion: "test" },
+              parameterVersions: [],
+              parameterSchema: {},
+              admittedInputs: [],
+              admittedOutputs: [],
+              limits: {},
+              availability: {
+                state: availability,
+                refusalReasons:
+                  availability === "unavailable" ? ["Engine missing"] : [],
+              },
+            },
+          ],
+        })
+      : json(route, { error: "unavailable" }, 503),
+  );
+  await startReview(page, state.url, "All Photos");
+  await openPhotoToolsView(page, "edit");
+  const create = page.getByRole("button", {
+    name: "Edit with darktable",
+    exact: true,
+  });
+  await expect(create).toBeDisabled();
+  await expect(page.locator("[data-workspace-selection]")).toContainText(
+    "could not be checked",
+  );
+  await page.locator("[data-workspace-files] summary").click();
+  await expect(
+    page.locator('[data-artifact-id="retained-output"] a', {
+      hasText: "Download",
+    }),
+  ).toBeVisible();
+  availability = "unavailable";
+  await page.getByRole("button", { name: "Retry tool check" }).click();
+  await expect(page.locator("[data-workspace-selection]")).toContainText(
+    "Engine missing",
+  );
+  await expect(create).toBeDisabled();
+  availability = "ready";
+  await page.getByRole("button", { name: "Retry tool check" }).click();
+  await expect(create).toBeEnabled();
+  expect(
+    state.commands.some((entry) => entry.command.operation === "edit create"),
+  ).toBe(false);
 });
 
 test("real-processing: native settings save, explicit preview and export remain in workspace after reopen", async ({

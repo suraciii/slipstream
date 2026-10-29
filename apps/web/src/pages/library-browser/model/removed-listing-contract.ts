@@ -68,6 +68,7 @@ export type RemovedPanelViewModel = Readonly<{
   items: ReadonlyArray<
     Readonly<{
       photoId: string;
+      originalId: string;
       filename: string;
       originalLocation: string;
       originalKind: "raw" | "jpeg";

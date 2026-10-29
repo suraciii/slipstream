@@ -49,6 +49,7 @@ export type EditorControllerDependencies = Readonly<{
 export type EditorController = Readonly<{
   open(photoId: string): void;
   refresh(photoId: string): void;
+  referenceChanged(photoId: string): void;
   act(photoId: string, action: string, args: JsonObject): void;
   leave(): void;
 }>;

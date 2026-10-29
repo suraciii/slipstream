@@ -18,6 +18,7 @@ import {
   type WorkspaceFile,
 } from "../api/workspace-edit.js";
 import type { ProcessingModuleDescription } from "../api/processing-modules.js";
+import { fetchProcessingModules } from "../api/processing-modules.js";
 import { coalesceChanges } from "./workspace-edit-draft.js";
 import { refreshWorkspaceFiles } from "./workspace-edit-files.js";
 import { isUnknownEffect, type UncertainRequest } from "./uncertain-request.js";
@@ -68,6 +69,14 @@ export type WorkspaceEditModel = {
   previewPending: boolean;
   comparing: boolean;
   cameraReference: boolean;
+  resultSelected?: boolean;
+  cameraReferenceUrl?: string;
+  toolDiscovery?: {
+    input: string;
+    revision: string;
+    state: "loading" | "unknown" | "ready" | "unavailable";
+    reasons: readonly string[];
+  };
   jobs: ToolJob[];
   history: JsonObject[];
   /** The tool's retained revisions, restored as their own operation. */
@@ -135,6 +144,7 @@ export function createWorkspaceEditOwner(
   };
   let alive = true;
   let editGeneration = 0;
+  let discoveryGeneration = 0;
   let savePromise: Promise<void> | undefined;
   let selectingEdit = false;
   const session: SessionEditHistory = createSessionEditHistory();
@@ -147,6 +157,54 @@ export function createWorkspaceEditOwner(
   };
   const publish = () => {
     if (alive) notify(model);
+  };
+  const discoverTool = async (force = false) => {
+    const file = model.files.find(
+      (item) =>
+        item.artifactId === model.selectedInput && item.state === "ready",
+    );
+    if (!file || !file.revision) {
+      discoveryGeneration++;
+      delete model.toolDiscovery;
+      publish();
+      return;
+    }
+    if (
+      !force &&
+      model.toolDiscovery?.input === file.artifactId &&
+      model.toolDiscovery.revision === file.revision
+    )
+      return;
+    const generation = ++discoveryGeneration;
+    const input = file.artifactId;
+    const revision = file.revision;
+    model.toolDiscovery = { input, revision, state: "loading", reasons: [] };
+    publish();
+    const modules = await fetchProcessingModules(
+      fetcher,
+      new AbortController().signal,
+    );
+    if (
+      !alive ||
+      generation !== discoveryGeneration ||
+      model.selectedInput !== input ||
+      !model.files.some(
+        (item) =>
+          item.artifactId === input &&
+          item.revision === revision &&
+          item.state === "ready",
+      )
+    )
+      return;
+    const darktable = modules?.find((module) => module.id.name === "darktable");
+    model.toolDiscovery = {
+      input,
+      revision,
+      state: !darktable ? "unknown" : darktable.availability.state,
+      reasons: darktable?.availability.refusalReasons ?? [],
+    };
+    if (modules) model.filmModules = modules;
+    publish();
   };
   const failure = (error: unknown, operation: string) => {
     model.error =
@@ -295,7 +353,7 @@ export function createWorkspaceEditOwner(
   };
   const refresh = async () => {
     model.loading = true;
-    delete model.error;
+    if (!model.blocked) delete model.error;
     publish();
     try {
       if (!model.workspace) {
@@ -320,6 +378,7 @@ export function createWorkspaceEditOwner(
       await readFiles();
       if (!model.selectedInput && model.workspace.inputArtifactId)
         model.selectedInput = model.workspace.inputArtifactId;
+      void discoverTool();
       const edits = model.workspace.edits.filter(
         (edit) => edit.tool === "darktable",
       );
@@ -331,8 +390,11 @@ export function createWorkspaceEditOwner(
         !model.saving
       )
         await readEdit(model.edit.editId);
-      else if (!selectingEdit && !model.edit && edits.length === 1)
+      else if (!selectingEdit && !model.edit && edits.length === 1) {
+        model.resultSelected = true;
+        publish();
         await readEdit(edits[0]!.editId);
+      }
       if (
         model.edit &&
         !model.preview &&
@@ -603,7 +665,18 @@ export function createWorkspaceEditOwner(
     }
   };
   const act = async (action: string, args: JsonObject = {}) => {
-    delete model.error;
+    if (
+      [
+        "change",
+        "preview",
+        "export",
+        "create",
+        "replay",
+        "reapply",
+        "discard",
+      ].includes(action)
+    )
+      delete model.error;
     try {
       if (action === "change") {
         if (isRecord(args.change) && typeof args.change.type === "string")
@@ -658,7 +731,12 @@ export function createWorkspaceEditOwner(
       }
       if (action === "input") {
         model.selectedInput = String(args.artifactId);
+        void discoverTool();
         publish();
+        return;
+      }
+      if (action === "retry-tool-discovery") {
+        void discoverTool(true);
         return;
       }
       if (action === "edit-select") {
@@ -666,12 +744,15 @@ export function createWorkspaceEditOwner(
           throw new Error(
             "Save or reconcile this draft before choosing another edit.",
           );
+        model.cameraReference = false;
+        model.resultSelected = true;
         editGeneration++;
         session.past = [];
         session.future = [];
         publishSession();
         lane.supersedePreview();
         delete model.preview;
+        publish();
         await readEdit(String(args.editId));
         return;
       }
@@ -729,7 +810,15 @@ export function createWorkspaceEditOwner(
         const file = model.files.find(
           (item) => item.artifactId === model.selectedInput,
         );
-        if (!file) throw new Error("Select a ready input file first.");
+        if (
+          !file ||
+          file.state !== "ready" ||
+          model.toolDiscovery?.state !== "ready" ||
+          model.toolDiscovery.input !== file.artifactId ||
+          model.toolDiscovery.revision !== file.revision
+        )
+          return;
+        model.cameraReference = false;
         if (selectingEdit) return;
         const generation = ++editGeneration;
         selectingEdit = true;
@@ -755,6 +844,8 @@ export function createWorkspaceEditOwner(
           if (typeof result.editId !== "string")
             throw new Error("The tool did not return a saved edit identity.");
           if (generation !== editGeneration) return;
+          model.resultSelected = true;
+          publish();
           await readEdit(result.editId, generation);
         } finally {
           selectingEdit = false;
@@ -841,7 +932,8 @@ export function createWorkspaceEditOwner(
         return;
       }
       if (action === "camera") {
-        model.cameraReference = !model.cameraReference;
+        model.cameraReference = true;
+        model.comparing = false;
         publish();
         return;
       }

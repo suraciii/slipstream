@@ -15,6 +15,7 @@ export type AlbumMutationResult = Readonly<{
   ok: boolean;
   latest: boolean;
   failureMessage?: string;
+  unknown?: boolean;
   announce: (text: string) => void;
   removedFromCurrentAlbum?: Readonly<{
     albumId: string;
@@ -102,6 +103,20 @@ export function createAlbumMutationController(
   };
   return {
     clearInactive,
+    async refreshOverview(): Promise<void> {
+      if (closed) return;
+      const authority = options.source.authority;
+      try {
+        const committed = await options.application.refreshOverview();
+        if (!closed && committed && options.source.isCurrent(authority)) {
+          recover(authority);
+          options.reachable();
+          options.connectionChanged();
+        }
+      } catch {
+        // The existing recovery claim and summary remain until a refresh succeeds.
+      }
+    },
     async mutate(
       start: (context: AlbumActionContext) => AlbumActionAdmission | undefined,
       surface: "photo" | "summary",
@@ -165,6 +180,7 @@ export function createAlbumMutationController(
             ...silent,
             admitted: true,
             failureMessage: outcome.failureMessage,
+            unknown: outcome.connectivity === "lost-if-latest",
             latest: options.actions.isLatest(outcome.mutation),
           };
         }
